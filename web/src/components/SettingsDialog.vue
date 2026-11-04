@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { NButton, NForm, NFormItem, NInput, NModal, NPopconfirm, NSelect } from 'naive-ui'
 import {
   ApiError,
@@ -26,6 +26,14 @@ function onMaskClick(e: MouseEvent) {
 const loading = ref(true)
 const saving = ref(false)
 const error = ref<string | null>(null)
+
+watch(loading, async (isLoading) => {
+  if (isLoading) return
+  await nextTick()
+  // `autofocus` only applies at parse time; this form mounts after the data
+  // load completes, so focus the first field (Senior model) programmatically
+  document.querySelector<HTMLElement>('.role-fieldset input')?.focus()
+})
 
 // Connection presets (Stage 17): the per-role "connection" select picks a
 // provider preset (which supplies base URL + API key) or "Manual".

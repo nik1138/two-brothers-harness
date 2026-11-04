@@ -222,6 +222,7 @@ export {
   REPAIR_ISSUE_CHARS,
   STRUCTURED_PAYLOAD_KINDS,
   strictPayloadIssues,
+  relaxedStrictPayload,
   buildRepairRequest,
   formatPayloadIssues,
   missingRequiredIssues,

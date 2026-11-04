@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onUnmounted, ref } from 'vue'
 import { NButton, NScrollbar, useMessage } from 'naive-ui'
 import { relativeTime, sessionTitle } from '../chat'
 import { ApiError, deleteSession, renameSession } from '../api'
@@ -113,21 +113,43 @@ function startRename(s: SessionInfo) {
   renameDraft.value = titleOf(s)
 }
 
+/**
+ * End the inline rename and return focus to the row's rename button — the
+ * editor is unmounted on completion, which would otherwise drop focus on
+ * <body> and force the operator to re-tab through the whole list.
+ */
+function endRename(s: SessionInfo) {
+  editing.value = null
+  focusRowButton(s.name, 'Rename session')
+}
+
+function cancelRename(s: SessionInfo) {
+  endRename(s)
+}
+
+/** Focus one of a session row's action buttons (after the DOM swapped). */
+function focusRowButton(name: string, ariaLabel: string) {
+  nextTick(() => {
+    const row = document.querySelector<HTMLElement>(`.session-row[data-name="${CSS.escape(name)}"]`)
+    row?.querySelector<HTMLElement>(`button[aria-label="${ariaLabel}"]`)?.focus()
+  })
+}
+
 async function commitRename(s: SessionInfo) {
   const title = renameDraft.value.trim()
   if (!title) {
-    editing.value = null
+    endRename(s)
     return
   }
   if (title === titleOf(s)) {
-    editing.value = null
+    endRename(s)
     return
   }
   if (busy.value) return
   busy.value = s.name
   try {
     await renameSession(s.name, title)
-    editing.value = null
+    endRename(s)
     emit('refresh')
   } catch (e) {
     message.error(`Rename failed: ${errText(e)}`)
@@ -138,11 +160,21 @@ async function commitRename(s: SessionInfo) {
 
 function askDelete(name: string) {
   confirmDelete.value = name
+  // the confirm button replaces the clicked delete button — move focus along
+  focusRowButton(name, 'Confirm delete session')
   if (confirmTimer) clearTimeout(confirmTimer)
   confirmTimer = setTimeout(() => {
-    confirmDelete.value = null
     confirmTimer = null
+    revertDelete(name)
   }, 3000)
+}
+
+/** Undo the confirm affordance; restore focus when it held focus. */
+function revertDelete(name: string) {
+  const active = document.activeElement as HTMLElement | null
+  const confirmHeldFocus = active?.getAttribute('aria-label') === 'Confirm delete session'
+  confirmDelete.value = null
+  if (confirmHeldFocus) focusRowButton(name, 'Delete session')
 }
 
 function cancelDelete() {
@@ -153,6 +185,24 @@ function cancelDelete() {
   confirmDelete.value = null
 }
 
+/** Focus the first session row, or the search box on an empty list. The list
+ * re-renders after the parent's async re-list, so poll briefly instead of a
+ * single nextTick. */
+function focusListFallback() {
+  const deadline = Date.now() + 800
+  const tryFocus = () => {
+    const target =
+      document.querySelector<HTMLElement>('.session-item') ??
+      document.querySelector<HTMLElement>('.session-search-input')
+    if (target) {
+      target.focus()
+      return
+    }
+    if (Date.now() < deadline) window.setTimeout(tryFocus, 100)
+  }
+  window.setTimeout(tryFocus, 50)
+}
+
 async function doDelete(s: SessionInfo) {
   cancelDelete()
   if (busy.value) return
@@ -160,6 +210,7 @@ async function doDelete(s: SessionInfo) {
   try {
     await deleteSession(s.name)
     emit('deleted', s.name)
+    focusListFallback()
   } catch (e) {
     message.error(`Delete failed: ${errText(e)}`)
   } finally {
@@ -298,12 +349,12 @@ onUnmounted(() => {
         <section v-for="g in displayGroups" :key="g.key || 'unassigned'">
           <h3 v-if="workspaceFilter === 'all'" class="session-group-label">
             {{ g.label }}
-            <span class="session-group-count" :aria-label="`${g.items.length} sessions`">
+            <span class="session-group-count" role="img" :aria-label="`${g.items.length} sessions`">
               {{ g.items.length }}
             </span>
           </h3>
           <ul class="session-list">
-            <li v-for="s in g.items" :key="s.name" class="session-row">
+            <li v-for="s in g.items" :key="s.name" class="session-row" :data-name="s.name">
               <form
                 v-if="editing === s.name"
                 class="session-rename"
@@ -315,7 +366,7 @@ onUnmounted(() => {
                   :aria-label="`Rename ${titleOf(s)}`"
                   autofocus
                   @focus="($event.target as HTMLInputElement).select()"
-                  @keydown.esc.prevent="editing = null"
+                  @keydown.esc.prevent="cancelRename(s)"
                 />
                 <button
                   type="submit"
@@ -331,7 +382,7 @@ onUnmounted(() => {
                   class="icon-btn"
                   title="Cancel rename"
                   aria-label="Cancel rename"
-                  @click="editing = null"
+                  @click="cancelRename(s)"
                 >
                   <span aria-hidden="true">✕</span>
                 </button>
@@ -345,7 +396,7 @@ onUnmounted(() => {
                 >
                   <span class="session-title">{{ titleOf(s) }}</span>
                   <span class="session-meta">
-                    <span v-if="isLive(s.name)" class="live-dot" aria-label="live"></span>
+                    <span v-if="isLive(s.name)" class="live-dot" role="img" aria-label="live"></span>
                     <span class="muted">{{ relativeTime(s.mtime) }}</span>
                   </span>
                 </button>
@@ -423,7 +474,6 @@ onUnmounted(() => {
 }
 
 .session-search-input:focus {
-  outline: none;
   border-color: var(--accent);
 }
 

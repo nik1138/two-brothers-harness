@@ -141,8 +141,12 @@ node dist/cli.js run "Plan a migration from Redis to Valkey" --provider mock
   `sessions/runtime/*.events.jsonl` (tool/approval events). Run records and
   pending approvals are in-memory only; role settings persist to
   `sessions/settings.json` (keys encrypted at rest).
-- Known gaps (see `docs/design-review.md`): no real-network tests, no
-  load tests, no timeout tests.
+- Known gaps (see `docs/design-review.md`): no load tests. Timeout and
+  shutdown behavior is covered hermetically (provider retry/timeout
+  registry, `run_shell` timeout clamp, `serve` shutdown grace); real-network
+  coverage exists only in the opt-in live E2E layers (`packages/harness/e2e`
+  against LM Studio, the browser `real` scenario) — every other suite is
+  hermetic and offline (mock/scripted providers).
 
 ## Docs Map
 

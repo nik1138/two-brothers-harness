@@ -862,6 +862,7 @@ onUnmounted(() => {
       v-if="!sidebarCollapsed"
       class="sidebar-backdrop"
       aria-label="Hide sessions"
+      tabindex="-1"
       @click="sidebarCollapsed = true"
     ></button>
 

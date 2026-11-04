@@ -1429,9 +1429,73 @@ async function doServe(argv: string[], io: CliIO): Promise<number> {
     `Two Brothers server on http://${host}:${port} ` +
       `(sessions: ${path.resolve(values["sessions-dir"] ?? "sessions")})`,
   );
-  // Serve until interrupted; keeps libuv handles alive without spinning.
-  await new Promise<void>((resolve) => server.on("close", resolve));
+  // Serve until interrupted. SIGINT/SIGTERM run a graceful shutdown:
+  // cooperatively cancel in-flight runs, end SSE connections, close the
+  // server — then fall through to the normal exit-code path instead of
+  // dying in the signal default. A `close` from any other source (an
+  // embedder calling app.close()) resolves the loop the same way.
+  await new Promise<void>((resolve) => {
+    let shutdownStarted = false;
+    const finish = (): void => {
+      process.off("SIGINT", onSigint);
+      process.off("SIGTERM", onSigterm);
+      resolve();
+    };
+    const beginShutdown = (signal: string | null): void => {
+      if (shutdownStarted) return;
+      shutdownStarted = true;
+      if (signal !== null) io.error(`[two-brothers] ${signal} received — shutting down`);
+      void shutdownServe(app)
+        .catch((exc) => {
+          io.error(
+            `[two-brothers] shutdown error: ${exc instanceof Error ? exc.message : String(exc)}`,
+          );
+        })
+        .finally(finish);
+    };
+    const onSigint = (): void => beginShutdown("SIGINT");
+    const onSigterm = (): void => beginShutdown("SIGTERM");
+    process.on("SIGINT", onSigint);
+    process.on("SIGTERM", onSigterm);
+    server.on("close", () => beginShutdown(null));
+  });
   return 0;
+}
+
+/** Grace window for in-flight runs to unwind after a cooperative stop. */
+const SERVE_SHUTDOWN_GRACE_MS = 5_000;
+
+type ServeApp = ReturnType<typeof createServer>;
+
+/**
+ * Graceful `serve` shutdown, shared by the CLI signal handlers: stop
+ * accepting new requests by closing the HTTP server(s), cooperatively cancel
+ * queued/running/waiting runs (a stop resolves pending approvals as deny, so
+ * no mutation parks mid-approval), give in-flight runs a bounded grace window
+ * to unwind their resources (MCP clients close in the run's finally), and end
+ * every SSE connection. Already-flushed session JSONL is never touched —
+ * envelopes are written per append, so shutdown loses no recorded history.
+ */
+export async function shutdownServe(
+  app: ServeApp,
+  graceMs: number = SERVE_SHUTDOWN_GRACE_MS,
+): Promise<void> {
+  const runs = app.state.runs;
+  const activeStatuses = new Set(["queued", "running", "waiting"]);
+  for (const record of runs.list()) {
+    if (activeStatuses.has(String(record.status))) {
+      runs.stop(String(record.run_id));
+    }
+  }
+  const idleDeadline = Date.now() + graceMs;
+  while (Date.now() < idleDeadline) {
+    const stillActive = runs
+      .list()
+      .some((record) => activeStatuses.has(String(record.status)));
+    if (!stillActive) break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  await app.close();
 }
 
 // --------------------------------------------------------------------------- //

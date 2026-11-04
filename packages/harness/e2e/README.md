@@ -101,8 +101,9 @@ For CI and other non-interactive callers, `run` accepts pi-style output modes
   With `--json`, stdout carries the decision object as JSON instead. The
   usage footer and all warnings go to stderr, so stdout stays pipe-clean.
 - `--mode json` — stdout is exactly one JSON object:
-  `{task, events, decision, usage, rounds, errors}` (`events` is the raw
-  envelope list, `usage` the merged token totals). Nothing else is printed
+  `{task, events, decision, usage, cost, rounds, errors}` (`events` is the raw
+  envelope list, `usage` the merged token totals, `cost` the estimated USD
+  cost or `null` for unknown models). Nothing else is printed
   to stdout; diagnostics stay on stderr. A bare `--json` with no explicit
   `--mode` selects this mode (it only narrows `--mode print`).
 - `--json-events` — alias for `--mode json`, so it composes with a

@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Relaxed strict payload parse** (payload fix 2): `relaxedStrictPayload`
+  (`src/payloads.ts`) runs before the repair re-ask — a node reply that is a
+  bare JSON object or a fenced block without the byte-stable markers is
+  accepted when it passes the same strict zod validation; extraction is
+  relaxed, the schema is not. Tests: `tests/relaxedparse.test.ts`.
+- **Graceful `serve` shutdown**: SIGINT/SIGTERM run `shutdownServe` — stop
+  accepting connections, cooperatively cancel queued/running/waiting runs
+  (a stop resolves pending approvals as deny), give in-flight runs a bounded
+  5 s grace window, then end SSE connections and close; flushed session
+  JSONL is never touched. Tests: `tests/serveshutdown.test.ts`.
+
+### Security
+
+- **Server local-request guards**: while every binding is loopback,
+  requests with a non-loopback `Host` header (DNS-rebinding defense) and
+  state-changing requests with a non-local browser `Origin` are refused
+  with 403; binding a non-loopback address logs a warning that the guards
+  are off. Session routes accept only flattened `.jsonl` names.
+  Tests: `tests/security.test.ts`.
+- **`run_shell` timeout clamp**: model-supplied timeouts are clamped to
+  1–600 s (default stays 30 s; non-positive means no timer), so a huge
+  model-invented value cannot park a run.
+
+### Fixed
+
+- **Web workspace (UI shipped in the tarball)**: accessibility and
+  keyboard-focus improvements across the chat, sidebar, composer, and
+  Settings dialog, plus visible summaries of the effective per-role
+  settings.
+- **Web tooling**: `vue-tsc` pinned to `~3.0.2`, eliminating the minimatch
+  advisory; `npm run build` keeps passing. A follow-up bump to 3.3 is
+  tracked in `docs/backlog.md`.
+
 ## [0.0.1] — 2026-11-04
 
 First public release.

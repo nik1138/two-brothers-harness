@@ -80,10 +80,21 @@ test("sessions: empty directory prints a friendly message", async () => {
 });
 
 test("sessions: default sessions-dir is 'sessions'", async () => {
-  const io = makeIO();
-  const code = await main(["sessions"], io);
-  assert.equal(code, 0);
-  assert.deepEqual(io.out, ["no session files in sessions"]);
+  // The default resolves against process.cwd(); run from an empty temp cwd
+  // so the test never reads (or races with) a real ./sessions directory.
+  // cwd is restored even when the assertion fails.
+  await withTempDir(async (dir) => {
+    const cwd = process.cwd();
+    try {
+      process.chdir(dir);
+      const io = makeIO();
+      const code = await main(["sessions"], io);
+      assert.equal(code, 0);
+      assert.deepEqual(io.out, ["no session files in sessions"]);
+    } finally {
+      process.chdir(cwd);
+    }
+  });
 });
 
 test("sessions: lists titles, envelope counts and update times", async () => {

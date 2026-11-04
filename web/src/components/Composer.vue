@@ -33,8 +33,11 @@ const provider = ref<RunProvider | ''>('')
  * Unknown (request failed) stays false — the run error toast already explains failures.
  */
 const settingsMissing = ref(false)
+/** What "from settings" actually resolves to (per-role model/provider), when known. */
+const settingsSummary = ref<string | null>(null)
 
 async function checkSettings() {
+  settingsSummary.value = null
   if (provider.value !== '') {
     settingsMissing.value = false
     return
@@ -44,6 +47,14 @@ async function checkSettings() {
     settingsMissing.value = (['senior', 'junior'] as const).some(
       (role) => !settings[role].model && !settings[role].base_url,
     )
+    if (settingsMissing.value) return
+    const part = (role: 'senior' | 'junior'): string | null => {
+      const s = settings[role]
+      const what = s.model || s.provider || s.base_url
+      return what ? `${role}: ${what}` : null
+    }
+    const parts = [part('senior'), part('junior')].filter((p): p is string => p !== null)
+    if (parts.length) settingsSummary.value = `From settings — ${parts.join(' · ')}`
   } catch {
     settingsMissing.value = false
   }
@@ -91,6 +102,7 @@ function onKeydown(e: KeyboardEvent) {
       v-model="task"
       class="composer-input"
       rows="1"
+      aria-label="Task for the two brothers"
       :placeholder="
         waiting
           ? 'Draft your next task… (it can be sent once this run finishes)'
@@ -131,10 +143,19 @@ function onKeydown(e: KeyboardEvent) {
         :disabled="!task.trim()"
       >Send</n-button>
     </div>
+    <p v-if="settingsSummary" class="composer-provider-summary muted" role="note">
+      {{ settingsSummary }}
+    </p>
   </form>
 </template>
 
 <style scoped>
+.composer-provider-summary {
+  margin: -0.2rem 0.3rem 0;
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
 .composer-waiting {
   padding: 0.4rem 0.75rem;
   font-size: 0.8rem;
@@ -146,6 +167,7 @@ function onKeydown(e: KeyboardEvent) {
 
 .composer-hint {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;

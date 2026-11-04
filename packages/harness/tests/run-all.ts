@@ -7,6 +7,7 @@
 import "./protocol.test.ts";
 import "./harness.test.ts";
 import "./payloadrepair.test.ts";
+import "./relaxedparse.test.ts";
 import "./graph.test.ts";
 import "./session.test.ts";
 import "./prompts.test.ts";
@@ -39,8 +40,10 @@ import "./commands.test.ts";
 import "./pluginmcp.test.ts";
 import "./skillinvoke.test.ts";
 import "./approvaldeny.test.ts";
+import "./security.test.ts";
 import "./providerwarnings.test.ts";
 import "./cliwiring.test.ts";
+import "./serveshutdown.test.ts";
 import "./apicommands.test.ts";
 import "./integration.test.ts";
 import "./tui.test.ts";

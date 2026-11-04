@@ -36,3 +36,24 @@ the intended deployment, so a report that depends on doing so will be treated
 as expected behavior. In scope: protocol/payload handling, session files,
 provider and MCP client code, workspace tool confinement and approvals,
 plugin loading, and secret storage.
+
+## Deployment expectations
+
+- **Loopback only.** `serve` binds `127.0.0.1` by default (`--host` changes
+  this) and is designed for a single operator on one machine. There is no
+  authentication, authorization, or transport encryption — do not expose it
+  to a network interface you do not fully trust. If you must reach it from
+  another machine, put your own authenticated, TLS-terminating proxy in
+  front; the server itself will not protect you.
+- **API keys on the command line leak.** `--api-key <key>` (and the manual
+  `--senior-api-key`/`--junior-api-key` forms) land in shell history and in
+  process listings while the run is alive. Prefer the environment variables
+  (`TWO_BROTHERS_API_KEY`, `TWO_BROTHERS_SENIOR_API_KEY`,
+  `TWO_BROTHERS_JUNIOR_API_KEY`) or, for `models`/`onboard`, the
+  `--api-key-env <VAR>` form that reads the key from a named variable. In the
+  web workspace, enter keys in Settings instead: they are sealed at rest and
+  never returned by the API.
+- **Session files are plaintext transcripts.** Everything the brothers said,
+  including quoted secrets from the task or tool output, ends up in the JSONL
+  session files and runtime sidecars under `--sessions-dir`. Treat that
+  directory as sensitive and do not publish or share it.

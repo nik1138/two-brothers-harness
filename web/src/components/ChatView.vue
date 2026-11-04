@@ -432,7 +432,7 @@ const workingLine = computed(() => {
         <span class="activity-dot" aria-hidden="true"></span>{{ activity }}
       </p>
 
-      <p v-if="workingLine" class="activity-line working-line" aria-live="polite">
+      <p v-if="workingLine" class="activity-line working-line">
         <span class="activity-dot" aria-hidden="true"></span>{{ workingLine }}
       </p>
 

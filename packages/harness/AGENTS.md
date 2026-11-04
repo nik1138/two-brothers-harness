@@ -266,8 +266,16 @@ the protocol reference and is not modified by work here either.
    and `--max-rounds` is untouched. Kind-specific prompt assembly appends
    one tiny, strict-valid fenced example per kind (`PAYLOAD_EXAMPLES`,
    `harness.ts`, code only — `shared/prompts.json` stays byte-identical).
-   Tests: `tests/payloadrepair.test.ts`. Relaxed strict parse remains open
-   (`docs/backlog.md`).
+   Tests: `tests/payloadrepair.test.ts`. **Relaxed strict parse is shipped
+   (same lane, fix 2):** `payloads.ts::relaxedStrictPayload` accepts any JSON
+   object in a raw node reply — bare, fenced, prose-wrapped, after a non-JSON
+   thinking block, stray braces and all — when it passes the same strict
+   check (zod + protocol-required fields); `harness.ts::structuredReply`
+   runs it via `strictReplyCheck` before spending the one repair re-ask, so
+   valid bare/fenced JSON never repairs or warns needlessly, while
+   malformed/schema-invalid replies still repair exactly once and degrade
+   with one warning. Transcript markers and the tolerant parse/sanitize
+   pipeline are untouched. Tests: `tests/relaxedparse.test.ts`.
    **Skills are shipped (Wave 4, S2b + integration):** `src/skills.ts`
    (`discoverSkills(roots)` over `<root>/<name>/SKILL.md` and loose `.md`
    files, hand-rolled frontmatter with `name`/`description`/`scope`/
@@ -428,6 +436,21 @@ the protocol reference and is not modified by work here either.
    quits after a confirm hint. Tests: `tests/tui.test.ts` (render wrap/
    scroll/determinism, reducer, input resolver, non-TTY guard). No new
    runtime deps.
+   **Graceful `serve` shutdown + local-request guards are shipped
+   (2026-11-04 hardening):** `cli.ts serve` traps SIGINT/SIGTERM and runs
+   `shutdownServe(app)` — stop accepting connections, cooperatively stop
+   queued/running/waiting runs (stop resolves pending approvals as deny),
+   bounded 5 s grace (`SERVE_SHUTDOWN_GRACE_MS`) for in-flight runs to
+   unwind (MCP clients close in the run's `finally`), then end SSE and
+   close; flushed session JSONL is never rewound. `server.ts` enforces
+   local-request guards **only while every binding is loopback**:
+   non-loopback `Host` (DNS-rebinding defense) and non-local browser
+   `Origin` on state-changing methods are refused with 403; a non-loopback
+   `--host` logs a warning that the guards are off. Session-name routes
+   take flattened `.jsonl`-only names. `run_shell` clamps model-supplied
+   timeouts to 1–600 s (`MIN/MAX_SHELL_TIMEOUT_S`; default 30 s,
+   non-positive = no timer). Tests: `tests/serveshutdown.test.ts`,
+   `tests/security.test.ts`. No new runtime deps.
 
 ## Commands
 

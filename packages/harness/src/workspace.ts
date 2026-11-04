@@ -47,6 +47,10 @@ export const MAX_SEARCH_RESULT_CHARS = 20_000;
 export const MAX_LIST_ENTRIES = 400;
 export const DEFAULT_MAX_MATCHES = 50;
 export const DIFF_CONTEXT_LINES = 3;
+/** run_shell timeout ceiling for model-supplied values (the default stays 30 s). */
+export const MAX_SHELL_TIMEOUT_S = 600;
+/** run_shell timeout floor: a non-positive value means "run without a timer". */
+export const MIN_SHELL_TIMEOUT_S = 1;
 
 // Refused everywhere, reads included. Patterns are matched against each path
 // component (case-insensitively on case-insensitive filesystems).
@@ -1124,7 +1128,13 @@ export class Workspace {
       }
       throw exc;
     }
-    const data = await this.shell.run(command, { timeout, signal });
+    // Model-supplied timeouts are clamped: a huge value would park a run (and
+    // a worker-pool slot) for hours on a single shell call.
+    const bounded =
+      timeout === undefined
+        ? undefined
+        : Math.min(Math.max(timeout, MIN_SHELL_TIMEOUT_S), MAX_SHELL_TIMEOUT_S);
+    const data = await this.shell.run(command, { timeout: bounded, signal });
     return { ...data, tool: "run_shell" };
   }
 

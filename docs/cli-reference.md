@@ -7,6 +7,10 @@ below use `node dist/cli.js <command>` from `packages/harness/` (after
 the same core commands as `node src/cli.ts <command>`. `serve` is provided by
 the package: a plain `node:http` server exposing the HTTP + SSE API.
 
+Global invocations: `two-brothers --version` (or `-v`) prints the package
+version; a bare `two-brothers` with no arguments drops into the chat REPL on
+an interactive terminal and prints the usage screen when stdin is piped.
+
 ## Commands
 
 ### `run "<task>"`
@@ -260,7 +264,21 @@ name the preset declares. Manual fields: `--base-url`, `--api-key` (or
 | `TWO_BROTHERS_PLUGINS_SENIOR` / `TWO_BROTHERS_PLUGINS_JUNIOR` | — (comma-separated plugin names; see `docs/plugins.md`) |
 | `TWO_BROTHERS_SHELL_PATH_EXTRA` | — (path-separated dirs prepended to the confined workspace-shell `PATH`, e.g. the directory holding the binaries your tool proofs call) |
 
-**Precedence:** CLI flags > environment variables > defaults.
+**Precedence:** CLI flags > environment variables > defaults. (Persisted
+settings from `onboard` / the web Settings sit between env vars and defaults
+on the server path: per-run flags > `TWO_BROTHERS_*` env vars > persisted
+settings > defaults.)
+
+**Env-pinned fields.** An environment variable does not just override a
+settings field — it *pins* it. A field pinned by a `TWO_BROTHERS_*` env var
+(`TWO_BROTHERS_PROVIDER`, `TWO_BROTHERS_BASE_URL`/`_API_KEY` and their
+per-role variants, `TWO_BROTHERS_SENIOR_MODEL`/`_JUNIOR_MODEL`) keeps the env
+value as the effective value, is stripped before anything is written to
+`sessions/settings.json`, and is surfaced in Settings/`onboard` output as the
+env value. Consequence: a `PUT /api/settings` edit or an `onboard` run that
+touches a pinned field is accepted but transient — the env value wins again
+on the next read/run until the env var is unset. `onboard` prints a
+`pinned by TWO_BROTHERS_* env vars` note naming the stripped fields.
 
 ## Sessions
 

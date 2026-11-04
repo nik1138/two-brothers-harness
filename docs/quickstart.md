@@ -57,7 +57,10 @@ node dist/cli.js run "Your task"
 Any OpenAI-compatible endpoint works: DeepSeek, OpenAI, OpenRouter, vLLM,
 Ollama, OpenCode Zen — and Anthropic / Google Gemini through their adapters
 (`--provider-kind anthropic|google`). `node dist/cli.js onboard` writes the
-per-role settings interactively if you prefer not to set environment variables.
+per-role settings interactively if you prefer not to set environment
+variables. Environment variables win over saved settings while they are set
+and are never written to the settings file (see the
+[CLI reference](cli-reference.md#environment-variables)).
 
 ## 5. Persist and resume a session
 

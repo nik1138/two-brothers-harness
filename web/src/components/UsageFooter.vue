@@ -62,7 +62,9 @@ const visible = computed(() => ticking.value || props.usage !== null || props.tu
 </script>
 
 <template>
-  <footer v-if="visible" class="usage-footer" aria-live="polite">
+  <!-- No aria-live: the elapsed time ticks every second while a run is alive,
+       which would re-announce the region continuously to screen readers. -->
+  <footer v-if="visible" class="usage-footer">
     <template v-if="waiting">
       <span class="usage-dot usage-dot-waiting" aria-hidden="true"></span>
       <span>{{ elapsed ? `${elapsed} · ` : '' }}waiting for approval</span>

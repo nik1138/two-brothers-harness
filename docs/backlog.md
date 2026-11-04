@@ -232,10 +232,13 @@ Design anchors that already exist:
   `toolLoop` now returns the model's final reply — it used to return the
   last conversation message (the last tool result, or the prompt itself), so
   a structured deliverable was discarded whenever a tool ran. Tests:
-  `tests/payloadrepair.test.ts`. **Follow-up still open: fix (2) relaxed
-  strict parse** — accept bare JSON objects / fenced blocks without the
-  byte-stable markers when they validate against the zod schema (markers
-  stay for byte-stable transcript rendering).
+  `tests/payloadrepair.test.ts`. **Follow-up fix (2) relaxed strict parse —
+  shipped 2026-11-04** (`relaxedStrictPayload` in `src/payloads.ts`, checked
+  before the repair re-ask): a reply that is a bare JSON object or a fenced
+  block without the byte-stable markers is accepted when it passes the same
+  strict zod validation — extraction is relaxed, the schema is not (markers
+  stay for byte-stable transcript rendering). Tests:
+  `tests/relaxedparse.test.ts`.
 
 ## Shipped 2026-11-04 (Wave 4 feature lanes + integration)
 
@@ -343,9 +346,11 @@ Design anchors that already exist:
   plugin-contributed tools that request approvals through the same
   broker are capped too, and expose the auto-denial count as an additive
   run field if the UI needs it.
-- **Relaxed strict parse** (payload fix 2) — accept bare/fenced JSON that
-  validates against the zod schema without the byte-stable markers;
-  markers stay for transcript rendering. See the strict-parse item above.
+- **Relaxed strict parse** — **shipped** (payload fix 2, 2026-11-04):
+  bare/fenced JSON that validates against the zod schema is accepted without
+  the byte-stable markers (`relaxedStrictPayload`,
+  `tests/relaxedparse.test.ts`); markers stay for transcript rendering. See
+  the strict-parse item above.
 - **Streaming responses** — S3 lane, **shipped**: run-level
   events (envelopes, repairs, tools, status) ship as NDJSON /
   `onStreamEvent` (see the S3a shipped section above), and
@@ -363,3 +368,12 @@ Design anchors that already exist:
 - **Subagents** — spawning nested cooperation runs (and likely child
   sessions) beyond the two-brother senior/junior pair. The context and
   approval machinery are the prerequisites; not started.
+- **Stacked-dialog mask-click (web, non-blocker)** — naive-ui fires
+  `mask-click` for clicks that land inside a stacked second dialog, so
+  every dialog's handler must ignore those via the `web/src/modal.ts`
+  guard. Revisit when upstream fixes the stacked-dialog semantics (or
+  replace the guard with upstream support).
+- **vue-tsc 3.3 follow-up (web, non-blocker)** — the `~3.0.2` pin
+  (2026-11-04 security update eliminating the minimatch advisory) stays
+  until vue-tsc 3.3's template-scope handling is verified; then bump and
+  re-check `npm run build`.

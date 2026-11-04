@@ -81,9 +81,13 @@ fallback.
 **TS-first now:** in the TypeScript package the retry loop is driven by an
 ordered `PROVIDER_ERROR_REGISTRY` (retryable 408/409/429/5xx and transport
 errors; `Retry-After` honored; other 4xx, quota/billing and context-overflow
-fail fast, with overflow triggering compact-and-retry). The
-`LangChainResponder` behavior described below belongs to the removed
-prototype and is kept for the record.
+fail fast, with overflow triggering compact-and-retry). Streaming and
+accounting have since shipped too: `run --stream` / `--stream-tokens` emit
+bounded NDJSON run events and per-text-delta `token` records (the TUI
+renders deltas in place), and a hand-maintained price table drives a `cost:`
+line plus a `cost` field in `--mode json`. Model fallback on 429/5xx is
+still the open gap. The `LangChainResponder` behavior described below
+belongs to the removed prototype and is kept for the record.
 
 ### 6. In-memory context only
 
@@ -119,16 +123,23 @@ No integration tests with a real network, no load tests, no timeout checks.
 
 ### 10. The web workspace is single-user, single-process
 
-Run records, pending approvals, and role settings live in the backend
-process's memory: a backend restart loses them (session JSONL and the runtime
-sidecars survive). Runs execute on a **worker pool** (default 2 workers,
+Run records and pending approvals live in the backend process's memory, but
+persistence is finer-grained than "restart loses everything": role settings
+and presets survive in `sessions/settings.json` (API keys sealed at rest),
+session JSONL and runtime sidecars are durable, and a terminal run record is
+rebuilt after a restart — `GET /api/runs/{id}` falls back to the per-session
+runtime sidecar and reconstructs a failed/cancelled record (with a
+`rebuilt: true` marker; `task` and `mode` are not event fields and come back
+empty). Only *pending* approvals and live run state are truly lost on
+restart. Runs execute on a **worker pool** (default 2 workers,
 `TWO_BROTHERS_WORKERS` / `Config.workers`): runs for different sessions run
 concurrently, while runs for the *same* session stay strictly serialized —
 the session file is a shared context and overlapping runs would corrupt
 envelope `seq` continuity. A run submitted while all workers are busy stays
 `queued` (backpressure, no rejection); there is no auth and no remote access
-by design. Approval answers are poll-based HTTP, so an operator UI must be
-open to answer.
+by design. Approval requests reach the operator over the SSE stream
+(`approval_requested`) and are answered with `POST
+/api/runs/{id}/approvals/{approval_id}` — no polling.
 
 ## Run failures (2026-10-31 incident hardening)
 

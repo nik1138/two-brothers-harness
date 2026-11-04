@@ -62,6 +62,12 @@
  *   this module, never cwd): the packaged `<package>/web` copy that
  *   `scripts/sync-web.mjs` places in the npm tarball, then the repo layout
  *   `<repo>/web/dist`. Overridable via `webDist`.
+ * - Local-request guards (SECURITY.md: local single-user, loopback only):
+ *   while every binding is loopback, requests with a non-loopback `Host`
+ *   (DNS-rebinding defense) and state-changing requests with a non-local
+ *   browser `Origin` (cross-site write defense) are refused with 403.
+ *   Binding a routable address (`--host 0.0.0.0` etc.) opts out with a
+ *   startup warning — that deployment is outside the intended threat model.
  */
 import * as fs from "node:fs";
 import * as http from "node:http";
@@ -149,6 +155,37 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function errorDetail(exc: unknown): string {
   return exc instanceof Error ? exc.message : String(exc);
+}
+
+// ---------------------------------------------------------------------------
+// Local-request guards (see SECURITY.md: local single-user, loopback only)
+// ---------------------------------------------------------------------------
+
+/**
+ * A bind address or Host/Origin hostname is "local" when it is loopback:
+ * `localhost`, any `*.localhost` name (RFC 6761), `::1`, or an IPv4 address
+ * in 127.0.0.0/8. Everything else (machine IPs, `0.0.0.0`, public names) is
+ * not.
+ */
+function isLocalHostName(host: string): boolean {
+  const name = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (name === "localhost" || name.endsWith(".localhost")) return true;
+  if (name === "::1" || name === "::ffff:127.0.0.1") return true;
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(name);
+  if (ipv4) return Number(ipv4[1]) === 127;
+  return false;
+}
+
+/** The hostname part of a `Host` header (port stripped, brackets handled). */
+function hostHeaderName(hostHeader: string): string {
+  const trimmed = hostHeader.trim();
+  if (trimmed.startsWith("[")) {
+    const end = trimmed.indexOf("]");
+    return end === -1 ? trimmed : trimmed.slice(1, end);
+  }
+  const idx = trimmed.lastIndexOf(":");
+  if (idx !== -1 && /^\d+$/.test(trimmed.slice(idx + 1))) return trimmed.slice(0, idx);
+  return trimmed;
 }
 
 // ---------------------------------------------------------------------------
@@ -673,6 +710,21 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     return name.endsWith(".jsonl") ? name : `${name}.jsonl`;
   }
 
+  /**
+   * Validate a name that must already denote a session file: basename-
+   * flattened (never a path) and ending in `.jsonl`, so the session endpoints
+   * cannot touch the settings/provider JSON or the registry file living next
+   * to the sessions. `sessionName()` above appends the extension for run
+   * submissions; these handlers require it to be present instead.
+   */
+  function sessionFileName(raw: string): string {
+    const name = path.basename(raw);
+    if (name === "." || name === ".." || name === "" || !name.endsWith(".jsonl")) {
+      throw new HttpError(400, "invalid session name");
+    }
+    return name;
+  }
+
   function listSessions(workspaceId: string | null): Array<Record<string, unknown>> {
     let files: string[];
     try {
@@ -990,15 +1042,16 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
 
   routes.push(
     compileRoute("GET", "/api/sessions/{name}", (ctx) => {
-      const store = storeFor(ctx.params.name);
+      const name = sessionFileName(ctx.params.name);
+      const store = storeFor(name);
       if (!store.exists()) throw new HttpError(404, "not found");
       const detail: Record<string, unknown> = {
-        name: path.basename(ctx.params.name),
+        name,
         events: store.load(),
       };
-      const meta = state.metadata.get(ctx.params.name);
+      const meta = state.metadata.get(name);
       if (meta !== null) {
-        const stem = path.basename(ctx.params.name).replace(/\.jsonl$/, "");
+        const stem = name.replace(/\.jsonl$/, "");
         detail.title = typeof meta.title === "string" ? meta.title : stem;
         if (typeof meta.workspace_id === "string" && meta.workspace_id) {
           detail.workspace_id = meta.workspace_id;
@@ -1010,9 +1063,10 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
 
   routes.push(
     compileRoute("GET", "/api/sessions/{name}/events", (ctx) => {
+      const name = sessionFileName(ctx.params.name);
       return {
-        name: path.basename(ctx.params.name),
-        events: state.runtimeEvents.load(path.basename(ctx.params.name)),
+        name,
+        events: state.runtimeEvents.load(name),
       };
     }),
   );
@@ -1048,7 +1102,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     compileRoute("GET", "/api/stream", (ctx) => {
       const session = ctx.query.get("session");
       if (!session) throw new HttpError(400, "invalid request body");
-      const store = storeFor(session);
+      const store = storeFor(sessionFileName(session));
       let sent = 0;
       let closed = false;
       ctx.req.on("close", () => {
@@ -1133,21 +1187,23 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
 
   routes.push(
     compileRoute("PATCH", "/api/sessions/{name}", async (ctx) => {
-      const store = storeFor(ctx.params.name);
+      const name = sessionFileName(ctx.params.name);
+      const store = storeFor(name);
       if (!store.exists()) throw new HttpError(404, "not found");
       const body = await ctx.json();
       const title = optionalString(body, "title");
       if (title === undefined || !title.trim()) {
         throw new HttpError(400, "title must not be empty");
       }
-      const meta = state.metadata.save(ctx.params.name, { title });
-      return { name: path.basename(ctx.params.name), ...meta };
+      const meta = state.metadata.save(name, { title });
+      return { name, ...meta };
     }),
   );
 
   routes.push(
     compileRoute("DELETE", "/api/sessions/{name}", async (ctx) => {
-      const store = storeFor(ctx.params.name);
+      const safe = sessionFileName(ctx.params.name);
+      const store = storeFor(safe);
       let isFile = false;
       try {
         isFile = fs.statSync(store.path).isFile();
@@ -1155,7 +1211,6 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         isFile = false;
       }
       if (!isFile) throw new HttpError(404, "not found");
-      const safe = path.basename(ctx.params.name);
       // A live run keeps its SessionStore handle and would re-append the next
       // envelope, resurrecting the file — stop it and let it unwind first.
       const activeFor = (): Array<Record<string, unknown>> =>
@@ -1697,6 +1752,37 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         return;
       }
       const method = req.method ?? "GET";
+      // Local-request guards (only while every binding is loopback — the
+      // operator binding a routable address opts into that exposure, see
+      // SECURITY.md):
+      // - Host: rebinding an attacker-controlled DNS name to 127.0.0.1 makes
+      //   the browser send a foreign Host header; refuse it, so the API is
+      //   only reachable under a loopback name.
+      // - Origin: a malicious page cannot read responses (no CORS headers),
+      //   but simple cross-site requests would still execute state changes;
+      //   refuse any non-local browser origin on state-changing methods.
+      if (localBindingsOnly()) {
+        const hostHeader = req.headers.host;
+        if (hostHeader !== undefined && !isLocalHostName(hostHeaderName(hostHeader))) {
+          writeJson(res, 403, { detail: "forbidden" });
+          return;
+        }
+        if (method !== "GET" && method !== "HEAD") {
+          const origin = req.headers.origin;
+          if (origin !== undefined) {
+            let originHost = "";
+            try {
+              originHost = new URL(origin).hostname;
+            } catch {
+              originHost = "";
+            }
+            if (!isLocalHostName(originHost)) {
+              writeJson(res, 403, { detail: "forbidden" });
+              return;
+            }
+          }
+        }
+      }
       let pathMatched = false;
       for (const route of routes) {
         const match = route.regex.exec(pathname);
@@ -1747,11 +1833,30 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   // -- lifecycle -------------------------------------------------------------------
 
   const servers = new Set<http.Server>();
+  // Every address this handle has been bound to (listen() records each one).
+  // The local-request guards apply only while all of them are loopback.
+  const boundHosts = new Set<string>();
+
+  function localBindingsOnly(): boolean {
+    if (boundHosts.size === 0) return true;
+    for (const host of boundHosts) {
+      if (!isLocalHostName(host)) return false;
+    }
+    return true;
+  }
 
   return {
     state,
     handler,
     listen(host = "127.0.0.1", port = 0): Promise<http.Server> {
+      boundHosts.add(host);
+      if (!isLocalHostName(host)) {
+        console.warn(
+          `[two-brothers] serving on non-loopback address ${host} — the server has ` +
+            "no authentication; exposing it beyond this machine is untrusted exposure " +
+            "(see SECURITY.md).",
+        );
+      }
       const server = http.createServer(handler);
       servers.add(server);
       server.on("close", () => servers.delete(server));

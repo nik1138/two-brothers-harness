@@ -179,6 +179,10 @@ wire adapter per role, and `onboard` writes the same settings to
 `sessions/settings.json`.
 
 Precedence: CLI flags > environment variables > persisted settings > defaults.
+Environment variables also *pin* their fields: an env value wins over any
+Settings edit and is never written to `settings.json`, so a change to a
+pinned field in the web UI (or `onboard`) does not stick while the env var
+is set.
 
 ## CLI
 
@@ -222,6 +226,10 @@ From a checkout, replace `two-brothers` with `node dist/cli.js`.
 | `serve` | web workspace backend (HTTP + SSE; serves the built UI) |
 | `onboard` | write per-role provider settings from a preset or manual fields |
 | `models` | list the models an OpenAI-compatible endpoint reports |
+
+`--version` (or `-v`) prints the package version. With no arguments at all,
+an interactive terminal drops straight into the chat REPL; piped/CI
+invocations print the usage screen instead.
 
 Common flags: `--provider`, `--base-url`, `--api-key`, `--senior-model`,
 `--junior-model`, `--senior-system`, `--junior-system`, `--max-rounds`,
@@ -304,7 +312,12 @@ What the workspace gives you:
   dropped connection reconnects without gaps). You can send follow-up messages
   into the same session, stop a run cooperatively, and set per-role
   Senior/Junior provider/model/base URL/API key in Settings (keys are never
-  returned by the API; the server seals them at rest).
+  returned by the API; the server seals them at rest). Settings fields pinned
+  by `TWO_BROTHERS_*` env vars show the env value; an edit to a pinned field
+  is accepted but transient — the PUT can echo the submitted value back
+  in-memory, yet it is never persisted and the env value wins again on the
+  next read/run for as long as the env var is set (see
+  [Connecting a real model](#connecting-a-real-model)).
 - **Workspace tools with operator approvals** — in `work` mode with a linked
   workspace the junior gets confined tools (`read_file`, `list_dir`,
   `search_text`, `write_file`, `edit_file`, `delete_file`, `run_shell`) that

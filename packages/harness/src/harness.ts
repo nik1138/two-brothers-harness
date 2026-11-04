@@ -61,10 +61,14 @@
  *   `## Using tools`. Every provider call appends a names-and-lengths
  *   `PromptAuditEntry` to `result.promptAudits` and emits the same entry as
  *   a `prompt_audit` runtime event.
- * - Structured-payload discipline (BACKLOG, fixes 1 + 3): every structured
+ * - Structured-payload discipline (BACKLOG, fixes 1 + 2 + 3): every structured
  *   node reply is checked against the strict zod schema and gets exactly ONE
- *   repair re-ask when it fails. The repair turn is appended to the shared
- *   context as a marked `message` envelope from "user"
+ *   repair re-ask when it fails. Before the repair runs, the relaxed strict
+ *   parse accepts any JSON object in the raw reply (bare, fenced, surrounded
+ *   by prose — no byte-stable reply markers required) that passes the same
+ *   strict check, so a valid payload never takes a needless repair. The
+ *   repair turn is appended to the shared context as a marked `message`
+ *   envelope from "user"
  *   (`[[REPAIR_REQUEST]]` … `[[/REPAIR_REQUEST]]`, the compaction-summary
  *   convention) and the request resends the conversation OpenAI-style: the
  *   bad reply as an assistant turn, the repair instruction as a user turn.
@@ -102,6 +106,7 @@ import {
 } from "./compaction.ts";
 import {
   buildRepairRequest,
+  relaxedStrictPayload,
   strictPayloadIssues,
   STRUCTURED_PAYLOAD_KINDS,
   type PayloadIssueLike,
@@ -226,6 +231,29 @@ export function sanitizePayload(
     if (data.text === undefined) data.text = text.trim();
   }
   return data;
+}
+
+/**
+ * The strict payload check for one raw node reply, with the relaxed-parse
+ * fallback (BACKLOG fix 2). Runs the tolerant parse and the strict zod check
+ * first; only when issues remain does it scan the raw reply for a JSON object
+ * candidate (every fenced block and every brace-delimited span, byte-stable
+ * markers or not) that fully passes the SAME strict check — zod schema plus
+ * protocol-required fields — and accepts the first such candidate. Returns
+ * the payload to keep (the accepted candidate, else the tolerant parse's) and
+ * the issues to feed back (null when the reply is acceptable).
+ */
+function strictReplyCheck(
+  kind: string,
+  reply: string,
+): { payload: Record<string, unknown>; issues: PayloadIssueLike[] | null } {
+  const parsed = parseModelOutput(reply, kind);
+  const issues = strictPayloadIssues(kind, parsed.payload, parsed.parseFailed);
+  if (issues === null) return { payload: parsed.payload, issues: null };
+  const relaxed = relaxedStrictPayload(kind, reply);
+  return relaxed !== null
+    ? { payload: relaxed, issues: null }
+    : { payload: parsed.payload, issues };
 }
 
 // ---------------------------------------------------------------------------
@@ -1047,12 +1075,17 @@ export class TwoBrothersHarness {
    * Enforce the strict payload contract on one node reply, with at most ONE
    * repair re-ask. The tolerant parse runs first (it never throws); a reply
    * that fails the strict check — no JSON payload, a required field missing,
-   * or a schema violation such as an out-of-enum verdict — gets the repair
-   * turn appended to the shared context and re-sent OpenAI-style. If the
-   * repair cannot be attempted (context overflow with nothing to compact) or
-   * its reply is still not strict, the LAST reply goes to the caller and the
-   * tolerant pipeline (sanitize + defaults) plus one warning records the
-   * degradation — exactly the pre-repair behavior, never an exception.
+   * or a schema violation such as an out-of-enum verdict — gets one relaxed
+   * strict-parse chance (BACKLOG fix 2): any JSON object deeper in the reply
+   * (a later fenced block after a thinking block, a bare object surrounded by
+   * prose with stray braces) that fully passes the same strict check is the
+   * payload, so a valid bare/fenced JSON reply never takes a needless repair.
+   * Only when no candidate passes does the repair turn get appended to the
+   * shared context and re-sent OpenAI-style. If the repair cannot be attempted
+   * (context overflow with nothing to compact) or its reply is still not
+   * strict, the LAST reply goes to the caller and the tolerant pipeline
+   * (sanitize + defaults) plus one warning records the degradation — exactly
+   * the pre-repair behavior, never an exception.
    *
    * `warn` receives the run-scoped warning target (`lastErrors` for the plain
    * path, `state.errors` for the tool-loop deliverable — unchanged).
@@ -1067,30 +1100,33 @@ export class TwoBrothersHarness {
     rebuild?: () => ChatMessage[],
   ): Promise<{ text: string; payload: Record<string, unknown> }> {
     let reply = text;
-    let parsed = parseModelOutput(reply, kind);
-    let failed = parsed.parseFailed;
+    let parsed: Record<string, unknown>;
+    let failed: boolean;
     if (STRUCTURED_PAYLOAD_KINDS.has(kind)) {
-      let issues: PayloadIssueLike[] | null = strictPayloadIssues(
-        kind,
-        parsed.payload,
-        parsed.parseFailed,
-      );
+      let check = strictReplyCheck(kind, reply);
+      let issues = check.issues;
+      parsed = check.payload;
       if (issues !== null) {
         const request = buildRepairRequest(kind, issues);
         const repaired = await this.repairReply(state, role, kind, messages, reply, request, rebuild);
         if (repaired !== null) {
           reply = repaired;
-          parsed = parseModelOutput(reply, kind);
-          issues = strictPayloadIssues(kind, parsed.payload, parsed.parseFailed);
+          check = strictReplyCheck(kind, reply);
+          parsed = check.payload;
+          issues = check.issues;
         }
       }
       failed = issues !== null;
+    } else {
+      const initial = parseModelOutput(reply, kind);
+      parsed = initial.payload;
+      failed = initial.parseFailed;
     }
     if (failed) warn.push(`unstructured model reply for ${kind}`);
     // The payload is already parsed; delivery only enriches the shared context
     // for the turns that follow (the node's own append happens next).
     this.deliverSkillRequest(state, role, reply);
-    return { text: reply, payload: parsed.payload };
+    return { text: reply, payload: parsed };
   }
 
   /**

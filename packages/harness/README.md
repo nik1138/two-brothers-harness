@@ -27,6 +27,7 @@ npm install -g @two-brothers/harness
 
 ## Quick start
 
+`two-brothers --version` (or `-v`) prints the installed package version.
 Offline against the built-in mock provider:
 
 ```bash
