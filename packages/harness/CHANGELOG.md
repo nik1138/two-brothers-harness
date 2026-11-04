@@ -45,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   standard SSE headers (`Content-Type: text/event-stream`,
   `Cache-Control: no-cache`, `X-Accel-Buffering: no`), so proxies and
   EventSource clients treat the legacy tail as a proper event stream.
+- **Installed CLI entry**: POSIX/npm `.bin` symlinks now resolve real paths
+  correctly (`isCliEntry` compares canonical paths on both sides), so an
+  installed `two-brothers` executes instead of silently exiting without
+  output; regression coverage included.
 
 ## [0.0.1] — 2026-11-04
 

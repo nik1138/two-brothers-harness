@@ -5,10 +5,12 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { deriveTitle, main, type CliIO } from "../src/cli.ts";
+import { deriveTitle, isCliEntry, main, type CliIO } from "../src/cli.ts";
 
 function makeIO(): CliIO & { out: string[]; err: string[] } {
   const out: string[] = [];
@@ -253,4 +255,61 @@ test("help aliases print help and exit 0 (no Unknown command)", async () => {
 test("sessions: rejects unexpected positional arguments", async () => {
   const io = makeIO();
   await assert.rejects(main(["sessions", "extra"], io), /unexpected argument/i);
+});
+
+// ---------------------------------------------------------------------------
+// Entry-point detection: npm's POSIX `.bin` is a symlink, so argv[1] carries
+// the link path while `import.meta.url` resolves the real file — a plain
+// string comparison there silently skipped `main()`.
+// ---------------------------------------------------------------------------
+
+test("isCliEntry: realpath comparison unit cases", () => {
+  const here = fileURLToPath(import.meta.url);
+  assert.equal(isCliEntry(import.meta.url, here), true, "same file via its own path");
+  assert.equal(
+    isCliEntry(import.meta.url, path.join(here, "..", "run-all.ts")),
+    false,
+    "a sibling file is not the entry",
+  );
+  assert.equal(
+    isCliEntry(import.meta.url, path.join(here, "missing.ts")),
+    false,
+    "an unreadable path is not the entry",
+  );
+  assert.equal(isCliEntry(import.meta.url, undefined), false, "no argv[1]");
+});
+
+test("CLI runs through a symlinked entry (npm .bin parity)", async (t) => {
+  await withTempDir(async (dir) => {
+    // Extensionless like the POSIX bin; Windows needs an extension for the
+    // loader to pick the module format from the link name.
+    const link = path.join(
+      dir,
+      process.platform === "win32" ? "two-brothers.js" : "two-brothers",
+    );
+    const target = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+    try {
+      fs.symlinkSync(target, link, "file");
+    } catch (exc) {
+      t.skip(`symlinks unavailable here: ${exc instanceof Error ? exc.message : String(exc)}`);
+      return;
+    }
+
+    const pkg = JSON.parse(
+      fs.readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf-8"),
+    ) as { version: string };
+
+    // Before the realpath fix both invocations exited 0 with no output.
+    const version = spawnSync(process.execPath, [link, "--version"], { encoding: "utf-8" });
+    assert.equal(version.status, 0, version.stderr);
+    assert.equal(version.stdout.trim(), pkg.version, "symlinked --version prints the version");
+
+    const help = spawnSync(process.execPath, [link, "--help"], { encoding: "utf-8" });
+    assert.equal(help.status, 0, help.stderr);
+    assert.match(help.stdout, /two-brothers run "<task>"/, "symlinked --help prints usage");
+
+    const selftest = spawnSync(process.execPath, [link, "selftest"], { encoding: "utf-8" });
+    assert.equal(selftest.status, 0, selftest.stderr);
+    assert.match(selftest.stdout, /SELFTEST: PASS/, "symlinked selftest runs");
+  });
 });

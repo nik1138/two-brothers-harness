@@ -88,6 +88,34 @@ try {
 	} else {
 		check("node dist/cli.js run --provider mock", false, `missing ${cliEntry}`);
 	}
+
+	// 6. The installed executable exactly as a consumer invokes it: the
+	//    node_modules/.bin shim — on POSIX the extensionless symlink executed
+	//    directly, on Windows the .cmd wrapper through a shell (like npm's
+	//    own bins). This is the path a broken entry-point check would silence.
+	const binEntry = join(
+		tempDir,
+		"node_modules",
+		".bin",
+		process.platform === "win32" ? "two-brothers.cmd" : "two-brothers",
+	);
+	if (existsSync(binEntry)) {
+		const version = run(binEntry, ["--version"], tempDir);
+		check(
+			"two-brothers --version (installed .bin shim)",
+			!version.failed && version.status === 0 && version.stdout.trim() === manifest.version,
+			`exit ${version.status}; ${(version.stdout + version.stderr).trim().split("\n").slice(-1)[0] ?? ""}`,
+		);
+		const selftestBin = run(binEntry, ["selftest"], tempDir);
+		check(
+			"two-brothers selftest (installed .bin shim)",
+			!selftestBin.failed && selftestBin.status === 0 && selftestBin.stdout.includes("SELFTEST: PASS"),
+			(selftestBin.stdout + selftestBin.stderr).trim().split("\n").slice(-1)[0] ?? "",
+		);
+	} else {
+		check("two-brothers --version (installed .bin shim)", false, `missing ${binEntry}`);
+		check("two-brothers selftest (installed .bin shim)", false, `missing ${binEntry}`);
+	}
 } finally {
 	rmSync(tempDir, { recursive: true, force: true });
 }

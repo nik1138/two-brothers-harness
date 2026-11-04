@@ -15,7 +15,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createInterface } from "node:readline/promises";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
 
 import { resolveConfig, maxTokensForRole, validateRunConfig, type Config } from "./config.ts";
@@ -1840,9 +1840,24 @@ export async function main(argv: string[], io: CliIO = defaultIO): Promise<numbe
   return 2;
 }
 
-const invokedAsScript =
-  process.argv[1] !== undefined &&
-  import.meta.url === pathToFileURL(process.argv[1]).href;
+/**
+ * True when this module is the process entry point. npm's POSIX `.bin`
+ * entries are symlinks: `process.argv[1]` keeps the symlink path while
+ * `import.meta.url` is already resolved to the real file, so a plain string
+ * comparison misses. Compare canonical real paths on both sides instead
+ * (also correct under `node --preserve-symlinks`, where the module URL keeps
+ * the link path too). A missing entry path or unreadable file is not us.
+ */
+export function isCliEntry(moduleUrl: string, argv1: string | undefined): boolean {
+  if (argv1 === undefined) return false;
+  try {
+    return fs.realpathSync(fileURLToPath(moduleUrl)) === fs.realpathSync(argv1);
+  } catch {
+    return false;
+  }
+}
+
+const invokedAsScript = isCliEntry(import.meta.url, process.argv[1]);
 
 if (invokedAsScript) {
   main(process.argv.slice(2))
