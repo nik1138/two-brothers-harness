@@ -1,0 +1,417 @@
+import type {
+  ApprovalAnswerRequest,
+  ApprovalDecisionView,
+  Envelope,
+  FsBrowseResult,
+  ProviderPreset,
+  RunApprovalsView,
+  RunEvent,
+  RunRecord,
+  RunRequest,
+  RunStart,
+  SessionCreateRequest,
+  SessionDetail,
+  SessionInfo,
+  SessionRuntimeEvents,
+  SettingsView,
+  Workspace,
+  WorkspaceCreateRequest,
+} from './types'
+
+export class ApiError extends Error {
+  status: number
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
+async function request<T>(url: string, init?: RequestInit): Promise<T> {
+  let res: Response
+  try {
+    res = await fetch(url, init)
+  } catch {
+    throw new ApiError('API is unreachable — is the backend running on port 8600?', 0)
+  }
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`
+    try {
+      const body = await res.json()
+      if (body && typeof body.detail === 'string') detail = body.detail
+    } catch {
+      // keep default message
+    }
+    throw new ApiError(detail, res.status)
+  }
+  return (await res.json()) as T
+}
+
+function json(method: string, body: unknown): RequestInit {
+  return { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+}
+
+// -- sessions ---------------------------------------------------------------
+
+export async function listSessions(workspaceId?: string | null): Promise<SessionInfo[]> {
+  const q = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : ''
+  return request<SessionInfo[]>(`/api/sessions${q}`)
+}
+
+export async function getSession(name: string): Promise<SessionDetail> {
+  return request<SessionDetail>(`/api/sessions/${encodeURIComponent(name)}`)
+}
+
+/** Runtime sidecar (tool/approval/run events) for a session; empty for legacy sessions. */
+export async function getSessionRuntimeEvents(name: string): Promise<SessionRuntimeEvents> {
+  return request<SessionRuntimeEvents>(`/api/sessions/${encodeURIComponent(name)}/events`)
+}
+
+export async function createSession(body: SessionCreateRequest): Promise<SessionInfo> {
+  return request<SessionInfo>('/api/sessions', json('POST', body))
+}
+
+/** Result of `PATCH /api/sessions/{name}` — the saved metadata sidecar. */
+export interface SessionRenameResult {
+  name: string
+  title?: string
+  workspace_id?: string
+  created?: number
+  updated?: number
+}
+
+/** Set a session's readable title (the session file itself is untouched). */
+export async function renameSession(name: string, title: string): Promise<SessionRenameResult> {
+  return request<SessionRenameResult>(
+    `/api/sessions/${encodeURIComponent(name)}`,
+    json('PATCH', { title }),
+  )
+}
+
+/** Remove a session plus its metadata/runtime sidecars (stops a live run first). */
+export async function deleteSession(name: string): Promise<{ deleted: string }> {
+  return request<{ deleted: string }>(`/api/sessions/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+  })
+}
+
+// -- workspaces ---------------------------------------------------------------
+
+export async function listWorkspaces(): Promise<Workspace[]> {
+  return request<Workspace[]>('/api/workspaces')
+}
+
+export async function addWorkspace(body: WorkspaceCreateRequest): Promise<Workspace> {
+  return request<Workspace>('/api/workspaces', json('POST', body))
+}
+
+export async function removeWorkspace(id: string): Promise<{ removed: string }> {
+  return request<{ removed: string }>(`/api/workspaces/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  })
+}
+
+// -- settings ---------------------------------------------------------------
+
+/** Per-role settings patch accepted by `PUT /api/settings`. */
+export interface RoleSettingsPatch {
+  provider?: string
+  model?: string
+  base_url?: string
+  /** Write-only: the backend stores it and never echoes it back. */
+  api_key?: string
+  /** Provider preset name supplying base_url/api_key; "" clears it. */
+  provider_ref?: string
+}
+
+/**
+ * The shared plugin selection (`plugins` section of GET/PUT /api/settings).
+ * One list: every enabled plugin is available to both Senior and Junior
+ * (owner decision 2026-11-03).
+ */
+export type PluginSelection = string[]
+
+/** Legacy per-role plugin selection; read fail-soft and merged. */
+export interface LegacyPluginSelection {
+  senior?: string[]
+  junior?: string[]
+}
+
+/** Either selection shape the backend may return (old builds: per-role). */
+export type PluginSelectionPayload = PluginSelection | LegacyPluginSelection
+
+/**
+ * Normalize either selection shape into the shared list (dedup, order
+ * preserved: list order, or senior then junior for the legacy object).
+ */
+export function normalizePluginSelection(value: unknown): PluginSelection {
+  const out: string[] = []
+  const add = (item: unknown): void => {
+    if (typeof item !== 'string') return
+    const name = item.trim()
+    if (name && !out.includes(name)) out.push(name)
+  }
+  if (Array.isArray(value)) {
+    value.forEach(add)
+  } else if (value !== null && typeof value === 'object') {
+    const legacy = value as Record<string, unknown>
+    for (const role of ['senior', 'junior'] as const) {
+      const list = legacy[role]
+      if (Array.isArray(list)) list.forEach(add)
+    }
+  }
+  return out
+}
+
+export interface SettingsPatch {
+  senior?: RoleSettingsPatch
+  junior?: RoleSettingsPatch
+  /** Omit to leave the persisted plugin selection untouched. */
+  plugins?: PluginSelection
+}
+
+/** `GET/PUT /api/settings` response: role views plus the plugin selection. */
+export type SettingsResponse = SettingsView & { plugins?: PluginSelectionPayload }
+
+export async function getSettings(): Promise<SettingsResponse> {
+  return request<SettingsResponse>('/api/settings')
+}
+
+export async function updateSettings(patch: SettingsPatch): Promise<SettingsResponse> {
+  return request<SettingsResponse>('/api/settings', json('PUT', patch))
+}
+
+/**
+ * Save role settings together with the shared plugin selection in one PUT.
+ * The plugin list is read back after the backend reloads the plugin set.
+ */
+export async function updateSettingsWithPlugins(
+  patch: SettingsPatch & { plugins: PluginSelection },
+): Promise<SettingsResponse> {
+  return request<SettingsResponse>('/api/settings', json('PUT', patch))
+}
+
+// -- plugins ------------------------------------------------------------------
+
+/** One discovered plugin (`GET /api/plugins`); names and descriptions only. */
+export interface PluginDescriptor {
+  name: string
+  description: string
+  roles: string[]
+}
+
+/** A plugin that failed to load; fail-soft, the rest keep working. */
+export interface PluginLoadError {
+  plugin: string
+  error: string
+}
+
+export interface PluginsView {
+  plugins: PluginDescriptor[]
+  errors: PluginLoadError[]
+}
+
+export async function listPlugins(): Promise<PluginsView> {
+  const body = await request<Partial<PluginsView>>('/api/plugins')
+  return { plugins: body.plugins ?? [], errors: body.errors ?? [] }
+}
+
+// -- background runs ----------------------------------------------------------
+
+export async function startRun(body: RunRequest): Promise<RunStart> {
+  return request<RunStart>('/api/runs', json('POST', body))
+}
+
+/**
+ * Lists run records, newest first. Without a session the whole pool is
+ * returned; with one, only that session's runs (the backend filters).
+ */
+export async function listRuns(session?: string | null): Promise<RunRecord[]> {
+  const q = session ? `?session=${encodeURIComponent(session)}` : ''
+  // tolerate either a bare array or an object wrapping one
+  const body = await request<RunRecord[] | { runs?: RunRecord[] }>(`/api/runs${q}`)
+  return Array.isArray(body) ? body : (body.runs ?? [])
+}
+
+export async function getRun(runId: string): Promise<RunRecord> {
+  return request<RunRecord>(`/api/runs/${encodeURIComponent(runId)}`)
+}
+
+export async function stopRun(runId: string): Promise<{ run_id: string; status: string }> {
+  return request<{ run_id: string; status: string }>(
+    `/api/runs/${encodeURIComponent(runId)}/stop`,
+    { method: 'POST' },
+  )
+}
+
+/** Result of the legacy synchronous `POST /api/run` (replays the whole run). */
+export interface RunSyncResult {
+  session: string
+  events: Envelope[]
+  decision?: Record<string, unknown> | null
+  errors: string[]
+}
+
+/** Legacy synchronous run; prefer `startRun` + the event stream. */
+export async function runSync(body: RunRequest): Promise<RunSyncResult> {
+  return request<RunSyncResult>('/api/run', json('POST', body))
+}
+
+// -- operator approvals -------------------------------------------------------
+
+export async function getRunApprovals(runId: string): Promise<RunApprovalsView> {
+  return request<RunApprovalsView>(`/api/runs/${encodeURIComponent(runId)}/approvals`)
+}
+
+export async function answerRunApproval(
+  runId: string,
+  approvalId: string,
+  body: ApprovalAnswerRequest,
+): Promise<ApprovalDecisionView> {
+  return request<ApprovalDecisionView>(
+    `/api/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(approvalId)}`,
+    json('POST', body),
+  )
+}
+
+// -- run event stream (SSE) -----------------------------------------------------
+
+/** SSE URL for a run; `after` is the last SSE event id already seen. */
+export function runEventsUrl(runId: string, after = 0): string {
+  const cursor = Number.isFinite(after) ? Math.max(0, Math.floor(after)) : 0
+  return `/api/runs/${encodeURIComponent(runId)}/events?after=${cursor}`
+}
+
+export interface RunEventMeta {
+  /** SSE event id of this frame (`0` when the frame carried none). */
+  eventId: number
+  /** Raw JSON text, for callers that log or debug the wire format. */
+  raw: string
+}
+
+export interface RunEventStreamOptions {
+  /** Resume cursor; the server replays every event after it. */
+  after?: number
+  onEvent: (event: RunEvent, meta: RunEventMeta) => void
+  /** Fired when the connection drops or the server closes the stream. */
+  onError?: (cause: Event) => void
+}
+
+export interface RunEventStream {
+  /** Stop the stream and cancel EventSource's own auto-reconnect. */
+  close: () => void
+  /** Highest SSE event id observed so far (the `?after=N` resume cursor). */
+  lastEventId: () => number
+}
+
+/**
+ * Opens the typed event stream for one run. The server closes the stream
+ * after `run_end`, so callers should `close()` in `onError`/on completion and
+ * reconnect with a fresh `after` cursor if the run is still active.
+ */
+export function openRunEventStream(
+  runId: string,
+  options: RunEventStreamOptions,
+): RunEventStream {
+  let last = Number.isFinite(options.after) ? Math.max(0, Math.floor(options.after ?? 0)) : 0
+  const source = new EventSource(runEventsUrl(runId, last))
+  source.onmessage = (ev: MessageEvent<string>) => {
+    const parsed = Number.parseInt(ev.lastEventId, 10)
+    if (Number.isFinite(parsed)) last = parsed
+    let data: RunEvent
+    try {
+      data = JSON.parse(ev.data) as RunEvent
+    } catch {
+      return
+    }
+    options.onEvent(data, { eventId: Number.isFinite(parsed) ? parsed : last, raw: ev.data })
+  }
+  source.onerror = (ev) => options.onError?.(ev)
+  return {
+    close: () => source.close(),
+    lastEventId: () => last,
+  }
+}
+
+/**
+ * Legacy session-file envelope stream (`GET /api/stream?session=`) — replays
+ * every persisted envelope and then follows the JSONL file. Prefer the run
+ * event stream for live runs.
+ */
+export interface EnvelopeStream {
+  close: () => void
+}
+
+export function openSessionEnvelopeStream(
+  session: string,
+  onEnvelope: (envelope: Envelope) => void,
+  onError?: (cause: Event) => void,
+): EnvelopeStream {
+  const source = new EventSource(`/api/stream?session=${encodeURIComponent(session)}`)
+  source.onmessage = (ev: MessageEvent<string>) => {
+    let envelope: Envelope
+    try {
+      envelope = JSON.parse(ev.data) as Envelope
+    } catch {
+      return
+    }
+    onEnvelope(envelope)
+  }
+  source.onerror = (ev) => onError?.(ev)
+  return { close: () => source.close() }
+}
+
+// -- filesystem browsing --------------------------------------------------------
+
+/** List directories at `path` (server cwd when omitted; drive roots on Windows when empty). */
+export async function browseFs(path?: string): Promise<FsBrowseResult> {
+  const q = path ? `?path=${encodeURIComponent(path)}` : ''
+  return request<FsBrowseResult>(`/api/fs/browse${q}`)
+}
+
+// -- provider presets -----------------------------------------------------------
+
+export interface ProviderCreateRequest {
+  name: string
+  base_url: string
+  /** Write-only; responses only report `api_key_set`. */
+  api_key?: string
+  /** Preset flavor; only "openai-compatible" exists today. */
+  kind?: string
+  models?: string[]
+}
+
+export interface ProviderPatchRequest {
+  base_url?: string
+  /** Omitted or empty keeps the stored key. */
+  api_key?: string
+  kind?: string
+  models?: string[]
+}
+
+export async function listProviders(): Promise<ProviderPreset[]> {
+  const res = await request<{ providers: ProviderPreset[] }>('/api/providers')
+  return res.providers
+}
+
+export async function createProvider(body: ProviderCreateRequest): Promise<ProviderPreset> {
+  const res = await request<{ provider: ProviderPreset }>('/api/providers', json('POST', body))
+  return res.provider
+}
+
+export async function updateProvider(
+  name: string,
+  patch: ProviderPatchRequest,
+): Promise<ProviderPreset> {
+  const res = await request<{ provider: ProviderPreset }>(
+    `/api/providers/${encodeURIComponent(name)}`,
+    json('PUT', patch),
+  )
+  return res.provider
+}
+
+export async function deleteProvider(name: string): Promise<{ removed: string }> {
+  return request<{ removed: string }>(`/api/providers/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+  })
+}

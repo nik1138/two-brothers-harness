@@ -1,0 +1,13 @@
+{
+  "name": "two-brothers-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browser end-to-end tests for the Two Brothers web workspace",
+  "type": "module",
+  "scripts": {
+    "test": "node run.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.64.1"
+  }
+}

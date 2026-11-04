@@ -1,0 +1,563 @@
+/**
+ * CLI ergonomics lane: `models` discovery, `onboard` settings writing, and
+ * `--max-tokens` / cost reporting. Hermetic — discovery and the end-to-end
+ * run talk to a local `node:http` stub on 127.0.0.1, and onboarding writes
+ * into a temp directory.
+ */
+import * as fs from "node:fs";
+import * as http from "node:http";
+import * as os from "node:os";
+import * as path from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { test } from "node:test";
+import assert from "node:assert/strict";
+
+import { costLine, estimateRunCost, main, type CliIO } from "../src/cli.ts";
+import { maxTokensForRole, resolveConfig } from "../src/config.ts";
+import {
+  AnthropicProvider,
+  GoogleProvider,
+  OpenAICompatibleProvider,
+  type FetchLike,
+  type ModelProviderConfig,
+} from "../src/provider.ts";
+import { SettingsStore } from "../src/settings_store.ts";
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+function makeIO(): CliIO & { out: string[]; err: string[] } {
+  const out: string[] = [];
+  const err: string[] = [];
+  return { out, err, log: (line) => out.push(line), error: (line) => err.push(line) };
+}
+
+async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tb-cli-ergonomics-"));
+  try {
+    await fn(dir);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+interface RecordedRequest {
+  path: string;
+  headers: http.IncomingHttpHeaders;
+  body: any;
+}
+
+interface StubServer {
+  url: string;
+  requests: RecordedRequest[];
+  close(): Promise<void>;
+}
+
+/** A local HTTP stub: records every request, answers with `handler`'s JSON. */
+async function startServer(
+  handler: (request: RecordedRequest) => { status?: number; body: unknown },
+): Promise<StubServer> {
+  const requests: RecordedRequest[] = [];
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf-8");
+      let body: any = undefined;
+      try {
+        body = raw ? JSON.parse(raw) : undefined;
+      } catch {
+        body = raw;
+      }
+      const request: RecordedRequest = { path: req.url ?? "", headers: req.headers, body };
+      requests.push(request);
+      const result = handler(request);
+      res.writeHead(result.status ?? 200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result.body));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const port = typeof address === "object" && address !== null ? address.port : 0;
+  return {
+    url: `http://127.0.0.1:${port}`,
+    requests,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// `models` discovery
+// ---------------------------------------------------------------------------
+
+test("models: compact id/owned_by table, Bearer auth, no key echoed", async () => {
+  const server = await startServer(() => ({
+    body: {
+      data: [
+        { id: "gpt-4o", owned_by: "openai" },
+        { id: "gpt-4o-mini", owned_by: "openai" },
+      ],
+    },
+  }));
+  const io = makeIO();
+  try {
+    const code = await main(
+      ["models", "--base-url", `${server.url}/v1`, "--api-key", "sk-models-secret"],
+      io,
+    );
+    assert.equal(code, 0, io.err.join("\n"));
+    assert.equal(server.requests.length, 1);
+    assert.equal(server.requests[0].path, "/v1/models");
+    assert.equal(server.requests[0].headers.authorization, "Bearer sk-models-secret");
+    assert.match(io.out[0], /^id\s+owned_by$/);
+    assert.ok(io.out.some((line) => /^gpt-4o\s+openai$/.test(line)), io.out.join("\n"));
+    assert.ok(io.out.some((line) => /^gpt-4o-mini\s+openai$/.test(line)), io.out.join("\n"));
+    const printed = [...io.out, ...io.err].join("\n");
+    assert.ok(!printed.includes("sk-models-secret"), "the key never appears in output");
+  } finally {
+    await server.close();
+  }
+});
+
+test("models --json: one array of {id, owned_by}", async () => {
+  const server = await startServer(() => ({
+    body: { data: [{ id: "deepseek-chat", owned_by: "deepseek" }] },
+  }));
+  const io = makeIO();
+  try {
+    const code = await main(["models", "--base-url", server.url, "--json"], io);
+    assert.equal(code, 0, io.err.join("\n"));
+    assert.equal(io.out.length, 1);
+    assert.deepEqual(JSON.parse(io.out[0]), [{ id: "deepseek-chat", owned_by: "deepseek" }]);
+  } finally {
+    await server.close();
+  }
+});
+
+test("models: no owner labels -> a plain id list", async () => {
+  const server = await startServer(() => ({ body: [{ id: "local-model" }] }));
+  const io = makeIO();
+  try {
+    const code = await main(["models", "--base-url", server.url], io);
+    assert.equal(code, 0, io.err.join("\n"));
+    assert.deepEqual(io.out, ["local-model"]);
+  } finally {
+    await server.close();
+  }
+});
+
+test("models: an empty endpoint result is a friendly line, exit 0", async () => {
+  const server = await startServer(() => ({ body: { data: [] } }));
+  const io = makeIO();
+  try {
+    const code = await main(["models", "--base-url", server.url], io);
+    assert.equal(code, 0);
+    assert.deepEqual(io.out, [`no models reported by ${server.url}`]);
+  } finally {
+    await server.close();
+  }
+});
+
+test("models: HTTP errors exit 1 with a clean message", async () => {
+  const server = await startServer(() => ({ status: 401, body: { error: { message: "bad key" } } }));
+  const io = makeIO();
+  try {
+    const code = await main(["models", "--base-url", server.url], io);
+    assert.equal(code, 1);
+    assert.match(io.err.join("\n"), /\[error\] HTTP 401/);
+    assert.deepEqual(io.out, []);
+  } finally {
+    await server.close();
+  }
+});
+
+test("models: connection refused exits 1 with `cannot reach`", async () => {
+  const io = makeIO();
+  const code = await main(["models", "--base-url", "http://127.0.0.1:9/v1"], io);
+  assert.equal(code, 1);
+  assert.equal(io.out.length, 0);
+  assert.match(io.err[0], /^\[error\] cannot reach http:\/\/127\.0\.0\.1:9\/v1\/models/);
+});
+
+test("models: missing --base-url and a missing key env var are usage errors (exit 2)", async () => {
+  const io = makeIO();
+  assert.equal(await main(["models"], io), 2);
+  assert.match(io.err.join("\n"), /Usage: models --base-url/);
+
+  const io2 = makeIO();
+  const code = await main(
+    ["models", "--base-url", "http://127.0.0.1:9/v1", "--api-key-env", "TB_TEST_UNSET_KEY_ENV"],
+    io2,
+  );
+  assert.equal(code, 2);
+  assert.match(io2.err.join("\n"), /TB_TEST_UNSET_KEY_ENV is not set/);
+});
+
+// ---------------------------------------------------------------------------
+// `onboard` settings writing
+// ---------------------------------------------------------------------------
+
+test("onboard --non-interactive: writes role settings, masks the key", async () => {
+  await withTempDir(async (dir) => {
+    const io = makeIO();
+    const secret = "sk-onboard-secret-42";
+    const code = await main(
+      [
+        "onboard",
+        "--sessions-dir",
+        dir,
+        "--base-url",
+        "http://example.test/v1",
+        "--senior-model",
+        "gpt-4o",
+        "--junior-model",
+        "gpt-4o-mini",
+        "--api-key",
+        secret,
+        "--non-interactive",
+      ],
+      io,
+    );
+    assert.equal(code, 0, io.err.join("\n"));
+    const file = path.join(dir, "settings.json");
+    assert.ok(fs.existsSync(file), "settings.json written");
+    assert.ok(
+      io.out.some((line) => line.startsWith("wrote ") && line.includes("settings.json")),
+      io.out.join("\n"),
+    );
+
+    const store = new SettingsStore(file);
+    const settings = store.read();
+    assert.equal(settings.senior?.provider, "openai");
+    assert.equal(settings.senior?.base_url, "http://example.test/v1");
+    assert.equal(settings.senior?.model, "gpt-4o");
+    assert.equal(settings.senior?.api_key, secret, "key round-trips through the store");
+    assert.equal(settings.junior?.model, "gpt-4o-mini");
+    assert.equal(store.public().senior.api_key_set, true);
+
+    const printed = [...io.out, ...io.err].join("\n");
+    assert.ok(!printed.includes(secret), "the key is never printed back");
+    assert.match(printed, /api-key=\(set\)/);
+    assert.ok(!fs.readFileSync(file, "utf-8").includes(secret), "key is encrypted at rest");
+  });
+});
+
+test("onboard: --preset supplies the base url and default models", async () => {
+  await withTempDir(async (dir) => {
+    const io = makeIO();
+    const code = await main(
+      ["onboard", "--sessions-dir", dir, "--preset", "lmstudio", "--non-interactive"],
+      io,
+    );
+    assert.equal(code, 0, io.err.join("\n"));
+    const settings = new SettingsStore(path.join(dir, "settings.json")).read();
+    assert.equal(settings.senior?.base_url, "http://localhost:1234/v1");
+    assert.equal(settings.senior?.model, "spark-x2.6-4b@q4_k_m");
+    assert.equal(settings.junior?.model, "lfm3-1.7b");
+    assert.equal(settings.senior?.api_key, undefined, "no key stored without --api-key");
+  });
+});
+
+test("onboard: a native-family preset notes the wire family it needs", async () => {
+  await withTempDir(async (dir) => {
+    const io = makeIO();
+    const code = await main(
+      ["onboard", "--sessions-dir", dir, "--preset", "anthropic", "--non-interactive"],
+      io,
+    );
+    assert.equal(code, 0, io.err.join("\n"));
+    assert.match(io.out.join("\n"), /--provider-kind anthropic/);
+  });
+});
+
+test("onboard: interactive prompts work from piped input (scripted onboarding)", async () => {
+  await withTempDir(async (dir) => {
+    const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+    const result = spawnSync(process.execPath, [cli, "onboard", "--sessions-dir", dir], {
+      // preset (blank) → base url (default) → senior model → junior model
+      input: "\n\nmodel-a\nmodel-b\n",
+      encoding: "utf-8",
+      timeout: 30_000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /base url \[http:\/\/localhost:1234\/v1\]/);
+    assert.match(result.stdout, /wrote /);
+    const settings = new SettingsStore(path.join(dir, "settings.json")).read();
+    assert.equal(settings.senior?.base_url, "http://localhost:1234/v1");
+    assert.equal(settings.senior?.model, "model-a");
+    assert.equal(settings.junior?.model, "model-b");
+  });
+});
+
+test("onboard: missing base url / unknown preset / missing models exit 2", async () => {
+  await withTempDir(async (dir) => {
+    const io = makeIO();
+    const code = await main(
+      ["onboard", "--sessions-dir", dir, "--non-interactive", "--senior-model", "a", "--junior-model", "b"],
+      io,
+    );
+    assert.equal(code, 2);
+    assert.match(io.err.join("\n"), /no base url/);
+
+    const io2 = makeIO();
+    assert.equal(
+      await main(["onboard", "--sessions-dir", dir, "--preset", "nope", "--non-interactive"], io2),
+      2,
+    );
+    assert.match(io2.err.join("\n"), /unknown preset: nope/);
+
+    const io3 = makeIO();
+    const code3 = await main(
+      ["onboard", "--sessions-dir", dir, "--base-url", "http://localhost:1234/v1", "--non-interactive"],
+      io3,
+    );
+    assert.equal(code3, 2);
+    assert.match(io3.err.join("\n"), /no model ids/);
+    assert.ok(!fs.existsSync(path.join(dir, "settings.json")), "a failed onboard writes nothing");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `--max-tokens` config and provider wiring
+// ---------------------------------------------------------------------------
+
+function withCleanMaxTokenEnv(fn: () => void): void {
+  const keys = [
+    "TWO_BROTHERS_MAX_TOKENS",
+    "TWO_BROTHERS_SENIOR_MAX_TOKENS",
+    "TWO_BROTHERS_JUNIOR_MAX_TOKENS",
+  ];
+  const saved = new Map(keys.map((key) => [key, process.env[key]]));
+  for (const key of keys) delete process.env[key];
+  try {
+    fn();
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+test("--max-tokens: flag parsing, validation and per-role env overrides", () => {
+  withCleanMaxTokenEnv(() => {
+    assert.equal(resolveConfig({ maxTokens: "321" }).maxTokens, 321);
+    assert.equal(maxTokensForRole(resolveConfig({ maxTokens: "321" }), "senior"), 321);
+    assert.equal(maxTokensForRole(resolveConfig({ maxTokens: "321" }), "junior"), 321);
+    assert.throws(() => resolveConfig({ maxTokens: "abc" }), /invalid max tokens/);
+    assert.throws(() => resolveConfig({ maxTokens: "0" }), /invalid max tokens/);
+
+    process.env.TWO_BROTHERS_MAX_TOKENS = "200";
+    process.env.TWO_BROTHERS_SENIOR_MAX_TOKENS = "50";
+    const cfg = resolveConfig({});
+    assert.equal(cfg.maxTokens, 200);
+    assert.equal(maxTokensForRole(cfg, "senior"), 50, "role env override wins");
+    assert.equal(maxTokensForRole(cfg, "junior"), 200, "other role keeps the run-level cap");
+  });
+});
+
+function baseProviderConfig(overrides: Partial<ModelProviderConfig> = {}): ModelProviderConfig {
+  return {
+    provider: "openai",
+    baseUrl: "http://stub.test/v1",
+    apiKey: "k",
+    seniorModel: "",
+    juniorModel: "",
+    model: "gpt-4o",
+    temperature: 0.4,
+    timeout: 5,
+    retries: 0,
+    ...overrides,
+  };
+}
+
+/** Answers each family's wire shape and records request bodies. */
+function shapeAwareFetch(): { fetchImpl: FetchLike; urls: string[]; bodies: any[] } {
+  const urls: string[] = [];
+  const bodies: any[] = [];
+  return {
+    urls,
+    bodies,
+    fetchImpl: async (url, init) => {
+      urls.push(url);
+      bodies.push(JSON.parse(String(init.body)));
+      let payload: unknown;
+      if (url.includes("/messages")) {
+        payload = { content: [{ type: "text", text: "ok" }], usage: { input_tokens: 1, output_tokens: 1 } };
+      } else if (url.includes(":generateContent")) {
+        payload = {
+          candidates: [{ content: { parts: [{ text: "ok" }] } }],
+          usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+        };
+      } else {
+        payload = {
+          choices: [{ message: { content: "ok" } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        };
+      }
+      return new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+  };
+}
+
+test("provider bodies: all three adapters send the configured output cap", async () => {
+  const messages = [{ role: "user" as const, content: "hi" }];
+
+  const openai = shapeAwareFetch();
+  await new OpenAICompatibleProvider(
+    baseProviderConfig({ fetchImpl: openai.fetchImpl, maxTokens: 321 }),
+  ).chat(messages);
+  assert.equal(openai.bodies[0].max_tokens, 321);
+  assert.equal(openai.bodies[0].model, "gpt-4o");
+
+  const openaiDefault = shapeAwareFetch();
+  await new OpenAICompatibleProvider(baseProviderConfig({ fetchImpl: openaiDefault.fetchImpl })).chat(
+    messages,
+  );
+  assert.ok(!("max_tokens" in openaiDefault.bodies[0]), "unset cap leaves the field off the wire");
+
+  const anthropic = shapeAwareFetch();
+  await new AnthropicProvider(
+    baseProviderConfig({ fetchImpl: anthropic.fetchImpl, maxTokens: 77 }),
+  ).chat(messages);
+  assert.equal(anthropic.bodies[0].max_tokens, 77);
+
+  const google = shapeAwareFetch();
+  await new GoogleProvider(
+    baseProviderConfig({ fetchImpl: google.fetchImpl, maxTokens: 99 }),
+  ).chat(messages);
+  assert.equal(google.bodies[0].generationConfig.maxOutputTokens, 99);
+
+  const googleDefault = shapeAwareFetch();
+  await new GoogleProvider(baseProviderConfig({ fetchImpl: googleDefault.fetchImpl })).chat(messages);
+  assert.ok(!("maxOutputTokens" in googleDefault.bodies[0].generationConfig));
+});
+
+// ---------------------------------------------------------------------------
+// usage splits + cost line / JSON
+// ---------------------------------------------------------------------------
+
+test("costLine: format, and no estimate for mixed or unknown models", () => {
+  const same = resolveConfig({ provider: "mock", seniorModel: "gpt-4o", juniorModel: "gpt-4o" });
+  assert.equal(
+    costLine(same, { input_tokens: 4000, output_tokens: 2000 }),
+    "cost: $0.0300 (in 4000 / out 2000 tokens)",
+  );
+  assert.equal(
+    estimateRunCost(same, { input_tokens: 1000, output_tokens: 500 })?.totalCost,
+    0.0075,
+  );
+
+  const mixed = resolveConfig({
+    provider: "mock",
+    seniorModel: "gpt-4o",
+    juniorModel: "gpt-4o-mini",
+  });
+  assert.equal(costLine(mixed, { input_tokens: 1, output_tokens: 1 }), null);
+
+  const unknown = resolveConfig({ provider: "mock", seniorModel: "mystery", juniorModel: "mystery" });
+  assert.equal(costLine(unknown, { input_tokens: 5, output_tokens: 5 }), null);
+});
+
+test("run --mode json: usage splits and cost survive the mocked run (cost null without a model)", async () => {
+  const io = makeIO();
+  const code = await main(["run", "pick an approach", "--provider", "mock", "--mode", "json"], io);
+  assert.equal(code, 0, io.err.join("\n"));
+  const parsed = JSON.parse(io.out[0]);
+  assert.ok(parsed.usage.input_tokens > 0, "prompt-token split present");
+  assert.ok(parsed.usage.output_tokens > 0, "completion-token split present");
+  assert.equal(parsed.cost, null, "mock runs name no model");
+});
+
+test("run: --max-tokens rides every request; cost estimates from the usage splits", async () => {
+  // One union payload satisfies every node's schema (sanitize drops the
+  // extra keys), so the stub run needs no repair round-trips: 4 calls.
+  const payload = {
+    text: "ok",
+    task: "pick an approach",
+    ask: "what is best?",
+    expect: "proposal",
+    title: "Plan",
+    answer: "Do it",
+    rationale: "because",
+    risks: [],
+    asks: [],
+    confidence: 0.7,
+    work: "do part",
+    acceptance: ["done"],
+    return: "deliverable",
+    result: "done",
+    artifacts: [],
+    notes: "ok",
+    verdict: "accept",
+    points: [],
+    decision: "ok",
+    dissent: null,
+    accepted_proposals: ["Plan"],
+  };
+  const server = await startServer(() => ({
+    body: {
+      choices: [{ message: { content: JSON.stringify(payload) } }],
+      usage: { prompt_tokens: 1000, completion_tokens: 500 },
+    },
+  }));
+  const io = makeIO();
+  try {
+    const code = await main(
+      [
+        "run",
+        "pick an approach",
+        "--provider",
+        "openai",
+        "--base-url",
+        `${server.url}/v1`,
+        "--api-key",
+        "sk-run-secret",
+        "--senior-model",
+        "gpt-4o",
+        "--junior-model",
+        "gpt-4o",
+        "--max-tokens",
+        "321",
+        "--mode",
+        "json",
+      ],
+      io,
+    );
+    assert.equal(code, 0, io.err.join("\n"));
+    assert.equal(io.out.length, 1, io.out.join("\n"));
+    const parsed = JSON.parse(io.out[0]);
+    assert.equal(parsed.usage.model_calls, 4);
+    assert.equal(parsed.usage.input_tokens, 4000);
+    assert.equal(parsed.usage.output_tokens, 2000);
+    assert.ok(parsed.cost, "known model yields a cost estimate");
+    assert.equal(parsed.cost.model, "gpt-4o");
+    assert.equal(parsed.cost.currency, "USD");
+    assert.ok(Math.abs(parsed.cost.totalCost - 0.03) < 1e-9, String(parsed.cost.totalCost));
+
+    assert.equal(server.requests.length, 4);
+    for (const request of server.requests) {
+      assert.equal(request.path, "/v1/chat/completions");
+      assert.equal(request.body.max_tokens, 321);
+      assert.equal(request.body.model, "gpt-4o");
+      assert.equal(request.headers.authorization, "Bearer sk-run-secret");
+    }
+    assert.ok(!io.out.join("\n").includes("sk-run-secret"));
+  } finally {
+    await server.close();
+  }
+});
+
+test("--help lists the new commands and the max-tokens flag", async () => {
+  const io = makeIO();
+  assert.equal(await main(["--help"], io), 0);
+  const text = io.out.join("\n");
+  assert.match(text, /two-brothers models/);
+  assert.match(text, /two-brothers onboard/);
+  assert.match(text, /--max-tokens/);
+});

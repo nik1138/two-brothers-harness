@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://two-brothers.local/protocol.schema.json",
+  "title": "Two Brothers Protocol v1",
+  "description": "Message envelope and payloads for the senior/junior cooperation harness.",
+  "type": "object",
+  "required": ["v", "id", "seq", "ts", "from", "to", "kind", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "v": { "const": 1, "description": "Protocol version." },
+    "id": { "type": "string", "minLength": 1, "description": "Unique message id." },
+    "seq": { "type": "integer", "minimum": 1, "description": "Monotonic sequence number in the shared context." },
+    "ts": { "type": "string", "description": "ISO-8601 UTC timestamp." },
+    "from": { "enum": ["senior", "junior", "user"], "description": "Sender role." },
+    "to": { "enum": ["senior", "junior", "user"], "description": "Receiver role." },
+    "kind": {
+      "enum": ["consult", "proposal", "delegation", "deliverable", "review", "decision", "message"],
+      "description": "Message type."
+    },
+    "payload": {
+      "description": "Exactly one key matching the message kind.",
+      "oneOf": [
+        { "type": "object", "required": ["task", "ask"], "additionalProperties": true, "properties": { "task": { "type": "string" }, "ask": { "type": "string" }, "expect": { "enum": ["proposal", "review", "answer", "work"] }, "deadline_hint": { "type": "string" } } },
+        { "type": "object", "required": ["title", "answer"], "additionalProperties": true, "properties": { "title": { "type": "string" }, "answer": { "type": "string" }, "rationale": { "type": "string" }, "risks": { "type": "array", "items": { "type": "string" } }, "confidence": { "type": "number", "minimum": 0, "maximum": 1 }, "asks": { "type": "array", "items": { "type": "string" } } } },
+        { "type": "object", "required": ["work", "acceptance"], "additionalProperties": true, "properties": { "work": { "type": "string" }, "acceptance": { "type": "array", "items": { "type": "string" } }, "return": { "enum": ["deliverable", "proposal"] }, "notes": { "type": "string" } } },
+        { "type": "object", "required": ["result"], "additionalProperties": true, "properties": { "result": { "type": "string" }, "artifacts": { "type": "array", "items": { "type": "string" } }, "notes": { "type": "string" }, "confidence": { "type": "number", "minimum": 0, "maximum": 1 } } },
+        { "type": "object", "required": ["verdict"], "additionalProperties": true, "properties": { "verdict": { "enum": ["accept", "revise", "reject"] }, "notes": { "type": "string" }, "points": { "type": "array", "items": { "type": "string" } } } },
+        { "type": "object", "required": ["decision"], "additionalProperties": true, "properties": { "decision": { "type": "string" }, "rationale": { "type": "string" }, "confidence": { "type": "number", "minimum": 0, "maximum": 1 }, "dissent": { "type": ["string", "null"] }, "accepted_proposals": { "type": "array", "items": { "type": "string" } } } },
+        { "type": "object", "required": ["text"], "additionalProperties": true, "properties": { "text": { "type": "string" } } }
+      ]
+    }
+  }
+}

@@ -1,0 +1,42 @@
+# Node / TypeScript
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Local config
+.env
+
+# Smoke-test artifacts
+*.request.json
+
+# Local runs / verification artifacts
+sessions/
+# run/test logs
+*.log
+server.log
+wheelhouse/
+mcp-demo-config.json
+dist/
+.e2e-tmp/
+.build-tmp/
+.zcode/
+
+# Local research scratch: the whole research/ tree (vendored MIT clones,
+# adoption notes, design research) stays local and is never published.
+research/
+
+# Personal planning scratch (historical goal-mode plan), not project docs.
+todo.md
+
+# test-suite debris created at the repo root by tempdir fixtures
+tmp*/
+# review-agent probe sandboxes (tempfile.mkdtemp with a tb- prefix)
+tb-*/
+
+# Real-model E2E evidence (packages/harness)
+packages/harness/e2e/runs/
+
+# local pack artifacts (npm pack for install testing)
+packages/harness/*.tgz
+# built web app copied into the package for the npm tarball (scripts/sync-web.mjs)
+packages/harness/web/

@@ -1,0 +1,107 @@
+# Release workflow: publish packages/harness (@two-brothers/harness) to npm.
+#
+# Triggered by pushing a version tag (e.g. `v0.0.1`). Auth is via npm Trusted
+# Publisher (OIDC) — no registry token is stored or passed anywhere:
+# npm >= 11 exchanges the GitHub OIDC token (id-token: write) for a short-lived
+# publish token when the repo is linked to the package as a trusted publisher.
+#
+# ── One-time manual setup (must happen BEFORE the first `v*` tag push) ──────
+#
+# 1. Create the npm scope/org:
+#      a) The `@two-brothers` organization must exist on npmjs.com
+#         (https://www.npmjs.com/org/create), OR
+#      b) change the package name in packages/harness/package.json to a scope
+#         the publisher already owns.
+#    The package name determines which org owns the published package.
+#
+# 2. Link this GitHub repo as a Trusted Publisher:
+#      - On https://www.npmjs.com, sign in → navigate to the package
+#        (@two-brothers/harness) if it already exists, otherwise to the
+#        @two-brothers organization → "Settings" → "Trusted Publishers"
+#        (or, for an existing package: package page → "Settings" tab →
+#        "Trusted Publishers" section).
+#      - Add a GitHub Actions trusted publisher with:
+#          Organization:  <your GitHub org/user owning this repo>
+#          Repository:    two-brothers-harness
+#          Workflow:      publish.yml     (must match this file's name)
+#          Environment:   (leave blank — no GitHub environment is used here)
+#    Note: a package's first publish can only be done by a scope member with a
+#    token; Trusted Publisher handles all subsequent publishes (including the
+#    first publish *if* the package is created via "Create a package" in the
+#    org's Provenance/Trusted Publisher UI beforehand).
+#
+# 3. Tag the release: bump `version` in packages/harness/package.json, merge,
+#    then `git tag vX.Y.Z && git push origin vX.Y.Z`. This workflow runs the
+#    full gate (typecheck → build → tests → selftest → pack:check) before
+#    publishing with `--tag next`, so the release lands on the `next`
+#    dist-tag, not `latest`.
+# ────────────────────────────────────────────────────────────────────────────
+
+name: publish
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write # OIDC token for npm Trusted Publisher
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Release gate — mirrors .github/workflows/ci.yml, plus the web workspace
+      # build that `prepack` copies into the tarball.
+      # Every step is continue-on-error: false (the default): any failure
+      # aborts before publish.
+      - name: Typecheck
+        run: npm run typecheck
+        working-directory: packages/harness
+
+      - name: Build
+        run: npm run build
+        working-directory: packages/harness
+
+      - name: Test (in-process)
+        run: npm test
+        working-directory: packages/harness
+
+      - name: Test (spawned)
+        run: npm run test:spawn
+        working-directory: packages/harness
+
+      # prepack copies web/dist into the tarball and fails when it is absent.
+      - name: Install web dependencies
+        run: npm ci
+        working-directory: web
+
+      - name: Build web workspace
+        run: npm run build
+        working-directory: web
+
+      - name: Offline selftest
+        run: node dist/selftest.js
+        working-directory: packages/harness
+
+      - name: Verify pack contents
+        run: npm run pack:check
+        working-directory: packages/harness
+
+      # Trusted Publisher OIDC: no NODE_AUTH_TOKEN / npm token needed.
+      # --provenance is automatic (npm >= 11, id-token present), kept explicit.
+      - name: Publish to npm (dist-tag "next")
+        run: npm publish --tag next --provenance
+        working-directory: packages/harness

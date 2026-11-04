@@ -1,0 +1,231 @@
+/**
+ * Zod payload schemas per protocol kind.
+ * Mirrors the original prototype's payload models (removed 2026-11-04; see
+ * git history) for consumers
+ * that want strict shape validation — e.g. API boundaries and the future
+ * structured-output contract.
+ *
+ * This is ADDITIVE to the tolerant pipeline: `parseModelOutput` /
+ * `validateMessage` / `sanitizePayload` remain the authority at the model
+ * boundary (PROTOCOL.md §11). These schemas are strict instead: unknown keys
+ * are stripped (pydantic `extra="ignore"`), missing keys get the same
+ * defaults as the Python models, and confidence must be within [0, 1]
+ * (clamping of out-of-range values stays a `sanitizePayload` concern).
+ *
+ * Note: the delegation wire key is `return` (PROTOCOL.md section 4); the
+ * Python model names the field `return_kind` with a `return` alias, in TS
+ * the schema simply uses the wire key.
+ */
+import { z } from "zod";
+import { REQUIRED_PAYLOAD } from "./protocol.ts";
+
+export const consultPayloadSchema = z.object({
+  task: z.string().default(""),
+  ask: z.string().default(""),
+  expect: z.enum(["proposal", "review", "answer", "work"]).default("proposal"),
+  deadline_hint: z.string().nullable().optional(),
+});
+
+export const proposalPayloadSchema = z.object({
+  title: z.string().default(""),
+  answer: z.string().default(""),
+  rationale: z.string().default(""),
+  risks: z.array(z.string()).default([]),
+  confidence: z.number().min(0).max(1).default(0.5),
+  asks: z.array(z.string()).default([]),
+});
+
+export const delegationPayloadSchema = z.object({
+  work: z.string().default(""),
+  acceptance: z.array(z.string()).default([]),
+  return: z.enum(["deliverable", "proposal"]).default("deliverable"),
+  notes: z.string().default(""),
+});
+
+export const deliverablePayloadSchema = z.object({
+  result: z.string().default(""),
+  artifacts: z.array(z.string()).default([]),
+  notes: z.string().default(""),
+  confidence: z.number().min(0).max(1).default(0.5),
+});
+
+export const reviewPayloadSchema = z.object({
+  verdict: z.enum(["accept", "revise", "reject"]),
+  notes: z.string().default(""),
+  points: z.array(z.string()).default([]),
+});
+
+export const decisionPayloadSchema = z.object({
+  decision: z.string().default(""),
+  rationale: z.string().default(""),
+  confidence: z.number().min(0).max(1).default(0.7),
+  dissent: z.string().nullable().optional(),
+  accepted_proposals: z.array(z.string()).default([]),
+});
+
+export const messagePayloadSchema = z.object({
+  text: z.string().default(""),
+});
+
+export const PAYLOAD_SCHEMAS: Record<string, z.ZodTypeAny> = {
+  consult: consultPayloadSchema,
+  proposal: proposalPayloadSchema,
+  delegation: delegationPayloadSchema,
+  deliverable: deliverablePayloadSchema,
+  review: reviewPayloadSchema,
+  decision: decisionPayloadSchema,
+  message: messagePayloadSchema,
+};
+
+export type ConsultPayload = z.infer<typeof consultPayloadSchema>;
+export type ProposalPayload = z.infer<typeof proposalPayloadSchema>;
+export type DelegationPayload = z.infer<typeof delegationPayloadSchema>;
+export type DeliverablePayload = z.infer<typeof deliverablePayloadSchema>;
+export type ReviewPayload = z.infer<typeof reviewPayloadSchema>;
+export type DecisionPayload = z.infer<typeof decisionPayloadSchema>;
+export type MessagePayload = z.infer<typeof messagePayloadSchema>;
+
+export type PayloadParseResult =
+  | { ok: true; data: Record<string, unknown> }
+  | { ok: false; issues: z.core.$ZodIssue[] };
+
+/**
+ * Strictly validate a payload against the schema for `kind`.
+ *
+ * Unlike `sanitizePayload` nothing is coerced beyond the schema's own
+ * defaults; a payload the tolerant pipeline would fix (e.g. confidence "9")
+ * is reported as invalid here. Unknown kinds fail with a single issue.
+ */
+export function parsePayload(kind: string, data: unknown): PayloadParseResult {
+  const schema = PAYLOAD_SCHEMAS[kind];
+  if (!schema) {
+    return {
+      ok: false,
+      issues: [{ message: `unknown payload kind: ${kind}` } as z.core.$ZodIssue],
+    };
+  }
+  const result = schema.safeParse(data);
+  if (result.success) return { ok: true, data: result.data as Record<string, unknown> };
+  return { ok: false, issues: result.error.issues };
+}
+
+// ---------------------------------------------------------------------------
+// repair pass (BACKLOG "Structured-payload discipline", fix 1)
+// ---------------------------------------------------------------------------
+
+/**
+ * The kinds that travel as structured node payloads — the six protocol kinds
+ * a model is asked to emit. `message` is the free-text kind and is never
+ * repaired. Kept in sync with {@link PAYLOAD_SCHEMAS}.
+ */
+export const STRUCTURED_PAYLOAD_KINDS: ReadonlySet<string> = new Set([
+  "consult",
+  "proposal",
+  "delegation",
+  "deliverable",
+  "review",
+  "decision",
+]);
+
+/**
+ * The marked repair turn appended to the shared context. Kept byte-stable:
+ * like `[[TASK]]`/`[[/TASK]]` and the compaction-summary marker, it is a
+ * user-visible string sent to models inside the "Context events:" transcript
+ * section. The envelope is a regular `message` from "user" (the
+ * harness-injected context role), so the protocol and session JSONL shapes
+ * are untouched.
+ */
+export const REPAIR_REQUEST_PREFIX = "[[REPAIR_REQUEST]]";
+export const REPAIR_REQUEST_SUFFIX = "[[/REPAIR_REQUEST]]";
+
+/** Total character budget for the issue list inside one repair request. */
+export const REPAIR_ISSUE_CHARS = 500;
+
+/**
+ * The structural part of a zod issue the repair request needs. `zod` issues
+ * are assignable as-is; the harness also synthesizes them for required fields
+ * the schemas would otherwise default away.
+ */
+export interface PayloadIssueLike {
+  readonly code?: string;
+  readonly path?: ReadonlyArray<PropertyKey>;
+  readonly message: string;
+}
+
+/** The schema keys that are missing or empty in `data` (protocol-required). */
+export function missingRequiredIssues(kind: string, data: unknown): PayloadIssueLike[] {
+  const required = REQUIRED_PAYLOAD[kind] ?? [];
+  const record =
+    data !== null && typeof data === "object" && !Array.isArray(data)
+      ? (data as Record<string, unknown>)
+      : {};
+  return required
+    .filter((key) => record[key] === undefined || record[key] === null || record[key] === "")
+    .map((key) => ({ code: "custom", path: [key], message: "Required" }));
+}
+
+/**
+ * Strictness check for a node reply that already went through the tolerant
+ * parser. Returns null when the reply is acceptable, else the issues to feed
+ * back. `tolerantFailed` carries `parseModelOutput`'s "required keys missing /
+ * no JSON object" verdict — necessary because the zod schemas fill defaults,
+ * so a raw-prose reply would otherwise validate as an all-empty payload.
+ */
+export function strictPayloadIssues(
+  kind: string,
+  payload: Record<string, unknown>,
+  tolerantFailed = false,
+): PayloadIssueLike[] | null {
+  const strict = parsePayload(kind, payload);
+  if (!tolerantFailed) return strict.ok ? null : strict.issues;
+  const strictIssues = strict.ok ? [] : strict.issues;
+  const covered = new Set(strictIssues.map((issue) => String(issue.path?.[0] ?? "")));
+  const issues = [
+    ...missingRequiredIssues(kind, payload).filter(
+      (issue) => !covered.has(String(issue.path?.[0] ?? "")),
+    ),
+    ...strictIssues,
+  ];
+  return issues.length > 0 ? issues : null;
+}
+
+/** `path: message; …`, clipped to `limit` characters (explicit ellipsis). */
+export function formatPayloadIssues(
+  issues: readonly PayloadIssueLike[],
+  limit = REPAIR_ISSUE_CHARS,
+): string {
+  const parts: string[] = [];
+  let used = 0;
+  for (const issue of issues) {
+    const location =
+      issue.path !== undefined && issue.path.length > 0
+        ? issue.path.map((segment) => String(segment)).join(".")
+        : "(root)";
+    const line = `${location}: ${issue.message}`;
+    const separator = parts.length === 0 ? 0 : 2; // "; "
+    if (used + separator + line.length > limit) {
+      const room = limit - used - separator;
+      if (room > 1) parts.push(line.slice(0, room - 1) + "…");
+      break;
+    }
+    parts.push(line);
+    used += separator + line.length;
+  }
+  return parts.join("; ");
+}
+
+/**
+ * One compact, machine-readable repair request: the strict issues (paths +
+ * messages, clipped) and the instruction to re-emit a single fenced json
+ * block. It is appended to the conversation as a user turn and to the shared
+ * context as a marked `message` envelope.
+ */
+export function buildRepairRequest(kind: string, issues: readonly PayloadIssueLike[]): string {
+  return [
+    REPAIR_REQUEST_PREFIX,
+    `Your previous reply did not match the required ${kind} payload schema.`,
+    `Issues: ${formatPayloadIssues(issues)}`,
+    `Reply again with the complete ${kind} payload as a single fenced \`\`\`json block and nothing else.`,
+    REPAIR_REQUEST_SUFFIX,
+  ].join("\n");
+}

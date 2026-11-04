@@ -1,0 +1,72 @@
+{
+  "name": "@two-brothers/harness",
+  "version": "0.0.1",
+  "description": "Two-brothers cooperation harness: senior arbiter + junior collaborator sharing one context.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nik1138/two-brothers-harness.git",
+    "directory": "packages/harness"
+  },
+  "homepage": "https://github.com/nik1138/two-brothers-harness#readme",
+  "bugs": {
+    "url": "https://github.com/nik1138/two-brothers-harness/issues"
+  },
+  "engines": {
+    "node": ">=22.19"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./cli": {
+      "types": "./dist/cli.d.ts",
+      "default": "./dist/cli.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "two-brothers": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "shared",
+    "web",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "sync-web": "node scripts/sync-web.mjs",
+    "prepack": "npm run build && npm run sync-web",
+    "typecheck": "tsc --noEmit",
+    "test": "node tests/run-all.ts",
+    "test:printmode": "node --test tests/printmode.test.ts",
+    "test:spawn": "node --test",
+    "test:e2e": "node e2e/run.ts",
+    "test:e2e:dist": "node e2e/run-dist.mjs",
+    "test:e2e:cli": "node e2e/cli.ts",
+    "test:e2e:cli:dist": "node e2e/cli.ts --dist",
+    "selftest": "node dist/selftest.js",
+    "cli": "node src/cli.ts",
+    "pack:check": "publint && attw --pack --profile esm-only"
+  },
+  "dependencies": {
+    "@earendil-works/pi-mcp": "1.5.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.0",
+    "@types/node": "^24.0.0",
+    "publint": "^0.3.0",
+    "typescript": "^5.9.0"
+  }
+}

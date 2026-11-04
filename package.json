@@ -1,0 +1,16 @@
+{
+  "name": "two-brothers-harness",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "prepare": "husky",
+    "check": "node scripts/check-pinned-deps.mjs && node scripts/check-runtime-deps.mjs",
+    "check:tarball-smoke": "node scripts/tarball-smoke.mjs",
+    "//": "run `npm run check:tarball-smoke` manually before each npm publish (pi-style release rehearsal); tarball-smoke is intentionally NOT part of `check` (it packs + installs, so it needs a build and is slower)"
+  },
+  "devDependencies": {
+    "husky": "^9.1.7"
+  }
+}

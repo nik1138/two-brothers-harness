@@ -1,0 +1,16 @@
+{
+  "name": "two-brothers",
+  "version": "0.2.0",
+  "description": "Two-brothers cooperation harness: senior arbiter + junior collaborator sharing one context.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "bin": {
+    "two-brothers": "src/cli.ts"
+  },
+  "scripts": {
+    "cli": "node src/cli.ts",
+    "selftest": "node src/selftest.ts",
+    "test": "node tests/run-all.ts"
+  }
+}

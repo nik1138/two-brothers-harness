@@ -1,0 +1,25 @@
+#!/bin/sh
+
+# Supply-chain guard (pi-style): lockfile changes are deliberate, reviewed
+# events — block them by default. To commit a package-lock.json change:
+#
+#   ALLOW_LOCKFILE_CHANGE=1 git commit ...
+
+if git diff --cached --name-only | grep -qx 'package-lock.json'; then
+	case "$ALLOW_LOCKFILE_CHANGE" in
+	1 | true | yes)
+		echo "package-lock.json is staged; ALLOW_LOCKFILE_CHANGE is set, allowing commit."
+		;;
+	*)
+		echo "package-lock.json is staged." >&2
+		echo "" >&2
+		echo "Review the lockfile diff before committing:" >&2
+		echo "  - confirm every new/updated package is intentional" >&2
+		echo "  - confirm runtime deps stay pinned to exact versions" >&2
+		echo "" >&2
+		echo "If intentional, commit with:" >&2
+		echo "  ALLOW_LOCKFILE_CHANGE=1 git commit ..." >&2
+		exit 1
+		;;
+	esac
+fi
