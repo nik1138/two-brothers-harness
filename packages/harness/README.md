@@ -12,6 +12,13 @@ TypeScript, Node ≥ 22.19, zero-dependency core with two curated runtime
 dependencies (`zod` for payload validation, `@earendil-works/pi-mcp` for
 MCP). MIT.
 
+> **Pre-release:** v0.0.1 has not been published to npm yet — the install
+> command below is the intended path once the package is published. Until
+> then, build from a checkout:
+> `git clone https://github.com/nik1138/two-brothers-harness.git`,
+> `cd packages/harness`, `npm install`, `npm run build`, then use
+> `node dist/cli.js` (or `npm link` for a global `two-brothers`).
+
 ## Install
 
 ```bash
@@ -98,6 +105,11 @@ presets with sealed API keys.
   (`--context-window`, `--compact-threshold-tokens`).
 - **Plugins**: drop ES-module files in `plugins/` exposing
   `register(ctx)` — tools are shared by both brothers.
+- **Skills**: `<root>/<name>/SKILL.md` files become a role-scoped
+  `## Available skills` prompt section; `<skill name="…">` requests inject
+  the body on demand.
+- **Slash commands**: markdown prompt templates expanded literally in the
+  chat REPL and the TUI (`/name args`, `$ARGUMENTS`, `$1`..`$9`).
 - **Server**: HTTP + SSE on plain `node:http`; worker pool, approval
   broker, settings/secret stores (DPAPI/`plain1:`).
 

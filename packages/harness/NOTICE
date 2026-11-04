@@ -1,0 +1,48 @@
+Two Brothers Harness
+Copyright (c) 2026 Nikita
+
+This product includes software adapted from pi (https://github.com/earendil-works/pi),
+Copyright (c) 2025 Mario Zechner, licensed under the MIT License:
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+Adapted pi material (MIT):
+
+- `packages/harness/src/compaction.ts` — context-compaction algorithm
+  (cut-point selection, transcript serialization, incremental summary chaining).
+  The `SUMMARIZATION_PROMPT` and `UPDATE_SUMMARIZATION_PROMPT` prompt strings
+  are verbatim copies of pi's summarization prompts.
+- `packages/harness/src/provider.ts` — the retry / error-classification registry
+  is ported from pi-ai's `utils/{retry,provider-retry,overflow}.ts`.
+- `packages/harness/src/workspace.ts` — `normalizeForFuzzyMatch` and the
+  robust-edit matching strategy are ported from pi's `edit-diff.ts`.
+- `packages/harness/src/output.ts` — bounded output windows + ANSI sanitizing;
+  informed by pi's `chord/src/output.ts`, reimplemented (not copied).
+
+Design conventions adopted from other MIT projects (reimplemented, not copied):
+
+- kimi-code (https://github.com/MoonshotAI/kimi-code, MIT, (c) 2026 Moonshot AI):
+  `<skill-loaded>` delivery convention, plugin command model.
+- deepseek-harness (https://github.com/deepseek-ai/deepseek-harness, MIT,
+  (c) 2026 DeepSeek): NDJSON run-stream projection shape and field/line bounds.
+- opencode (https://github.com/sst/opencode, MIT, (c) 2025 opencode):
+  flat command catalogue, plugin hooks and `{ path, options }` entry form.
+
+No source code is copied from these three; only ideas and wire shapes, each with
+an attribution comment at the point of use in `packages/harness/src/`.

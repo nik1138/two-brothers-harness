@@ -13,7 +13,8 @@ jobs:
       fail-fast: false
       matrix:
         # Dev/test scripts run .ts sources directly (native type stripping),
-        # which needs Node >= 22.6; the built dist/ itself runs on Node >= 20.
+        # which needs Node >= 22.6; the built dist/ and the shipped package
+        # require Node >= 22.19 (the engines floor).
         node: [22, 24]
     steps:
       - uses: actions/checkout@v4

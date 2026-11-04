@@ -8,7 +8,8 @@ rules live in `../AGENTS.md`.
 A **Vue 3 + Vite + TypeScript** app that turns Two Brothers into a local,
 single-user coding workspace. The only conversation view is a three-party
 group chat — **Operator / Senior / Junior** — projected from protocol
-envelopes. It talks to a FastAPI-compatible backend API:
+envelopes. It talks to the backend HTTP + SSE API served by the TypeScript
+package on plain `node:http`:
 sessions/workspaces/settings via `/api/sessions*` and `/api/workspaces*`,
 async run progress and operator approvals via `/api/runs*` (SSE with
 `?after=N` reconnect). The backend serves the built app at `/` when present —

@@ -15,15 +15,19 @@ within a single context.
 
 The implementation is the TypeScript package in
 [`packages/harness/`](packages/harness/) (`@two-brothers/harness`, written in
-the style of pi / deepseek-harness). Install it from npm (see [Install](#install))
-or build it from a checkout with the [Quickstart](docs/quickstart.md) — offline
-in a couple of minutes, no API key — and see the full flag,
-environment-variable, and endpoint reference in
+the style of pi / deepseek-harness). **The package is not on npm yet** — v0.0.1
+is the pre-publication version, so today you build it from a checkout with the
+[Quickstart](docs/quickstart.md) — offline in a couple of minutes, no API key.
+Once it is published, `npm install -g @two-brothers/harness` gives the global
+`two-brothers` command (see [Install](#install)). The full flag,
+environment-variable, and endpoint reference is
 [docs/cli-reference.md](docs/cli-reference.md).
 
 ## Install
 
-The published package is the primary path:
+> **Pre-release:** v0.0.1 has not been published to npm yet, so the command
+> below will not work today. It is the intended install path once the package
+> is published. Until then, use the source build from the [Quickstart](docs/quickstart.md).
 
 ```powershell
 npm install -g @two-brothers/harness
@@ -31,11 +35,6 @@ two-brothers --help
 ```
 
 Requirement: **Node ≥ 22.19** (the package's `engines` floor).
-
-v0.0.1 isn't on npm yet — until it is, build from source: `git clone
-https://github.com/nik1138/two-brothers-harness.git`, `cd packages/harness`,
-`npm install`, `npm run build`, then use `node dist/cli.js` (or `npm link`
-for a global `two-brothers`).
 
 ## Quick start
 
@@ -231,7 +230,7 @@ Common flags: `--provider`, `--base-url`, `--api-key`, `--senior-model`,
 `--resume`, `--mcp-config <path>`, `--compact`, `--max-tokens`.
 `--mode print|json` / `--json-events` give pipe-clean automation output
 (decision-only stdout; one JSON object with
-`{events, decision, usage, rounds, errors}`).
+`{task, events, decision, usage, cost, rounds, errors}`).
 Full flag, environment-variable, and endpoint reference:
 [docs/cli-reference.md](docs/cli-reference.md).
 
@@ -346,9 +345,8 @@ It runs the package gates, the `typescript/` reference selftest, a mock demo
 run, and the web build; expected final line: `SMOKE TEST: PASS`.
 
 Real-model evidence: a consult cycle with two local LM Studio models
-(`LMSTUDIO-TRANSCRIPT.md`, `sessions/lmstudio-consult.jsonl`) and a full
-cooperation cycle with `spark-x2.6` via the DSH `xhtoken` provider
-(`SPARK-TRANSCRIPT.md`).
+(`LMSTUDIO-TRANSCRIPT.md`) and a full cooperation cycle with `spark-x2.6` via
+the DSH `xhtoken` provider (`SPARK-TRANSCRIPT.md`).
 
 ## Repository layout
 

@@ -12,8 +12,9 @@ reachable. Everything under `tests/` stays offline; nothing here runs in
 ## Prerequisites
 
 - **LM Studio serving** both models on an OpenAI-compatible endpoint
-  (default probe list: `http://172.18.0.1:1234/v1`, `http://localhost:1234/v1`,
-  `http://127.0.0.1:1234/v1`; override with `TWO_BROTHERS_E2E_BASE_URL`).
+  (the default probe list includes `http://localhost:1234/v1` and
+  `http://127.0.0.1:1234/v1`, plus the original dev machine's LAN address;
+  point the suite at your own endpoint with `TWO_BROTHERS_E2E_BASE_URL`).
 - **Node ≥ 22.6** (sources run via native type stripping).
 - `npm run build` first for the `test:e2e:dist` variant.
 
@@ -42,7 +43,7 @@ hermetic status suites add well under a second.
 | `consult` | Real consult cycle: exactly `message → consult → proposal → review → decision`; every envelope passes `validateMessage`; every payload passes strict zod `parsePayload` **except** model-invented wrong-type scalars (e.g. `decision` delivered as an object — the sanitize contract, inherited from the original prototype, fills missing keys but deliberately does not coerce those; they are recorded as quirks); decision non-empty; ≥ 4 model calls in the usage snapshot; `[[TASK]]`/`[[/TASK]]` markers in the rendered transcript; every raw model reply survives `parseModelOutput` + `sanitizePayload`. |
 | `work` | Work mode with a temp workspace and a `CallbackBroker(() => "approve")`: exactly `message → delegation → deliverable → review → decision`; ≥ 1 approval reached the broker; `calc.js` exists with the requested function + comment and is verified on disk; deliverable carries ≥ 1 `tool:` artifact; review carries ≥ 1 `verify:` point. |
 | `resume` | Two tasks on one session file with `restoreContext` (the `--resume` flow): seq stays dense `1..N`, no duplicates. |
-| `connection-server` | The TS server (`node:http`, FastAPI-compatible) starts in-process on an ephemeral port backed by the live providers; `/api/sessions`, `/api/settings`, `/api/fs/browse` all answer. Inherits the global LM Studio probe for its SKIP gate. |
+| `connection-server` | The TS server (plain `node:http`) starts in-process on an ephemeral port backed by the live providers; `/api/sessions`, `/api/settings`, `/api/fs/browse` all answer. Inherits the global LM Studio probe for its SKIP gate. |
 | `server-consult` | One real run over HTTP: `POST /api/runs` (202) → envelope kinds asserted over the SSE stream (`id:` frames strictly increasing), `run_end` completed with a non-empty decision and ≥ 4 model calls, `?after=` reconnect honored, and the session JSONL on disk validated (`validateMessage` + strict zod + dense seq). |
 | `server-work-approvals` | Temp workspace registered via `POST /api/workspaces`, work-mode run; every `approval_requested` SSE event is answered through `POST /api/runs/{id}/approvals/{approval_id}` mid-stream and the matching `approval_resolved` arrives; `calc.js` verified on disk; session JSONL validated. |
 | `server-status-waiting` | **Hermetic** (mock providers). A work-mode run parks: `approval_requested` then exactly one `run_status: waiting`; the record and pending-approvals endpoint agree (`waiting`); answering emits `approval_resolved` (allow) before `run_status: running`; the run completes (`queued → running → waiting → running`). A second run is stopped while parked: the wait resolves as deny/cancelled, statuses end `queued → running → waiting`, `run_end` is `cancelled`, and no phantom `running`/`run_error` appears. |

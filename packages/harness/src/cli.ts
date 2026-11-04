@@ -15,7 +15,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createInterface } from "node:readline/promises";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
 
 import { resolveConfig, maxTokensForRole, validateRunConfig, type Config } from "./config.ts";
@@ -80,6 +80,7 @@ const OPTIONS = {
   "max-tokens": { type: "string" as const },
   temperature: { type: "string" as const },
   timeout: { type: "string" as const },
+  retries: { type: "string" as const },
   mode: { type: "string" as const },
   verbose: { type: "boolean" as const, default: false },
   json: { type: "boolean" as const, default: false },
@@ -118,6 +119,7 @@ const FLAG_TO_CONFIG: Record<string, string> = {
   "max-tokens": "maxTokens",
   temperature: "temperature",
   timeout: "timeout",
+  retries: "retries",
   mode: "mode",
   verbose: "verbose",
   json: "jsonOut",
@@ -768,11 +770,19 @@ async function runOnce(
 }
 
 async function doRun(argv: string[], io: CliIO): Promise<number> {
-  const { values, positionals } = parseArgs({
-    args: argv,
-    allowPositionals: true,
-    options: OPTIONS,
-  });
+  let values: Record<string, any>;
+  let positionals: string[];
+  try {
+    ({ values, positionals } = parseArgs({
+      args: argv,
+      allowPositionals: true,
+      options: OPTIONS,
+    }) as { values: Record<string, any>; positionals: string[] });
+  } catch (exc) {
+    io.error(`[error] ${exc instanceof Error ? exc.message : String(exc)}`);
+    io.error('Usage: two-brothers run "<task>" [flags]  (see: two-brothers help)');
+    return 2;
+  }
   const cfg = resolveConfig(argsToConfigArgs(values));
   const task = positionals.join(" ").trim();
   if (
@@ -1087,6 +1097,7 @@ Usage:
                                       write per-role settings to
                                       sessions/settings.json (interactive
                                       prompts unless --non-interactive)
+  two-brothers --version             print the @two-brothers/harness version
 
 Flags:
   --provider openai|mock
@@ -1106,6 +1117,8 @@ Flags:
   --senior-model <m>          --junior-model <m>
   --senior-system <text>      --junior-system <text>
   --max-rounds <n>            --temperature <f>   --timeout <s>
+  --retries <n>               retries after a failed model call (default 6;
+                              env TWO_BROTHERS_RETRIES)
   --max-tokens <n>            output-token cap for both roles (env
                               TWO_BROTHERS_MAX_TOKENS; per-role env
                               TWO_BROTHERS_SENIOR_MAX_TOKENS /
@@ -1718,6 +1731,20 @@ async function doOnboard(argv: string[], io: CliIO): Promise<number> {
   return 0;
 }
 
+/**
+ * The shipped package version for `--version`. Read from `package.json` at
+ * the package root (a repo checkout and the packed tarball both place it one
+ * level up from `src/`/`dist/`) — plain `node:fs`, no import assertions.
+ */
+function packageVersion(): string {
+  const pkgPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json");
+  const parsed = JSON.parse(fs.readFileSync(pkgPath, "utf-8")) as { version?: unknown };
+  if (typeof parsed.version !== "string" || parsed.version.length === 0) {
+    throw new Error(`package.json at ${pkgPath} carries no version`);
+  }
+  return parsed.version;
+}
+
 export async function main(argv: string[], io: CliIO = defaultIO): Promise<number> {
   if (argv.length === 0) {
     // Modern-CLI convention: an interactive terminal drops into the REPL
@@ -1730,6 +1757,10 @@ export async function main(argv: string[], io: CliIO = defaultIO): Promise<numbe
   const command = argv[0];
   if (command === "help" || command === "--help" || command === "-h") {
     printHelp(io);
+    return 0;
+  }
+  if (command === "--version" || command === "-v") {
+    io.log(packageVersion());
     return 0;
   }
   if (command === "selftest") return selftest();

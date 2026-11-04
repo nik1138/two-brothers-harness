@@ -1,8 +1,8 @@
 /**
  * CLI ergonomics lane: `models` discovery, `onboard` settings writing, and
- * `--max-tokens` / cost reporting. Hermetic — discovery and the end-to-end
- * run talk to a local `node:http` stub on 127.0.0.1, and onboarding writes
- * into a temp directory.
+ * `--max-tokens` / `--retries` / cost reporting. Hermetic — discovery and the
+ * end-to-end run talk to a local `node:http` stub on 127.0.0.1, and
+ * onboarding writes into a temp directory.
  */
 import * as fs from "node:fs";
 import * as http from "node:http";
@@ -560,4 +560,78 @@ test("--help lists the new commands and the max-tokens flag", async () => {
   assert.match(text, /two-brothers models/);
   assert.match(text, /two-brothers onboard/);
   assert.match(text, /--max-tokens/);
+  assert.match(text, /--retries <n>.*default 6;/s);
+  assert.match(text, /TWO_BROTHERS_RETRIES/);
+  assert.match(text, /two-brothers --version/);
+});
+
+test("--version (and -v) print exactly the package version, exit 0", async () => {
+  const pkg = JSON.parse(
+    fs.readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf-8"),
+  ) as { version: string };
+  for (const flag of ["--version", "-v"]) {
+    const io = makeIO();
+    assert.equal(await main([flag], io), 0);
+    assert.deepEqual(io.out, [pkg.version], `${flag} prints exactly the version`);
+    assert.deepEqual(io.err, [], `${flag} keeps stderr clean`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// `--retries` on `run` + run usage-error exit codes
+// ---------------------------------------------------------------------------
+
+function failingRunArgs(serverUrl: string, retries: string): string[] {
+  return [
+    "run",
+    "pick an approach",
+    "--provider",
+    "openai",
+    "--base-url",
+    `${serverUrl}/v1`,
+    "--senior-model",
+    "gpt-4o",
+    "--junior-model",
+    "gpt-4o",
+    "--retries",
+    retries,
+  ];
+}
+
+test("run --retries is accepted and maps to the provider attempt budget", async () => {
+  // A 500 is classified retryable, so the attempt count proves the flag
+  // reached the provider: 0 -> one attempt, 1 -> two (one backoff wait).
+  // A persistently failing endpoint is a runtime failure: the script entry
+  // maps the rejected run to exit 1.
+  const server = await startServer(() => ({
+    status: 500,
+    body: { error: { message: "boom" } },
+  }));
+  try {
+    const io0 = makeIO();
+    await assert.rejects(main(failingRunArgs(server.url, "0"), io0), /HTTP 500/);
+    assert.equal(server.requests.length, 1, "--retries 0 = a single attempt");
+
+    const io1 = makeIO();
+    await assert.rejects(main(failingRunArgs(server.url, "1"), io1), /HTTP 500/);
+    assert.equal(server.requests.length, 3, "--retries 1 = one retry after the first attempt");
+  } finally {
+    await server.close();
+  }
+});
+
+test("run --retries accepts mock runs", async () => {
+  const io = makeIO();
+  const code = await main(["run", "pick an approach", "--provider", "mock", "--retries", "1"], io);
+  assert.equal(code, 0, io.err.join("\n"));
+  assert.match(io.out.join("\n"), /decision:/);
+});
+
+test("run: an unknown option is a usage error (exit 2) with a usage line", async () => {
+  const io = makeIO();
+  const code = await main(["run", "pick an approach", "--provider", "mock", "--bogus"], io);
+  assert.equal(code, 2);
+  assert.match(io.err[0], /^\[error\] Unknown option '--bogus'/);
+  assert.match(io.err[1], /Usage: two-brothers run "<task>" \[flags\]/);
+  assert.deepEqual(io.out, [], "nothing ran — no transcript on stdout");
 });

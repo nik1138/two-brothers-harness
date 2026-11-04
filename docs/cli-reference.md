@@ -107,6 +107,7 @@ node dist/cli.js serve [--host 127.0.0.1] [--port 8600] [--sessions-dir sessions
 | `--host` | `127.0.0.1` | bind address |
 | `--port` | `8600` | port |
 | `--sessions-dir` | `sessions` | directory of JSONL session files to expose |
+| `--workers` | (runtime default) | background run workers (env `TWO_BROTHERS_WORKERS`) |
 
 The backend is a **local single-user workspace server**. API overview:
 
@@ -125,6 +126,11 @@ The backend is a **local single-user workspace server**. API overview:
 | `POST /api/runs/{run_id}/stop` | cooperative stop (pending approvals are denied) |
 | `GET /api/runs/{run_id}/events?after=N` | SSE of typed runtime events (`run_status`, `envelope`, `tool_started`, `tool_completed`, `approval_requested`, `approval_resolved`, `run_error`, `run_end`); reconnectable via `after` |
 | `GET /api/runs/{run_id}/approvals`, `POST /api/runs/{run_id}/approvals/{id}` | list/answer pending operator approvals (`{"allow": bool}`) |
+| `GET /api/providers`, `PUT /api/providers/{seed}` | provider presets (seeded: openai, deepseek, anthropic, gemini, openrouter, lmstudio, custom); keys are never returned — responses carry `api_key_set` only |
+| `GET /api/plugins` | discovered plugins (`name`, `description`, `roles`, load `errors`, `diagnostics`) |
+| `GET /api/skills` | discovered skills metadata (`name`, `description`, `scope`, `tools`, `file`) — never bodies |
+| `GET /api/commands` | discovered slash-command metadata (`name`, `description`, `argumentHint`, `mode?`, `file`) — never bodies |
+| `GET /api/fs/browse` | browse the filesystem for workspace registration (UI helper) |
 | `POST /api/run` | legacy synchronous run (body `{"task", "mode"?, "session"?, "provider"?}` → `{"session", "events", "decision"}`) |
 | `GET /api/stream?session=<name>` | legacy SSE tail of a session file |
 
@@ -137,6 +143,37 @@ directory. Reads auto-allow; mutations and shell commands pause the run on an
 read-only workspace checks (plus approval-brokered `run_shell`) to verify the
 junior's deliverable before reviewing it. See the
 [Quickstart](quickstart.md) for the operator-facing walkthrough.
+
+### `models`
+
+List the models an OpenAI-compatible endpoint reports (`GET {base}/models`).
+
+```powershell
+node dist/cli.js models --base-url https://api.deepseek.com/v1
+node dist/cli.js models --base-url https://api.deepseek.com/v1 --api-key-env DEEPSEEK_API_KEY
+node dist/cli.js models --base-url https://api.deepseek.com/v1 --json
+```
+
+`--api-key-env <VAR>` reads the key from an environment variable name
+(alternative to `--api-key <key>`); `--json` prints the raw list.
+
+### `onboard`
+
+Write per-role provider settings to `sessions/settings.json`
+(`--sessions-dir <dir>` selects the store) from a seeded preset or manual
+fields. Interactive by default; `--non-interactive` accepts piped stdin.
+
+```powershell
+node dist/cli.js onboard                                    # interactive prompts
+node dist/cli.js onboard --preset lmstudio --non-interactive
+node dist/cli.js onboard --base-url https://api.deepseek.com/v1 `
+  --api-key sk-... --senior-model deepseek-chat --junior-model deepseek-chat --non-interactive
+```
+
+`--preset <id>` takes a seeded preset id (openai, deepseek, anthropic,
+gemini, openrouter, lmstudio, custom); its API key resolves from the env-var
+name the preset declares. Manual fields: `--base-url`, `--api-key` (or
+`--api-key-env <VAR>`), `--senior-model`, `--junior-model`.
 
 ## Flags
 
@@ -162,9 +199,11 @@ junior's deliverable before reviewing it. See the
 | `--temperature` | float | `0.4` | temperature |
 | `--timeout` | int | `120` | per-request HTTP timeout, seconds; bounds every attempt of the retry loop |
 | `--retries` | int | `6` | retries after a failed model call (`0` = single attempt); backoff 2 s, 4 s, 8 s, … capped at 30 s (7 attempts total by default); a stopped run aborts the loop between attempts |
+| `--max-tokens` | int | — | (TS package) output-token cap for both roles (env `TWO_BROTHERS_MAX_TOKENS`; per-role `TWO_BROTHERS_SENIOR_MAX_TOKENS` / `TWO_BROTHERS_JUNIOR_MAX_TOKENS` override it); Anthropic's default stays 4096, OpenAI/Gemini omit the cap when unset |
 | `--mode` | `consult`, `work`, `auto` | `consult` | cooperation mode |
 | `--mode` | `print`, `json` | — | (TS package, `run` only) non-interactive automation output — see [Automation output](#automation-output-ts-package); `--mode work --json-events` stays possible because `print`/`json` are output modes, not cooperation modes |
 | `--json-events` | flag | off | (TS package, `run` only) alias for `--mode json` |
+| `--stream` | flag | off | (TS package, `run` only) NDJSON run events on stdout as they happen: one JSON object per line from `run_status`, `envelope`, `repair`, `tool_call`, `tool_result`, `result`. Its own output mode — cannot combine with `--json`/`--json-events`/`--mode print|json` (usage error, exit 2); the human summary and cost line are suppressed |
 | `--verbose` | flag | off | print the full payload of every message |
 | `--json` | flag | off | with no explicit `--mode`: select `--mode json` (one machine-readable object). With an explicit `--mode print`: print the `decision` as JSON on the last line |
 | `--session-file` | path | — | JSONL file to persist every protocol envelope to |
@@ -173,6 +212,8 @@ junior's deliverable before reviewing it. See the
 | `--compact-threshold` | int | `0` (off) | (TS package) auto-compact whenever the rendered context passes this many characters (an auto trigger caps its budgets so the compacted context lands under the threshold) |
 | `--compact-keep-recent` | int | `40000` | (TS package) chars of recent envelopes kept verbatim when compacting |
 | `--mcp-config` | path | — | JSON file with MCP server definitions; a server may take a `"role": "shared" \| "senior" \| "junior"` field (default `"junior"`) |
+| `--plugins-dir` | dir | `<cwd>/plugins` | (TS package) plugin directory for `run`/`chat`/`serve` (env `TWO_BROTHERS_PLUGINS_DIR`); plugins load fail-soft, diagnostics under `--verbose`; plugin tools need a workspace, so `serve` runs over a workspace get them |
+| `--skills-dir` | path | — (repeatable) | (TS package) extra skills root; defaults are `TWO_BROTHERS_SKILLS_DIR` (OS path list), then `<cwd>/skills` and `~/.two-brothers/skills` |
 | `--stream-tokens` | flag | off | (TS package, `run --stream` and `tui`) with `--stream`: ask providers to stream their replies and add one `"token"` NDJSON record (`{type, role, delta, at}`) per text delta, in arrival order, interleaved with the other run records. In the TUI the deltas render in place (no `--stream` needed). Without `--stream` in a run it is a usage error (exit 2); env `TWO_BROTHERS_STREAM_TOKENS=1` pins it on |
 | `--commands-dir` | path | — (repeatable) | (TS package) extra slash-command root for the chat REPL and `tui`; defaults are `TWO_BROTHERS_COMMANDS_DIR` (OS path list), then `<cwd>/commands` and `~/.two-brothers/commands` |
 
@@ -205,8 +246,14 @@ junior's deliverable before reviewing it. See the
 | `TWO_BROTHERS_RESUME` | `--resume` (`true`/`1`) |
 | `TWO_BROTHERS_COMPACT` | `--compact` (`true`/`1`; TS package) |
 | `TWO_BROTHERS_COMPACT_THRESHOLD` | `--compact-threshold` (TS package) |
+| `TWO_BROTHERS_COMPACT_THRESHOLD_TOKENS` | `--compact-threshold-tokens` (TS package) |
+| `TWO_BROTHERS_CONTEXT_WINDOW` | `--context-window` (TS package) |
 | `TWO_BROTHERS_COMPACT_KEEP_RECENT` | `--compact-keep-recent` (TS package) |
+| `TWO_BROTHERS_MAX_TOKENS` | `--max-tokens` (TS package) |
+| `TWO_BROTHERS_SENIOR_MAX_TOKENS` / `TWO_BROTHERS_JUNIOR_MAX_TOKENS` | per-role `--max-tokens` overrides (TS package) |
 | `TWO_BROTHERS_MCP_CONFIG` | `--mcp-config` |
+| `TWO_BROTHERS_PLUGINS_DIR` | `--plugins-dir` (TS package) |
+| `TWO_BROTHERS_SKILLS_DIR` | `--skills-dir` (OS path list; TS package) |
 | `TWO_BROTHERS_STREAM_TOKENS` | `--stream-tokens` (`true`/`1`; requires `--stream`, which a run without it reports as a usage error) |
 | `TWO_BROTHERS_COMMANDS_DIR` | `--commands-dir` (one or more roots separated by the OS path-list separator; TS package) |
 | `TWO_BROTHERS_WORKERS` | `--workers` (serve) |
@@ -285,6 +332,18 @@ as `mcp:<name>`. Model-facing MCP tool names are namespaced
 (`mcp__<server>__<tool>`), a single result is clipped to 20 KiB, and each call
 has a timeout (default 60 s, per-server `timeoutMs` override).
 
+## Skills (TS package)
+
+`<root>/<name>/SKILL.md` files (or loose `.md` files) with hand-rolled
+frontmatter (`name`, `description`, optional `scope: shared|senior|junior`,
+optional `tools`) become an `## Available skills` section in the system
+prompt of each role that has visible skills. Roots: repeatable `--skills-dir`,
+then `TWO_BROTHERS_SKILLS_DIR` (OS path list), then `<cwd>/skills` and
+`~/.two-brothers/skills`. A `<skill name="…">` request in a structured reply
+injects the body once as a `<skill-loaded>` message (at most three per run,
+each skill once, only skills visible to the acting role). The server serves
+metadata only at `GET /api/skills`.
+
 ## Modes
 
 | Mode | What happens |
@@ -305,7 +364,7 @@ has a timeout (default 60 s, per-server `timeoutMs` override).
 - `--mode json` (alias `--json-events`; a bare `--json` with no explicit
   `--mode` selects this mode too) — stdout is exactly one
   machine-readable JSON object
-  `{task, events, decision, usage, rounds, errors}`; diagnostics stay on
+  `{task, events, decision, usage, cost, rounds, errors}`; diagnostics stay on
   stderr. One event per line is intentionally not produced — the object is
   single-shot. (`run --stream` is the line-by-line NDJSON alternative.)
 
@@ -338,6 +397,14 @@ them):
   `Retry-After` replaces that attempt's fixed backoff, and a context-overflow
   payload triggers compact-and-retry instead of burning the retry budget.
 - **Plugins** — see `docs/plugins.md`.
+- **Skills** — role-scoped `SKILL.md` catalogs (see [Skills](#skills-ts-package)).
+- **Provider presets, onboarding, cost** — seeded presets (openai, deepseek,
+  anthropic, gemini, openrouter, lmstudio, custom) keyed by env-var names,
+  `onboard` to write per-role settings, `models` to list an endpoint's
+  models, a `cost:` line (and `cost` in `--mode json`) from a hand-maintained
+  price table, and per-role `--max-tokens` output caps.
+- **TUI** — `tui [task]` is a zero-dependency full-screen chat in the
+  terminal's alternate screen over the same harness and flags.
 
 ## Examples
 

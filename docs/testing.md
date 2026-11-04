@@ -8,7 +8,7 @@ protocol reference; its suite is kept as a contract check.
 ## Quick check
 
 ```powershell
-cd two-brothers
+cd two-brothers-harness
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-test.ps1
 ```
 
@@ -114,9 +114,10 @@ TWO_BROTHERS_REAL_E2E=1 node e2e/run.mjs
 $env:TWO_BROTHERS_REAL_E2E = '1'; node e2e/run.mjs
 ```
 
-Requirements: LM Studio serving the OpenAI-compatible API at
-`http://172.18.0.1:1234/v1` (override with `TWO_BROTHERS_LM_BASE`) with both
-models loaded — `spark-x2.6-4b@q4_k_m` (senior) and `lfm3-1.7b` (junior).
+Requirements: LM Studio serving the OpenAI-compatible API on localhost,
+e.g. `http://localhost:1234/v1` (point the suite at your endpoint with
+`TWO_BROTHERS_LM_BASE`) with both models loaded — `spark-x2.6-4b@q4_k_m`
+(senior) and `lfm3-1.7b` (junior).
 
 What it proves, end to end through the real backend and the browser UI:
 

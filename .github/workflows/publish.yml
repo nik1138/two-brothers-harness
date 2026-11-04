@@ -104,6 +104,11 @@ jobs:
         run: npm run pack:check
         working-directory: packages/harness
 
+      # Trusted Publisher OIDC token exchange requires npm CLI >= 11.5.1;
+      # Node 22 still ships npm 10.x, so upgrade before publishing.
+      - name: Install npm with Trusted Publisher support
+        run: npm install --global npm@11
+
       # Trusted Publisher OIDC: no NODE_AUTH_TOKEN / npm token needed.
       # --provenance is automatic (npm >= 11, id-token present), kept explicit.
       - name: Publish to npm (dist-tag "next")

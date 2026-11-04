@@ -62,7 +62,7 @@ URLs only (`e420d9a`); token-based compaction accounting — `estimateTokens`,
 
 ## Environment quirks (this machine — important)
 
-- **Node.js is a no-admin zip install**: `C:\Users\Nikita\AppData\Local\Programs\nodejs`
+- **Node.js is a no-admin zip install**: `%LOCALAPPDATA%\Programs\nodejs`
   (v22.19.0 + npm 10.9.3, 2026-11-03). Git Bash does NOT inherit its PATH —
   prefix commands with `export PATH="$HOME/AppData/Local/Programs/nodejs:$PATH"`.
   winget MSI installs stall on an unattended UAC prompt; the zip method works.

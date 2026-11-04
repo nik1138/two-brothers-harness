@@ -51,7 +51,13 @@ const scanned = [];
 
 for (const file of distFiles.sort()) {
 	const path = join(distDir, file);
-	const lines = readFileSync(path, "utf8").split("\n");
+	// tsc keeps JSDoc comments in the emit; prose like `envelope from "user"`
+	// must not be scanned as an import. Strip comments first (the `[^:"']`
+	// guard keeps `https://` inside string literals intact).
+	const source = readFileSync(path, "utf8")
+		.replace(/\/\*[\s\S]*?\*\//g, " ")
+		.replace(/(^|[^:"'])\/\/[^\n]*/g, "$1");
+	const lines = source.split("\n");
 	scanned.push(path);
 
 	for (let i = 0; i < lines.length; i++) {
