@@ -42,6 +42,10 @@ name: publish
 on:
   push:
     tags: ['v*']
+  # Lets the owner re-run the full gate + publish by hand after the one-time
+  # npm setup below (GitHub → Actions → publish → Run workflow), without
+  # needing to move or re-push the tag.
+  workflow_dispatch:
 
 jobs:
   publish:
