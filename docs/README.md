@@ -16,6 +16,7 @@ One flat set of documents, grouped by what you are trying to do.
 
 - [Backlog](backlog.md) — deferred work, shipped items, and design requirements.
 - [Design review](design-review.md) — the v0.1 critique and what changed since.
+- [Release runbook](release.md) — npm org setup, Trusted Publisher linkage, publishing, and promotion (pre-release).
 
 ## History
 
