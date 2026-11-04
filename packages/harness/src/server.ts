@@ -1103,6 +1103,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       const session = ctx.query.get("session");
       if (!session) throw new HttpError(400, "invalid request body");
       const store = storeFor(sessionFileName(session));
+      ctx.res.writeHead(200, SSE_HEADERS);
       let sent = 0;
       let closed = false;
       ctx.req.on("close", () => {

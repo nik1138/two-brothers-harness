@@ -62,6 +62,19 @@ variables. Environment variables win over saved settings while they are set
 and are never written to the settings file (see the
 [CLI reference](cli-reference.md#environment-variables)).
 
+> **Local models (LM Studio, CPU):** small models on CPU can take 2–7+
+> minutes per provider call. The default `--timeout` (120 s) bounds *each
+> attempt*, and every retry restarts generation from scratch — so a slow
+> local model can fail all attempts even with retries left. Raise the
+> timeout instead of the retry count:
+>
+> ```powershell
+> node dist/cli.js run "Your task" --timeout 900   # or higher on slower machines
+> # or serve/web runs:
+> $env:TWO_BROTHERS_TIMEOUT = "900"
+> node dist/cli.js serve --port 8600 --sessions-dir sessions
+> ```
+
 ## 5. Persist and resume a session
 
 ```powershell

@@ -201,7 +201,7 @@ name the preset declares. Manual fields: `--base-url`, `--api-key` (or
 | `--junior-system` | text | (from `shared/prompts.json`) | override the junior system prompt |
 | `--max-rounds` | int | `3` | maximum revise rounds |
 | `--temperature` | float | `0.4` | temperature |
-| `--timeout` | int | `120` | per-request HTTP timeout, seconds; bounds every attempt of the retry loop |
+| `--timeout` | int | `120` | per-request HTTP timeout, seconds; bounds every attempt of the retry loop (see [Local models and timeouts](#local-models-lm-studio-and-timeouts)) |
 | `--retries` | int | `6` | retries after a failed model call (`0` = single attempt); backoff 2 s, 4 s, 8 s, … capped at 30 s (7 attempts total by default); a stopped run aborts the loop between attempts |
 | `--max-tokens` | int | — | (TS package) output-token cap for both roles (env `TWO_BROTHERS_MAX_TOKENS`; per-role `TWO_BROTHERS_SENIOR_MAX_TOKENS` / `TWO_BROTHERS_JUNIOR_MAX_TOKENS` override it); Anthropic's default stays 4096, OpenAI/Gemini omit the cap when unset |
 | `--mode` | `consult`, `work`, `auto` | `consult` | cooperation mode |
@@ -279,6 +279,20 @@ env value. Consequence: a `PUT /api/settings` edit or an `onboard` run that
 touches a pinned field is accepted but transient — the env value wins again
 on the next read/run until the env var is unset. `onboard` prints a
 `pinned by TWO_BROTHERS_* env vars` note naming the stripped fields.
+
+## Local models (LM Studio) and timeouts
+
+Small local models on CPU (observed with `lfm3-1.7b` in the live E2E) can
+take **2–7+ minutes per provider call**. `--timeout` bounds *each attempt*
+of the retry loop, and every retry restarts generation from scratch — so a
+slow local model can exhaust all attempts even with retries left. Raise the
+timeout rather than the retry count:
+
+```powershell
+node dist/cli.js run "Your task" --timeout 900    # seconds; go higher on slower machines
+$env:TWO_BROTHERS_TIMEOUT = "900"                 # env equivalent (run/chat/serve)
+node dist/cli.js serve --timeout 900              # serve/web path (flag or env)
+```
 
 ## Sessions
 

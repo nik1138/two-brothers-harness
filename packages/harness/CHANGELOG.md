@@ -41,6 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Web tooling**: `vue-tsc` pinned to `~3.0.2`, eliminating the minimatch
   advisory; `npm run build` keeps passing. A follow-up bump to 3.3 is
   tracked in `docs/backlog.md`.
+- **Legacy SSE endpoint**: `GET /api/stream?session=<name>` now sends the
+  standard SSE headers (`Content-Type: text/event-stream`,
+  `Cache-Control: no-cache`, `X-Accel-Buffering: no`), so proxies and
+  EventSource clients treat the legacy tail as a proper event stream.
 
 ## [0.0.1] — 2026-11-04
 

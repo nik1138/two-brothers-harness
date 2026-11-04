@@ -342,6 +342,34 @@ test("api/stream replays existing session events", async () => {
   }
 });
 
+test("api/stream answers with the standard SSE headers", async () => {
+  const srv = await startServer();
+  try {
+    const res = await post<Record<string, unknown>>(srv.base, "/api/run", { task: "stream me" });
+    const name = String(res.body.session);
+    const headers = await new Promise<http.IncomingHttpHeaders>((resolve, reject) => {
+      const req = http.get(
+        `${srv.base}/api/stream?session=${encodeURIComponent(name)}`,
+        (incoming) => {
+          incoming.once("data", () => {
+            req.destroy();
+            resolve(incoming.headers);
+          });
+          incoming.on("error", () => {
+            // the destroyed socket may error after the headers were captured
+          });
+        },
+      );
+      req.on("error", reject);
+    });
+    assert.equal(headers["content-type"], "text/event-stream");
+    assert.equal(headers["cache-control"], "no-cache");
+    assert.equal(headers["x-accel-buffering"], "no");
+  } finally {
+    await srv.close();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Workspaces
 // ---------------------------------------------------------------------------
