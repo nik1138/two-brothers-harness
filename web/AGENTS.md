@@ -42,7 +42,10 @@ The backend is the TypeScript server in `packages/harness`:
   collection (also incremental); `src/markdown.ts` — dependency-free Markdown
   subset parser (typed block/inline tree, no HTML output, URL allowlist, hard
   bounds) rendered by `ChatView`; `src/themeMode.ts` — persisted
-  light/dark/system theme pin (`data-theme` on `<html>`)
+  light/dark/system theme pin (`data-theme` on `<html>`); `src/drafts.ts` —
+  per-session unsent composer drafts in a versioned, bounded localStorage blob
+  (injectable `StorageLike`, no DOM dependency; `Composer` debounces writes and
+  flushes on session switch/unmount)
 - `vite.config.ts` — dev proxy `/api` → `http://127.0.0.1:8600`
 
 ## Rules specific to this tree
@@ -55,8 +58,11 @@ The backend is the TypeScript server in `packages/harness`:
    not global CSS resets.
 2. **`npm run build` must keep passing** (outputs `dist/`). The backend serves
    that build, so a broken build breaks the product, not just CI. `npm test`
-   runs the chat/timeline projection tests (plain `node --test` via
-   `tests/register-ts.mjs`); keep it green too — the smoke test calls it.
+   runs the chat/timeline projection tests and the draft-store tests (plain
+   `node --test` via `tests/register-ts.mjs`); keep it green too — the smoke
+   test calls it. Run test files individually (`node --import
+   ./tests/register-ts.mjs --test tests/drafts.test.ts`) when the sandbox
+   blocks spawned test runners.
 3. `npm run dev` proxies `/api` to the backend — start it first:
 
    - `cd packages/harness && node dist/cli.js serve --port 8600 --sessions-dir sessions`

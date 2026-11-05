@@ -28,6 +28,36 @@ The script runs:
 Expected final line: `SMOKE TEST: PASS`. It is an offline pre-flight, not the
 whole product gate — run the package gates below for that.
 
+## CI coverage
+
+`.github/workflows/ci.yml` runs on every push and pull request to `main`, on
+Node 22 and 24 (the `engines` floor and the next supported release), in this
+order:
+
+1. `typescript/`: `node src/selftest.ts`, then `node tests/run-all.ts`
+   (no install step: the reference is zero-dependency);
+2. `packages/harness`: typecheck, build, `npm test`, `npm run test:spawn`,
+   `node dist/selftest.js`, and the mock CLI run;
+3. `packages/harness`: the hermetic CLI E2E — `node e2e/cli.ts` (sources)
+   and then `node e2e/cli.ts --dist` (the built CLI);
+4. `packages/harness`: `node e2e/run.ts` with
+   `TWO_BROTHERS_E2E_BASE_URL=http://127.0.0.1:9/v1`. The closed port makes
+   the endpoint probe fail immediately: the runner logs one `E2E SKIP:` line
+   (and records a synthetic `connection` SKIP entry), omits the live-model
+   suites, then runs the hermetic server-status and prompt-audit suites and
+   exits 0;
+5. `web/`: `npm ci`, `npm test`, `npm run build`;
+6. Node 22 only, after the web build: `node scripts/tarball-smoke.mjs` at
+   the repo root and `npm run pack:check` in `packages/harness`. Both trigger
+   the package `prepack` (build + `sync-web`), which is why they need
+   `web/dist`; the packed artifact is identical on both matrix legs, so the
+   heavier release checks run once, on the engines floor.
+
+npm caching covers the root and `web/` lockfiles (`setup-node`); the
+reference tree needs none. Network use is limited to npm (`npm ci` and the
+tarball smoke's dependency install) — no CI step talks to a live model
+endpoint.
+
 ## TypeScript package (primary)
 
 ```powershell
@@ -48,7 +78,8 @@ loader, the HTTP/SSE server and its run-status contract, the
 provider error-classification registry, and the workspace tools
 (confinement, approvals, diffs). Hermetic offline CLI E2E:
 `npm run test:e2e:cli` (sources) / `npm run test:e2e:cli:dist` (built
-`dist/cli.js`) drive the CLI as a subprocess against the mock provider.
+`dist/cli.js`) drive the CLI as a subprocess against the mock provider; CI
+runs both after the package build (see [CI coverage](#ci-coverage)).
 
 ## Web workspace (`web/`)
 
@@ -114,7 +145,11 @@ suite's temp dirs live under `<repo>/.e2e-tmp/` (gitignored).
 (`npm run test:e2e` on sources, `npm run test:e2e:dist` on the built
 `dist/`). Same models and endpoint as below; reports land in
 `packages/harness/e2e/runs/`. An unreachable endpoint prints `E2E SKIP:` and
-exits 0, so the suite stays safe on a machine without LM Studio.
+exits 0, so the suite stays safe on a machine without LM Studio. CI takes
+exactly that path on every push: with
+`TWO_BROTHERS_E2E_BASE_URL=http://127.0.0.1:9/v1` the live suites skip and
+the hermetic server-status/prompt-audit suites still run (see
+[CI coverage](#ci-coverage)).
 
 ### Browser real-model E2E (opt-in)
 

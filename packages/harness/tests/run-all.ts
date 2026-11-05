@@ -54,3 +54,4 @@ import "./tuiwidth.test.ts";
 import "./tuivisualmodel.test.ts";
 import "./tuiviewlane.test.ts";
 import "./tuiintegration.test.ts";
+import "./tuihistory.test.ts";

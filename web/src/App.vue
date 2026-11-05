@@ -87,6 +87,9 @@ interface RunRequestState {
 }
 /** Last submitted run, so a live failure can be retried with the exact request. */
 const lastRequest = ref<RunRequestState | null>(null)
+/** Task text of a start request that never became a run; the composer puts it
+ * back (the token makes every failure a distinct restore trigger). */
+const draftRestore = ref<{ token: number; text: string } | null>(null)
 /** Retry action per session — survives session switches and reloads. */
 const retryBySession = ref<Record<string, RunRequestState>>({})
 /** Latest failure per session, rendered as an inline error card (G-5). */
@@ -681,6 +684,13 @@ async function startNewRun(payload: {
     // the activeRun watcher opens the event stream for the new run
     refreshSessions()
   } catch (e) {
+    // The request never became a run, so the submit-time clear must not be the
+    // last word: hand the exact task back to the composer (it refuses to
+    // overwrite text the operator has typed since).
+    draftRestore.value = {
+      token: (draftRestore.value?.token ?? 0) + 1,
+      text: request.task,
+    }
     reportError(errText(e))
   }
 }
@@ -985,6 +995,8 @@ onUnmounted(() => {
         :usage="usageForSelected"
       />
       <Composer
+        :session-id="selected"
+        :draft-restore="draftRestore"
         :busy="live"
         :waiting="waiting"
         :stopping="stopping"

@@ -51,9 +51,19 @@ import {
   handleEditorKey,
   insertText,
   pasteText,
+  recordHistory,
+  setEditorText,
   takeSubmission,
+  type EditorOptions,
   type EditorState,
 } from "./editor.ts";
+import {
+  appendHistory,
+  defaultTuiHistoryPath,
+  loadHistory,
+  saveHistory,
+  TUI_HISTORY_FILE_ENV,
+} from "./historystore.ts";
 import {
   findSlashCommand,
   isCommandEnabled,
@@ -148,6 +158,13 @@ export interface TuiAppOptions {
   cwd?: string;
   /** Directory the session picker scans for `.jsonl` sessions. */
   sessionsDir?: string;
+  /**
+   * Prompt-history JSON path. Defaults to `TWO_BROTHERS_TUI_HISTORY_FILE` or
+   * `~/.two-brothers/tui-history.json`. Callers injecting `input`/`output`
+   * (tests, embedding) must pass a path or the env override to persist, so an
+   * embedded app never writes the host's home directory unasked.
+   */
+  historyFile?: string;
   /** Injection seams for tests/embedding; default to the process streams. */
   input?: NodeJS.ReadStream;
   output?: NodeJS.WriteStream;
@@ -700,6 +717,60 @@ export function printableChar(key: Key): string | null {
   return code >= 0x20 && code !== 0x7f ? key.raw : null;
 }
 
+/** One-slot draft stash: the stashed text, or null when the slot is empty. */
+export type DraftStash = string | null;
+
+/** What one stash-key press did. */
+export type DraftStashOutcome = "stashed" | "restored" | "empty";
+
+/** Pure result of folding the stash key into the composer and slot. */
+export interface DraftStashResult {
+  editor: EditorState;
+  stash: DraftStash;
+  outcome: DraftStashOutcome;
+}
+
+/**
+ * Fold one stash-key press into the composer.
+ *
+ * A non-blank draft moves into the single stash slot and the composer clears;
+ * an empty composer restores the stashed draft (and empties the slot); with
+ * both empty nothing changes, so the caller can show an honest no-op toast.
+ * Whitespace-only text counts as empty in both directions.
+ */
+export function toggleDraftStash(
+  editor: EditorState,
+  stash: DraftStash,
+  options: EditorOptions = {},
+): DraftStashResult {
+  if (editor.text.trim() !== "") {
+    return { editor: clearEditor(editor), stash: editor.text, outcome: "stashed" };
+  }
+  if (stash !== null && stash.trim() !== "") {
+    return {
+      editor: setEditorText(clearEditor(editor), stash, options),
+      stash: null,
+      outcome: "restored",
+    };
+  }
+  return { editor, stash, outcome: "empty" };
+}
+
+/**
+ * Seed an editor's history from persisted entries, oldest first. The editor's
+ * own 100-entry cap and consecutive-dedupe rules apply, so a long history
+ * never exceeds the recall depth the composer expects.
+ */
+export function seedEditorHistory(
+  editor: EditorState,
+  entries: readonly string[],
+  options: EditorOptions = {},
+): EditorState {
+  let state = editor;
+  for (const entry of entries) state = recordHistory(state, entry, options);
+  return state;
+}
+
 function usageOf(value: unknown): UsageSnapshot {  const record = (value ?? {}) as Record<string, unknown>;
   const num = (key: string): number => {
     const n = Number(record[key]);
@@ -782,7 +853,19 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
 
   let mode: Config["mode"] = sessionCfg.mode;
   let model: TuiModel = createTuiModel();
-  let editor: EditorState = createEditor();
+  // Loaded exactly once per TUI run; later submissions are appended here and
+  // saved atomically. A malformed/unreadable file yields [] without noise.
+  const envHistoryFile = process.env[TUI_HISTORY_FILE_ENV];
+  const historyFile =
+    options.historyFile ??
+    (typeof envHistoryFile === "string" && envHistoryFile.trim() !== ""
+      ? envHistoryFile.trim()
+      : options.input === undefined && options.output === undefined
+        ? defaultTuiHistoryPath()
+        : null);
+  let promptHistory: string[] = historyFile === null ? [] : loadHistory(historyFile);
+  let editor: EditorState = seedEditorHistory(createEditor(), promptHistory);
+  let draftStash: DraftStash = null;
   let scroll: TranscriptScroll = latestTranscriptScroll();
   let overlay: Overlay | null = null;
   let running = false;
@@ -832,6 +915,42 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       render();
     }, 4000);
     timer.unref?.();
+  };
+
+  /**
+   * Remember one accepted prompt in the live editor history and the persisted
+   * sequence. A blank prompt or a repeat of the newest entry is a no-op, so a
+   * seeded entry is never duplicated just because it was submitted again.
+   */
+  const rememberPrompt = (entry: string): void => {
+    const prompt = appendHistory([], entry)[0];
+    if (prompt === undefined) return;
+    editor = recordHistory(editor, prompt);
+    const next = appendHistory(promptHistory, prompt);
+    const unchanged =
+      next.length === promptHistory.length &&
+      next.every((value, index) => value === promptHistory[index]);
+    if (unchanged) return;
+    promptHistory = next;
+    if (historyFile !== null) saveHistory(historyFile, promptHistory);
+  };
+
+  /** One Ctrl+O press: stash the draft, restore it, or report the no-op. */
+  const toggleStash = (): void => {
+    const result = toggleDraftStash(editor, draftStash);
+    editor = result.editor;
+    draftStash = result.stash;
+    if (result.outcome === "stashed") {
+      pushToast("success", "draft stashed");
+    } else if (result.outcome === "restored") {
+      pushToast("success", "draft restored");
+    } else {
+      pushToast(
+        "info",
+        "nothing to stash or restore — the composer is empty and no draft is stashed",
+      );
+    }
+    render();
   };
 
   const statusState = (): StatusBarState => ({
@@ -937,7 +1056,13 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     model = addNotice(model, "warn", line);
   };
 
-  const executeTurn = (task: string, turnMode: Config["mode"]): void => {
+  /**
+   * Start one turn. `prompt` is the user-facing submission to remember in
+   * history (raw composer text, a CLI task, or a palette template) and is
+   * deliberately separate from the expanded `task`. Only a turn that actually
+   * starts records history; retry replays the same task without a new entry.
+   */
+  const executeTurn = (task: string, turnMode: Config["mode"], prompt?: string): void => {
     if (running) {
       // Defensive only — submitEditor refuses before reaching here, so the
       // caller's draft is never dropped by this guard.
@@ -945,6 +1070,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       render();
       return;
     }
+    if (prompt !== undefined) rememberPrompt(prompt);
     model = addUserBlock(model, task);
     scroll = latestTranscriptScroll();
     running = true;
@@ -1218,7 +1344,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
               context = openTuiContext({ ...sessionCfg, sessionFile, resume: true }, options.io);
               sessionCfg = { ...sessionCfg, sessionFile, resume: true };
               model = createTuiModel();
-              editor = createEditor();
+              // A session switch resets the draft but not durable prompt
+              // history or the in-memory stash slot.
+              editor = seedEditorHistory(createEditor(), editor.history);
               scroll = latestTranscriptScroll();
               usage = null;
               cost = null;
@@ -1272,7 +1400,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       if ((template.argumentHint ?? "") !== "") {
         editor = insertText(editor, `/${template.name} `);
       } else {
-        executeTurn(expandCommand(template, ""), template.mode ?? mode);
+        executeTurn(expandCommand(template, ""), template.mode ?? mode, `/${template.name}`);
       }
       return;
     }
@@ -1294,6 +1422,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       }
       case "exit":
         requestQuit();
+        break;
+      case "stash":
+        toggleStash();
         break;
       case "mode":
         openModePicker();
@@ -1477,7 +1608,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         pushToast("info", `mode: ${mode} — the next turn uses it`);
         break;
       case "run":
-        executeTurn(action.task, action.mode ?? mode);
+        executeTurn(action.task, action.mode ?? mode, text);
         break;
     }
   };
@@ -1549,6 +1680,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         return true;
       case "help":
         openHelp();
+        return true;
+      case "stash":
+        toggleStash();
         return true;
       case "cancel":
       case "exit":
@@ -1629,7 +1763,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     terminal.enter();
     render();
     if (options.initialTask !== undefined && options.initialTask.trim() !== "") {
-      executeTurn(options.initialTask.trim(), mode);
+      executeTurn(options.initialTask.trim(), mode, options.initialTask.trim());
     }
     for (;;) {
       render();

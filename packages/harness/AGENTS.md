@@ -435,6 +435,18 @@ the protocol reference and is not modified by work here either.
    seams. Tests: `tests/tui*.test.ts` lanes plus the assembled-app
    `tests/tuiintegration.test.ts`, all registered in `tests/run-all.ts`.
    No new runtime deps.
+   **TUI prompt history + draft stash (P1):** `src/tui/historystore.ts`
+   persists submitted tasks across restarts at
+   `~/.two-brothers/tui-history.json` (env override
+   `TWO_BROTHERS_TUI_HISTORY_FILE`; versioned `{version: 1, entries}`,
+   newest-last, 100 entries, 16 384 chars each, consecutive dedupe, atomic
+   temp-file + rename, fail-soft on every IO/parse error). The app loads it
+   once at startup and seeds the editor history in order; only accepted task
+   submissions (typed, slash-template, or `tui "<task>"`) are appended, never
+   a draft/recall that was not submitted. Ctrl+O (the `stash` registry
+   command, so `?`/F1 and Ctrl+P expose it) moves one draft between the
+   composer and an in-memory one-slot stash with toasts; the slot survives
+   session switches. Tests: `tests/tuihistory.test.ts`.
    **Graceful `serve` shutdown + local-request guards are shipped
    (2026-11-04 hardening):** `cli.ts serve` traps SIGINT/SIGTERM and runs
    `shutdownServe(app)` — stop accepting connections, cooperatively stop

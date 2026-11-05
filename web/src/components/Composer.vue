@@ -2,9 +2,18 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { NButton, NPopover } from 'naive-ui'
 import { getSettings } from '../api'
+import { clearDraft, getDraft, setDraft } from '../drafts'
 import type { RunMode, RunProvider, SettingsView } from '../types'
 
 const props = defineProps<{
+  /** Session the composer belongs to; its unsent text is saved under this id. */
+  sessionId?: string | null
+  /**
+   * Recovery payload from App: a start request that failed before any run
+   * existed. `token` changes on every failure; the text is put back only when
+   * the operator has not typed anything new since the submit.
+   */
+  draftRestore?: { token: number; text: string } | null
   /** The followed run is working (queued/running) — the composer is locked. */
   busy: boolean
   /**
@@ -190,12 +199,89 @@ const settingsHint = computed(
   () => `Set the ${missingLabel.value} in Settings to start a run.`,
 )
 
+// -- unsent draft persistence -------------------------------------------------
+// The box holds one draft at a time: the active session's unsent text, or —
+// with no session selected — the welcome-screen text, remembered in memory.
+// Switching without remounting flushes the previous state synchronously and
+// restores the next one, so drafts never leak across sessions. Busy/approval-
+// waiting changes only lock sending — they must never touch the text or the
+// saved copy.
+
+const DRAFT_SAVE_DELAY_MS = 300
+let draftSaveTimer: ReturnType<typeof setTimeout> | null = null
+/** True while a restore writes `task`; that programmatic change is not saved. */
+let restoringDraft = false
+/** Welcome-screen draft (no active session), kept in memory until submit. */
+let unsessionedDraft = ''
+
+function cancelDraftSave() {
+  if (draftSaveTimer === null) return
+  clearTimeout(draftSaveTimer)
+  draftSaveTimer = null
+}
+
+/** Write the current text for `sessionId` now (session switch / unmount). */
+function flushDraft(sessionId: string | null | undefined = props.sessionId) {
+  cancelDraftSave()
+  if (!sessionId) {
+    // no storage key for the welcome screen — remember the text in memory
+    unsessionedDraft = task.value
+    return
+  }
+  setDraft(sessionId, task.value)
+}
+
+/** Show `sessionId`'s saved draft, or the remembered welcome-screen text. */
+function restoreDraft(sessionId: string | null | undefined) {
+  cancelDraftSave()
+  restoringDraft = true
+  task.value = sessionId ? getDraft(sessionId) : unsessionedDraft
+  void nextTick(() => {
+    restoringDraft = false
+  })
+}
+
+/**
+ * null -> id: a non-empty welcome-screen draft follows the operator into the
+ * session they just picked (persisted under that id), unless the session
+ * already has its own saved draft — then that saved draft wins.
+ */
+function adoptOrRestore(sessionId: string) {
+  if (getDraft(sessionId) === '' && task.value.trim().length > 0) {
+    setDraft(sessionId, task.value)
+    return
+  }
+  restoreDraft(sessionId)
+}
+
+function scheduleDraftSave() {
+  if (restoringDraft) return
+  if (!props.sessionId) {
+    // nothing to key the welcome-screen draft to; the in-memory copy is enough
+    unsessionedDraft = task.value
+    return
+  }
+  cancelDraftSave()
+  const sessionId = props.sessionId
+  draftSaveTimer = setTimeout(() => {
+    draftSaveTimer = null
+    // the selection may have moved while the timer was pending
+    if (props.sessionId !== sessionId) return
+    setDraft(sessionId, task.value)
+  }, DRAFT_SAVE_DELAY_MS)
+}
+
 function submit() {
   const text = task.value.trim()
   // `waiting` keeps the textarea usable for drafting, but a new run cannot
   // start while this session's run is still alive.
   if (!text || props.busy || props.waiting) return
   emit('submit', { task: text, mode: mode.value, provider: providerForRun.value })
+  // The run accepted the text — submit consumes every draft form. A blocked
+  // submit returned above, so text and drafts stay intact.
+  cancelDraftSave()
+  clearDraft(props.sessionId)
+  unsessionedDraft = ''
   task.value = ''
 }
 
@@ -275,6 +361,37 @@ function configureModels() {
 const MENU_STYLE = { padding: '0.35rem', width: 'min(20rem, calc(100vw - 2rem))' }
 
 watch(task, () => nextTick(resizeInput))
+watch(task, scheduleDraftSave)
+watch(
+  () => props.sessionId,
+  (next, prev) => {
+    // `task` still holds the previous state's text here: save it under the old
+    // id (or remember it when there was no session), then swap the box.
+    flushDraft(prev)
+    if (!prev && next) adoptOrRestore(next)
+    else restoreDraft(next)
+  },
+)
+// A start request that threw before creating a run: App hands the task back.
+// The successful-submit path already cleared text + saved draft, so this is
+// the only way that text survives; an operator edit since then wins.
+watch(
+  () => props.draftRestore?.token ?? 0,
+  () => {
+    const restore = props.draftRestore
+    if (!restore || restore.text.trim().length === 0) return
+    if (task.value.trim().length > 0) return
+    cancelDraftSave()
+    restoringDraft = true
+    task.value = restore.text
+    // persist again now (the submit path consumed the saved copy)
+    if (props.sessionId) setDraft(props.sessionId, restore.text)
+    else unsessionedDraft = restore.text
+    void nextTick(() => {
+      restoringDraft = false
+    })
+  },
+)
 watch(
   () => props.busy,
   (busy) => {
@@ -286,12 +403,16 @@ watch(
 watch(() => props.settingsVersion, checkSettings)
 
 onMounted(() => {
+  // a mounted composer may already have a session (restored selection on load)
+  restoreDraft(props.sessionId)
   resizeInput()
   window.addEventListener('resize', resizeInput)
   void checkSettings()
 })
 
 onBeforeUnmount(() => {
+  // synchronous last write: the debounce may still be pending
+  flushDraft()
   settingsRequest++
   window.removeEventListener('resize', resizeInput)
 })

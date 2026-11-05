@@ -184,6 +184,16 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
     palette: false,
   },
   {
+    id: "stash",
+    title: "Stash or restore draft",
+    description: "Stash the composer draft, or bring the stashed draft back.",
+    group: "Composer",
+    // Ctrl+O: unused, produces one control byte, and falls outside the
+    // terminal's XON/XOFF pair (Ctrl+Q / Ctrl+S), so it can never pause output.
+    keys: [{ name: "o", ctrl: true }],
+    when: "composer",
+  },
+  {
     id: "scroll",
     title: "Scroll transcript",
     description: "Page through the transcript without moving the composer cursor.",

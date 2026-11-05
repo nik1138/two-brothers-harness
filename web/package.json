@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
-    "test": "node --import ./tests/register-ts.mjs --test tests/chat.test.ts tests/timeline.test.ts",
+    "test": "node --import ./tests/register-ts.mjs --test tests/chat.test.ts tests/timeline.test.ts tests/drafts.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {

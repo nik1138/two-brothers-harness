@@ -30,6 +30,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Zero-dependency protocol reference: no install step of its own, the
+      # selftest and in-process suite run on the checked-in sources alone.
+      - name: Protocol reference selftest
+        run: node src/selftest.ts
+        working-directory: typescript
+
+      - name: Protocol reference tests
+        run: node tests/run-all.ts
+        working-directory: typescript
+
       - name: Typecheck
         run: npm run typecheck
         working-directory: packages/harness
@@ -54,6 +64,28 @@ jobs:
         run: node dist/cli.js run "ci smoke" --provider mock
         working-directory: packages/harness
 
+      # Hermetic CLI E2E: drives the CLI as a real subprocess against the
+      # mock provider (temp dirs, offline). Sources first, then `--dist` so
+      # the built artifact is proven too. web/dist is not built yet at this
+      # point, so the `serve` scenario asserts the expected 404 path.
+      - name: Hermetic CLI E2E (sources)
+        run: node e2e/cli.ts
+        working-directory: packages/harness
+
+      - name: Hermetic CLI E2E (dist)
+        run: node e2e/cli.ts --dist
+        working-directory: packages/harness
+
+      # Hermetic server-status/prompt-audit suites. The override points the
+      # runner at a closed loopback port, so the endpoint probe fails at once
+      # and the live-model suites report SKIP; the hermetic suites still run
+      # and the runner exits 0.
+      - name: Hermetic server E2E (no live endpoint)
+        run: node e2e/run.ts
+        working-directory: packages/harness
+        env:
+          TWO_BROTHERS_E2E_BASE_URL: http://127.0.0.1:9/v1
+
       - name: Web install
         run: npm ci
         working-directory: web
@@ -65,3 +97,20 @@ jobs:
       - name: Web build
         run: npm run build
         working-directory: web
+
+      # Release rehearsal: `npm pack` (whose prepack runs build + sync-web),
+      # install the tarball in a fresh temp dir, then exercise the installed
+      # selftest/CLI/.bin shim. Needs the package build and web/dist, hence
+      # it runs after the web build. The packed artifact does not depend on
+      # the Node version running the job, so the two heavier release checks
+      # run once, on the Node 22 engines floor.
+      - name: Tarball install smoke
+        if: matrix.node == 22
+        run: node scripts/tarball-smoke.mjs
+
+      # publint + attw on the packed tarball (package-format analysis; the
+      # prepack it triggers also needs the web build). No network beyond npm.
+      - name: Packaging checks (publint + attw)
+        if: matrix.node == 22
+        run: npm run pack:check
+        working-directory: packages/harness
