@@ -92,13 +92,87 @@ node dist/cli.js tui "Plan a migration from Redis to Valkey" --provider mock
 ### `sessions`
 
 List the JSONL session files of a sessions directory (default `sessions`)
-with readable titles (from the `<name>.meta.json` sidecar, or derived from the
-first operator message) and the last-modified time. Output-only — it never
-touches the files.
+with readable titles derived from the first operator message, envelope counts
+and the last-modified time. Output-only — it never touches the files.
 
 ```powershell
-node dist/cli.js sessions [--sessions-dir sessions]
+node dist/cli.js sessions [--sessions-dir sessions] [--limit N] [--json]
+node dist/cli.js sessions show <name> [--limit N] [--json]
 ```
+
+`sessions --json` prints one JSON array with one flat object per session, keys
+in this order: `{name, title, envelopes, updated, error}` — `name` keeps the
+`.jsonl` suffix, `updated` is local `YYYY-MM-DD HH:MM`, and `error` is `null`
+or a message such as `corrupt line 3`. An empty or missing directory prints
+`[]` and exits 0.
+
+`sessions show <name>` prints the session summary (`session:`, `title:`,
+`envelopes:`, `updated:`, an `error:` line only when the file has corrupt
+lines) and one render line per protocol envelope
+(`seq from -> to kind — preview`). The name resolves with or without the
+`.jsonl` suffix. `sessions show <name> --json` prints one JSON object with the
+same summary fields plus `events` (the envelope array):
+
+```
+{name, title, envelopes, updated, error, events}
+```
+
+`--limit N` caps the listed rows (`sessions`) or the envelopes printed/shown
+(`show`, in both human and JSON output; `envelopes` stays the total). An
+unknown session or a missing name is a usage error (exit 2); an unreadable
+session file exits 1.
+
+### `doctor`
+
+Local, read-only diagnostics: one `[pass]` / `[warn]` / `[fail]` / `[skip]`
+line per check, in this order — Node engine (the package's `>= 22.19` floor),
+settings file (`<sessions-dir>/settings.json`), sessions-directory
+writability, per-role provider configuration (kind, base URL, model, key
+presence), the provider endpoint (`GET {base-url}/models`; skipped for
+`mock`), built web assets, and the `<cwd>/plugins` directory. API keys are
+never printed. The endpoint probe is bounded by `--timeout` (seconds, default
+5) and only runs for `openai`.
+
+Exit code: `0` when no check failed, `1` when at least one check failed, `2` on
+a usage/config error. Warnings (a missing settings file or plugins directory,
+absent web build) never fail the report.
+
+```powershell
+node dist/cli.js doctor
+node dist/cli.js doctor --provider mock
+node dist/cli.js doctor --json --sessions-dir sessions --timeout 10
+```
+
+`--json` prints one JSON object on stdout and keeps the same exit semantics:
+
+```json
+{"ok": true, "checks": [{"id": "engine", "label": "Node engine", "status": "pass", "detail": "v22.19.0"}]}
+```
+
+`ok` is `false` iff some check has status `fail`; `status` is one of
+`pass`/`warn`/`fail`/`skip`. Provider flags (`--provider`, `--provider-kind`,
+`--senior-kind`, `--junior-kind`, `--base-url`, `--api-key`, the four
+per-role endpoint flags, `--senior-model`, `--junior-model`) resolve exactly
+like `run`, so the report describes the run configuration.
+
+### `completions`
+
+Print a shell completion script generated from the same command/flag catalog
+as `help --all`, so the script never drifts from the CLI. Supported shells:
+`bash`, `zsh`, `fish`, `powershell`.
+
+```powershell
+node dist/cli.js completions bash        # a complete -F hook
+node dist/cli.js completions zsh         # #compdef script (fpath-installable)
+node dist/cli.js completions fish        # complete -c rules
+node dist/cli.js completions powershell  # Register-ArgumentCompleter -Native (PowerShell 7+)
+```
+
+A missing or unknown shell is a usage error (exit 2) that lists the valid
+shells; an unknown option suggests the nearest known flag. Save the output
+where your shell expects it (e.g. `_two-brothers` in a zsh `$fpath` directory,
+`~/.config/fish/completions/two-brothers.fish` for fish); under PowerShell
+redirect with `Out-File -Encoding utf8`.
 
 ### `selftest`
 
@@ -415,7 +489,8 @@ metadata only at `GET /api/skills`.
   single-shot. (`run --stream` is the line-by-line NDJSON alternative.)
 
 Exit codes in both modes: `0` success, `1` run error (the `errors` array in
-JSON mode is non-empty), `2` unknown command / task not given.
+JSON mode is non-empty), `2` usage error (unknown command/option, task not
+given).
 
 ```powershell
 node dist/cli.js run "Pick a testing scheme" --provider mock --mode print
@@ -449,6 +524,10 @@ them):
   `onboard` to write per-role settings, `models` to list an endpoint's
   models, a `cost:` line (and `cost` in `--mode json`) from a hand-maintained
   price table, and per-role `--max-tokens` output caps.
+- **Diagnostics and shell completions** — `doctor` reports the local
+  environment and provider setup (human report or `--json`, exit 1 on a
+  failing check), and `completions <bash|zsh|fish|powershell>` prints a
+  completion script generated from the same command/flag catalog as help.
 - **TUI** — `tui [task]` (also the bare interactive `two-brothers`) is a
   zero-dependency full-screen chat in the terminal's alternate screen over
   the same harness and flags: block transcript with textual role labels, a
@@ -482,6 +561,18 @@ node dist/cli.js run "Pick a testing scheme" --provider mock --mode json
 # delegation
 node dist/cli.js run "Write hello world" --provider mock --mode work
 
+# local diagnostics: human report and one machine-readable object
+node dist/cli.js doctor --provider mock
+node dist/cli.js doctor --provider mock --json
+
+# shell completions (write the output to your shell's completion location)
+node dist/cli.js completions bash
+node dist/cli.js completions powershell
+
+# inspect persisted sessions (JSON array, then one session's envelopes)
+node dist/cli.js sessions --sessions-dir sessions --json
+node dist/cli.js sessions show session --sessions-dir sessions
+
 # a real provider
 node dist/cli.js run "Task" --provider openai `
   --base-url https://api.deepseek.com/v1 --api-key sk-... `
@@ -492,6 +583,6 @@ node dist/cli.js run "Task" --provider openai `
 
 | Code | Meaning |
 |---|---|
-| 0 | success |
-| 1 | run error / selftest FAIL |
-| 2 | unknown command / task not given |
+| 0 | success (including `doctor` when no check failed, and a missing/empty sessions directory) |
+| 1 | run error (the `errors` array in `--mode json`) / selftest FAIL / `doctor` with at least one failing check / unreadable session file |
+| 2 | usage error: unknown command or option, missing task, shell or session argument, unknown session, invalid flag value, bad config |

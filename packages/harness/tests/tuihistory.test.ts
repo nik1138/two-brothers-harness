@@ -45,6 +45,16 @@ import {
   tuiHelpLines,
 } from "../src/tui/keymap.ts";
 import { ANSI, stripAnsi } from "../src/tui/render.ts";
+import { displayWidth } from "../src/tui/text.ts";
+import {
+  historySearchHints,
+  historySearchView,
+  moveHistorySearchSelection,
+  openHistorySearch,
+  searchHistory,
+  searchHistoryKey,
+  selectedHistoryMatch,
+} from "../src/tui/view/historysearch.ts";
 
 function tmpdir(): { root: string; cleanup: () => void } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-tui-history-"));
@@ -263,6 +273,14 @@ class FakeInput extends EventEmitter {
   ctrlO(): void {
     this.key("o", { ctrl: true, raw: "\u000f" });
   }
+
+  ctrlR(): void {
+    this.key("r", { ctrl: true, raw: "\u0012" });
+  }
+
+  backspace(): void {
+    this.key("backspace", { raw: "\u007f" });
+  }
 }
 
 class FakeOutput extends EventEmitter {
@@ -476,6 +494,235 @@ test("Ctrl+O stashes and restores one draft with toasts; submitting it persists 
     assert.ok(await waitFor(() => textOf(output).includes("decision:"), 30_000));
     assert.ok(await waitIdle(output));
     assert.deepEqual(loadHistory(history), ["stashed draft"]);
+  } finally {
+    await stop(harness, root);
+  }
+});
+
+// --------------------------------------------------------------------------- //
+// reverse history search (Ctrl+R)
+// --------------------------------------------------------------------------- //
+
+function searchKey(
+  name: string,
+  raw = name,
+  modifiers: { ctrl?: boolean; shift?: boolean; alt?: boolean } = {},
+): { name: string; raw: string; ctrl?: boolean; shift?: boolean; alt?: boolean } {
+  return { name, raw, ...modifiers };
+}
+
+test("history search filters case-insensitively, newest first", () => {
+  const entries = ["Alpha one", "beta two", "Gamma three", "BETA four"];
+  assert.deepEqual(searchHistory(entries, ""), [
+    "BETA four",
+    "Gamma three",
+    "beta two",
+    "Alpha one",
+  ]);
+  assert.deepEqual(searchHistory(entries, "beta"), ["BETA four", "beta two"]);
+  assert.deepEqual(searchHistory(entries, "ALPHA"), ["Alpha one"]);
+  assert.deepEqual(searchHistory(entries, "nope"), []);
+});
+
+test("openHistorySearch and searchHistoryKey filter incrementally and cycle", () => {
+  let state = openHistorySearch(["first", "second", "third"]);
+  assert.equal(state.query, "");
+  assert.deepEqual(state.matches, ["third", "second", "first"]);
+  assert.equal(state.selected, 0);
+  assert.equal(selectedHistoryMatch(state), "third");
+
+  const typed = searchHistoryKey(state, searchKey("s"));
+  state = typed.state;
+  assert.equal(typed.action, "filter");
+  assert.equal(state.query, "s");
+  assert.deepEqual(state.matches, ["second", "first"]);
+
+  const erased = searchHistoryKey(state, searchKey("backspace", "\u007f"));
+  assert.equal(erased.action, "filter");
+  assert.equal(erased.state.query, "");
+  assert.deepEqual(erased.state.matches, ["third", "second", "first"]);
+
+  const wrappedUp = moveHistorySearchSelection(erased.state, -1);
+  assert.equal(wrappedUp.selected, 2);
+  const wrappedDown = moveHistorySearchSelection(wrappedUp, 1);
+  assert.equal(wrappedDown.selected, 0);
+  const repeated = searchHistoryKey(wrappedDown, searchKey("r", "\u0012", { ctrl: true }));
+  assert.equal(repeated.action, "move");
+  assert.equal(repeated.state.selected, 1);
+
+  const empty = openHistorySearch([]);
+  assert.equal(moveHistorySearchSelection(empty, 1).selected, 0);
+});
+
+test("Enter accepts the selected match, Esc cancels and no-match is a no-op", () => {
+  const state = openHistorySearch(["one", "two", "three"]);
+  const accepted = searchHistoryKey(state, searchKey("return", "\r"));
+  assert.equal(accepted.action, "accept");
+  assert.equal(accepted.text, "three", "the newest match is selected first");
+  assert.equal(accepted.state, state);
+
+  const moved = searchHistoryKey(state, searchKey("r", "\u0012", { ctrl: true })).state;
+  const second = searchHistoryKey(moved, searchKey("return", "\r"));
+  assert.equal(second.text, "two");
+
+  const cancelled = searchHistoryKey(state, searchKey("escape", "\u001b"));
+  assert.equal(cancelled.action, "cancel");
+  assert.equal(cancelled.state, state);
+
+  const noMatch = searchHistoryKey(state, searchKey("z"));
+  assert.deepEqual(noMatch.state.matches, []);
+  const refused = searchHistoryKey(noMatch.state, searchKey("return", "\r"));
+  assert.equal(refused.action, "no-match");
+  assert.equal(refused.text, undefined);
+});
+
+test("history search never mutates the submitted history", () => {
+  const entries = ["older", "newest"];
+  const snapshot = [...entries];
+  let state = openHistorySearch(entries);
+  state = searchHistoryKey(state, searchKey("o")).state;
+  const accepted = searchHistoryKey(state, searchKey("return", "\r"));
+  assert.equal(accepted.text, "older");
+  assert.deepEqual(entries, snapshot);
+  assert.deepEqual(state.entries, snapshot);
+});
+
+test("history search view is an exact cell with a highlighted match and clear empty/no-match rows", () => {
+  const state = openHistorySearch(["alpha task", "beta task"]);
+  const view = historySearchView(state, { width: 40, height: 6 });
+  assert.equal(view.lines.length, 6);
+  for (const row of view.lines) {
+    assert.equal(displayWidth(row), 40);
+    assert.ok(!row.includes("\u001b"));
+  }
+  assert.equal(view.noMatch, false);
+  assert.equal(view.visible.length, 2);
+  assert.equal(view.selectedRow, 2);
+  assert.ok(view.lines[view.selectedRow]?.startsWith("› "));
+  assert.ok(view.lines[view.selectedRow]?.includes("beta task"));
+  assert.match(view.lines[0] ?? "", /History search \(2\) · 1\/2/);
+
+  for (const width of [0, 1, 10, 26, 68]) {
+    for (const height of [0, 1, 2, 3, 6, 14]) {
+      const sized = historySearchView(state, { width, height });
+      assert.equal(sized.lines.length, height, `height ${height}`);
+      for (const row of sized.lines) assert.equal(displayWidth(row), width);
+    }
+  }
+
+  const noMatch = historySearchView(searchHistoryKey(state, searchKey("z")).state, {
+    width: 40,
+    height: 6,
+  });
+  assert.equal(noMatch.noMatch, true);
+  assert.equal(noMatch.selectedRow, -1);
+  assert.match(noMatch.lines[2] ?? "", /No matches for "z"/);
+
+  const empty = historySearchView(openHistorySearch([]), { width: 40, height: 6 });
+  assert.equal(empty.noMatch, true);
+  assert.match(empty.lines[2] ?? "", /No submitted prompts yet/);
+  assert.match(historySearchHints(TUI_COMMANDS), /Ctrl\+R cycle$/);
+});
+
+test("history search is a conflict-free Ctrl+R command exposed in help and palette", () => {
+  const command = findCommand(TUI_COMMANDS, "history-search");
+  assert.ok(command);
+  assert.equal(formatKeys(command), "Ctrl+R");
+  assert.equal(command.when, "composer");
+  assert.ok(paletteEntries(TUI_COMMANDS).some((entry) => entry.id === "history-search"));
+  assert.ok(documentEntries(TUI_COMMANDS).some((entry) => entry.id === "history-search"));
+  assert.match(
+    tuiHelpLines(TUI_COMMANDS).join("\n"),
+    /Ctrl\+R\s+Incrementally search earlier submitted tasks/,
+  );
+
+  const key = { name: "r", ctrl: true, raw: "\u0012" };
+  assert.equal(resolveKey(TUI_COMMANDS, key)?.command.id, "history-search");
+  const conflicts = TUI_COMMANDS.filter(
+    (candidate) =>
+      candidate.id !== "history-search" &&
+      (candidate.keys ?? []).some((chord) => matchChord(chord, key)),
+  );
+  assert.deepEqual(conflicts.map((candidate) => candidate.id), []);
+});
+
+test("Ctrl+R accepts a match into the composer and submits it through the normal path", async () => {
+  const { root } = tmpdir();
+  const history = path.join(root, "tui-history.json");
+  saveHistory(history, ["older task", "newer task"]);
+  const harness = startApp(root, history);
+  const { input, output } = harness;
+  try {
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+    input.ctrlR();
+    assert.ok(await waitFor(() => lastFrameText(output).includes("HISTORY")));
+    assert.ok(lastFrameText(output).includes("newer task"));
+
+    // A repeated Ctrl+R cycles older matches, wrapping back to the newest.
+    input.ctrlR();
+    assert.ok(await waitFor(() => lastFrameText(output).includes("› older task")));
+    input.ctrlR();
+    assert.ok(await waitFor(() => lastFrameText(output).includes("› newer task")));
+
+    input.type("OLDER");
+    assert.ok(await waitFor(() => lastFrameText(output).includes("> OLDER")));
+    assert.ok(await waitFor(() => lastFrameText(output).includes("› older task")));
+    input.enter();
+    assert.ok(await waitFor(() => !lastFrameText(output).includes("HISTORY")));
+    assert.ok(lastFrameText(output).includes("older task"), "the accepted match lands in the composer");
+
+    // The cursor sits at the end of the accepted match: typing appends.
+    input.type("!");
+    assert.ok(await waitFor(() => lastFrameText(output).includes("older task!")));
+    input.backspace();
+    assert.ok(await waitFor(() => !lastFrameText(output).includes("older task!")));
+    assert.ok(lastFrameText(output).includes("older task"));
+
+    assert.deepEqual(
+      loadHistory(history),
+      ["older task", "newer task"],
+      "accepting must not re-append or mutate persisted history",
+    );
+
+    input.enter();
+    assert.ok(await waitFor(() => textOf(output).includes("decision:"), 30_000));
+    assert.ok(await waitIdle(output));
+    assert.deepEqual(loadHistory(history), ["older task", "newer task", "older task"]);
+  } finally {
+    await stop(harness, root);
+  }
+});
+
+test("Ctrl+R Esc restores the exact draft and never mutates history", async () => {
+  const { root } = tmpdir();
+  const history = path.join(root, "tui-history.json");
+  saveHistory(history, ["first task", "second task"]);
+  const harness = startApp(root, history);
+  const { input, output } = harness;
+  try {
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+    input.type("my draft survives");
+    assert.ok(await waitFor(() => lastFrameText(output).includes("my draft survives")));
+
+    input.ctrlR();
+    assert.ok(await waitFor(() => lastFrameText(output).includes("HISTORY")));
+    input.type("first");
+    assert.ok(await waitFor(() => lastFrameText(output).includes("> first")));
+    assert.ok(lastFrameText(output).includes("first task"));
+    input.type("zz");
+    assert.ok(await waitFor(() => lastFrameText(output).includes('No matches for "firstzz"')));
+    input.backspace();
+    input.backspace();
+    assert.ok(await waitFor(() => lastFrameText(output).includes("first task")));
+    assert.ok(!lastFrameText(output).includes("No matches"));
+
+    input.key("escape");
+    assert.ok(await waitFor(() => !lastFrameText(output).includes("HISTORY")));
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("my draft survives")),
+      "the pre-search draft is restored exactly",
+    );
+    assert.deepEqual(loadHistory(history), ["first task", "second task"]);
   } finally {
     await stop(harness, root);
   }

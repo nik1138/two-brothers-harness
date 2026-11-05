@@ -352,6 +352,97 @@ async function scenarioServe(): Promise<string> {
   }
 }
 
+async function scenarioDoctor(): Promise<string> {
+  const dir = mkTempDir("tb-cli-doctor-");
+  try {
+    // a temp sessions dir keeps the report deterministic (missing settings is
+    // a warn, an existing unwritable checkout file would not be)
+    const result = runCli([
+      "doctor", "--provider", "mock", "--json",
+      "--sessions-dir", dir,
+    ]);
+    check(result.status === 0, `exit code ${result.status}: ${result.stderr.slice(-300)}`);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(result.stdout);
+    } catch {
+      throw new CheckError(`doctor --json stdout is not JSON: ${result.stdout.slice(0, 200)}`);
+    }
+    check(typeof parsed === "object" && parsed !== null && !Array.isArray(parsed), "doctor JSON is not an object");
+    const report = parsed as { ok?: unknown; checks?: unknown };
+    check(typeof report.ok === "boolean", "doctor JSON carries no boolean ok");
+    check(Array.isArray(report.checks) && report.checks.length > 0, "doctor JSON carries no checks");
+    const ids = (report.checks as Array<{ id?: unknown }>).map((entry) => String(entry.id));
+    check(ids.includes("endpoint"), `doctor checks miss the endpoint probe: ${ids.join(",")}`);
+    return `JSON object ok=${String(report.ok)} with ${ids.length} checks (${ids.join(", ")})`;
+  } finally {
+    rmDir(dir);
+  }
+}
+
+async function scenarioCompletions(): Promise<string> {
+  const bash = runCli(["completions", "bash"]);
+  check(bash.status === 0, `completions bash exit code ${bash.status}: ${bash.stderr.slice(-300)}`);
+  check(/^complete .*two-brothers$/m.test(bash.stdout), "bash completion hook missing");
+  check(bash.stdout.includes("two-brothers"), "completion script misses the program name");
+  for (const command of ["run", "doctor", "completions"]) {
+    check(bash.stdout.includes(command), `bash completion misses '${command}'`);
+  }
+  const unknown = runCli(["completions", "tcsh"]);
+  check(unknown.status === 2, `unknown shell exit code ${unknown.status}, expected 2`);
+  check(/unknown shell: tcsh/.test(unknown.stderr), "unknown-shell diagnostic missing");
+  return "bash script defines the complete hook for two-brothers; unknown shell exits 2";
+}
+
+async function scenarioSessionsJson(): Promise<string> {
+  const dir = mkTempDir("tb-cli-sessions-json-");
+  try {
+    const created = runCli([
+      "run", "Name one benefit of code review",
+      "--provider", "mock",
+      "--session-file", path.join(dir, "s.jsonl"),
+    ]);
+    check(created.status === 0, `setup run exit code ${created.status}: ${created.stderr.slice(-300)}`);
+    const result = runCli(["sessions", "--sessions-dir", dir, "--json"]);
+    check(result.status === 0, `sessions --json exit code ${result.status}: ${result.stderr.slice(-300)}`);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(result.stdout);
+    } catch {
+      throw new CheckError(`sessions --json stdout is not JSON: ${result.stdout.slice(0, 200)}`);
+    }
+    check(Array.isArray(parsed), "sessions --json is not an array");
+    const rows = parsed as Array<{ name?: unknown; envelopes?: unknown }>;
+    check(rows.length === 1 && rows[0].name === "s.jsonl", `unexpected session rows: ${result.stdout.trim()}`);
+    check(rows[0].envelopes === 5, `expected 5 envelopes, got ${String(rows[0].envelopes)}`);
+    return "JSON array with the created session and its envelope count";
+  } finally {
+    rmDir(dir);
+  }
+}
+
+async function scenarioSessionsShow(): Promise<string> {
+  const dir = mkTempDir("tb-cli-sessions-show-");
+  try {
+    const created = runCli([
+      "run", "Name one risk of tight deadlines",
+      "--provider", "mock",
+      "--session-file", path.join(dir, "review.jsonl"),
+    ]);
+    check(created.status === 0, `setup run exit code ${created.status}: ${created.stderr.slice(-300)}`);
+    const result = runCli(["sessions", "show", "review", "--sessions-dir", dir]);
+    check(result.status === 0, `sessions show exit code ${result.status}: ${result.stderr.slice(-300)}`);
+    check(/^session: review\.jsonl$/m.test(result.stdout), "session summary header missing");
+    check(/^envelopes: 5$/m.test(result.stdout), "envelope count missing");
+    check(/^events:$/m.test(result.stdout), "events section missing");
+    check(/user -> senior message — Name one risk of tight deadlines/.test(result.stdout), "first envelope not rendered");
+    check(/senior -> user decision/.test(result.stdout), "decision envelope not rendered");
+    return "summary + rendered envelopes for a mock session (with and without .jsonl resolution)";
+  } finally {
+    rmDir(dir);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -364,11 +455,15 @@ const SCENARIOS: Array<{ name: string; run: () => Promise<string> }> = [
   { name: "session+resume", run: scenarioSessionResume },
   { name: "mcp", run: scenarioMcp },
   { name: "serve", run: scenarioServe },
+  { name: "doctor", run: scenarioDoctor },
+  { name: "completions", run: scenarioCompletions },
+  { name: "sessions-json", run: scenarioSessionsJson },
+  { name: "sessions-show", run: scenarioSessionsShow },
 ];
 
 async function main(): Promise<number> {
   check(fs.existsSync(CLI), `CLI entry not found: ${CLI}${DIST ? " (run npm run build first)" : ""}`);
-  log(`E2E CLI: entry ${path.relative(REPO_ROOT, CLI)} (dist=${DIST}), node ${process.version}`);
+  log(`E2E CLI: ${SCENARIOS.length} scenarios, entry ${path.relative(REPO_ROOT, CLI)} (dist=${DIST}), node ${process.version}`);
 
   let failures = 0;
   for (const scenario of SCENARIOS) {
@@ -381,7 +476,11 @@ async function main(): Promise<number> {
       log(`  FAIL ${scenario.name} (${((Date.now() - started) / 1000).toFixed(1)}s) — ${exc instanceof Error ? exc.message : String(exc)}`);
     }
   }
-  log(failures === 0 ? "E2E CLI: PASS" : `E2E CLI: FAIL (${failures} scenario(s) failed)`);
+  log(
+    failures === 0
+      ? `E2E CLI: PASS (${SCENARIOS.length} scenarios)`
+      : `E2E CLI: FAIL (${failures}/${SCENARIOS.length} scenario(s) failed)`,
+  );
   return failures === 0 ? 0 : 1;
 }
 

@@ -55,3 +55,6 @@ import "./tuivisualmodel.test.ts";
 import "./tuiviewlane.test.ts";
 import "./tuiintegration.test.ts";
 import "./tuihistory.test.ts";
+import "./doctor.test.ts";
+import "./completions.test.ts";
+import "./reliability.test.ts";

@@ -1,8 +1,10 @@
 /**
- * CLI ergonomics lane: `models` discovery, `onboard` settings writing, and
- * `--max-tokens` / `--retries` / cost reporting. Hermetic — discovery and the
- * end-to-end run talk to a local `node:http` stub on 127.0.0.1, and
- * onboarding writes into a temp directory.
+ * CLI ergonomics lane: `models` discovery, `onboard` settings writing,
+ * `--max-tokens` / `--retries` / cost reporting, and the help/sessions
+ * surface (`--help` per command, grouped/full help, did-you-mean diagnostics,
+ * `sessions --json` and `sessions show`). Hermetic — discovery and the
+ * end-to-end run talk to a local `node:http` stub on 127.0.0.1, onboarding
+ * writes into a temp directory and the session fixtures live under temp.
  */
 import * as fs from "node:fs";
 import * as http from "node:http";
@@ -13,7 +15,8 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { costLine, estimateRunCost, main, type CliIO } from "../src/cli.ts";
+import { costLine, estimateRunCost, main, OPTIONS, type CliIO } from "../src/cli.ts";
+import { commandHelp, COMMAND_ORDER, FLAGS } from "../src/clihelp.ts";
 import { maxTokensForRole, resolveConfig } from "../src/config.ts";
 import {
   AnthropicProvider,
@@ -634,4 +637,392 @@ test("run: an unknown option is a usage error (exit 2) with a usage line", async
   assert.match(io.err[0], /^\[error\] Unknown option '--bogus'/);
   assert.match(io.err[1], /Usage: two-brothers run "<task>" \[flags\]/);
   assert.deepEqual(io.out, [], "nothing ran — no transcript on stdout");
+});
+
+// ---------------------------------------------------------------------------
+// help catalog: per-command help, grouped help, full reference
+// ---------------------------------------------------------------------------
+
+/** The commands this CLI batch gives first-class help (requirement: all but
+ * `help`, which is covered through `help --all` and `--help`). */
+const HELP_COMMANDS = [
+  "run",
+  "chat",
+  "tui",
+  "serve",
+  "sessions",
+  "models",
+  "onboard",
+  "selftest",
+] as const;
+
+test("every command: --help and -h print command help on stdout, exit 0", async () => {
+  for (const command of HELP_COMMANDS) {
+    for (const flag of ["--help", "-h"]) {
+      const io = makeIO();
+      const code = await main([command, flag], io);
+      const label = `${command} ${flag}`;
+      assert.equal(code, 0, `${label}: ${io.err.join("\n")}`);
+      assert.deepEqual(io.err, [], `${label} keeps stderr clean`);
+      const text = io.out.join("\n");
+      assert.match(text, new RegExp(`Usage: two-brothers ${command}\\b`), label);
+      assert.match(text, /Flags:/, `${label} lists flags`);
+      assert.match(
+        text,
+        /Run 'two-brothers help --all' for the full reference\./,
+        `${label} points at the full reference`,
+      );
+    }
+  }
+});
+
+test("help <command> prints that command's help, exit 0", async () => {
+  for (const command of HELP_COMMANDS) {
+    const io = makeIO();
+    assert.equal(await main(["help", command], io), 0, command);
+    assert.deepEqual(io.err, [], `${command} keeps stderr clean`);
+    const text = io.out.join("\n");
+    assert.match(text, new RegExp(`Usage: two-brothers ${command}\\b`), command);
+    if (command === "tui") {
+      // `help tui` and `tui --help` share the generated key guide.
+      assert.match(text, /Keys:/, "help tui includes the key guide");
+      assert.match(text, /PgUp \/ PgDn/, "help tui includes the keymap registry rows");
+    }
+  }
+});
+
+test("help: concise grouped overview with the documented sections", async () => {
+  const io = makeIO();
+  assert.equal(await main(["help"], io), 0);
+  assert.deepEqual(io.err, []);
+  const text = io.out.join("\n");
+  for (const heading of [
+    "Commands:",
+    "Common flows:",
+    "Output modes:",
+    "Provider & models:",
+    "Sessions & context:",
+    "Extensions:",
+    "Environment:",
+  ]) {
+    assert.ok(text.includes(heading), `missing section ${heading}:\n${text}`);
+  }
+  assert.match(text, /two-brothers run "<task>"/);
+  assert.match(text, /two-brothers help --all/);
+  assert.ok(!text.includes("Return codes:"), "the grouped help is not the full reference");
+});
+
+test("help --all: full reference covers every command, flags, env and exit codes", async () => {
+  const io = makeIO();
+  assert.equal(await main(["help", "--all"], io), 0);
+  assert.deepEqual(io.err, []);
+  const text = io.out.join("\n");
+  assert.match(text, /full reference/i);
+  for (const command of [...COMMAND_ORDER]) {
+    assert.ok(
+      text.includes(`  Usage: two-brothers ${command}`),
+      `full reference misses ${command}:\n${text.slice(0, 400)}`,
+    );
+  }
+  assert.match(text, /Environment variables/);
+  assert.match(text, /TWO_BROTHERS_RETRIES/);
+  assert.match(text, /Return codes:/);
+  assert.match(text, /2  usage error/);
+});
+
+test("help catalog covers every flag the shared parser accepts", () => {
+  for (const flag of Object.keys(OPTIONS)) {
+    assert.ok(flag in FLAGS, `clihelp FLAGS is missing --${flag}`);
+  }
+  for (const command of COMMAND_ORDER) {
+    const spec = commandHelp(command);
+    assert.ok(spec, `missing help spec for ${command}`);
+    for (const flag of [...spec.flags, ...(spec.acceptedFlags ?? [])]) {
+      assert.ok(flag in FLAGS, `${command} help references unknown flag --${flag}`);
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// unknown command / unknown option diagnostics
+// ---------------------------------------------------------------------------
+
+test("unknown command: exit 2, stderr diagnostic + suggestion, no full-help dump", async () => {
+  const io = makeIO();
+  assert.equal(await main(["rnu"], io), 2);
+  assert.equal(io.err[0], "Unknown command: rnu");
+  assert.ok(io.err.includes("Did you mean 'run'?"), io.err.join("\n"));
+  assert.ok(
+    io.err.includes("Run 'two-brothers help' for the command list."),
+    io.err.join("\n"),
+  );
+  const stdout = io.out.join("\n");
+  assert.match(stdout, /two-brothers run "<task>"/, "brief usage stays on stdout");
+  assert.ok(!stdout.includes("Commands:"), "no full help dump on stdout");
+  assert.ok(!stdout.includes("Common flows:"), "no full help dump on stdout");
+  assert.ok(stdout.split("\n").length <= 10, "stdout stays brief");
+
+  // A name farther than edit distance 2 gets no did-you-mean line.
+  const far = makeIO();
+  assert.equal(await main(["frobnicate"], far), 2);
+  assert.ok(
+    !far.err.some((line) => line.startsWith("Did you mean")),
+    far.err.join("\n"),
+  );
+});
+
+test("unknown option: exit 2 with a nearest-flag suggestion for every command", async () => {
+  const cases: ReadonlyArray<readonly [string, string, string]> = [
+    ["run", "--providr", "--provider"],
+    ["run", "--hlep", "--help"],
+    ["chat", "--providr", "--provider"],
+    ["tui", "--providr", "--provider"],
+    ["serve", "--por", "--port"],
+    ["sessions", "--sesions-dir", "--sessions-dir"],
+    ["models", "--base-ur", "--base-url"],
+    ["onboard", "--presett", "--preset"],
+    ["selftest", "--hlep", "--help"],
+    ["help", "--al", "--all"],
+  ];
+  for (const [command, unknown, nearest] of cases) {
+    const io = makeIO();
+    const code = await main([command, unknown], io);
+    assert.equal(code, 2, `${command} ${unknown}`);
+    assert.equal(io.err[0], `[error] Unknown option '${unknown}'`, `${command} ${unknown}`);
+    assert.ok(
+      io.err.some((line) => line === `Did you mean '${nearest}'?`),
+      `${command} ${unknown}: ${io.err.join("\n")}`,
+    );
+    assert.ok(
+      io.err.some((line) => line.startsWith("Usage: ")),
+      `${command} ${unknown} prints usage`,
+    );
+    assert.deepEqual(io.out, [], `${command} ${unknown} prints nothing on stdout`);
+  }
+
+  const top = makeIO();
+  assert.equal(await main(["--bogus"], top), 2);
+  assert.match(top.err[0], /^\[error\] Unknown option '--bogus'/);
+  assert.match(top.err.join("\n"), /Run 'two-brothers --help'\./);
+});
+
+test("missing option value: exit 2 with usage instead of an uncaught error", async () => {
+  const io = makeIO();
+  assert.equal(await main(["run", "a task", "--provider"], io), 2);
+  assert.match(io.err.join("\n"), /Usage: two-brothers run "<task>" \[flags\]/);
+  assert.deepEqual(io.out, []);
+});
+
+// ---------------------------------------------------------------------------
+// `sessions --json` / `sessions show`
+// ---------------------------------------------------------------------------
+
+/** One protocol envelope line for the session fixtures. */
+function sessionEnvelope(
+  seq: number,
+  from: string,
+  to: string,
+  kind: string,
+  payload: Record<string, unknown>,
+): string {
+  return JSON.stringify({
+    v: 1,
+    id: `id-${seq}`,
+    seq,
+    ts: "2026-11-01T00:00:00Z",
+    from,
+    to,
+    kind,
+    payload,
+  });
+}
+
+/** Two session files (3 envelopes, 1 envelope) plus an ignored non-JSONL. */
+function writeSessionFixtures(dir: string): void {
+  fs.writeFileSync(
+    path.join(dir, "alpha.jsonl"),
+    [
+      sessionEnvelope(1, "user", "senior", "message", { text: "Alpha task" }),
+      sessionEnvelope(2, "senior", "junior", "consult", {
+        task: "t",
+        ask: "a",
+        expect: "proposal",
+      }),
+      sessionEnvelope(3, "junior", "senior", "proposal", {
+        title: "Plan",
+        answer: "Do it",
+      }),
+    ].join("\n") + "\n",
+    "utf-8",
+  );
+  fs.writeFileSync(
+    path.join(dir, "beta.jsonl"),
+    sessionEnvelope(1, "user", "senior", "message", { text: "Beta task" }) + "\n",
+    "utf-8",
+  );
+  fs.writeFileSync(path.join(dir, "notes.txt"), "not a session\n", "utf-8");
+}
+
+test("sessions --json: a stable array of session summaries", async () => {
+  await withTempDir(async (dir) => {
+    writeSessionFixtures(dir);
+    const io = makeIO();
+    assert.equal(await main(["sessions", "--sessions-dir", dir, "--json"], io), 0);
+    assert.deepEqual(io.err, []);
+    assert.equal(io.out.length, 1, "one JSON document on stdout");
+    const parsed = JSON.parse(io.out[0]) as Array<Record<string, unknown>>;
+    assert.ok(Array.isArray(parsed), "list JSON is an array");
+    assert.deepEqual(
+      parsed.map((item) => item.name),
+      ["alpha.jsonl", "beta.jsonl"],
+    );
+    assert.deepEqual(Object.keys(parsed[0]), [
+      "name",
+      "title",
+      "envelopes",
+      "updated",
+      "error",
+    ]);
+    assert.equal(parsed[0].title, "Alpha task");
+    assert.equal(parsed[0].envelopes, 3);
+    assert.equal(parsed[0].error, null);
+    assert.match(String(parsed[0].updated), /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+  });
+});
+
+test("sessions --json: an empty/missing directory is an empty array, exit 0", async () => {
+  await withTempDir(async (dir) => {
+    const io = makeIO();
+    assert.equal(await main(["sessions", "--sessions-dir", dir, "--json"], io), 0);
+    assert.deepEqual(JSON.parse(io.out[0]), []);
+    const missing = makeIO();
+    assert.equal(
+      await main(["sessions", "--sessions-dir", path.join(dir, "missing"), "--json"], missing),
+      0,
+    );
+    assert.deepEqual(JSON.parse(missing.out[0]), []);
+  });
+});
+
+test("sessions --limit caps the listed rows (human and JSON)", async () => {
+  await withTempDir(async (dir) => {
+    writeSessionFixtures(dir);
+    const json = makeIO();
+    assert.equal(await main(["sessions", "--sessions-dir", dir, "--json", "--limit", "1"], json), 0);
+    const parsed = JSON.parse(json.out[0]) as Array<{ name: string }>;
+    assert.equal(parsed.length, 1);
+    assert.equal(parsed[0].name, "alpha.jsonl");
+
+    const human = makeIO();
+    assert.equal(await main(["sessions", "--sessions-dir", dir, "--limit", "1"], human), 0);
+    assert.equal(human.out.length, 2, "header + one row");
+    assert.match(human.out[1], /^alpha\.jsonl/);
+  });
+});
+
+test("sessions show: human summary + envelopes, name with or without .jsonl", async () => {
+  await withTempDir(async (dir) => {
+    writeSessionFixtures(dir);
+    for (const name of ["alpha", "alpha.jsonl"]) {
+      const io = makeIO();
+      assert.equal(await main(["sessions", "show", name, "--sessions-dir", dir], io), 0, name);
+      assert.deepEqual(io.err, []);
+      const text = io.out.join("\n");
+      assert.equal(io.out[0], "session: alpha.jsonl");
+      assert.match(text, /title: Alpha task/);
+      assert.match(text, /envelopes: 3/);
+      assert.match(text, /events:/);
+      assert.match(text, /user -> senior message — Alpha task/);
+      assert.match(text, /junior -> senior proposal — Plan — Do it/);
+    }
+  });
+});
+
+test("sessions show --json: one object with the session summary and events", async () => {
+  await withTempDir(async (dir) => {
+    writeSessionFixtures(dir);
+    const io = makeIO();
+    assert.equal(
+      await main(["sessions", "show", "alpha", "--sessions-dir", dir, "--json"], io),
+      0,
+    );
+    assert.deepEqual(io.err, []);
+    assert.equal(io.out.length, 1, "one JSON document on stdout");
+    const parsed = JSON.parse(io.out[0]) as {
+      name: string;
+      title: string;
+      envelopes: number;
+      error: string | null;
+      events: Array<{ kind: string; seq: number }>;
+    };
+    assert.equal(typeof parsed, "object");
+    assert.equal(parsed.name, "alpha.jsonl");
+    assert.equal(parsed.title, "Alpha task");
+    assert.equal(parsed.envelopes, 3);
+    assert.equal(parsed.error, null);
+    assert.ok(Array.isArray(parsed.events));
+    assert.deepEqual(
+      parsed.events.map((event) => event.kind),
+      ["message", "consult", "proposal"],
+    );
+    assert.deepEqual(
+      parsed.events.map((event) => event.seq),
+      [1, 2, 3],
+    );
+
+    const limited = makeIO();
+    assert.equal(
+      await main(
+        ["sessions", "show", "alpha", "--sessions-dir", dir, "--json", "--limit", "2"],
+        limited,
+      ),
+      0,
+    );
+    const limitedParsed = JSON.parse(limited.out[0]) as { events: unknown[] };
+    assert.equal(limitedParsed.events.length, 2);
+  });
+});
+
+test("sessions show --limit caps the printed envelopes", async () => {
+  await withTempDir(async (dir) => {
+    writeSessionFixtures(dir);
+    const io = makeIO();
+    assert.equal(
+      await main(["sessions", "show", "alpha", "--sessions-dir", dir, "--limit", "1"], io),
+      0,
+    );
+    const text = io.out.join("\n");
+    assert.equal(
+      io.out.filter((line) => line.includes(" -> ")).length,
+      1,
+      "only one envelope line",
+    );
+    assert.match(text, /Alpha task/);
+    assert.ok(!text.includes("proposal"), text);
+    assert.match(text, /… 2 more envelope\(s\); raise --limit to see them/);
+  });
+});
+
+test("sessions show: unknown session and missing name exit 2 with a clear message", async () => {
+  await withTempDir(async (dir) => {
+    writeSessionFixtures(dir);
+
+    const unknown = makeIO();
+    assert.equal(await main(["sessions", "show", "nope", "--sessions-dir", dir], unknown), 2);
+    assert.match(unknown.err.join("\n"), /Unknown session: nope/);
+    assert.deepEqual(unknown.out, []);
+
+    const unknownJson = makeIO();
+    assert.equal(
+      await main(["sessions", "show", "nope", "--sessions-dir", dir, "--json"], unknownJson),
+      2,
+    );
+    assert.match(unknownJson.err.join("\n"), /Unknown session: nope/);
+    assert.deepEqual(unknownJson.out, [], "a failed lookup prints no JSON");
+
+    const missing = makeIO();
+    assert.equal(await main(["sessions", "show", "--sessions-dir", dir], missing), 2);
+    assert.match(missing.err.join("\n"), /no session name/);
+    assert.deepEqual(missing.out, []);
+  });
 });

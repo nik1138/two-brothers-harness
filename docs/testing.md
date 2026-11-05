@@ -76,10 +76,20 @@ transcript markers, session persistence (`--session-file` / `--resume`,
 dense `seq`), context compaction, MCP loading and role scoping, the plugin
 loader, the HTTP/SSE server and its run-status contract, the
 provider error-classification registry, and the workspace tools
-(confinement, approvals, diffs). Hermetic offline CLI E2E:
-`npm run test:e2e:cli` (sources) / `npm run test:e2e:cli:dist` (built
-`dist/cli.js`) drive the CLI as a subprocess against the mock provider; CI
-runs both after the package build (see [CI coverage](#ci-coverage)).
+(confinement, approvals, diffs). The CLI-ergonomics suites cover the help
+catalog, `sessions --json` / `sessions show`, `models` and `onboard`;
+`tests/doctor.test.ts` covers the `doctor` diagnostics (injected transport and
+clock, API keys never rendered), `tests/completions.test.ts` the deterministic
+bash/zsh/fish/PowerShell completion generator, and
+`tests/reliability.test.ts` the hermetic concurrency, restart, approval-race
+and compaction-stress paths. All three are registered in `tests/run-all.ts`.
+
+Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
+`npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
+subprocess against the mock provider — **11 scenarios**: consult, chat-repl,
+help, work, session+resume, mcp, serve, doctor (`--json`), completions
+(`bash`), sessions-json and sessions-show. CI runs both (see
+[CI coverage](#ci-coverage)).
 
 ## Web workspace (`web/`)
 

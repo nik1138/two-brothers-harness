@@ -175,6 +175,15 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
     palette: false,
   },
   {
+    id: "history-search",
+    title: "Search prompt history",
+    description: "Incrementally search earlier submitted tasks, newest first.",
+    group: "Composer",
+    // Ctrl+R: unbound here, and the conventional shell reverse-search key.
+    keys: [{ name: "r", ctrl: true }],
+    when: "composer",
+  },
+  {
     id: "complete",
     title: "Complete slash command",
     description: "Complete the typed slash name from the discovered templates.",

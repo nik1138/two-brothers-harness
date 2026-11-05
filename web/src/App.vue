@@ -33,6 +33,8 @@ import type {
   Workspace,
 } from './types'
 import { projectEnvelopes, sessionTitle, taskOf } from './chat'
+import { buildPaletteItems, PALETTE_SESSION_PREFIX, PALETTE_WORKSPACE_PREFIX } from './palette'
+import type { PaletteItem } from './palette'
 import {
   changedFilesOf,
   mergeTimeline,
@@ -50,6 +52,8 @@ import NewSessionDialog from './components/NewSessionDialog.vue'
 import DiffReview from './components/DiffReview.vue'
 import ApprovalCard from './components/ApprovalCard.vue'
 import UsageFooter from './components/UsageFooter.vue'
+import CommandPalette from './components/CommandPalette.vue'
+import AppIcon from './components/AppIcon.vue'
 
 const sessions = ref<SessionInfo[]>([])
 const workspaces = ref<Workspace[]>([])
@@ -194,6 +198,152 @@ const visibleSessions = computed(() =>
     ? sessions.value
     : sessions.value.filter((s) => s.workspace_id === workspaceFilter.value),
 )
+
+// -- command palette (Ctrl+K / Cmd+K) ------------------------------------------
+// Keyboard-first navigation: sessions, workspaces and app actions in one
+// scored list. Items are rebuilt reactively from the current lists;
+// CommandPalette.vue owns filtering, highlighting and the aria wiring.
+
+/** Static app actions offered by the palette; the id is the dispatch key. */
+const PALETTE_ACTIONS: PaletteItem[] = [
+  {
+    id: 'action:new-session',
+    kind: 'action',
+    label: 'New session',
+    hint: 'Start a new chat',
+    keywords: ['create', 'start', 'chat', 'session'],
+  },
+  {
+    id: 'action:new-workspace',
+    kind: 'action',
+    label: 'New workspace',
+    hint: 'Link a folder',
+    keywords: ['create', 'add', 'folder', 'link', 'workspace'],
+  },
+  {
+    id: 'action:settings',
+    kind: 'action',
+    label: 'Settings',
+    hint: 'Roles, providers, appearance',
+    keywords: ['preferences', 'config', 'provider', 'model', 'roles'],
+  },
+  {
+    id: 'action:theme-light',
+    kind: 'action',
+    label: 'Theme: Light',
+    hint: 'Appearance',
+    keywords: ['appearance', 'color', 'scheme', 'light theme', 'day'],
+  },
+  {
+    id: 'action:theme-dark',
+    kind: 'action',
+    label: 'Theme: Dark',
+    hint: 'Appearance',
+    keywords: ['appearance', 'color', 'scheme', 'dark theme', 'night'],
+  },
+  {
+    id: 'action:theme-system',
+    kind: 'action',
+    label: 'Theme: System',
+    hint: 'Appearance',
+    keywords: ['appearance', 'color', 'scheme', 'auto', 'os'],
+  },
+  {
+    id: 'action:toggle-sidebar',
+    kind: 'action',
+    label: 'Toggle sidebar',
+    hint: 'Layout',
+    keywords: ['hide', 'show', 'sessions', 'drawer', 'collapse', 'panel'],
+  },
+  {
+    id: 'action:refresh-sessions',
+    kind: 'action',
+    label: 'Refresh sessions',
+    hint: 'Reload the sidebar list',
+    keywords: ['reload', 'update', 'list', 'sessions'],
+  },
+]
+
+const paletteOpen = ref(false)
+/** Shortcut label for the header affordance; the chord itself always works. */
+const paletteShortcut = /Mac|iPhone|iPad|iPod/i.test(navigator.platform) ? '⌘ K' : 'Ctrl K'
+
+/** Rebuilt whenever sessions/workspaces change; cheap (pure array building). */
+const paletteItems = computed(() =>
+  buildPaletteItems({
+    sessions: sessions.value,
+    workspaces: workspaces.value,
+    actions: PALETTE_ACTIONS,
+  }),
+)
+
+/** Global shortcut: toggle the palette, but never from inside it (double-toggle). */
+function onPaletteShortcut(e: KeyboardEvent) {
+  if (e.defaultPrevented || e.isComposing || e.repeat) return
+  if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return
+  if (e.key.toLowerCase() !== 'k') return
+  const target = e.target instanceof Element ? e.target : null
+  if (target?.closest('[data-command-palette]')) return
+  e.preventDefault()
+  paletteOpen.value = !paletteOpen.value
+}
+
+/** Dispatch one palette selection; the palette is already closed by then. */
+function onPaletteSelect(item: PaletteItem) {
+  paletteOpen.value = false
+  switch (item.kind) {
+    case 'session': {
+      const name = item.id.startsWith(PALETTE_SESSION_PREFIX)
+        ? item.id.slice(PALETTE_SESSION_PREFIX.length)
+        : ''
+      // loadSession closes the mobile drawer exactly like a sidebar pick
+      if (name) void loadSession(name)
+      return
+    }
+    case 'workspace': {
+      const id = item.id.startsWith(PALETTE_WORKSPACE_PREFIX)
+        ? item.id.slice(PALETTE_WORKSPACE_PREFIX.length)
+        : ''
+      if (!id) return
+      workspaceFilter.value = id
+      // a workspace pick dismisses the drawer, like a session pick
+      if (drawerQuery?.matches && !sidebarCollapsed.value) sidebarCollapsed.value = true
+      return
+    }
+    case 'action':
+      runPaletteAction(item.id)
+      return
+  }
+}
+
+function runPaletteAction(id: string) {
+  switch (id) {
+    case 'action:new-session':
+      newSessionOpen.value = true
+      break
+    case 'action:new-workspace':
+      workspaceDialogOpen.value = true
+      break
+    case 'action:settings':
+      settingsOpen.value = true
+      break
+    case 'action:theme-light':
+      onThemeChange('light')
+      break
+    case 'action:theme-dark':
+      onThemeChange('dark')
+      break
+    case 'action:theme-system':
+      onThemeChange('system')
+      break
+    case 'action:toggle-sidebar':
+      sidebarCollapsed.value = !sidebarCollapsed.value
+      break
+    case 'action:refresh-sessions':
+      void refreshSessions(false)
+      break
+  }
+}
 
 // -- run event stream ---------------------------------------------------------
 // The backend buffers typed runtime events per run; we resume with ?after=N
@@ -864,6 +1014,7 @@ watch([themeMode, isDark], syncTheme)
 onMounted(() => {
   schemeQuery.addEventListener('change', onSchemeChange)
   window.addEventListener('keydown', onDrawerEscape)
+  window.addEventListener('keydown', onPaletteShortcut)
   refreshSessions(false)
   refreshWorkspaces(false)
   refreshLiveRuns()
@@ -877,6 +1028,7 @@ onMounted(() => {
 onUnmounted(() => {
   schemeQuery.removeEventListener('change', onSchemeChange)
   window.removeEventListener('keydown', onDrawerEscape)
+  window.removeEventListener('keydown', onPaletteShortcut)
   if (sidebarTimer) clearInterval(sidebarTimer)
   if (reconnectTimer) clearTimeout(reconnectTimer)
   es?.close()
@@ -935,6 +1087,17 @@ onUnmounted(() => {
           <p v-if="task" class="chat-task muted">{{ task }}</p>
         </div>
         <div class="chat-header-side">
+          <button
+            type="button"
+            class="palette-chip"
+            title="Search sessions, workspaces and actions"
+            :aria-label="`Open command palette (${paletteShortcut})`"
+            @click="paletteOpen = true"
+          >
+            <AppIcon name="search" class="palette-chip-icon" />
+            <span class="palette-chip-label">Search</span>
+            <kbd class="palette-chip-keys">{{ paletteShortcut }}</kbd>
+          </button>
           <div class="participants" aria-label="Participants">
             <span class="participant"><span class="dot dot-senior" aria-hidden="true"></span>Senior</span>
             <span class="participant-sep" aria-hidden="true">×</span>
@@ -1016,7 +1179,59 @@ onUnmounted(() => {
       @create="onCreateSession"
       @workspace-created="refreshWorkspaces()"
     />
+    <CommandPalette
+      :visible="paletteOpen"
+      :items="paletteItems"
+      @close="paletteOpen = false"
+      @select="onPaletteSelect"
+    />
     </div>
     </n-message-provider>
   </n-config-provider>
 </template>
+
+<style scoped>
+/* Header affordance for the keyboard-first palette (Ctrl+K / Cmd+K). It is a
+   button as well, so the palette is discoverable without knowing the chord. */
+.palette-chip {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.18rem 0.5rem;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.palette-chip:hover {
+  color: var(--text-primary);
+  background: var(--surface-hover);
+}
+
+.palette-chip-icon {
+  width: 13px;
+  height: 13px;
+  flex: none;
+}
+
+.palette-chip-keys {
+  padding: 0.02rem 0.28rem;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-secondary);
+  background: var(--surface-canvas);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+}
+
+@media (max-width: 640px) {
+  .palette-chip-label {
+    display: none;
+  }
+}
+</style>

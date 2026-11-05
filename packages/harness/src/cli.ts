@@ -6,10 +6,14 @@
  *   node src/cli.ts run "<task>" [flags]
  *   node src/cli.ts chat [flags]
  *   node src/cli.ts tui [task] [flags]
- *   node src/cli.ts sessions [--sessions-dir sessions]
+ *   node src/cli.ts help [command | --all]
+ *   node src/cli.ts sessions [--sessions-dir sessions] [--json] [--limit N]
+ *   node src/cli.ts sessions show <name> [--json] [--limit N]
  *   node src/cli.ts selftest
  *   node src/cli.ts models --base-url <url> [--api-key <key>] [--json]
  *   node src/cli.ts onboard [--sessions-dir sessions] [--preset <id>] [--non-interactive]
+ *   node src/cli.ts doctor [--json] [--sessions-dir sessions] [--timeout <s>]
+ *   node src/cli.ts completions <bash|zsh|fish|powershell>
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -19,6 +23,25 @@ import { fileURLToPath } from "node:url";
 import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
 
 import { resolveConfig, maxTokensForRole, validateRunConfig, type Config } from "./config.ts";
+import {
+  allFlagNames,
+  commandHelp,
+  commandNames,
+  commandUsage,
+  flagCandidatesForCommand,
+  renderBriefUsage,
+  renderCommandHelp,
+  renderFullHelp,
+  renderMainHelp,
+  suggestCommand,
+  suggestFlag,
+} from "./clihelp.ts";
+import {
+  COMPLETION_SHELLS,
+  generateCompletions,
+  type CompletionShell,
+  type CompletionSpec,
+} from "./completions.ts";
 import { SharedContext } from "./context.ts";
 import type { CompactionSettings } from "./compaction.ts";
 import {
@@ -28,6 +51,7 @@ import {
   type CommandCatalog,
 } from "./commands.ts";
 import { estimateCost, type CostEstimate } from "./cost.ts";
+import { formatDoctorReport, runDoctor } from "./doctor.ts";
 import { TwoBrothersHarness, type PromptAuditEntry, type ToolScopes } from "./harness.ts";
 import {
   loadMcpToolSpecs,
@@ -62,7 +86,12 @@ import { envPinnedPairs, SettingsStore } from "./settings_store.ts";
 import { runTuiApp } from "./tui/app.ts";
 import { tuiHelpLines } from "./tui/keymap.ts";
 
-const OPTIONS = {
+/**
+ * The shared `run` / `chat` / `tui` / `serve` flag table. Exported so the
+ * help catalog (`src/clihelp.ts`) can be checked for parity and so shell
+ * completions can be generated from the same source.
+ */
+export const OPTIONS = {
   provider: { type: "string" as const },
   "provider-kind": { type: "string" as const },
   "senior-kind": { type: "string" as const },
@@ -99,7 +128,13 @@ const OPTIONS = {
   "plugins-dir": { type: "string" as const },
   "skills-dir": { type: "string" as const, multiple: true },
   "commands-dir": { type: "string" as const, multiple: true },
-};
+} satisfies ParseArgsOptionsConfig;
+
+/** `--help` / `-h` on every command: print the command's help, exit 0. */
+const HELP_OPTIONS = {
+  help: { type: "boolean" as const, default: false },
+  h: { type: "boolean" as const, default: false },
+} satisfies ParseArgsOptionsConfig;
 
 const FLAG_TO_CONFIG: Record<string, string> = {
   provider: "provider",
@@ -143,6 +178,94 @@ const defaultIO: CliIO = {
   log: (line) => console.log(line),
   error: (line) => console.error(line),
 };
+
+// --------------------------------------------------------------------------- //
+// help + argument-error plumbing (all help text lives in src/clihelp.ts)
+// --------------------------------------------------------------------------- //
+
+/** `--help` or `-h` was passed (both `parseArgs` keys are checked). */
+function isHelpRequested(values: Record<string, any>): boolean {
+  return values.help === true || values.h === true;
+}
+
+/** Print the concise grouped top-level help (bare invocation, `--help`, ...). */
+function printHelp(io: CliIO): void {
+  io.log(renderMainHelp());
+}
+
+/**
+ * An unknown command (or an unknown target of `help <command>`): the error,
+ * a did-you-mean suggestion within edit distance 2 and the help pointer go to
+ * stderr; stdout keeps the short usage block the legacy contract expects.
+ * Returns exit code 2.
+ */
+function reportUnknownCommand(target: string, io: CliIO): number {
+  const suggestion = suggestCommand(target);
+  io.error(`Unknown command: ${target}`);
+  if (suggestion !== null) io.error(`Did you mean '${suggestion}'?`);
+  io.error("Run 'two-brothers help' for the command list.");
+  io.log(renderBriefUsage());
+  return 2;
+}
+
+/**
+ * An unknown option: `Unknown option '--x'` first (the documented diagnostic),
+ * the command's usage line, the nearest known flag and the per-command help
+ * pointer. Returns exit code 2. `command` is undefined for a top-level option.
+ */
+function reportUnknownOption(token: string, command: string | undefined, io: CliIO): void {
+  io.error(`[error] Unknown option '${token}'`);
+  io.error(
+    `Usage: ${command !== undefined ? commandUsage(command) : "two-brothers [command] [flags]"}`,
+  );
+  const candidates =
+    command !== undefined
+      ? flagCandidatesForCommand(command)
+      : [...allFlagNames(), "-h", "-v"];
+  const suggestion = suggestFlag(token, candidates);
+  if (suggestion !== null) io.error(`Did you mean '${suggestion}'?`);
+  io.error(`Run '${command !== undefined ? `two-brothers ${command}` : "two-brothers"} --help'.`);
+}
+
+/** Parsed `parseArgs` result with positionals normalized (always an array). */
+interface ParsedCommandArgs {
+  values: Record<string, any>;
+  positionals: string[];
+}
+
+/**
+ * `parseArgs` with the consistent CLI argument-error contract: an unknown
+ * command option is exit 2 with a nearest-flag suggestion, every other
+ * argument error is exit 2 with the command's usage and `--help` pointer.
+ * Returns null after printing the diagnostics; the caller returns 2.
+ */
+function parseCommandArgs(
+  argv: string[],
+  options: ParseArgsOptionsConfig,
+  command: string,
+  io: CliIO,
+  allowPositionals = false,
+): ParsedCommandArgs | null {
+  try {
+    const parsed = parseArgs({
+      args: argv,
+      options,
+      ...(allowPositionals ? { allowPositionals: true } : {}),
+    }) as { values: Record<string, any>; positionals?: string[] };
+    return { values: parsed.values, positionals: parsed.positionals ?? [] };
+  } catch (exc) {
+    const message = exc instanceof Error ? exc.message : String(exc);
+    const unknown = /Unknown option '([^']+)'/.exec(message);
+    if (unknown !== null) {
+      reportUnknownOption(unknown[1], command, io);
+      return null;
+    }
+    io.error(`[error] ${message}`);
+    io.error(`Usage: ${commandUsage(command)}`);
+    io.error(`Run 'two-brothers ${command} --help'.`);
+    return null;
+  }
+}
 
 /**
  * One line per provider call: the assembled section names, the tool belt
@@ -771,18 +894,12 @@ async function runOnce(
 }
 
 async function doRun(argv: string[], io: CliIO): Promise<number> {
-  let values: Record<string, any>;
-  let positionals: string[];
-  try {
-    ({ values, positionals } = parseArgs({
-      args: argv,
-      allowPositionals: true,
-      options: OPTIONS,
-    }) as { values: Record<string, any>; positionals: string[] });
-  } catch (exc) {
-    io.error(`[error] ${exc instanceof Error ? exc.message : String(exc)}`);
-    io.error('Usage: two-brothers run "<task>" [flags]  (see: two-brothers help)');
-    return 2;
+  const parsed = parseCommandArgs(argv, { ...OPTIONS, ...HELP_OPTIONS }, "run", io, true);
+  if (parsed === null) return 2;
+  const { values, positionals } = parsed;
+  if (isHelpRequested(values)) {
+    io.log(renderCommandHelp("run"));
+    return 0;
   }
   const cfg = resolveConfig(argsToConfigArgs(values));
   const task = positionals.join(" ").trim();
@@ -827,19 +944,11 @@ async function doRun(argv: string[], io: CliIO): Promise<number> {
 }
 
 async function doChat(argv: string[], io: CliIO): Promise<number> {
-  let values: Record<string, any>;
-  try {
-    ({ values } = parseArgs({
-      args: argv,
-      options: { ...OPTIONS, help: { type: "boolean" as const, default: false } },
-    }) as { values: Record<string, any> });
-  } catch (exc) {
-    io.error(`[error] ${exc instanceof Error ? exc.message : String(exc)}`);
-    io.error("Usage: two-brothers chat [flags]  (see: two-brothers chat --help)");
-    return 2;
-  }
-  if (values.help === true) {
-    printChatHelp(io);
+  const parsed = parseCommandArgs(argv, { ...OPTIONS, ...HELP_OPTIONS }, "chat", io);
+  if (parsed === null) return 2;
+  const { values } = parsed;
+  if (isHelpRequested(values)) {
+    io.log(renderCommandHelp("chat"));
     return 0;
   }
   const cfg = resolveConfig(argsToConfigArgs(values));
@@ -981,63 +1090,25 @@ function printResolvedRoles(cfg: Config, io: CliIO): void {
   );
 }
 
-function printTuiHelp(io: CliIO): void {
-  io.log(`Usage: two-brothers tui [initial task] [flags]
-
-Full-screen interactive chat in the terminal's alternate screen, over the
-same cooperation harness as run/chat (mock or real providers). A bare
-\`two-brothers\` in an interactive terminal opens this TUI; piped stdin is
-refused with exit 2. The key guide below is generated from the same command
-registry that powers the in-app Ctrl+P palette and ? help overlay.
-
-${tuiHelpLines().join("\n")}
-
-Flags: every chat flag (--provider, --base-url, --senior-model,
---session-file, --resume, --mcp-config, --plugins-dir, --skills-dir,
---commands-dir, --compact*, ...) plus --stream-tokens. --mode is the
-cooperation mode (consult|work|auto) only; the run output modes
-(print/json) are not accepted here.`);
+/** Command help as printed by `<command> --help` / `help <command>`; the TUI
+ * additionally prints the key guide generated from the same keymap registry
+ * that powers the in-app Ctrl+P palette and `?` overlay. */
+function commandHelpFor(command: string): string {
+  const text = renderCommandHelp(command);
+  if (command !== "tui") return text;
+  return `${text}\n\nKeys:\n${tuiHelpLines().join("\n")}`;
 }
 
-const TUI_USAGE = "Usage: two-brothers tui [initial task] [flags]";
-
-function printChatHelp(io: CliIO): void {
-  io.log(`Usage: two-brothers chat [flags]
-
-Interactive line-based REPL over the cooperation harness (mock or real
-providers). A bare interactive two-brothers opens the full-screen TUI
-instead; piped stdin runs one task per line.
-
-REPL commands:
-  /help, /h        this list
-  /commands        list discovered slash commands
-  /mode consult|work   switch the cooperation mode for the next turn
-  /exit            leave the REPL
-  /<name> [args]   expand a command from the commands roots
-                   (<cwd>/commands, ~/.two-brothers/commands, --commands-dir)
-
-Flags: --provider, --base-url, --api-key, --senior-model, --junior-model,
---mode consult|work|auto, --session-file, --resume, --mcp-config,
---plugins-dir, --skills-dir, --commands-dir, --verbose, --timeout,
---max-tokens. --stream-tokens is not accepted here (no stream sink in the
-REPL); --mode takes cooperation modes only, not the run output modes.`);
+/** `tui --help`: the clihelp spec plus the generated key guide. */
+function printTuiHelp(io: CliIO): void {
+  io.log(commandHelpFor("tui"));
 }
 
 async function doTui(argv: string[], io: CliIO): Promise<number> {
-  let values: Record<string, any>;
-  let positionals: string[];
-  try {
-    ({ values, positionals } = parseArgs({
-      args: argv,
-      allowPositionals: true,
-      options: { ...OPTIONS, help: { type: "boolean" as const, default: false } },
-    }) as { values: Record<string, any>; positionals: string[] });
-  } catch (exc) {
-    io.error(`[error] ${exc instanceof Error ? exc.message : String(exc)}`);
-    io.error(TUI_USAGE);
-    return 2;
-  }
-  if (values.help === true) {
+  const parsed = parseCommandArgs(argv, { ...OPTIONS, ...HELP_OPTIONS }, "tui", io, true);
+  if (parsed === null) return 2;
+  const { values, positionals } = parsed;
+  if (isHelpRequested(values)) {
     printTuiHelp(io);
     return 0;
   }
@@ -1067,133 +1138,6 @@ async function doTui(argv: string[], io: CliIO): Promise<number> {
     ...(streamTokensForCli(values) ? { streamTokens: true } : {}),
     ...(initialTask ? { initialTask } : {}),
   });
-}
-
-function printHelp(io: CliIO): void {
-  io.log(`Two Brothers: a senior (arbiter) and a junior (advisor/executor).
-
-Usage:
-  two-brothers run "<task>" [flags]   one call: task -> cooperation -> decision
-  two-brothers chat [flags]           REPL: many tasks in one session
-  two-brothers tui [task] [flags]     full-screen terminal chat (alternate
-                                      screen; needs a TTY; chat flags plus
-                                      --stream-tokens)
-  two-brothers sessions [--sessions-dir sessions]
-                                      list session files with readable titles
-  two-brothers selftest               offline check of the protocol and providers
-  two-brothers serve [--host 127.0.0.1] [--port 8600] [--sessions-dir sessions]
-                                      web viewer backend (API + SSE + web/dist)
-  two-brothers models --base-url <url> [--api-key <key>|--api-key-env <VAR>] [--json]
-                                      list the models an OpenAI-compatible
-                                      endpoint reports (GET {base}/models)
-  two-brothers onboard [--sessions-dir sessions] [--preset <id>]
-                       [--base-url <url>] [--api-key <key>]
-                       [--senior-model <m>] [--junior-model <m>]
-                       [--non-interactive]
-                                      write per-role settings to
-                                      sessions/settings.json (interactive
-                                      prompts unless --non-interactive)
-  two-brothers --version             print the @two-brothers/harness version
-
-Flags:
-  --provider openai|mock
-  --provider-kind openai-compatible|anthropic|google
-                              wire family for openai roles (default
-                              openai-compatible; env TWO_BROTHERS_PROVIDER_KIND)
-  --senior-kind <kind>        --junior-kind <kind>
-                              per-role wire family overrides (env
-                              TWO_BROTHERS_SENIOR_KIND / _JUNIOR_KIND; pinned
-                              like all env vars, never persisted)
-  --base-url <url>            --api-key <key>
-  --senior-base-url <url>     --senior-api-key <key>
-  --junior-base-url <url>     --junior-api-key <key>
-                              (per-role endpoints; env equivalents
-                              TWO_BROTHERS_SENIOR_BASE_URL etc. — like all
-                              env vars they pin and are never persisted)
-  --senior-model <m>          --junior-model <m>
-  --senior-system <text>      --junior-system <text>
-  --max-rounds <n>            --temperature <f>   --timeout <s>
-  --retries <n>               retries after a failed model call (default 6;
-                              env TWO_BROTHERS_RETRIES)
-  --max-tokens <n>            output-token cap for both roles (env
-                              TWO_BROTHERS_MAX_TOKENS; per-role env
-                              TWO_BROTHERS_SENIOR_MAX_TOKENS /
-                              _JUNIOR_MAX_TOKENS override it; Anthropic's
-                              default stays 4096, OpenAI/Gemini omit it)
-  --mode consult|work|auto
-  --mode print|json           (run only) non-interactive output: "print"
-                              streams only the final decision text, "json"
-                              one machine-readable object on stdout
-                              ({task, events, decision, usage, cost, rounds,
-                              errors}); see --json for the shorthand.
-                              --json-events is an alias for --mode json so
-                              e.g. --mode work --json-events stays possible
-  --session-file <path>       --resume
-  --stream                    (run only) NDJSON run events on stdout as they
-                              happen: one JSON object per line from
-                              run_status, envelope, repair, tool_call,
-                              tool_result and result. The terminal result
-                              event carries usage, so the human summary and
-                              cost line are suppressed. Its own output mode:
-                              cannot be combined with --json/--json-events or
-                              --mode print|json
-  --stream-tokens             (run --stream, or tui) stream provider
-                              replies and add one "token" NDJSON record per
-                              text delta ({type, role, delta, at}), in arrival
-                              order, additive to the envelope records. In the
-                              TUI, token deltas render in place while a turn
-                              runs. Without --stream in a run it is a usage
-                              error (env TWO_BROTHERS_STREAM_TOKENS=1 pins it
-                              on)
-  --compact                   compact the context once before the run starts
-  --compact-threshold <chars> auto-compact when the rendered context passes
-                              this many characters (0 = off, the default; an
-                              auto trigger keeps the compacted context under
-                              the threshold)
-  --compact-threshold-tokens <n>
-                              auto-compact when the estimated transcript
-                              passes this many tokens; switches compaction to
-                              token mode (env
-                              TWO_BROTHERS_COMPACT_THRESHOLD_TOKENS)
-  --context-window <n>        provider context window in tokens; with it
-                              known, auto-compaction triggers at
-                              window - reserve (default reserve 2000) and
-                              budgets are measured in tokens (env
-                              TWO_BROTHERS_CONTEXT_WINDOW). Token mode
-                              overrides --compact-threshold <chars>
-  --compact-keep-recent <n>   chars of recent envelopes kept verbatim when
-                              compacting in char mode (default 40000; token
-                              mode derives its own tail from the trigger; env
-                              TWO_BROTHERS_COMPACT* equivalents)
-  --mcp-config <file>         JSON file with MCP server definitions
-                              ({"mcpServers": {...}}, optional per-server
-                              "role": "shared"|"senior"|"junior", default junior)
-  --plugins-dir <dir>         plugin directory for run/chat/serve (default
-                              <cwd>/plugins; env TWO_BROTHERS_PLUGINS_DIR —
-                              pinned like all env vars, never persisted).
-                              Plugins load fail-soft; hook diagnostics print
-                              under --verbose. Plugin tools need a workspace,
-                              so serve runs over a workspace get them (a CLI
-                              run has none).
-  --skills-dir <path>         extra skills root (repeatable); defaults are
-                              TWO_BROTHERS_SKILLS_DIR (OS path list), then
-                              <cwd>/skills and ~/.two-brothers/skills
-  --commands-dir <path>       extra slash-command root for the chat REPL and
-                              tui (repeatable); defaults are
-                              TWO_BROTHERS_COMMANDS_DIR (OS path list), then
-                              <cwd>/commands and ~/.two-brothers/commands.
-                              Type /commands or /help in either UI to list
-                              them
-  --json                      (run only) shorthand for --mode json: ONE
-                              machine-readable object on stdout instead of
-                              the human transcript. It is an output mode of
-                              its own, not a print-mode modifier; with an
-                              explicit --mode print it only narrows that
-                              mode's output to the decision object as JSON
-  --verbose                   extra diagnostics (prompt audits; per-run
-                              plugin load notes). Warnings, usage and the
-                              provider timeout hint always go to stderr.
-`);
 }
 
 // --------------------------------------------------------------------------- //
@@ -1233,77 +1177,89 @@ interface SessionListing {
   error: string | null;
 }
 
+/** One parsed session JSONL: the listing view plus every protocol envelope
+ * (needed by `sessions show`; the list command only uses the summary fields). */
+interface SessionScan extends SessionListing {
+  events: Array<Record<string, any>>;
+}
+
+/**
+ * Read and parse one session JSONL file. Never throws for IO/parse problems:
+ * an unreadable file comes back with an `error`, and corrupt lines are counted
+ * (the first line number is reported) while every valid object is kept.
+ */
+function scanSessionFile(filePath: string, name: string): SessionScan {
+  const fallback = name.endsWith(".jsonl") ? name.slice(0, -".jsonl".length) : name;
+  let updated = "(unknown)";
+  try {
+    updated = formatMtime(fs.statSync(filePath).mtime);
+  } catch {
+    // unreadable stat: still list/show the file
+  }
+
+  let text: string;
+  try {
+    text = fs.readFileSync(filePath, "utf-8");
+  } catch (exc) {
+    return {
+      name,
+      title: "(unreadable)",
+      count: 0,
+      updated,
+      error: `cannot read file: ${exc instanceof Error ? exc.message : String(exc)}`,
+      events: [],
+    };
+  }
+
+  const lines = text.split(/\r?\n/);
+  const head: Array<Record<string, any>> = [];
+  const events: Array<Record<string, any>> = [];
+  let count = 0;
+  let corruptLine = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    let event: unknown;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      if (!corruptLine) corruptLine = i + 1;
+      continue;
+    }
+    if (typeof event !== "object" || event === null || Array.isArray(event)) {
+      if (!corruptLine) corruptLine = i + 1;
+      continue;
+    }
+    count += 1;
+    events.push(event as Record<string, any>);
+    if (head.length < SCAN_LIMIT) head.push(event as Record<string, any>);
+  }
+
+  return {
+    name,
+    title: deriveTitle(head, fallback),
+    count,
+    updated,
+    error: corruptLine ? `corrupt line ${corruptLine}` : null,
+    events,
+  };
+}
+
 function listSessions(sessionsDir: string): SessionListing[] {
   const names = fs
     .readdirSync(sessionsDir)
     .filter((name) => name.endsWith(".jsonl"))
     .sort();
-  const listings: SessionListing[] = [];
-  for (const name of names) {
-    const filePath = path.join(sessionsDir, name);
-    const fallback = name.slice(0, -".jsonl".length);
-    let updated = "(unknown)";
-    try {
-      updated = formatMtime(fs.statSync(filePath).mtime);
-    } catch {
-      // unreadable stat: still list the file
-    }
-
-    let text: string;
-    try {
-      text = fs.readFileSync(filePath, "utf-8");
-    } catch (exc) {
-      listings.push({
-        name,
-        title: "(unreadable)",
-        count: 0,
-        updated,
-        error: `cannot read file: ${exc}`,
-      });
-      continue;
-    }
-
-    const lines = text.split(/\r?\n/);
-    const head: Array<Record<string, any>> = [];
-    let count = 0;
-    let corruptLine = 0;
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (!line) continue;
-      let event: unknown;
-      try {
-        event = JSON.parse(line);
-      } catch {
-        if (!corruptLine) corruptLine = i + 1;
-        continue;
-      }
-      if (typeof event !== "object" || event === null || Array.isArray(event)) {
-        if (!corruptLine) corruptLine = i + 1;
-        continue;
-      }
-      count += 1;
-      if (head.length < SCAN_LIMIT) head.push(event as Record<string, any>);
-    }
-
-    if (corruptLine) {
-      listings.push({
-        name,
-        title: deriveTitle(head, fallback),
-        count,
-        updated,
-        error: `corrupt line ${corruptLine}`,
-      });
-    } else {
-      listings.push({
-        name,
-        title: deriveTitle(head, fallback),
-        count,
-        updated,
-        error: null,
-      });
-    }
-  }
-  return listings;
+  return names.map((name) => {
+    const scan = scanSessionFile(path.join(sessionsDir, name), name);
+    return {
+      name: scan.name,
+      title: scan.title,
+      count: scan.count,
+      updated: scan.updated,
+      error: scan.error,
+    };
+  });
 }
 
 function formatMtime(mtime: Date): string {
@@ -1314,30 +1270,116 @@ function formatMtime(mtime: Date): string {
   );
 }
 
-function doSessions(argv: string[], io: CliIO): number {
-  const { values } = parseArgs({
-    args: argv,
-    options: { "sessions-dir": { type: "string" as const } },
-  });
-  const sessionsDir = values["sessions-dir"] ?? "sessions";
+const SESSIONS_OPTIONS = {
+  "sessions-dir": { type: "string" as const },
+  json: { type: "boolean" as const, default: false },
+  limit: { type: "string" as const },
+  ...HELP_OPTIONS,
+} satisfies ParseArgsOptionsConfig;
 
+/** `--limit` parse result: absent is fine, a bad value is a usage error. */
+type LimitParse = { ok: true; limit?: number } | { ok: false };
+
+function parseLimit(raw: unknown, io: CliIO): LimitParse {
+  if (raw === undefined) return { ok: true };
+  const text = String(raw).trim();
+  if (!/^\d+$/.test(text)) {
+    io.error(`[error] invalid --limit: ${String(raw)} (use a non-negative integer)`);
+    return { ok: false };
+  }
+  return { ok: true, limit: Number.parseInt(text, 10) };
+}
+
+/** Resolve `sessions show <name>`: the name works with or without the
+ * `.jsonl` suffix (and may be a path relative to the sessions directory). */
+function resolveSessionFile(sessionsDir: string, requested: string): string | null {
+  const name = requested.trim();
+  if (!name) return null;
+  const candidates = name.endsWith(".jsonl") ? [name] : [`${name}.jsonl`, name];
+  for (const candidate of candidates) {
+    const resolved = path.resolve(sessionsDir, candidate);
+    try {
+      if (fs.statSync(resolved).isFile()) return resolved;
+    } catch {
+      // try the next candidate
+    }
+  }
+  return null;
+}
+
+/** Whitespace-collapsed, length-capped payload preview for `sessions show`. */
+function previewText(value: unknown, max = 90): string {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return text.length > max ? text.slice(0, max) + "…" : text;
+}
+
+/** One rendered envelope line for the human `sessions show` output. */
+function renderSessionEvent(event: Record<string, any>): string {
+  const seq = typeof event.seq === "number" ? String(event.seq).padStart(3) : "  ?";
+  const from = String(event.from ?? "?");
+  const to = String(event.to ?? "?");
+  const kind = String(event.kind ?? "?");
+  const payload = event.payload ?? {};
+  let summary = "";
+  if (kind === "message") {
+    summary = previewText(payload.text);
+  } else if (kind === "consult") {
+    summary = `ask: ${previewText(payload.ask)}`;
+  } else if (kind === "proposal") {
+    summary = `${previewText(payload.title)} — ${previewText(payload.answer)}`;
+  } else if (kind === "delegation") {
+    summary = `work: ${previewText(payload.work)}`;
+  } else if (kind === "deliverable") {
+    summary = `result: ${previewText(payload.result)}`;
+  } else if (kind === "review") {
+    summary = `verdict: ${previewText(payload.verdict)}`;
+  } else if (kind === "decision") {
+    summary = previewText(payload.decision);
+  }
+  return `  ${seq} ${from} -> ${to} ${kind}${summary ? ` — ${summary}` : ""}`;
+}
+
+/** `sessions [--json] [--limit N]`: the human table or a stable JSON array. */
+function listSessionsCommand(
+  sessionsDir: string,
+  jsonMode: boolean,
+  limit: number | undefined,
+  io: CliIO,
+): number {
   let listings: SessionListing[];
   try {
     listings = listSessions(sessionsDir);
   } catch {
-    io.log(`no session files in ${sessionsDir}`);
+    if (jsonMode) io.log("[]");
+    else io.log(`no session files in ${sessionsDir}`);
     return 0;
   }
   if (listings.length === 0) {
-    io.log(`no session files in ${sessionsDir}`);
+    if (jsonMode) io.log("[]");
+    else io.log(`no session files in ${sessionsDir}`);
     return 0;
   }
-
+  const rows = limit === undefined ? listings : listings.slice(0, limit);
+  if (jsonMode) {
+    io.log(
+      JSON.stringify(
+        rows.map((item) => ({
+          name: item.name,
+          title: item.title,
+          envelopes: item.count,
+          updated: item.updated,
+          error: item.error,
+        })),
+      ),
+    );
+    return 0;
+  }
   io.log(
     `${padTrunc("session", 28)} ${padTrunc("title", 44)} ` +
       `${"envelopes".padStart(9)} updated`,
   );
-  for (const item of listings) {
+  for (const item of rows) {
     const marker = item.error ? `  [error: ${item.error}]` : "";
     io.log(
       `${padTrunc(item.name, 28)} ${padTrunc(item.title, 44)} ` +
@@ -1347,51 +1389,262 @@ function doSessions(argv: string[], io: CliIO): number {
   return 0;
 }
 
-/** `two-brothers serve --help`: the server's own flags (the run flags it
- * shares still accept their long forms, but the output lives here). */
-function printServeHelp(io: CliIO): void {
-  io.log(`Usage: two-brothers serve [flags]
+/** `sessions show <name> [--json] [--limit N]`: summary + protocol envelopes. */
+function showSession(
+  sessionsDir: string,
+  names: string[],
+  jsonMode: boolean,
+  limit: number | undefined,
+  io: CliIO,
+): number {
+  if (names.length === 0) {
+    io.error("[error] no session name: sessions show <name> [--json] [--limit <n>]");
+    io.error("Run 'two-brothers sessions --help'.");
+    return 2;
+  }
+  if (names.length > 1) {
+    io.error(`[error] unexpected argument: ${names.slice(1).join(" ")}`);
+    io.error(`Usage: ${commandUsage("sessions")}`);
+    io.error("Run 'two-brothers sessions --help'.");
+    return 2;
+  }
+  const requested = names[0];
+  const filePath = resolveSessionFile(sessionsDir, requested);
+  if (filePath === null) {
+    io.error(`Unknown session: ${requested} (in ${path.resolve(sessionsDir)})`);
+    io.error("Run 'two-brothers sessions' for the session list.");
+    return 2;
+  }
+  const scan = scanSessionFile(filePath, path.basename(filePath));
+  if (scan.error !== null && scan.title === "(unreadable)") {
+    io.error(`[error] ${scan.error}`);
+    return 1;
+  }
+  const total = scan.events.length;
+  const events = limit === undefined ? scan.events : scan.events.slice(0, limit);
+  if (jsonMode) {
+    io.log(
+      JSON.stringify({
+        name: scan.name,
+        title: scan.title,
+        envelopes: scan.count,
+        updated: scan.updated,
+        error: scan.error,
+        events,
+      }),
+    );
+    return 0;
+  }
+  io.log(`session: ${scan.name}`);
+  io.log(`title: ${scan.title}`);
+  io.log(`envelopes: ${scan.count}`);
+  io.log(`updated: ${scan.updated}`);
+  if (scan.error) io.log(`error: ${scan.error}`);
+  if (events.length === 0) {
+    io.log(
+      total === 0
+        ? "events: (none)"
+        : `events: (none shown; ${total} hidden by --limit ${limit ?? 0})`,
+    );
+    return 0;
+  }
+  io.log("events:");
+  for (const event of events) io.log(renderSessionEvent(event));
+  if (limit !== undefined && limit < total) {
+    io.log(`  … ${total - limit} more envelope(s); raise --limit to see them`);
+  }
+  return 0;
+}
 
-Start the web workspace backend: JSON API + SSE + the built web app
-(the repo's web/dist, or the packaged copy).
+function doSessions(argv: string[], io: CliIO): number {
+  const parsed = parseCommandArgs(argv, SESSIONS_OPTIONS, "sessions", io, true);
+  if (parsed === null) return 2;
+  const { values, positionals } = parsed;
+  if (isHelpRequested(values)) {
+    io.log(renderCommandHelp("sessions"));
+    return 0;
+  }
+  const sessionsDir =
+    typeof values["sessions-dir"] === "string" && values["sessions-dir"].trim()
+      ? values["sessions-dir"]
+      : "sessions";
+  const limitResult = parseLimit(values.limit, io);
+  if (!limitResult.ok) return 2;
+  const jsonMode = values.json === true;
+  const subcommand = positionals[0];
+  if (subcommand === undefined) {
+    return listSessionsCommand(sessionsDir, jsonMode, limitResult.limit, io);
+  }
+  if (subcommand !== "show") {
+    // Kept as a thrown argument error (the long-standing contract for extra
+    // positionals, covered by tests/cli.test.ts).
+    throw new Error(
+      `unexpected argument '${subcommand}' (sessions takes only the 'show' subcommand)`,
+    );
+  }
+  return showSession(sessionsDir, positionals.slice(1), jsonMode, limitResult.limit, io);
+}
 
-Flags:
-  --host <addr>               bind address (default 127.0.0.1)
-  --port <n>                  port (default 8600)
-  --sessions-dir <dir>        session store root (default sessions)
-  --workers <n>               background run workers
-  --timeout <s>               per-provider-attempt timeout in seconds
-                              (default 120; env TWO_BROTHERS_TIMEOUT). A
-                              timed-out attempt is retried and warns on
-                              stderr, at most three times per run — raise
-                              this for slow local models
-  --plugins-dir <dir>         plugin directory (default <cwd>/plugins; env
-                              TWO_BROTHERS_PLUGINS_DIR)
-  --skills-dir <path>         extra skills root (repeatable)
-  --commands-dir <path>       extra slash-command root (repeatable; served as
-                              metadata at GET /api/commands)
-  --mcp-config <file>         MCP server definitions merged with the
-                              plugin-contributed servers on every run
-  --help                      this screen
+// --------------------------------------------------------------------------- //
+// doctor: local environment + provider diagnostics
+// --------------------------------------------------------------------------- //
 
-The shared provider flags (--provider, --base-url, --senior-*/--junior-*,
---max-tokens, ...) are accepted too; see "two-brothers --help".`);
+/**
+ * The config flags `doctor` resolves (a focused subset of the shared run
+ * flags: diagnostics read the provider, endpoints, models and wire kinds, and
+ * nothing else). `--timeout` doubles as the endpoint-probe timeout below.
+ */
+const DOCTOR_OPTIONS = {
+  provider: { type: "string" as const },
+  "provider-kind": { type: "string" as const },
+  "senior-kind": { type: "string" as const },
+  "junior-kind": { type: "string" as const },
+  "base-url": { type: "string" as const },
+  "api-key": { type: "string" as const },
+  "senior-base-url": { type: "string" as const },
+  "senior-api-key": { type: "string" as const },
+  "junior-base-url": { type: "string" as const },
+  "junior-api-key": { type: "string" as const },
+  "senior-model": { type: "string" as const },
+  "junior-model": { type: "string" as const },
+  timeout: { type: "string" as const },
+  "sessions-dir": { type: "string" as const },
+  json: { type: "boolean" as const, default: false },
+  ...HELP_OPTIONS,
+} satisfies ParseArgsOptionsConfig;
+
+/**
+ * `two-brothers doctor [--json] [--sessions-dir <dir>] [--timeout <s>]`:
+ * run the diagnostics in `src/doctor.ts` and print the human report (plus a
+ * `doctor: ok` / `doctor: N failed check(s)` summary) or one JSON object.
+ * Exit 0 when no check failed, 1 otherwise, 2 on a usage/config error.
+ */
+async function doDoctor(argv: string[], io: CliIO): Promise<number> {
+  const parsed = parseCommandArgs(argv, DOCTOR_OPTIONS, "doctor", io);
+  if (parsed === null) return 2;
+  const { values } = parsed;
+  if (isHelpRequested(values)) {
+    io.log(renderCommandHelp("doctor"));
+    return 0;
+  }
+  let cfg: Config;
+  try {
+    // exactly like run: flags and TWO_BROTHERS_* env vars resolve the config;
+    // a bad value (provider, kind, mode) is a usage error, not a crash
+    cfg = resolveConfig(argsToConfigArgs(values));
+  } catch (exc) {
+    io.error(`[error] ${exc instanceof Error ? exc.message : String(exc)}`);
+    io.error(`Usage: ${commandUsage("doctor")}`);
+    return 2;
+  }
+  let timeoutMs: number | undefined;
+  if (values.timeout !== undefined) {
+    const seconds = Number(values.timeout);
+    if (!Number.isFinite(seconds) || seconds <= 0) {
+      io.error(`[error] invalid --timeout: ${String(values.timeout)} (use positive seconds)`);
+      io.error(`Usage: ${commandUsage("doctor")}`);
+      return 2;
+    }
+    timeoutMs = seconds * 1000;
+  }
+  const report = await runDoctor({
+    config: cfg,
+    sessionsDir: values["sessions-dir"] ?? "sessions",
+    cwd: process.cwd(),
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+  });
+  if (values.json === true) {
+    io.log(JSON.stringify(report, null, 2));
+    return report.ok ? 0 : 1;
+  }
+  for (const line of formatDoctorReport(report)) io.log(line);
+  const failed = report.checks.filter((check) => check.status === "fail").length;
+  io.log(report.ok ? "doctor: ok" : `doctor: ${failed} failed check(s)`);
+  return report.ok ? 0 : 1;
+}
+
+// --------------------------------------------------------------------------- //
+// completions: shell completion scripts from the clihelp catalog
+// --------------------------------------------------------------------------- //
+
+/**
+ * The completion surface: every command in display order (with the help
+ * catalog's one-line summary and the exact flag names its parseArgs accepts)
+ * plus every long flag as a global candidate. The same catalog powers help,
+ * so the script can never drift from the documented commands.
+ */
+function completionSpec(): CompletionSpec {
+  return {
+    program: "two-brothers",
+    commands: commandNames().map((name) => {
+      const help = commandHelp(name);
+      return {
+        name,
+        ...(help ? { description: help.summary } : {}),
+        flags: flagCandidatesForCommand(name),
+      };
+    }),
+    globalFlags: allFlagNames(),
+  };
+}
+
+/**
+ * `two-brothers completions <bash|zsh|fish|powershell>`: print the generated
+ * script on stdout. A missing or unknown shell is a usage error (exit 2).
+ */
+function doCompletions(argv: string[], io: CliIO): number {
+  const parsed = parseCommandArgs(argv, HELP_OPTIONS, "completions", io, true);
+  if (parsed === null) return 2;
+  const { values, positionals } = parsed;
+  if (isHelpRequested(values)) {
+    io.log(renderCommandHelp("completions"));
+    return 0;
+  }
+  if (positionals.length > 1) {
+    io.error(`[error] unexpected argument: ${positionals.slice(1).join(" ")}`);
+    io.error(`Usage: ${commandUsage("completions")}`);
+    io.error("Run 'two-brothers completions --help'.");
+    return 2;
+  }
+  const shell = (positionals[0] ?? "").trim().toLowerCase();
+  if (!shell) {
+    io.error(`[error] no shell given: completions <${COMPLETION_SHELLS.join("|")}>`);
+    io.error(`Usage: ${commandUsage("completions")}`);
+    io.error("Run 'two-brothers completions --help'.");
+    return 2;
+  }
+  if (!(COMPLETION_SHELLS as readonly string[]).includes(shell)) {
+    io.error(
+      `[error] unknown shell: ${shell} (choose one of ${COMPLETION_SHELLS.join(", ")})`,
+    );
+    io.error(`Usage: ${commandUsage("completions")}`);
+    io.error("Run 'two-brothers completions --help'.");
+    return 2;
+  }
+  const script = generateCompletions(shell as CompletionShell, completionSpec());
+  // the generator returns exactly one trailing newline; `io.log` adds one
+  io.log(script.endsWith("\n") ? script.slice(0, -1) : script);
+  return 0;
 }
 
 async function doServe(argv: string[], io: CliIO): Promise<number> {
-  const { values } = parseArgs({
-    args: argv,
-    options: {
+  const parsed = parseCommandArgs(
+    argv,
+    {
       ...OPTIONS,
       host: { type: "string" as const },
       port: { type: "string" as const },
       "sessions-dir": { type: "string" as const },
       workers: { type: "string" as const },
-      help: { type: "boolean" as const, default: false },
+      ...HELP_OPTIONS,
     },
-  });
-  if (values.help === true) {
-    printServeHelp(io);
+    "serve",
+    io,
+  );
+  if (parsed === null) return 2;
+  const { values } = parsed;
+  if (isHelpRequested(values)) {
+    io.log(renderCommandHelp("serve"));
     return 0;
   }
   const host = values.host ?? "127.0.0.1";
@@ -1504,36 +1757,24 @@ const MODELS_OPTIONS = {
   "api-key-env": { type: "string" as const },
   timeout: { type: "string" as const },
   json: { type: "boolean" as const, default: false },
-};
-
-const MODELS_USAGE =
-  "Usage: models --base-url <url> [--api-key <key> | --api-key-env <VAR>] [--json]";
-
-/**
- * `parseArgs` with a clean usage error: the onboarding/discovery commands
- * fail with exit 2 on a malformed flag instead of throwing out of `main`.
- */
-function parseCliArgs(
-  argv: string[],
-  options: ParseArgsOptionsConfig,
-  usage: string,
-  io: CliIO,
-): Record<string, any> | null {
-  try {
-    return parseArgs({ args: argv, options }).values as Record<string, any>;
-  } catch (exc) {
-    io.error(`[error] ${exc instanceof Error ? exc.message : String(exc)}`);
-    io.error(usage);
-    return null;
-  }
-}
+  ...HELP_OPTIONS,
+} satisfies ParseArgsOptionsConfig;
 
 async function doModels(argv: string[], io: CliIO): Promise<number> {
-  const values = parseCliArgs(argv, MODELS_OPTIONS, MODELS_USAGE, io);
-  if (values === null) return 2;
+  const parsed = parseCommandArgs(argv, MODELS_OPTIONS, "models", io);
+  if (parsed === null) return 2;
+  const { values } = parsed;
+  if (isHelpRequested(values)) {
+    io.log(renderCommandHelp("models"));
+    return 0;
+  }
   const baseUrl = values["base-url"]?.trim() ?? "";
   if (!baseUrl) {
-    io.error(MODELS_USAGE);
+    io.error("[error] --base-url is required");
+    // Keep the legacy bare `Usage: models ...` line: the discovery command's
+    // long-standing message is pinned by tests/cliergonomics.test.ts.
+    io.error(`Usage: ${commandUsage("models").replace(/^two-brothers /, "")}`);
+    io.error("Run 'two-brothers models --help'.");
     return 2;
   }
   let apiKey = values["api-key"] ?? "";
@@ -1597,15 +1838,11 @@ const ONBOARD_OPTIONS = {
   "junior-model": { type: "string" as const },
   "provider-kind": { type: "string" as const },
   "non-interactive": { type: "boolean" as const, default: false },
-};
+  ...HELP_OPTIONS,
+} satisfies ParseArgsOptionsConfig;
 
 /** Local-first default endpoint LM Studio serves. */
 const DEFAULT_ONBOARD_BASE_URL = "http://localhost:1234/v1";
-
-const ONBOARD_USAGE =
-  "Usage: onboard [--sessions-dir <dir>] [--preset <id>] [--base-url <url>] " +
-  "[--api-key <key> | --api-key-env <VAR>] [--senior-model <m>] [--junior-model <m>] " +
-  "[--non-interactive]";
 
 /**
  * Read one answer from a line iterator: the prompt is written manually so
@@ -1634,8 +1871,13 @@ type OnboardRoleSettings = {
 };
 
 async function doOnboard(argv: string[], io: CliIO): Promise<number> {
-  const values = parseCliArgs(argv, ONBOARD_OPTIONS, ONBOARD_USAGE, io);
-  if (values === null) return 2;
+  const parsed = parseCommandArgs(argv, ONBOARD_OPTIONS, "onboard", io);
+  if (parsed === null) return 2;
+  const { values } = parsed;
+  if (isHelpRequested(values)) {
+    io.log(renderCommandHelp("onboard"));
+    return 0;
+  }
   const sessionsDir = values["sessions-dir"] ?? "sessions";
   const store = new SettingsStore(path.join(sessionsDir, "settings.json"));
   const existing = store.read();
@@ -1737,7 +1979,8 @@ async function doOnboard(argv: string[], io: CliIO): Promise<number> {
       "[error] no base url: pass --base-url <url> (or --preset <id>; " +
         "interactive mode prompts for one)",
     );
-    io.error(ONBOARD_USAGE);
+    io.error(`Usage: ${commandUsage("onboard")}`);
+    io.error("Run 'two-brothers onboard --help'.");
     return 2;
   }
   if (!seniorModel) seniorModel = preset?.models[0] ?? existingSenior.model ?? "";
@@ -1805,6 +2048,52 @@ function packageVersion(): string {
   return parsed.version;
 }
 
+/** `two-brothers help [command]` / `two-brothers help --all`. */
+function doHelp(argv: string[], io: CliIO): number {
+  const parsed = parseCommandArgs(
+    argv,
+    { all: { type: "boolean" as const, default: false }, ...HELP_OPTIONS },
+    "help",
+    io,
+    true,
+  );
+  if (parsed === null) return 2;
+  const { values, positionals } = parsed;
+  if (values.all === true) {
+    io.log(renderFullHelp());
+    return 0;
+  }
+  if (isHelpRequested(values)) {
+    printHelp(io);
+    return 0;
+  }
+  const target = positionals[0];
+  if (target === undefined) {
+    printHelp(io);
+    return 0;
+  }
+  if (positionals.length > 1) {
+    io.error(`[error] unexpected argument: ${positionals.slice(1).join(" ")}`);
+    io.error("Usage: two-brothers help [command]");
+    io.error("Run 'two-brothers help --help'.");
+    return 2;
+  }
+  if (commandHelp(target) === undefined) return reportUnknownCommand(target, io);
+  io.log(commandHelpFor(target));
+  return 0;
+}
+
+/** `two-brothers selftest [--help]`: the offline protocol/provider gate. */
+async function doSelftest(argv: string[], io: CliIO): Promise<number> {
+  const parsed = parseCommandArgs(argv, HELP_OPTIONS, "selftest", io);
+  if (parsed === null) return 2;
+  if (isHelpRequested(parsed.values)) {
+    io.log(renderCommandHelp("selftest"));
+    return 0;
+  }
+  return selftest();
+}
+
 export async function main(argv: string[], io: CliIO = defaultIO): Promise<number> {
   if (argv.length === 0) {
     // Modern-CLI convention: an interactive terminal opens the full TUI
@@ -1815,7 +2104,8 @@ export async function main(argv: string[], io: CliIO = defaultIO): Promise<numbe
     return 0;
   }
   const command = argv[0];
-  if (command === "help" || command === "--help" || command === "-h") {
+  if (command === "help") return doHelp(argv.slice(1), io);
+  if (command === "--help" || command === "-h") {
     printHelp(io);
     return 0;
   }
@@ -1823,7 +2113,7 @@ export async function main(argv: string[], io: CliIO = defaultIO): Promise<numbe
     io.log(packageVersion());
     return 0;
   }
-  if (command === "selftest") return selftest();
+  if (command === "selftest") return doSelftest(argv.slice(1), io);
   if (command === "sessions") return doSessions(argv.slice(1), io);
   if (command === "run") return doRun(argv.slice(1), io);
   if (command === "chat") return doChat(argv.slice(1), io);
@@ -1831,9 +2121,15 @@ export async function main(argv: string[], io: CliIO = defaultIO): Promise<numbe
   if (command === "serve") return doServe(argv.slice(1), io);
   if (command === "models") return doModels(argv.slice(1), io);
   if (command === "onboard") return doOnboard(argv.slice(1), io);
-  io.error(`Unknown command: ${command}`);
-  printHelp(io);
-  return 2;
+  if (command === "doctor") return doDoctor(argv.slice(1), io);
+  if (command === "completions") return doCompletions(argv.slice(1), io);
+  // An option in the command position (`two-brothers --bogus`) is an unknown
+  // option; anything else is an unknown command (both exit 2 with a hint).
+  if (command.startsWith("-")) {
+    reportUnknownOption(command, undefined, io);
+    return 2;
+  }
+  return reportUnknownCommand(command, io);
 }
 
 /**

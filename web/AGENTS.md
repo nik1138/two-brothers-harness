@@ -22,7 +22,10 @@ The backend is the TypeScript server in `packages/harness`:
 
 - `src/App.vue` — shell: session sidebar (workspace-grouped sessions,
   bottom-left Settings entry and theme selector, mobile drawer below a
-  breakpoint), chat, composer, run follow/stop, dialogs
+  breakpoint), chat, composer, run follow/stop, dialogs, command palette
+  (`Ctrl+K`/`Cmd+K`); `src/palette.ts` — pure palette item building/scoring/
+  filtering; `src/components/CommandPalette.vue` — the combobox dialog
+  (grouped results, `aria-activedescendant`, focus restore via `AppDialog`)
 - `src/components/` — `Sidebar`, `SessionGroup`/`SessionRow` (workspace
   groups), `SidebarFooter` (bottom-left Settings plus a Light/Dark/System
   segmented theme selector), `ChatView`, `Composer`,
@@ -59,7 +62,8 @@ The backend is the TypeScript server in `packages/harness`:
    not global CSS resets.
 2. **`npm run build` must keep passing** (outputs `dist/`). The backend serves
    that build, so a broken build breaks the product, not just CI. `npm test`
-   runs the chat/timeline projection tests and the draft-store tests (plain
+   runs the chat/timeline projection tests, the draft-store tests, and the
+   command-palette build/score/filter tests (plain
    `node --test` via `tests/register-ts.mjs`); keep it green too — the smoke
    test calls it. Run test files individually (`node --import
    ./tests/register-ts.mjs --test tests/drafts.test.ts`) when the sandbox

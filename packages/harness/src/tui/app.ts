@@ -5,10 +5,10 @@
  * seam), the block model lives in `model.ts`, the views in `view/`, and
  * `terminal.ts` is the only module that touches a real terminal. This module
  * owns everything in between — the grapheme-aware editor, the block
- * transcript, overlays (palette/help/pickers/dialogs), one non-blocking
- * harness run per turn with `AbortController` cancellation, and the graceful
- * teardown. The stream-event reducer (`reduceStreamEvent`) and the input
- * resolver (`resolveTuiInput`) stay exported as pure functions so the
+ * transcript, overlays (palette/help/history search/pickers/dialogs), one
+ * non-blocking harness run per turn with `AbortController` cancellation, and
+ * the graceful teardown. The stream-event reducer (`reduceStreamEvent`) and the
+ * input resolver (`resolveTuiInput`) stay exported as pure functions so the
  * interactive behavior is testable without a TTY.
  *
  * The harness construction mirrors `cli.ts`'s chat path: the same resolved
@@ -96,6 +96,12 @@ import {
   helpView,
   type HelpState,
 } from "./view/help.ts";
+import {
+  historySearchView,
+  openHistorySearch,
+  searchHistoryKey,
+  type HistorySearchState,
+} from "./view/historysearch.ts";
 import {
   createPaletteState,
   handlePaletteKey,
@@ -678,6 +684,7 @@ function messageOf(exc: unknown): string {
 type Overlay =
   | { kind: "palette"; state: PaletteState }
   | { kind: "help"; state: HelpState }
+  | { kind: "history-search"; state: HistorySearchState }
   | {
       kind: "picker";
       title: string;
@@ -1007,6 +1014,15 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       }).lines;
       return renderBox(lines, { width: boxW, title: "HELP", theme });
     }
+    if (overlay.kind === "history-search") {
+      const boxW = Math.max(30, Math.min(Math.max(columns - 4, 30), 72));
+      const boxH = Math.max(6, Math.min(Math.max(rows - 4, 6), 14));
+      const lines = historySearchView(overlay.state, {
+        width: Math.max(10, boxW - 4),
+        height: Math.max(3, boxH - 2),
+      }).lines;
+      return renderBox(lines, { width: boxW, title: "HISTORY", theme });
+    }
     if (overlay.kind === "picker") {
       const boxW = Math.max(30, Math.min(Math.max(columns - 8, 30), 72));
       const boxH = Math.max(8, Math.min(Math.max(rows - 6, 8), 18));
@@ -1200,6 +1216,15 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   };
   const openHelp = (): void => {
     overlay = { kind: "help", state: createHelpState() };
+  };
+  /**
+   * Open reverse-history search over the editor's submitted history. The
+   * composer draft and cursor are deliberately left untouched: accepting
+   * replaces them, cancelling simply closes the overlay, so Escape always
+   * restores the exact pre-search draft.
+   */
+  const openHistorySearchOverlay = (): void => {
+    overlay = { kind: "history-search", state: openHistorySearch(editor.history) };
   };
 
   const openModePicker = (): void => {
@@ -1426,6 +1451,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       case "stash":
         toggleStash();
         break;
+      case "history-search":
+        openHistorySearchOverlay();
+        break;
       case "mode":
         openModePicker();
         break;
@@ -1643,6 +1671,22 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       }
       return;
     }
+    if (overlay.kind === "history-search") {
+      const result = searchHistoryKey(overlay.state, key);
+      if (result.action === "cancel") {
+        // The composer was never touched while searching, so closing the
+        // overlay restores the exact pre-search draft and cursor.
+        overlay = null;
+      } else if (result.action === "accept" && result.text !== undefined) {
+        // setEditorText puts the cursor at the end and leaves the history
+        // untouched: accepting recalls, it never re-records.
+        editor = setEditorText(editor, result.text);
+        overlay = null;
+      } else {
+        overlay = { ...overlay, state: result.state };
+      }
+      return;
+    }
     if (overlay.kind === "picker") {
       const result = handlePickerKey(overlay.state, key, overlay.items);
       overlay = { ...overlay, state: result.state };
@@ -1683,6 +1727,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         return true;
       case "stash":
         toggleStash();
+        return true;
+      case "history-search":
+        openHistorySearchOverlay();
         return true;
       case "cancel":
       case "exit":
