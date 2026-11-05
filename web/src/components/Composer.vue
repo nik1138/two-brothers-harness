@@ -425,6 +425,7 @@ onBeforeUnmount(() => {
       :class="{ 'is-busy': busy, 'is-waiting': waiting }"
     >
       <textarea
+        id="composer-input"
         ref="inputEl"
         v-model="task"
         class="composer-input"
@@ -658,6 +659,13 @@ onBeforeUnmount(() => {
   box-shadow: 0 0 0 1px var(--accent-soft), var(--shadow-raised);
 }
 
+/* Keyboard focus on the text area: the surface owns the visible ring (the
+   textarea itself has no border to outline), using the shared focus token. */
+.composer-surface:has(.composer-input:focus-visible) {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--focus-ring), var(--shadow-raised);
+}
+
 .composer-surface.is-waiting {
   border-color: var(--warning);
 }
@@ -685,6 +693,7 @@ onBeforeUnmount(() => {
 }
 
 .composer-input:focus {
+  /* the .composer-surface :focus-within ring is the visible focus indicator */
   border-color: transparent;
   outline: none;
 }
@@ -994,6 +1003,12 @@ onBeforeUnmount(() => {
 .menu-action:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: -1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-surface {
+    transition: none;
+  }
 }
 
 @media (max-width: 620px) {

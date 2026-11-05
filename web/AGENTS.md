@@ -52,7 +52,9 @@ The backend is the TypeScript server in `packages/harness`:
   flushes on session switch/unmount); `src/sessionStatus.ts` — pure sidebar row
   status derivation (live / waiting / failed / unread / read) plus a bounded,
   persisted last-seen map for unread dots; `src/recents.ts` — bounded MRU
-  workspace ids in a versioned, fail-soft localStorage list
+  workspace ids in a versioned, fail-soft localStorage list;
+  `src/density.ts` — persisted Comfortable/Compact spacing preference
+  (`data-density` on `<html>`, injectable storage, palette-exposed)
 - `vite.config.ts` — dev proxy `/api` → `http://127.0.0.1:8600`
 
 ## Rules specific to this tree

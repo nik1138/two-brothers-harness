@@ -136,7 +136,10 @@ watch(
     if (!open) return
     query.value = ''
     activeIndex.value = 0
-    void nextTick(() => inputEl.value?.focus())
+    void nextTick(() => {
+      if (listEl.value) listEl.value.scrollTop = 0
+      inputEl.value?.focus()
+    })
   },
   { immediate: true },
 )
@@ -153,13 +156,29 @@ watch(results, (items) => {
   else if (activeIndex.value >= items.length) activeIndex.value = items.length - 1
 })
 
-/** Keep the highlighted option visible while arrowing through the list. */
+/**
+ * Keep the highlighted option inside the list viewport while arrowing through
+ * it. Scroll only the list itself (measured against its client box) instead of
+ * calling `scrollIntoView`, which can also scroll the dialog/page ancestors.
+ */
+function scrollActiveIntoView(index: number): void {
+  const list = listEl.value
+  if (!list) return
+  const option = list.querySelector<HTMLElement>(`#${optionId(index)}`)
+  if (!option) return
+  const listRect = list.getBoundingClientRect()
+  const optionRect = option.getBoundingClientRect()
+  if (optionRect.top < listRect.top) {
+    list.scrollTop -= listRect.top - optionRect.top
+  } else if (optionRect.bottom > listRect.bottom) {
+    list.scrollTop += optionRect.bottom - listRect.bottom
+  }
+}
+
 watch(activeIndex, async (index) => {
   if (index < 0) return
   await nextTick()
-  listEl.value
-    ?.querySelector<HTMLElement>(`#${optionId(index)}`)
-    ?.scrollIntoView({ block: 'nearest' })
+  scrollActiveIntoView(index)
 })
 </script>
 
@@ -285,16 +304,18 @@ watch(activeIndex, async (index) => {
   color: var(--text-primary);
   background: transparent;
   border: none;
-  outline: none;
 }
 
 .palette-input::placeholder {
   color: var(--text-secondary);
 }
 
-.palette-input:focus,
+/* The search field has no border of its own, so it carries the app's keyboard
+   ring directly (same token/width as every other control). */
 .palette-input:focus-visible {
-  outline: none;
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
 }
 
 .palette-close {
@@ -367,7 +388,8 @@ watch(activeIndex, async (index) => {
 
 .palette-option[aria-selected='true'] {
   background: var(--accent-soft);
-  box-shadow: inset 0 0 0 1px var(--accent);
+  /* keyboard position cue, using the same focus token as every other ring */
+  box-shadow: inset 0 0 0 2px var(--focus-ring);
 }
 
 .palette-option-label {

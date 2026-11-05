@@ -9,6 +9,8 @@ import {
   saveThemeMode,
 } from './themeMode'
 import type { ThemeMode } from './themeMode'
+import { applyDensityAttribute, readDensity, saveDensity } from './density'
+import type { Density } from './density'
 import {
   ApiError,
   answerRunApproval,
@@ -320,6 +322,13 @@ const PALETTE_ACTIONS: PaletteItem[] = [
     keywords: ['preferences', 'config', 'provider', 'model', 'roles'],
   },
   {
+    id: 'action:focus-composer',
+    kind: 'action',
+    label: 'Focus composer',
+    hint: 'Skip straight to the task box',
+    keywords: ['skip', 'composer', 'task', 'type', 'message', 'jump'],
+  },
+  {
     id: 'action:theme-light',
     kind: 'action',
     label: 'Theme: Light',
@@ -359,13 +368,35 @@ const PALETTE_ACTIONS: PaletteItem[] = [
 const paletteOpen = ref(false)
 /** Shortcut label for the header affordance; the chord itself always works. */
 const paletteShortcut = /Mac|iPhone|iPad|iPod/i.test(navigator.platform) ? '⌘ K' : 'Ctrl K'
+/** Persisted spacing preference (Comfortable by default); applied as data-density. */
+const density = ref<Density>(readDensity())
+
+/** Density is a palette-exposed preference (Settings → Appearance is read-only
+ * for spacing today). The hint marks the active mode. */
+const densityPaletteActions = computed<PaletteItem[]>(() =>
+  (['compact', 'comfortable'] as const).map((value) => ({
+    id: `action:density-${value}`,
+    kind: 'action' as const,
+    label: `Density: ${value === 'compact' ? 'Compact' : 'Comfortable'}`,
+    hint:
+      density.value === value
+        ? 'Current density'
+        : value === 'compact'
+          ? 'Tighter rows'
+          : 'Default spacing',
+    keywords:
+      value === 'compact'
+        ? ['density', 'spacing', 'rows', 'appearance', 'compact', 'tight', 'dense']
+        : ['density', 'spacing', 'rows', 'appearance', 'comfortable', 'default', 'roomy'],
+  })),
+)
 
 /** Rebuilt whenever sessions/workspaces change; cheap (pure array building). */
 const paletteItems = computed(() =>
   buildPaletteItems({
     sessions: sessions.value,
     workspaces: workspaces.value,
-    actions: PALETTE_ACTIONS,
+    actions: [...PALETTE_ACTIONS, ...densityPaletteActions.value],
   }),
 )
 
@@ -419,6 +450,15 @@ function runPaletteAction(id: string) {
     case 'action:settings':
       settingsOpen.value = true
       break
+    case 'action:focus-composer':
+      skipToComposer()
+      break
+    case 'action:density-compact':
+      setDensity('compact')
+      break
+    case 'action:density-comfortable':
+      setDensity('comfortable')
+      break
     case 'action:theme-light':
       onThemeChange('light')
       break
@@ -435,6 +475,23 @@ function runPaletteAction(id: string) {
       void refreshSessions(false)
       break
   }
+}
+
+/**
+ * Skip-to-composer, shared by the skip link (first focusable element) and the
+ * palette action. The focus move waits one tick so the palette's modal has
+ * deactivated its focus trap — otherwise the trap would pull focus back.
+ */
+function focusComposer() {
+  const el = document.getElementById('composer-input')
+  if (!(el instanceof HTMLTextAreaElement)) return
+  el.scrollIntoView({ block: 'nearest' })
+  el.focus({ preventScroll: true })
+}
+
+function skipToComposer() {
+  if (paletteOpen.value) paletteOpen.value = false
+  void nextTick(focusComposer)
 }
 
 // -- run event stream ---------------------------------------------------------
@@ -1181,11 +1238,24 @@ function collapseDrawer() {
   }
 }
 
+/**
+ * Escape dismisses exactly one layer, topmost first: palette → dialogs →
+ * mobile drawer. The palette and dialogs dismiss themselves — their focus
+ * traps only let the topmost one react — so this handler is the drawer's last
+ * resort and only acts while the drawer is the layer on top. An Escape already
+ * handled elsewhere (`defaultPrevented`, e.g. clearing the sidebar search) is
+ * left alone rather than also closing the drawer.
+ */
+function topmostEscapeLayer(): 'palette' | 'dialog' | 'drawer' | null {
+  if (paletteOpen.value) return 'palette'
+  if (document.querySelector('[role="dialog"]')) return 'dialog'
+  if (!sidebarCollapsed.value && drawerQuery?.matches) return 'drawer'
+  return null
+}
+
 function onDrawerEscape(e: KeyboardEvent) {
-  if (e.key !== 'Escape' || sidebarCollapsed.value) return
-  // dialogs manage their own Escape — never close the drawer under one
-  if (document.querySelector('[role="dialog"]')) return
-  if (!drawerQuery?.matches) return
+  if (e.key !== 'Escape' || e.defaultPrevented) return
+  if (topmostEscapeLayer() !== 'drawer') return
   e.stopPropagation()
   collapseDrawer()
 }
@@ -1223,6 +1293,28 @@ watch(settingsVersion, () => {
   void probeSettings()
 })
 
+// -- density ------------------------------------------------------------------
+// Comfortable (default) or Compact: a persisted, spacing-only preference written
+// as `data-density` on <html>; style.css owns every rule, the shell only keeps
+// the attribute and the stored value in step. Exposed from the palette.
+// (`density` itself is declared with the palette actions above.)
+
+function syncDensity() {
+  applyDensityAttribute(density.value)
+}
+
+function setDensity(next: Density) {
+  if (density.value !== next) {
+    density.value = next
+    saveDensity(next)
+  }
+  // always re-apply: a stale attribute (e.g. another tab) self-heals on use
+  syncDensity()
+}
+
+// apply before the first paint, like the theme attribute above
+syncDensity()
+
 onMounted(() => {
   schemeQuery.addEventListener('change', onSchemeChange)
   window.addEventListener('keydown', onDrawerEscape)
@@ -1256,6 +1348,10 @@ onUnmounted(() => {
   >
     <n-message-provider>
     <div class="workspace" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
+    <!-- First focusable element: Tab reveals it, Enter jumps to the composer. -->
+    <a class="skip-link" href="#composer-input" @click.prevent="skipToComposer">
+      Skip to composer
+    </a>
     <Sidebar
       v-if="!sidebarCollapsed"
       :sessions="visibleSessions"
@@ -1435,6 +1531,31 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+/* Skip link: the first focusable element in the app, kept off-screen until it
+   is keyboard-focused. It is fixed, so it never takes part in the shell layout,
+   and it appears instantly — a skip affordance should never animate. */
+.skip-link {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 4000;
+  padding: 0.4rem 0.7rem;
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--text-on-accent);
+  background: var(--accent);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-raised);
+  text-decoration: none;
+  transform: translateY(calc(-100% - 12px));
+}
+
+.skip-link:focus-visible {
+  transform: translateY(0);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
 /* First-run model hint: one compact inline row above the transcript. */
 .onboarding-hint {
   display: flex;

@@ -661,9 +661,17 @@ onUnmounted(() => {
   border-radius: 7px;
 }
 
+/* The search input has no border of its own, so the wrapper shows focus. The
+   focus-within rule is the fallback for engines without :has(); the second rule
+   upgrades a keyboard focus to the shared focus token ring. */
 .session-search:focus-within {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.session-search:has(.session-search-input:focus-visible) {
+  border-color: var(--focus-ring);
+  box-shadow: 0 0 0 2px var(--focus-ring);
 }
 
 .search-icon {
@@ -682,11 +690,11 @@ onUnmounted(() => {
   color: var(--text-primary);
   background: transparent;
   border: none;
-  outline: none;
 }
 
 .session-search-input:focus,
 .session-search-input:focus-visible {
+  /* the bordered .session-search wrapper draws the focus ring (see above) */
   outline: none;
 }
 

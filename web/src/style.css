@@ -247,6 +247,14 @@ samp {
   outline-offset: 2px;
 }
 
+/* naive-ui draws its own focus state and resets `outline: none` on buttons, so
+   its focus ring is easy to lose. Give every naive button (composer Send/Stop,
+   dialog primary actions) the app's single keyboard ring. */
+.n-button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
 /* The page scrollbar is part of the surface, not a black slab. */
 :root {
   scrollbar-color: var(--border-strong) transparent;
@@ -1400,17 +1408,6 @@ select {
     flex-wrap: wrap;
   }
 }
-
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
-  }
-}
 /* ==== approval-wait chrome ==== */
 
 /* Header badge while the run is parked on an operator approval (G-1). */
@@ -1458,8 +1455,170 @@ select {
   animation: pulse 1.8s ease-in-out infinite;
 }
 
+/* ============================================================
+   Density (P1) — `data-density` on <html>
+   ------------------------------------------------------------
+   Two preferences, spacing only: no structural layout changes.
+   Comfortable is the default and needs no overrides; Compact
+   tightens row heights and vertical padding. Tokens cover the
+   rules that already read them; the selectors below reach
+   component-scoped rules that hard-code a size. Scoped styles add
+   one attribute selector, so the `html[data-density]` prefix is
+   what lets these win over them without `!important`.
+   ============================================================ */
+
+:root[data-density='compact'] {
+  --session-row-height: 26px;
+  --sidebar-padding: 6px;
+  --sidebar-footer-height: 42px;
+  --chat-header-height: 42px;
+  --control-height-sm: 24px;
+  --control-height-md: 28px;
+  --control-height-lg: 32px;
+}
+
+/* sidebar */
+html[data-density='compact'] .sidebar-top {
+  padding-block: 0.35rem 0.3rem;
+}
+
+html[data-density='compact'] .sidebar-list {
+  padding-block: 0.1rem 0.4rem;
+}
+
+html[data-density='compact'] .status-legend {
+  padding-block: 0.2rem 0.25rem;
+}
+
+html[data-density='compact'] .sidebar .session-item {
+  height: 26px;
+}
+
+html[data-density='compact'] .workspace-select {
+  height: 24px;
+}
+
+html[data-density='compact'] .new-session,
+html[data-density='compact'] .action-secondary,
+html[data-density='compact'] .session-search {
+  height: 26px;
+}
+
+html[data-density='compact'] .search-close {
+  width: 20px;
+  height: 20px;
+}
+
+html[data-density='compact'] .footer-action {
+  height: 28px;
+}
+
+html[data-density='compact'] .theme-option {
+  height: 24px;
+}
+
+/* transcript + composer */
+html[data-density='compact'] .chat-scroll {
+  padding-block: 1rem 0.8rem;
+  gap: 0.85rem;
+}
+
+html[data-density='compact'] .composer-surface {
+  gap: 0.35rem;
+  padding: 0.45rem 0.6rem 0.35rem;
+}
+
+html[data-density='compact'] .onboarding-hint {
+  padding-block: 0.3rem;
+}
+
+/* dialogs */
+html[data-density='compact'] .app-dialog__header {
+  padding: 12px 16px 10px;
+}
+
+html[data-density='compact'] .app-dialog__body {
+  padding: 12px 16px;
+}
+
+html[data-density='compact'] .app-dialog__footer {
+  padding: 10px 16px;
+}
+
+html[data-density='compact'] .modal {
+  padding: 1rem 1.1rem 1.1rem;
+}
+
+/* command palette */
+html[data-density='compact'] .palette-search {
+  padding-block: 0.5rem;
+}
+
+html[data-density='compact'] .palette-group-label {
+  padding-block: 0.25rem 0.15rem;
+}
+
+html[data-density='compact'] .palette-option {
+  padding-block: 0.28rem;
+}
+
+/* ============================================================
+   Reduced motion (P1)
+   ------------------------------------------------------------
+   ONE policy for the whole app. When the OS asks for reduced
+   motion, every keyframe animation and every transition collapses
+   to an instant state change: the live/waiting pulses stop, dialog
+   and drawer chrome appear without a fade or slide, and no hover
+   or focus transition animates. Nothing becomes invisible or
+   ambiguous — state that was carried by motion keeps its colour,
+   border and text label (live badge, status dot + legend,
+   "awaiting approval", the selected palette row ring), so the
+   change is still visible, just not moving. Component-scoped
+   keyframes repeat `animation: none` in their own guards
+   (Sidebar, SessionRow, ApprovalCard, DiffReview, WorkspaceFinder,
+   SettingsDialog); this block is the backstop that also covers
+   rules added later and naive-ui's own transitions.
+   ============================================================ */
 @media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 1ms;
+    --motion-base: 1ms;
+    --motion-slow: 1ms;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    animation-delay: 0ms !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* naive-ui declares its overlay transitions (modal mask, dialog body, drawer,
+     popover) as `transition: ... !important` on two-class selectors such as
+     `.n-modal-mask.fade-in-transition-enter-active`. The universal rule above
+     loses that specificity battle, so match it with a higher-specificity
+     selector and switch those layers instantly as well. */
+  :root [class*='transition-enter-active'][class],
+  :root [class*='transition-leave-active'][class],
+  :root [class*='transition-appear-active'][class] {
+    transition: none !important;
+    animation: none !important;
+  }
+
+  /* The pulses carry no information of their own: the dot's colour and the
+     adjacent label ("live", "awaiting approval", status legend) do. */
+  .live-dot,
+  .activity-dot,
   .approval-dock-dot {
-    animation: none;
+    animation: none !important;
+  }
+
+  /* Keyboard focus must stay instant and visible (no fade-in ring). */
+  :focus-visible {
+    transition: none !important;
   }
 }
