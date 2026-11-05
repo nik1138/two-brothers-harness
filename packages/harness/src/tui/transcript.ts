@@ -21,6 +21,7 @@ import type {
   TuiModel,
   UserBlock,
 } from "./model.ts";
+import { renderMarkdown } from "./markdown.ts";
 import { clipStyled, wrapDisplay } from "./screen.ts";
 import { plainTheme, type Theme, type ThemeToken } from "./theme.ts";
 
@@ -117,9 +118,11 @@ function decisionRows(block: DecisionBlock): ContentRow[] {
   return rows;
 }
 
-function envelopeRows(block: EnvelopeBlock): ContentRow[] {
+function envelopeRows(block: EnvelopeBlock, width: number): ContentRow[] {
   const tone: ThemeToken = block.role === "junior" ? "junior" : "senior";
-  const rows: ContentRow[] = [{ text: block.text, tone }];
+  // Assistant message bodies are Markdown; every other block kind stays
+  // literal so user intent and tool output are never reinterpreted.
+  const rows: ContentRow[] = renderMarkdown(block.text, width).map((text) => ({ text, tone }));
   if (block.interrupted === true) {
     rows.push({ text: "[interrupted — partial reply]", tone: "warning" });
   }
@@ -141,12 +144,12 @@ function userRows(block: UserBlock): ContentRow[] {
   return [{ text: block.text, tone: "user" }];
 }
 
-function contentRows(block: TuiBlock, options: TranscriptOptions): ContentRow[] {
+function contentRows(block: TuiBlock, options: TranscriptOptions, width: number): ContentRow[] {
   switch (block.kind) {
     case "user":
       return userRows(block);
     case "envelope":
-      return envelopeRows(block);
+      return envelopeRows(block, width);
     case "decision":
       return decisionRows(block);
     case "tool":
@@ -195,7 +198,7 @@ export function renderBlock(block: TuiBlock, options: TranscriptOptions): string
   const compact = width <= TRANSCRIPT_LABEL_WIDTH + 8;
 
   const contentWidth = compact ? width : Math.max(1, width - TRANSCRIPT_LABEL_WIDTH);
-  let rows = visualRows(contentRows(block, options), contentWidth);
+  let rows = visualRows(contentRows(block, options, contentWidth), contentWidth);
   if (block.kind === "tool" && options.expandedTools === true) {
     rows = boundToolRows(rows, options);
   }

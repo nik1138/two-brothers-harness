@@ -20,6 +20,7 @@ import {
   type EnvelopeBlock,
   type ToolBlock,
 } from "../src/tui/model.ts";
+import { renderMarkdown } from "../src/tui/markdown.ts";
 import {
   boxContentWidth,
   composeScreen,
@@ -38,6 +39,7 @@ import {
 } from "../src/tui/theme.ts";
 import {
   labelForBlock,
+  renderBlock,
   renderTranscript,
 } from "../src/tui/transcript.ts";
 
@@ -275,4 +277,131 @@ test("transcript: expanded tools bound only the view, not model detail", () => {
   const rows = renderTranscript(model, { width: 40, expandedTools: true, maxToolRows: 4 });
   assert.ok(rows.join("\n").includes("more lines"));
   assert.ok((model.blocks[0] as ToolBlock).result!.length > 100);
+});
+
+test("markdown: headings carry one textual marker per supported level", () => {
+  assert.deepEqual(renderMarkdown("# One\n## Two\n### Three", 40), ["# One", "## Two", "### Three"]);
+  assert.deepEqual(renderMarkdown("#### Deep stays literal", 40), ["#### Deep stays literal"]);
+  const wrapped = renderMarkdown("### " + "word ".repeat(20), 16);
+  assert.ok(wrapped[0]!.startsWith("### "));
+  assert.ok(wrapped.length > 1, "long headings wrap");
+  for (const row of wrapped) assert.ok(displayWidth(row) <= 16, JSON.stringify(row));
+});
+
+test("markdown: bold, italic and inline code render without their markers", () => {
+  assert.equal(
+    renderMarkdown("Use **bold**, *italic* and `code` here.", 60).join("\n"),
+    "Use bold, italic and code here.",
+  );
+  assert.equal(renderMarkdown("**bold *italic* bold**", 60).join("\n"), "bold italic bold");
+  assert.equal(renderMarkdown("a `literal **star**` span", 60)[0], "a literal **star** span");
+});
+
+test("markdown: bullets and numbered items nest one level with a hanging indent", () => {
+  assert.deepEqual(renderMarkdown("- one\n  - nested\n1. first\n  2. second", 40), [
+    "- one",
+    "  - nested",
+    "1. first",
+    "  2. second",
+  ]);
+  const wrapped = renderMarkdown("- " + "alpha ".repeat(20) + "\n  - " + "beta ".repeat(20), 20);
+  assert.ok(wrapped[0]!.startsWith("- "));
+  assert.ok(wrapped.some((row) => row.startsWith("  - ")));
+  for (const row of wrapped) assert.ok(displayWidth(row) <= 20, JSON.stringify(row));
+});
+
+test("markdown: blockquotes get a two-column gutter and stay width-safe", () => {
+  const rows = renderMarkdown("> quoted text that has to wrap", 16);
+  assert.ok(rows[0]!.startsWith("│ "));
+  for (const row of rows) {
+    assert.ok(row.startsWith("│ ") || row.startsWith("  "), JSON.stringify(row));
+    assert.ok(displayWidth(row) <= 16, JSON.stringify(row));
+  }
+  assert.doesNotThrow(() => renderMarkdown("> narrow", 2));
+});
+
+test("markdown: --- is a rule capped at the width", () => {
+  assert.deepEqual(renderMarkdown("---", 10), ["──────────"]);
+  assert.deepEqual(renderMarkdown("***", 4), ["────"]);
+});
+
+test("markdown: fenced code keeps its language label and code rows verbatim", () => {
+  assert.deepEqual(renderMarkdown("```ts\nconst x = 1;\n```", 40), ["┌─ ts", "const x = 1;", "└─"]);
+  assert.deepEqual(renderMarkdown("```\nplain code\n```", 40), ["┌─", "plain code", "└─"]);
+});
+
+test("markdown: an unclosed fence still renders its code (streaming drafts)", () => {
+  assert.deepEqual(renderMarkdown("```js\nconst y = 2;", 40), ["┌─ js", "const y = 2;"]);
+  assert.deepEqual(renderMarkdown("```", 20), ["┌─"]);
+});
+
+test("markdown: unclosed inline markers stay literal and never throw", () => {
+  for (const source of ["**a", "*a", "`a", "[a](b", "unclosed **bold and `tick"]) {
+    assert.doesNotThrow(() => renderMarkdown(source, 20));
+  }
+  assert.equal(
+    renderMarkdown("unclosed **bold and `tick and *star", 80)[0],
+    "unclosed **bold and `tick and *star",
+  );
+});
+
+test("markdown: links render as text plus the URL", () => {
+  assert.equal(
+    renderMarkdown("See [docs](https://example.com/a) now.", 80)[0],
+    "See docs (https://example.com/a) now.",
+  );
+  assert.equal(renderMarkdown("[only-label]()", 40)[0], "only-label");
+});
+
+test("markdown: long code rows clip with an explicit marker instead of wrapping", () => {
+  const rows = renderMarkdown("```\nconst longLine = 'aaaaaaaaaaaaaaaaaaaa';\n```", 12);
+  assert.deepEqual(rows, ["┌─", "const longL…", "└─"]);
+  const long = renderMarkdown("word ".repeat(80), 12);
+  for (const row of long) assert.ok(displayWidth(row) <= 12, JSON.stringify(row));
+});
+
+test("markdown: a 200 KB body renders in under two seconds and stays width-safe", () => {
+  const section = [
+    "## Build report",
+    "",
+    "The build **passed** with *one* warning and `npm test` green.",
+    "",
+    "- first item",
+    "  - nested with [a link](https://example.com/path)",
+    "1. numbered",
+    "",
+    "> quoted guidance that wraps in most widths",
+    "",
+    "```ts",
+    "const answer = 42;",
+    "```",
+    "",
+  ].join("\n");
+  const source = section.repeat(Math.ceil(200_000 / section.length));
+  assert.ok(source.length >= 200_000);
+  const started = Date.now();
+  const rows = renderMarkdown(source, 100);
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 2_000, `${source.length} chars took ${elapsed} ms`);
+  assert.ok(rows.length > 1_000);
+  for (const row of rows) assert.ok(displayWidth(row) <= 100, JSON.stringify(row));
+});
+
+test("transcript: assistant bodies are markdown while user and tool rows stay literal", () => {
+  let model = addUserBlock(createTuiModel(), "# not a heading");
+  model = commitEnvelope(
+    model,
+    message("m-md", "senior", "message", { text: "# Heading\n\n- **bold** item\n\n```ts\nx\n```" }),
+  );
+  model = addToolCall(model, { role: "junior", tool: "shell", args: "# not a heading" });
+  model = addToolResult(model, { role: "junior", tool: "shell", status: "ok", result: "- not a list" });
+  const rows = renderBlock(model.blocks[1]!, { width: 60, theme: plainTheme });
+  assert.ok(rows[0]!.startsWith("SENIOR  # Heading"), rows[0]);
+  assert.ok(rows.join("\n").includes("- bold item"));
+  assert.ok(rows.join("\n").includes("┌─ ts"));
+  const all = renderTranscript(model, { width: 60, theme: plainTheme, expandedTools: true }).join("\n");
+  assert.ok(all.includes("# not a heading"), "user text is not reinterpreted");
+  assert.ok(all.includes("- not a list"), "tool text is not reinterpreted");
+  const raw = renderBlock(model.blocks[1]!, { width: 60, theme: plainTheme });
+  for (const row of raw) assert.ok(!row.includes(ESC), "markdown output is plain text");
 });
