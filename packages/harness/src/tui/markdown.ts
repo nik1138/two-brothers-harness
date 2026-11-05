@@ -14,6 +14,16 @@
  * syntax: `` `code` ``, `**bold**`, `*italic*` and `[text](url)`, which is
  * rendered as `text (url)`. Everything else passes through as text.
  *
+ * Diff-aware code: a fence labelled `diff` or `patch`, and a plain (unfenced)
+ * unified diff (`--- a/x`, `+++ b/x`, `@@ -1,2 +1,2 @@`), renders with a
+ * classification marker in front of every row — `- ` for removed lines, `+ `
+ * for added lines, `@@ ` for hunk headers — while the source row itself stays
+ * intact (`-old` becomes `- -old`). A marked row therefore always repeats its
+ * sign, which no ordinary Markdown row does, so the transcript can color
+ * added/removed rows from the leading marker pair alone. A plain diff is
+ * rendered like a `diff` fenced block (`┌─ diff` … `└─`) and its rows are
+ * clipped, never Markdown-parsed or wrapped.
+ *
  * Streaming-safe: an unclosed fence renders as code, and an unclosed inline
  * marker is emitted literally — parsing never throws. The parser walks the
  * source once per line: line splitting, inline scanning and wrapping are all
@@ -44,6 +54,25 @@ const FENCE_CLOSE = "└─";
 /** Ellipsis used when a code row cannot fit the available columns. */
 const CLIP_MARKER = "…";
 
+/** Info-string languages rendered as a unified diff (marker-classified rows). */
+const DIFF_LANGUAGES: ReadonlySet<string> = new Set(["diff", "patch"]);
+
+/** `--- a/x` old-file header of a plain unified diff. */
+const DIFF_OLD_HEADER = /^\s{0,3}---\s+\S/;
+
+/** `+++ b/x` new-file header of a plain unified diff. */
+const DIFF_NEW_HEADER = /^\s{0,3}\+\+\+\s+\S/;
+
+/** `@@ -1,2 +1,2 @@` hunk header of a plain unified diff. */
+const DIFF_HUNK_HEADER = /^\s{0,3}@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@/;
+
+/**
+ * A row that belongs to a unified diff body: metadata (`diff --git`, `index`,
+ * `---`/`+++`), a hunk header, a no-newline note, or a `+`/`-`/context row.
+ * A blank line or ordinary prose ends the run.
+ */
+const DIFF_BODY_LINE = /^\s{0,3}(?:diff |index |--- |\+\+\+ |@@ |\\ |[ +\-])/;
+
 interface LinkSpan {
   /** Index of the `]` closing the label. */
   labelEnd: number;
@@ -53,6 +82,47 @@ interface LinkSpan {
 
 function columnLimit(width: number): number {
   return Number.isFinite(width) && width >= 1 ? Math.floor(width) : 0;
+}
+
+/** True when a fence info string names a unified-diff language. */
+function isDiffLanguage(info: string): boolean {
+  const language = (info.split(/\s+/)[0] ?? "").toLowerCase();
+  return DIFF_LANGUAGES.has(language);
+}
+
+/**
+ * Prefix one unified-diff row with its classification marker. The source row
+ * is kept intact, so a removed `-old` renders as `- -old`, an added `+new` as
+ * `+ +new` and a `@@ -1 +1 @@` hunk as `@@ @@ -1 +1 @@`. The doubled sign is
+ * the point: it makes marked rows distinguishable from a Markdown bullet
+ * (`- item`) after the rows have been flattened into plain text.
+ */
+function markDiffRow(line: string): string {
+  if (/^\s{0,3}@@/.test(line)) return `@@ ${line}`;
+  if (/^\s{0,3}\+/.test(line)) return `+ ${line}`;
+  if (/^\s{0,3}-/.test(line)) return `- ${line}`;
+  return line;
+}
+
+/** True when `lines[index]` starts a plain (unfenced) unified diff. */
+function startsPlainDiff(lines: readonly string[], index: number): boolean {
+  const first = lines[index] ?? "";
+  if (DIFF_OLD_HEADER.test(first) && DIFF_NEW_HEADER.test(lines[index + 1] ?? "")) {
+    return true;
+  }
+  return DIFF_HUNK_HEADER.test(first);
+}
+
+/**
+ * Rows of the plain diff that starts at `index`, or 0 when this is not one.
+ * A run stops at a blank line or the first non-diff row, so following
+ * Markdown prose is parsed normally.
+ */
+function plainDiffLength(lines: readonly string[], index: number): number {
+  if (!startsPlainDiff(lines, index)) return 0;
+  let end = index;
+  while (end < lines.length && DIFF_BODY_LINE.test(lines[end] ?? "")) end += 1;
+  return end - index;
 }
 
 /**
@@ -70,14 +140,15 @@ export function renderMarkdown(text: string, width: number): string[] {
   // that never closes is still rendered as code (streaming drafts).
   let fenceInfo: string | null = null;
 
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
     if (fenceInfo !== null) {
       if (/^\s{0,3}```+\s*$/.test(line)) {
         out.push(clipLine(FENCE_CLOSE, columns));
         fenceInfo = null;
         continue;
       }
-      out.push(clipLine(line, columns));
+      out.push(clipLine(isDiffLanguage(fenceInfo) ? markDiffRow(line) : line, columns));
       continue;
     }
 
@@ -91,6 +162,17 @@ export function renderMarkdown(text: string, width: number): string[] {
       const info = (fence[1] ?? "").trim();
       out.push(clipLine(info === "" ? FENCE_OPEN : `${FENCE_OPEN} ${info}`, columns));
       fenceInfo = info;
+      continue;
+    }
+
+    const diffLength = plainDiffLength(lines, index);
+    if (diffLength > 0) {
+      out.push(clipLine(`${FENCE_OPEN} diff`, columns));
+      for (let offset = 0; offset < diffLength; offset += 1) {
+        out.push(clipLine(markDiffRow(lines[index + offset] ?? ""), columns));
+      }
+      out.push(clipLine(FENCE_CLOSE, columns));
+      index += diffLength - 1;
       continue;
     }
 

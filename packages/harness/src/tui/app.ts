@@ -83,6 +83,12 @@ import {
   type TuiModel,
 } from "./model.ts";
 import {
+  newestToolBlock,
+  toggleNewestToolExpansion,
+  withToolExpansion,
+  type ToolExpansionKeys,
+} from "./transcript.ts";
+import {
   type TuiLine,
   type TuiLineKind,
 } from "./render.ts";
@@ -860,6 +866,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
 
   let mode: Config["mode"] = sessionCfg.mode;
   let model: TuiModel = createTuiModel();
+  // Tool-result expansion is per row and keyed by call id (or block id), so
+  // it survives streaming updates and never depends on the row's position.
+  let toolExpansion: ToolExpansionKeys = new Set<string>();
   // Loaded exactly once per TUI run; later submissions are appended here and
   // saved atomically. A malformed/unreadable file yields [] without noise.
   const envHistoryFile = process.env[TUI_HISTORY_FILE_ENV];
@@ -960,6 +969,19 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     render();
   };
 
+  /** Ctrl+T: show every line of the newest tool result, or collapse it. */
+  const toggleToolExpansion = (): void => {
+    const newest = newestToolBlock(model);
+    const result = toggleNewestToolExpansion(model, toolExpansion);
+    toolExpansion = result.keys;
+    if (newest === undefined) {
+      pushToast("info", "no tool result yet — expansion applies to the newest tool call");
+    } else {
+      pushToast("info", `${result.expanded ? "expanded" : "collapsed"} ${newest.tool} output`);
+    }
+    render();
+  };
+
   const statusState = (): StatusBarState => ({
     mode,
     seniorModel: sessionCfg.seniorModel,
@@ -1044,7 +1066,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     const frame = screenView({
       width: size.columns,
       height: size.rows,
-      model,
+      model: withToolExpansion(model, toolExpansion),
       editor,
       status: statusState(),
       theme,
@@ -1369,6 +1391,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
               context = openTuiContext({ ...sessionCfg, sessionFile, resume: true }, options.io);
               sessionCfg = { ...sessionCfg, sessionFile, resume: true };
               model = createTuiModel();
+              toolExpansion = new Set<string>();
               // A session switch resets the draft but not durable prompt
               // history or the in-memory stash slot.
               editor = seedEditorHistory(createEditor(), editor.history);
@@ -1447,6 +1470,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       }
       case "exit":
         requestQuit();
+        break;
+      case "tool-expand":
+        toggleToolExpansion();
         break;
       case "stash":
         toggleStash();
@@ -1727,6 +1753,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         return true;
       case "stash":
         toggleStash();
+        return true;
+      case "tool-expand":
+        toggleToolExpansion();
         return true;
       case "history-search":
         openHistorySearchOverlay();

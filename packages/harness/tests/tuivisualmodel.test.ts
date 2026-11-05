@@ -22,6 +22,16 @@ import {
 } from "../src/tui/model.ts";
 import { renderMarkdown } from "../src/tui/markdown.ts";
 import {
+  TUI_COMMANDS,
+  documentEntries,
+  findCommand,
+  formatKeys,
+  matchChord,
+  paletteEntries,
+  resolveKey,
+  tuiHelpLines,
+} from "../src/tui/keymap.ts";
+import {
   boxContentWidth,
   composeScreen,
   renderBox,
@@ -39,8 +49,12 @@ import {
 } from "../src/tui/theme.ts";
 import {
   labelForBlock,
+  newestToolBlock,
   renderBlock,
   renderTranscript,
+  toggleNewestToolExpansion,
+  toolExpansionKey,
+  withToolExpansion,
 } from "../src/tui/transcript.ts";
 
 const AT = "2026-11-04T00:00:00Z";
@@ -404,4 +418,236 @@ test("transcript: assistant bodies are markdown while user and tool rows stay li
   assert.ok(all.includes("- not a list"), "tool text is not reinterpreted");
   const raw = renderBlock(model.blocks[1]!, { width: 60, theme: plainTheme });
   for (const row of raw) assert.ok(!row.includes(ESC), "markdown output is plain text");
+});
+
+// --------------------------------------------------------------------------- //
+// diff styling
+// --------------------------------------------------------------------------- //
+
+function numberedLines(prefix: string, count: number): string {
+  return Array.from({ length: count }, (_, index) => `${prefix}${index}`).join("\n");
+}
+
+test("markdown: diff and patch fences mark removed, added and hunk rows", () => {
+  const rows = renderMarkdown(
+    "```diff\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n-old\n+new\n context\n```",
+    60,
+  );
+  assert.deepEqual(rows, [
+    "┌─ diff",
+    "- --- a/x",
+    "+ +++ b/x",
+    "@@ @@ -1,2 +1,2 @@",
+    "- -old",
+    "+ +new",
+    " context",
+    "└─",
+  ]);
+  assert.deepEqual(renderMarkdown("```patch\n@@ -1 +1 @@\n-a\n+b\n```", 40), [
+    "┌─ patch",
+    "@@ @@ -1 +1 @@",
+    "- -a",
+    "+ +b",
+    "└─",
+  ]);
+  for (const width of [4, 8, 13, 40]) {
+    for (const row of renderMarkdown(
+      "```diff\n--- a/very/long/path\n+added line that is long\n```",
+      width,
+    )) {
+      assert.ok(displayWidth(row) <= width, `${JSON.stringify(row)} exceeds ${width}`);
+    }
+  }
+});
+
+test("markdown: a plain unified diff renders as marked code, not Markdown", () => {
+  const rows = renderMarkdown("--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n-old\n+new", 60);
+  assert.deepEqual(rows, [
+    "┌─ diff",
+    "- --- a/x",
+    "+ +++ b/x",
+    "@@ @@ -1,2 +1,2 @@",
+    "- -old",
+    "+ +new",
+    "└─",
+  ]);
+  // A lone `---` rule followed by prose is still a rule, never a diff.
+  const rule = renderMarkdown("---\ntitle: not a diff", 40);
+  assert.ok(!rule.some((row) => row.startsWith("┌─")), rule.join("\n"));
+  assert.ok(/^─+$/.test(rule[0]!), rule[0]);
+  // The run ends at the blank line, so following Markdown is parsed again.
+  const mixed = renderMarkdown(
+    "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n\n- **bold** item",
+    60,
+  );
+  assert.ok(mixed.includes("┌─ diff"));
+  assert.ok(mixed.includes("- bold item"));
+});
+
+test("markdown: non-diff fences keep their rows verbatim", () => {
+  assert.deepEqual(
+    renderMarkdown("```ts\n- removed-looking\n+ added-looking\n@@ hunk?\n```", 40),
+    ["┌─ ts", "- removed-looking", "+ added-looking", "@@ hunk?", "└─"],
+  );
+  assert.equal(renderMarkdown("```text\n--- a/x\n```", 40)[1], "--- a/x");
+  assert.equal(renderMarkdown("```\n-old\n+new\n```", 40)[1], "-old");
+});
+
+// --------------------------------------------------------------------------- //
+// tool-result expansion
+// --------------------------------------------------------------------------- //
+
+test("transcript: collapsed tool rows show six lines plus a marker, expanded rows all lines", () => {
+  let model = addToolCall(createTuiModel(), { role: "junior", tool: "read", callId: "c1" });
+  model = addToolResult(model, {
+    role: "junior",
+    tool: "read",
+    callId: "c1",
+    status: "ok",
+    result: numberedLines("line ", 12),
+  });
+  const block = model.blocks[0]!;
+  const rows = renderBlock(block, { width: 80, theme: plainTheme });
+  assert.equal(rows.length, 8, rows.join("\n"));
+  assert.ok(rows.at(-1)!.includes("… +6 more lines"), rows.at(-1));
+  const joined = rows.join("\n");
+  assert.ok(joined.includes("result: line 0"));
+  assert.ok(joined.includes("line 5"));
+  assert.ok(!joined.includes("line 6"));
+
+  // The preview cap follows maxToolRows and never wraps the hidden tail.
+  const narrow = renderBlock(block, { width: 80, theme: plainTheme, maxToolRows: 2 });
+  assert.ok(narrow.join("\n").includes("… +10 more lines"));
+
+  // Expanding the row shows every line and the call detail.
+  const keys = toggleNewestToolExpansion(model, new Set()).keys;
+  const expanded = renderBlock(withToolExpansion(model, keys).blocks[0]!, {
+    width: 80,
+    theme: plainTheme,
+  });
+  const all = expanded.join("\n");
+  assert.ok(all.includes("call: c1"));
+  assert.ok(all.includes("line 11"));
+  assert.ok(!all.includes("more lines"));
+});
+
+test("transcript: tool expansion is per call id, isolated and survives unrelated updates", () => {
+  let model = addToolCall(createTuiModel(), { role: "junior", tool: "shell", callId: "a" });
+  model = addToolCall(model, { role: "junior", tool: "shell", callId: "b" });
+  model = addToolResult(model, {
+    role: "junior",
+    tool: "shell",
+    callId: "a",
+    status: "ok",
+    result: numberedLines("a", 8),
+  });
+  model = addToolResult(model, {
+    role: "junior",
+    tool: "shell",
+    callId: "b",
+    status: "ok",
+    result: numberedLines("b", 8),
+  });
+
+  const none = toggleNewestToolExpansion(createTuiModel(), new Set());
+  assert.equal(none.key, null);
+  assert.equal(none.expanded, false);
+
+  assert.equal(toolExpansionKey(model.blocks[0] as ToolBlock), "call:a");
+  assert.equal(newestToolBlock(model)?.callId, "b");
+  assert.equal(withToolExpansion(model, new Set()), model, "empty keys keep model identity");
+
+  const first = toggleNewestToolExpansion(model, new Set());
+  assert.equal(first.key, "call:b");
+  assert.equal(first.expanded, true);
+  const keys = first.keys;
+
+  const expanded = withToolExpansion(model, keys);
+  const older = renderBlock(expanded.blocks[0]!, { width: 80, theme: plainTheme }).join("\n");
+  const newest = renderBlock(expanded.blocks[1]!, { width: 80, theme: plainTheme }).join("\n");
+  assert.ok(newest.includes("b7") && !newest.includes("more lines"), newest);
+  assert.ok(older.includes("more lines") && !older.includes("a7"), older);
+
+  // A streaming reply from another role must not reset the keyed row.
+  const streamed = appendEnvelopeDelta(model, { role: "senior", delta: "working" });
+  const after = withToolExpansion(streamed, keys);
+  assert.ok(
+    renderBlock(after.blocks[1]!, { width: 80, theme: plainTheme }).join("\n").includes("b7"),
+  );
+
+  const second = toggleNewestToolExpansion(model, keys);
+  assert.equal(second.expanded, false);
+  assert.equal(second.keys.has("call:b"), false);
+  assert.equal(second.keys.has("call:a"), false);
+
+  // A row without a call id falls back to its stable block id.
+  let anonymous = addToolCall(createTuiModel(), { role: "senior", tool: "echo" });
+  assert.equal(toolExpansionKey(anonymous.blocks[0] as ToolBlock), "block:b1");
+  anonymous = addToolResult(anonymous, {
+    role: "senior",
+    tool: "echo",
+    status: "ok",
+    result: numberedLines("x", 8),
+  });
+  const fallback = toggleNewestToolExpansion(anonymous, new Set());
+  assert.equal(fallback.key, "block:b1");
+  assert.ok(
+    renderBlock(withToolExpansion(anonymous, fallback.keys).blocks[0]!, { width: 80, theme: plainTheme })
+      .join("\n")
+      .includes("x7"),
+  );
+});
+
+test("transcript: expanded tool detail stays width-safe at every width", () => {
+  let model = addToolCall(createTuiModel(), {
+    role: "senior",
+    tool: "read",
+    callId: "wide",
+    args: "x".repeat(200),
+  });
+  model = addToolResult(model, {
+    role: "senior",
+    tool: "read",
+    callId: "wide",
+    status: "ok",
+    result: "終".repeat(40) + "\n" + "word ".repeat(60),
+  });
+  const keys = toggleNewestToolExpansion(model, new Set()).keys;
+  const expanded = withToolExpansion(model, keys);
+  for (const width of [1, 2, 4, 9, 16, 40, 80]) {
+    for (const row of renderTranscript(expanded, { width, theme: plainTheme })) {
+      assert.ok(styledWidth(row) <= width, `${JSON.stringify(row)} exceeds ${width}`);
+    }
+  }
+  assert.ok(
+    renderTranscript(expanded, { width: 40, theme: plainTheme }).join("\n").includes("word word"),
+  );
+});
+
+test("keymap: Ctrl+T toggles tool expansion and conflicts with no other binding", () => {
+  const command = findCommand(TUI_COMMANDS, "tool-expand");
+  assert.ok(command);
+  assert.equal(command.group, "Transcript");
+  assert.equal(formatKeys(command), "Ctrl+T");
+
+  const key = { name: "t", ctrl: true, raw: "\u0014" };
+  assert.equal(resolveKey(TUI_COMMANDS, key)?.command.id, "tool-expand");
+  const conflicts = TUI_COMMANDS.filter(
+    (candidate) =>
+      candidate.id !== "tool-expand" &&
+      (candidate.keys ?? []).some((chord) => matchChord(chord, key)),
+  );
+  assert.deepEqual(conflicts.map((candidate) => candidate.id), []);
+
+  assert.ok(paletteEntries(TUI_COMMANDS).some((entry) => entry.id === "tool-expand"));
+  assert.ok(documentEntries(TUI_COMMANDS).some((entry) => entry.id === "tool-expand"));
+  assert.match(tuiHelpLines(TUI_COMMANDS).join("\n"), /Ctrl\+T\s+Show every line/);
+  assert.ok(
+    !TUI_COMMANDS.some((candidate) =>
+      (candidate.keys ?? []).some(
+        (chord) => chord.ctrl === true && /^[sq]$/i.test(chord.name),
+      ),
+    ),
+    "Ctrl+S / Ctrl+Q (XON/XOFF) stay unbound",
+  );
 });

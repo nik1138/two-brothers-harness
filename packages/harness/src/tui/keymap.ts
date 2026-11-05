@@ -212,6 +212,16 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
     palette: false,
   },
   {
+    id: "tool-expand",
+    title: "Expand tool result",
+    description: "Show every line of the newest tool result, or collapse it again.",
+    group: "Transcript",
+    // Ctrl+T: no other binding, one control byte, and outside the terminal's
+    // XON/XOFF pair (Ctrl+Q / Ctrl+S), so it can never pause output.
+    keys: [{ name: "t", ctrl: true }],
+    when: "app",
+  },
+  {
     id: "list-move",
     title: "Move selection",
     description: "Move the highlighted row in a palette, help or picker.",
