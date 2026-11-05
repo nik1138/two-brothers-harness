@@ -30,7 +30,7 @@ export function saveThemeMode(mode: ThemeMode): void {
   try {
     window.localStorage.setItem(STORAGE_KEY, mode)
   } catch {
-    // the toggle still works for this page view; only persistence is lost
+    // the control still works for this page view; only persistence is lost
   }
 }
 
@@ -44,21 +44,4 @@ export function applyThemeAttribute(mode: ThemeMode, isDark: boolean): void {
   const root = document.documentElement
   if (mode === 'system') root.removeAttribute('data-theme')
   else root.setAttribute('data-theme', isDark ? 'dark' : 'light')
-}
-
-/** Cycle order used by the header toggle: light → dark → system → light. */
-export function nextThemeMode(mode: ThemeMode): ThemeMode {
-  const i = MODES.indexOf(mode)
-  return MODES[(i + 1) % MODES.length]
-}
-
-export function themeModeLabel(mode: ThemeMode): string {
-  return mode === 'system' ? 'system' : mode
-}
-
-/** Header button glyph: sun / moon / half circle for the system follow. */
-export function themeModeGlyph(mode: ThemeMode): string {
-  if (mode === 'light') return '☀'
-  if (mode === 'dark') return '☾'
-  return '◐'
 }

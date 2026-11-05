@@ -21,10 +21,11 @@ The backend is the TypeScript server in `packages/harness`:
 ## Layout
 
 - `src/App.vue` — shell: session sidebar (workspace-grouped sessions,
-  bottom-left Settings entry, mobile drawer below a breakpoint), chat,
-  composer, run follow/stop, dialogs
+  bottom-left Settings entry and theme selector, mobile drawer below a
+  breakpoint), chat, composer, run follow/stop, dialogs
 - `src/components/` — `Sidebar`, `SessionGroup`/`SessionRow` (workspace
-  groups), `SidebarFooter` (bottom-left Settings), `ChatView`, `Composer`,
+  groups), `SidebarFooter` (bottom-left Settings plus a Light/Dark/System
+  segmented theme selector), `ChatView`, `Composer`,
   `ToolActivity`, `ApprovalCard` (docked approvals), `DiffView`/`DiffReview`
   (changed-file review), `CommandResult`, `PromptAudit`, `ContextMeter`,
   `UsageFooter`, `SettingsDialog` (Senior/Junior roles + provider presets,

@@ -4,11 +4,9 @@ import { NConfigProvider, NMessageProvider, darkTheme, lightTheme } from 'naive-
 import { darkThemeOverrides, themeOverrides } from './theme'
 import {
   applyThemeAttribute,
-  nextThemeMode,
   readThemeMode,
   resolveDark,
   saveThemeMode,
-  themeModeLabel,
 } from './themeMode'
 import type { ThemeMode } from './themeMode'
 import {
@@ -835,17 +833,15 @@ function onDrawerEscape(e: KeyboardEvent) {
 }
 
 // -- theme mode ---------------------------------------------------------------
-// The OS scheme drives the design tokens in style.css by default. The header
-// toggle pins light/dark by writing `data-theme` on <html>, or returns to
-// 'system' (attribute removed, media query authoritative); the choice is
-// persisted in localStorage, and naive-ui's theme follows `isDark`.
+// The OS scheme drives the design tokens in style.css by default. The footer
+// selector and the Settings → Appearance radio group pin light/dark by writing
+// `data-theme` on <html>, or return to 'system' (attribute removed, media query
+// authoritative); the choice is persisted in localStorage, and naive-ui's theme
+// follows `isDark`.
 const schemeQuery = window.matchMedia('(prefers-color-scheme: dark)')
 const systemDark = ref(schemeQuery.matches)
 const themeMode = ref<ThemeMode>(readThemeMode())
 const isDark = computed(() => resolveDark(themeMode.value, systemDark.value))
-const themeModeText = computed(
-  () => `Theme: ${themeModeLabel(themeMode.value)} — click to switch`,
-)
 
 function syncTheme() {
   applyThemeAttribute(themeMode.value, isDark.value)
@@ -855,12 +851,7 @@ function onSchemeChange(e: MediaQueryListEvent) {
   systemDark.value = e.matches
 }
 
-function cycleTheme() {
-  themeMode.value = nextThemeMode(themeMode.value)
-  saveThemeMode(themeMode.value)
-}
-
-/** Settings Appearance section changed the theme; keep shell + naive-ui in sync. */
+/** Footer selector or Settings Appearance changed the theme; keep shell + naive-ui in sync. */
 function onThemeChange(mode: ThemeMode) {
   themeMode.value = mode
   saveThemeMode(mode)
@@ -914,9 +905,9 @@ onUnmounted(() => {
       @new-session="newSessionOpen = true"
       @filter-workspace="workspaceFilter = $event"
       @deleted="onSessionDeleted"
-      :theme-label="themeModeText"
+      :theme-mode="themeMode"
       @open-settings="settingsOpen = true"
-      @toggle-theme="cycleTheme"
+      @theme-change="onThemeChange"
     />
     <button
       v-else

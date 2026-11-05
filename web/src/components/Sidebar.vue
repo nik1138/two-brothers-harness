@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { NScrollbar } from 'naive-ui'
 import { sessionTitle } from '../chat'
+import type { ThemeMode } from '../themeMode'
 import type { SessionInfo, Workspace } from '../types'
 import AppIcon from './AppIcon.vue'
 import SessionGroup from './SessionGroup.vue'
@@ -17,8 +18,8 @@ const props = defineProps<{
   live: string | null
   /** All sessions with a live run (parallel runs); takes precedence over `live` when set. */
   liveSessions?: string[]
-  /** Footer theme control label, e.g. "Theme: dark — click to switch". */
-  themeLabel?: string
+  /** Selected theme preference shown by the footer's three-way selector. */
+  themeMode: ThemeMode
 }>()
 
 const emit = defineEmits<{
@@ -32,8 +33,8 @@ const emit = defineEmits<{
   deleted: [name: string]
   /** Footer: open the settings dialog. */
   openSettings: []
-  /** Footer: cycle the light/dark/system theme. */
-  toggleTheme: []
+  /** Footer: the user picked a theme preference. */
+  themeChange: [mode: ThemeMode]
 }>()
 
 /** Sessions rendered per group before "Show N more". */
@@ -414,9 +415,9 @@ onUnmounted(() => {
     </n-scrollbar>
 
     <SidebarFooter
-      :theme-label="themeLabel"
+      :theme-mode="themeMode"
       @open-settings="emit('openSettings')"
-      @toggle-theme="emit('toggleTheme')"
+      @theme-change="emit('themeChange', $event)"
     />
   </nav>
 </template>
