@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { NScrollbar } from 'naive-ui'
 import { sessionTitle } from '../chat'
+import type { SessionStatusView } from '../sessionStatus'
 import type { ThemeMode } from '../themeMode'
 import type { SessionInfo, Workspace } from '../types'
 import AppIcon from './AppIcon.vue'
@@ -18,6 +19,8 @@ const props = defineProps<{
   live: string | null
   /** All sessions with a live run (parallel runs); takes precedence over `live` when set. */
   liveSessions?: string[]
+  /** Derived per-session row status, keyed by session name (App owns the derivation). */
+  statuses?: Record<string, SessionStatusView>
   /** Selected theme preference shown by the footer's three-way selector. */
   themeMode: ThemeMode
 }>()
@@ -58,6 +61,14 @@ function titleOf(s: SessionInfo): string {
 const liveNames = computed(() =>
   props.liveSessions ?? (props.live ? [props.live] : []),
 )
+
+/** Compact legend for the row dots; `read` intentionally has none. */
+const STATUS_LEGEND = [
+  { label: 'live', tone: 'ok', title: 'A run is working in this session.' },
+  { label: 'waiting', tone: 'warning', title: 'The run is paused until you allow or deny.' },
+  { label: 'failed', tone: 'danger', title: 'The last run in this session failed.' },
+  { label: 'new', tone: 'accent', title: 'A run finished since you last opened the session.' },
+] as const
 
 const searching = computed(() => query.value.trim() !== '')
 
@@ -404,6 +415,7 @@ onUnmounted(() => {
             :unassigned="g.unassigned"
             :selected="selected"
             :live-names="liveNames"
+            :statuses="statuses"
             @toggle-collapse="toggleGroup(g.key)"
             @toggle-expand="toggleExpand(g.key)"
             @select="emit('select', $event)"
@@ -413,6 +425,24 @@ onUnmounted(() => {
         </template>
       </div>
     </n-scrollbar>
+
+    <div
+      v-if="sessions.length"
+      class="status-legend"
+      role="group"
+      aria-label="Session status legend"
+    >
+      <span class="status-legend-title">Status</span>
+      <span
+        v-for="item in STATUS_LEGEND"
+        :key="item.label"
+        class="status-legend-item"
+        :title="item.title"
+      >
+        <span class="legend-dot" :class="`tone-${item.tone}`" aria-hidden="true"></span>
+        <span>{{ item.label }}</span>
+      </span>
+    </div>
 
     <SidebarFooter
       :theme-mode="themeMode"
@@ -754,6 +784,54 @@ onUnmounted(() => {
 
 .empty-primary:hover {
   opacity: 0.9;
+}
+
+/* Compact status legend pinned above the footer; muted until needed. */
+.status-legend {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.2rem 0.6rem;
+  padding: 0.35rem var(--sidebar-inline) 0.4rem;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 0.68rem;
+}
+
+.status-legend-title {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.status-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  white-space: nowrap;
+}
+
+.legend-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+}
+
+.legend-dot.tone-ok {
+  background: var(--ok);
+}
+
+.legend-dot.tone-warning {
+  background: var(--warning);
+}
+
+.legend-dot.tone-danger {
+  background: var(--danger);
+}
+
+.legend-dot.tone-accent {
+  background: var(--accent);
 }
 
 @keyframes empty-arrow-nudge {

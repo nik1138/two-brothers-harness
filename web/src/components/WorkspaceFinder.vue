@@ -2,8 +2,9 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
 import { NButton, NInput } from 'naive-ui'
 import type { InputInst } from 'naive-ui'
-import { ApiError, browseFs } from '../api'
-import type { FsEntry } from '../types'
+import { ApiError, browseFs, listWorkspaces } from '../api'
+import { readRecentWorkspaces, recordRecentWorkspace } from '../recents'
+import type { FsEntry, Workspace } from '../types'
 
 /**
  * Folder-finder surface shared by the workspace dialogs: breadcrumbs, an
@@ -68,6 +69,8 @@ const draft = ref('')
 const selectedPath = ref<string | null>(null)
 const activeIndex = ref(-1)
 const name = ref('')
+/** MRU workspaces offered as quick picks above the folder list. */
+const recentWorkspaces = ref<Workspace[]>([])
 /** The path the last listing asked for (`null` = server default), for Retry. */
 const lastRequested = ref<string | null>(null)
 
@@ -206,6 +209,32 @@ function goHome(): void {
   navigate(undefined)
 }
 
+/** Best-effort MRU quick picks: recent ids resolved against the live workspace list. */
+async function loadRecentWorkspaces(): Promise<void> {
+  const ids = readRecentWorkspaces()
+  if (!ids.length) return
+  try {
+    const all = await listWorkspaces()
+    if (!alive) return
+    const byId = new Map(all.map((workspace) => [workspace.id, workspace]))
+    const out: Workspace[] = []
+    for (const id of ids) {
+      const workspace = byId.get(id)
+      if (workspace) out.push(workspace)
+    }
+    recentWorkspaces.value = out
+  } catch {
+    // quick picks are a convenience; the finder works without them
+  }
+}
+
+/** Jump to a recent workspace folder and refresh its MRU position. */
+function openRecent(workspace: Workspace): void {
+  if (props.busy || loading.value) return
+  recordRecentWorkspace(workspace.id)
+  navigate(workspace.path)
+}
+
 async function startPathEdit(): Promise<void> {
   if (props.busy || loading.value) return
   const base = selectedPath.value ?? displayPath.value
@@ -338,11 +367,47 @@ watch(activeIndex, async (index) => {
 onMounted(() => {
   void nextTick(() => listEl.value?.focus())
   void load(props.initialPath || undefined)
+  void loadRecentWorkspaces()
 })
 </script>
 
 <template>
   <div class="wsf" role="group" :aria-label="label" @keydown="onSurfaceKeydown">
+    <section
+      v-if="recentWorkspaces.length"
+      class="wsf-recents"
+      role="group"
+      aria-label="Recent workspaces"
+    >
+      <span class="wsf-recents-label">Recent</span>
+      <div class="wsf-recents-list">
+        <button
+          v-for="workspace in recentWorkspaces"
+          :key="workspace.id"
+          type="button"
+          class="wsf-recent"
+          :class="{ 'is-current': displayPath === workspace.path }"
+          :title="workspace.path"
+          :aria-label="`Recent workspace ${workspace.name} — ${workspace.path}`"
+          :aria-current="displayPath === workspace.path ? 'location' : undefined"
+          :disabled="busy || loading"
+          @click="openRecent(workspace)"
+        >
+          <svg class="wsf-recent-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+            <circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.2" />
+            <path
+              d="M8 4.8V8l2.2 1.3"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.2"
+              stroke-linecap="round"
+            />
+          </svg>
+          <span class="wsf-recent-name">{{ workspace.name }}</span>
+        </button>
+      </div>
+    </section>
+
     <div class="wsf-nav">
       <button
         type="button"
@@ -593,6 +658,86 @@ onMounted(() => {
   flex-direction: column;
   gap: 0.55rem;
   min-height: 0;
+}
+
+/* MRU workspace quick picks: one compact chip row above the breadcrumbs. */
+.wsf-recents {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+  padding: 0 0.15rem;
+}
+
+.wsf-recents-label {
+  flex: none;
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.wsf-recents-list {
+  display: flex;
+  flex: 1;
+  gap: 0.3rem;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.wsf-recents-list::-webkit-scrollbar {
+  display: none;
+}
+
+.wsf-recent {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 0.3rem;
+  max-width: 14rem;
+  height: 1.9rem;
+  padding: 0 0.55rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.wsf-recent:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+}
+
+.wsf-recent.is-current {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.wsf-recent:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.wsf-recent-icon {
+  flex: none;
+  width: 0.85rem;
+  height: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.wsf-recent.is-current .wsf-recent-icon {
+  color: var(--accent);
+}
+
+.wsf-recent-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .wsf-nav {

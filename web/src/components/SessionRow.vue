@@ -3,6 +3,8 @@ import { computed, nextTick, onUnmounted, ref, useId } from 'vue'
 import { useMessage } from 'naive-ui'
 import { ApiError, deleteSession, renameSession } from '../api'
 import { relativeTime, sessionTitle } from '../chat'
+import { deriveSessionStatus } from '../sessionStatus'
+import type { SessionStatusView } from '../sessionStatus'
 import type { SessionInfo } from '../types'
 import AppIcon from './AppIcon.vue'
 
@@ -12,6 +14,8 @@ const props = defineProps<{
   active: boolean
   /** A run is live on this session. */
   live: boolean
+  /** Derived row status; absent falls back to the live-dot-only behavior. */
+  status?: SessionStatusView | null
 }>()
 
 const emit = defineEmits<{
@@ -25,6 +29,17 @@ const emit = defineEmits<{
 const message = useMessage()
 
 const title = computed(() => props.session.title || sessionTitle(props.session.name))
+
+/**
+ * The single row indicator. App derives it from run/live/last-seen state; the
+ * fallback keeps the pre-existing live-dot behavior for other callers.
+ */
+const statusView = computed<SessionStatusView>(
+  () => props.status ?? deriveSessionStatus({ liveStatus: props.live ? 'running' : null }),
+)
+const showStatus = computed(
+  () => statusView.value.kind !== 'read' && statusView.value.label !== '',
+)
 
 /** Menu state. The row shows one overflow button; rename and delete live in it. */
 const menuOpen = ref(false)
@@ -275,9 +290,20 @@ onUnmounted(() => {
         @click="emit('select')"
       >
         <span class="session-title">{{ title }}</span>
-        <span v-if="live" class="session-status" role="img" aria-label="Live run">
-          <span class="live-dot" aria-hidden="true"></span>
-          <span class="live-label" aria-hidden="true">live</span>
+        <span
+          v-if="showStatus"
+          class="session-status"
+          :class="`tone-${statusView.tone}`"
+          role="img"
+          :aria-label="statusView.ariaLabel"
+          :title="statusView.title"
+        >
+          <span
+            class="status-dot"
+            :class="{ 'live-dot': statusView.kind === 'live' }"
+            aria-hidden="true"
+          ></span>
+          <span class="live-label" aria-hidden="true">{{ statusView.label }}</span>
         </span>
         <span v-else class="session-time">{{ relativeTime(session.mtime) }}</span>
       </button>
@@ -427,14 +453,35 @@ onUnmounted(() => {
   font-size: 0.6875rem;
   font-weight: 600;
   line-height: 1;
+  color: var(--text-secondary);
+}
+
+.session-status.tone-ok {
   color: var(--ok);
 }
 
-.live-dot {
+.session-status.tone-warning {
+  color: var(--warning);
+}
+
+.session-status.tone-danger {
+  color: var(--danger);
+}
+
+.session-status.tone-accent {
+  color: var(--accent);
+}
+
+.status-dot {
+  flex: none;
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--ok);
+  background: currentColor;
+}
+
+/* The original live dot keeps its pulse; the other tones stay still. */
+.live-dot {
   animation: session-pulse 1.4s ease-in-out infinite;
 }
 

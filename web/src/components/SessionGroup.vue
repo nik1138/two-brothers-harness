@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import type { SessionStatusView } from '../sessionStatus'
 import type { SessionInfo } from '../types'
 import AppIcon from './AppIcon.vue'
 import SessionRow from './SessionRow.vue'
@@ -25,6 +26,8 @@ const props = defineProps<{
   unassigned?: boolean
   selected: string | null
   liveNames: string[]
+  /** Derived row statuses for the whole sidebar, keyed by session name. */
+  statuses?: Record<string, SessionStatusView>
 }>()
 
 const emit = defineEmits<{
@@ -36,6 +39,10 @@ const emit = defineEmits<{
 }>()
 
 const liveSet = computed(() => new Set(props.liveNames))
+
+function statusFor(name: string): SessionStatusView | null {
+  return props.statuses?.[name] ?? null
+}
 
 const groupLabel = computed(() => {
   const sessions = props.total === 1 ? '1 session' : `${props.total} sessions`
@@ -72,6 +79,7 @@ const groupLabel = computed(() => {
         :session="s"
         :active="s.name === selected"
         :live="liveSet.has(s.name)"
+        :status="statusFor(s.name)"
         @select="emit('select', s.name)"
         @refresh="emit('refresh')"
         @deleted="emit('deleted', $event)"

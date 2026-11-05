@@ -49,7 +49,10 @@ The backend is the TypeScript server in `packages/harness`:
   light/dark/system theme pin (`data-theme` on `<html>`); `src/drafts.ts` —
   per-session unsent composer drafts in a versioned, bounded localStorage blob
   (injectable `StorageLike`, no DOM dependency; `Composer` debounces writes and
-  flushes on session switch/unmount)
+  flushes on session switch/unmount); `src/sessionStatus.ts` — pure sidebar row
+  status derivation (live / waiting / failed / unread / read) plus a bounded,
+  persisted last-seen map for unread dots; `src/recents.ts` — bounded MRU
+  workspace ids in a versioned, fail-soft localStorage list
 - `vite.config.ts` — dev proxy `/api` → `http://127.0.0.1:8600`
 
 ## Rules specific to this tree
@@ -62,8 +65,9 @@ The backend is the TypeScript server in `packages/harness`:
    not global CSS resets.
 2. **`npm run build` must keep passing** (outputs `dist/`). The backend serves
    that build, so a broken build breaks the product, not just CI. `npm test`
-   runs the chat/timeline projection tests, the draft-store tests, and the
-   command-palette build/score/filter tests (plain
+   runs the chat/timeline projection tests, the draft-store tests, the
+   command-palette build/score/filter tests, and the session-status/recents
+   stores (plain
    `node --test` via `tests/register-ts.mjs`); keep it green too — the smoke
    test calls it. Run test files individually (`node --import
    ./tests/register-ts.mjs --test tests/drafts.test.ts`) when the sandbox

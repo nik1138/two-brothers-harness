@@ -18,6 +18,8 @@ const props = defineProps<{
   workspaces: Workspace[]
   /** Pre-selected workspace id (the current sidebar filter), if any. */
   defaultWorkspace: string | null
+  /** MRU workspaces from the shell, newest first; only seeds the initial pick. */
+  recentWorkspaces?: Workspace[]
 }>()
 
 const emit = defineEmits<{
@@ -39,7 +41,21 @@ const workspaceLabelId = `new-session-workspace-${uid}`
 const radioName = `new-session-workspace-${uid}`
 
 const title = ref('')
-const workspaceId = ref<string>(props.defaultWorkspace ?? '')
+/**
+ * Initial pick: an explicit sidebar-filter workspace wins; otherwise fall back
+ * to the newest recent workspace that still exists. Read exactly once — any
+ * later change is the operator's own choice and is never overwritten.
+ */
+function initialWorkspaceId(): string {
+  const exists = (id: string) => props.workspaces.some((workspace) => workspace.id === id)
+  if (props.defaultWorkspace && exists(props.defaultWorkspace)) return props.defaultWorkspace
+  for (const workspace of props.recentWorkspaces ?? []) {
+    if (exists(workspace.id)) return workspace.id
+  }
+  return ''
+}
+
+const workspaceId = ref<string>(initialWorkspaceId())
 const step = ref<'choose' | 'add'>('choose')
 const adding = ref(false)
 const addError = ref<string | null>(null)

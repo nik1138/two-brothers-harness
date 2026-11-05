@@ -16,6 +16,7 @@ import {
   getRun,
   getSession,
   getSessionRuntimeEvents,
+  getSettings,
   listSessions,
   listWorkspaces,
   startRun,
@@ -23,6 +24,7 @@ import {
 } from './api'
 import type {
   Envelope,
+  RoleSettingsView,
   RunEvent,
   RunMode,
   RunProvider,
@@ -30,6 +32,7 @@ import type {
   RunStatus,
   RunUsage,
   SessionInfo,
+  SettingsView,
   Workspace,
 } from './types'
 import { projectEnvelopes, sessionTitle, taskOf } from './chat'
@@ -42,6 +45,20 @@ import {
   runtimeDedupeKey,
 } from './runtime'
 import type { ApprovalItem } from './runtime'
+import {
+  deriveSessionStatus,
+  loadLastSeen,
+  markSessionSeen,
+  pruneLastSeen,
+  saveLastSeen,
+} from './sessionStatus'
+import type { LastSeenMap, SessionStatusView } from './sessionStatus'
+import {
+  pruneRecentWorkspaces,
+  pushRecentWorkspace,
+  readRecentWorkspaces,
+  recordRecentWorkspace,
+} from './recents'
 import Sidebar from './components/Sidebar.vue'
 import ChatView from './components/ChatView.vue'
 import Composer from './components/Composer.vue'
@@ -104,6 +121,18 @@ const drawerQuery =
 const sidebarCollapsed = ref<boolean>(drawerQuery?.matches ?? false)
 /** Latest known per-run usage, keyed by session (from run_end events / run records). */
 const runUsageBySession = ref<Record<string, RunUsage | null>>({})
+/** Newest known run record per session; terminal state survives a reload via the 5 s pool poll. */
+interface LastRunInfo {
+  status: RunStatus
+  created: number
+  finished: number
+  error?: string
+}
+const lastRunBySession = ref<Record<string, LastRunInfo>>({})
+/** Operator's last-open stamps, persisted so unread dots survive a reload. */
+const lastSeen = ref<LastSeenMap>(loadLastSeen())
+/** MRU workspace ids (persisted); `recentWorkspaces` resolves them against the live list. */
+const recentWorkspaceIds = ref<string[]>(readRecentWorkspaces())
 /** When the followed run started working (epoch ms), driving the footer ticker. */
 const runStartedAt = ref<number | null>(null)
 /** Provider override actually used for sessions started from this app (only known truth). */
@@ -111,6 +140,16 @@ const providerBySession = ref<Record<string, RunProvider>>({})
 const settingsOpen = ref(false)
 /** Bumped on every settings save so mounted children (Composer hint) re-check. */
 const settingsVersion = ref(0)
+/**
+ * Settings snapshot for the first-run onboarding hint. One probe on mount plus
+ * one after a save — no polling. `unknown` means the probe failed, so the hint
+ * stays hidden rather than guessing.
+ */
+const settings = ref<SettingsView | null>(null)
+const settingsState = ref<'loading' | 'ready' | 'unknown'>('loading')
+let settingsRequest = 0
+/** Dismissal is intentionally in-memory only: it lasts for this page session. */
+const onboardingDismissed = ref(false)
 
 function onSettingsSaved() {
   settingsOpen.value = false
@@ -197,6 +236,59 @@ const visibleSessions = computed(() =>
   workspaceFilter.value === 'all'
     ? sessions.value
     : sessions.value.filter((s) => s.workspace_id === workspaceFilter.value),
+)
+
+/** Recent workspaces that still exist, newest first (the finder/dialog quick picks). */
+const recentWorkspaces = computed<Workspace[]>(() => {
+  const byId = new Map(workspaces.value.map((workspace) => [workspace.id, workspace]))
+  const out: Workspace[] = []
+  for (const id of recentWorkspaceIds.value) {
+    const workspace = byId.get(id)
+    if (workspace) out.push(workspace)
+  }
+  return out
+})
+
+/**
+ * One row state per session, derived from state the shell already owns: the
+ * live-run pool, the newest run record, in-memory errors/retries, and the
+ * persisted last-open stamps. Pure — `deriveSessionStatus` owns the precedence.
+ */
+const sessionStatuses = computed<Record<string, SessionStatusView>>(() => {
+  const out: Record<string, SessionStatusView> = {}
+  for (const session of sessions.value) {
+    const live = liveRuns.value[session.name] ?? null
+    const record = lastRunBySession.value[session.name] ?? null
+    // a retry seeded from a reloaded failure is itself evidence the last run failed
+    const retryPending = Boolean(retryBySession.value[session.name])
+    out[session.name] = deriveSessionStatus({
+      liveStatus: live?.status ?? null,
+      lastRun: record ?? (retryPending ? { status: 'failed', finished: 0 } : null),
+      lastSeen: lastSeen.value[session.name] ?? null,
+      active: session.name === selected.value,
+      error: runErrorBySession.value[session.name] ?? null,
+    })
+  }
+  return out
+})
+
+/** A saved role route that can actually start a run — the Composer's rule. */
+function roleConfigured(view: RoleSettingsView | undefined): boolean {
+  if (!view) return false
+  const provider = view.provider?.trim() || null
+  const model = view.model?.trim() || null
+  const baseUrl = view.base_url?.trim() || null
+  return provider === 'mock' || Boolean(model && baseUrl)
+}
+
+const modelsUsable = computed(() => {
+  const view = settings.value
+  return Boolean(view && roleConfigured(view.senior) && roleConfigured(view.junior))
+})
+
+/** One inline first-run hint: settings loaded and at least one role unusable. */
+const showOnboardingHint = computed(
+  () => settingsState.value === 'ready' && !modelsUsable.value && !onboardingDismissed.value,
 )
 
 // -- command palette (Ctrl+K / Cmd+K) ------------------------------------------
@@ -305,7 +397,7 @@ function onPaletteSelect(item: PaletteItem) {
         ? item.id.slice(PALETTE_WORKSPACE_PREFIX.length)
         : ''
       if (!id) return
-      workspaceFilter.value = id
+      onFilterWorkspace(id)
       // a workspace pick dismisses the drawer, like a session pick
       if (drawerQuery?.matches && !sidebarCollapsed.value) sidebarCollapsed.value = true
       return
@@ -463,6 +555,7 @@ async function syncRunOutcome(session: string) {
       (a, b) => (b.finished || b.created || 0) - (a.finished || a.created || 0),
     )[0]
     if (!latest) return
+    recordLastRun(latest)
     if (latest.status === 'failed') {
       setRunError(session, latest.error || runErrorBySession.value[session] || 'Run failed')
       if (!retryBySession.value[session]) {
@@ -545,6 +638,8 @@ function finalizeRun(runId: string, status: RunStatus, error: string | null) {
     refreshSessions()
     return
   }
+  // the operator watched this run end — it is read, not "unread" on the next switch
+  markSeen(entry.session)
   stopping.value = false
   runStartedAt.value = null
   if (status === 'failed') reportError(error ?? 'Run failed')
@@ -553,6 +648,8 @@ function finalizeRun(runId: string, status: RunStatus, error: string | null) {
   // stream did not deliver them (reconnect fallback, stop) — best-effort
   getRun(runId)
     .then((rec) => {
+      // the record carries the authoritative finished timestamp for unread
+      recordLastRun(rec)
       if (rec.usage) {
         runUsageBySession.value = { ...runUsageBySession.value, [entry.session]: rec.usage }
       }
@@ -657,6 +754,8 @@ function scheduleReconnect(runId: string) {
     // probe the run state first so we never reconnect to a finished stream
     getRun(runId)
       .then((rec) => {
+        // the terminal record is also the source of the unread timestamp
+        recordLastRun(rec)
         // 'waiting' = parked on an operator approval; the stream must go on
         if (rec.status === 'queued' || rec.status === 'running' || rec.status === 'waiting')
           connectEvents(runId)
@@ -713,6 +812,8 @@ async function refreshLiveRuns() {
   } catch {
     return
   }
+  // keep the per-session newest-record map current for the sidebar statuses
+  for (const rec of runs) recordLastRun(rec)
   const activeBySession = new Map(
     runs
       // 'waiting' = parked on an operator approval; still alive
@@ -728,7 +829,10 @@ async function refreshLiveRuns() {
     } else {
       // finished (or replaced) while unattended — fetch the terminal state
       getRun(run.run_id)
-        .then((rec) => finalizeRun(run.run_id, rec.status, rec.error ?? null))
+        .then((rec) => {
+          recordLastRun(rec)
+          finalizeRun(run.run_id, rec.status, rec.error ?? null)
+        })
         .catch(() => undefined)
     }
   }
@@ -744,9 +848,95 @@ async function refreshLiveRuns() {
 
 // -- data loading ---------------------------------------------------------
 
+/** Probe settings once (mount) and after each save; no polling is involved. */
+async function probeSettings() {
+  const request = ++settingsRequest
+  try {
+    const next = await getSettings()
+    if (request !== settingsRequest) return
+    settings.value = next
+    settingsState.value = 'ready'
+  } catch {
+    if (request !== settingsRequest) return
+    settings.value = null
+    settingsState.value = 'unknown'
+  }
+}
+
+/** Mark one session read at `now`, persisting the bounded stamp map. */
+function markSeen(name: string | null) {
+  if (!name) return
+  const next = markSessionSeen(name, lastSeen.value)
+  if (next === lastSeen.value) return
+  lastSeen.value = next
+  saveLastSeen(next)
+}
+
+/** Drop stamps for sessions the backend no longer lists (deleted sessions). */
+function pruneSeen(validNames: string[]) {
+  const next = pruneLastSeen(lastSeen.value, validNames)
+  if (next === lastSeen.value) return
+  lastSeen.value = next
+  saveLastSeen(next)
+}
+
+/** Track the newest run record per session, ignoring out-of-order responses. */
+function recordLastRun(run: RunRecord) {
+  const stamp = run.finished || run.created || 0
+  const prev = lastRunBySession.value[run.session]
+  const prevStamp = prev ? prev.finished || prev.created || 0 : -1
+  if (prev && stamp < prevStamp) return
+  lastRunBySession.value = {
+    ...lastRunBySession.value,
+    [run.session]: {
+      status: run.status,
+      created: run.created,
+      finished: run.finished,
+      error: run.error,
+    },
+  }
+}
+
+/** Drop cached run outcomes for sessions that no longer exist. */
+function pruneLastRuns(validNames: string[]) {
+  const valid = new Set(validNames)
+  const keys = Object.keys(lastRunBySession.value)
+  if (keys.every((key) => valid.has(key))) return
+  const next: Record<string, LastRunInfo> = {}
+  for (const key of keys) {
+    if (valid.has(key)) next[key] = lastRunBySession.value[key]
+  }
+  lastRunBySession.value = next
+}
+
+/** Record a workspace selection in the persisted MRU list (memory survives blocked storage). */
+function noteRecentWorkspace(id: string | null | undefined) {
+  const value = typeof id === 'string' ? id.trim() : ''
+  if (!value) return
+  const stored = recordRecentWorkspace(value)
+  recentWorkspaceIds.value = stored.length
+    ? stored
+    : pushRecentWorkspace(recentWorkspaceIds.value, value)
+}
+
+/** Drop recent ids the backend no longer lists, preserving MRU order. */
+function pruneRecents(validIds: string[]) {
+  recentWorkspaceIds.value = pruneRecentWorkspaces(recentWorkspaceIds.value, validIds)
+}
+
+/** Sidebar/palette workspace filter: a real workspace pick becomes recent. */
+function onFilterWorkspace(id: string) {
+  workspaceFilter.value = id
+  if (id !== 'all') noteRecentWorkspace(id)
+}
+
 async function refreshSessions(silent = true) {
   try {
-    sessions.value = await listSessions()
+    const next = await listSessions()
+    sessions.value = next
+    const names = next.map((session) => session.name)
+    pruneSeen(names)
+    pruneLastRuns(names)
   } catch (e) {
     if (!silent || errors.value.length === 0) reportError(errText(e))
   }
@@ -754,7 +944,9 @@ async function refreshSessions(silent = true) {
 
 async function refreshWorkspaces(silent = true) {
   try {
-    workspaces.value = await listWorkspaces()
+    const next = await listWorkspaces()
+    workspaces.value = next
+    pruneRecents(next.map((workspace) => workspace.id))
   } catch (e) {
     if (!silent || errors.value.length === 0) reportError(errText(e))
   }
@@ -774,6 +966,8 @@ async function loadSession(name: string) {
     maxSeq = detail.events.reduce((m, e) => Math.max(m, e.seq), 0)
     setRuntimeHistory(runtime.events)
     selected.value = name
+    // opening a session consumes its unread dot (persisted for the next reload)
+    markSeen(name)
     errors.value = []
     refreshUsageForSession(name)
     // the run record is the only place a failure survives a reload (G-5)
@@ -814,6 +1008,8 @@ async function startNewRun(payload: {
     }
     setLastEventId(res.run_id, 0)
     setReconnectAttempts(res.run_id, 0)
+    // a run started under a workspace is a strong recency signal
+    if (request.workspace_id) noteRecentWorkspace(request.workspace_id)
     stopping.value = false
     runStartedAt.value = Date.now()
     // a new attempt supersedes the previous failure and its error card
@@ -848,7 +1044,7 @@ async function retryLastRun() {
   const request = retryRequest.value
   if (!request || runActive.value) return
   if (request.session && request.session !== selected.value) selected.value = request.session
-  if (request.workspace_id) workspaceFilter.value = request.workspace_id
+  if (request.workspace_id) onFilterWorkspace(request.workspace_id)
   await startNewRun({ task: request.task, mode: request.mode, provider: request.provider })
 }
 
@@ -917,6 +1113,17 @@ function onSessionDeleted(name: string) {
   const rest = { ...runUsageBySession.value }
   delete rest[name]
   runUsageBySession.value = rest
+  if (lastSeen.value[name] !== undefined) {
+    const seen = { ...lastSeen.value }
+    delete seen[name]
+    lastSeen.value = seen
+    saveLastSeen(seen)
+  }
+  if (lastRunBySession.value[name]) {
+    const runs = { ...lastRunBySession.value }
+    delete runs[name]
+    lastRunBySession.value = runs
+  }
   clearRunError(name)
   clearRetryAction(name)
   refreshSessions()
@@ -928,6 +1135,7 @@ async function onCreateSession(payload: { title: string; workspace_id: string | 
       title: payload.title || undefined,
       workspace_id: payload.workspace_id ?? undefined,
     })
+    if (payload.workspace_id) noteRecentWorkspace(payload.workspace_id)
     newSessionOpen.value = false
     await refreshSessions()
     await loadSession(created.name)
@@ -1010,6 +1218,10 @@ function onThemeChange(mode: ThemeMode) {
 // apply before the first paint so a pinned scheme does not flash the OS one
 syncTheme()
 watch([themeMode, isDark], syncTheme)
+// settings saves can turn the onboarding hint on or off; no interval, only a save
+watch(settingsVersion, () => {
+  void probeSettings()
+})
 
 onMounted(() => {
   schemeQuery.addEventListener('change', onSchemeChange)
@@ -1018,6 +1230,7 @@ onMounted(() => {
   refreshSessions(false)
   refreshWorkspaces(false)
   refreshLiveRuns()
+  void probeSettings()
   syncShellInert()
   sidebarTimer = setInterval(() => {
     refreshSessions()
@@ -1031,6 +1244,7 @@ onUnmounted(() => {
   window.removeEventListener('keydown', onPaletteShortcut)
   if (sidebarTimer) clearInterval(sidebarTimer)
   if (reconnectTimer) clearTimeout(reconnectTimer)
+  settingsRequest++
   es?.close()
 })
 </script>
@@ -1050,12 +1264,13 @@ onUnmounted(() => {
       :selected="selected"
       :live="runActive && activeRun ? activeRun.session : null"
       :live-sessions="Object.keys(liveRuns)"
+      :statuses="sessionStatuses"
       @select="loadSession"
       @refresh="refreshSessions(false)"
       @collapse="sidebarCollapsed = true"
       @add-workspace="workspaceDialogOpen = true"
       @new-session="newSessionOpen = true"
-      @filter-workspace="workspaceFilter = $event"
+      @filter-workspace="onFilterWorkspace"
       @deleted="onSessionDeleted"
       :theme-mode="themeMode"
       @open-settings="settingsOpen = true"
@@ -1109,6 +1324,34 @@ onUnmounted(() => {
           <span v-if="waiting" class="approval-badge" role="status">awaiting approval</span>
         </div>
       </header>
+
+      <aside
+        v-if="showOnboardingHint"
+        class="onboarding-hint"
+        role="status"
+        aria-label="Model setup needed"
+      >
+        <span class="onboarding-hint-text">
+          <strong>No model route yet.</strong>
+          Set a provider and model for Senior and Junior to start a run.
+        </span>
+        <button
+          type="button"
+          class="onboarding-hint-action"
+          @click="settingsOpen = true"
+        >
+          Open Models &amp; roles
+        </button>
+        <button
+          type="button"
+          class="onboarding-hint-dismiss"
+          title="Dismiss"
+          aria-label="Dismiss model setup hint"
+          @click="onboardingDismissed = true"
+        >
+          <AppIcon name="x" class="onboarding-hint-icon" />
+        </button>
+      </aside>
 
       <ChatView
         v-if="selected"
@@ -1174,6 +1417,7 @@ onUnmounted(() => {
     <NewSessionDialog
       v-if="newSessionOpen"
       :workspaces="workspaces"
+      :recent-workspaces="recentWorkspaces"
       :default-workspace="workspaceFilter !== 'all' ? workspaceFilter : null"
       @close="newSessionOpen = false"
       @create="onCreateSession"
@@ -1191,6 +1435,90 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+/* First-run model hint: one compact inline row above the transcript. */
+.onboarding-hint {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.4rem 0.7rem;
+  font-size: 0.78rem;
+  color: var(--text-primary);
+  background: var(--warning-soft);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.onboarding-hint-text {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.35;
+}
+
+.onboarding-hint-text strong {
+  font-weight: 650;
+}
+
+.onboarding-hint-action {
+  flex: none;
+  height: 26px;
+  padding: 0 0.55rem;
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--text-on-accent);
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.onboarding-hint-action:hover {
+  opacity: 0.9;
+}
+
+.onboarding-hint-action:focus-visible {
+  outline-offset: 2px;
+}
+
+.onboarding-hint-dismiss {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.onboarding-hint-dismiss:hover {
+  color: var(--text-primary);
+  background: var(--surface-hover);
+}
+
+.onboarding-hint-dismiss:focus-visible {
+  outline-offset: 0;
+}
+
+.onboarding-hint-icon {
+  width: 13px;
+  height: 13px;
+}
+
+@media (max-width: 640px) {
+  .onboarding-hint {
+    flex-wrap: wrap;
+  }
+
+  .onboarding-hint-text {
+    flex-basis: 100%;
+  }
+}
+
 /* Header affordance for the keyboard-first palette (Ctrl+K / Cmd+K). It is a
    button as well, so the palette is discoverable without knowing the chord. */
 .palette-chip {
