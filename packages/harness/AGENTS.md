@@ -411,31 +411,30 @@ the protocol reference and is not modified by work here either.
    `TWO_BROTHERS_STREAM_TOKENS=1`. `MockProvider` fakes the delta stream
    (`MOCK_DELTA_CHARS`, `emitMockDeltas`). Tests:
    `tests/streamingtokens.test.ts`, `tests/cliwiring.test.ts`.
-   **The TUI is shipped (Wave 5, TUI lane):** `two-brothers tui [task]` is a
-   zero-dependency full-screen chat in the terminal's alternate screen over
-   the same harness (`mock` or real providers), split so the core stays
-   testable without a TTY: `src/tui/render.ts` is pure (greedy `wrapLine`
-   with per-kind ANSI colors that do not count toward width and a `plain`
-   option; `renderFrame` lays out the inverse header, a bottom-anchored
-   wrapped transcript honoring `scrollOffset`, the input line with a block
-   cursor and the status bar, deterministically for a given `TuiState`);
-   `src/tui/terminal.ts` is a thin driver (alternate screen, cursor
-   visibility, `getSize` with an 80×24 fallback, `readline` keypresses in
-   raw mode, `isTtyOk`) that refuses a non-TTY stdin; `src/tui/app.ts` is
-   the state machine and harness glue (`reduceStreamEvent` folds token
-   deltas/envelopes/tool events/run status into the line buffer in place,
-   `resolveTuiInput` maps `/help`, `/commands`, `/mode consult|work`,
-   `/exit` and discovered `commands.ts` templates to actions). Per-turn
-   construction mirrors `chat`: same resolved `Config`, one shared
-   `SharedContext` (`--session-file`/`--resume`), plugin bindings, the
-   `--mcp-config` + plugin MCP merge, hooks, skills and compaction.
-   `--stream-tokens` is supported here (no `--stream` needed); `--mode
-   print|json` is rejected because the TUI is interactive. A piped stdin
-   exits 2 with a clean message and no escape bytes (hermetic CI guard).
-   Keys: Enter sends, Backspace edits, PgUp/PgDn scroll, Esc/Ctrl+C twice
-   quits after a confirm hint. Tests: `tests/tui.test.ts` (render wrap/
-   scroll/determinism, reducer, input resolver, non-TTY guard). No new
-   runtime deps.
+   **The TUI is the interactive product (T0–T3 shipped):** a bare
+   `two-brothers` in an interactive terminal opens the full-screen TUI
+   (`tui [task]` stays the explicit form; `chat` remains the plain REPL and
+   piped no-arg usage is unchanged). The screen is assembled from the lane
+   modules: `model.ts` block transcript (full unclipped text, streaming
+   drafts finalized by envelope id), `view/` screens (welcome, transcript,
+   composer, two-line responsive status bar, palette, help, pickers, dialog,
+   toasts), `editor.ts` grapheme-aware multiline input with history and
+   bracketed paste, `keymap.ts` as the single registry behind Ctrl+P, `?`,
+   slash input and `tui --help`, and `terminal.ts` bracketed paste + resize
+   repaint + full restoration on every exit path. Turns run outside the
+   key-read await with an `AbortController`; Escape/Ctrl+C follow the safe
+   precedence overlay-close → cancel turn → clear composer → confirm quit.
+   The status bar shows mode/models/session/cwd plus context/tokens/cache/
+   cost/elapsed with honest unknowns (`cost unknown` when the merged usage
+   cannot be attributed to one priced model). Session resume and per-role
+   model pickers reuse the existing session/provider services and refuse
+   unsafe changes while a turn runs; tool calls/results pair by the
+   additive optional `callId`/`args`/`result` stream fields (NDJSON
+   consumers stay compatible). Non-TTY refusal stays exit 2 with no escape
+   bytes. `renderFrame`/`reduceStreamEvent` remain as the legacy pure test
+   seams. Tests: `tests/tui*.test.ts` lanes plus the assembled-app
+   `tests/tuiintegration.test.ts`, all registered in `tests/run-all.ts`.
+   No new runtime deps.
    **Graceful `serve` shutdown + local-request guards are shipped
    (2026-11-04 hardening):** `cli.ts serve` traps SIGINT/SIGTERM and runs
    `shutdownServe(app)` — stop accepting connections, cooperatively stop

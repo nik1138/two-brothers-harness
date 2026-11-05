@@ -108,17 +108,21 @@ node dist/cli.js serve --port 8600 --sessions-dir sessions
 
 Then open `http://127.0.0.1:8600`:
 
-1. **Register a workspace** (a directory you pick — it is never scanned) and
-   create a session linked to it.
-2. **Set the models** in Settings — per-role Senior/Junior provider, model,
-   base URL, and API key (keys are never echoed back; the server seals them at
-   rest).
+1. **Register a workspace** with the workspace finder (a directory you pick —
+   it is never scanned) and create a session linked to it. Sessions are
+   grouped by workspace in the sidebar.
+2. **Set the models** — the Settings dialog opens from the bottom-left of the
+   sidebar; per-role Senior/Junior provider, model, base URL, and API key
+   (keys are never echoed back; the server seals them at rest). Runs use the
+   configured models; there is no separate "mock" switch in the UI.
 3. **Send a task** in `work` mode. The run proceeds in the background; the
    chat updates live over SSE and you can send follow-up messages, stop the
    run, or just reload the page (progress is recovered from the runtime
    sidecar).
 4. **Approve mutations.** Reads inside the workspace are free, but every
-   write/edit/delete/shell command pauses the run until you allow or deny it.
+   write/edit/delete/shell command docks an approval card in the chat —
+   allow or deny there to resume the run. On narrow screens the sidebar
+   becomes a drawer over the chat.
 5. **Review the changes** — files touched by tools are collected with their
    unified diffs.
 
@@ -128,12 +132,20 @@ Sessions are plain JSONL files under `--sessions-dir`; each has a
 
 ## The terminal workspace
 
-`tui` is the same harness as a full-screen chat in the terminal (it needs a
-TTY — use `chat` for scripts):
+The **TUI** is the same harness as a full-screen chat in the terminal (it
+needs a TTY). A bare interactive `two-brothers` (or `node dist/cli.js` with
+no arguments) opens it directly; piped/CI invocations print the usage screen
+instead. Use `chat` for scripts.
 
 ```powershell
 node dist/cli.js tui --provider mock
 ```
+
+Block transcript with textual role labels, a grapheme-aware multiline
+composer with history and bracketed paste, Ctrl+P command palette and `?`
+help overlays, session/model pickers, token streaming in place, live resize
+repaint, and non-blocking turns — Escape/Ctrl+C cancel a running turn before
+anything else.
 
 ## Verify
 
@@ -144,8 +156,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-test.ps1
 
 It should end with `SMOKE TEST: PASS` (package typecheck/build/tests/selftest,
 a mock demo run, the hermetic CLI E2E, the `typescript/` reference selftest,
-and the web build). The package's own gates are `npm test` / `npm run
-test:spawn` in `packages/harness`; see [Testing](testing.md).
+the web unit tests, and the web build). The package's own gates are
+`npm test` / `npm run test:spawn` in `packages/harness`; see
+[Testing](testing.md).
 
 ## What's next
 

@@ -46,7 +46,7 @@ its history is in git history, and the captured `SPARK-TRANSCRIPT.md` /
 | `web/` | local single-user web workspace (Vue 3 + Vite + TS); `npm run build` must keep passing; the package tarball ships a copy of the build |
 | `e2e/` | browser E2E (own package; Playwright drives the system Edge headless) |
 | `plugins/` | local plugin modules (`register(ctx)` tool registration; see `docs/plugins.md`) — the example `notes.mts` ships with the repo |
-| `scripts/` | `smoke-test.ps1` — offline gate (TypeScript package + reference + web build); `e2e-test.ps1` — browser E2E runner |
+| `scripts/` | `smoke-test.ps1` — offline gate (TypeScript package + reference + web tests/build); `e2e-test.ps1` — browser E2E runner |
 | `docs/` | documentation, one flat set by topic; `docs/README.md` is the index (`quickstart.md`, `cli-reference.md`, `plugins.md`, `testing.md`, `backlog.md`, `design-review.md`) |
 | `docs/history/` | historical records, content frozen: `ts-rewrite-plan.md`, `cli-audit.md`, `web-ui-audit.md`, `handoff.md` |
 | `research/` | **local-only, gitignored** — research notes + vendored MIT reference clones (pi, kimi-code, deepseek-harness, opencode); never committed or published |
@@ -88,7 +88,7 @@ Subdirectories with their own agent guidance: `typescript/AGENTS.md`,
 ## Common Commands
 
 ```powershell
-# full offline gate (TypeScript package gates + reference selftest + web build);
+# full offline gate (TypeScript package gates + reference selftest + web tests/build);
 # pwsh is not installed on this machine — use Windows PowerShell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-test.ps1
 

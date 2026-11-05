@@ -22,7 +22,8 @@ The script runs:
 5. a demo run through the built CLI on `mock`
 6. the hermetic CLI E2E (`node e2e/cli.ts`)
 7. the `typescript/` reference selftest
-8. the `web/` build
+8. the `web/` unit tests (`npm test` — chat/timeline projections)
+9. the `web/` build
 
 Expected final line: `SMOKE TEST: PASS`. It is an offline pre-flight, not the
 whole product gate — run the package gates below for that.
@@ -48,6 +49,20 @@ provider error-classification registry, and the workspace tools
 (confinement, approvals, diffs). Hermetic offline CLI E2E:
 `npm run test:e2e:cli` (sources) / `npm run test:e2e:cli:dist` (built
 `dist/cli.js`) drive the CLI as a subprocess against the mock provider.
+
+## Web workspace (`web/`)
+
+```powershell
+cd web
+npm test                # chat/timeline projection tests (node:test, offline)
+```
+
+The suite (`tests/chat.test.ts`, `tests/timeline.test.ts`) covers the
+envelope→group-chat projection and the runtime-event timeline merge. The
+modules are dependency-free at runtime, so plain `node --test` runs them via
+the `tests/register-ts.mjs` bootstrap (a tiny resolve hook for the
+extensionless `./chat` import); `npm test` wires that up. The full `web/`
+gate also includes `npm run build` (see the smoke test above).
 
 ## TypeScript reference (`typescript/`)
 
@@ -114,10 +129,16 @@ TWO_BROTHERS_REAL_E2E=1 node e2e/run.mjs
 $env:TWO_BROTHERS_REAL_E2E = '1'; node e2e/run.mjs
 ```
 
-Requirements: LM Studio serving the OpenAI-compatible API on localhost,
-e.g. `http://localhost:1234/v1` (point the suite at your endpoint with
-`TWO_BROTHERS_LM_BASE`) with both models loaded — `spark-x2.6-4b@q4_k_m`
-(senior) and `lfm3-1.7b` (junior).
+Requirements: an OpenAI-compatible endpoint serving both models, pointed at
+with `TWO_BROTHERS_LM_BASE` — for example a local LM Studio server at
+`http://localhost:1234/v1` (the default baked into the suite is
+machine-specific; always set the variable for your setup). The models default
+to `spark-x2.6-4b@q4_k_m` (senior) and `lfm3-1.7b` (junior) and can be
+overridden with `TWO_BROTHERS_E2E_SENIOR_MODEL` and
+`TWO_BROTHERS_E2E_JUNIOR_MODEL`; the wall-clock deadline defaults to 10
+minutes and is overridden with `TWO_BROTHERS_E2E_DEADLINE_MS`. The suite only
+probes the endpoint you give it — it never starts a model server for you, so
+with nothing serving it reports `SKIP`.
 
 What it proves, end to end through the real backend and the browser UI:
 

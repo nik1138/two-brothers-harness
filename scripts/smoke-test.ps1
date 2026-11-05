@@ -6,8 +6,9 @@
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-test.ps1
 #
 # Runs: packages/harness typecheck -> build -> npm test -> dist selftest ->
-# mock run -> hermetic CLI E2E, the typescript/ reference selftest, and the
-# web/ build. Everything is offline; no model endpoint or API key is needed.
+# mock run -> hermetic CLI E2E, the typescript/ reference selftest, the
+# web/ unit tests, and the web/ build. Everything is offline; no model
+# endpoint or API key is needed.
 
 $ErrorActionPreference = "Stop"
 
@@ -86,6 +87,11 @@ Pop-Location
 Section "Protocol reference: selftest"
 Push-Location $ref
 Run-External "reference selftest" "node" "src/selftest.ts"
+Pop-Location
+
+Section "Web workspace: tests"
+Push-Location $web
+Run-External "web tests" "npm.cmd" "test"
 Pop-Location
 
 Section "Web workspace: build"

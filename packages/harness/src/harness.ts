@@ -1387,14 +1387,23 @@ export class TwoBrothersHarness {
   private async invokeTool(
     state: CooperationState,
     tool: Tool,
-    call: { name: string; args: Record<string, unknown> },
+    call: { id?: string; name: string; args: Record<string, unknown> },
     actor: string,
   ): Promise<string> {
     const role: HookRole = actor === "senior" ? "senior" : "junior";
     const args = { ...call.args };
+    const callId = call.id;
+    const argsText = JSON.stringify(clipArgs(args));
     // stream ordering: the attempt is reported before the hook can veto it,
     // mirroring `tool_started` on the runtime channel
-    this.emitStream({ type: "tool_call", role, tool: call.name, at: nowIso() });
+    this.emitStream({
+      type: "tool_call",
+      role,
+      tool: call.name,
+      at: nowIso(),
+      ...(callId !== undefined ? { callId } : {}),
+      args: argsText,
+    });
     const denial =
       this.options.hooks === undefined
         ? undefined
@@ -1402,7 +1411,7 @@ export class TwoBrothersHarness {
     this.emitRuntime({ type: "tool_started", tool: call.name, args: clipArgs(args), actor });
     if (denial !== undefined) {
       this.emitRuntime({ type: "tool_completed", tool: call.name, status: "blocked", result: denial, actor });
-      this.emitStream({ type: "tool_result", role, tool: call.name, status: "blocked", at: nowIso() });
+      this.emitStream({ type: "tool_result", role, tool: call.name, status: "blocked", at: nowIso(), callId });
       return denial;
     }
     const pair = this.options.workspace === undefined ? null : approvalPair(call.name, args);
@@ -1431,6 +1440,7 @@ export class TwoBrothersHarness {
         tool: call.name,
         status: streamToolStatus("denied"),
         at: nowIso(),
+        callId,
       });
       return text;
     }
@@ -1462,6 +1472,8 @@ export class TwoBrothersHarness {
       tool: call.name,
       status: streamToolStatus(status),
       at: nowIso(),
+      callId,
+      result: typeof compact === "string" ? compact : JSON.stringify(compact),
     });
     return result;
   }
@@ -1545,9 +1557,9 @@ export class TwoBrothersHarness {
         if (!tool) {
           result = `unknown tool: ${call.name}`;
           // a call the model invented is still an attempt: pair it on the stream
-          this.emitStream({ type: "tool_call", role, tool: call.name, at: nowIso() });
+          this.emitStream({ type: "tool_call", role, tool: call.name, at: nowIso(), callId: call.id, args: JSON.stringify(clipArgs(call.args)) });
           this.emitRuntime({ type: "tool_completed", tool: call.name, status: "error", result, actor: role });
-          this.emitStream({ type: "tool_result", role, tool: call.name, status: "error", at: nowIso() });
+          this.emitStream({ type: "tool_result", role, tool: call.name, status: "error", at: nowIso(), callId: call.id, result });
         } else {
           result = await this.invokeTool(state, tool, call, role);
           const line = toolEvidenceLine(compactToolResult(result), call.name);

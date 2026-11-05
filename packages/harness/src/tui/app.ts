@@ -1,12 +1,15 @@
 /**
  * The interactive TUI's state machine and harness glue.
  *
- * Layering: `render.ts` is pure presentation, `terminal.ts` is the only
- * module that touches a real terminal, and this module owns everything in
- * between — input actions, the line buffer, one harness run per turn, and the
- * graceful teardown. The stream-event reducer (`reduceStreamEvent`) and the
- * input resolver (`resolveTuiInput`) are pure exports so the interactive
- * behavior is testable without a TTY.
+ * Layering: `render.ts` is the legacy pure line renderer (kept as a test
+ * seam), the block model lives in `model.ts`, the views in `view/`, and
+ * `terminal.ts` is the only module that touches a real terminal. This module
+ * owns everything in between — the grapheme-aware editor, the block
+ * transcript, overlays (palette/help/pickers/dialogs), one non-blocking
+ * harness run per turn with `AbortController` cancellation, and the graceful
+ * teardown. The stream-event reducer (`reduceStreamEvent`) and the input
+ * resolver (`resolveTuiInput`) stay exported as pure functions so the
+ * interactive behavior is testable without a TTY.
  *
  * The harness construction mirrors `cli.ts`'s chat path: the same resolved
  * `Config`, one shared `SharedContext` (with the same `--session-file` /
@@ -15,11 +18,14 @@
  * Plugins are re-bound per turn exactly like the chat REPL; skills and slash
  * commands are discovered once per session.
  */
+import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { discoverCommands, expandCommand, matchCommand, type CommandCatalog } from "../commands.ts";
+import { discoverCommands, expandCommand, matchCommand, type Command, type CommandCatalog } from "../commands.ts";
 import type { CompactionSettings } from "../compaction.ts";
+import { estimateTokens } from "../compaction.ts";
 import { validateRunConfig, type Config } from "../config.ts";
+import { estimateCost } from "../cost.ts";
 import { SharedContext } from "../context.ts";
 import { TwoBrothersHarness, type ToolScopes } from "../harness.ts";
 import {
@@ -30,20 +36,85 @@ import {
   type McpToolSet,
 } from "../mcp.ts";
 import { PluginManager, type PluginBindings } from "../plugins.ts";
+import { mergeSeedPresets } from "../presets.ts";
 import type { Message } from "../protocol.ts";
 import type { RoleEndpoint } from "../runtime.ts";
 import type { StreamEvent } from "../runstream.ts";
 import { restoreContext, SessionError, SessionStore } from "../session.ts";
+import { envPinnedPairs } from "../settings_store.ts";
 import { discoverSkills, type SkillCatalog } from "../skills.ts";
 import type { Tool } from "../provider.ts";
 
 import {
-  renderFrame,
+  clearEditor,
+  createEditor,
+  handleEditorKey,
+  insertText,
+  pasteText,
+  takeSubmission,
+  type EditorState,
+} from "./editor.ts";
+import {
+  findSlashCommand,
+  isCommandEnabled,
+  paletteEntries,
+  resolveKey,
+  TUI_COMMANDS,
+  type KeyLike,
+  type PaletteEntry,
+  type SlashCommandInfo,
+  type TuiCommand,
+} from "./keymap.ts";
+import {
+  addNotice,
+  addUserBlock,
+  createTuiModel,
+  reduceModelEvent,
+  type TuiModel,
+} from "./model.ts";
+import {
   type TuiLine,
   type TuiLineKind,
-  type TuiState,
 } from "./render.ts";
-import { createTerminal, isTtyOk, TuiTerminalError, type Key, type Terminal } from "./terminal.ts";
+import { renderBox } from "./screen.ts";
+import { resolveTheme, type Theme, type ThemeMode } from "./theme.ts";
+import { createDialog, dialogView, handleDialogKey, type DialogState } from "./view/dialog.ts";
+import {
+  createHelpState,
+  handleHelpKey,
+  helpEntries,
+  helpView,
+  type HelpState,
+} from "./view/help.ts";
+import {
+  createPaletteState,
+  handlePaletteKey,
+  paletteView,
+  type PaletteState,
+} from "./view/palette.ts";
+import {
+  createPickerState,
+  handlePickerKey,
+  pickerView,
+  type PickerItem,
+  type PickerState,
+} from "./view/picker.ts";
+import { screenView } from "./view/screen.ts";
+import type { StatusBarState } from "./view/statusbar.ts";
+import type { Toast, ToastLevel } from "./view/toast.ts";
+import {
+  latestTranscriptScroll,
+  scrollTranscript,
+  type TranscriptScroll,
+} from "./view/transcript.ts";
+import {
+  createTerminal,
+  guardTtyResizeRefresh,
+  isTtyOk,
+  TuiTerminalError,
+  type Key,
+  type Terminal,
+} from "./terminal.ts";
 
 /** Minimal output sink, the same shape `CliIO` has. */
 export interface TuiIO {
@@ -73,6 +144,10 @@ export interface TuiAppOptions {
   streamTokens?: boolean;
   /** `tui "<task>"`: run this task as soon as the screen opens. */
   initialTask?: string;
+  /** Working directory shown in the welcome screen and status bar. */
+  cwd?: string;
+  /** Directory the session picker scans for `.jsonl` sessions. */
+  sessionsDir?: string;
   /** Injection seams for tests/embedding; default to the process streams. */
   input?: NodeJS.ReadStream;
   output?: NodeJS.WriteStream;
@@ -494,6 +569,7 @@ interface TurnSetup {
   resources: TuiResources;
   mcpConfig?: string;
   streamTokens?: boolean;
+  signal?: AbortSignal;
   onStreamEvent: (event: StreamEvent) => void;
   onWarning: (line: string) => void;
 }
@@ -562,6 +638,7 @@ async function buildTurnHarness(setup: TurnSetup): Promise<TurnHarness> {
     ...(setup.resources.skills.skills.length > 0 ? { skills: setup.resources.skills } : {}),
     onStreamEvent: setup.onStreamEvent,
     ...(setup.streamTokens === true ? { streamTokens: true } : {}),
+    ...(setup.signal !== undefined ? { signal: setup.signal } : {}),
     onProviderWarning: setup.onWarning,
   });
   return { harness, mcp };
@@ -575,8 +652,45 @@ function messageOf(exc: unknown): string {
 // interactive app
 // --------------------------------------------------------------------------- //
 
-const QUIT_HINT = "quit? press Ctrl+C or Esc again to exit (any other key cancels)";
-const READY_HINT = "ready — Enter sends · /help commands · PgUp/PgDn scroll · Ctrl+C quits";
+/**
+ * One modal surface over the transcript. Only one overlay is open at a time;
+ * Escape always closes it and restores the composer focus. Palette and help
+ * share the registry-derived entries; pickers and dialogs carry callbacks
+ * into the app, so no overlay module knows about the harness.
+ */
+type Overlay =
+  | { kind: "palette"; state: PaletteState }
+  | { kind: "help"; state: HelpState }
+  | {
+      kind: "picker";
+      title: string;
+      items: PickerItem[];
+      state: PickerState;
+      emptyText?: string;
+      onAccept: (item: PickerItem) => void;
+    }
+  | { kind: "dialog"; state: DialogState; onAction: (id: string) => void };
+
+interface UsageSnapshot {
+  input: number;
+  output: number;
+  cached: number;
+  calls: number;
+}
+
+const SPINNER_MS = 120;
+const TOKEN_RENDER_MS = 40;
+
+/** Status-bar text while a quit chord is armed (reset verbatim on disarm). */
+const QUIT_ARMED_ACTIVITY = "quit? press Ctrl+C or Esc again to exit (any other key cancels)";
+
+/** Internal control-flow signal for quit handed out of the key loop. */
+class TuiExit extends Error {
+  constructor() {
+    super("tui exit");
+    this.name = "TuiExit";
+  }
+}
 
 /** Printable single characters only (paste/escape sequences are ignored). */
 export function printableChar(key: Key): string | null {
@@ -586,14 +700,37 @@ export function printableChar(key: Key): string | null {
   return code >= 0x20 && code !== 0x7f ? key.raw : null;
 }
 
+function usageOf(value: unknown): UsageSnapshot {  const record = (value ?? {}) as Record<string, unknown>;
+  const num = (key: string): number => {
+    const n = Number(record[key]);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  };
+  return {
+    input: num("input_tokens"),
+    output: num("output_tokens"),
+    cached: num("cached_tokens"),
+    calls: num("model_calls"),
+  };
+}
+
 /**
  * Run the TUI. Returns a process exit code: 0 after a clean quit, 2 for a
  * non-TTY stdin/stdout (the hermetic-CI guard), 1 for a startup failure
  * (session/config). Turn errors are shown in the UI and never end the loop.
+ *
+ * The loop never awaits a model turn: `executeTurn` starts the harness run
+ * and returns immediately, so typing, scrolling, overlays and cancellation
+ * stay responsive while the brothers work. The turn's `AbortController` is
+ * driven by Escape/Ctrl+C under a safe precedence: overlay close → turn
+ * cancel → composer clear → quit confirm (never an unexpected quit).
  */
 export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   const input = options.input ?? process.stdin;
   const output = options.output ?? process.stdout;
+  // The process-level streams, not just the injected pair: a late console
+  // buffer event hits Node's internal SIGWINCH refresh on stderr too.
+  guardTtyResizeRefresh(process.stdout);
+  guardTtyResizeRefresh(process.stderr);
   if (!isTtyOk(input) || !isTtyOk(output)) {
     options.io.error(
       "Error: tui needs an interactive terminal — stdin/stdout are not TTYs. " +
@@ -602,9 +739,10 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     return 2;
   }
 
+  let sessionCfg = options.cfg;
   let context: SharedContext;
   try {
-    context = openTuiContext(options.cfg, options.io);
+    context = openTuiContext(sessionCfg, options.io);
   } catch (exc) {
     if (exc instanceof SessionError) {
       options.io.error(`[error] ${exc.message}`);
@@ -614,7 +752,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   }
 
   const resources = await loadTuiResources({
-    cfg: options.cfg,
+    cfg: sessionCfg,
     io: options.io,
     ...(options.pluginsDir !== undefined ? { pluginsDir: options.pluginsDir } : {}),
     ...(options.skillsRoots !== undefined ? { skillsRoots: options.skillsRoots } : {}),
@@ -632,204 +770,900 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     throw exc;
   }
 
-  const cfg = options.cfg;
-  let mode: Config["mode"] = cfg.mode;
-  const sessionName = cfg.sessionFile ? path.basename(cfg.sessionFile) : "in-memory";
-  let buffer = createLineBuffer([
-    {
-      kind: "system",
-      text: "Two Brothers TUI. Type a task and press Enter; /help lists commands.",
-    },
-    {
-      kind: "system",
-      text:
-        `senior model=${cfg.seniorModel || "(unset)"} | ` +
-        `junior model=${cfg.juniorModel || "(unset)"} | provider=${cfg.provider}`,
-    },
-  ]);
-  const state: TuiState = {
-    header: {
-      mode,
-      seniorModel: cfg.seniorModel,
-      juniorModel: cfg.juniorModel,
-      sessionName,
-    },
-    lines: buffer.lines,
-    input: "",
-    status: READY_HINT,
-    scrollOffset: 0,
-    height: 24,
-    width: 80,
-  };
-  let confirmQuit = false;
-  let lastStreamRender = 0;
+  const cwd = options.cwd ?? process.cwd();
+  const sessionsDir = options.sessionsDir ?? path.join(cwd, "sessions");
+  const slashInfos = (): SlashCommandInfo[] =>
+    resources.commands.commands.map((command: Command) => ({
+      name: command.name,
+      description: command.description,
+      ...(command.argumentHint ? { argumentHint: command.argumentHint } : {}),
+      ...(command.mode ? { mode: command.mode } : {}),
+    }));
 
-  const render = (): void => {
-    const size = terminal.size();
-    state.width = size.columns;
-    state.height = size.rows;
-    state.lines = buffer.lines;
-    terminal.render(renderFrame(state));
-  };
+  let mode: Config["mode"] = sessionCfg.mode;
+  let model: TuiModel = createTuiModel();
+  let editor: EditorState = createEditor();
+  let scroll: TranscriptScroll = latestTranscriptScroll();
+  let overlay: Overlay | null = null;
+  let running = false;
+  let turnAbort: AbortController | null = null;
+  let turnDone: Promise<void> | null = null;
+  let lastFailedTask: { task: string; turnMode: Config["mode"] } | null = null;
+  let usage: UsageSnapshot | null = null;
+  let cost: number | null = null;
+  let contextTokens: number | null = null;
+  let turnStartedAt = 0;
+  let lastElapsedMs: number | undefined;
+  let activity = "ready — type a task and press Enter";
+  let quitArmed = false;
+  let lastRenderAt = 0;
+  let spinnerTick = 0;
+  let toastSeq = 0;
+  let toasts: Toast[] = [];
+  let themeMode: ThemeMode | null = null;
+  let theme: Theme = resolveTheme({ mode: themeMode });
 
-  const pushLocal = (line: TuiLine): void => {
-    buffer = pushLineToBuffer(buffer, line);
-  };
+  const sessionName = (): string =>
+    sessionCfg.sessionFile ? path.basename(sessionCfg.sessionFile) : "in-memory";
 
-  const executeTurn = async (task: string, turnMode: Config["mode"]): Promise<void> => {
-    buffer = { lines: [...buffer.lines, { kind: "user", text: task }], pending: null };
-    state.scrollOffset = 0;
-    state.status = `running (${turnMode})…`;
-    render();
-    const onStreamEvent = (event: StreamEvent): void => {
-      // The harness echoes the submitted task as a user envelope; the app
-      // already owns that line, so skip only that exact duplicate.
-      if (
-        event.type === "envelope" &&
-        event.envelope.from === "user" &&
-        event.envelope.kind === "message" &&
-        String(event.envelope.payload?.text ?? "") === task
-      ) {
-        return;
-      }
-      const reduced = reduceStreamEvent(buffer, event);
-      buffer = reduced.buffer;
-      if (reduced.status !== undefined) state.status = reduced.status;
-      state.lines = buffer.lines;
-      const now = Date.now();
-      if (event.type !== "token" || now - lastStreamRender >= 40) {
-        lastStreamRender = now;
-        render();
-      }
-    };
-    const onWarning = (line: string): void => {
-      pushLocal({ kind: "system", text: line });
-    };
+  const measureContext = (): void => {
     try {
-      const { harness, mcp } = await buildTurnHarness({
-        cfg,
-        mode: turnMode,
-        resources,
-        ...(options.mcpConfig !== undefined ? { mcpConfig: options.mcpConfig } : {}),
-        ...(options.streamTokens === true ? { streamTokens: true } : {}),
-        onStreamEvent,
-        onWarning,
-      });
+      contextTokens = estimateTokens(context.renderTranscript());
+    } catch {
+      contextTokens = null;
+    }
+  };
+  measureContext();
+
+  const spinnerTimer = setInterval(() => {
+    if (!running) return;
+    spinnerTick += 1;
+    render();
+  }, SPINNER_MS);
+  spinnerTimer.unref?.();
+
+  const pushToast = (level: ToastLevel, text: string): void => {
+    toastSeq += 1;
+    const toast: Toast = { id: `t${toastSeq}`, level, text };
+    toasts = [...toasts, toast].slice(-3);
+    const id = toast.id;
+    const timer = setTimeout(() => {
+      toasts = toasts.filter((entry) => entry.id !== id);
+      render();
+    }, 4000);
+    timer.unref?.();
+  };
+
+  const statusState = (): StatusBarState => ({
+    mode,
+    seniorModel: sessionCfg.seniorModel,
+    juniorModel: sessionCfg.juniorModel,
+    sessionName: sessionName(),
+    cwd,
+    running,
+    activity,
+    ...(contextTokens !== null ? { contextTokens } : {}),
+    ...(sessionCfg.contextWindow > 0 ? { contextWindow: sessionCfg.contextWindow } : {}),
+    ...(usage !== null
+      ? {
+          inputTokens: usage.input,
+          outputTokens: usage.output,
+          cachedTokens: usage.cached,
+        }
+      : {}),
+    cost,
+    ...(running
+      ? { elapsedMs: Date.now() - turnStartedAt }
+      : lastElapsedMs !== undefined
+        ? { elapsedMs: lastElapsedMs }
+        : {}),
+  });
+
+  function transcriptBodyHeight(): number {
+    const size = terminal.size();
+    return Math.max(1, size.rows - 14);
+  }
+
+  const overlayLines = (columns: number, rows: number): string[] | undefined => {
+    if (overlay === null) return undefined;
+    if (overlay.kind === "palette") {
+      const boxW = Math.max(30, Math.min(Math.max(columns - 4, 30), 76));
+      const boxH = Math.max(8, Math.min(Math.max(rows - 4, 8), 22));
+      const entries = paletteEntries(TUI_COMMANDS, { commands: slashInfos(), running });
+      const lines = paletteView(TUI_COMMANDS, overlay.state, entries, {
+        width: Math.max(10, boxW - 4),
+        height: Math.max(3, boxH - 2),
+        title: "Commands",
+      }).lines;
+      return renderBox(lines, { width: boxW, title: "COMMANDS", theme });
+    }
+    if (overlay.kind === "help") {
+      const boxW = Math.max(30, Math.min(Math.max(columns - 4, 30), 80));
+      const boxH = Math.max(8, Math.min(Math.max(rows - 4, 8), 24));
+      const entries = helpEntries(TUI_COMMANDS, { commands: slashInfos(), running });
+      const lines = helpView(TUI_COMMANDS, overlay.state, entries, {
+        width: Math.max(10, boxW - 4),
+        height: Math.max(3, boxH - 2),
+        title: "Help",
+      }).lines;
+      return renderBox(lines, { width: boxW, title: "HELP", theme });
+    }
+    if (overlay.kind === "picker") {
+      const boxW = Math.max(30, Math.min(Math.max(columns - 8, 30), 72));
+      const boxH = Math.max(8, Math.min(Math.max(rows - 6, 8), 18));
+      return pickerView(overlay.state, overlay.items, {
+        width: boxW,
+        height: boxH,
+        title: overlay.title,
+        ...(overlay.emptyText !== undefined ? { emptyText: overlay.emptyText } : {}),
+        theme,
+      }).lines;
+    }
+    const boxW = Math.max(30, Math.min(Math.max(columns - 8, 30), 72));
+    const boxH = Math.max(8, Math.min(Math.max(rows - 6, 8), 20));
+    return dialogView(overlay.state, { width: boxW, height: boxH, theme }).lines;
+  };
+
+  function render(): void {
+    const size = terminal.size();
+    const frame = screenView({
+      width: size.columns,
+      height: size.rows,
+      model,
+      editor,
+      status: statusState(),
+      theme,
+      scroll,
+      overlay: overlayLines(size.columns, size.rows),
+      toasts,
+      spinnerTick,
+      reducedMotion: process.env.NO_COLOR !== undefined && process.env.NO_COLOR !== "",
+    });
+    terminal.render(frame.lines.join("\n"));
+  }
+
+  const onStreamEvent = (event: StreamEvent): void => {
+    const reduced = reduceModelEvent(model, event);
+    model = reduced.model;
+    if (reduced.status !== undefined) activity = reduced.status;
+    const now = Date.now();
+    if (event.type !== "token" || now - lastRenderAt >= TOKEN_RENDER_MS) {
+      lastRenderAt = now;
+      render();
+    }
+  };
+
+  const onWarning = (line: string): void => {
+    model = addNotice(model, "warn", line);
+  };
+
+  const executeTurn = (task: string, turnMode: Config["mode"]): void => {
+    if (running) {
+      // Defensive only — submitEditor refuses before reaching here, so the
+      // caller's draft is never dropped by this guard.
+      model = addNotice(model, "warn", "a turn is still running — wait for it to finish");
+      render();
+      return;
+    }
+    model = addUserBlock(model, task);
+    scroll = latestTranscriptScroll();
+    running = true;
+    quitArmed = false;
+    turnStartedAt = Date.now();
+    lastRenderAt = 0;
+    activity = `running (${turnMode})…`;
+    const controller = new AbortController();
+    turnAbort = controller;
+    render();
+    turnDone = (async () => {
       try {
-        const result = await harness.run(task, context);
-        for (const warning of result.warnings) pushLocal({ kind: "system", text: `warn: ${warning}` });
-        for (const error of result.errors) pushLocal({ kind: "error", text: error });
-        for (const audit of result.promptAudits) {
-          if (cfg.verbose) {
-            pushLocal({
-              kind: "system",
-              text:
-                `audit ${audit.role} ${audit.kind}: ${audit.sections.join(" > ")}; ` +
-                `tools: ${audit.tools.length > 0 ? audit.tools.join(", ") : "(none)"}`,
+        const { harness, mcp } = await buildTurnHarness({
+          cfg: sessionCfg,
+          mode: turnMode,
+          resources,
+          ...(options.mcpConfig !== undefined ? { mcpConfig: options.mcpConfig } : {}),
+          ...(options.streamTokens === true ? { streamTokens: true } : {}),
+          signal: controller.signal,
+          onStreamEvent,
+          onWarning,
+        });
+        try {
+          const result = await harness.run(task, context);
+          usage = usageOf(result.usage);
+          lastElapsedMs = Date.now() - turnStartedAt;
+          measureContext();
+          const senior = sessionCfg.seniorModel.trim();
+          const estimate =
+            senior !== "" && senior === sessionCfg.juniorModel.trim()
+              ? estimateCost(senior, {
+                  promptTokens: usage.input,
+                  completionTokens: usage.output,
+                })
+              : null;
+          // an honest unknown marker, never a fabricated zero
+          cost = estimate === null ? null : estimate.totalCost;
+          for (const warning of result.warnings) {
+            model = addNotice(model, "warn", `warn: ${warning}`);
+          }
+          for (const error of result.errors) {
+            model = addNotice(model, "error", error, {
+              details: `task: ${task}`,
+              retryable: true,
             });
           }
+          if (result.errors.length > 0) {
+            lastFailedTask = { task, turnMode };
+            activity = "turn completed with errors — /retry re-sends it";
+          }
+          if (sessionCfg.verbose) {
+            for (const audit of result.promptAudits) {
+              model = addNotice(
+                model,
+                "info",
+                `audit ${audit.role} ${audit.kind}: ${audit.sections.join(" > ")}; ` +
+                  `tools: ${audit.tools.length > 0 ? audit.tools.join(", ") : "(none)"}`,
+              );
+            }
+          }
+        } finally {
+          await mcp?.client.close();
         }
-        if (result.errors.length > 0) state.status = "ready — turn completed with errors";
+      } catch (exc) {
+        const text = messageOf(exc);
+        if (controller.signal.aborted) {
+          model = addNotice(model, "info", "turn cancelled");
+          activity = "turn cancelled — the session is still open";
+        } else {
+          model = addNotice(model, "error", text, {
+            details: `task: ${task}`,
+            retryable: true,
+          });
+          activity = "turn failed — the session is still open";
+          if (overlay === null) {
+            overlay = {
+              kind: "dialog",
+              state: createDialog({
+                title: "Turn failed",
+                message: text,
+                details: task,
+                tone: "error",
+                actions: [
+                  { id: "retry", label: "Retry" },
+                  { id: "close", label: "Close" },
+                ],
+              }),
+              onAction: (id) => {
+                if (id === "retry") doRetry();
+              },
+            };
+          }
+        }
+        lastFailedTask = { task, turnMode };
       } finally {
-        await mcp?.client.close();
+        running = false;
+        turnAbort = null;
+        render();
       }
-    } catch (exc) {
-      pushLocal({ kind: "error", text: messageOf(exc) });
-      state.status = "turn failed — the session is still open";
+    })();
+    // The turn reports its own errors into the transcript; a rejection here
+    // would be a bug, but it must never become an unhandled rejection.
+    turnDone.catch(() => {});
+  };
+
+  const doRetry = (): void => {
+    if (running) return;
+    if (lastFailedTask === null) {
+      model = addNotice(model, "info", "nothing to retry");
+      return;
     }
-    state.lines = buffer.lines;
+    executeTurn(lastFailedTask.task, lastFailedTask.turnMode);
+  };
+
+  const gateIdleCommand = (command: Pick<TuiCommand, "idleOnly" | "title">): boolean => {
+    if (isCommandEnabled(command, { running })) return true;
+    model = addNotice(model, "warn", `${command.title} is unavailable while a turn is running`);
+    return false;
+  };
+
+  // --------------------------------------------------------------------- //
+  // overlays
+  // --------------------------------------------------------------------- //
+
+  const openPalette = (): void => {
+    overlay = { kind: "palette", state: createPaletteState() };
+  };
+  const openHelp = (): void => {
+    overlay = { kind: "help", state: createHelpState() };
+  };
+
+  const openModePicker = (): void => {
+    const items: PickerItem[] = [
+      {
+        id: "consult",
+        label: "consult",
+        description: "the senior asks the junior and decides (read-only)",
+        keywords: ["mode"],
+      },
+      {
+        id: "work",
+        label: "work",
+        description: "the junior may use its tool belt and workspace",
+        keywords: ["mode"],
+      },
+    ];
+    overlay = {
+      kind: "picker",
+      title: "COOPERATION MODE",
+      items,
+      state: createPickerState(),
+      onAccept: (item) => {
+        mode = item.id === "work" ? "work" : "consult";
+        pushToast("info", `mode: ${mode} — the next turn uses it`);
+      },
+    };
+  };
+
+  const modelItemsForRole = (role: "senior" | "junior"): PickerItem[] => {
+    const pinned = envPinnedPairs().has(`${role}:model`);
+    const current = (role === "senior" ? sessionCfg.seniorModel : sessionCfg.juniorModel).trim();
+    const items: PickerItem[] = [];
+    if (current !== "") {
+      items.push({
+        id: `keep:${role}`,
+        label: `keep current (${current})`,
+        description: "no change",
+        ...(pinned ? { disabled: true, disabledReason: "pinned by a TWO_BROTHERS_* env var" } : {}),
+      });
+    }
+    for (const preset of mergeSeedPresets()) {
+      for (const presetModel of preset.models ?? []) {
+        items.push({
+          id: `${role}:${presetModel}`,
+          label: presetModel,
+          description: `${preset.name} preset`,
+          keywords: [preset.name, role],
+          ...(pinned ? { disabled: true, disabledReason: "pinned by a TWO_BROTHERS_* env var" } : {}),
+        });
+      }
+    }
+    if (items.length === 0) {
+      items.push({
+        id: "none",
+        label: "(no presets carry model lists)",
+        disabled: true,
+        disabledReason: "configure with --senior-model/--junior-model or two-brothers onboard",
+      });
+    }
+    return items;
+  };
+
+  const applyRoleModel = (role: "senior" | "junior", value: string): void => {
+    sessionCfg =
+      role === "senior"
+        ? { ...sessionCfg, seniorModel: value }
+        : { ...sessionCfg, juniorModel: value };
+    pushToast("success", `${role} model set to ${value} for this session`);
+  };
+
+  const openModelPicker = (preselectedRole?: "senior" | "junior"): void => {
+    const openRolePicker = (role: "senior" | "junior"): void => {
+      overlay = {
+        kind: "picker",
+        title: `${role.toUpperCase()} MODEL`,
+        items: modelItemsForRole(role),
+        state: createPickerState(),
+        onAccept: (item) => {
+          if (item.id.startsWith("keep:")) return;
+          const value = item.id.slice(role.length + 1);
+          if (value !== "") applyRoleModel(role, value);
+        },
+      };
+    };
+    if (preselectedRole !== undefined) openRolePicker(preselectedRole);
+    else {
+      overlay = {
+        kind: "picker",
+        title: "CHOOSE A ROLE",
+        items: [
+          { id: "senior", label: "Senior", description: "the arbiter — experience and judgment" },
+          { id: "junior", label: "Junior", description: "the executor — brave and determined" },
+        ],
+        state: createPickerState(),
+        onAccept: (item) => openRolePicker(item.id === "junior" ? "junior" : "senior"),
+      };
+    }
+  };
+
+  const openSessionPicker = (): void => {
+    const items: PickerItem[] = [];
+    try {
+      for (const name of fs.readdirSync(sessionsDir).filter((n) => n.endsWith(".jsonl")).sort()) {
+        let updated = "(unknown time)";
+        try {
+          updated = String(fs.statSync(path.join(sessionsDir, name)).mtime);
+        } catch {
+          // unreadable stat still lists the session
+        }
+        items.push({
+          id: name,
+          label: name.slice(0, -".jsonl".length),
+          description: updated,
+          keywords: [name],
+        });
+      }
+    } catch {
+      // missing sessions dir: the picker shows its empty state
+    }
+    overlay = {
+      kind: "picker",
+      title: "RESUME SESSION",
+      items,
+      state: createPickerState(),
+      emptyText: `No saved sessions in ${sessionsDir}.`,
+      onAccept: (item) => {
+        overlay = {
+          kind: "dialog",
+          state: createDialog({
+            title: "Resume session",
+            message: `Resume "${item.label}"? The current context is replaced by the saved session.`,
+            actions: [
+              { id: "resume", label: "Resume" },
+              { id: "cancel", label: "Cancel" },
+            ],
+          }),
+          onAction: (id) => {
+            if (id !== "resume") return;
+            try {
+              const sessionFile = path.join(sessionsDir, item.id);
+              context = openTuiContext({ ...sessionCfg, sessionFile, resume: true }, options.io);
+              sessionCfg = { ...sessionCfg, sessionFile, resume: true };
+              model = createTuiModel();
+              editor = createEditor();
+              scroll = latestTranscriptScroll();
+              usage = null;
+              cost = null;
+              measureContext();
+              pushToast("success", `resumed ${item.label}`);
+            } catch (exc) {
+              model = addNotice(model, "error", messageOf(exc));
+            }
+          },
+        };
+      },
+    };
+  };
+
+  const openSettingsDialog = (): void => {
+    overlay = {
+      kind: "dialog",
+      state: createDialog({
+        title: "Settings",
+        message:
+          "Provider setup is stored per role in sessions/settings.json. " +
+          "Run `two-brothers onboard` outside the TUI for guided setup, or start " +
+          "the TUI with --senior-model/--junior-model (and --base-url/--api-key).",
+        actions: [{ id: "close", label: "Close" }],
+      }),
+      onAction: () => {},
+    };
+  };
+
+  const cycleTheme = (explicit?: string): void => {
+    const requested = explicit?.trim().toLowerCase();
+    if (requested === "dark" || requested === "light") {
+      themeMode = requested;
+    } else if (requested === "system" || requested === undefined || requested === "") {
+      themeMode = null; // back to environment detection
+    } else {
+      model = addNotice(model, "warn", "usage: /theme dark|light|system");
+      return;
+    }
+    theme = resolveTheme({ mode: themeMode });
+    pushToast("info", `theme: ${theme.mode}${theme.color ? "" : " (no color)"}`);
+  };
+
+  /** Run a palette/help entry: commands dispatch, templates become tasks. */
+  const dispatchEntry = (entry: PaletteEntry): void => {
+    if (entry.kind === "slash-template") {
+      const template = resources.commands.commands.find(
+        (c) => c.name === entry.id.slice("template:".length),
+      );
+      if (template === undefined) return;
+      if ((template.argumentHint ?? "") !== "") {
+        editor = insertText(editor, `/${template.name} `);
+      } else {
+        executeTurn(expandCommand(template, ""), template.mode ?? mode);
+      }
+      return;
+    }
+    switch (entry.id) {
+      case "palette":
+        openPalette();
+        break;
+      case "help":
+        openHelp();
+        break;
+      case "commands": {
+        const action = resolveTuiInput("/commands", resources.commands);
+        if (action.type === "lines") {
+          for (const line of action.lines) {
+            model = addNotice(model, line.kind === "error" ? "error" : "info", line.text);
+          }
+        }
+        break;
+      }
+      case "exit":
+        requestQuit();
+        break;
+      case "mode":
+        openModePicker();
+        break;
+      case "models":
+        openModelPicker();
+        break;
+      case "sessions":
+        openSessionPicker();
+        break;
+      case "theme":
+        cycleTheme();
+        break;
+      case "settings":
+        openSettingsDialog();
+        break;
+      case "retry":
+        doRetry();
+        break;
+      default:
+        break;
+    }
+  };
+
+  // --------------------------------------------------------------------- //
+  // key handling
+  // --------------------------------------------------------------------- //
+
+  const requestQuit = (): void => {
+    if (quitArmed) throw new TuiExit();
+    quitArmed = true;
+    activity = QUIT_ARMED_ACTIVITY;
     render();
   };
 
-  const submit = async (): Promise<void> => {
-    const raw = state.input;
-    state.input = "";
-    const action = resolveTuiInput(raw, resources.commands);
+  /** Safe precedence: turn cancel → composer clear → quit confirm. */
+  const cancelKey = (): void => {
+    if (running && turnAbort !== null) {
+      turnAbort.abort();
+      activity = "cancelling…";
+      render();
+      return;
+    }
+    if (editor.text !== "") {
+      editor = clearEditor(editor);
+      activity = "composer cleared";
+      render();
+      return;
+    }
+    requestQuit();
+  };
+
+  const completeSlash = (): void => {
+    const text = editor.text;
+    if (!text.startsWith("/") || text.includes(" ")) return;
+    const prefix = text.slice(1).toLowerCase();
+    if (prefix === "") return;
+    const names = [
+      ...TUI_COMMANDS.map((c) => c.slash).filter((s): s is string => s !== undefined),
+      ...resources.commands.commands.map((c) => c.name),
+    ];
+    const unique = [...new Set(names.filter((name) => name.toLowerCase().startsWith(prefix)))];
+    if (unique.length === 1 && unique[0] !== undefined && unique[0] !== prefix) {
+      editor = insertText(editor, `/${unique[0]} `.slice(text.length));
+    }
+  };
+
+  /** Slash forms for registry commands that `resolveTuiInput` does not own
+   *  (`/models`, `/sessions`, `/theme`, …). Returns false when the caller
+   *  should fall back to the template/builtin resolver. */
+  const dispatchSlash = (command: TuiCommand, args: string): boolean => {
+    switch (command.id) {
+      case "palette":
+        openPalette();
+        return true;
+      case "help":
+        openHelp();
+        return true;
+      case "commands": {
+        const action = resolveTuiInput("/commands", resources.commands);
+        if (action.type === "lines") {
+          for (const line of action.lines) {
+            model = addNotice(model, line.kind === "error" ? "error" : "info", line.text);
+          }
+        }
+        return true;
+      }
+      case "exit":
+        throw new TuiExit();
+      case "mode": {
+        const requested = args.trim().toLowerCase();
+        if (requested === "") {
+          openModePicker();
+          return true;
+        }
+        if (requested === "consult" || requested === "work") {
+          mode = requested;
+          pushToast("info", `mode: ${mode} — the next turn uses it`);
+          return true;
+        }
+        model = addNotice(model, "warn", "usage: /mode consult|work");
+        return true;
+      }
+      case "models": {
+        if (!gateIdleCommand(command)) return true;
+        const words = args.trim().split(/\s+/).filter(Boolean);
+        if (words[0] === "senior" || words[0] === "junior") {
+          if (words.length >= 2 && words[1] !== undefined) {
+            if (envPinnedPairs().has(`${words[0]}:model`)) {
+              model = addNotice(
+                model,
+                "warn",
+                `${words[0]} model is pinned by a TWO_BROTHERS_* env var and cannot be changed here`,
+              );
+              return true;
+            }
+            applyRoleModel(words[0], words[1]);
+            return true;
+          }
+          openModelPicker(words[0]);
+          return true;
+        }
+        openModelPicker();
+        return true;
+      }
+      case "sessions":
+        if (!gateIdleCommand(command)) return true;
+        openSessionPicker();
+        return true;
+      case "theme":
+        cycleTheme(args);
+        return true;
+      case "settings":
+        if (!gateIdleCommand(command)) return true;
+        openSettingsDialog();
+        return true;
+      case "retry":
+        doRetry();
+        return true;
+      default:
+        return false;
+    }
+  };
+
+  const submitEditor = (): void => {
+    // Refuse before consuming the submission: takeSubmission would clear the
+    // editor, and a silent `executeTurn` return mid-run would lose the draft.
+    if (running && editor.text.trim() !== "") {
+      model = addNotice(
+        model,
+        "warn",
+        "a turn is still running — your draft is kept; send it when the turn finishes",
+      );
+      render();
+      return;
+    }
+    const submission = takeSubmission(editor);
+    editor = submission.state;
+    const text = submission.text;
+    if (text.trim() === "") return;
+    const matched = matchCommand(text);
+    if (matched !== null) {
+      const builtin = findSlashCommand(TUI_COMMANDS, matched.name);
+      const shadowsTemplate = resources.commands.commands.some((c) => c.name === matched.name);
+      if (builtin !== null && !shadowsTemplate && dispatchSlash(builtin, matched.args)) return;
+    }
+    const action = resolveTuiInput(text, resources.commands);
     switch (action.type) {
       case "none":
         break;
       case "exit":
         throw new TuiExit();
       case "lines":
-        for (const line of action.lines) pushLocal(line);
-        if (action.status !== undefined) state.status = action.status;
+        for (const line of action.lines) {
+          model = addNotice(model, line.kind === "error" ? "error" : "info", line.text);
+        }
+        if (action.status !== undefined) activity = action.status;
         break;
       case "mode":
         mode = action.mode;
-        state.header.mode = mode;
-        state.status = `mode: ${mode} — the next turn uses it`;
+        pushToast("info", `mode: ${mode} — the next turn uses it`);
         break;
       case "run":
-        await executeTurn(action.task, action.mode ?? mode);
+        executeTurn(action.task, action.mode ?? mode);
         break;
     }
+  };
+
+  const handleOverlayKey = (key: KeyLike): void => {
+    if (overlay === null) return;
+    if (overlay.kind === "palette") {
+      const entries = paletteEntries(TUI_COMMANDS, { commands: slashInfos(), running });
+      const result = handlePaletteKey(TUI_COMMANDS, overlay.state, key, entries);
+      overlay = { ...overlay, state: result.state };
+      if (result.action === "close") overlay = null;
+      else if (result.action === "accept" && result.entry !== undefined) {
+        const entry = result.entry;
+        overlay = null;
+        dispatchEntry(entry);
+      } else if (result.action === "blocked") {
+        pushToast("warn", result.reason ?? "unavailable");
+      }
+      return;
+    }
+    if (overlay.kind === "help") {
+      const entries = helpEntries(TUI_COMMANDS, { commands: slashInfos(), running });
+      const result = handleHelpKey(TUI_COMMANDS, overlay.state, key, entries);
+      overlay = { ...overlay, state: result.state };
+      if (result.action === "close") overlay = null;
+      else if (result.action === "accept" && result.entry !== undefined) {
+        const entry = result.entry;
+        overlay = null;
+        dispatchEntry(entry);
+      } else if (result.action === "blocked") {
+        pushToast("warn", result.reason ?? "unavailable");
+      }
+      return;
+    }
+    if (overlay.kind === "picker") {
+      const result = handlePickerKey(overlay.state, key, overlay.items);
+      overlay = { ...overlay, state: result.state };
+      if (result.action === "close") overlay = null;
+      else if (result.action === "accept" && result.item !== undefined) {
+        const accept = overlay.onAccept;
+        overlay = null;
+        accept(result.item);
+      } else if (result.action === "blocked") {
+        pushToast("warn", result.reason ?? "unavailable");
+      }
+      return;
+    }
+    const result = handleDialogKey(overlay.state, key);
+    if (result.action === "close") {
+      overlay = null;
+    } else if (result.action === "accept" && result.actionId !== undefined) {
+      const onAction = overlay.onAction;
+      overlay = null;
+      onAction(result.actionId);
+    } else if (result.action === "blocked") {
+      pushToast("warn", "unavailable");
+    }
+  };
+
+  /**
+   * Registry command dispatch for the app scope. Returns true when the key
+   * was consumed here; false lets the editor handle it (typing, history,
+   * submission, scrolling).
+   */
+  const dispatchCommand = (command: TuiCommand): boolean => {
+    switch (command.id) {
+      case "palette":
+        openPalette();
+        return true;
+      case "help":
+        openHelp();
+        return true;
+      case "cancel":
+      case "exit":
+        cancelKey();
+        return true;
+      default:
+        return false;
+    }
+  };
+
+  const pageSize = (): number => Math.max(1, terminal.size().rows - 10);
+
+  const handleKey = (key: Key): void => {
+    if (overlay !== null) {
+      handleOverlayKey(key);
+      return;
+    }
+    const match = resolveKey(TUI_COMMANDS, key, "app");
+    // A literal "?" with text in the composer is typing, not the help chord —
+    // tasks are full of questions. F1 (and "?" on an empty composer) still
+    // open help.
+    const helpChordBlocksTyping =
+      match !== null &&
+      match.command.id === "help" &&
+      match.chord.name === "?" &&
+      editor.text !== "";
+    if (match !== null && !helpChordBlocksTyping && dispatchCommand(match.command)) {
+      return;
+    }
+    const result = handleEditorKey(editor, key);
+    editor = result.state;
+    switch (result.action) {
+      case "submit":
+        submitEditor();
+        break;
+      case "scroll-prev":
+        scroll = scrollTranscript(model, scroll, -pageSize(), {
+          width: terminal.size().columns,
+          height: transcriptBodyHeight(),
+          theme,
+        });
+        break;
+      case "scroll-next":
+        scroll = scrollTranscript(model, scroll, pageSize(), {
+          width: terminal.size().columns,
+          height: transcriptBodyHeight(),
+          theme,
+        });
+        break;
+      case "cancel":
+        cancelKey();
+        break;
+      case "complete":
+        completeSlash();
+        break;
+      default:
+        break;
+    }
+  };
+
+  function isQuitChord(key: Key): boolean {
+    return (
+      (key.ctrl === true && (key.name === "c" || key.raw === "\u0003")) ||
+      key.name === "escape"
+    );
+  }
+
+  const unsubscribeResize = terminal.onResize(() => {
+    render();
+  });
+
+  const abortRunningTurn = (): void => {
+    const controller = turnAbort;
+    if (controller !== null) controller.abort();
   };
 
   try {
     terminal.enter();
     render();
     if (options.initialTask !== undefined && options.initialTask.trim() !== "") {
-      await executeTurn(options.initialTask.trim(), mode);
+      executeTurn(options.initialTask.trim(), mode);
     }
     for (;;) {
       render();
-      const key = await terminal.readKey();
-      if (key.ctrl && (key.name === "c" || key.raw === "\u0003")) {
-        if (confirmQuit) break;
-        confirmQuit = true;
-        state.status = QUIT_HINT;
+      const event = await terminal.readEvent();
+      if (event.type === "key" && quitArmed && isQuitChord(event.key)) {
+        // the confirming press of a quit chord: leave, restore the terminal
+        break;
+      }
+      if (quitArmed) {
+        // any other input disarms the quit chord; the armed status-bar text
+        // must not linger once the chord is cancelled
+        quitArmed = false;
+        if (activity === QUIT_ARMED_ACTIVITY) activity = "quit cancelled";
+      }
+      if (event.type === "paste") {
+        if (overlay === null) editor = pasteText(editor, event.text);
         continue;
       }
-      if (key.name === "escape") {
-        if (confirmQuit) break;
-        confirmQuit = true;
-        state.status = QUIT_HINT;
-        continue;
-      }
-      const page = Math.max(1, terminal.size().rows - 7);
-      if (key.name === "pageup") {
-        state.scrollOffset += page;
-        confirmQuit = false;
-        continue;
-      }
-      if (key.name === "pagedown") {
-        state.scrollOffset = Math.max(0, state.scrollOffset - page);
-        confirmQuit = false;
-        continue;
-      }
-      if (key.name === "return" || key.name === "enter") {
-        confirmQuit = false;
-        try {
-          await submit();
-        } catch (exc) {
-          if (exc instanceof TuiExit) break;
-          throw exc;
-        }
-        continue;
-      }
-      if (key.name === "backspace" || key.raw === "\u007f" || key.raw === "\b") {
-        state.input = state.input.slice(0, -1);
-        confirmQuit = false;
-        continue;
-      }
-      const char = printableChar(key);
-      if (char !== null) {
-        state.input += char;
-        confirmQuit = false;
-        continue;
-      }
-      confirmQuit = false;
+      handleKey(event.key);
     }
     return 0;
+  } catch (exc) {
+    // `/exit` (and the palette Exit entry) quit via this control-flow signal;
+    // it is a clean quit, not an error — without the catch it reached the
+    // CLI top level and turned into exit code 1.
+    if (!(exc instanceof TuiExit)) throw exc;
+    return 0;
   } finally {
+    unsubscribeResize();
+    clearInterval(spinnerTimer);
+    abortRunningTurn();
+    if (turnDone !== null) {
+      await Promise.race([turnDone, new Promise((resolve) => setTimeout(resolve, 1500))]);
+    }
     terminal.restore();
-  }
-}
-
-/** Internal control-flow signal for `/exit` handed out of `submit`. */
-class TuiExit extends Error {
-  constructor() {
-    super("tui exit");
-    this.name = "TuiExit";
   }
 }

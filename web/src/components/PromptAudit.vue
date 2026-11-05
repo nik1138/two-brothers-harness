@@ -127,11 +127,14 @@ const toggleLabel = computed(() => (open.value ? 'Hide prompt' : 'Show prompt'))
   display: inline-flex;
   align-items: center;
   gap: 0.5rem;
-  flex-shrink: 0;
+  flex: 1 1 auto;
+  min-width: 0;
   margin-left: auto;
 }
 
 .audit-summary {
+  flex: 1 1 auto;
+  min-width: 0;
   max-width: 20rem;
   overflow: hidden;
   text-overflow: ellipsis;

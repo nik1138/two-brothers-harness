@@ -1,46 +1,40 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
-import { NButton, NForm, NFormItem, NInput, NModal, NPopconfirm, NSelect } from 'naive-ui'
+import type { ComponentPublicInstance } from 'vue'
+import { NButton, NModal } from 'naive-ui'
 import {
   ApiError,
-  createProvider,
-  deleteProvider,
   getSettings,
   listPlugins,
   listProviders,
   normalizePluginSelection,
-  updateProvider,
   updateSettingsWithPlugins,
 } from '../api'
 import type { PluginLoadError, RoleSettingsPatch, SettingsPatch } from '../api'
 import type { ProviderPreset, RoleSettingsView } from '../types'
 import { clickInModalBody } from '../modal'
+import { applyThemeAttribute, readThemeMode, resolveDark, saveThemeMode } from '../themeMode'
+import type { ThemeMode } from '../themeMode'
+import ModelsRolesSection from './settings/ModelsRolesSection.vue'
+import ProvidersSection from './settings/ProvidersSection.vue'
+import PluginsSection from './settings/PluginsSection.vue'
+import AppearanceSection from './settings/AppearanceSection.vue'
+import AdvancedSection from './settings/AdvancedSection.vue'
 
-const emit = defineEmits<{ close: []; saved: [] }>()
+/** Optional controlled theme mode. When supplied, the host owns live theme
+ *  application and this panel only emits `theme-change`. */
+const props = defineProps<{ themeMode?: ThemeMode }>()
+
+const emit = defineEmits<{
+  close: []
+  saved: []
+  'theme-change': [ThemeMode]
+}>()
 
 function onMaskClick(e: MouseEvent) {
   if (clickInModalBody(e)) return
   emit('close')
 }
-
-const loading = ref(true)
-const saving = ref(false)
-const error = ref<string | null>(null)
-
-watch(loading, async (isLoading) => {
-  if (isLoading) return
-  await nextTick()
-  // `autofocus` only applies at parse time; this form mounts after the data
-  // load completes, so focus the first field (Senior model) programmatically
-  document.querySelector<HTMLElement>('.role-fieldset input')?.focus()
-})
-
-// Connection presets (Stage 17): the per-role "connection" select picks a
-// provider preset (which supplies base URL + API key) or "Manual".
-const connectionOptions = computed(() => [
-  { label: 'Manual', value: '' },
-  ...providers.value.map((p) => ({ label: `${p.name} — ${p.base_url}`, value: p.name })),
-])
 
 interface RoleForm {
   provider: string
@@ -49,6 +43,12 @@ interface RoleForm {
   api_key: string
   providerRef: string
 }
+
+const loading = ref(true)
+const settingsLoaded = ref(false)
+const saving = ref(false)
+const error = ref<string | null>(null)
+const panelRef = ref<HTMLElement | null>(null)
 
 const senior = reactive<RoleForm>({
   provider: '',
@@ -74,17 +74,102 @@ const pluginOptions = ref<{ label: string; value: string }[]>([])
 const pluginErrors = ref<PluginLoadError[]>([])
 const plugins = ref<string[]>([])
 
-// Provider presets: CRUD fires on its own buttons (not deferred to Save).
+// Connection presets (Stage 17): the per-role "connection" select picks a
+// provider preset (which supplies base URL + API key) or "Manual".
 const providers = ref<ProviderPreset[]>([])
 const providersError = ref<string | null>(null)
-const editingProvider = ref<string | null>(null)
-const editBaseUrl = ref('')
-const editKey = ref('')
-const editBusy = ref(false)
-const newName = ref('')
-const newBaseUrl = ref('')
-const newKey = ref('')
-const addBusy = ref(false)
+
+const connectionOptions = computed(() => [
+  { label: 'Manual', value: '' },
+  ...providers.value.map((p) => ({ label: `${p.name} — ${p.base_url}`, value: p.name })),
+])
+
+// -- section navigation -------------------------------------------------------
+
+type SectionId = 'models' | 'providers' | 'plugins' | 'appearance' | 'advanced'
+
+const sections: {
+  id: SectionId
+  label: string
+  description: string
+}[] = [
+  {
+    id: 'models',
+    label: 'Models & roles',
+    description: 'Each brother keeps its own provider connection and model.',
+  },
+  {
+    id: 'providers',
+    label: 'Providers',
+    description: 'Reusable connections that supply a base URL and API key.',
+  },
+  {
+    id: 'plugins',
+    label: 'Plugins',
+    description: 'Tools both brothers can use; the enabled list is shared.',
+  },
+  {
+    id: 'appearance',
+    label: 'Appearance',
+    description: 'Choose how the workspace looks on this device.',
+  },
+  {
+    id: 'advanced',
+    label: 'Advanced',
+    description: 'Environment pins, stored settings, and test transports.',
+  },
+]
+
+const activeId = ref<SectionId>('models')
+const activeSection = computed(
+  () => sections.find((section) => section.id === activeId.value) ?? sections[0]!,
+)
+
+const navRefs = ref<HTMLButtonElement[]>([])
+
+function setNavRef(el: Element | ComponentPublicInstance | null, index: number) {
+  if (el instanceof HTMLButtonElement) navRefs.value[index] = el
+}
+
+function onNavKeydown(event: KeyboardEvent, index: number) {
+  const step =
+    event.key === 'ArrowDown' || event.key === 'ArrowRight'
+      ? 1
+      : event.key === 'ArrowUp' || event.key === 'ArrowLeft'
+        ? -1
+        : 0
+  if (!step && event.key !== 'Home' && event.key !== 'End') return
+  event.preventDefault()
+  const next =
+    event.key === 'Home'
+      ? 0
+      : event.key === 'End'
+        ? sections.length - 1
+        : (index + step + sections.length) % sections.length
+  activeId.value = sections[next]!.id
+  void nextTick(() => navRefs.value[next]?.focus())
+}
+
+// -- theme -------------------------------------------------------------------
+
+/** Mirror used only while no `themeMode` prop is bound (standalone mount). */
+const fallbackTheme = ref<ThemeMode>(readThemeMode())
+const activeTheme = computed(() => props.themeMode ?? fallbackTheme.value)
+
+function onThemeChange(mode: ThemeMode) {
+  if (props.themeMode === undefined) {
+    // No host binding yet: persist through the existing theme API and apply
+    // the token attribute so the choice survives. The shell must pass
+    // `themeMode` and handle `theme-change` for naive-ui to follow live.
+    saveThemeMode(mode)
+    const systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+    applyThemeAttribute(mode, resolveDark(mode, systemDark))
+    fallbackTheme.value = mode
+  }
+  emit('theme-change', mode)
+}
+
+// -- data --------------------------------------------------------------------
 
 function errText(e: unknown): string {
   return e instanceof ApiError ? e.message : String(e)
@@ -95,84 +180,46 @@ function roleForm(role: 'senior' | 'junior'): RoleForm {
 }
 
 function fill(role: 'senior' | 'junior', view: RoleSettingsView) {
-  const f = roleForm(role)
-  f.provider = view.provider ?? ''
-  f.model = view.model ?? ''
-  f.base_url = view.base_url ?? ''
-  f.providerRef = view.provider_ref ?? ''
+  const form = roleForm(role)
+  form.provider = view.provider ?? ''
+  form.model = view.model ?? ''
+  form.base_url = view.base_url ?? ''
+  form.providerRef = view.provider_ref ?? ''
   keySet[role] = view.api_key_set
+}
+
+function updateSenior(patch: Partial<RoleForm>) {
+  Object.assign(senior, patch)
+}
+
+function updateJunior(patch: Partial<RoleForm>) {
+  Object.assign(junior, patch)
 }
 
 async function refreshProviders() {
   providers.value = await listProviders()
 }
 
-function startEdit(p: ProviderPreset) {
-  editingProvider.value = p.name
-  editBaseUrl.value = p.base_url
-  editKey.value = ''
+function onProvidersUpdated(next: ProviderPreset[]) {
+  providers.value = next
+  providersError.value = null
 }
 
-async function saveEdit(p: ProviderPreset) {
-  if (editBusy.value) return
-  const base = editBaseUrl.value.trim()
-  if (!base) {
-    // an all-empty patch would be accepted by the backend as a no-op while
-    // the operator believes a change applied — refuse it visibly
-    providersError.value = 'base URL must not be empty'
-    return
-  }
-  editBusy.value = true
-  providersError.value = null
-  try {
-    const patch: { base_url?: string; api_key?: string } = { base_url: base }
-    if (editKey.value) patch.api_key = editKey.value
-    await updateProvider(p.name, patch)
-    editingProvider.value = null
-    await refreshProviders()
-  } catch (e) {
-    providersError.value = errText(e)
-  } finally {
-    editBusy.value = false
+function onProviderDeleted(name: string) {
+  // the backend clears a deleted preset's role refs; re-sync the form so a
+  // stranded select value doesn't fail the next save with a 400
+  for (const role of ['senior', 'junior'] as const) {
+    if (roleForm(role).providerRef === name) roleForm(role).providerRef = ''
   }
 }
 
-async function addProvider() {
-  if (addBusy.value) return
-  addBusy.value = true
-  providersError.value = null
-  try {
-    await createProvider({
-      name: newName.value.trim(),
-      base_url: newBaseUrl.value.trim(),
-      ...(newKey.value ? { api_key: newKey.value } : {}),
-    })
-    newName.value = ''
-    newBaseUrl.value = ''
-    newKey.value = ''
-    await refreshProviders()
-  } catch (e) {
-    providersError.value = errText(e)
-  } finally {
-    addBusy.value = false
-  }
-}
-
-async function removePreset(name: string) {
-  providersError.value = null
-  try {
-    await deleteProvider(name)
-    if (editingProvider.value === name) editingProvider.value = null
-    // the backend clears a deleted preset's role refs; re-sync the form so a
-    // stranded select value doesn't fail the next save with a 400
-    for (const role of ['senior', 'junior'] as const) {
-      if (roleForm(role).providerRef === name) roleForm(role).providerRef = ''
-    }
-    await refreshProviders()
-  } catch (e) {
-    providersError.value = errText(e)
-  }
-}
+watch(loading, async (isLoading) => {
+  if (isLoading || !settingsLoaded.value) return
+  await nextTick()
+  // `autofocus` only applies at parse time; this form mounts after the data
+  // load completes, so focus the first field (Senior connection) programmatically
+  panelRef.value?.querySelector<HTMLElement>('.role-card input')?.focus()
+})
 
 onMounted(async () => {
   try {
@@ -185,6 +232,7 @@ onMounted(async () => {
       value: p.name,
     }))
     pluginErrors.value = discovered.errors
+    settingsLoaded.value = true
   } catch (e) {
     error.value = errText(e)
   } finally {
@@ -199,20 +247,21 @@ onMounted(async () => {
 })
 
 async function save() {
+  if (loading.value || saving.value || !settingsLoaded.value) return
   saving.value = true
   error.value = null
   const patch: SettingsPatch = {}
   for (const role of ['senior', 'junior'] as const) {
-    const f = roleForm(role)
+    const form = roleForm(role)
     const entry: RoleSettingsPatch = {
-      model: f.model.trim(),
-      base_url: f.base_url.trim(),
-      provider_ref: f.providerRef,
+      model: form.model.trim(),
+      base_url: form.base_url.trim(),
+      provider_ref: form.providerRef,
     }
-    if (f.provider) entry.provider = f.provider
+    if (form.provider) entry.provider = form.provider
     // send the key only when the operator typed one; the response never
     // echoes key material, so the field is cleared from the form afterwards
-    if (f.api_key) entry.api_key = f.api_key
+    if (form.api_key) entry.api_key = form.api_key
     patch[role] = entry
   }
   try {
@@ -243,161 +292,548 @@ async function save() {
 
 <template>
   <n-modal :show="true" @mask-click="onMaskClick" @esc="emit('close')">
-    <div class="modal" role="dialog" aria-modal="true" aria-label="Model settings">
-      <h2>Model settings</h2>
-      <p v-if="loading" class="empty-hint">Loading…</p>
-      <template v-else>
-        <n-form
-          id="settings-form"
-          class="modal-body"
-          label-placement="top"
-          :show-require-mark="false"
-          @submit.prevent="save"
-        >
-          <fieldset v-for="role in ['senior', 'junior'] as const" :key="role" class="role-fieldset">
-            <legend>{{ role === 'senior' ? 'Senior' : 'Junior' }}</legend>
-            <n-form-item label="connection">
-              <n-select
-                v-model:value="roleForm(role).providerRef"
-                :options="connectionOptions"
-                :consistent-menu-width="false"
-              />
-            </n-form-item>
-            <n-form-item label="model">
-              <n-input
-                v-model:value="roleForm(role).model"
-                placeholder="e.g. spark-x2.6-4b@q4_k_m"
-              />
-            </n-form-item>
-            <n-form-item label="base URL">
-              <n-input
-                v-model:value="roleForm(role).base_url"
-                placeholder="http://127.0.0.1:1234/v1"
-                :disabled="!!roleForm(role).providerRef"
-              />
-              <template #feedback>
-                <span v-if="roleForm(role).providerRef">
-                  Supplied by the selected provider preset.
-                </span>
-              </template>
-            </n-form-item>
-            <n-form-item label="API key">
-              <n-input
-                v-model:value="roleForm(role).api_key"
-                type="password"
-                show-password-on="click"
-                autocomplete="off"
-                :placeholder="keySet[role] ? 'set — type a new value to replace' : 'not set'"
-                :disabled="!!roleForm(role).providerRef"
-              />
-              <template #feedback>
-                <span v-if="keySet[role] && !roleForm(role).providerRef">
-                  A key is stored on the backend; it is never sent back to this app.
-                </span>
-              </template>
-            </n-form-item>
-          </fieldset>
-          <fieldset class="role-fieldset plugins-fieldset">
-            <legend>Plugins</legend>
-            <p class="field-hint">
-              Enabled plugins are available to both Senior and Junior.
-            </p>
-            <n-form-item label="plugins">
-              <n-select
-                v-model:value="plugins"
-                multiple
-                filterable
-                :options="pluginOptions"
-                :consistent-menu-width="false"
-                placeholder="no plugins active"
-              />
-              <template #feedback>
-                <span v-if="pluginErrors.length">
-                  {{ pluginErrors.length }} plugin(s) failed to load:
-                  {{ pluginErrors.map((e) => e.plugin).join(', ') }}
-                </span>
-              </template>
-            </n-form-item>
-          </fieldset>
-          <fieldset class="role-fieldset providers-fieldset">
-            <legend>Providers</legend>
-            <p class="field-hint">
-              Presets supply the base URL and API key for roles that select them; changes apply
-              immediately.
-            </p>
-            <div class="provider-list">
-              <div v-for="p in providers" :key="p.name" class="provider-row">
-                <template v-if="editingProvider === p.name">
-                  <n-input v-model:value="editBaseUrl" placeholder="http://127.0.0.1:1234/v1" />
-                  <n-input
-                    v-model:value="editKey"
-                    type="password"
-                    show-password-on="click"
-                    autocomplete="off"
-                    :placeholder="p.api_key_set ? 'set — type a new value to replace' : 'not set'"
-                  />
-                  <div class="provider-row-actions">
-                    <n-button attr-type="button" size="small" @click="editingProvider = null">
-                      Cancel
-                    </n-button>
-                    <n-button
-                      attr-type="button"
-                      size="small"
-                      type="primary"
-                      :disabled="editBusy"
-                      @click="saveEdit(p)"
-                    >
-                      Save
-                    </n-button>
-                  </div>
-                </template>
-                <template v-else>
-                  <span class="provider-row-name">{{ p.name }}</span>
-                  <span class="provider-row-url">{{ p.base_url }}</span>
-                  <span v-if="p.api_key_set" class="provider-chip">key set</span>
-                  <div class="provider-row-actions">
-                    <n-button attr-type="button" size="small" @click="startEdit(p)">Edit</n-button>
-                    <n-popconfirm @positive-click="removePreset(p.name)">
-                      <template #trigger>
-                        <n-button attr-type="button" size="small">Delete</n-button>
-                      </template>
-                      Delete provider {{ p.name }}?
-                    </n-popconfirm>
-                  </div>
-                </template>
-              </div>
-              <p v-if="providers.length === 0" class="empty-hint">No provider presets yet</p>
-            </div>
-            <div class="provider-add">
-              <n-input v-model:value="newName" placeholder="Preset name" />
-              <n-input v-model:value="newBaseUrl" placeholder="http://127.0.0.1:1234/v1" />
-              <n-input
-                v-model:value="newKey"
-                type="password"
-                show-password-on="click"
-                autocomplete="off"
-                placeholder="API key (optional)"
-              />
-              <n-button
-                attr-type="button"
-                type="primary"
-                :disabled="addBusy || !newName.trim() || !newBaseUrl.trim()"
-                @click="addProvider"
-              >
-                Add provider
-              </n-button>
-            </div>
-            <p v-if="providersError" class="modal-error" role="alert">{{ providersError }}</p>
-          </fieldset>
-        </n-form>
-        <p v-if="error" class="modal-error" role="alert">{{ error }}</p>
-        <div class="modal-actions">
-          <n-button attr-type="button" @click="emit('close')">Cancel</n-button>
-          <n-button form="settings-form" attr-type="submit" type="primary" :disabled="saving || loading">
-            {{ saving ? 'Saving…' : 'Save' }}
-          </n-button>
+    <div
+      ref="panelRef"
+      class="settings-panel"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="settings-dialog-title"
+    >
+      <aside class="settings-rail">
+        <div class="settings-brand">
+          <span class="settings-eyebrow">Two Brothers</span>
+          <h2 id="settings-dialog-title">Settings</h2>
         </div>
-      </template>
+        <nav class="settings-nav" aria-label="Settings sections">
+          <button
+            v-for="(section, index) in sections"
+            :key="section.id"
+            :ref="(el) => setNavRef(el, index)"
+            type="button"
+            class="settings-nav-item"
+            :class="{ active: activeId === section.id }"
+            :aria-current="activeId === section.id ? 'page' : undefined"
+            :tabindex="activeId === section.id ? 0 : -1"
+            @click="activeId = section.id"
+            @keydown="onNavKeydown($event, index)"
+          >
+            <svg
+              v-if="section.id === 'models'"
+              class="settings-nav-icon"
+              viewBox="0 0 16 16"
+              width="16"
+              height="16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.4"
+              stroke-linecap="round"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path d="M2 4.5h12M2 11.5h12" />
+              <circle cx="5.5" cy="4.5" r="1.5" fill="currentColor" stroke="none" />
+              <circle cx="10.5" cy="11.5" r="1.5" fill="currentColor" stroke="none" />
+            </svg>
+            <svg
+              v-else-if="section.id === 'providers'"
+              class="settings-nav-icon"
+              viewBox="0 0 16 16"
+              width="16"
+              height="16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.3"
+              stroke-linecap="round"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <rect x="2.5" y="2.5" width="11" height="4.4" rx="1.2" />
+              <rect x="2.5" y="9.1" width="11" height="4.4" rx="1.2" />
+              <path d="M4.9 4.7h.01M4.9 11.3h.01" />
+            </svg>
+            <svg
+              v-else-if="section.id === 'plugins'"
+              class="settings-nav-icon"
+              viewBox="0 0 16 16"
+              width="16"
+              height="16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.3"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1" />
+              <rect x="9" y="2.5" width="4.5" height="4.5" rx="1" />
+              <rect x="2.5" y="9" width="4.5" height="4.5" rx="1" />
+              <rect x="9" y="9" width="4.5" height="4.5" rx="1" />
+            </svg>
+            <svg
+              v-else-if="section.id === 'appearance'"
+              class="settings-nav-icon"
+              viewBox="0 0 16 16"
+              width="16"
+              height="16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.3"
+              stroke-linecap="round"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <circle cx="8" cy="8" r="3" />
+              <path
+                d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M12.6 3.4l-1.1 1.1M4.5 11.5l-1.1 1.1"
+              />
+            </svg>
+            <svg
+              v-else
+              class="settings-nav-icon"
+              viewBox="0 0 16 16"
+              width="16"
+              height="16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.4"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path d="M5.5 4 2 8l3.5 4M10.5 4 14 8l-3.5 4" />
+            </svg>
+            <span class="settings-nav-label">{{ section.label }}</span>
+          </button>
+        </nav>
+      </aside>
+
+      <form id="settings-form" class="settings-main" @submit.prevent="save">
+        <header class="settings-header">
+          <div class="settings-heading">
+            <h3>{{ activeSection.label }}</h3>
+            <p>{{ activeSection.description }}</p>
+          </div>
+          <button
+            type="button"
+            class="settings-close"
+            aria-label="Close settings"
+            @click="emit('close')"
+          >
+            <svg
+              viewBox="0 0 16 16"
+              width="16"
+              height="16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path d="m4 4 8 8M12 4l-8 8" />
+            </svg>
+          </button>
+        </header>
+
+        <div class="settings-body" :aria-busy="loading">
+          <div v-if="loading" class="settings-loading" role="status">
+            <span class="settings-spinner" aria-hidden="true"></span>
+            Loading settings…
+          </div>
+          <template v-else>
+            <div
+              v-show="activeId === 'models'"
+              class="settings-pane"
+              role="region"
+              aria-label="Models & roles"
+            >
+              <ModelsRolesSection
+                :senior="senior"
+                :junior="junior"
+                :key-set="keySet"
+                :connection-options="connectionOptions"
+                @update:senior="updateSenior"
+                @update:junior="updateJunior"
+              />
+            </div>
+
+            <div
+              v-show="activeId === 'providers'"
+              class="settings-pane"
+              role="region"
+              aria-label="Providers"
+            >
+              <ProvidersSection
+                :providers="providers"
+                :initial-error="providersError"
+                @update:providers="onProvidersUpdated"
+                @deleted="onProviderDeleted"
+              />
+            </div>
+
+            <div
+              v-show="activeId === 'plugins'"
+              class="settings-pane"
+              role="region"
+              aria-label="Plugins"
+            >
+              <PluginsSection
+                :plugins="plugins"
+                :options="pluginOptions"
+                :errors="pluginErrors"
+                @update:plugins="plugins = $event"
+              />
+            </div>
+
+            <div
+              v-show="activeId === 'appearance'"
+              class="settings-pane"
+              role="region"
+              aria-label="Appearance"
+            >
+              <AppearanceSection :mode="activeTheme" @change="onThemeChange" />
+            </div>
+
+            <div
+              v-show="activeId === 'advanced'"
+              class="settings-pane"
+              role="region"
+              aria-label="Advanced"
+            >
+              <AdvancedSection />
+            </div>
+          </template>
+        </div>
+
+        <footer class="settings-footer">
+          <p v-if="error" class="settings-footer-error" role="alert">{{ error }}</p>
+          <p v-else class="settings-footer-hint">
+            Role and plugin changes save together. Provider and theme changes apply immediately.
+          </p>
+          <div class="settings-footer-actions">
+            <n-button attr-type="button" @click="emit('close')">Cancel</n-button>
+            <n-button
+              attr-type="submit"
+              type="primary"
+              :disabled="saving || loading || !settingsLoaded"
+            >
+              {{ saving ? 'Saving…' : 'Save' }}
+            </n-button>
+          </div>
+        </footer>
+      </form>
     </div>
   </n-modal>
 </template>
+
+<style scoped>
+/* Shared 800x800 settings surface: a 188px section rail beside one scrolling
+   section. The title header and Save/Cancel footer stay pinned while the
+   section body scrolls; below 768px the panel fills the viewport and the rail
+   turns into a horizontal strip. */
+.settings-panel {
+  display: flex;
+  width: min(800px, calc(100vw - 32px));
+  height: min(800px, calc(100dvh - 32px));
+  max-width: calc(100vw - 32px);
+  max-height: calc(100dvh - 32px);
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--surface-panel);
+  box-shadow: var(--shadow-raised);
+  color: var(--text-primary);
+}
+
+.settings-rail {
+  flex: 0 0 188px;
+  width: 188px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border-subtle);
+  background: var(--surface-canvas);
+}
+
+.settings-brand {
+  flex: none;
+  padding: 22px 18px 10px;
+}
+
+.settings-eyebrow {
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.settings-brand h2 {
+  margin: 3px 0 0;
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.settings-nav {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px 12px 16px;
+  overflow-y: auto;
+}
+
+.settings-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.85rem;
+  line-height: 1.3;
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-nav-item:hover {
+  background: var(--surface-hover);
+}
+
+.settings-nav-item.active {
+  background: var(--surface-hover);
+  box-shadow: inset 3px 0 0 var(--accent);
+  font-weight: 600;
+}
+
+.settings-nav-icon {
+  flex: none;
+  opacity: 0.75;
+}
+
+.settings-nav-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-header {
+  flex: none;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 20px 18px 14px 24px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-panel);
+}
+
+.settings-heading {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-heading h3 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.settings-heading p {
+  margin: 3px 0 0;
+  font-size: 0.76rem;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+.settings-close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.settings-close:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.settings-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px 24px 26px;
+}
+
+.settings-pane {
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 12rem;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.settings-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: settings-spin 0.8s linear infinite;
+}
+
+@keyframes settings-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-spinner {
+    animation: none;
+  }
+}
+
+.settings-footer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 11px 18px 12px 24px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--surface-panel);
+}
+
+.settings-footer-hint,
+.settings-footer-error {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 0.74rem;
+  line-height: 1.4;
+}
+
+.settings-footer-hint {
+  color: var(--text-secondary);
+}
+
+.settings-footer-error {
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+.settings-footer-actions {
+  flex: none;
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+@media (max-width: 767px) {
+  .settings-panel {
+    flex-direction: column;
+    width: 100vw;
+    max-width: none;
+    height: 100dvh;
+    max-height: none;
+    border: none;
+    border-radius: 0;
+  }
+
+  .settings-rail {
+    flex: none;
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .settings-brand {
+    padding: 12px 16px 6px;
+  }
+
+  .settings-eyebrow {
+    display: none;
+  }
+
+  .settings-brand h2 {
+    margin: 0;
+    font-size: 0.95rem;
+  }
+
+  .settings-nav {
+    flex: none;
+    flex-direction: row;
+    gap: 4px;
+    padding: 0 12px 8px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+
+  .settings-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .settings-nav-item {
+    flex: 1 0 auto;
+    justify-content: center;
+    min-width: 108px;
+    min-height: 34px;
+    padding: 6px 12px;
+    box-shadow: none;
+  }
+
+  .settings-nav-item.active {
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
+
+  .settings-nav-icon {
+    display: none;
+  }
+
+  .settings-header {
+    padding: 13px 16px 10px;
+  }
+
+  .settings-body {
+    padding: 14px 16px 20px;
+  }
+
+  .settings-footer {
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+  }
+}
+</style>

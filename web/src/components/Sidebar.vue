@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed, nextTick, onUnmounted, ref } from 'vue'
-import { NButton, NScrollbar, useMessage } from 'naive-ui'
-import { relativeTime, sessionTitle } from '../chat'
-import { ApiError, deleteSession, renameSession } from '../api'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { NScrollbar } from 'naive-ui'
+import { sessionTitle } from '../chat'
 import type { SessionInfo, Workspace } from '../types'
+import AppIcon from './AppIcon.vue'
+import SessionGroup from './SessionGroup.vue'
+import SidebarFooter from './SidebarFooter.vue'
 
 const props = defineProps<{
   sessions: SessionInfo[]
@@ -15,6 +17,8 @@ const props = defineProps<{
   live: string | null
   /** All sessions with a live run (parallel runs); takes precedence over `live` when set. */
   liveSessions?: string[]
+  /** Footer theme control label, e.g. "Theme: dark — click to switch". */
+  themeLabel?: string
 }>()
 
 const emit = defineEmits<{
@@ -26,28 +30,33 @@ const emit = defineEmits<{
   filterWorkspace: [value: string]
   /** A session was deleted; the parent clears its selection if it was active. */
   deleted: [name: string]
+  /** Footer: open the settings dialog. */
+  openSettings: []
+  /** Footer: cycle the light/dark/system theme. */
+  toggleTheme: []
 }>()
 
-const message = useMessage()
+/** Sessions rendered per group before "Show N more". */
+const PREVIEW_LIMIT = 5
 
 /** Client-side title filter (case-insensitive substring; empty shows everything). */
 const query = ref('')
-/** Session currently being renamed (inline editor), if any. */
-const editing = ref<string | null>(null)
-const renameDraft = ref('')
-/** Session with a pending delete confirmation, if any. */
-const confirmDelete = ref<string | null>(null)
-/** Session whose rename/delete request is in flight, if any. */
-const busy = ref<string | null>(null)
-let confirmTimer: ReturnType<typeof setTimeout> | null = null
+const searchOpen = ref(false)
+const searchInput = ref<HTMLInputElement | null>(null)
+const searchButton = ref<HTMLButtonElement | null>(null)
+
+/** Collapsed workspace groups, keyed by workspace id ('' = Unassigned). */
+const collapsedGroups = ref<Record<string, boolean>>({})
+/** Groups whose preview window was expanded with "Show N more". */
+const expandedGroups = ref<Record<string, boolean>>({})
 
 function titleOf(s: SessionInfo): string {
   return s.title || sessionTitle(s.name)
 }
 
-function isLive(name: string): boolean {
-  return props.liveSessions ? props.liveSessions.includes(name) : props.live === name
-}
+const liveNames = computed(() =>
+  props.liveSessions ?? (props.live ? [props.live] : []),
+)
 
 const searching = computed(() => query.value.trim() !== '')
 
@@ -66,124 +75,133 @@ const emptyTitle = computed(() =>
   filteredWorkspaceName.value ? `No sessions in ${filteredWorkspaceName.value}` : 'Start your first run',
 )
 
-interface SessionGroup {
+interface DisplayGroup {
   key: string
   label: string
+  unassigned: boolean
   items: SessionInfo[]
 }
 
 /**
- * Groups for the list: by workspace under the "All" filter, a single flat
- * group otherwise (the group label is then not rendered).
+ * Groups for the list: by workspace under the "All" filter (Unassigned last),
+ * a single group otherwise.
  */
-const displayGroups = computed<SessionGroup[]>(() => {
+const displayGroups = computed<DisplayGroup[]>(() => {
   if (props.workspaceFilter !== 'all') {
-    return [{ key: '', label: '', items: filteredSessions.value }]
+    return [{ key: props.workspaceFilter, label: '', unassigned: false, items: filteredSessions.value }]
   }
-  const out: SessionGroup[] = []
-  const byKey = new Map<string, SessionGroup>()
+  const out: DisplayGroup[] = []
+  const byKey = new Map<string, DisplayGroup>()
   for (const s of filteredSessions.value) {
     const key = s.workspace_id ?? ''
     let group = byKey.get(key)
     if (!group) {
       const ws = key ? props.workspaces.find((w) => w.id === key) : undefined
-      group = { key, label: ws ? ws.name : 'Unassigned', items: [] }
+      group = {
+        key,
+        label: ws ? ws.name : key ? 'Unknown workspace' : 'Unassigned',
+        unassigned: key === '',
+        items: [],
+      }
       byKey.set(key, group)
       out.push(group)
     }
     group.items.push(s)
   }
-  return out
+  const assigned = out.filter((g) => !g.unassigned)
+  const unassigned = out.filter((g) => g.unassigned)
+  return [...assigned, ...unassigned]
 })
 
-// -- search ------------------------------------------------------------------
+/** Folder headers only make sense in the unfiltered, non-search list. */
+const showGroupHeaders = computed(() => props.workspaceFilter === 'all' && !searching.value)
+
+interface GroupView extends DisplayGroup {
+  listId: string
+  collapsible: boolean
+  collapsed: boolean
+  expanded: boolean
+  shownItems: SessionInfo[]
+  total: number
+  hiddenCount: number
+  showLess: boolean
+}
+
+/** Search results stay flat: one unlabelled group with every match. */
+const groupViews = computed<GroupView[]>(() => {
+  if (searching.value) {
+    const items = filteredSessions.value
+    return [
+      {
+        key: 'search',
+        label: '',
+        unassigned: false,
+        items,
+        listId: 'session-search-results',
+        collapsible: false,
+        collapsed: false,
+        expanded: false,
+        shownItems: items,
+        total: items.length,
+        hiddenCount: 0,
+        showLess: false,
+      },
+    ]
+  }
+  return displayGroups.value.map((g, i) => {
+    const collapsible = showGroupHeaders.value
+    const collapsed = collapsible && !!collapsedGroups.value[g.key]
+    const expanded = !!expandedGroups.value[g.key]
+    const shownItems = collapsed ? [] : expanded ? g.items : g.items.slice(0, PREVIEW_LIMIT)
+    return {
+      ...g,
+      listId: `session-list-${i}`,
+      collapsible,
+      collapsed,
+      expanded,
+      shownItems,
+      total: g.items.length,
+      hiddenCount: collapsed ? 0 : g.items.length - shownItems.length,
+      showLess: !collapsed && expanded && g.items.length > PREVIEW_LIMIT,
+    }
+  })
+})
+
+// -- search --------------------------------------------------------------------
+
+function openSearch() {
+  searchOpen.value = true
+  nextTick(() => searchInput.value?.focus())
+}
+
+/** Leave the search panel and put focus back on the Search action. */
+function closeSearch() {
+  query.value = ''
+  searchOpen.value = false
+  nextTick(() => searchButton.value?.focus())
+}
+
+function onSearchEscape() {
+  if (query.value) query.value = ''
+  else closeSearch()
+}
 
 function clearSearch() {
   query.value = ''
+  searchInput.value?.focus()
 }
 
-// -- session management (rename / delete) ------------------------------------
+// -- groups --------------------------------------------------------------------
 
-function errText(e: unknown): string {
-  return e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e)
+function toggleGroup(key: string) {
+  collapsedGroups.value = { ...collapsedGroups.value, [key]: !collapsedGroups.value[key] }
 }
 
-function startRename(s: SessionInfo) {
-  editing.value = s.name
-  renameDraft.value = titleOf(s)
+function toggleExpand(key: string) {
+  expandedGroups.value = { ...expandedGroups.value, [key]: !expandedGroups.value[key] }
 }
 
-/**
- * End the inline rename and return focus to the row's rename button — the
- * editor is unmounted on completion, which would otherwise drop focus on
- * <body> and force the operator to re-tab through the whole list.
- */
-function endRename(s: SessionInfo) {
-  editing.value = null
-  focusRowButton(s.name, 'Rename session')
-}
-
-function cancelRename(s: SessionInfo) {
-  endRename(s)
-}
-
-/** Focus one of a session row's action buttons (after the DOM swapped). */
-function focusRowButton(name: string, ariaLabel: string) {
-  nextTick(() => {
-    const row = document.querySelector<HTMLElement>(`.session-row[data-name="${CSS.escape(name)}"]`)
-    row?.querySelector<HTMLElement>(`button[aria-label="${ariaLabel}"]`)?.focus()
-  })
-}
-
-async function commitRename(s: SessionInfo) {
-  const title = renameDraft.value.trim()
-  if (!title) {
-    endRename(s)
-    return
-  }
-  if (title === titleOf(s)) {
-    endRename(s)
-    return
-  }
-  if (busy.value) return
-  busy.value = s.name
-  try {
-    await renameSession(s.name, title)
-    endRename(s)
-    emit('refresh')
-  } catch (e) {
-    message.error(`Rename failed: ${errText(e)}`)
-  } finally {
-    busy.value = null
-  }
-}
-
-function askDelete(name: string) {
-  confirmDelete.value = name
-  // the confirm button replaces the clicked delete button — move focus along
-  focusRowButton(name, 'Confirm delete session')
-  if (confirmTimer) clearTimeout(confirmTimer)
-  confirmTimer = setTimeout(() => {
-    confirmTimer = null
-    revertDelete(name)
-  }, 3000)
-}
-
-/** Undo the confirm affordance; restore focus when it held focus. */
-function revertDelete(name: string) {
-  const active = document.activeElement as HTMLElement | null
-  const confirmHeldFocus = active?.getAttribute('aria-label') === 'Confirm delete session'
-  confirmDelete.value = null
-  if (confirmHeldFocus) focusRowButton(name, 'Delete session')
-}
-
-function cancelDelete() {
-  if (confirmTimer) {
-    clearTimeout(confirmTimer)
-    confirmTimer = null
-  }
-  confirmDelete.value = null
-}
+// -- deletion focus fallback ---------------------------------------------------
 
 /** Focus the first session row, or the search box on an empty list. The list
  * re-renders after the parent's async re-list, so poll briefly instead of a
@@ -203,253 +221,464 @@ function focusListFallback() {
   window.setTimeout(tryFocus, 50)
 }
 
-async function doDelete(s: SessionInfo) {
-  cancelDelete()
-  if (busy.value) return
-  busy.value = s.name
-  try {
-    await deleteSession(s.name)
-    emit('deleted', s.name)
-    focusListFallback()
-  } catch (e) {
-    message.error(`Delete failed: ${errText(e)}`)
-  } finally {
-    busy.value = null
-  }
+function onRowDeleted(name: string) {
+  emit('deleted', name)
+  focusListFallback()
 }
 
+let narrowViewport: MediaQueryList | null = null
+
+function collapseSidebar() {
+  emit('collapse')
+  nextTick(() => document.querySelector<HTMLElement>('.sidebar-expand')?.focus())
+}
+
+function onViewportChange(event: MediaQueryListEvent) {
+  if (event.matches) collapseSidebar()
+}
+
+onMounted(() => {
+  narrowViewport = window.matchMedia('(max-width: 1023px)')
+  narrowViewport.addEventListener('change', onViewportChange)
+})
+
 onUnmounted(() => {
-  if (confirmTimer) clearTimeout(confirmTimer)
+  narrowViewport?.removeEventListener('change', onViewportChange)
 })
 </script>
 
 <template>
   <nav class="sidebar" aria-label="Sessions">
-    <div class="sidebar-header">
-      <h2>Sessions</h2>
-      <div class="sidebar-actions">
-        <n-button
-          circle
-          quaternary
-          size="small"
-          class="icon-btn"
-          title="New session"
-          aria-label="New session"
-          @click="emit('newSession')"
-        >
-          <span aria-hidden="true">✎</span>
-        </n-button>
-        <n-button
-          circle
-          quaternary
-          size="small"
-          class="icon-btn"
-          title="Add workspace"
-          aria-label="Add workspace"
-          @click="emit('addWorkspace')"
-        >
-          <span aria-hidden="true">＋</span>
-        </n-button>
-        <n-button
-          circle
-          quaternary
-          size="small"
+    <div class="sidebar-top">
+      <div class="brand-row">
+        <span class="brand-mark" aria-hidden="true">TB</span>
+        <span class="brand-name">Two Brothers</span>
+        <span class="brand-spacer"></span>
+        <button
+          type="button"
           class="icon-btn"
           title="Refresh session list"
           aria-label="Refresh session list"
           @click="emit('refresh')"
         >
-          <span aria-hidden="true">↻</span>
-        </n-button>
-        <n-button
-          circle
-          quaternary
-          size="small"
+          <AppIcon name="refresh" class="icon" />
+        </button>
+        <button
+          type="button"
           class="icon-btn"
           title="Collapse sidebar"
           aria-label="Collapse sidebar"
-          @click="emit('collapse')"
+          @click="collapseSidebar"
         >
-          <span aria-hidden="true">⇤</span>
-        </n-button>
+          <AppIcon name="panel" class="icon" />
+        </button>
       </div>
-    </div>
 
-    <label class="control workspace-filter">
-      <span class="control-label">workspace</span>
-      <select
-        :value="workspaceFilter"
-        title="Filter sessions by workspace"
-        @change="emit('filterWorkspace', ($event.target as HTMLSelectElement).value)"
-      >
-        <option value="all">All workspaces</option>
-        <option v-for="w in workspaces" :key="w.id" :value="w.id">{{ w.name }}</option>
-      </select>
-    </label>
+      <div class="workspace-row">
+        <AppIcon name="folder" class="icon workspace-icon" />
+        <span class="workspace-select-wrap">
+          <select
+            class="workspace-select"
+            :value="workspaceFilter"
+            aria-label="Workspace"
+            title="Filter sessions by workspace"
+            @change="emit('filterWorkspace', ($event.target as HTMLSelectElement).value)"
+          >
+            <option value="all">All workspaces</option>
+            <option v-for="w in workspaces" :key="w.id" :value="w.id">{{ w.name }}</option>
+          </select>
+          <AppIcon name="chevron-right" class="icon workspace-chevron" />
+        </span>
+        <button
+          type="button"
+          class="icon-btn"
+          title="Add workspace"
+          aria-label="Add workspace"
+          @click="emit('addWorkspace')"
+        >
+          <AppIcon name="folder-plus" class="icon" />
+        </button>
+      </div>
 
-    <div class="session-search">
-      <input
-        v-model="query"
-        type="search"
-        class="session-search-input"
-        aria-label="Search sessions"
-        placeholder="Search sessions…"
-        @keydown.esc="clearSearch"
-      />
-      <button
-        v-if="searching"
-        type="button"
-        class="session-search-clear"
-        title="Clear search"
-        aria-label="Clear session search"
-        @click="clearSearch"
-      >
-        <span aria-hidden="true">✕</span>
-      </button>
+      <div v-if="!searchOpen" class="primary-actions">
+        <button
+          type="button"
+          class="new-session"
+          aria-label="New session"
+          @click="emit('newSession')"
+        >
+          <AppIcon name="plus" class="icon" />
+          <span>New session</span>
+        </button>
+        <button
+          ref="searchButton"
+          type="button"
+          class="action-secondary"
+          title="Search sessions"
+          aria-label="Search sessions"
+          @click="openSearch"
+        >
+          <AppIcon name="search" class="icon" />
+          <span>Search</span>
+        </button>
+      </div>
+
+      <form v-else class="session-search" role="search" @submit.prevent>
+        <AppIcon name="search" class="icon search-icon" />
+        <input
+          ref="searchInput"
+          v-model="query"
+          type="search"
+          class="session-search-input"
+          aria-label="Search sessions"
+          placeholder="Search sessions…"
+          @keydown.esc.prevent="onSearchEscape"
+        />
+        <button
+          type="button"
+          class="icon-btn search-close"
+          title="Close search"
+          aria-label="Close search"
+          @click="closeSearch"
+        >
+          <AppIcon name="x" class="icon" />
+        </button>
+      </form>
+      <p v-if="searching && filteredSessions.length" class="session-search-count" aria-live="polite">
+        {{ filteredSessions.length }} of {{ sessions.length }} sessions
+      </p>
     </div>
-    <p v-if="searching && filteredSessions.length" class="session-search-count muted">
-      {{ filteredSessions.length }} of {{ sessions.length }} sessions
-    </p>
 
     <n-scrollbar class="sidebar-scroll">
-      <div v-if="sessions.length === 0" class="empty-state">
-        <p class="empty-state-title">{{ emptyTitle }}</p>
-        <p class="empty-hint empty-state-hint">
-          Describe a task in the composer below
-          <span class="empty-state-arrow" aria-hidden="true">↓</span>
-        </p>
-        <div class="empty-state-actions">
-          <n-button size="small" type="primary" @click="emit('newSession')">New session</n-button>
-          <n-button
-            v-if="workspaceFilter !== 'all'"
-            size="small"
-            tertiary
-            @click="emit('filterWorkspace', 'all')"
-          >
-            Show all workspaces
-          </n-button>
-          <n-button
-            v-else-if="workspaces.length === 0"
-            size="small"
-            tertiary
-            @click="emit('addWorkspace')"
-          >
-            Add workspace
-          </n-button>
+      <div class="sidebar-list">
+        <div v-if="sessions.length === 0" class="empty-state">
+          <p class="empty-state-title">{{ emptyTitle }}</p>
+          <p class="empty-state-hint">
+            Describe a task in the composer below
+            <span class="empty-state-arrow" aria-hidden="true">↓</span>
+          </p>
+          <div class="empty-state-actions">
+            <button type="button" class="empty-primary" @click="emit('newSession')">
+              New session
+            </button>
+            <button
+              v-if="workspaceFilter !== 'all'"
+              type="button"
+              class="empty-secondary"
+              @click="emit('filterWorkspace', 'all')"
+            >
+              Show all workspaces
+            </button>
+            <button
+              v-else-if="workspaces.length === 0"
+              type="button"
+              class="empty-secondary"
+              @click="emit('addWorkspace')"
+            >
+              Add workspace
+            </button>
+          </div>
         </div>
-      </div>
-      <div v-else-if="filteredSessions.length === 0" class="empty-state">
-        <p class="empty-state-title">No sessions match “{{ query.trim() }}”</p>
-        <div class="empty-state-actions">
-          <n-button size="small" tertiary @click="clearSearch">Clear search</n-button>
-        </div>
-      </div>
 
-      <template v-else>
-        <section v-for="g in displayGroups" :key="g.key || 'unassigned'">
-          <h3 v-if="workspaceFilter === 'all'" class="session-group-label">
-            {{ g.label }}
-            <span class="session-group-count" role="img" :aria-label="`${g.items.length} sessions`">
-              {{ g.items.length }}
-            </span>
-          </h3>
-          <ul class="session-list">
-            <li v-for="s in g.items" :key="s.name" class="session-row" :data-name="s.name">
-              <form
-                v-if="editing === s.name"
-                class="session-rename"
-                @submit.prevent="commitRename(s)"
-              >
-                <input
-                  v-model="renameDraft"
-                  class="session-rename-input"
-                  :aria-label="`Rename ${titleOf(s)}`"
-                  autofocus
-                  @focus="($event.target as HTMLInputElement).select()"
-                  @keydown.esc.prevent="cancelRename(s)"
-                />
-                <button
-                  type="submit"
-                  class="icon-btn"
-                  title="Save title"
-                  aria-label="Save session title"
-                  :disabled="busy === s.name"
-                >
-                  <span aria-hidden="true">✓</span>
-                </button>
-                <button
-                  type="button"
-                  class="icon-btn"
-                  title="Cancel rename"
-                  aria-label="Cancel rename"
-                  @click="cancelRename(s)"
-                >
-                  <span aria-hidden="true">✕</span>
-                </button>
-              </form>
-              <template v-else>
-                <button
-                  class="session-item"
-                  :class="{ active: s.name === selected }"
-                  :aria-current="s.name === selected ? 'true' : undefined"
-                  @click="emit('select', s.name)"
-                >
-                  <span class="session-title">{{ titleOf(s) }}</span>
-                  <span class="session-meta">
-                    <span v-if="isLive(s.name)" class="live-dot" role="img" aria-label="live"></span>
-                    <span class="muted">{{ relativeTime(s.mtime) }}</span>
-                  </span>
-                </button>
-                <!-- Sibling of the row button (never nested in it), so row clicks
-                     can't be swallowed; the wrapper also stops propagation. -->
-                <span class="session-actions" @click.stop>
-                  <button
-                    type="button"
-                    class="icon-btn row-action"
-                    title="Rename session"
-                    aria-label="Rename session"
-                    :disabled="busy === s.name"
-                    @click="startRename(s)"
-                  >
-                    <span aria-hidden="true">✏</span>
-                  </button>
-                  <button
-                    v-if="confirmDelete !== s.name"
-                    type="button"
-                    class="icon-btn row-action"
-                    title="Delete session"
-                    aria-label="Delete session"
-                    :disabled="busy === s.name"
-                    @click="askDelete(s.name)"
-                  >
-                    <span aria-hidden="true">🗑</span>
-                  </button>
-                  <button
-                    v-else
-                    type="button"
-                    class="row-action row-action-confirm"
-                    aria-label="Confirm delete session"
-                    :disabled="busy === s.name"
-                    @click="doDelete(s)"
-                  >
-                    {{ busy === s.name ? '…' : 'sure?' }}
-                  </button>
-                </span>
-              </template>
-            </li>
-          </ul>
-        </section>
-      </template>
+        <div v-else-if="filteredSessions.length === 0" class="empty-state">
+          <p class="empty-state-title">No sessions match “{{ query.trim() }}”</p>
+          <div class="empty-state-actions">
+            <button type="button" class="empty-secondary" @click="clearSearch">Clear search</button>
+          </div>
+        </div>
+
+        <template v-else>
+          <SessionGroup
+            v-for="g in groupViews"
+            :key="g.key || 'unassigned'"
+            :list-id="g.listId"
+            :label="g.label"
+            :items="g.shownItems"
+            :total="g.total"
+            :hidden-count="g.hiddenCount"
+            :expanded="g.expanded"
+            :collapsed="g.collapsed"
+            :collapsible="g.collapsible"
+            :show-less="g.showLess"
+            :unassigned="g.unassigned"
+            :selected="selected"
+            :live-names="liveNames"
+            @toggle-collapse="toggleGroup(g.key)"
+            @toggle-expand="toggleExpand(g.key)"
+            @select="emit('select', $event)"
+            @refresh="emit('refresh')"
+            @deleted="onRowDeleted"
+          />
+        </template>
+      </div>
     </n-scrollbar>
+
+    <SidebarFooter
+      :theme-label="themeLabel"
+      @open-settings="emit('openSettings')"
+      @toggle-theme="emit('toggleTheme')"
+    />
   </nav>
 </template>
 
 <style scoped>
-/* The list scrolls inside n-scrollbar; the nav itself must not scroll or the
-   two scrollbar systems would overlap. */
+.icon {
+  width: 16px;
+  height: 16px;
+  display: block;
+  flex: none;
+}
+
+/* The nav is a fixed-height column: top block, scrolling list, pinned footer. */
 .sidebar {
-  overflow-y: hidden;
-  padding-bottom: 0;
+  --sidebar-inline: 0.55rem;
+  overflow: hidden;
+  padding: 0;
+  min-height: 0;
+}
+
+.sidebar-top {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.5rem var(--sidebar-inline) 0.45rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.brand-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 26px;
+}
+
+.brand-mark {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  font-size: 0.56rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--text-on-accent);
+  background: var(--accent);
+  border-radius: 6px;
+}
+
+.brand-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.8rem;
+  font-weight: 650;
+}
+
+.brand-spacer {
+  flex: 1;
+}
+
+.icon-btn {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.icon-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.icon-btn:focus-visible {
+  outline-offset: -2px;
+}
+
+.workspace-row {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.workspace-icon {
+  width: 14px;
+  height: 14px;
+  color: var(--text-secondary);
+}
+
+.workspace-select-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+
+.workspace-select {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 1.2rem 0 0.35rem;
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 550;
+  color: var(--text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+}
+
+.workspace-select:hover {
+  background: var(--surface-hover);
+}
+
+.workspace-select:focus-visible {
+  outline-offset: -2px;
+}
+
+.workspace-chevron {
+  position: absolute;
+  top: 50%;
+  right: 5px;
+  width: 11px;
+  height: 11px;
+  color: var(--text-secondary);
+  transform: translateY(-50%) rotate(90deg);
+  pointer-events: none;
+}
+
+.primary-actions {
+  display: flex;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.new-session {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  height: 30px;
+  padding: 0 0.5rem;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  background: var(--accent-soft);
+  border: 1px solid transparent;
+  border-radius: 7px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.new-session:hover {
+  border-color: var(--accent);
+}
+
+.new-session:focus-visible,
+.action-secondary:focus-visible {
+  outline-offset: -2px;
+}
+
+.action-secondary {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  height: 30px;
+  padding: 0 0.5rem;
+  font: inherit;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.action-secondary:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.session-search {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  height: 30px;
+  padding: 0 0.2rem 0 0.45rem;
+  background: var(--surface-canvas);
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+}
+
+.session-search:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.search-icon {
+  width: 14px;
+  height: 14px;
+  color: var(--text-secondary);
+}
+
+.session-search-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  font: inherit;
+  font-size: 0.8125rem;
+  color: var(--text-primary);
+  background: transparent;
+  border: none;
+  outline: none;
+}
+
+.session-search-input:focus,
+.session-search-input:focus-visible {
+  outline: none;
+}
+
+.session-search-input::placeholder {
+  color: var(--text-secondary);
+}
+
+/* The wrapper's own close button replaces the native search affordance. */
+.session-search-input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.search-close {
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+}
+
+.session-search-count {
+  margin: 0 0 0 0.1rem;
+  font-size: 0.7rem;
+  color: var(--text-secondary);
 }
 
 .sidebar-scroll {
@@ -457,89 +686,28 @@ onUnmounted(() => {
   min-height: 0;
 }
 
-.session-search {
-  position: relative;
-  padding: 0 0.25rem 0.6rem;
-}
-
-.session-search-input {
-  width: 100%;
-  padding: 0.35rem 1.9rem 0.35rem 0.55rem;
-  font: inherit;
-  font-size: 0.85rem;
-  color: var(--text-primary);
-  background: var(--surface-panel);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-}
-
-.session-search-input:focus {
-  border-color: var(--accent);
-}
-
-/* The wrapper's own clear button replaces the native search affordance. */
-.session-search-input::-webkit-search-cancel-button {
-  -webkit-appearance: none;
-  appearance: none;
-}
-
-.session-search-clear {
-  position: absolute;
-  top: calc(50% - 0.3rem);
-  right: 0.55rem;
-  transform: translateY(-50%);
-  display: grid;
-  place-items: center;
-  width: 1.4rem;
-  height: 1.4rem;
-  padding: 0;
-  font-size: 0.75rem;
-  color: var(--text-secondary);
-  background: transparent;
-  border: none;
-  border-radius: 50%;
-  cursor: pointer;
-}
-
-.session-search-clear:hover {
-  color: var(--text-primary);
-  background: var(--surface-hover);
-}
-
-.session-search-count {
-  margin: -0.35rem 0.25rem 0.45rem;
-  font-size: 0.72rem;
-}
-
-.session-group-count {
-  display: inline-block;
-  min-width: 1.25rem;
-  margin-left: 0.35rem;
-  padding: 0 0.3rem;
-  font-size: 0.68rem;
-  font-weight: 500;
-  line-height: 1.3;
-  text-align: center;
-  color: var(--text-secondary);
-  background: var(--surface-hover);
-  border-radius: 999px;
+.sidebar-list {
+  padding: 0.2rem var(--sidebar-inline) 0.6rem;
 }
 
 /* Empty list: a real call to action instead of inert text. */
 .empty-state {
-  padding: 0.9rem 0.4rem 0.6rem;
+  padding: 1rem 0.4rem 0.6rem;
   text-align: center;
 }
 
 .empty-state-title {
   margin: 0 0 0.3rem;
-  font-size: 0.92rem;
+  font-size: 0.86rem;
   font-weight: 600;
   color: var(--text-primary);
+  overflow-wrap: break-word;
 }
 
 .empty-state-hint {
   margin: 0 0 0.7rem;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
 }
 
 .empty-state-arrow {
@@ -553,6 +721,38 @@ onUnmounted(() => {
   flex-wrap: wrap;
   justify-content: center;
   gap: 0.4rem;
+}
+
+.empty-primary,
+.empty-secondary {
+  height: 28px;
+  padding: 0 0.6rem;
+  font: inherit;
+  font-size: 0.78rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.empty-primary {
+  font-weight: 600;
+  color: var(--text-on-accent);
+  background: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+.empty-secondary {
+  color: var(--text-primary);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+}
+
+.empty-secondary:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.empty-primary:hover {
+  opacity: 0.9;
 }
 
 @keyframes empty-arrow-nudge {
@@ -569,93 +769,5 @@ onUnmounted(() => {
   .empty-state-arrow {
     animation: none;
   }
-}
-
-/* Row = main button + action buttons as siblings, so the actions never
-   overlap the row click target (E2E clicks .session-item to select). */
-.session-row {
-  display: flex;
-  align-items: stretch;
-  gap: 0.1rem;
-}
-
-.session-row .session-item {
-  width: auto;
-  flex: 1;
-  min-width: 0;
-}
-
-.session-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.05rem;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.12s ease;
-}
-
-.session-row:hover .session-actions,
-.session-row:focus-within .session-actions {
-  opacity: 1;
-  pointer-events: auto;
-}
-
-/* Touch devices have no hover: keep the row actions permanently reachable
-   and give them a comfortable tap target. */
-@media (hover: none) {
-  .session-actions {
-    opacity: 1;
-    pointer-events: auto;
-  }
-
-  .row-action {
-    min-width: 2.5rem;
-    min-height: 2.5rem;
-  }
-}
-
-.row-action {
-  flex: 0 0 auto;
-  font-size: 0.8rem;
-}
-
-.row-action:disabled {
-  cursor: progress;
-  opacity: 0.55;
-}
-
-.row-action-confirm {
-  border: 1px solid var(--danger);
-  border-radius: var(--radius-sm);
-  background: var(--danger-soft);
-  color: var(--danger);
-  font-size: 0.75rem;
-  padding: 0 0.45rem;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.session-rename {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  gap: 0.15rem;
-  padding: 0.15rem 0;
-}
-
-.session-rename-input {
-  flex: 1;
-  min-width: 0;
-  padding: 0.4rem 0.55rem;
-  font: inherit;
-  font-size: 0.88rem;
-  color: var(--text-primary);
-  background: var(--surface-panel);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-md);
-}
-
-.session-rename-input:focus {
-  outline: none;
 }
 </style>

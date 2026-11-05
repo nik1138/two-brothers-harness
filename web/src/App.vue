@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { NConfigProvider, NMessageProvider, darkTheme, lightTheme } from 'naive-ui'
 import { darkThemeOverrides, themeOverrides } from './theme'
 import {
@@ -8,7 +8,6 @@ import {
   readThemeMode,
   resolveDark,
   saveThemeMode,
-  themeModeGlyph,
   themeModeLabel,
 } from './themeMode'
 import type { ThemeMode } from './themeMode'
@@ -42,6 +41,7 @@ import {
   projectRuntimeEvents,
   runtimeDedupeKey,
 } from './runtime'
+import type { ApprovalItem } from './runtime'
 import Sidebar from './components/Sidebar.vue'
 import ChatView from './components/ChatView.vue'
 import Composer from './components/Composer.vue'
@@ -50,6 +50,7 @@ import SettingsDialog from './components/SettingsDialog.vue'
 import WorkspaceDialog from './components/WorkspaceDialog.vue'
 import NewSessionDialog from './components/NewSessionDialog.vue'
 import DiffReview from './components/DiffReview.vue'
+import ApprovalCard from './components/ApprovalCard.vue'
 import UsageFooter from './components/UsageFooter.vue'
 
 const sessions = ref<SessionInfo[]>([])
@@ -90,7 +91,12 @@ const lastRequest = ref<RunRequestState | null>(null)
 const retryBySession = ref<Record<string, RunRequestState>>({})
 /** Latest failure per session, rendered as an inline error card (G-5). */
 const runErrorBySession = ref<Record<string, string | null>>({})
-const sidebarCollapsed = ref(false)
+/** Below the drawer breakpoint the sidebar starts closed; it opens as an
+ * accessible drawer (backdrop, Escape, focus/inert handling) over the chat. */
+const MOBILE_DRAWER_QUERY = '(max-width: 768px)'
+const drawerQuery =
+  typeof window === 'undefined' ? null : window.matchMedia(MOBILE_DRAWER_QUERY)
+const sidebarCollapsed = ref<boolean>(drawerQuery?.matches ?? false)
 /** Latest known per-run usage, keyed by session (from run_end events / run records). */
 const runUsageBySession = ref<Record<string, RunUsage | null>>({})
 /** When the followed run started working (epoch ms), driving the footer ticker. */
@@ -169,6 +175,14 @@ const activity = computed(() => {
 const runError = computed(() =>
   selected.value ? (runErrorBySession.value[selected.value] ?? null) : null,
 )
+/** The selected session's unanswered approval, if any — docked above the
+ * composer so Allow/Deny stay visible and clickable without scrolling. */
+const pendingApproval = computed<ApprovalItem | null>(() => {
+  for (const item of runtimeItems.value) {
+    if (item.type === 'approval' && item.decision === undefined) return item
+  }
+  return null
+})
 /** Retry action for the selected session, when this app knows the request. */
 const retryRequest = computed(() =>
   selected.value ? (retryBySession.value[selected.value] ?? null) : null,
@@ -595,7 +609,10 @@ async function refreshWorkspaces(silent = true) {
   }
 }
 
+/** Session pick or create: close the mobile drawer, then load. */
 async function loadSession(name: string) {
+  // a session choice (row click or create) dismisses the mobile drawer
+  if (drawerQuery?.matches && !sidebarCollapsed.value) sidebarCollapsed.value = true
   loading.value = true
   try {
     const [detail, runtime] = await Promise.all([
@@ -761,18 +778,50 @@ async function onCreateSession(payload: { title: string; workspace_id: string | 
   }
 }
 
-/** Bring the pending approval card into view and focus it (banner action). */
-function focusApproval() {
-  const pending = runtimeItems.value.find(
-    (item) => item.type === 'approval' && item.decision === undefined,
-  )
-  if (!pending || pending.type !== 'approval') return
-  const el = document.querySelector<HTMLElement>(
-    `[data-approval-id="${CSS.escape(pending.approvalId)}"]`,
-  )
+// -- mobile drawer --------------------------------------------------------------
+// Below 768px the sidebar overlays the transcript (style.css). Opening it is
+// only possible via the expand button, so it can take focus; while open the
+// chat shell is inert, Escape or the backdrop closes it, and choosing a
+// session closes it too. Selecting a session closes the drawer (see
+// onSelectSession).
+
+const chatShellEl = ref<HTMLElement | null>(null)
+
+function syncShellInert() {
+  const el = chatShellEl.value
   if (!el) return
-  el.scrollIntoView({ block: 'center', behavior: 'smooth' })
-  el.focus({ preventScroll: true })
+  if (!sidebarCollapsed.value && drawerQuery?.matches) el.setAttribute('inert', '')
+  else el.removeAttribute('inert')
+}
+
+watch([sidebarCollapsed, () => drawerQuery?.matches], syncShellInert)
+
+function expandSidebar() {
+  sidebarCollapsed.value = false
+  // move focus into the drawer so keyboard users land on its controls
+  nextTick(() => {
+    document.querySelector<HTMLElement>('.sidebar button[aria-label="Collapse sidebar"]')?.focus()
+  })
+}
+
+function collapseDrawer() {
+  if (sidebarCollapsed.value) return
+  sidebarCollapsed.value = true
+  if (drawerQuery?.matches) {
+    // the expand button is re-created by v-if — focus the fresh element
+    nextTick(() => {
+      document.querySelector<HTMLElement>('button.sidebar-expand')?.focus()
+    })
+  }
+}
+
+function onDrawerEscape(e: KeyboardEvent) {
+  if (e.key !== 'Escape' || sidebarCollapsed.value) return
+  // dialogs manage their own Escape — never close the drawer under one
+  if (document.querySelector('[role="dialog"]')) return
+  if (!drawerQuery?.matches) return
+  e.stopPropagation()
+  collapseDrawer()
 }
 
 // -- theme mode ---------------------------------------------------------------
@@ -787,7 +836,6 @@ const isDark = computed(() => resolveDark(themeMode.value, systemDark.value))
 const themeModeText = computed(
   () => `Theme: ${themeModeLabel(themeMode.value)} — click to switch`,
 )
-const themeModeIcon = computed(() => themeModeGlyph(themeMode.value))
 
 function syncTheme() {
   applyThemeAttribute(themeMode.value, isDark.value)
@@ -802,15 +850,23 @@ function cycleTheme() {
   saveThemeMode(themeMode.value)
 }
 
+/** Settings Appearance section changed the theme; keep shell + naive-ui in sync. */
+function onThemeChange(mode: ThemeMode) {
+  themeMode.value = mode
+  saveThemeMode(mode)
+}
+
 // apply before the first paint so a pinned scheme does not flash the OS one
 syncTheme()
 watch([themeMode, isDark], syncTheme)
 
 onMounted(() => {
   schemeQuery.addEventListener('change', onSchemeChange)
+  window.addEventListener('keydown', onDrawerEscape)
   refreshSessions(false)
   refreshWorkspaces(false)
   refreshLiveRuns()
+  syncShellInert()
   sidebarTimer = setInterval(() => {
     refreshSessions()
     refreshLiveRuns()
@@ -819,6 +875,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   schemeQuery.removeEventListener('change', onSchemeChange)
+  window.removeEventListener('keydown', onDrawerEscape)
   if (sidebarTimer) clearInterval(sidebarTimer)
   if (reconnectTimer) clearTimeout(reconnectTimer)
   es?.close()
@@ -847,13 +904,16 @@ onUnmounted(() => {
       @new-session="newSessionOpen = true"
       @filter-workspace="workspaceFilter = $event"
       @deleted="onSessionDeleted"
+      :theme-label="themeModeText"
+      @open-settings="settingsOpen = true"
+      @toggle-theme="cycleTheme"
     />
     <button
       v-else
       class="icon-btn sidebar-expand"
-      title="Expand sidebar"
-      aria-label="Expand sidebar"
-      @click="sidebarCollapsed = false"
+      title="Show sessions"
+      aria-label="Show sessions"
+      @click="expandSidebar"
     >
       <span aria-hidden="true">⇥</span>
     </button>
@@ -863,10 +923,10 @@ onUnmounted(() => {
       class="sidebar-backdrop"
       aria-label="Hide sessions"
       tabindex="-1"
-      @click="sidebarCollapsed = true"
+      @click="collapseDrawer"
     ></button>
 
-    <div class="chat-shell">
+    <div ref="chatShellEl" class="chat-shell">
       <header class="chat-header">
         <div class="chat-title-block">
           <h1 v-if="selected" class="chat-title">{{ title }}</h1>
@@ -883,35 +943,8 @@ onUnmounted(() => {
           <span v-if="live && activeRun?.status === 'queued'" class="provider-chip">queued</span>
           <span v-if="live && activeRun?.status === 'running'" class="live-badge">live</span>
           <span v-if="waiting" class="approval-badge" role="status">awaiting approval</span>
-          <button
-            class="icon-btn"
-            :title="themeModeText"
-            :aria-label="themeModeText"
-            @click="cycleTheme"
-          >
-            <span aria-hidden="true">{{ themeModeIcon }}</span>
-          </button>
-          <button
-            class="icon-btn"
-            title="Model settings"
-            aria-label="Model settings"
-            @click="settingsOpen = true"
-          >
-            <span aria-hidden="true">⚙</span>
-          </button>
         </div>
       </header>
-
-      <div v-if="waiting" class="approval-banner" role="alert">
-        <span class="approval-banner-dot" aria-hidden="true"></span>
-        <p class="approval-banner-text">
-          <strong>Waiting for your approval.</strong>
-          The run is paused until you allow or deny the request in the conversation.
-        </p>
-        <button type="button" class="approval-banner-action" @click="focusApproval">
-          Review request
-        </button>
-      </div>
 
       <ChatView
         v-if="selected"
@@ -920,6 +953,7 @@ onUnmounted(() => {
         :loading="loading"
         :activity="activity"
         :resolve-approval="resolveApproval"
+        :docked-approval-id="pendingApproval?.approvalId ?? null"
         :run-error="runError"
         :on-retry="retryLastRun"
       />
@@ -934,6 +968,14 @@ onUnmounted(() => {
       </div>
 
       <DiffReview v-if="selected && changedFiles.length" :files="changedFiles" />
+
+      <div v-if="pendingApproval" class="approval-dock">
+        <p class="approval-dock-label" role="status">
+          <span class="approval-dock-dot" aria-hidden="true"></span>
+          Waiting for your approval — the run stays paused until you allow or deny.
+        </p>
+        <ApprovalCard :item="pendingApproval" :resolve="resolveApproval" />
+      </div>
 
       <UsageFooter
         :live="liveHere"
@@ -957,8 +999,10 @@ onUnmounted(() => {
 
     <SettingsDialog
       v-if="settingsOpen"
+      :theme-mode="themeMode"
       @close="settingsOpen = false"
       @saved="onSettingsSaved"
+      @theme-change="onThemeChange"
     />
     <WorkspaceDialog v-if="workspaceDialogOpen" @close="onWorkspaceDialogClose" />
     <NewSessionDialog
@@ -967,6 +1011,7 @@ onUnmounted(() => {
       :default-workspace="workspaceFilter !== 'all' ? workspaceFilter : null"
       @close="newSessionOpen = false"
       @create="onCreateSession"
+      @workspace-created="refreshWorkspaces()"
     />
     </div>
     </n-message-provider>

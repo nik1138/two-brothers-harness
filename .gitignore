@@ -27,8 +27,12 @@ dist/
 # adoption notes, design research) stays local and is never published.
 research/
 
-# Personal planning scratch (historical goal-mode plan), not project docs.
+# Personal planning scratch and local session handoff, not project docs. Keep
+# both todo spellings explicit so the ignore also works on case-sensitive
+# filesystems.
 todo.md
+TODO.md
+HANDOFF.md
 
 # test-suite debris created at the repo root by tempdir fixtures
 tmp*/

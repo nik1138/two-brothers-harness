@@ -23,6 +23,9 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            web/package-lock.json
 
       - name: Install dependencies
         run: npm ci
@@ -50,3 +53,15 @@ jobs:
       - name: Mock end-to-end run
         run: node dist/cli.js run "ci smoke" --provider mock
         working-directory: packages/harness
+
+      - name: Web install
+        run: npm ci
+        working-directory: web
+
+      - name: Web unit tests
+        run: npm test
+        working-directory: web
+
+      - name: Web build
+        run: npm run build
+        working-directory: web

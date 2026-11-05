@@ -52,13 +52,16 @@ node dist/cli.js run "Plan a migration from Redis to Valkey" --provider mock
 node dist/cli.js serve --port 8600 --sessions-dir sessions
 #    → http://127.0.0.1:8600
 
-# 3. the terminal workspace (full-screen chat over the same harness)
+# 3. the terminal workspace (a bare interactive `two-brothers` opens this TUI)
 node dist/cli.js tui --provider mock
 ```
 
 The `run` output is the full conversation: `[user]`,
 `[senior -> junior] consult`, `[junior -> senior] proposal`,
 `[senior -> junior] review`, `[senior -> user] decision`.
+
+With no arguments at all, an interactive terminal opens the TUI directly;
+piped/CI invocations print the usage screen instead.
 
 For frontend development: `cd web && npm install && npm run dev` (Vite proxies
 `/api` to :8600); `npm run build` produces `web/dist`, which the TypeScript
@@ -120,10 +123,17 @@ server then serves (the npm tarball ships its own copy of that build).
   (flushed immediately, dense `seq`); `--resume` rebuilds the shared context,
   and `sessions` lists files with readable titles.
 - **Web workspace.** A Vue 3 + Vite group chat (Operator / Senior / Junior)
-  with registered workspaces, background runs over SSE, live approvals,
+  with registered workspaces, workspace-grouped sessions, background runs
+  over SSE, docked approval cards (a mobile drawer below the breakpoint),
   runtime sidecars, and changed-file diffs.
-- **TUI.** `two-brothers tui` is a zero-dependency full-screen chat in the
-  terminal's alternate screen, over the same harness and the same flags.
+- **TUI.** A bare interactive `two-brothers` (or `tui [task]`) is a
+  zero-dependency full-screen chat in the terminal's alternate screen, over
+  the same harness and the same flags: block transcript with textual role
+  labels, grapheme-aware multiline composer with history and bracketed paste,
+  Ctrl+P command palette and `?` help from one keymap registry, session and
+  model pickers, token streaming in place, live resize repaint, and
+  non-blocking turns with Escape/Ctrl+C cancellation. Piped no-arg
+  invocations print the usage screen instead.
 - **Protocol reference.** [`typescript/`](typescript/) is a zero-dependency
   implementation of `PROTOCOL.md` (no npm packages, no build step) that
   documents the contract.
@@ -228,7 +238,7 @@ From a checkout, replace `two-brothers` with `node dist/cli.js`.
 | `models` | list the models an OpenAI-compatible endpoint reports |
 
 `--version` (or `-v`) prints the package version. With no arguments at all,
-an interactive terminal drops straight into the chat REPL; piped/CI
+an interactive terminal drops straight into the full-screen TUI; piped/CI
 invocations print the usage screen instead.
 
 Common flags: `--provider`, `--base-url`, `--api-key`, `--senior-model`,
@@ -303,30 +313,34 @@ node dist/cli.js serve --port 8600 --sessions-dir sessions
 
 What the workspace gives you:
 
-- **Workspaces** — directories you explicitly register (`POST /api/workspaces`);
-  a session is linked to one workspace and the sidebar can filter by it.
-  Workspaces are registered, never scanned.
+- **Workspaces** — directories you explicitly register through the workspace
+  finder (`POST /api/workspaces`); a session is linked to one workspace and
+  the sidebar groups sessions by it. Workspaces are registered, never
+  scanned.
 - **Async live runs** — `POST /api/runs` starts a background run (one active
   run at a time per session, later ones are `queued`) and returns immediately;
   progress streams over SSE (`GET /api/runs/{run_id}/events?after=N`, so a
-  dropped connection reconnects without gaps). You can send follow-up messages
-  into the same session, stop a run cooperatively, and set per-role
-  Senior/Junior provider/model/base URL/API key in Settings (keys are never
-  returned by the API; the server seals them at rest). Settings fields pinned
-  by `TWO_BROTHERS_*` env vars show the env value; an edit to a pinned field
-  is accepted but transient — the PUT can echo the submitted value back
-  in-memory, yet it is never persisted and the env value wins again on the
-  next read/run for as long as the env var is set (see
+  dropped connection reconnects without gaps). You can send follow-up
+  messages into the same session and stop a run cooperatively. Runs use the
+  configured per-role models — there is no separate "mock" switch in the UI;
+  the per-role Senior/Junior provider/model/base URL/API key live in the
+  Settings dialog, opened from the bottom-left of the sidebar (keys are never
+  returned by the API; the server seals them at rest). Settings fields
+  pinned by `TWO_BROTHERS_*` env vars show the env value; an edit to a
+  pinned field is accepted but transient — the PUT can echo the submitted
+  value back in-memory, yet it is never persisted and the env value wins
+  again on the next read/run for as long as the env var is set (see
   [Connecting a real model](#connecting-a-real-model)).
-- **Workspace tools with operator approvals** — in `work` mode with a linked
-  workspace the junior gets confined tools (`read_file`, `list_dir`,
+- **Workspace tools with docked operator approvals** — in `work` mode with a
+  linked workspace the junior gets confined tools (`read_file`, `list_dir`,
   `search_text`, `write_file`, `edit_file`, `delete_file`, `run_shell`) that
   can only touch files inside the workspace. Reads auto-allow; every write,
-  edit, delete, or shell command raises an approval request you allow or deny
-  in the UI; the run pauses until you answer (or stop it — pending approvals
-  are then denied). The senior additionally gets read-only workspace checks
-  (including approval-brokered `run_shell`) to verify the junior's work before
-  reviewing it.
+  edit, delete, or shell command docks an approval card in the chat — allow
+  or deny there to resume the run (or stop it — pending approvals are then
+  denied). The senior additionally gets read-only workspace checks
+  (including approval-brokered `run_shell`) to verify the junior's work
+  before reviewing it. Below the drawer breakpoint the sidebar turns into a
+  drawer over the chat (backdrop, Escape, focus handling).
 - **Sessions and presets** — session files listed with readable titles and
   workspace grouping, plus named provider presets (seeded: openai, deepseek,
   anthropic, gemini, openrouter, lmstudio, custom) that a role can reference;
@@ -355,7 +369,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-test.ps1
 ```
 
 It runs the package gates, the `typescript/` reference selftest, a mock demo
-run, and the web build; expected final line: `SMOKE TEST: PASS`.
+run, the web unit tests, and the web build; expected final line:
+`SMOKE TEST: PASS`.
 
 Real-model evidence: a consult cycle with two local LM Studio models
 (`LMSTUDIO-TRANSCRIPT.md`) and a full cooperation cycle with `spark-x2.6` via

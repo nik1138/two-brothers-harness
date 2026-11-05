@@ -20,6 +20,9 @@ const props = defineProps<{
   activity: string | null
   /** Answer a pending approval; returns true when the backend accepted it. */
   resolveApproval: (runId: string, approvalId: string, allow: boolean) => Promise<boolean>
+  /** Approval currently docked above the composer; its pending timeline card is
+   * suppressed (the dock is its live surface), resolved cards stay in history. */
+  dockedApprovalId?: string | null
   /** Inline failure card at the tail of the stream (G-5 contract, optional). */
   runError?: string | null
   /** Retry handler for the failure card; the button hides when omitted. */
@@ -43,10 +46,6 @@ const SPEAKER_LABEL: Record<Speaker, string> = {
   junior: 'Junior',
 }
 
-function recipientLabel(g: ChatGroup): string {
-  return g.author === 'operator' ? `to ${SPEAKER_LABEL[g.recipient]}` : `to ${SPEAKER_LABEL[g.recipient]}`
-}
-
 function initial(s: Speaker): string {
   return s === 'operator' ? 'O' : s === 'senior' ? 'S' : 'J'
 }
@@ -62,7 +61,7 @@ const contextCount = computed(() => {
   for (const row of props.timeline) {
     const e = row.entry
     if (e.type === 'group') n += e.group.messages.length
-    else if (e.type === 'tool' || e.type === 'approval') n += 1
+    else if (e.type === 'system' || e.type === 'tool' || e.type === 'approval') n += 1
   }
   return n
 })
@@ -86,9 +85,20 @@ function verdictClass(m: ChatMessage): string {
 function entryKey(entry: TimelineEntry['entry'], i: number): string {
   if (entry.type === 'group') return entry.group.messages[0].id
   if (entry.type === 'divider') return `divider-${entry.seq}-${i}`
+  if (entry.type === 'system') return entry.activity.id
   if (entry.type === 'tool') return entry.id
   if (entry.type === 'prompt_audit') return entry.id
   return `approval-${entry.approvalId}`
+}
+
+/** Pending approvals surfaced by the dock above the composer hide their
+ * duplicate timeline card; resolved approvals always render as history. */
+function isDockedApproval(entry: TimelineEntry['entry']): boolean {
+  return (
+    entry.type === 'approval' &&
+    entry.decision === undefined &&
+    entry.approvalId === props.dockedApprovalId
+  )
 }
 
 /** Envelope time for the group header; null when the group lacks a usable ts. */
@@ -282,7 +292,10 @@ async function copyMessage(m: ChatMessage) {
   }
 }
 
-// -- live "who is acting" working row ------------------------------------------
+// -- live "who is acting" status line ------------------------------------------
+// One line, not two: the shell's `activity` text (stopping / queued / working)
+// and the derived actor label share a single row so the stream never shows
+// duplicate "working…" banners.
 
 /** A run is live when the shell says so; `loading` also covers session loads. */
 const runLive = computed(() => props.loading || props.activity !== null)
@@ -313,14 +326,25 @@ onUnmounted(() => {
   if (copyTimer !== undefined) window.clearTimeout(copyTimer)
 })
 
-const workingLine = computed(() => {
+const statusLine = computed(() => {
   if (!runLive.value) return null
   const tail = props.timeline[props.timeline.length - 1]?.entry
-  const label = nextActorLabel(tail) ?? 'Working…'
   const at = timestampOf(tail)
-  if (at === null) return label
-  const secs = Math.max(0, Math.floor((now.value - at) / 1000))
-  return `${label} · ${secs}s`
+  const secs = at === null ? null : Math.max(0, Math.floor((now.value - at) / 1000))
+  // shell status wins (Stopping… / Run queued…); a live working run also gets
+  // the elapsed clock
+  if (props.activity) {
+    if (
+      secs !== null &&
+      !props.activity.startsWith('Run queued') &&
+      !props.activity.startsWith('Stopping')
+    ) {
+      return `${props.activity} · ${secs}s`
+    }
+    return props.activity
+  }
+  const label = nextActorLabel(tail) ?? 'Working…'
+  return secs !== null ? `${label} · ${secs}s` : label
 })
 </script>
 
@@ -349,24 +373,31 @@ const workingLine = computed(() => {
           <span class="revision-label">{{ row.entry.label }}</span>
         </div>
 
+        <div v-else-if="row.entry.type === 'system'" class="system-activity" role="note">
+          <span class="system-activity-dot" aria-hidden="true"></span>
+          <span class="system-activity-label">{{ row.entry.activity.label }}</span>
+          <span v-if="row.entry.activity.body" class="system-activity-body">{{
+            row.entry.activity.body
+          }}</span>
+        </div>
+
         <ToolActivity v-else-if="row.entry.type === 'tool'" :item="row.entry" />
 
         <PromptAudit v-else-if="row.entry.type === 'prompt_audit'" :item="row.entry" />
 
         <ApprovalCard
-          v-else-if="row.entry.type === 'approval'"
+          v-else-if="row.entry.type === 'approval' && !isDockedApproval(row.entry)"
           :item="row.entry"
           :resolve="resolveApproval"
         />
 
-        <section v-else class="chat-group" :class="[`side-${row.entry.group.author}`]">
+        <section v-else-if="row.entry.type === 'group'" class="chat-group" :class="[`side-${row.entry.group.author}`]">
           <div class="avatar" :class="`avatar-${row.entry.group.author}`" aria-hidden="true">
             {{ initial(row.entry.group.author) }}
           </div>
           <div class="group-content">
             <header class="group-header">
               <span class="speaker-name">{{ SPEAKER_LABEL[row.entry.group.author] }}</span>
-              <span class="recipient-chip">{{ recipientLabel(row.entry.group) }}</span>
               <time
                 v-if="groupTime(row.entry.group)"
                 class="muted"
@@ -379,9 +410,9 @@ const workingLine = computed(() => {
                 class="bubble"
                 :class="{ 'bubble-highlight': m.highlight, 'bubble-continuation': j > 0 }"
               >
-                <header v-if="m.title || m.verdict || m.kind !== 'message'" class="bubble-meta">
+                <header v-if="m.title || m.verdict || m.highlight" class="bubble-meta">
                   <h3 v-if="m.title" class="bubble-title">{{ m.title }}</h3>
-                  <span class="kind-chip">{{ m.kind }}</span>
+                  <span v-if="m.kind !== 'message'" class="kind-chip">{{ m.kind }}</span>
                   <span v-if="m.verdict" class="verdict-chip" :class="verdictClass(m)">{{ m.verdict }}</span>
                 </header>
 
@@ -393,28 +424,34 @@ const workingLine = computed(() => {
                   />
                 </div>
 
-                <dl v-if="m.details.length" class="detail-list">
-                  <div v-for="d in m.details" :key="d.label" class="detail-row">
-                    <dt>{{ d.label }}</dt>
-                    <dd>{{ d.value }}</dd>
-                  </div>
-                </dl>
-
-                <div v-for="l in m.lists" :key="l.label ?? 'items'" class="detail-list-block">
-                  <p v-if="l.label" class="list-label muted">{{ l.label }}</p>
-                  <ul class="detail-items">
-                    <li v-for="(entry, k) in l.items" :key="k">{{ entry }}</li>
-                  </ul>
-                </div>
-
                 <p v-if="m.dissent" class="dissent-note">dissent: {{ m.dissent }}</p>
 
-                <div v-if="m.confidencePct !== null" class="confidence">
-                  <div class="confidence-bar" role="img" :aria-label="`confidence ${m.confidencePct}%`">
-                    <div class="confidence-fill" :style="{ width: m.confidencePct + '%' }"></div>
+                <details
+                  v-if="m.details.length || m.lists.length || m.confidencePct !== null"
+                  class="bubble-tech"
+                >
+                  <summary>Details</summary>
+                  <dl v-if="m.details.length" class="detail-list">
+                    <div v-for="d in m.details" :key="d.label" class="detail-row">
+                      <dt>{{ d.label }}</dt>
+                      <dd>{{ d.value }}</dd>
+                    </div>
+                  </dl>
+
+                  <div v-for="l in m.lists" :key="l.label ?? 'items'" class="detail-list-block">
+                    <p v-if="l.label" class="list-label muted">{{ l.label }}</p>
+                    <ul class="detail-items">
+                      <li v-for="(entry, k) in l.items" :key="k">{{ entry }}</li>
+                    </ul>
                   </div>
-                  <span class="muted small">{{ m.confidencePct }}% confident</span>
-                </div>
+
+                  <div v-if="m.confidencePct !== null" class="confidence">
+                    <div class="confidence-bar" role="img" :aria-label="`confidence ${m.confidencePct}%`">
+                      <div class="confidence-fill" :style="{ width: m.confidencePct + '%' }"></div>
+                    </div>
+                    <span class="muted small">{{ m.confidencePct }}% confident</span>
+                  </div>
+                </details>
               </article>
 
               <button
@@ -428,12 +465,8 @@ const workingLine = computed(() => {
         </section>
       </template>
 
-      <p v-if="activity" class="activity-line" aria-live="polite">
-        <span class="activity-dot" aria-hidden="true"></span>{{ activity }}
-      </p>
-
-      <p v-if="workingLine" class="activity-line working-line">
-        <span class="activity-dot" aria-hidden="true"></span>{{ workingLine }}
+      <p v-if="statusLine" class="activity-line" aria-live="polite">
+        <span class="activity-dot" aria-hidden="true"></span>{{ statusLine }}
       </p>
 
       <article v-if="runError" class="run-error" role="alert">
@@ -472,7 +505,7 @@ const workingLine = computed(() => {
 
 .bubble-wrap {
   position: relative;
-  max-width: 46rem;
+  max-width: none;
   align-self: flex-start;
 }
 
@@ -482,6 +515,65 @@ const workingLine = computed(() => {
 
 .bubble-wrap .bubble {
   max-width: none;
+}
+
+/* Compact neutral marker for internal protocol activity (payload repairs). */
+.system-activity {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  max-width: 46rem;
+  margin: 0.1rem 0;
+  padding: 0.28rem 0.7rem;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-panel);
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.system-activity-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  align-self: center;
+}
+
+.system-activity-label {
+  flex: none;
+  font-weight: 600;
+}
+
+.system-activity-body {
+  min-width: 0;
+}
+
+/* Progressive disclosure for per-message technical detail. */
+.bubble-tech {
+  margin-top: 0.35rem;
+}
+
+.bubble-tech summary {
+  display: inline-block;
+  cursor: pointer;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  padding: 0.05rem 0.55rem;
+  user-select: none;
+}
+
+.bubble-tech summary:hover {
+  color: var(--text-primary);
+  background: var(--surface-hover);
+}
+
+.bubble-tech[open] summary {
+  margin-bottom: 0.3rem;
 }
 
 .bubble-copy {
@@ -717,27 +809,5 @@ const workingLine = computed(() => {
   color: var(--accent);
   text-decoration: underline;
   overflow-wrap: anywhere;
-}
-
-.side-operator .bubble .body-link {
-  color: var(--text-on-accent);
-}
-
-.side-operator .bubble .md-inline-code,
-.side-operator .bubble .md-code {
-  background: rgba(255, 255, 255, 0.14);
-  border-color: rgba(255, 255, 255, 0.32);
-}
-
-.side-operator .bubble .md-code-lang,
-.side-operator .bubble .md-table th,
-.side-operator .bubble .md-table td {
-  border-color: rgba(255, 255, 255, 0.32);
-  color: inherit;
-}
-
-.side-operator .bubble .md-quote {
-  border-left-color: rgba(255, 255, 255, 0.5);
-  color: rgba(255, 255, 255, 0.85);
 }
 </style>

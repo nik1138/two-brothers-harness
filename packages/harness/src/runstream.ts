@@ -107,6 +107,14 @@ export interface ToolCallStreamEvent {
   role: StreamRole;
   tool: string;
   at: string;
+  /**
+   * Additive pairing id (`tc1`, `tc2`, … within one run), present so a
+   * consumer can match a result to its call without relying on ordering.
+   * Optional: older producers omit it and pairing falls back to role+tool.
+   */
+  callId?: string;
+  /** Additive, already-bounded JSON rendering of the call arguments. */
+  args?: string;
 }
 
 export interface ToolResultStreamEvent {
@@ -115,6 +123,10 @@ export interface ToolResultStreamEvent {
   tool: string;
   status: StreamToolStatus;
   at: string;
+  /** Additive pairing id matching the {@link ToolCallStreamEvent} when set. */
+  callId?: string;
+  /** Additive, already-compacted result text (bounded like any string field). */
+  result?: string;
 }
 
 export interface ResultStreamEvent {

@@ -8,7 +8,7 @@ the same core commands as `node src/cli.ts <command>`. `serve` is provided by
 the package: a plain `node:http` server exposing the HTTP + SSE API.
 
 Global invocations: `two-brothers --version` (or `-v`) prints the package
-version; a bare `two-brothers` with no arguments drops into the chat REPL on
+version; a bare `two-brothers` with no arguments opens the full-screen TUI on
 an interactive terminal and prints the usage screen when stdin is piped.
 
 ## Commands
@@ -63,12 +63,26 @@ served at `GET /api/commands`.
 ### `tui [initial task]`
 
 Full-screen interactive chat in the terminal's alternate screen, over the
-same harness as `chat` (mock or real providers). Needs a TTY: a piped stdin
-exits `2` with a clean message and no escape bytes (use `chat` for scripts).
-Keys: Enter sends, Backspace edits, PgUp/PgDn scroll, Esc or Ctrl+C twice
-quits after a confirm hint. `/help`, `/commands`, `/mode consult|work` and
-`/exit` work as in the chat REPL; `--stream-tokens` renders token deltas in
-place while a turn runs.
+same harness as `chat` (mock or real providers). A bare `two-brothers` in an
+interactive terminal opens this TUI. Needs a TTY: a piped stdin exits `2`
+with a clean message and no escape bytes (use `chat` for scripts).
+
+The screen is a block transcript with textual role labels (`YOU`, `SENIOR`,
+`JUNIOR`, `TOOL`, `ERR`/`WARN`/`INFO`), a contained multiline composer
+(grapheme-aware cursor, prompt history, bracketed paste — a pasted newline
+never submits), and a two-line status bar with mode, models, session, cwd,
+context/tokens/cache/cost and key hints. The screen repaints on terminal
+resize and restores the terminal on every exit path. Turns run without
+blocking input; Escape/Ctrl+C under a safe precedence (overlay close → cancel
+the running turn → clear the composer → confirm quit). `Ctrl+P` opens the
+command
+palette, `?` a scrollable help overlay, both generated from the same keymap
+registry as `tui --help`. Slash input: `/mode consult|work`, `/models`,
+`/sessions`, `/theme dark|light|system`, `/settings`, `/retry`, `/help`,
+`/commands`, `/exit`, plus discovered `<name>.md` templates (unknown names are
+never submitted as tasks). `/models` and `/sessions` refuse to change things
+while a turn runs, and model changes are session-local. `--stream-tokens`
+renders token deltas in place while a turn runs.
 
 ```powershell
 node dist/cli.js tui --provider mock
@@ -435,8 +449,12 @@ them):
   `onboard` to write per-role settings, `models` to list an endpoint's
   models, a `cost:` line (and `cost` in `--mode json`) from a hand-maintained
   price table, and per-role `--max-tokens` output caps.
-- **TUI** — `tui [task]` is a zero-dependency full-screen chat in the
-  terminal's alternate screen over the same harness and flags.
+- **TUI** — `tui [task]` (also the bare interactive `two-brothers`) is a
+  zero-dependency full-screen chat in the terminal's alternate screen over
+  the same harness and flags: block transcript with textual role labels, a
+  multiline grapheme-aware composer with bracketed paste, a two-line status
+  bar, Ctrl+P palette / `?` help from one keymap registry, session and model
+  pickers, and non-blocking turns with Escape/Ctrl+C cancellation.
 
 ## Examples
 

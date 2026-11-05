@@ -73,6 +73,15 @@ const result = await harness.run("Plan a migration from Redis to Valkey");
 console.log(result.decision);
 ```
 
+## Terminal workspace
+
+A bare interactive `two-brothers` (or `tui [task]`) opens a zero-dependency
+full-screen TUI over the same harness: block transcript, grapheme-aware
+multiline composer, Ctrl+P palette / `?` help, session and model pickers,
+token streaming in place, resize repaint, and cancellable non-blocking turns.
+Piped no-arg invocations print the usage screen instead; `chat` stays the
+plain REPL for scripts.
+
 ## Web workspace
 
 ```bash
@@ -83,9 +92,12 @@ two-brothers serve --port 8600 --sessions-dir sessions
 A local single-user coding workspace (Vue app served by the same binary; the
 npm tarball ships the built app, so no separate frontend build is needed):
 three-party Operator/Senior/Junior group chat, operator-registered
-workspaces, confined junior tools with per-mutation approvals, async runs
-with live SSE progress, changed-file diff review, per-role provider
-presets with sealed API keys.
+workspaces picked through a single finder, workspace-grouped sessions,
+confined junior tools with docked per-mutation approval cards (a mobile
+drawer below the breakpoint), async runs with live SSE progress,
+changed-file diff review, and a bottom-left Settings dialog for the per-role
+provider presets with sealed API keys. Runs use the configured models — the
+UI has no separate "mock" switch.
 
 ## Features
 

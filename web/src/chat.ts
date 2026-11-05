@@ -39,9 +39,20 @@ export interface ChatGroup {
   messages: ChatMessage[]
 }
 
+/** A neutral system activity projected from internal protocol traffic
+ * (e.g. a payload repair re-ask). Never carries raw markers or prompt text. */
+export interface SystemActivity {
+  id: string
+  seq: number
+  ts: string
+  label: string
+  body: string | null
+}
+
 export type ChatItem =
   | { type: 'group'; group: ChatGroup }
   | { type: 'divider'; seq: number; label: string }
+  | { type: 'system'; activity: SystemActivity }
 
 export function speakerOf(from: Envelope['from']): Speaker {
   return from === 'user' ? 'operator' : from
@@ -62,6 +73,39 @@ function strList(v: unknown): string[] {
 
 function detail(lines: DetailLine[], label: string, value: string | null) {
   if (value !== null) lines.push({ label, value })
+}
+
+// -- payload repair (REPAIR_REQUEST) ------------------------------------------
+// The harness re-asks a role whose structured reply failed the strict schema by
+// appending a `message` envelope from "user" whose text is wrapped in
+// `[[REPAIR_REQUEST]]` … `[[/REPAIR_REQUEST]]` markers (payloads.ts
+// buildRepairRequest). The raw text is internal prompt traffic: the projection
+// turns it into a compact, marker-free system activity; the session file and
+// protocol behavior are untouched.
+
+const REPAIR_REQUEST_PREFIX = '[[REPAIR_REQUEST]]'
+const REPAIR_REQUEST_SUFFIX = '[[/REPAIR_REQUEST]]'
+
+/** True when a user message text is a payload-repair re-ask envelope.
+ *  Anchored on the generated structure (payloads.ts buildRepairRequest):
+ *  the text must open with the prefix marker and close with the suffix
+ *  marker after trimming — a mere mention of the marker inside an operator
+ *  message must stay operator speech. */
+export function isRepairRequestText(text: unknown): text is string {
+  if (typeof text !== 'string') return false
+  const trimmed = text.trim()
+  return trimmed.startsWith(REPAIR_REQUEST_PREFIX) && trimmed.endsWith(REPAIR_REQUEST_SUFFIX)
+}
+
+/** Neutral summary of a repair envelope — no markers, no internal prompt text. */
+function repairActivityOf(env: Envelope): SystemActivity {
+  const raw = str((env.payload ?? {})['text']) ?? ''
+  const inner = raw.replace(REPAIR_REQUEST_PREFIX, '').replace(REPAIR_REQUEST_SUFFIX, '')
+  const kind = inner.match(/required\s+([\w-]+)\s+payload\s+schema/i)?.[1] ?? null
+  const body = kind
+    ? `The ${kind} reply did not match the required format — the request was sent again.`
+    : 'A reply did not match the required format — the request was sent again.'
+  return { id: env.id || `repair-${env.seq}`, seq: env.seq, ts: env.ts, label: 'Reply format repair', body }
 }
 
 function toMessage(env: Envelope): ChatMessage {
@@ -172,6 +216,18 @@ export function chatProjectionGeneration(): number {
 
 /** Fold one envelope into the projection (the body of the full-pass loop). */
 function appendToProjection(state: ChatProjectionState, env: Envelope) {
+  // Repair re-asks are internal protocol traffic, not operator speech: project
+  // them as a neutral system activity and break the open speaker group.
+  if (
+    env.from === 'user' &&
+    env.kind === 'message' &&
+    isRepairRequestText((env.payload ?? {})['text'])
+  ) {
+    state.group = null
+    state.items.push({ type: 'system', activity: repairActivityOf(env) })
+    return
+  }
+
   const author = speakerOf(env.from)
   const recipient = speakerOf(env.to)
   const msg = toMessage(env)
@@ -299,7 +355,7 @@ export function taskOf(events: Envelope[]): string | null {
   for (const env of events) {
     if (env.from === 'user' && env.kind === 'message') {
       const text = str((env.payload as Record<string, unknown>).text)
-      if (text) return text
+      if (text && !isRepairRequestText(text)) return text
     }
     if (env.kind === 'consult') {
       const task = str((env.payload as Record<string, unknown>).task)

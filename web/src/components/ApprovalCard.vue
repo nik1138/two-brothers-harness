@@ -277,9 +277,20 @@ function onKeydown(e: KeyboardEvent) {
 }
 
 .approval-btn {
-  flex: 1 1 8rem;
+  flex: 1 1 6rem;
   min-height: 2.5rem;
   font-weight: 600;
+}
+
+/* Keep the pair side by side on phones: the hint moves below, buttons stay. */
+@media (max-width: 480px) {
+  .approval-actions {
+    flex-wrap: nowrap;
+  }
+
+  .approval-shortcut {
+    flex-basis: 100%;
+  }
 }
 
 .approval-shortcut {

@@ -1,40 +1,47 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { NButton, NForm, NFormItem, NInput, NModal } from 'naive-ui'
+import { NModal } from 'naive-ui'
 import { ApiError, addWorkspace } from '../api'
 import { clickInModalBody } from '../modal'
-import FolderPicker from './FolderPicker.vue'
+import WorkspaceFinder from './WorkspaceFinder.vue'
+import type { Workspace } from '../types'
 
-const emit = defineEmits<{ close: [] }>()
+/**
+ * Add-workspace dialog: ONE modal wrapping the folder finder. The old
+ * path-form → nested `FolderPicker` stack is gone; the finder owns breadcrumb,
+ * parent/home, editable-path, folder-list, and confirmation.
+ */
+
+const emit = defineEmits<{
+  close: []
+  /** The workspace was created (optional hook for the app shell). */
+  created: [workspace: Workspace]
+}>()
 
 function onMaskClick(e: MouseEvent) {
-  // a click inside the stacked FolderPicker fires our mask-click too — ignore it
+  // A click inside another stacked dialog must not dismiss this one.
   if (clickInModalBody(e)) return
+  if (busy.value) return
   emit('close')
 }
 
-const path = ref('')
-const name = ref('')
 const busy = ref(false)
 const error = ref<string | null>(null)
-const pickerOpen = ref(false)
 
 function errText(e: unknown): string {
   return e instanceof ApiError ? e.message : String(e)
 }
 
-function onFolderPicked(picked: string) {
-  pickerOpen.value = false
-  path.value = picked
-}
-
-async function submit() {
-  const p = path.value.trim()
-  if (!p || busy.value) return
+async function onConfirm(payload: { path: string; name: string }) {
+  if (busy.value) return
   busy.value = true
   error.value = null
   try {
-    await addWorkspace({ path: p, name: name.value.trim() || undefined })
+    const workspace = await addWorkspace({
+      path: payload.path,
+      name: payload.name || undefined,
+    })
+    emit('created', workspace)
     emit('close')
   } catch (e) {
     error.value = errText(e)
@@ -42,38 +49,76 @@ async function submit() {
     busy.value = false
   }
 }
+
+function onEsc() {
+  if (busy.value) return
+  emit('close')
+}
 </script>
 
 <template>
-  <n-modal :show="true" @mask-click="onMaskClick" @esc="emit('close')">
-    <div class="modal" role="dialog" aria-modal="true" aria-label="Add workspace">
-      <h2>Add workspace</h2>
-      <n-form label-placement="top" :show-require-mark="false" @submit.prevent="submit">
-        <n-form-item label="Directory path">
-          <div class="folder-picker-path">
-            <n-input
-              v-model:value="path"
-              placeholder="C:\path\to\project"
-              :input-props="{ autofocus: true }"
-            />
-            <n-button attr-type="button" @click.stop="pickerOpen = true">Browse…</n-button>
-          </div>
-        </n-form-item>
-        <n-form-item label="Name (optional)">
-          <n-input v-model:value="name" placeholder="Defaults to the directory name" />
-        </n-form-item>
-        <p v-if="error" class="modal-error" role="alert">{{ error }}</p>
-        <div class="modal-actions">
-          <n-button attr-type="button" @click="emit('close')">Cancel</n-button>
-          <n-button attr-type="submit" type="primary" :disabled="busy || !path.trim()">
-            {{ busy ? 'Adding…' : 'Add' }}
-          </n-button>
-        </div>
-      </n-form>
+  <n-modal
+    :show="true"
+    :auto-focus="false"
+    :close-on-esc="false"
+    @mask-click="onMaskClick"
+  >
+    <div
+      class="modal workspace-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Add workspace"
+      @keydown.esc.stop="onEsc"
+    >
+      <header class="workspace-dialog-header">
+        <h2>Add workspace</h2>
+        <p class="workspace-dialog-sub">
+          Browse to a project folder — no path typing required. Escape closes.
+        </p>
+      </header>
+      <WorkspaceFinder
+        label="Add workspace folder"
+        confirm-label="Add workspace"
+        busy-label="Adding…"
+        :busy="busy"
+        :server-error="error"
+        @confirm="onConfirm"
+        @cancel="emit('close')"
+      />
     </div>
   </n-modal>
-  <!-- Sibling root, not nested in the outer n-modal's slot: a nested second
-       n-modal inherits the outer modal's mask-click bubbling and closes both
-       dialogs on the Browse… click. -->
-  <FolderPicker v-if="pickerOpen" @close="pickerOpen = false" @select="onFolderPicked" />
 </template>
+
+<style scoped>
+.workspace-dialog {
+  width: min(42.5rem, calc(100vw - 1.5rem));
+  max-width: 42.5rem;
+  height: min(31.25rem, calc(100dvh - 1.5rem));
+  max-height: calc(100dvh - 1.5rem);
+}
+
+.workspace-dialog-header {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-bottom: 0.75rem;
+}
+
+.workspace-dialog-header h2 {
+  margin: 0;
+}
+
+.workspace-dialog-sub {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+}
+
+@media (max-width: 720px) {
+  .workspace-dialog {
+    width: calc(100vw - 1rem);
+    height: min(33rem, calc(100dvh - 1rem));
+  }
+}
+</style>

@@ -60,6 +60,7 @@ import { restoreContext, SessionError, SessionStore } from "./session.ts";
 import { discoverSkills, type SkillCatalog } from "./skills.ts";
 import { envPinnedPairs, SettingsStore } from "./settings_store.ts";
 import { runTuiApp } from "./tui/app.ts";
+import { tuiHelpLines } from "./tui/keymap.ts";
 
 const OPTIONS = {
   provider: { type: "string" as const },
@@ -984,17 +985,12 @@ function printTuiHelp(io: CliIO): void {
   io.log(`Usage: two-brothers tui [initial task] [flags]
 
 Full-screen interactive chat in the terminal's alternate screen, over the
-same cooperation harness as run/chat (mock or real providers). Requires an
-interactive terminal; piped stdin is refused with exit 2.
+same cooperation harness as run/chat (mock or real providers). A bare
+\`two-brothers\` in an interactive terminal opens this TUI; piped stdin is
+refused with exit 2. The key guide below is generated from the same command
+registry that powers the in-app Ctrl+P palette and ? help overlay.
 
-Keys:
-  Enter              send the task
-  Backspace          edit the input line
-  PgUp / PgDn        scroll the transcript
-  Ctrl+C / Esc       press twice to quit (the first press asks)
-
-Slash input: /help, /commands, /mode consult|work, /exit, plus any
-<name>.md command discovered from the commands roots.
+${tuiHelpLines().join("\n")}
 
 Flags: every chat flag (--provider, --base-url, --senior-model,
 --session-file, --resume, --mcp-config, --plugins-dir, --skills-dir,
@@ -1009,8 +1005,8 @@ function printChatHelp(io: CliIO): void {
   io.log(`Usage: two-brothers chat [flags]
 
 Interactive line-based REPL over the cooperation harness (mock or real
-providers). Bare "two-brothers" in a terminal starts this mode; piped
-stdin runs one task per line.
+providers). A bare interactive two-brothers opens the full-screen TUI
+instead; piped stdin runs one task per line.
 
 REPL commands:
   /help, /h        this list
@@ -1811,10 +1807,10 @@ function packageVersion(): string {
 
 export async function main(argv: string[], io: CliIO = defaultIO): Promise<number> {
   if (argv.length === 0) {
-    // Modern-CLI convention: an interactive terminal drops into the REPL
+    // Modern-CLI convention: an interactive terminal opens the full TUI
     // (like opencode/kimi bare invocations); piped or CI invocations get
     // the usage screen so scripts keep working.
-    if (process.stdin.isTTY === true) return doChat([], io);
+    if (process.stdin.isTTY === true) return doTui([], io);
     printHelp(io);
     return 0;
   }

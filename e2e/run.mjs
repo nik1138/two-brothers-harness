@@ -43,10 +43,12 @@ const tsAvailable = fs.existsSync(TS_CLI)
 // -- real-model scenario (opt-in) ------------------------------------------------
 // LM Studio serves both roles over the OpenAI-compatible API; no api_key needed.
 const LMSTUDIO_BASE = process.env.TWO_BROTHERS_LM_BASE || 'http://172.18.0.1:1234/v1'
-const SENIOR_MODEL = 'spark-x2.6-4b@q4_k_m'
-const JUNIOR_MODEL = 'lfm3-1.7b'
+// Role model ids default to the LM Studio pair; any OpenAI-compatible endpoint
+// can be driven by overriding them (and TWO_BROTHERS_LM_BASE).
+const SENIOR_MODEL = process.env.TWO_BROTHERS_E2E_SENIOR_MODEL || 'spark-x2.6-4b@q4_k_m'
+const JUNIOR_MODEL = process.env.TWO_BROTHERS_E2E_JUNIOR_MODEL || 'lfm3-1.7b'
 const REAL_TASK = 'In one sentence: what is a reversible migration?'
-const REAL_DEADLINE_MS = 10 * 60 * 1000
+const REAL_DEADLINE_MS = Number(process.env.TWO_BROTHERS_E2E_DEADLINE_MS) || 10 * 60 * 1000
 const LM_PROBE_MS = 5000
 
 /** In-scenario skip: reported as SKIP (never FAIL), like a missing fixture. */
@@ -95,6 +97,28 @@ function walkRemove(target) {
 
 function log(msg) {
   process.stdout.write(msg + '\n')
+}
+
+// -- browser console guard ------------------------------------------------------
+// Every scenario attaches this collector and asserts before passing, so any
+// app-side console error / uncaught page error (e.g. a TypeError inside a Vue
+// computed) fails the scenario instead of passing silently.
+function attachConsoleGuard(page) {
+  const errors = []
+  page.on('console', (msg) => {
+    if (msg.type() === 'error') errors.push(`console.error: ${msg.text()}`)
+  })
+  page.on('pageerror', (e) => {
+    errors.push(`pageerror: ${e.message ?? String(e)}`)
+  })
+  return {
+    assertClean() {
+      assert.ok(
+        errors.length === 0,
+        `browser console must stay clean — got ${errors.length} error(s):\n${errors.join('\n')}`,
+      )
+    },
+  }
 }
 
 // -- web build ----------------------------------------------------------------
@@ -310,43 +334,76 @@ async function probeLmStudio() {
   }
 }
 
-/** Follow /api/runs/{run_id}/events until the run_end event (or the deadline). */
+/**
+ * Follow /api/runs/{run_id}/events until the run_end event (or the deadline).
+ *
+ * The single-shot fetch proved flaky on this machine: Windows severs the
+ * long-lived SSE socket mid-run (undici `TypeError: terminated`), and a
+ * silently hung connection otherwise sat until the deadline. This follower
+ * therefore mirrors the app's own EventSource contract: it tracks the SSE
+ * `id:` cursor and reconnects with `?after=N` after any error or premature
+ * close, while keeping the hard overall deadline unchanged. A stall is
+ * reported with the run record's status so a slow/stuck model (product
+ * behavior) is distinguishable from a lost test-client stream.
+ */
 async function followRunEvents(base, runId, timeoutMs) {
-  const ctrl = new AbortController()
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+  const deadline = Date.now() + timeoutMs
   const events = []
-  try {
-    const res = await fetch(`${base}/api/runs/${runId}/events`, { signal: ctrl.signal })
-    if (!res.ok || !res.body) throw new Error(`GET events -> HTTP ${res.status}`)
-    const reader = res.body.getReader()
-    const decoder = new TextDecoder()
-    let buf = ''
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buf += decoder.decode(value, { stream: true })
-      let sep
-      while ((sep = buf.indexOf('\n\n')) >= 0) {
-        const block = buf.slice(0, sep)
-        buf = buf.slice(sep + 2)
-        for (const line of block.split('\n')) {
-          if (!line.startsWith('data: ')) continue
-          const ev = JSON.parse(line.slice('data: '.length))
-          events.push(ev)
-          if (ev.type === 'run_end') return events
-        }
-      }
-    }
-    throw new Error('SSE stream ended without a run_end event')
-  } catch (e) {
-    if (e?.name === 'AbortError') {
+  let after = 0
+  for (;;) {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) {
+      let record = 'unreachable'
+      try {
+        const rec = await (await fetch(`${base}/api/runs/${runId}`)).json()
+        record = `${rec.status}${rec.error ? ` (${String(rec.error).slice(0, 200)})` : ''}`
+      } catch {}
       throw new Error(
-        `run ${runId} did not reach run_end within ${Math.round(timeoutMs / 60000)} min`,
+        `run ${runId} did not reach run_end within ${Math.round(timeoutMs / 60000)} min ` +
+          `(run record at deadline: ${record})`,
       )
     }
-    throw e
-  } finally {
-    clearTimeout(timer)
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), remaining)
+    try {
+      const res = await fetch(`${base}/api/runs/${runId}/events?after=${after}`, {
+        signal: ctrl.signal,
+      })
+      if (!res.ok || !res.body) throw new Error(`GET events -> HTTP ${res.status}`)
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += decoder.decode(value, { stream: true })
+        let sep
+        while ((sep = buf.indexOf('\n\n')) >= 0) {
+          const block = buf.slice(0, sep)
+          buf = buf.slice(sep + 2)
+          const idLine = block.split('\n').find((l) => l.startsWith('id: '))
+          const cursor = idLine ? Number(idLine.slice(4)) : NaN
+          for (const line of block.split('\n')) {
+            if (!line.startsWith('data: ')) continue
+            if (Number.isFinite(cursor)) after = cursor
+            const ev = JSON.parse(line.slice('data: '.length))
+            events.push(ev)
+            if (ev.type === 'run_end') return events
+          }
+        }
+      }
+      // The backend closes the response only after delivering run_end; an
+      // early close is a dropped connection — reconnect from the cursor.
+      log(`[real] SSE stream closed before run_end (after=${after}) — reconnecting`)
+    } catch (e) {
+      if (e?.name === 'AbortError') {
+        // overall deadline — diagnosed at the top of the next iteration
+      } else {
+        log(`[real] SSE follow error: ${e.message} — reconnecting after=${after}`)
+      }
+    } finally {
+      clearTimeout(timer)
+    }
   }
 }
 
@@ -397,8 +454,17 @@ async function addWorkspaceViaDialog(page, dirPath) {
   await page.click('button[aria-label="Add workspace"]')
   const dialog = page.locator('[role="dialog"][aria-label="Add workspace"]')
   await dialog.waitFor({ state: 'visible' })
-  await dialog.locator('input').first().fill(dirPath)
-  await dialog.locator('button[type="submit"]').click()
+  // the workspace finder: edit the path directly, then confirm the current folder
+  await dialog.locator('button[aria-label="Edit path"]').click()
+  const pathInput = dialog.locator('input[aria-label="Folder path"]')
+  await pathInput.fill(dirPath)
+  await pathInput.press('Enter')
+  await waitFor(
+    async () =>
+      (await dialog.locator('.wsf-current-path').innerText()).trim() === dirPath,
+    { desc: 'finder to list the target folder' },
+  )
+  await dialog.getByRole('button', { name: 'Add workspace', exact: true }).click()
   await dialog.waitFor({ state: 'hidden', timeout: 10000 })
 }
 
@@ -406,15 +472,13 @@ async function workspaceOptions(page) {
   return page.locator('select[title="Filter sessions by workspace"] option').allInnerTexts()
 }
 
-/** Ensure the sidebar filter offers `name`; add the workspace via the UI if not.
- *  NOTE: the app only loads workspaces on mount (App.vue), so after adding one
- *  we reload the page to see it — see "bugs found" in the report. */
+/** Ensure the sidebar filter offers `name`; add the workspace via the UI if
+ *  not. App.vue refreshes the workspace list on `workspace-created`, so no
+ *  page reload is needed after adding. */
 async function ensureWorkspace(page, dirPath, name) {
   const opts = await workspaceOptions(page)
   if (opts.includes(name)) return
   await addWorkspaceViaDialog(page, dirPath)
-  await page.reload()
-  await page.locator('nav[aria-label="Sessions"]').waitFor()
   await waitFor(async () => (await workspaceOptions(page)).includes(name), {
     desc: `workspace "${name}" in filter`,
   })
@@ -429,18 +493,28 @@ async function createSession(page, title) {
   const dialog = page.locator('[role="dialog"][aria-label="New session"]')
   await dialog.waitFor({ state: 'visible' })
   if (title) await dialog.locator('input').first().fill(title)
-  await dialog.locator('button[type="submit"]').click()
+  await dialog.getByRole('button', { name: 'Create' }).click()
   await dialog.waitFor({ state: 'hidden', timeout: 10000 })
   await page.locator('.chat-scroll').waitFor({ state: 'visible' })
 }
 
-async function sendTask(page, task, { mode = 'consult', provider = 'mock' } = {}) {
-  if (mode !== 'consult') {
-    await page.locator('select[title="Cooperation mode"]').selectOption(mode)
-  }
-  if (provider !== 'mock') {
-    await page.locator('select[title="Provider override for this run"]').selectOption(provider)
-  }
+const MODE_LABELS = { consult: 'Consult', work: 'Work', auto: 'Auto' }
+
+/** Open the composer's cooperation-mode popover and pick a mode. */
+async function chooseMode(page, mode) {
+  await page.locator('button[data-testid="composer-mode"]').click()
+  const menu = page.locator('#composer-mode-menu')
+  await menu.waitFor({ state: 'visible' })
+  await menu.locator(`.mode-option:has(.mode-title:text-is("${MODE_LABELS[mode]}"))`).click()
+}
+
+/**
+ * Send a task. The provider is never chosen in the composer anymore: it comes
+ * from the backend environment (TWO_BROTHERS_PROVIDER / scripted fixture) or
+ * the `?provider=` dev URL flag — scenarios pin it via startBackend's env.
+ */
+async function sendTask(page, task, { mode = 'consult' } = {}) {
+  if (mode !== 'consult') await chooseMode(page, mode)
   await page.locator('textarea.composer-input').fill(task)
   await page.locator('textarea.composer-input').press('Enter')
 }
@@ -463,6 +537,7 @@ async function scenarioChat(runner) {
   const wsName = path.basename(wsDir)
   const context = await browser.newContext()
   const page = await context.newPage()
+  const consoleGuard = attachConsoleGuard(page)
   try {
     await page.goto(be.base)
     await page.locator('nav[aria-label="Sessions"]').waitFor()
@@ -501,7 +576,12 @@ async function scenarioChat(runner) {
     const transcript = await page.locator('.chat-scroll').innerText()
     assert.ok(!transcript.includes('{"v":1'), 'raw protocol JSON visible in chat')
     assert.ok(!transcript.includes('[[TASK]]'), 'raw [[TASK]] marker visible in chat')
+    assert.ok(
+      !transcript.includes('[[REPAIR_REQUEST]]'),
+      'raw [[REPAIR_REQUEST]] marker visible in chat',
+    )
 
+    consoleGuard.assertClean()
     runner.pass('chat')
 
     // -- resume: reload, session list + history
@@ -514,7 +594,9 @@ async function scenarioChat(runner) {
     const history = await page.locator('.chat-scroll').innerText()
     assert.ok(history.includes(TASK_TEXT.slice(0, 20)), 'conversation history not rendered')
     assert.ok(!history.includes('{"v":1'), 'raw protocol JSON visible after reload')
+    assert.ok(!history.includes('[[REPAIR_REQUEST]]'), 'raw [[REPAIR_REQUEST]] marker after reload')
 
+    consoleGuard.assertClean()
     runner.pass('resume')
   } finally {
     await context.close().catch(() => {})
@@ -522,6 +604,18 @@ async function scenarioChat(runner) {
     rmTree(wsDir)
     rmTree(be.dir)
   }
+}
+
+/** Assert a locator's box lies fully inside the viewport (nothing clipped
+ *  by composer/footer chrome). */
+async function assertFullyVisible(page, locator, label) {
+  const box = await locator.boundingBox()
+  const vp = page.viewportSize()
+  assert.ok(box && vp, `${label}: element has no bounding box`)
+  assert.ok(
+    box.y >= 0 && box.y + box.height <= vp.height && box.x >= 0 && box.x + box.width <= vp.width,
+    `${label} not fully visible in viewport (box=${JSON.stringify(box)}, viewport=${vp.width}x${vp.height})`,
+  )
 }
 
 // -- scenario: approval (allow / deny) ------------------------------------------------
@@ -532,6 +626,7 @@ async function approvalFlow(runner, decision) {
   const be = await startBackend({ kind: 'fixture', scenario: 'approval' })
   const context = await browser.newContext()
   const page = await context.newPage()
+  const consoleGuard = attachConsoleGuard(page)
   const helloPath = path.join(wsDir, HELLO_FILE)
   try {
     await page.goto(be.base)
@@ -540,18 +635,45 @@ async function approvalFlow(runner, decision) {
     await ensureWorkspace(page, wsDir, wsName)
     await selectWorkspaceFilter(page, wsName)
     await createSession(page, `E2E approval ${decision}`)
-    // let the scripted server drive: no provider override
-    await sendTask(page, 'Write the hello file in the workspace', {
-      mode: 'work',
-      provider: '',
-    })
+    // let the scripted server drive: provider comes from the backend env
+    await sendTask(page, 'Write the hello file in the workspace', { mode: 'work' })
 
     const card = page.locator('article.approval', { hasText: 'awaiting operator' })
     await card.first().waitFor({ timeout: 30000 })
-    await card
-      .first()
-      .locator('button.approval-btn', { hasText: decision === 'allow' ? 'Allow' : 'Deny' })
-      .click()
+
+    // the active request is docked above the composer, fully visible and
+    // clickable — never clipped behind the composer or the usage footer
+    const dock = page.locator('.approval-dock')
+    await dock.waitFor({ state: 'visible', timeout: 10000 })
+    assert.equal(
+      await card.count(),
+      1,
+      `expected exactly one pending approval card (dock + timeline duplicate?), got ${await card.count()}`,
+    )
+    const decideBtn = dock.locator(
+      'button.approval-btn',
+      { hasText: decision === 'allow' ? 'Allow' : 'Deny' },
+    )
+    await assertFullyVisible(page, dock.locator('article.approval'), 'docked approval card')
+    await assertFullyVisible(page, decideBtn, `${decision} button`)
+
+    // the scripted fixture answers a structured reply badly once, so the run
+    // emits a REPAIR_REQUEST envelope: it must surface as a neutral system
+    // activity, never as a raw marker / operator bubble
+    const systemActivity = page.locator('.system-activity')
+    await systemActivity.first().waitFor({ timeout: 10000 })
+    const activityText = await systemActivity.first().innerText()
+    assert.ok(
+      !activityText.includes('[[REPAIR_REQUEST]]'),
+      'raw [[REPAIR_REQUEST]] marker visible in the repair activity',
+    )
+    const transcriptNow = await page.locator('.chat-scroll').innerText()
+    assert.ok(
+      !transcriptNow.includes('[[REPAIR_REQUEST]]'),
+      'raw [[REPAIR_REQUEST]] marker visible in chat',
+    )
+
+    await decideBtn.click()
 
     await waitForRunEnd(page)
 
@@ -569,6 +691,7 @@ async function approvalFlow(runner, decision) {
         .first()
         .waitFor({ timeout: 10000 })
     }
+    consoleGuard.assertClean()
     runner.pass(`approval-${decision}`)
   } finally {
     await context.close().catch(() => {})
@@ -586,6 +709,7 @@ async function scenarioStop(runner) {
   const be = await startBackend({ kind: 'fixture', scenario: 'slow' })
   const context = await browser.newContext()
   const page = await context.newPage()
+  const consoleGuard = attachConsoleGuard(page)
   try {
     await page.goto(be.base)
     await page.locator('nav[aria-label="Sessions"]').waitFor()
@@ -593,7 +717,7 @@ async function scenarioStop(runner) {
     await ensureWorkspace(page, wsDir, wsName)
     await selectWorkspaceFilter(page, wsName)
     await createSession(page, 'E2E stop')
-    await sendTask(page, 'Start a long-running task', { mode: 'consult', provider: '' })
+    await sendTask(page, 'Start a long-running task', { mode: 'consult' })
 
     const stopBtn = page.locator('form[aria-label="New task"] button:has-text("Stop")')
     await stopBtn.waitFor({ timeout: 30000 })
@@ -612,7 +736,87 @@ async function scenarioStop(runner) {
       runs.every((r) => r.status !== 'running' && r.status !== 'queued'),
       `backend still reports an active run: ${JSON.stringify(runs.map((r) => r.status))}`,
     )
+    consoleGuard.assertClean()
     runner.pass('stop')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(wsDir)
+    rmTree(be.dir)
+  }
+}
+
+// -- scenario: mobile drawer (390px) -----------------------------------------------------
+// Below 768px the sidebar starts closed, opens as an accessible drawer
+// (Escape / backdrop / inert chat / focus), and closes on session select.
+
+async function scenarioMobile(runner) {
+  const wsDir = tmpDir('tb-e2e-ws-mobile')
+  const wsName = path.basename(wsDir)
+  const be = await startBackend({ kind: 'mock' })
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 } })
+  const page = await context.newPage()
+  const consoleGuard = attachConsoleGuard(page)
+  try {
+    await page.goto(be.base)
+    const nav = page.locator('nav[aria-label="Sessions"]')
+    const expand = page.locator('button[aria-label="Show sessions"]')
+
+    // initial viewport below 768px: the sidebar starts closed
+    assert.equal(await nav.count(), 0, 'sidebar must start closed on a 390px viewport')
+    await expand.waitFor({ state: 'visible' })
+
+    // open: drawer visible, chat inert, backdrop present
+    await expand.click()
+    await nav.waitFor({ state: 'visible' })
+    assert.ok(
+      await page.evaluate(() =>
+        document.querySelector('.chat-shell')?.hasAttribute('inert'),
+      ),
+      'chat shell must be inert while the drawer is open',
+    )
+    await page.locator('.sidebar-backdrop').waitFor({ state: 'visible' })
+
+    // Escape closes and restores focus to the trigger
+    await page.keyboard.press('Escape')
+    await nav.waitFor({ state: 'hidden' })
+    assert.ok(
+      await page.evaluate(
+        () => document.activeElement === document.querySelector('button.sidebar-expand'),
+      ),
+      'focus must return to the expand button after Escape closes the drawer',
+    )
+
+    // backdrop click closes (click beside the drawer, not under it)
+    await expand.click()
+    await nav.waitFor({ state: 'visible' })
+    await page
+      .locator('.sidebar-backdrop')
+      .click({ position: { x: 380, y: 420 } })
+    await nav.waitFor({ state: 'hidden' })
+
+    // creating a session loads it and closes the drawer
+    await expand.click()
+    await nav.waitFor({ state: 'visible' })
+    await ensureWorkspace(page, wsDir, wsName)
+    await createSession(page, 'E2E mobile session')
+    await nav.waitFor({ state: 'hidden' })
+    assert.ok(
+      !(await page.evaluate(() =>
+        document.querySelector('.chat-shell')?.hasAttribute('inert'),
+      )),
+      'chat shell must not stay inert after the drawer closes',
+    )
+
+    // selecting a session from the drawer closes it too
+    await expand.click()
+    await nav.waitFor({ state: 'visible' })
+    await page.locator('.session-item', { hasText: 'E2E mobile session' }).first().click()
+    await nav.waitFor({ state: 'hidden' })
+    await page.locator('.chat-scroll').waitFor({ state: 'visible' })
+
+    consoleGuard.assertClean()
+    runner.pass('mobile')
   } finally {
     await context.close().catch(() => {})
     await killBackend(be)
@@ -636,6 +840,7 @@ async function scenarioReal(runner) {
   const wsName = path.basename(wsDir)
   const context = await browser.newContext()
   const page = await context.newPage()
+  const consoleGuard = attachConsoleGuard(page)
   try {
     // per-role provider/model -> LM Studio (OpenAI-compatible, no api_key needed)
     const put = await fetch(`${be.base}/api/settings`, {
@@ -655,10 +860,10 @@ async function scenarioReal(runner) {
     await selectWorkspaceFilter(page, wsName)
     await createSession(page, 'E2E real session')
 
-    // provider: '' keeps the shared sendTask helper from selecting the mock
-    // override — the run must take its models from the settings above
+    // the run must take its models from the settings above (provider: null —
+    // the composer no longer offers a provider override)
     const t0 = Date.now()
-    await sendTask(page, REAL_TASK, { provider: '' })
+    await sendTask(page, REAL_TASK)
 
     // the UI POSTs the run; find its id, then follow the event stream ourselves
     const runId = await waitFor(
@@ -723,6 +928,9 @@ async function scenarioReal(runner) {
       elapsed < REAL_DEADLINE_MS,
       `run took ${(elapsed / 1000).toFixed(1)}s, deadline is ${REAL_DEADLINE_MS / 60000} min`,
     )
+
+    // (e) the app's browser console stayed clean for the whole run
+    consoleGuard.assertClean()
 
     runner.pass('real')
   } finally {
@@ -793,6 +1001,13 @@ async function main() {
           scenarioStop(currentRunner)
         ),
       },
+      {
+        label: 'mobile',
+        run: () => (
+          (currentRunner = makeRunner('mobile')),
+          scenarioMobile(currentRunner)
+        ),
+      },
     )
     if (realEnabled) {
       blocks.push({
@@ -806,7 +1021,7 @@ async function main() {
   }
 
   if (!tsAvailable) {
-    for (const name of ['chat', 'resume', 'approval-allow', 'approval-deny', 'stop', 'real']) {
+    for (const name of ['chat', 'resume', 'approval-allow', 'approval-deny', 'stop', 'mobile', 'real']) {
       results.push({
         name,
         status: 'SKIP',

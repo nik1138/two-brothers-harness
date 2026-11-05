@@ -20,13 +20,17 @@ The backend is the TypeScript server in `packages/harness`:
 
 ## Layout
 
-- `src/App.vue` — shell: session sidebar (workspace filter), chat, composer,
-  run follow/stop, dialogs
-- `src/components/` — `Sidebar`, `ChatView`, `Composer`, `ToolActivity`,
-  `ApprovalCard`, `DiffView`/`DiffReview` (changed-file review),
-  `CommandResult`, `SettingsDialog` (Senior/Junior roles + provider presets),
-  `WorkspaceDialog`, `FolderPicker` (fs explorer fed by `/api/fs/browse`),
-  `NewSessionDialog`, `ErrorToast`
+- `src/App.vue` — shell: session sidebar (workspace-grouped sessions,
+  bottom-left Settings entry, mobile drawer below a breakpoint), chat,
+  composer, run follow/stop, dialogs
+- `src/components/` — `Sidebar`, `SessionGroup`/`SessionRow` (workspace
+  groups), `SidebarFooter` (bottom-left Settings), `ChatView`, `Composer`,
+  `ToolActivity`, `ApprovalCard` (docked approvals), `DiffView`/`DiffReview`
+  (changed-file review), `CommandResult`, `PromptAudit`, `ContextMeter`,
+  `UsageFooter`, `SettingsDialog` (Senior/Junior roles + provider presets,
+  `settings/` sections), `WorkspaceDialog` + `WorkspaceFinder` (the single
+  workspace picker; fs explorer fed by `/api/fs/browse`), `NewSessionDialog`,
+  `AppDialog`/`AppIcon`, `ErrorToast`
 - `src/api.ts` — backend client; `src/types.ts` — API types mirroring the
   protocol envelopes (`PROTOCOL.md`) and runtime events; `src/modal.ts` —
   stacked-modal mask-click guard (naive-ui fires `mask-click` for clicks
@@ -50,7 +54,9 @@ The backend is the TypeScript server in `packages/harness`:
    auto-import plugins. Match the app theme via `theme-overrides`/tokens,
    not global CSS resets.
 2. **`npm run build` must keep passing** (outputs `dist/`). The backend serves
-   that build, so a broken build breaks the product, not just CI.
+   that build, so a broken build breaks the product, not just CI. `npm test`
+   runs the chat/timeline projection tests (plain `node --test` via
+   `tests/register-ts.mjs`); keep it green too — the smoke test calls it.
 3. `npm run dev` proxies `/api` to the backend — start it first:
 
    - `cd packages/harness && node dist/cli.js serve --port 8600 --sessions-dir sessions`

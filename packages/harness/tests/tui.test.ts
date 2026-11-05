@@ -715,7 +715,13 @@ test("runTuiApp: a typed task runs a mock turn, renders a decision and restores 
     pluginsDir: `${process.cwd()}/does-not-exist-tui-plugins`,
   });
 
-  assert.ok(await waitFor(() => output.data.includes("two-brothers"), 5_000), "first frame");
+  assert.ok(
+    await waitFor(() => {
+      const text = stripAnsi(output.data);
+      return text.includes("Two Brothers") && text.includes("WORKSPACE");
+    }, 5_000),
+    "welcome screen renders the product title and workspace row",
+  );
   for (const char of "hello") input.emit("keypress", char, { name: char, ctrl: false });
   input.emit("keypress", "\r", { name: "return", ctrl: false });
   assert.ok(

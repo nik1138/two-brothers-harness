@@ -305,6 +305,10 @@ export function currentRuntimeItems(): RuntimeItem[] {
 
 function chatItemTime(item: ChatItem): number {
   if (item.type === 'divider') return 0
+  if (item.type === 'system') {
+    const t = Date.parse(item.activity.ts)
+    return Number.isNaN(t) ? 0 : t
+  }
   const t = Date.parse(item.group.startTs)
   return Number.isNaN(t) ? 0 : t
 }
@@ -457,9 +461,17 @@ export function changedFilesOf(runtime: RuntimeItem[]): ChangedFile[] {
 // -- live "who is acting" tail state (additive) ------------------------------
 
 /** Wall-clock ms for a timeline entry, or null when it carries no usable time. */
-export function timestampOf(entry: TimelineEntry['entry']): number | null {
+export function timestampOf(entry: TimelineEntry['entry'] | undefined): number | null {
+  // Callers derive the entry from a timeline position (e.g. the tail of the
+  // merged stream), which is undefined while a live run has produced no rows
+  // yet — an absent entry carries no time, exactly like an unusable one.
+  if (!entry) return null
   if (entry.type === 'group') {
     const t = Date.parse(entry.group.startTs)
+    return Number.isNaN(t) ? null : t
+  }
+  if (entry.type === 'system') {
+    const t = Date.parse(entry.activity.ts)
     return Number.isNaN(t) ? null : t
   }
   if (entry.type === 'tool' || entry.type === 'approval' || entry.type === 'prompt_audit') {

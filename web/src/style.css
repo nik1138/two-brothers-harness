@@ -1,48 +1,206 @@
+/* ============================================================
+   Design tokens
+   ------------------------------------------------------------
+   Two token layers:
+   - raw measurements / type / motion (scheme independent)
+   - semantic colour tokens (light here, dark in the blocks below)
+
+   A pinned theme writes `data-theme` on <html>; the pre-paint script in
+   index.html does the same before the first frame. `system` writes no
+   attribute, so the prefers-color-scheme block stays authoritative.
+   Keep theme.ts in sync with the colour values.
+   ============================================================ */
+
 :root {
-  --surface-canvas: #f4f5f7;
+  color-scheme: light;
+
+  /* --- surfaces --------------------------------------------------------- */
+  --surface-canvas: #f6f7f9;
   --surface-panel: #ffffff;
+  --surface-raised: #ffffff;
+  --surface-sunken: #eef1f5;
   --surface-bubble: #ffffff;
-  --surface-bubble-operator: #2f6fed;
-  --surface-hover: #eef0f3;
-  --surface-highlight: #eef4ff;
-  --border-subtle: #e4e6eb;
-  --border-strong: #c9cdd4;
-  --text-primary: #1d2129;
-  --text-secondary: #646a73;
+  --surface-bubble-operator: #3568d4;
+  --surface-hover: #f1f3f7;
+  --surface-active: #e7ebf1;
+  --surface-highlight: #eaf0fc;
+
+  /* --- borders ---------------------------------------------------------- */
+  --border-subtle: #e4e7ec;
+  --border-strong: #cbd1db;
+  --border-focus: #3568d4;
+
+  /* --- text ------------------------------------------------------------- */
+  --text-primary: #171a21;
+  --text-secondary: #5c6370;
+  --text-tertiary: #858c98;
   --text-on-accent: #ffffff;
-  --accent: #2f6fed;
-  --accent-soft: #dbe7ff;
-  --senior: #2f6fed;
-  --junior: #0d9c7f;
-  --operator: #7a8194;
-  --danger: #d54941;
-  --danger-soft: #fdecea;
-  --warning: #b07d10;
-  --warning-soft: #fdf3dc;
-  --ok: #1f883d;
-  --shadow-raised: 0 4px 16px rgba(29, 33, 41, 0.08);
-  --radius-sm: 8px;
-  --radius-md: 12px;
-  --radius-lg: 16px;
+  --text-on-danger: #ffffff;
+
+  /* --- intent ----------------------------------------------------------- */
+  --accent: #3568d4;
+  --accent-hover: #2a56b4;
+  --accent-pressed: #234a9e;
+  --accent-soft: #e8eefb;
+  --senior: #3568d4;
+  --junior: #0d7f69;
+  --operator: #6f7684;
+  --danger: #c8433b;
+  --danger-soft: #fbecea;
+  --warning: #946200;
+  --warning-soft: #fbf1dc;
+  --ok: #1c7f3f;
+  --ok-soft: #e7f5eb;
+  --focus-ring: #3568d4;
+
+  /* --- elevation -------------------------------------------------------- */
+  --shadow-raised:
+    0 1px 2px rgb(16 24 40 / 6%),
+    0 8px 24px -12px rgb(16 24 40 / 18%);
+  --shadow-dialog:
+    0 1px 2px rgb(16 24 40 / 8%),
+    0 24px 64px -18px rgb(16 24 40 / 32%);
+  --overlay: rgb(20 23 31 / 38%);
+
+  /* --- radii ------------------------------------------------------------ */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-pill: 999px;
+
+  /* --- typography ------------------------------------------------------- */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue',
+    Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-md: 13px;
+  --text-base: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --leading-tight: 1.3;
+  --leading-normal: 1.5;
+
+  /* --- motion ----------------------------------------------------------- */
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --motion-slow: 240ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-emphasized: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  /* --- layout contract -------------------------------------------------- */
+  --sidebar-width: 280px;
+  --sidebar-rail-width: 56px;
+  --session-row-height: 32px;
+  --sidebar-footer-height: 48px;
+  --chat-header-height: 48px;
+  --composer-max-width: 880px;
+  --finder-width: 680px;
+  --finder-height: 500px;
+  --settings-width: 800px;
+  --settings-height: 800px;
+  --settings-nav-width: 188px;
+  --dialog-inset: 16px;
+  --sidebar-padding: 8px;
+  --sidebar-row-padding: 12px;
+  --control-height-sm: 28px;
+  --control-height-md: 32px;
+  --control-height-lg: 36px;
 }
 
+/* Dark palette — duplicated for OS preference and a pinned `data-theme`.
+   Keep the two declarations byte-identical. */
 @media (prefers-color-scheme: dark) {
-  :root {
-    --surface-canvas: #17181c;
-    --surface-panel: #1f2026;
-    --surface-bubble: #232429;
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --surface-canvas: #101115;
+    --surface-panel: #17181d;
+    --surface-raised: #1d1f25;
+    --surface-sunken: #0b0c0f;
+    --surface-bubble: #1d1f25;
     --surface-bubble-operator: #2f6fed;
-    --surface-hover: #2a2b31;
-    --surface-highlight: #22314f;
-    --border-subtle: #33353c;
-    --border-strong: #45474f;
-    --text-primary: #e8eaf0;
-    --text-secondary: #9aa0ab;
-    --accent-soft: #263b63;
+    --surface-hover: #23252c;
+    --surface-active: #2b2e37;
+    --surface-highlight: #1b2a44;
+    --border-subtle: #2a2c34;
+    --border-strong: #3d404a;
+    --border-focus: #6c9bff;
+    --text-primary: #e7e9ef;
+    --text-secondary: #a1a7b3;
+    --text-tertiary: #7d8492;
+    --text-on-accent: #ffffff;
+    --text-on-danger: #ffffff;
+    --accent: #2f6fed;
+    --accent-hover: #4f7fe8;
+    --accent-pressed: #2753c9;
+    --accent-soft: #1e2a44;
+    --senior: #2f6fed;
+    --junior: #0d7f69;
+    --operator: #7a8194;
+    --danger: #d54941;
     --danger-soft: #3a2224;
+    --warning: #b07d10;
     --warning-soft: #38300f;
-    --shadow-raised: 0 4px 16px rgba(0, 0, 0, 0.4);
+    --ok: #1f883d;
+    --ok-soft: #16301d;
+    --focus-ring: #6c9bff;
+    --shadow-raised:
+      0 1px 2px rgb(0 0 0 / 45%),
+      0 8px 24px -12px rgb(0 0 0 / 55%);
+    --shadow-dialog:
+      0 1px 2px rgb(0 0 0 / 50%),
+      0 24px 64px -18px rgb(0 0 0 / 70%);
+    --overlay: rgb(0 0 0 / 56%);
   }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --surface-canvas: #101115;
+  --surface-panel: #17181d;
+  --surface-raised: #1d1f25;
+  --surface-sunken: #0b0c0f;
+  --surface-bubble: #1d1f25;
+  --surface-bubble-operator: #2f6fed;
+  --surface-hover: #23252c;
+  --surface-active: #2b2e37;
+  --surface-highlight: #1b2a44;
+  --border-subtle: #2a2c34;
+  --border-strong: #3d404a;
+  --border-focus: #6c9bff;
+  --text-primary: #e7e9ef;
+  --text-secondary: #a1a7b3;
+  --text-tertiary: #7d8492;
+  --text-on-accent: #ffffff;
+  --text-on-danger: #ffffff;
+  --accent: #2f6fed;
+  --accent-hover: #4f7fe8;
+  --accent-pressed: #2753c9;
+  --accent-soft: #1e2a44;
+  --senior: #2f6fed;
+  --junior: #0d7f69;
+  --operator: #7a8194;
+  --danger: #d54941;
+  --danger-soft: #3a2224;
+  --warning: #b07d10;
+  --warning-soft: #38300f;
+  --ok: #1f883d;
+  --ok-soft: #16301d;
+  --focus-ring: #6c9bff;
+  --shadow-raised:
+    0 1px 2px rgb(0 0 0 / 45%),
+    0 8px 24px -12px rgb(0 0 0 / 55%);
+  --shadow-dialog:
+    0 1px 2px rgb(0 0 0 / 50%),
+    0 24px 64px -18px rgb(0 0 0 / 70%);
+  --overlay: rgb(0 0 0 / 56%);
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
 }
 
 * {
@@ -57,10 +215,14 @@ body,
 
 body {
   margin: 0;
-  font-family:
-    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
   background: var(--surface-canvas);
   color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
 button {
@@ -68,9 +230,27 @@ button {
   color: inherit;
 }
 
+code,
+kbd,
+pre,
+samp {
+  font-family: var(--font-mono);
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--text-primary);
+}
+
 :focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
+}
+
+/* The page scrollbar is part of the surface, not a black slab. */
+:root {
+  scrollbar-color: var(--border-strong) transparent;
+  scrollbar-width: thin;
 }
 
 .muted {
@@ -79,6 +259,27 @@ button {
 
 .small {
   font-size: 0.8rem;
+}
+
+/* Accessible label for icon-only controls that still need a text node. */
+.visually-hidden {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* AppIcon's default presentation; the component adds the name as a class. */
+.app-icon {
+  display: inline-block;
+  flex: none;
+  vertical-align: -0.125em;
+  pointer-events: none;
 }
 
 /* ---------- layout ---------- */
@@ -102,48 +303,104 @@ button {
 /* ---------- sidebar ---------- */
 
 .sidebar {
-  flex: 0 0 280px;
+  flex: 0 0 var(--sidebar-width);
+  width: var(--sidebar-width);
+  min-width: 0;
   display: flex;
   flex-direction: column;
   background: var(--surface-panel);
   border-right: 1px solid var(--border-subtle);
   overflow-y: auto;
-  padding: 0.75rem;
+  padding: var(--sidebar-padding);
 }
 
 .sidebar-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 0.25rem 0.25rem 0.6rem;
+  gap: 0.5rem;
+  min-height: var(--control-height-lg);
+  padding: 0 4px 6px;
 }
 
 .sidebar-header h2 {
   margin: 0;
-  font-size: 0.95rem;
+  font-size: var(--text-md);
+  font-weight: 600;
+  letter-spacing: 0.01em;
 }
 
 .sidebar-actions {
   display: flex;
-  gap: 0.15rem;
+  gap: 2px;
 }
 
+/* Shared 28px icon control — sidebar rows, header and rail. */
 .icon-btn {
   border: none;
   background: transparent;
   border-radius: var(--radius-sm);
-  width: 1.9rem;
-  height: 1.9rem;
+  width: var(--control-height-sm);
+  height: var(--control-height-sm);
+  padding: 0;
   cursor: pointer;
   color: var(--text-secondary);
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
 }
 
 .icon-btn:hover {
   background: var(--surface-hover);
   color: var(--text-primary);
+}
+
+.icon-btn:active {
+  background: var(--surface-active);
+}
+
+.icon-btn:disabled {
+  cursor: progress;
+  opacity: 0.55;
+}
+
+/* Collapsed desktop sidebar: a 56px icon rail. Consumers add `.sidebar-rail`
+   to the column that replaces the expanded sidebar. */
+.sidebar-rail {
+  flex: 0 0 var(--sidebar-rail-width);
+  width: var(--sidebar-rail-width);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 10px;
+  background: var(--surface-panel);
+  border-right: 1px solid var(--border-subtle);
+}
+
+.sidebar-rail .icon-btn {
+  width: var(--control-height-lg);
+  height: var(--control-height-lg);
+  border-radius: var(--radius-md);
+}
+
+/* Fixed bottom-left application/account area (Settings + theme). */
+.sidebar-footer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: var(--sidebar-footer-height);
+  margin-top: auto;
+  padding: 6px 4px 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.sidebar-footer-spacer {
+  flex: 1;
 }
 
 .sidebar-expand {
@@ -163,20 +420,25 @@ button {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.2rem;
+  gap: 2px;
 }
 
+/* Dense session row: one line, title ellipsis, right-aligned meta. */
 .session-item {
   width: 100%;
+  min-height: var(--session-row-height);
   text-align: left;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: var(--radius-md);
-  padding: 0.55rem 0.7rem;
+  border-radius: var(--radius-sm);
+  padding: 0 8px;
   cursor: pointer;
   display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  transition: background-color var(--motion-fast) var(--ease-standard);
 }
 
 .session-item:hover {
@@ -184,13 +446,17 @@ button {
 }
 
 .session-item.active {
-  background: var(--surface-highlight);
-  border-color: var(--accent);
+  background: var(--surface-active);
+  border-color: transparent;
+  color: var(--text-primary);
 }
 
 .session-title {
-  font-size: 0.88rem;
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-md);
   font-weight: 500;
+  line-height: var(--leading-tight);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -198,9 +464,12 @@ button {
 
 .session-meta {
   display: flex;
+  flex: none;
   align-items: center;
-  gap: 0.4rem;
-  font-size: 0.75rem;
+  gap: 6px;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  white-space: nowrap;
 }
 
 .live-dot {
@@ -230,7 +499,8 @@ button {
   justify-content: space-between;
   align-items: center;
   gap: 1rem;
-  padding: 0.7rem 1.25rem;
+  min-height: var(--chat-header-height);
+  padding: 6px 1.25rem;
   border-bottom: 1px solid var(--border-subtle);
   background: var(--surface-panel);
 }
@@ -241,16 +511,17 @@ button {
 
 .chat-title {
   margin: 0;
-  font-size: 1rem;
+  font-size: var(--text-lg);
   font-weight: 600;
+  line-height: var(--leading-tight);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .chat-task {
-  margin: 0.15rem 0 0;
-  font-size: 0.8rem;
+  margin: 2px 0 0;
+  font-size: var(--text-sm);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -259,7 +530,7 @@ button {
 .chat-header-side {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
+  gap: 8px;
   flex-shrink: 0;
 }
 
@@ -267,7 +538,7 @@ button {
   display: flex;
   align-items: center;
   gap: 0.4rem;
-  font-size: 0.85rem;
+  font-size: var(--text-sm);
 }
 
 .participant {
@@ -319,7 +590,7 @@ button {
   flex: 1;
   min-width: 0;
   width: 100%;
-  max-width: 880px;
+  max-width: var(--composer-max-width);
   margin: 0 auto;
   overflow-y: auto;
   /* manual scroll pinning (see ChatView) — browser scroll-anchoring fights it */
@@ -334,6 +605,16 @@ button {
   display: flex;
   gap: 0.7rem;
   align-items: flex-start;
+}
+
+/* Transcript rows are flex children of .chat-scroll; card rows with
+   overflow:hidden have a zero automatic minimum main size, so under a full
+   viewport they would absorb all flex shrink and collapse to their border.
+   Pin every card row's flex basis so content never collapses. */
+.chat-scroll > article.prompt-audit,
+.chat-scroll > article.tool-activity,
+.chat-scroll > article.approval {
+  flex: none;
 }
 
 .chat-group.side-operator {
@@ -389,29 +670,20 @@ button {
   font-weight: 600;
 }
 
-.recipient-chip {
-  font-size: 0.72rem;
-  color: var(--text-secondary);
-  border: 1px solid var(--border-subtle);
-  border-radius: 999px;
-  padding: 0.05rem 0.5rem;
-}
-
+/* Senior/Junior turns are flat, full-width text blocks — identity comes from
+   the textual speaker label, not card chrome. */
 .bubble {
-  max-width: 46rem;
-  background: var(--surface-bubble);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  border-top-left-radius: 4px;
-  padding: 0.6rem 0.9rem;
+  max-width: none;
+  padding: 0.15rem 0;
+  line-height: 1.55;
 }
 
+/* The operator's own message stays neutral — same surface as everyone else. */
 .side-operator .bubble {
-  background: var(--surface-bubble-operator);
-  border-color: transparent;
-  border-radius: var(--radius-md);
-  border-top-right-radius: 4px;
-  color: var(--text-on-accent);
+  background: transparent;
+  border: none;
+  padding: 0.15rem 0;
+  color: var(--text-primary);
 }
 
 .bubble-continuation {
@@ -422,13 +694,17 @@ button {
   border-top-right-radius: var(--radius-md);
 }
 
+/* A decision stays visually distinct without shouting: accent edge + soft fill. */
 .bubble-highlight {
-  border-color: var(--accent);
+  border: 1px solid var(--accent);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-md);
   background: var(--surface-highlight);
+  padding: 0.6rem 0.9rem;
 }
 
 .side-operator .bubble-highlight {
-  background: var(--surface-bubble-operator);
+  background: var(--surface-highlight);
 }
 
 .bubble-meta {
@@ -453,15 +729,7 @@ button {
   border: 1px solid var(--border-subtle);
   border-radius: 999px;
   padding: 0.05rem 0.5rem;
-}
-
-.side-operator .bubble .kind-chip,
-.side-operator .bubble .muted {
-  color: rgba(255, 255, 255, 0.85);
-}
-
-.side-operator .bubble .kind-chip {
-  border-color: rgba(255, 255, 255, 0.4);
+  background: var(--surface-panel);
 }
 
 .verdict-chip {
@@ -617,7 +885,7 @@ button {
 .retry-action {
   flex: 0 0 auto;
   width: 100%;
-  max-width: 880px;
+  max-width: var(--composer-max-width);
   margin: 0 auto;
   padding: 0 1.25rem 0.5rem;
   display: flex;
@@ -627,7 +895,7 @@ button {
 .composer {
   flex: 0 0 auto;
   width: 100%;
-  max-width: 880px;
+  max-width: var(--composer-max-width);
   margin: 0 auto;
   padding: 0 1.25rem 1rem;
   display: flex;
@@ -730,16 +998,44 @@ select {
 
 .modal {
   background: var(--surface-panel);
+  color: var(--text-primary);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-raised);
+  box-shadow: var(--shadow-dialog);
   width: 100%;
-  max-width: 30rem;
+  max-width: min(30rem, calc(100vw - 2rem));
   max-height: calc(100dvh - 2rem);
   display: flex;
   flex-direction: column;
   overflow: hidden;
   padding: 1.2rem 1.4rem 1.4rem;
+}
+
+/* Optional width presets for legacy `.modal` markup. */
+.modal--sm {
+  max-width: min(420px, calc(100vw - 2rem));
+}
+
+.modal--md {
+  max-width: min(560px, calc(100vw - 2rem));
+}
+
+.modal--lg {
+  max-width: min(var(--finder-width), calc(100vw - 2rem));
+}
+
+.modal--xl {
+  max-width: min(var(--settings-width), calc(100vw - 2rem));
+}
+
+.modal--finder {
+  width: min(var(--finder-width), calc(100vw - 2rem));
+  height: min(var(--finder-height), calc(100dvh - 2rem));
+}
+
+.modal--settings {
+  width: min(var(--settings-width), calc(100vw - 2rem));
+  max-height: min(var(--settings-height), calc(100dvh - 2rem));
 }
 
 /* scrollable body of tall dialogs (e.g. model settings); header and the
@@ -751,12 +1047,13 @@ select {
 
 .modal h2 {
   margin: 0 0 1rem;
-  font-size: 1.05rem;
+  font-size: var(--text-lg);
+  line-height: var(--leading-tight);
   flex: none;
 }
 
 .field-hint {
-  font-size: 0.75rem;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
 }
 
@@ -785,6 +1082,149 @@ select {
   gap: 0.6rem;
   margin-top: 1.2rem;
   flex: none;
+}
+
+/* ---------- AppDialog ----------
+   Shared modal surface used by new dialogs. The header and footer are
+   fixed flex tracks; the body is the only scroll container, so tall
+   settings/finder content never pushes the actions off-screen. */
+
+.app-dialog {
+  --dialog-width: 560px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(var(--dialog-width), calc(100vw - (var(--dialog-inset) * 2)));
+  max-width: calc(100vw - (var(--dialog-inset) * 2));
+  max-height: calc(100dvh - (var(--dialog-inset) * 2));
+  background: var(--surface-panel);
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-dialog);
+  overflow: hidden;
+  outline: none;
+}
+
+.app-dialog--sm {
+  --dialog-width: 420px;
+}
+
+.app-dialog--md {
+  --dialog-width: 560px;
+}
+
+.app-dialog--lg {
+  --dialog-width: var(--finder-width);
+}
+
+.app-dialog--xl {
+  --dialog-width: var(--settings-width);
+}
+
+.app-dialog__header {
+  flex: none;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-panel);
+}
+
+.app-dialog__heading {
+  flex: 1;
+  min-width: 0;
+}
+
+.app-dialog__title {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  line-height: var(--leading-tight);
+  overflow-wrap: anywhere;
+}
+
+.app-dialog__description {
+  margin: 4px 0 0;
+  color: var(--text-secondary);
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
+}
+
+.app-dialog__close {
+  flex: none;
+  margin: -3px -3px 0 0;
+}
+
+.app-dialog__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 16px 18px;
+}
+
+.app-dialog__body--flush {
+  padding: 0;
+}
+
+.app-dialog__body--static {
+  overflow: visible;
+}
+
+.app-dialog__footer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--surface-panel);
+}
+
+.app-dialog__footer-start {
+  margin-right: auto;
+}
+
+/* Settings panels use a fixed 188px navigation rail beside the body. */
+.app-dialog__split {
+  display: grid;
+  grid-template-columns: var(--settings-nav-width) minmax(0, 1fr);
+  min-height: 0;
+  flex: 1;
+}
+
+.app-dialog__nav {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px;
+  border-right: 1px solid var(--border-subtle);
+  background: var(--surface-sunken);
+}
+
+.app-dialog__main {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 18px;
+}
+
+/* Width presets for the app shell's dialogs stay inside the viewport. */
+@media (max-width: 720px) {
+  .app-dialog--lg,
+  .app-dialog--xl {
+    --dialog-width: calc(100vw - (var(--dialog-inset) * 2));
+  }
+
+  .app-dialog__split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .app-dialog__nav {
+    display: none;
+  }
 }
 
 /* path input + Browse row (workspace dialog) and the folder picker path row */
@@ -926,10 +1366,6 @@ select {
 /* ---------- responsive ---------- */
 
 @media (max-width: 860px) {
-  .sidebar {
-    flex-basis: 220px;
-  }
-
   .participants {
     display: none;
   }
@@ -939,13 +1375,14 @@ select {
   }
 }
 
-@media (max-width: 640px) {
+/* Below 768px the expanded sidebar becomes a drawer over the transcript. */
+@media (max-width: 768px) {
   .sidebar {
     position: absolute;
     z-index: 20;
     height: 100dvh;
-    width: 260px;
-    box-shadow: var(--shadow-raised);
+    width: min(var(--sidebar-width), calc(100vw - 48px));
+    box-shadow: var(--shadow-dialog);
   }
 
   .sidebar-backdrop {
@@ -955,7 +1392,7 @@ select {
     z-index: 15;
     border: none;
     padding: 0;
-    background: rgba(0, 0, 0, 0.25);
+    background: var(--overlay);
     cursor: pointer;
   }
 
@@ -963,79 +1400,18 @@ select {
     flex-wrap: wrap;
   }
 }
-/* ==== lane2 shell: manual theme pin + approval-wait chrome ==== */
 
-/* Manual theme (G-6). `system` writes no `data-theme`, so the
-   prefers-color-scheme block above stays authoritative. The pinned blocks
-   mirror the token sets at the top of this file — keep them in sync when
-   tokens change. */
-:root {
-  color-scheme: light;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    color-scheme: dark;
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
-
-:root[data-theme='light'] {
-  color-scheme: light;
-  --surface-canvas: #f4f5f7;
-  --surface-panel: #ffffff;
-  --surface-bubble: #ffffff;
-  --surface-bubble-operator: #2f6fed;
-  --surface-hover: #eef0f3;
-  --surface-highlight: #eef4ff;
-  --border-subtle: #e4e6eb;
-  --border-strong: #c9cdd4;
-  --text-primary: #1d2129;
-  --text-secondary: #646a73;
-  --text-on-accent: #ffffff;
-  --accent: #2f6fed;
-  --accent-soft: #dbe7ff;
-  --senior: #2f6fed;
-  --junior: #0d9c7f;
-  --operator: #7a8194;
-  --danger: #d54941;
-  --danger-soft: #fdecea;
-  --warning: #b07d10;
-  --warning-soft: #fdf3dc;
-  --ok: #1f883d;
-  --shadow-raised: 0 4px 16px rgba(29, 33, 41, 0.08);
-  --radius-sm: 8px;
-  --radius-md: 12px;
-  --radius-lg: 16px;
-}
-
-:root[data-theme='dark'] {
-  color-scheme: dark;
-  --surface-canvas: #17181c;
-  --surface-panel: #1f2026;
-  --surface-bubble: #232429;
-  --surface-bubble-operator: #2f6fed;
-  --surface-hover: #2a2b31;
-  --surface-highlight: #22314f;
-  --border-subtle: #33353c;
-  --border-strong: #45474f;
-  --text-primary: #e8eaf0;
-  --text-secondary: #9aa0ab;
-  --text-on-accent: #ffffff;
-  --accent: #2f6fed;
-  --accent-soft: #263b63;
-  --senior: #2f6fed;
-  --junior: #0d9c7f;
-  --operator: #7a8194;
-  --danger: #d54941;
-  --danger-soft: #3a2224;
-  --warning: #b07d10;
-  --warning-soft: #38300f;
-  --ok: #1f883d;
-  --shadow-raised: 0 4px 16px rgba(0, 0, 0, 0.4);
-  --radius-sm: 8px;
-  --radius-md: 12px;
-  --radius-lg: 16px;
-}
+/* ==== approval-wait chrome ==== */
 
 /* Header badge while the run is parked on an operator approval (G-1). */
 .approval-badge {
@@ -1051,25 +1427,30 @@ select {
   white-space: nowrap;
 }
 
-/* Banner between the header and the transcript while the run waits. */
-.approval-banner {
+/* The active request is docked above the composer: Allow/Deny stay visible
+   and clickable at any transcript position or viewport height. Resolved
+   requests remain in the transcript as history. */
+.approval-dock {
   flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
   width: calc(100% - 2.5rem);
-  max-width: 880px;
-  margin: 0.6rem auto 0;
-  padding: 0.55rem 0.9rem;
-  border: 1px solid var(--warning);
-  border-radius: var(--radius-md);
-  background: var(--warning-soft);
-  color: var(--text-primary);
-  font-size: 0.85rem;
+  max-width: var(--composer-max-width);
+  margin: 0.4rem auto 0;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border-subtle);
 }
 
-.approval-banner-dot {
-  flex: 0 0 auto;
+.approval-dock-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 0.4rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--warning);
+}
+
+.approval-dock-dot {
+  flex: none;
   width: 8px;
   height: 8px;
   border-radius: 50%;
@@ -1077,45 +1458,8 @@ select {
   animation: pulse 1.8s ease-in-out infinite;
 }
 
-.approval-banner-text {
-  flex: 1;
-  min-width: 0;
-  margin: 0;
-  line-height: 1.4;
-}
-
-.approval-banner-text strong {
-  color: var(--warning);
-}
-
-.approval-banner-action {
-  flex: 0 0 auto;
-  border: 1px solid var(--warning);
-  border-radius: var(--radius-sm);
-  background: var(--surface-panel);
-  color: var(--warning);
-  font-size: 0.8rem;
-  font-weight: 600;
-  padding: 0.35rem 0.7rem;
-  cursor: pointer;
-}
-
-.approval-banner-action:hover {
-  background: var(--surface-hover);
-}
-
-@media (max-width: 640px) {
-  .approval-banner {
-    flex-wrap: wrap;
-  }
-
-  .approval-banner-action {
-    width: 100%;
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .approval-banner-dot {
+  .approval-dock-dot {
     animation: none;
   }
 }
