@@ -90,6 +90,49 @@ crashed run leaves a valid, replayable log. `--resume` rebuilds the shared conte
 `seq` numbering continues densely. An existing file without `--resume` is an error —
 use `--resume` or delete the file. See the [CLI reference](cli-reference.md) for details.
 
+## 6. Diagnose problems
+
+Run `doctor` before changing configuration. It checks the Node engine, settings
+file, sessions directory, role configuration, provider endpoint, web assets and
+plugins, and prints one `[pass]`/`[warn]`/`[fail]`/`[skip]` line per check.
+Exit `0` means no check failed, `1` means a failed check, and `2` is a usage
+error; warnings never fail.
+
+```powershell
+node dist/cli.js doctor --provider mock   # offline: no provider endpoint is contacted
+node dist/cli.js doctor                    # the configured provider, models and endpoint
+node dist/cli.js doctor --json             # one {ok, checks} object
+```
+
+It never prints API keys — role details only say `key set` or `key not set`. For
+a failing check, see [Troubleshooting](troubleshooting.md).
+
+## 7. Command help, sessions and completion
+
+`--help` works after every command. `help` prints the overview, `help <command>`
+one command's flags and examples, and `help --all` the full reference; a
+near-miss command or option gets a did-you-mean line, and usage errors exit 2.
+
+`sessions` lists the JSONL files under `--sessions-dir`; `sessions show <name>`
+prints one session's summary and envelopes. Both accept `--json`, and the
+`--limit N` flag caps rows or envelopes.
+
+```powershell
+node dist/cli.js help sessions
+node dist/cli.js sessions --sessions-dir sessions --json
+node dist/cli.js sessions show <name> --sessions-dir sessions --limit 20
+```
+
+Completion scripts are generated from the same catalog; for an installed
+`two-brothers` command (or `npm link`), add one line to your shell profile:
+
+| Shell | Add to profile |
+|---|---|
+| bash | `source <(two-brothers completions bash)` |
+| zsh | `eval "$(two-brothers completions zsh)"` after `compinit` |
+| fish | `two-brothers completions fish \| source` |
+| PowerShell 7+ | `two-brothers completions powershell \| Out-String \| Invoke-Expression` |
+
 ## The web workspace
 
 The browser app is a **local, single-user coding workspace**. The only
@@ -125,6 +168,9 @@ Then open `http://127.0.0.1:8600`:
    becomes a drawer over the chat.
 5. **Review the changes** — files touched by tools are collected with their
    unified diffs.
+6. **Jump around with `Ctrl+K`** (`Cmd+K` on macOS) — the command palette
+   searches sessions, workspaces, and actions. The sidebar footer's
+   Light/Dark/System selector sets the theme.
 
 Sessions are plain JSONL files under `--sessions-dir`; each has a
 `<name>.meta.json` sidecar (title, workspace link) and a runtime sidecar in
@@ -142,7 +188,8 @@ node dist/cli.js tui --provider mock
 ```
 
 Block transcript with textual role labels, a grapheme-aware multiline
-composer with history and bracketed paste, Ctrl+P command palette and `?`
+composer with history and bracketed paste, `Ctrl+R` incremental prompt-history
+search, `Ctrl+O` to stash or restore a draft, Ctrl+P command palette and `?`
 help overlays, session/model pickers, token streaming in place, live resize
 repaint, and non-blocking turns — Escape/Ctrl+C cancel a running turn before
 anything else.
@@ -163,5 +210,7 @@ the web unit tests, and the web build). The package's own gates are
 ## What's next
 
 - [CLI reference](cli-reference.md) — all commands and flags.
+- [Troubleshooting](troubleshooting.md) — fixes for common provider, session, web and TUI failures.
+- [Attribution](attribution.md) — the MIT references behind the project.
 - [Protocol](../PROTOCOL.md) — how the message exchange is structured.
 - [Testing](testing.md) — tests and verification tools.

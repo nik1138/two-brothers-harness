@@ -6,6 +6,7 @@ One flat set of documents, grouped by what you are trying to do.
 
 - [Quickstart](quickstart.md) — install, first offline run, a real model, sessions, the web workspace.
 - [CLI reference](cli-reference.md) — every command, flag, environment variable, and endpoint.
+- [Troubleshooting](troubleshooting.md) — symptom-first fixes keyed to the `doctor` checks and exit codes.
 
 ## Extend
 
@@ -16,6 +17,7 @@ One flat set of documents, grouped by what you are trying to do.
 
 - [Backlog](backlog.md) — deferred work, shipped items, and design requirements.
 - [Design review](design-review.md) — the v0.1 critique and what changed since.
+- [Attribution](attribution.md) — the vendored MIT references and the code and ideas adopted from them.
 - [Release runbook](release.md) — npm org setup, Trusted Publisher linkage, publishing, and promotion (pre-release).
 
 ## History

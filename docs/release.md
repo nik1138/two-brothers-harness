@@ -43,12 +43,13 @@ dist-tag, never `latest`, until explicitly promoted below.
 path runs the identical gate + publish without any tag involvement.
 
 Do **not** reuse the existing `v0.0.1` tag blindly: it points at `157c952` and
-predates the final hardening commits on `main` (`b9429b2`, `d8ae5c9`), so a
-tag-triggered run would publish stale sources. Deliberately moving the tag
-(`git tag -f v0.0.1 d8ae5c9 && git push -f origin v0.0.1`) so future tag
-pushes line up with the released commit is a separate owner decision — only
-after the npm setup above is complete, and only if you accept rewriting the
-remote tag.
+predates the redesign (`28883fc`) and the CLI diagnostics and ergonomics
+milestone on top of it, so a tag-triggered run would publish stale sources.
+Deliberately moving the tag
+(`git tag -f v0.0.1 <current-main> && git push -f origin v0.0.1`, with the
+commit you intend to publish) so future tag pushes line up with the released
+commit is a separate owner decision — only after the npm setup above is
+complete, and only if you accept rewriting the remote tag.
 
 For releases after 0.0.1 the generic flow is: bump `version` in
 `packages/harness/package.json`, merge to `main`, then

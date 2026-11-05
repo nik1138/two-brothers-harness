@@ -409,7 +409,7 @@ the DSH `xhtoken` provider (`SPARK-TRANSCRIPT.md`).
 Two Brothers takes inspiration from these projects and their communities:
 
 - [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — workspace-oriented interfaces, session management, and coding-agent workflows.
-- [Kimi Code](https://github.com/MoonshotAI/kimi-cli) — clean conversation design, tool interaction, and permission workflows.
+- [Kimi Code](https://github.com/MoonshotAI/kimi-code) — clean conversation design, tool interaction, and permission workflows.
 - [OpenHarness](https://github.com/HKUDS/OpenHarness) — practical patterns for permissions, tool execution, streaming events, and reliability.
 - [DeepAgents](https://github.com/langchain-ai/deepagents) — graph-based multi-agent architecture, filesystem backends, and human-in-the-loop approvals.
 
