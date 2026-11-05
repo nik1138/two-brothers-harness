@@ -394,6 +394,113 @@ async function scenarioCompletions(): Promise<string> {
   return "bash script defines the complete hook for two-brothers; unknown shell exits 2";
 }
 
+async function scenarioConfig(): Promise<string> {
+  const dir = mkTempDir("tb-cli-config-");
+  try {
+    const secret = "sk-e2e-config-secret";
+    const result = runCli([
+      "config", "--json",
+      "--provider", "mock",
+      "--api-key", secret,
+      "--sessions-dir", dir,
+    ]);
+    check(result.status === 0, `exit code ${result.status}: ${result.stderr.slice(-300)}`);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(result.stdout);
+    } catch {
+      throw new CheckError(`config --json stdout is not JSON: ${result.stdout.slice(0, 200)}`);
+    }
+    check(typeof parsed === "object" && parsed !== null && !Array.isArray(parsed), "config JSON is not an object");
+    const view = parsed as {
+      schema?: unknown;
+      roles?: Record<string, { apiKey?: unknown; baseUrl?: unknown; sources?: unknown }>;
+      settings?: unknown;
+    };
+    check(view.schema === "two-brothers.config/1", `unexpected config schema: ${String(view.schema)}`);
+    for (const role of ["senior", "junior"]) {
+      const entry = view.roles?.[role];
+      if (entry === undefined) throw new CheckError(`config JSON misses the ${role} role`);
+      check(typeof entry.apiKey === "string", `${role} api key state missing`);
+      check(entry.apiKey === "set" || entry.apiKey === "not set", `${role} api key state is not masked`);
+      check(typeof entry.baseUrl === "string", `${role} base URL missing`);
+      check(typeof entry.sources === "object" && entry.sources !== null, `${role} sources missing`);
+    }
+    check(!result.stdout.includes(secret), "the API key value leaked into config --json");
+    check(!result.stderr.includes(secret), "the API key value leaked onto stderr");
+
+    const human = runCli(["config", "--provider", "mock", "--sessions-dir", dir]);
+    check(human.status === 0, `config exit code ${human.status}: ${human.stderr.slice(-300)}`);
+    check(/^role\s+field\s+value\s+source$/m.test(human.stdout), "config table header/source column missing");
+    check(/flag --provider/.test(human.stdout), "config table misses the flag source");
+    check(!human.stdout.includes(secret), "the API key value leaked into the config table");
+    return "JSON object with both roles, sources and masked keys; human table has a source column";
+  } finally {
+    rmDir(dir);
+  }
+}
+
+async function scenarioDryRun(): Promise<string> {
+  const dir = mkTempDir("tb-cli-dryrun-");
+  try {
+    const sessionFile = path.join(dir, "s.jsonl");
+    const result = runCli([
+      "run", "Name one benefit of code review",
+      "--provider", "mock",
+      "--session-file", sessionFile,
+      "--dry-run",
+    ]);
+    check(result.status === 0, `exit code ${result.status}: ${result.stderr.slice(-300)}`);
+    check(
+      /dry run — no model calls, no session written/.test(result.stdout),
+      "dry-run banner missing",
+    );
+    check(/problems: none/.test(result.stdout), "dry-run plan reports problems");
+    check(!fs.existsSync(sessionFile), "the dry run created a session file");
+
+    const json = runCli([
+      "run", "Name one benefit of code review",
+      "--provider", "mock",
+      "--session-file", sessionFile,
+      "--dry-run", "--json",
+    ]);
+    check(json.status === 0, `dry-run --json exit code ${json.status}: ${json.stderr.slice(-300)}`);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(json.stdout);
+    } catch {
+      throw new CheckError(`dry-run --json stdout is not JSON: ${json.stdout.slice(0, 200)}`);
+    }
+    check(
+      typeof parsed === "object" && parsed !== null && (parsed as { dryRun?: unknown }).dryRun === true,
+      "dry-run --json misses dryRun:true",
+    );
+    check(!fs.existsSync(sessionFile), "the JSON dry run created a session file");
+    return "plan text and JSON object, exit 0; no session file written";
+  } finally {
+    rmDir(dir);
+  }
+}
+
+async function scenarioStdin(): Promise<string> {
+  const run = spawnSync(
+    process.execPath,
+    [CLI, "run", "-", "--provider", "mock"],
+    {
+      cwd: CLI_CWD,
+      timeout: 60_000,
+      encoding: "utf-8",
+      env: { ...process.env },
+      input: "task from stdin\n",
+    },
+  );
+  check(run.status === 0, `exit code ${run.status}: ${String(run.stderr).slice(-300)}`);
+  const stdout = run.stdout ?? "";
+  check(/\[user\]\s+task from stdin/.test(stdout), "the stdin task was not rendered");
+  check(/\[senior -> user\] decision/.test(stdout), "the decision envelope is missing");
+  return "task read from piped stdin through run -";
+}
+
 async function scenarioSessionsJson(): Promise<string> {
   const dir = mkTempDir("tb-cli-sessions-json-");
   try {
@@ -457,6 +564,9 @@ const SCENARIOS: Array<{ name: string; run: () => Promise<string> }> = [
   { name: "serve", run: scenarioServe },
   { name: "doctor", run: scenarioDoctor },
   { name: "completions", run: scenarioCompletions },
+  { name: "config", run: scenarioConfig },
+  { name: "dry-run", run: scenarioDryRun },
+  { name: "stdin", run: scenarioStdin },
   { name: "sessions-json", run: scenarioSessionsJson },
   { name: "sessions-show", run: scenarioSessionsShow },
 ];

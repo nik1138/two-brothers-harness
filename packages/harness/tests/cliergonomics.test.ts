@@ -17,7 +17,12 @@ import assert from "node:assert/strict";
 
 import { costLine, estimateRunCost, main, OPTIONS, type CliIO } from "../src/cli.ts";
 import { commandHelp, COMMAND_ORDER, FLAGS } from "../src/clihelp.ts";
-import { maxTokensForRole, resolveConfig } from "../src/config.ts";
+import { maxTokensForRole, resolveConfig, type Config } from "../src/config.ts";
+import {
+  buildConfigView,
+  renderConfigView,
+  type ConfigView,
+} from "../src/configview.ts";
 import {
   AnthropicProvider,
   GoogleProvider,
@@ -25,7 +30,11 @@ import {
   type FetchLike,
   type ModelProviderConfig,
 } from "../src/provider.ts";
-import { SettingsStore } from "../src/settings_store.ts";
+import { seedPresets } from "../src/presets.ts";
+import {
+  SettingsStore,
+  type SettingsSnapshot,
+} from "../src/settings_store.ts";
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -653,6 +662,9 @@ const HELP_COMMANDS = [
   "sessions",
   "models",
   "onboard",
+  "doctor",
+  "config",
+  "completions",
   "selftest",
 ] as const;
 
@@ -774,6 +786,8 @@ test("unknown command: exit 2, stderr diagnostic + suggestion, no full-help dump
 test("unknown option: exit 2 with a nearest-flag suggestion for every command", async () => {
   const cases: ReadonlyArray<readonly [string, string, string]> = [
     ["run", "--providr", "--provider"],
+    ["run", "--dryrun", "--dry-run"],
+    ["run", "--task-fil", "--task-file"],
     ["run", "--hlep", "--help"],
     ["chat", "--providr", "--provider"],
     ["tui", "--providr", "--provider"],
@@ -781,6 +795,8 @@ test("unknown option: exit 2 with a nearest-flag suggestion for every command", 
     ["sessions", "--sesions-dir", "--sessions-dir"],
     ["models", "--base-ur", "--base-url"],
     ["onboard", "--presett", "--preset"],
+    ["config", "--jsn", "--json"],
+    ["config", "--providr", "--provider"],
     ["selftest", "--hlep", "--help"],
     ["help", "--al", "--all"],
   ];
@@ -1025,4 +1041,405 @@ test("sessions show: unknown session and missing name exit 2 with a clear messag
     assert.match(missing.err.join("\n"), /no session name/);
     assert.deepEqual(missing.out, []);
   });
+});
+
+// ---------------------------------------------------------------------------
+// config: provenance, key masking, `config --json`
+// ---------------------------------------------------------------------------
+
+/** Run `fn` with every TWO_BROTHERS_* env var cleared, then restore them. */
+async function withCleanCliEnv<T>(fn: () => T | Promise<T>): Promise<T> {
+  const saved = new Map<string, string | undefined>();
+  for (const key of Object.keys(process.env)) {
+    if (!key.startsWith("TWO_BROTHERS_")) continue;
+    saved.set(key, process.env[key]);
+    delete process.env[key];
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+test("configview: provenance flag > role env > shared env > preset > settings > default", async () => {
+  await withCleanCliEnv(() => {
+    const flagSecret = "sk-provenance-flag-secret";
+    const settings: SettingsSnapshot = {
+      senior: {
+        base_url: "http://settings.test/v1",
+        model: "settings-model",
+        api_key: "sk-provenance-settings-secret",
+      },
+    };
+    const roleEnv: NodeJS.ProcessEnv = {
+      TWO_BROTHERS_SENIOR_BASE_URL: "http://role-env.test/v1",
+      TWO_BROTHERS_BASE_URL: "http://shared-env.test/v1",
+      TWO_BROTHERS_SENIOR_MODEL: "env-model",
+      TWO_BROTHERS_SENIOR_API_KEY: "sk-provenance-env-secret",
+      TWO_BROTHERS_API_KEY: "sk-provenance-shared-secret",
+    };
+    // config carries the CLI-resolved values; the view reports the layers.
+    const config = resolveConfig({ provider: "openai", seniorModel: "config-model" });
+    const flags = {
+      provider: "openai",
+      "senior-base-url": "http://flag.test/v1",
+      "senior-model": "flag-model",
+      "senior-api-key": flagSecret,
+    };
+
+    const top = buildConfigView({
+      config,
+      env: roleEnv,
+      settings,
+      flags,
+      settingsFile: "sessions/settings.json",
+      settingsPresent: true,
+    });
+    assert.equal(top.roles.senior.baseUrl, "http://flag.test/v1");
+    assert.equal(top.roles.senior.sources.baseUrl.kind, "flag");
+    assert.equal(top.roles.senior.sources.baseUrl.detail, "--senior-base-url");
+    assert.equal(top.roles.senior.model, "flag-model");
+    assert.equal(top.roles.senior.sources.model.kind, "flag");
+    assert.equal(top.roles.senior.apiKey, "set");
+    assert.equal(top.roles.senior.sources.apiKey.kind, "flag");
+    assert.equal(top.roles.senior.sources.provider.kind, "flag");
+    assert.equal(top.providerSource.kind, "flag");
+
+    // No flags: the role env pair wins over the shared env pair and settings.
+    const fromRoleEnv = buildConfigView({
+      config,
+      env: roleEnv,
+      settings,
+      flags: {},
+      settingsFile: "sessions/settings.json",
+      settingsPresent: true,
+    });
+    assert.equal(fromRoleEnv.roles.senior.baseUrl, "http://role-env.test/v1");
+    assert.equal(fromRoleEnv.roles.senior.sources.baseUrl.kind, "role-env");
+    assert.equal(fromRoleEnv.roles.senior.model, "env-model");
+    assert.equal(fromRoleEnv.roles.senior.sources.model.kind, "role-env");
+    assert.equal(fromRoleEnv.roles.senior.sources.apiKey.kind, "role-env");
+
+    // Only the shared pair: it beats settings for both roles.
+    const sharedEnv: NodeJS.ProcessEnv = {
+      TWO_BROTHERS_BASE_URL: "http://shared-env.test/v1",
+      TWO_BROTHERS_API_KEY: "sk-provenance-shared-secret",
+    };
+    const fromSharedEnv = buildConfigView({
+      config,
+      env: sharedEnv,
+      settings,
+      flags: {},
+      settingsFile: "sessions/settings.json",
+      settingsPresent: true,
+    });
+    assert.equal(fromSharedEnv.roles.senior.baseUrl, "http://shared-env.test/v1");
+    assert.equal(fromSharedEnv.roles.senior.sources.baseUrl.kind, "shared-env");
+    assert.equal(fromSharedEnv.roles.senior.apiKey, "set");
+    assert.equal(fromSharedEnv.roles.senior.sources.apiKey.kind, "shared-env");
+
+    // A settings provider_ref resolves the preset (env-backed key included).
+    const presetSettings: SettingsSnapshot = {
+      senior: { provider_ref: "deepseek", model: "settings-model" },
+    };
+    const presetEnv: NodeJS.ProcessEnv = { DEEPSEEK_API_KEY: "sk-provenance-preset-secret" };
+    const fromPreset = buildConfigView({
+      config,
+      env: presetEnv,
+      settings: presetSettings,
+      flags: {},
+      presets: seedPresets(),
+      settingsFile: "sessions/settings.json",
+      settingsPresent: true,
+    });
+    assert.equal(fromPreset.roles.senior.baseUrl, "https://api.deepseek.com/v1");
+    assert.equal(fromPreset.roles.senior.sources.baseUrl.kind, "preset");
+    assert.equal(fromPreset.roles.senior.sources.baseUrl.detail, "deepseek");
+    assert.equal(fromPreset.roles.senior.kind, "openai-compatible");
+    assert.equal(fromPreset.roles.senior.apiKey, "set");
+    assert.equal(fromPreset.roles.senior.sources.apiKey.detail, "deepseek (DEEPSEEK_API_KEY)");
+    // model is not part of the preset connection: settings supplies it.
+    assert.equal(fromPreset.roles.senior.model, "settings-model");
+    assert.equal(fromPreset.roles.senior.sources.model.kind, "settings");
+
+    // Nothing set: built-in defaults.
+    const fromDefaults = buildConfigView({
+      config: resolveConfig({ provider: "mock" }),
+      env: {},
+      settings: {},
+      flags: {},
+      settingsFile: "sessions/settings.json",
+      settingsPresent: false,
+    });
+    assert.equal(fromDefaults.roles.senior.baseUrl, "");
+    assert.equal(fromDefaults.roles.senior.sources.baseUrl.kind, "default");
+    assert.equal(fromDefaults.roles.senior.model, "");
+    assert.equal(fromDefaults.roles.senior.sources.model.kind, "default");
+    assert.equal(fromDefaults.roles.senior.apiKey, "not set");
+    assert.equal(fromDefaults.roles.senior.sources.apiKey.kind, "default");
+    assert.equal(fromDefaults.provider, "mock");
+
+    const serialized = JSON.stringify([
+      top,
+      fromRoleEnv,
+      fromSharedEnv,
+      fromPreset,
+      fromDefaults,
+    ]);
+    for (const value of [
+      flagSecret,
+      "sk-provenance-settings-secret",
+      "sk-provenance-env-secret",
+      "sk-provenance-shared-secret",
+      "sk-provenance-preset-secret",
+    ]) {
+      assert.ok(!serialized.includes(value), `config view leaked ${value}`);
+    }
+
+    const table = renderConfigView(top).join("\n");
+    assert.match(table, /^role\s+field\s+value\s+source$/m);
+    assert.match(table, /flag --senior-base-url/);
+    assert.ok(!table.includes(flagSecret), "the rendered table leaked the key");
+  });
+});
+
+test("config --json: stable object with per-role sources and masked keys", async () => {
+  await withTempDir(async (dir) => {
+    await withCleanCliEnv(async () => {
+      const secret = "sk-config-command-secret";
+      const store = new SettingsStore(path.join(dir, "settings.json"));
+      store.write({
+        senior: {
+          provider: "openai",
+          base_url: "http://settings.test/v1",
+          model: "settings-senior",
+          api_key: secret,
+        },
+        junior: { model: "settings-junior" },
+      });
+
+      const io = makeIO();
+      const code = await main(
+        [
+          "config",
+          "--json",
+          "--provider",
+          "openai",
+          "--base-url",
+          "http://flag.test/v1",
+          "--sessions-dir",
+          dir,
+        ],
+        io,
+      );
+      assert.equal(code, 0, io.err.join("\n"));
+      assert.deepEqual(io.err, []);
+      assert.equal(io.out.length, 1, "config --json is one JSON document");
+      const view = JSON.parse(io.out[0]) as ConfigView;
+      assert.equal(view.schema, "two-brothers.config/1");
+      assert.deepEqual(Object.keys(view.roles), ["senior", "junior"]);
+      assert.deepEqual(Object.keys(view.roles.senior.sources), [
+        "provider",
+        "kind",
+        "baseUrl",
+        "model",
+        "apiKey",
+      ]);
+      assert.equal(view.provider, "openai");
+      assert.equal(view.providerSource.detail, "--provider");
+      assert.equal(view.roles.senior.baseUrl, "http://flag.test/v1");
+      assert.equal(view.roles.senior.sources.baseUrl.kind, "flag");
+      assert.equal(view.roles.junior.baseUrl, "http://flag.test/v1");
+      assert.equal(view.roles.senior.model, "settings-senior");
+      assert.equal(view.roles.senior.sources.model.kind, "settings");
+      assert.equal(view.roles.senior.apiKey, "set");
+      assert.equal(view.roles.senior.sources.apiKey.kind, "settings");
+      assert.equal(view.roles.junior.apiKey, "not set");
+      assert.deepEqual(view.settings, {
+        file: path.join(dir, "settings.json"),
+        present: true,
+      });
+      assert.equal(view.sessionsDir, dir);
+      assert.equal(view.limits.retries, 6);
+      assert.equal(view.limits.timeoutSeconds, 120);
+      assert.equal(view.compaction.mode, "off");
+      assert.ok(view.roots.skills.paths.length >= 2, "default skill roots are listed");
+      assert.equal(view.pinning.notes.length, 0);
+      assert.ok(!io.out[0].includes(secret), "the key value leaked into --json");
+
+      const human = makeIO();
+      assert.equal(
+        await main(["config", "--provider", "mock", "--sessions-dir", dir], human),
+        0,
+        human.err.join("\n"),
+      );
+      const text = human.out.join("\n");
+      assert.match(text, /^role\s+field\s+value\s+source$/m);
+      assert.match(text, /senior\s+model\s+settings-senior\s+settings /);
+      assert.match(text, /settings: .*settings\.json \(present\)/);
+      assert.match(text, /notes:/, "served settings/preset layers are called out");
+      assert.ok(!text.includes(secret), "the key value leaked into the table");
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// run input: --dry-run, --task-file and `run -`
+// ---------------------------------------------------------------------------
+
+test("run --dry-run: prints the plan, writes no session, calls no provider", async () => {
+  await withTempDir(async (dir) => {
+    await withCleanCliEnv(async () => {
+      const sessionFile = path.join(dir, "dry.jsonl");
+      const io = makeIO();
+      const code = await main(
+        [
+          "run",
+          "dry task",
+          "--provider",
+          "mock",
+          "--session-file",
+          sessionFile,
+          "--dry-run",
+        ],
+        io,
+      );
+      assert.equal(code, 0, io.err.join("\n"));
+      const text = io.out.join("\n");
+      assert.match(text, /^dry run — no model calls, no session written$/m);
+      assert.match(text, /^task: dry task$/m);
+      assert.match(text, /session: .*dry\.jsonl \(new\)/);
+      assert.match(text, /problems: none/);
+      assert.ok(!fs.existsSync(sessionFile), "the dry run created the session file");
+      assert.deepEqual(fs.readdirSync(dir), [], "the dry run wrote nothing");
+      assert.ok(!text.includes("tokens:"), "no usage footer on a dry run");
+
+      const jsonIo = makeIO();
+      assert.equal(
+        await main(
+          [
+            "run",
+            "dry task",
+            "--provider",
+            "mock",
+            "--session-file",
+            sessionFile,
+            "--dry-run",
+            "--json",
+          ],
+          jsonIo,
+        ),
+        0,
+        jsonIo.err.join("\n"),
+      );
+      assert.equal(jsonIo.out.length, 1, "dry-run --json is one JSON document");
+      const plan = JSON.parse(jsonIo.out[0]) as {
+        dryRun: boolean;
+        command: string;
+        task: string;
+        session: { mode: string };
+        problems: string[];
+        config: ConfigView;
+      };
+      assert.equal(plan.dryRun, true);
+      assert.equal(plan.command, "run");
+      assert.equal(plan.task, "dry task");
+      assert.equal(plan.session.mode, "new");
+      assert.deepEqual(plan.problems, []);
+      assert.equal(plan.config.roles.senior.provider, "mock");
+      assert.equal(plan.config.roles.senior.apiKey, "not set");
+      assert.ok(!fs.existsSync(sessionFile), "the JSON dry run created the session file");
+
+      const bad = makeIO();
+      assert.equal(
+        await main(["run", "dry task", "--provider", "mock", "--dry-run", "--stream"], bad),
+        2,
+      );
+      assert.match(bad.err.join("\n"), /cannot combine with --stream/);
+      assert.deepEqual(bad.out, []);
+
+      const chat = makeIO();
+      assert.equal(await main(["chat", "--provider", "mock", "--dry-run"], chat), 0);
+      assert.match(chat.out.join("\n"), /^command: chat$/m);
+      assert.ok(
+        !chat.out.join("\n").includes("Two Brothers REPL."),
+        "a dry-run chat must not start the REPL",
+      );
+    });
+  });
+});
+
+test("run --task-file: reads the task; missing/blank/ambiguous files exit 2", async () => {
+  await withTempDir(async (dir) => {
+    await withCleanCliEnv(async () => {
+      const file = path.join(dir, "task.txt");
+      fs.writeFileSync(file, "task from a file\n", "utf-8");
+
+      const io = makeIO();
+      assert.equal(
+        await main(["run", "--task-file", file, "--provider", "mock"], io),
+        0,
+        io.err.join("\n"),
+      );
+      assert.match(io.out.join("\n"), /\[user\]\s+task from a file/);
+      assert.match(io.out.join("\n"), /\[senior -> user\] decision/);
+
+      const missing = makeIO();
+      assert.equal(
+        await main(
+          ["run", "--task-file", path.join(dir, "missing.txt"), "--provider", "mock"],
+          missing,
+        ),
+        2,
+      );
+      assert.match(missing.err.join("\n"), /cannot read --task-file .*missing\.txt/);
+      assert.match(missing.err.join("\n"), /Usage: two-brothers run/);
+      assert.deepEqual(missing.out, []);
+
+      const blankFile = path.join(dir, "blank.txt");
+      fs.writeFileSync(blankFile, "  \r\n\n ", "utf-8");
+      const blank = makeIO();
+      assert.equal(await main(["run", "--task-file", blankFile, "--provider", "mock"], blank), 2);
+      assert.match(blank.err.join("\n"), /--task-file .*blank\.txt is empty/);
+
+      const both = makeIO();
+      assert.equal(
+        await main(["run", "positional", "--task-file", file, "--provider", "mock"], both),
+        2,
+      );
+      assert.match(both.err.join("\n"), /mutually exclusive/);
+    });
+  });
+});
+
+test("run -: reads the task from piped stdin; blank and oversized input exit 2", async () => {
+  const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+  const ok = spawnSync(process.execPath, [cli, "run", "-", "--provider", "mock"], {
+    input: "task from stdin\n",
+    encoding: "utf-8",
+    timeout: 60_000,
+  });
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stdout, /\[user\]\s+task from stdin/);
+  assert.match(ok.stdout, /\[senior -> user\] decision/);
+
+  const blank = spawnSync(process.execPath, [cli, "run", "-", "--provider", "mock"], {
+    input: "\n \n",
+    encoding: "utf-8",
+    timeout: 60_000,
+  });
+  assert.equal(blank.status, 2, blank.stderr);
+  assert.match(blank.stderr, /no task given on stdin/);
+
+  const oversized = spawnSync(process.execPath, [cli, "run", "-", "--provider", "mock"], {
+    input: "x".repeat(1024 * 1024 + 1),
+    encoding: "utf-8",
+    timeout: 60_000,
+  });
+  assert.equal(oversized.status, 2, oversized.stderr);
+  assert.match(oversized.stderr, /1 MiB limit/);
 });

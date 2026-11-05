@@ -198,6 +198,17 @@ export const FLAGS: Record<string, FlagHelp> = {
     description:
       "with --stream: one token NDJSON record per provider text delta (env TWO_BROTHERS_STREAM_TOKENS)",
   },
+  "dry-run": {
+    name: "dry-run",
+    description:
+      "resolve the run (config, tools, session) and print the plan; no model calls, no session written",
+  },
+  "task-file": {
+    name: "task-file",
+    value: "<path>",
+    description:
+      "read the task from a file (run only); a task of `-` on the command line reads stdin (max 1 MiB)",
+  },
   "session-file": {
     name: "session-file",
     value: "<path>",
@@ -364,12 +375,20 @@ defineCommand({
   name: "run",
   summary: "one cooperation cycle: task -> decision",
   commandLine: 'two-brothers run "<task>" [flags]',
-  usage: ['run "<task>" [flags]'],
+  usage: [
+    'run "<task>" [flags]',
+    "run - [flags]",
+    "run --task-file <path> [flags]",
+  ],
   description:
     "Run one task through the two-brother loop: the senior either consults the " +
     "junior for a proposal or delegates work and receives a deliverable, reviews " +
     "it and makes the final decision. Prints the human transcript, a token-usage " +
-    "footer and, when both roles resolve to the same priced model, a cost line.",
+    "footer and, when both roles resolve to the same priced model, a cost line. " +
+    "The task comes from the positional argument; a task of `-` reads it from " +
+    "stdin (bounded to 1 MiB) and --task-file reads it from a file. --dry-run " +
+    "resolves the whole run and prints the plan without calling a model or " +
+    "writing a session.",
   flags: [
     "provider",
     "provider-kind",
@@ -392,6 +411,8 @@ defineCommand({
     "retries",
     "mode",
     ...RUN_OUTPUT_FLAGS,
+    "dry-run",
+    "task-file",
     "session-file",
     "resume",
     "compact",
@@ -404,14 +425,19 @@ defineCommand({
     "skills-dir",
     "help",
   ],
-  acceptedFlags: SHARED_FLAGS,
+  acceptedFlags: [...SHARED_FLAGS, "dry-run", "task-file"],
   flagNotes: {
     mode: "cooperation mode consult|work|auto; run also accepts the output modes print|json",
+    "dry-run":
+      "print the resolved plan (roles with sources, tools, session, compaction) " +
+      "and exit 0; invalid with --stream (usage error)",
   },
   examples: [
     'two-brothers run "Plan a migration from Redis to Valkey" --provider mock',
     'two-brothers run "Pick a testing scheme" --provider mock --mode json',
     'two-brothers run "List the files" --provider mock --mode work --stream',
+    'two-brothers run - --provider mock --dry-run < task.txt',
+    "two-brothers run --task-file task.txt --provider mock",
   ],
 });
 
@@ -423,7 +449,8 @@ defineCommand({
   description:
     "Line-based REPL over the cooperation harness. Every non-command line is a " +
     "task; the shared context and an optional --session-file carry across turns. " +
-    "An empty line, exit, quit, q, /exit or /quit leaves the REPL.",
+    "An empty line, exit, quit, q, /exit or /quit leaves the REPL. --dry-run " +
+    "prints the resolved plan and exits without starting the REPL.",
   flags: [
     "provider",
     "provider-kind",
@@ -446,6 +473,7 @@ defineCommand({
     "retries",
     "mode",
     "verbose",
+    "dry-run",
     "session-file",
     "resume",
     "compact",
@@ -459,7 +487,7 @@ defineCommand({
     "commands-dir",
     "help",
   ],
-  acceptedFlags: SHARED_FLAGS,
+  acceptedFlags: [...SHARED_FLAGS, "dry-run"],
   flagNotes: {
     mode: "cooperation mode consult|work|auto (the run output modes are not accepted here)",
   },
@@ -723,6 +751,75 @@ defineCommand({
 });
 
 defineCommand({
+  name: "config",
+  summary: "resolved configuration: roles, sources, roots and limits",
+  commandLine: "two-brothers config [--json] [provider flags]",
+  usage: ["config [--json] [--sessions-dir <dir>] [provider flags]"],
+  description:
+    "Print the resolved configuration without making a model call: per role the " +
+    "provider, wire kind, base URL, model and API-key presence, each with the " +
+    "layer that supplied it (flag > role env > shared env > preset > settings > " +
+    "default), then the cooperation mode, sessions directory, plugin/skills/" +
+    "commands roots, compaction settings and the token/retry/timeout limits. " +
+    "API keys are only ever reported as set or not set — a value never leaves " +
+    "the process. The settings and preset layers come from " +
+    "<sessions-dir>/settings.json (the serve store); run/chat/tui resolve flags " +
+    "and TWO_BROTHERS_* env only. --json prints one stable object instead of " +
+    "the aligned table.",
+  flags: [
+    "provider",
+    "provider-kind",
+    "senior-kind",
+    "junior-kind",
+    "base-url",
+    "api-key",
+    "senior-base-url",
+    "senior-api-key",
+    "junior-base-url",
+    "junior-api-key",
+    "senior-model",
+    "junior-model",
+    "max-tokens",
+    "retries",
+    "timeout",
+    "mode",
+    "sessions-dir",
+    "json",
+    "help",
+  ],
+  acceptedFlags: [
+    "provider",
+    "provider-kind",
+    "senior-kind",
+    "junior-kind",
+    "base-url",
+    "api-key",
+    "senior-base-url",
+    "senior-api-key",
+    "junior-base-url",
+    "junior-api-key",
+    "senior-model",
+    "junior-model",
+    "max-tokens",
+    "retries",
+    "timeout",
+    "mode",
+    "sessions-dir",
+    "json",
+  ],
+  flagNotes: {
+    json: "print one stable JSON object instead of the human table (keys stay masked)",
+    "sessions-dir": "sessions directory whose settings.json and defaults are inspected",
+  },
+  examples: [
+    "two-brothers config",
+    "two-brothers config --json",
+    "two-brothers config --provider mock --sessions-dir ./sessions",
+    "two-brothers config --provider openai --base-url https://api.deepseek.com/v1 --senior-model deepseek-chat",
+  ],
+});
+
+defineCommand({
   name: "completions",
   summary: "shell completion scripts (bash|zsh|fish|powershell)",
   commandLine: "two-brothers completions <shell>",
@@ -785,6 +882,7 @@ export const COMMAND_ORDER: readonly string[] = [
   "models",
   "onboard",
   "doctor",
+  "config",
   "completions",
   "selftest",
   "help",
@@ -945,6 +1043,9 @@ export function renderMainHelp(): string {
     "       --mode print          only the final decision text",
     "       --stream-tokens       with --stream: token deltas as NDJSON records",
     "       --verbose             payloads and diagnostics; warnings always go to stderr",
+    "       --dry-run             resolve the run and print the plan; no model calls,",
+    "                             no session written (invalid with --stream)",
+    "       --task-file <path>    read the task from a file; `run -` reads stdin",
     "",
     "Provider & models:",
     "  --provider <openai|mock>   --base-url <url>   --api-key <key>",
@@ -965,6 +1066,8 @@ export function renderMainHelp(): string {
     "  --commands-dir <path>",
     "",
     "Diagnostics & shell integration:",
+    "  two-brothers config [--json]   resolved roles with their sources, roots,",
+    "                                 compaction and limits; keys never printed",
     "  two-brothers doctor [--json]   check the engine, settings, sessions, roles,",
     "                                 endpoint, web assets and plugins; exit 1 on a",
     "                                 failing check, 0 otherwise (warnings pass)",

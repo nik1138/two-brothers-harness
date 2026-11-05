@@ -86,10 +86,16 @@ and compaction-stress paths. All three are registered in `tests/run-all.ts`.
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
-subprocess against the mock provider — **11 scenarios**: consult, chat-repl,
+subprocess against the mock provider — **14 scenarios**: consult, chat-repl,
 help, work, session+resume, mcp, serve, doctor (`--json`), completions
-(`bash`), sessions-json and sessions-show. CI runs both (see
+(`bash`), config (`--json`, masked keys), dry-run (plan text/JSON, no session
+file), stdin (`run -`), sessions-json and sessions-show. CI runs both (see
 [CI coverage](#ci-coverage)).
+
+The CLI-ergonomics suite also covers `config`'s provenance precedence
+(flag > role env > shared env > preset > settings > default) and key masking,
+`run --dry-run` (no session write, no provider call), `run --task-file`, and
+`run -` over piped stdin (spawned subprocess, blank/oversized input exits 2).
 
 ## Web workspace (`web/`)
 

@@ -23,6 +23,32 @@ node dist/cli.js run "Plan a migration from Redis to Valkey"
 
 If the task contains spaces, pass it as a single string (quote it in PowerShell).
 
+The task can also come from stdin or a file:
+
+```powershell
+Get-Content task.txt | node dist/cli.js run - --provider mock   # task from stdin (max 1 MiB)
+node dist/cli.js run --task-file task.txt --provider mock        # task from a file
+```
+
+`run -` reads the task from stdin (blank input is a usage error, exit 2; more
+than 1 MiB is rejected). `--task-file <path>` reads it from a file (a missing,
+unreadable or blank file exits 2). A positional task and `--task-file` are
+mutually exclusive. The bare `two-brothers` invocation with piped stdin still
+prints the usage screen — only `run -` opts into reading stdin as a task, and
+`chat`/`tui` piped behavior is unchanged.
+
+`--dry-run` resolves the whole run — configuration (with per-field sources),
+providers, session file, plugin/skills/commands roots and MCP config presence,
+compaction settings and limits — prints the plan, and exits 0 **without calling
+a model and without writing a session**. `run --dry-run --json` prints the plan
+as one JSON object; `--dry-run` with `--stream` is a usage error (exit 2).
+`chat --dry-run` prints the REPL plan and exits without starting the REPL.
+
+```powershell
+node dist/cli.js run "Plan a migration" --provider mock --dry-run
+node dist/cli.js run - --provider mock --dry-run --json < task.txt
+```
+
 ### `chat`
 
 REPL: several tasks in one session. Empty line, `exit`, `quit`, `q`, `/exit`,
@@ -154,6 +180,38 @@ node dist/cli.js doctor --json --sessions-dir sessions --timeout 10
 `--senior-kind`, `--junior-kind`, `--base-url`, `--api-key`, the four
 per-role endpoint flags, `--senior-model`, `--junior-model`) resolve exactly
 like `run`, so the report describes the run configuration.
+
+### `config`
+
+Print the resolved configuration without making a model call. Per role it
+shows the provider, wire kind, base URL, model and API-key presence, each with
+the layer that supplied it, in this precedence order:
+
+`flag > role env > shared env > preset > settings > default`
+
+```powershell
+node dist/cli.js config
+node dist/cli.js config --json
+node dist/cli.js config --provider openai --base-url https://api.deepseek.com/v1 `
+  --senior-model deepseek-chat --junior-model deepseek-chat
+```
+
+The human output is an aligned table with a `source` column (`flag
+--senior-model`, `role env TWO_BROTHERS_SENIOR_MODEL`, `shared env
+TWO_BROTHERS_BASE_URL`, `preset deepseek`, `settings <dir>/settings.json`,
+`default`), followed by the cooperation mode, sessions directory,
+plugin/skills/commands roots, compaction mode and thresholds, and the
+max-tokens/retries/timeout limits. `--json` prints one stable object
+(`schema: "two-brothers.config/1"`) with the same information plus the
+env-pinning notes. **API keys are only ever reported as `set` / `not set` — a
+key value is never printed.**
+
+The flag/env layers resolve exactly like `run`; the preset/settings layers are
+read from `<sessions-dir>/settings.json` (the store `serve`/`onboard` use), so
+the table also explains what the web path would use. `run`/`chat`/`tui`
+themselves resolve flags and `TWO_BROTHERS_*` env only. Exit codes: `0`
+success, `2` usage/config error (unknown option, invalid flag value, unknown
+`--mode`).
 
 ### `completions`
 
@@ -307,6 +365,8 @@ name the preset declares. Manual fields: `--base-url`, `--api-key` (or
 | `--plugins-dir` | dir | `<cwd>/plugins` | (TS package) plugin directory for `run`/`chat`/`serve` (env `TWO_BROTHERS_PLUGINS_DIR`); plugins load fail-soft, diagnostics under `--verbose`; plugin tools need a workspace, so `serve` runs over a workspace get them |
 | `--skills-dir` | path | — (repeatable) | (TS package) extra skills root; defaults are `TWO_BROTHERS_SKILLS_DIR` (OS path list), then `<cwd>/skills` and `~/.two-brothers/skills` |
 | `--stream-tokens` | flag | off | (TS package, `run --stream` and `tui`) with `--stream`: ask providers to stream their replies and add one `"token"` NDJSON record (`{type, role, delta, at}`) per text delta, in arrival order, interleaved with the other run records. In the TUI the deltas render in place (no `--stream` needed). Without `--stream` in a run it is a usage error (exit 2); env `TWO_BROTHERS_STREAM_TOKENS=1` pins it on |
+| `--dry-run` | flag | off | (TS package, `run`/`chat`) resolve the run (config with sources, tools, session, compaction, limits) and print the plan; exits 0 with no model calls and no session write. `run --dry-run --json` prints one JSON object. Invalid with `--stream` (usage error, exit 2) |
+| `--task-file` | path | — | (TS package, `run` only) read the task from a file — missing/unreadable/blank exits 2; mutually exclusive with a positional task. `run -` reads the task from stdin instead (bounded to 1 MiB, blank exits 2) |
 | `--commands-dir` | path | — (repeatable) | (TS package) extra slash-command root for the chat REPL and `tui`; defaults are `TWO_BROTHERS_COMMANDS_DIR` (OS path list), then `<cwd>/commands` and `~/.two-brothers/commands` |
 
 ## Environment variables
@@ -354,8 +414,9 @@ name the preset declares. Manual fields: `--base-url`, `--api-key` (or
 
 **Precedence:** CLI flags > environment variables > defaults. (Persisted
 settings from `onboard` / the web Settings sit between env vars and defaults
-on the server path: per-run flags > `TWO_BROTHERS_*` env vars > persisted
-settings > defaults.)
+on the server path: per-run flags > `TWO_BROTHERS_*` env vars > named preset
+(`provider_ref`) > role manual settings > defaults. `two-brothers config` prints
+this chain per field with the winning source.)
 
 **Env-pinned fields.** An environment variable does not just override a
 settings field — it *pins* it. A field pinned by a `TWO_BROTHERS_*` env var
@@ -526,8 +587,14 @@ them):
   price table, and per-role `--max-tokens` output caps.
 - **Diagnostics and shell completions** — `doctor` reports the local
   environment and provider setup (human report or `--json`, exit 1 on a
-  failing check), and `completions <bash|zsh|fish|powershell>` prints a
-  completion script generated from the same command/flag catalog as help.
+  failing check), `config` prints the resolved configuration with per-field
+  provenance and masked keys (`--json` for one stable object), and
+  `completions <bash|zsh|fish|powershell>` prints a completion script
+  generated from the same command/flag catalog as help.
+- **Task input and dry runs** — `run -` (stdin, ≤ 1 MiB) and
+  `run --task-file <path>` feed the task without shell quoting, and
+  `run`/`chat --dry-run` print the resolved plan (config, tools, session,
+  compaction, limits) with no model call and no session write.
 - **TUI** — `tui [task]` (also the bare interactive `two-brothers`) is a
   zero-dependency full-screen chat in the terminal's alternate screen over
   the same harness and flags: block transcript with textual role labels, a
@@ -565,6 +632,14 @@ node dist/cli.js run "Write hello world" --provider mock --mode work
 node dist/cli.js doctor --provider mock
 node dist/cli.js doctor --provider mock --json
 
+# resolved configuration with per-field sources (keys masked), and as JSON
+node dist/cli.js config --provider mock
+node dist/cli.js config --provider mock --json
+
+# task from stdin / a file; a dry run prints the plan and writes nothing
+Get-Content task.txt | node dist/cli.js run - --provider mock --dry-run
+node dist/cli.js run --task-file task.txt --provider mock --dry-run --json
+
 # shell completions (write the output to your shell's completion location)
 node dist/cli.js completions bash
 node dist/cli.js completions powershell
@@ -583,6 +658,6 @@ node dist/cli.js run "Task" --provider openai `
 
 | Code | Meaning |
 |---|---|
-| 0 | success (including `doctor` when no check failed, and a missing/empty sessions directory) |
+| 0 | success (including `doctor` when no check failed, a `--dry-run` plan, and a missing/empty sessions directory) |
 | 1 | run error (the `errors` array in `--mode json`) / selftest FAIL / `doctor` with at least one failing check / unreadable session file |
-| 2 | usage error: unknown command or option, missing task, shell or session argument, unknown session, invalid flag value, bad config |
+| 2 | usage error: unknown command or option, missing task, shell or session argument, unknown session, invalid flag value, bad config, blank stdin/`--task-file` task, `--dry-run` with `--stream` |

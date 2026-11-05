@@ -187,19 +187,17 @@ test("bash declares per-command flag variables and branches on each command", ()
   );
 });
 
-test("bash expands the per-command flag variable inside the subcommand branch", (t) => {
+test("bash expands the per-command flag variable inside the subcommand branch", () => {
   const script = generateCompletions("bash", SPEC);
   const intended = 'compgen -W "${flags_run} ${global_flags}" -- "${cur}"';
-  if (!script.includes(intended)) {
-    t.todo(
-      'KNOWN BUG src/completions.ts:285 (bashScript case branch) emits the literal word ' +
-        '"flags_run" instead of expanding "${flags_run}": `two-brothers run <TAB>` offers ' +
-        "the candidate `flags_run` and never the run flags.",
-    );
-  }
   assert.ok(
     script.includes(intended),
     'the run branch should expand its flag list: compgen -W "${flags_run} ${global_flags}"',
+  );
+  // The literal variable name must never leak as a candidate word.
+  assert.ok(
+    !script.includes('compgen -W "flags_run'),
+    "bash must not offer the literal candidate 'flags_run'",
   );
 });
 

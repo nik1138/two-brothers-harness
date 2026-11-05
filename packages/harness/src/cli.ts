@@ -4,11 +4,14 @@
  * (removed 2026-11-04; see git history).
  *
  *   node src/cli.ts run "<task>" [flags]
+ *   node src/cli.ts run - [flags]                (task from stdin, max 1 MiB)
+ *   node src/cli.ts run --task-file <path> [flags]
  *   node src/cli.ts chat [flags]
  *   node src/cli.ts tui [task] [flags]
  *   node src/cli.ts help [command | --all]
  *   node src/cli.ts sessions [--sessions-dir sessions] [--json] [--limit N]
  *   node src/cli.ts sessions show <name> [--json] [--limit N]
+ *   node src/cli.ts config [--json] [provider flags]
  *   node src/cli.ts selftest
  *   node src/cli.ts models --base-url <url> [--api-key <key>] [--json]
  *   node src/cli.ts onboard [--sessions-dir sessions] [--preset <id>] [--non-interactive]
@@ -23,6 +26,12 @@ import { fileURLToPath } from "node:url";
 import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
 
 import { resolveConfig, maxTokensForRole, validateRunConfig, type Config } from "./config.ts";
+import {
+  buildConfigView,
+  renderConfigView,
+  sourceLabel,
+  type ConfigView,
+} from "./configview.ts";
 import {
   allFlagNames,
   commandHelp,
@@ -60,7 +69,7 @@ import {
   type McpConfigFileShape,
   type McpToolSet,
 } from "./mcp.ts";
-import { presetById, presetIds, seedPresets } from "./presets.ts";
+import { mergeSeedPresets, presetById, presetIds, seedPresets } from "./presets.ts";
 import { toNdjsonLine, type StreamEvent } from "./runstream.ts";
 import {
   PluginManager,
@@ -134,6 +143,24 @@ export const OPTIONS = {
 const HELP_OPTIONS = {
   help: { type: "boolean" as const, default: false },
   h: { type: "boolean" as const, default: false },
+} satisfies ParseArgsOptionsConfig;
+
+/**
+ * `--dry-run` is parsed by `run` and `chat` only (not part of the shared
+ * `OPTIONS` table, so `serve`/`tui` reject it instead of silently ignoring
+ * it). `--task-file` is a `run`-only input.
+ */
+const DRY_RUN_OPTIONS = {
+  "dry-run": { type: "boolean" as const, default: false },
+} satisfies ParseArgsOptionsConfig;
+
+const TASK_FILE_OPTIONS = {
+  "task-file": { type: "string" as const },
+} satisfies ParseArgsOptionsConfig;
+
+const RUN_INPUT_OPTIONS = {
+  ...DRY_RUN_OPTIONS,
+  ...TASK_FILE_OPTIONS,
 } satisfies ParseArgsOptionsConfig;
 
 const FLAG_TO_CONFIG: Record<string, string> = {
@@ -893,8 +920,364 @@ async function runOnce(
   }
 }
 
+// --------------------------------------------------------------------------- //
+// run task input: positional, `run -` (stdin) and --task-file
+// --------------------------------------------------------------------------- //
+
+/** Upper bound for a task piped on stdin (`run -`): 1 MiB of raw bytes. */
+const STDIN_TASK_MAX_BYTES = 1024 * 1024;
+
+/** A usage error while resolving the task (missing/blank/oversized input). */
+class TaskInputError extends Error {}
+
+interface ResolvedTask {
+  task: string;
+  source: "argument" | "stdin" | "file";
+}
+
+/** Read all of stdin, failing past `maxBytes` instead of buffering forever. */
+async function readStdinTask(maxBytes = STDIN_TASK_MAX_BYTES): Promise<string> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of process.stdin) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+    total += buffer.length;
+    if (total > maxBytes) {
+      throw new TaskInputError(
+        `stdin task exceeds the ${STDIN_TASK_MAX_BYTES / (1024 * 1024)} MiB limit; ` +
+          "pass a shorter task or use --task-file",
+      );
+    }
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks).toString("utf-8");
+}
+
+/**
+ * Resolve `run`'s task: the positional argument, `-` (stdin, bounded) or
+ * `--task-file <path>`. A blank task is a usage error, exactly like a missing
+ * positional; the caller prints the exit-2 diagnostic and usage line.
+ */
+async function resolveRunTask(
+  positionals: string[],
+  values: Record<string, any>,
+): Promise<ResolvedTask> {
+  const positional = positionals.join(" ").trim();
+  const taskFile =
+    typeof values["task-file"] === "string" ? values["task-file"].trim() : "";
+  if (taskFile && positional) {
+    throw new TaskInputError(
+      "--task-file and a positional task are mutually exclusive; pass exactly one",
+    );
+  }
+  if (taskFile) {
+    let raw: string;
+    try {
+      raw = fs.readFileSync(taskFile, "utf-8");
+    } catch (exc) {
+      throw new TaskInputError(
+        `cannot read --task-file ${taskFile}: ${exc instanceof Error ? exc.message : String(exc)}`,
+      );
+    }
+    const task = raw.trim();
+    if (!task) throw new TaskInputError(`--task-file ${taskFile} is empty`);
+    return { task, source: "file" };
+  }
+  if (positional === "-") {
+    const task = (await readStdinTask()).trim();
+    if (!task) {
+      throw new TaskInputError("no task given on stdin (run - expects the task on stdin)");
+    }
+    return { task, source: "stdin" };
+  }
+  if (!positional) throw new TaskInputError('no task given. Usage: run "<task>"');
+  return { task: positional, source: "argument" };
+}
+
+// --------------------------------------------------------------------------- //
+// --dry-run: the resolved plan, without provider calls or session writes
+// --------------------------------------------------------------------------- //
+
+interface DryRunSession {
+  file: string | null;
+  mode: "none" | "new" | "resume" | "exists";
+  note: string;
+}
+
+interface DryRunTools {
+  plugins: { dir: string; present: boolean; files: number };
+  skills: { roots: string[]; count: number };
+  commands: { roots: string[]; count: number };
+  mcp: {
+    configured: boolean;
+    file: string | null;
+    present: boolean;
+    servers: number;
+    error: string | null;
+  };
+}
+
+/** The `--dry-run --json` object (one stable shape; `config` is the config view). */
+interface DryRunPlan {
+  dryRun: true;
+  command: "run" | "chat";
+  task: string | null;
+  taskSource: "argument" | "stdin" | "file" | null;
+  session: DryRunSession;
+  tools: DryRunTools;
+  problems: string[];
+  config: ConfigView;
+}
+
+/**
+ * Plugin-file count for the plan. Mirrors `PLUGIN_FILE_RE` in `plugins.ts`
+ * (kept local: a dry run must not import/execute plugin modules, so this is
+ * a filesystem glance, not a plugin load).
+ */
+const PLUGIN_FILE_NAME = /^[a-z0-9_]+\.(?:ts|mts|mjs)$/;
+
+function planPlugins(dir: string): DryRunTools["plugins"] {
+  let present = false;
+  let files = 0;
+  try {
+    present = fs.statSync(dir).isDirectory();
+  } catch {
+    present = false;
+  }
+  if (present) {
+    try {
+      files = fs
+        .readdirSync(dir, { withFileTypes: true })
+        .filter((entry) => entry.isFile() && PLUGIN_FILE_NAME.test(entry.name)).length;
+    } catch {
+      files = 0;
+    }
+  }
+  return { dir, present, files };
+}
+
+/** MCP config presence/server count; never spawns a server. */
+function planMcp(values: Record<string, any>): DryRunTools["mcp"] {
+  const file =
+    typeof values["mcp-config"] === "string" ? values["mcp-config"].trim() : "";
+  if (!file) {
+    return { configured: false, file: null, present: false, servers: 0, error: null };
+  }
+  if (!fs.existsSync(file)) {
+    return {
+      configured: true,
+      file,
+      present: false,
+      servers: 0,
+      error: `MCP config not found: ${file}`,
+    };
+  }
+  try {
+    const specs = loadMcpToolSpecs(file);
+    return {
+      configured: true,
+      file,
+      present: true,
+      servers: Object.keys(specs).length,
+      error: null,
+    };
+  } catch (exc) {
+    return {
+      configured: true,
+      file,
+      present: true,
+      servers: 0,
+      error: exc instanceof Error ? exc.message : String(exc),
+    };
+  }
+}
+
+function planTools(values: Record<string, any>): DryRunTools {
+  const skillRoots = skillsRootsForCli(values);
+  const commandRoots = commandsRootsForCli(values);
+  return {
+    plugins: planPlugins(pluginsDirForCli(values)),
+    skills: { roots: skillRoots, count: discoverSkills(skillRoots).skills.length },
+    commands: {
+      roots: commandRoots,
+      count: discoverCommands(commandRoots).commands.length,
+    },
+    mcp: planMcp(values),
+  };
+}
+
+/** Session-file plan: existence is read, never opened/written. */
+function planSession(cfg: Config): DryRunSession {
+  if (!cfg.sessionFile) {
+    return {
+      file: null,
+      mode: "none",
+      note: "no --session-file; the session stays in memory",
+    };
+  }
+  const exists = fs.existsSync(cfg.sessionFile);
+  if (cfg.resume) {
+    return exists
+      ? {
+          file: cfg.sessionFile,
+          mode: "resume",
+          note: "would resume this session file",
+        }
+      : {
+          file: cfg.sessionFile,
+          mode: "new",
+          note: "no file to resume; a real run warns and starts a new session",
+        };
+  }
+  return exists
+    ? {
+        file: cfg.sessionFile,
+        mode: "exists",
+        note: "file exists; a real run exits 1 unless --resume is passed",
+      }
+    : {
+        file: cfg.sessionFile,
+        mode: "new",
+        note: "would be created on the first envelope",
+      };
+}
+
+/** Provider-config gaps a real run would fail on (reported, never fatal here). */
+function planProblems(cfg: Config): string[] {
+  try {
+    validateRunConfig(cfg, cliEndpoints(cfg));
+    return [];
+  } catch (exc) {
+    return [exc instanceof Error ? exc.message : String(exc)];
+  }
+}
+
+function buildDryRunPlan(
+  command: "run" | "chat",
+  cfg: Config,
+  values: Record<string, any>,
+  task: ResolvedTask | undefined,
+): DryRunPlan {
+  const sessionsDir =
+    typeof values["sessions-dir"] === "string" && values["sessions-dir"].trim()
+      ? values["sessions-dir"].trim()
+      : "sessions";
+  return {
+    dryRun: true,
+    command,
+    task: task?.task ?? null,
+    taskSource: task?.source ?? null,
+    session: planSession(cfg),
+    tools: planTools(values),
+    problems: planProblems(cfg),
+    config: buildConfigView({
+      config: cfg,
+      env: process.env,
+      flags: values,
+      cwd: process.cwd(),
+      homeDir: os.homedir(),
+      sessionsDir,
+    }),
+  };
+}
+
+/** Human plan text; the first line is the dry-run contract (asserted by tests). */
+function renderDryRunPlan(plan: DryRunPlan): string[] {
+  const { config } = plan;
+  const lines: string[] = [
+    "dry run — no model calls, no session written",
+    `command: ${plan.command}`,
+  ];
+  if (plan.task !== null) {
+    lines.push(`task: ${plan.task}`);
+    lines.push(`task source: ${plan.taskSource}`);
+  }
+  lines.push(
+    `mode: ${config.mode} (${sourceLabel(config.modeSource)})`,
+    `provider: ${config.provider} (${sourceLabel(config.providerSource)})`,
+    "roles:",
+  );
+  for (const role of ["senior", "junior"] as const) {
+    const entry = config.roles[role];
+    lines.push(
+      `  ${role}: provider=${entry.provider} kind=${entry.kind} ` +
+        `base-url=${entry.baseUrl || "(unset)"} model=${entry.model || "(unset)"} ` +
+        `api-key=${entry.apiKey}`,
+    );
+  }
+  const session = plan.session;
+  lines.push(
+    session.file === null
+      ? `session: (none) — ${session.note}`
+      : `session: ${session.file} (${session.mode}) — ${session.note}`,
+  );
+  lines.push(
+    "tools:",
+    `  plugins: ${plan.tools.plugins.dir} ` +
+      `(${
+        plan.tools.plugins.present
+          ? `${plan.tools.plugins.files} plugin file(s); not loaded in a dry run`
+          : "missing"
+      })`,
+    `  skills: ${plan.tools.skills.count} discovered from ` +
+      `${plan.tools.skills.roots.join(", ")}`,
+    `  commands: ${plan.tools.commands.count} discovered from ` +
+      `${plan.tools.commands.roots.join(", ")}`,
+  );
+  const mcp = plan.tools.mcp;
+  lines.push(
+    !mcp.configured
+      ? "  mcp: not configured"
+      : `  mcp: ${mcp.file} ` +
+          `(${mcp.present ? `${mcp.servers} server(s) configured` : "missing"})` +
+          `${mcp.error ? ` — ${mcp.error}` : ""}`,
+  );
+  lines.push(
+    `compaction: ${config.compaction.mode}` +
+      `${config.compaction.force ? " (forced once)" : ""} — ` +
+      `chars=${config.compaction.thresholdChars}, ` +
+      `tokens=${config.compaction.thresholdTokens}, ` +
+      `context-window=${config.compaction.contextWindow}, ` +
+      `keep-recent=${config.compaction.keepRecentChars} chars, ` +
+      `reserve=${config.compaction.reserveChars} chars/` +
+      `${config.compaction.reserveTokens} tokens`,
+    `limits: max-tokens=${config.limits.maxTokens ?? "(unset)"} ` +
+      `retries=${config.limits.retries} timeout=${config.limits.timeoutSeconds}s`,
+  );
+  if (plan.problems.length === 0) {
+    lines.push("problems: none");
+  } else {
+    lines.push("problems:");
+    for (const problem of plan.problems) lines.push(`  - ${problem}`);
+  }
+  return lines;
+}
+
+/** `--dry-run` (+ `--json` in its JSON mode) for run/chat: exit 0, no writes. */
+function printDryRun(
+  command: "run" | "chat",
+  cfg: Config,
+  values: Record<string, any>,
+  io: CliIO,
+  task: ResolvedTask | undefined,
+): number {
+  const plan = buildDryRunPlan(command, cfg, values, task);
+  if (resolveOutputMode(values) === "json") {
+    io.log(JSON.stringify(plan));
+    return 0;
+  }
+  for (const line of renderDryRunPlan(plan)) io.log(line);
+  return 0;
+}
+
 async function doRun(argv: string[], io: CliIO): Promise<number> {
-  const parsed = parseCommandArgs(argv, { ...OPTIONS, ...HELP_OPTIONS }, "run", io, true);
+  const parsed = parseCommandArgs(
+    argv,
+    { ...OPTIONS, ...HELP_OPTIONS, ...RUN_INPUT_OPTIONS },
+    "run",
+    io,
+    true,
+  );
   if (parsed === null) return 2;
   const { values, positionals } = parsed;
   if (isHelpRequested(values)) {
@@ -902,7 +1285,6 @@ async function doRun(argv: string[], io: CliIO): Promise<number> {
     return 0;
   }
   const cfg = resolveConfig(argsToConfigArgs(values));
-  const task = positionals.join(" ").trim();
   if (
     values.stream === true &&
     (values.json === true || values["json-events"] === true || isOutputMode(values.mode))
@@ -921,14 +1303,30 @@ async function doRun(argv: string[], io: CliIO): Promise<number> {
     );
     return 2;
   }
-  if (!task) {
-    io.error('Error: no task given. Usage: run "<task>"');
+  const dryRun = values["dry-run"] === true;
+  if (dryRun && values.stream === true) {
+    io.error(
+      "Error: --dry-run makes no model calls, so it cannot combine with --stream; drop one of them.",
+    );
     return 2;
   }
+  let resolved: ResolvedTask;
+  try {
+    resolved = await resolveRunTask(positionals, values);
+  } catch (exc) {
+    if (exc instanceof TaskInputError) {
+      io.error(`[error] ${exc.message}`);
+      io.error(`Usage: ${commandUsage("run")}`);
+      io.error("Run 'two-brothers run --help'.");
+      return 2;
+    }
+    throw exc;
+  }
+  if (dryRun) return printDryRun("run", cfg, values, io, resolved);
   try {
     const context = openSession(cfg, io);
     const resources = await loadRunResources(cfg, values, io);
-    return await runOnce(cfg, task, io, context, {
+    return await runOnce(cfg, resolved.task, io, context, {
       ...(values["mcp-config"] ? { mcpConfig: values["mcp-config"] } : {}),
       outputMode: resolveOutputMode(values),
       resources,
@@ -944,7 +1342,12 @@ async function doRun(argv: string[], io: CliIO): Promise<number> {
 }
 
 async function doChat(argv: string[], io: CliIO): Promise<number> {
-  const parsed = parseCommandArgs(argv, { ...OPTIONS, ...HELP_OPTIONS }, "chat", io);
+  const parsed = parseCommandArgs(
+    argv,
+    { ...OPTIONS, ...HELP_OPTIONS, ...DRY_RUN_OPTIONS },
+    "chat",
+    io,
+  );
   if (parsed === null) return 2;
   const { values } = parsed;
   if (isHelpRequested(values)) {
@@ -961,6 +1364,7 @@ async function doChat(argv: string[], io: CliIO): Promise<number> {
     );
     return 2;
   }
+  if (values["dry-run"] === true) return printDryRun("chat", cfg, values, io, undefined);
   let context: SharedContext;
   try {
     context = openSession(cfg, io);
@@ -1564,6 +1968,86 @@ async function doDoctor(argv: string[], io: CliIO): Promise<number> {
 }
 
 // --------------------------------------------------------------------------- //
+// config: the resolved configuration, with per-field provenance
+// --------------------------------------------------------------------------- //
+
+/**
+ * The config command's flags: the provider subset `doctor` accepts plus the
+ * store location and `--json`. It resolves exactly like `run` (flags > env >
+ * defaults) and layers the persisted settings/presets from `<sessions-dir>`
+ * for the serve path.
+ */
+const CONFIG_OPTIONS = {
+  provider: { type: "string" as const },
+  "provider-kind": { type: "string" as const },
+  "senior-kind": { type: "string" as const },
+  "junior-kind": { type: "string" as const },
+  "base-url": { type: "string" as const },
+  "api-key": { type: "string" as const },
+  "senior-base-url": { type: "string" as const },
+  "senior-api-key": { type: "string" as const },
+  "junior-base-url": { type: "string" as const },
+  "junior-api-key": { type: "string" as const },
+  "senior-model": { type: "string" as const },
+  "junior-model": { type: "string" as const },
+  "max-tokens": { type: "string" as const },
+  retries: { type: "string" as const },
+  timeout: { type: "string" as const },
+  mode: { type: "string" as const },
+  "sessions-dir": { type: "string" as const },
+  json: { type: "boolean" as const, default: false },
+  ...HELP_OPTIONS,
+} satisfies ParseArgsOptionsConfig;
+
+/**
+ * `two-brothers config [--json] [provider flags]`: the resolved configuration
+ * with per-field provenance. Reads `<sessions-dir>/settings.json` for the
+ * preset/settings layers; keys are only reported as set/not set. Never makes
+ * a provider call. Exit 0, or 2 on a usage/config error.
+ */
+function doConfig(argv: string[], io: CliIO): number {
+  const parsed = parseCommandArgs(argv, CONFIG_OPTIONS, "config", io);
+  if (parsed === null) return 2;
+  const { values } = parsed;
+  if (isHelpRequested(values)) {
+    io.log(renderCommandHelp("config"));
+    return 0;
+  }
+  let cfg: Config;
+  try {
+    cfg = resolveConfig(argsToConfigArgs(values));
+  } catch (exc) {
+    io.error(`[error] ${exc instanceof Error ? exc.message : String(exc)}`);
+    io.error(`Usage: ${commandUsage("config")}`);
+    io.error("Run 'two-brothers config --help'.");
+    return 2;
+  }
+  const sessionsDir =
+    typeof values["sessions-dir"] === "string" && values["sessions-dir"].trim()
+      ? values["sessions-dir"].trim()
+      : "sessions";
+  const store = new SettingsStore(path.join(sessionsDir, "settings.json"));
+  const view = buildConfigView({
+    config: cfg,
+    env: process.env,
+    settings: store.read(),
+    flags: values,
+    presets: mergeSeedPresets(store.readProviders()),
+    cwd: process.cwd(),
+    homeDir: os.homedir(),
+    sessionsDir,
+    settingsFile: store.filePath,
+    settingsPresent: fs.existsSync(store.filePath),
+  });
+  if (values.json === true) {
+    io.log(JSON.stringify(view));
+    return 0;
+  }
+  for (const line of renderConfigView(view)) io.log(line);
+  return 0;
+}
+
+// --------------------------------------------------------------------------- //
 // completions: shell completion scripts from the clihelp catalog
 // --------------------------------------------------------------------------- //
 
@@ -2122,6 +2606,7 @@ export async function main(argv: string[], io: CliIO = defaultIO): Promise<numbe
   if (command === "models") return doModels(argv.slice(1), io);
   if (command === "onboard") return doOnboard(argv.slice(1), io);
   if (command === "doctor") return doDoctor(argv.slice(1), io);
+  if (command === "config") return doConfig(argv.slice(1), io);
   if (command === "completions") return doCompletions(argv.slice(1), io);
   // An option in the command position (`two-brothers --bogus`) is an unknown
   // option; anything else is an unknown command (both exit 2 with a hint).
