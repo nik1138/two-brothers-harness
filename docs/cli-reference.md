@@ -101,9 +101,9 @@ context/tokens/cache/cost and key hints. The screen repaints on terminal
 resize and restores the terminal on every exit path. Turns run without
 blocking input; Escape/Ctrl+C under a safe precedence (overlay close → cancel
 the running turn → clear the composer → confirm quit). `Ctrl+P` opens the
-command
-palette, `?` a scrollable help overlay, both generated from the same keymap
-registry as `tui --help`. Slash input: `/mode consult|work`, `/models`,
+command palette, `?` a scrollable help overlay (only while the composer is
+empty; `F1` always opens it), both generated from the same keymap registry as
+`tui --help`. Slash input: `/mode consult|work`, `/models`,
 `/sessions`, `/theme dark|light|system`, `/settings`, `/retry`, `/help`,
 `/commands`, `/exit`, plus discovered `<name>.md` templates (unknown names are
 never submitted as tasks). `/models` and `/sessions` refuse to change things

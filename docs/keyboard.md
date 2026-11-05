@@ -1,0 +1,169 @@
+# Keyboard and Shortcuts
+
+This page collects the keys and help paths on the three surfaces — the CLI,
+the web workspace, and the terminal UI. The TUI tables mirror
+[`keymap.ts`](../packages/harness/src/tui/keymap.ts), the registry behind
+`tui --help`, the in-app `?`/`F1` help and the `Ctrl+P` palette, so CLI help
+and the app list the same chords.
+
+## CLI
+
+The CLI is command-driven; these are its help and discovery paths.
+
+| Goal | Command |
+|---|---|
+| Command overview | `two-brothers help` |
+| One command's flags and examples | `two-brothers help tui`, `two-brothers tui --help`, `two-brothers tui -h` |
+| Full flag/environment reference | `two-brothers help --all` |
+| Version | `two-brothers --version` (or `-v`) |
+| Resolved configuration | `two-brothers config [--json]` |
+| Local diagnostics | `two-brothers doctor [--json]` |
+| One stored session | `two-brothers sessions show <name> [--json] [--limit N]` |
+| Completion script | `two-brothers completions <bash\|zsh\|fish\|powershell>` |
+
+`help <command>` and `<command> --help` print the same page; a near-miss
+command or option gets a did-you-mean line, and usage errors exit `2`. `config`
+prints each role field with its winning source and never a key value; `doctor`
+runs the local checks and exits `1` only when a check fails; `sessions show`
+writes the session summary plus one line per envelope.
+
+### Completion install lines
+
+`completions` is generated from the same command/flag catalog as `help --all`,
+so it never drifts from the CLI. For an installed `two-brothers` (or
+`npm link`), add one line to your shell profile:
+
+```powershell
+# bash
+source <(two-brothers completions bash)
+# zsh (after compinit)
+eval "$(two-brothers completions zsh)"
+# fish
+two-brothers completions fish | source
+# PowerShell 7+
+two-brothers completions powershell | Out-String | Invoke-Expression
+```
+
+From a checkout, replace `two-brothers` with `node dist/cli.js` after
+`npm run build`.
+
+## Web workspace
+
+| Where | Keys | Action |
+|---|---|---|
+| Anywhere outside the palette | `Ctrl+K` / `Cmd+K` | open the command palette |
+| Palette search | `↑` / `↓` | move the highlight; wraps at the ends |
+| Palette search | `Enter` | open the highlighted session or workspace, or run the action |
+| Palette | `Esc` | close it from anywhere inside |
+| Sidebar search | `Esc` | clear the query, then close search |
+| Composer | `Enter` | send the task |
+| Composer | `Shift+Enter` | insert a newline |
+| Approval card | `y` / `n` | allow / deny while the card has focus |
+| Mobile drawer | `Esc` | close the drawer when it is the topmost layer |
+| Dialog | `Esc` | close the topmost dialog |
+| Session actions trigger | `↓` | open the row menu; `↑`/`↓`/`Home`/`End` move, `Esc`/`Tab` close |
+
+- **Palette.** Opens with the search field focused and empty; typing filters
+  sessions, workspaces and actions, grouped in that order. The footer shows
+  `↑ ↓ navigate · Enter select · Esc close` and the match count. `Enter` is
+  claimed only while the search field has focus (a focused footer button keeps
+  its native behavior) and `Esc` closes from anywhere inside the palette. The
+  chord is ignored while focus is already in the palette (no double toggle),
+  and focus returns to the trigger when it closes. The header's Search chip
+  opens the palette too.
+
+- **Platform difference.** On macOS the chip reads `⌘ K` and `Cmd+K` is the
+  natural chord; `Ctrl+K` also works, and both modifiers are accepted on every
+  platform.
+
+- **Search and session switch.** The sidebar's Search action opens a title
+  filter over the session list; `Esc` clears a non-empty query, and `Esc` again
+  closes the field and returns focus to Search. Session rows are buttons, so
+  `Tab` to one and press `Enter` (or `Space`) to switch; a palette session
+  entry does the same from the keyboard. Either way the mobile drawer closes.
+
+- **Composer.** `Enter` sends, `Shift+Enter` breaks the line. `Enter` becomes a
+  newline while a run waits for approval (the box stays usable for the next
+  draft) and is unavailable while the brothers work (the box is locked); an
+  IME composition never submits.
+
+- **Stop and approvals.** Stop is the composer's Stop button (Tab to it, press
+  `Enter`/`Space`); it is cooperative and denies pending approvals. The docked
+  approval card is focusable: `y` allows and `n` denies while it has focus,
+  both ignored while an input has focus; the Allow/Deny buttons always work.
+  There is no chord for either action.
+
+- **Theme.** The sidebar footer's Light/Dark/System radio group sets the theme
+  — Settings → Appearance and the palette's `Theme: …` actions do the same. The
+  choice persists in localStorage; System follows the OS and updates live.
+
+- **Mobile drawer and focus.** At 768 px and narrower the sidebar starts
+  closed. The Show sessions button opens it and moves focus to Collapse
+  sidebar; the chat shell becomes inert; `Esc`, the backdrop, or a session pick
+  closes it and returns focus to the Show sessions button. Dialogs trap focus
+  while open and restore it to their trigger on close. The first Tab stop is
+  the Skip to composer link; `Enter` moves focus into the task box.
+
+## Terminal UI (TUI)
+
+`tui --help` prints the same lines, and the help overlay and palette are built
+from the registry at runtime. The TUI is Ctrl-based: terminals do not deliver
+`Cmd`, so the TUI's modifier chords are `Ctrl`, never `Cmd`.
+
+### Open
+
+| Keys | Action |
+|---|---|
+| `Ctrl+P` | Command palette: search every command, key binding and slash template. |
+| `?` or `F1` | Keyboard help: a filterable list of every command and key. `?` opens it only while the composer is empty — with text there it types a literal question mark; `F1` always opens it. |
+
+### Compose and send
+
+| Keys | Action |
+|---|---|
+| `Enter` | Send the composer text as the next task. |
+| `Shift+Enter` or `Ctrl+J` | Insert a newline instead of sending. |
+| `Tab` | Complete a partially typed slash name when exactly one built-in or discovered template matches. |
+| `Up` / `Down` | Recall earlier submitted tasks; on a multi-line draft they move within the draft until the cursor reaches the first or last line. The live draft is preserved and restored when you come back to it. |
+| `Ctrl+R` | Incremental prompt-history search, newest first; accepting puts the entry back in the composer. |
+| `Ctrl+O` | Stash the draft, or restore the stashed draft. |
+
+### Read the transcript
+
+| Keys | Action |
+|---|---|
+| `PgUp` / `PgDn` | Page the transcript without moving the composer cursor. |
+| `Ctrl+T` | Expand or collapse the most recent tool result: collapsed shows the first six result lines plus a `… +N more lines` marker, expanded shows the whole result. |
+
+### Cancel, clear, quit
+
+| Keys | Action |
+|---|---|
+| `Esc` | Close the open overlay first; with no overlay, cancel the running turn, then clear a non-empty composer, then arm the quit confirmation (`Esc` or `Ctrl+C` again leaves). |
+| `Ctrl+C` | Labelled `Ctrl+C ×2`: cancel the running turn, clear a non-empty composer, then arm the quit confirmation; press it again to leave. Close an open overlay with `Esc` first. |
+
+### Overlays (palette, help, pickers)
+
+| Keys | Action |
+|---|---|
+| `Up` / `Down` | Move the highlighted row. |
+| `Enter` | Open or run the highlighted item; a disabled row refuses and says why. |
+| `Esc` | Close the overlay and restore the previous focus. |
+
+Overlays receive keys before the composer: while one is open, `Up`/`Down` move
+the selection and never recall composer history, and `Esc` closes the overlay
+before it can cancel a turn.
+
+### Slash input
+
+Every registry command also has a typed slash form — even when it has no
+chord — and all are searchable in `Ctrl+P`: `/palette`, `/help` (`/h`),
+`/commands`, `/retry`, `/exit` (`/quit`, `/q`), `/mode consult|work`,
+`/models`, `/sessions`, `/theme dark|light|system`, `/settings`, plus
+discovered `<name>.md` templates. `/models` and `/sessions` refuse while a turn
+runs.
+
+## See also
+
+- [CLI reference](cli-reference.md) — every command, flag and environment variable.
+- [Quickstart](quickstart.md) — first run and the web/terminal walkthroughs.

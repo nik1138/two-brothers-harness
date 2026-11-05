@@ -56,5 +56,11 @@ conventions, each with an attribution comment at the point of use (see
 `string-width` v7 and adapts `is-fullwidth-code-point` v5 (both MIT, Sindre
 Sorhus). Neither package is vendored; the rules are implemented locally.
 
+`packages/harness/src/tui/markdown.ts` follows the block/inline model and
+width handling of pi's TUI Markdown component
+(`packages/tui/src/components/markdown.ts`, MIT, Copyright (c) 2025 Mario
+Zechner). It is implemented locally without `marked` and emits the same
+grapheme/width-safe plain rows as the rest of the TUI.
+
 `@earendil-works/pi-mcp` 1.5.0 is a runtime dependency (MIT, Copyright (c) 2025
 Mario Zechner). It is installed from npm, not vendored.

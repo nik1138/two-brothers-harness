@@ -194,6 +194,8 @@ help overlays, session/model pickers, token streaming in place, live resize
 repaint, and non-blocking turns — Escape/Ctrl+C cancel a running turn before
 anything else.
 
+Full keymap and web palette keys: [Keyboard and shortcuts](keyboard.md).
+
 ## Verify
 
 ```powershell

@@ -6,6 +6,7 @@ One flat set of documents, grouped by what you are trying to do.
 
 - [Quickstart](quickstart.md) — install, first offline run, a real model, sessions, the web workspace.
 - [CLI reference](cli-reference.md) — every command, flag, environment variable, and endpoint.
+- [Keyboard and shortcuts](keyboard.md) — CLI help paths, the web palette and composer keys, and the full TUI keymap.
 - [Troubleshooting](troubleshooting.md) — symptom-first fixes keyed to the `doctor` checks and exit codes.
 
 ## Extend

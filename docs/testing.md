@@ -22,7 +22,8 @@ The script runs:
 5. a demo run through the built CLI on `mock`
 6. the hermetic CLI E2E (`node e2e/cli.ts`)
 7. the `typescript/` reference selftest
-8. the `web/` unit tests (`npm test` — chat/timeline projections)
+8. the `web/` unit tests (`npm test` — chat, timeline, drafts, palette,
+   session-status, recents and density)
 9. the `web/` build
 
 Expected final line: `SMOKE TEST: PASS`. It is an offline pre-flight, not the
@@ -82,7 +83,11 @@ catalog, `sessions --json` / `sessions show`, `models` and `onboard`;
 clock, API keys never rendered), `tests/completions.test.ts` the deterministic
 bash/zsh/fish/PowerShell completion generator, and
 `tests/reliability.test.ts` the hermetic concurrency, restart, approval-race
-and compaction-stress paths. All three are registered in `tests/run-all.ts`.
+and compaction-stress paths. The TUI lanes (`tests/tui*.test.ts`) cover the
+editor, the keymap registry, the terminal, the views and prompt history, with
+the assembled app in `tests/tuiintegration.test.ts`. The TUI lanes and the
+doctor, completions and reliability suites are registered in
+`tests/run-all.ts`.
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
@@ -101,15 +106,19 @@ The CLI-ergonomics suite also covers `config`'s provenance precedence
 
 ```powershell
 cd web
-npm test                # chat/timeline projection tests (node:test, offline)
+npm test                # every web suite below (node:test, offline)
 ```
 
-The suite (`tests/chat.test.ts`, `tests/timeline.test.ts`) covers the
-envelope→group-chat projection and the runtime-event timeline merge. The
-modules are dependency-free at runtime, so plain `node --test` runs them via
-the `tests/register-ts.mjs` bootstrap (a tiny resolve hook for the
-extensionless `./chat` import); `npm test` wires that up. The full `web/`
-gate also includes `npm run build` (see the smoke test above).
+The suite (`tests/chat.test.ts`, `tests/timeline.test.ts`,
+`tests/drafts.test.ts`, `tests/palette.test.ts`, `tests/sessionStatus.test.ts`,
+`tests/recents.test.ts`, `tests/density.test.ts`) covers the
+envelope→group-chat projection, the runtime-event timeline merge, per-session
+unsent drafts, palette building/scoring/filtering, sidebar row status, the MRU
+workspace list, and the persisted UI density preference. The modules are
+dependency-free at runtime, so plain `node --test` runs them via the
+`tests/register-ts.mjs` bootstrap (a tiny resolve hook for the extensionless
+imports); `npm test` wires that up. The full `web/` gate also includes
+`npm run build` (see the smoke test above).
 
 ## TypeScript reference (`typescript/`)
 
@@ -148,12 +157,14 @@ node e2e/run.mjs
 
 Scenarios: group-chat run with the mock provider (distinct role bubbles, no
 raw-protocol leakage), reload/resume, approval card → file on disk →
-changed-file diff (allow and deny paths), and stop. Every scenario runs
-against the TypeScript backend (`packages/harness/dist/cli.js serve`, built
-from this checkout). Fixture-backed scenarios drive a scripted
-OpenAI-compatible model server (`e2e/fixtures/scripted-server.mjs`) through the
-real approval broker, and skip (never fail) when the built CLI is missing. The
-suite's temp dirs live under `<repo>/.e2e-tmp/` (gitignored).
+changed-file diff (allow and deny paths), stop, and the 390 px mobile drawer
+(starts closed, chat inert while open, Escape/backdrop close it, focus returns
+to the trigger). Every scenario runs against the TypeScript backend
+(`packages/harness/dist/cli.js serve`, built from this checkout). Fixture-backed
+scenarios drive a scripted OpenAI-compatible model server
+(`e2e/fixtures/scripted-server.mjs`) through the real approval broker, and skip
+(never fail) when the built CLI is missing. The suite's temp dirs live under
+`<repo>/.e2e-tmp/` (gitignored).
 
 ### Package real-model E2E (opt-in)
 
