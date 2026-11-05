@@ -1500,7 +1500,8 @@ function printResolvedRoles(cfg: Config, io: CliIO): void {
 function commandHelpFor(command: string): string {
   const text = renderCommandHelp(command);
   if (command !== "tui") return text;
-  return `${text}\n\nKeys:\n${tuiHelpLines().join("\n")}`;
+  // tuiHelpLines() already starts with its own "Keys:" heading.
+  return `${text}\n\n${tuiHelpLines().join("\n")}`;
 }
 
 /** `tui --help`: the clihelp spec plus the generated key guide. */
