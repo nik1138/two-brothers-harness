@@ -595,4 +595,3 @@ test("side panel: resize recomputes immediately and the toggle choice sticks", (
   const on = screenView({ ...base, width: 120, height: 30, sidePanelEnabled: true });
   assert.ok(on.lines.join("\n").includes("STATUS"));
 });
-

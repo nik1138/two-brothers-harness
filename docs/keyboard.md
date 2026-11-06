@@ -97,6 +97,16 @@ From a checkout, replace `two-brothers` with `node dist/cli.js` after
   — Settings → Appearance and the palette's `Theme: …` actions do the same. The
   choice persists in localStorage; System follows the OS and updates live.
 
+- **Find in the conversation.** `Ctrl+F` (or `Cmd+F` on macOS) opens the find
+  bar over the transcript: `Enter` goes to the next match, `Shift+Enter` to the
+  previous one, and `Esc` closes it and clears the highlights. The bar shows the
+  current match out of the total and can switch to case-sensitive matching; the
+  palette and dialogs stay above it, so `Esc` unwinds the find bar before them.
+
+- **Density.** Settings → Appearance's Density radios (or the palette's
+  `Density: …` actions) switch Comfortable/Compact spacing. The choice persists
+  and is applied before the first paint.
+
 - **Mobile drawer and focus.** At 768 px and narrower the sidebar starts
   closed. The Show sessions button opens it and moves focus to Collapse
   sidebar; the chat shell becomes inert; `Esc`, the backdrop, or a session pick
@@ -134,6 +144,7 @@ from the registry at runtime. The TUI is Ctrl-based: terminals do not deliver
 |---|---|
 | `PgUp` / `PgDn` | Page the transcript without moving the composer cursor. |
 | `Ctrl+T` | Expand or collapse the most recent tool result: collapsed shows the first six result lines plus a `… +N more lines` marker, expanded shows the whole result. |
+| `Ctrl+B` | Toggle the status side panel on wide terminals (it needs at least 100 columns and 20 rows; below that the transcript simply uses the full width). `/panel` does the same. |
 
 ### Cancel, clear, quit
 

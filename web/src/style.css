@@ -53,6 +53,12 @@
   --ok-soft: #e7f5eb;
   --focus-ring: #3568d4;
 
+  /* find-in-transcript highlights (CSS Custom Highlight names, see ChatView) */
+  --find-hit-bg: #fbe7a8;
+  --find-hit-text: #171a21;
+  --find-active-bg: #9a5b00;
+  --find-active-text: #ffffff;
+
   /* --- elevation -------------------------------------------------------- */
   --shadow-raised:
     0 1px 2px rgb(16 24 40 / 6%),
@@ -147,6 +153,10 @@
     --ok: #1f883d;
     --ok-soft: #16301d;
     --focus-ring: #6c9bff;
+    --find-hit-bg: #4a3c12;
+    --find-hit-text: #f2ead2;
+    --find-active-bg: #e0a92a;
+    --find-active-text: #171a21;
     --shadow-raised:
       0 1px 2px rgb(0 0 0 / 45%),
       0 8px 24px -12px rgb(0 0 0 / 55%);
@@ -190,6 +200,10 @@
   --ok: #1f883d;
   --ok-soft: #16301d;
   --focus-ring: #6c9bff;
+  --find-hit-bg: #4a3c12;
+  --find-hit-text: #f2ead2;
+  --find-active-bg: #e0a92a;
+  --find-active-text: #171a21;
   --shadow-raised:
     0 1px 2px rgb(0 0 0 / 45%),
     0 8px 24px -12px rgb(0 0 0 / 55%);
@@ -240,6 +254,20 @@ samp {
 ::selection {
   background: var(--accent-soft);
   color: var(--text-primary);
+}
+
+/* Find in transcript (ChatView). The view registers Range objects under these
+   names through the CSS Custom Highlight API; no wrapper elements are inserted,
+   so selection, copy and the transcript DOM stay exactly as rendered. Browsers
+   without the API simply ignore these rules. */
+::highlight(two-brothers-find) {
+  background-color: var(--find-hit-bg);
+  color: var(--find-hit-text);
+}
+
+::highlight(two-brothers-find-active) {
+  background-color: var(--find-active-bg);
+  color: var(--find-active-text);
 }
 
 :focus-visible {

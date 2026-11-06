@@ -56,6 +56,7 @@ The backend is the TypeScript server in `packages/harness`:
   `src/density.ts` — persisted Comfortable/Compact spacing preference
   (`data-density` on `<html>`, injectable storage, applied pre-paint in
   `index.html`, exposed from Settings → Appearance and the palette)
+- `src/find.ts` — pure find-in-transcript matcher (block offsets, case/whole-word options, wrap helpers) used by `ChatView`'s Ctrl+F bar
 - `vite.config.ts` — dev proxy `/api` → `http://127.0.0.1:8600`
 
 ## Rules specific to this tree

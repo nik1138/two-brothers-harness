@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed, defineComponent, h, nextTick, onUnmounted, ref, watch } from 'vue'
+import { computed, defineComponent, h, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import type { PropType, VNode } from 'vue'
 import { NButton } from 'naive-ui'
 import { formatTime } from '../chat'
 import type { ChatGroup, ChatMessage, Speaker } from '../chat'
+import { findMatches, nextMatch, prevMatch } from '../find'
+import type { FindMatch } from '../find'
 import { nextActorLabel, timestampOf } from '../runtime'
 import type { TimelineEntry } from '../runtime'
 import { parseMarkdown } from '../markdown'
@@ -12,6 +14,7 @@ import ToolActivity from './ToolActivity.vue'
 import ApprovalCard from './ApprovalCard.vue'
 import PromptAudit from './PromptAudit.vue'
 import ContextMeter from './ContextMeter.vue'
+import AppIcon from './AppIcon.vue'
 
 const props = defineProps<{
   timeline: TimelineEntry[]
@@ -38,6 +41,12 @@ function onScroll() {
   const el = scrollEl.value
   if (!el) return
   nearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 120
+}
+
+/** Keep the transcript pinned when chrome (the find bar) changes its height. */
+function keepPinnedToBottom() {
+  const el = scrollEl.value
+  if (el && nearBottom.value) el.scrollTop = el.scrollHeight
 }
 
 const SPEAKER_LABEL: Record<Speaker, string> = {
@@ -260,6 +269,333 @@ async function showEarlier() {
   if (el) el.scrollTop = Math.max(0, el.scrollHeight - fromTop)
 }
 
+// -- find in transcript (Ctrl+F / Cmd+F) --------------------------------------
+// Search covers the rendered conversation only: blocks are collected from the
+// transcript DOM when the bar opens (or when the rendered window changes), so
+// sidebar/composer text can never match and the matcher sees exactly the text
+// the markdown renderer printed. find.ts owns the matching semantics. Indexed
+// regions are the always-visible conversation text (message titles/bodies,
+// dissent notes, system activities, tool/approval/audit headers and bodies);
+// collapsed drill-down drawers are left out so the counter never points at
+// text that cannot be painted.
+//
+// Escape layering, topmost first: command palette → dialogs → mobile drawer →
+// this find bar. The palette and every dialog are modal AppDialogs with
+// role="dialog"; the drawer marks the chat shell inert. A keydown while any of
+// those is above the bar is deliberately left to that layer, so Ctrl+F cannot
+// open a second search surface behind a modal and Escape cannot dismiss the bar
+// through a dialog. `Esc` otherwise closes the bar and clears its highlights.
+// The palette shortcut (Ctrl+K) and the composer's Enter/Shift+Enter are never
+// touched: Enter is claimed only while the find input has focus.
+//
+// Highlighting uses the CSS Custom Highlight API (Range objects registered by
+// name), so no <mark> wrappers are inserted: Vue's text nodes, copy behavior
+// and the transcript structure stay untouched. Browsers without the API still
+// get the counter and scroll-to-match. App.vue keys ChatView by session, so a
+// session switch remounts this component — the bar, its focus and its highlight
+// registry entries therefore cannot leak across sessions (unmount clears the
+// global registry explicitly as well).
+
+const FIND_TEXT_SELECTOR = [
+  '.bubble-title',
+  '.bubble-body',
+  '.dissent-note',
+  '.system-activity',
+  '.tool-header',
+  '.approval-header',
+  '.approval-body',
+  '.audit-header',
+].join(', ')
+
+const FIND_HIGHLIGHT_ALL = 'two-brothers-find'
+const FIND_HIGHLIGHT_ACTIVE = 'two-brothers-find-active'
+const FIND_SCROLL_PAD = 16
+
+/** One rendered text region: its concatenated text and the DOM nodes behind it. */
+interface FindTextBlock {
+  text: string
+  nodes: Text[]
+  el: HTMLElement
+}
+
+interface FindHighlightRegistry {
+  set(name: string, highlight: Highlight): void
+  delete(name: string): void
+}
+
+/**
+ * CSS Custom Highlight API when the browser supports it. TypeScript's DOM lib
+ * (5.6) declares the registry incompletely, so the two calls this view needs
+ * are typed through `FindHighlightRegistry`; the runtime check keeps older
+ * browsers on the no-highlight fallback instead of throwing.
+ */
+const findHighlights: FindHighlightRegistry | null = (() => {
+  if (typeof CSS === 'undefined' || typeof Highlight !== 'function') return null
+  const registry = (CSS as unknown as { highlights?: unknown }).highlights
+  if (!registry || typeof (registry as FindHighlightRegistry).set !== 'function') return null
+  return registry as FindHighlightRegistry
+})()
+
+const findOpen = ref(false)
+const findQuery = ref('')
+const findCaseSensitive = ref(false)
+const findActiveIndex = ref(-1)
+const findTotal = ref(0)
+const findInputEl = ref<HTMLInputElement | null>(null)
+
+const findStatus = computed(() => {
+  if (!findOpen.value || findQuery.value.trim() === '') return ''
+  if (findTotal.value === 0) return 'No results'
+  return `${findActiveIndex.value + 1}/${findTotal.value}`
+})
+
+/** Searchable blocks, collected lazily and invalidated whenever they re-render. */
+let findBlocks: FindTextBlock[] | null = null
+let findResults: FindMatch[] = []
+let findReturnFocus: HTMLElement | null = null
+
+function collectFindBlocks(): FindTextBlock[] {
+  const root = scrollEl.value
+  if (!root) return []
+  const blocks: FindTextBlock[] = []
+  for (const el of root.querySelectorAll<HTMLElement>(FIND_TEXT_SELECTOR)) {
+    const nodes: Text[] = []
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)
+    let node = walker.nextNode()
+    while (node !== null) {
+      const text = node as Text
+      if (text.data.length > 0) nodes.push(text)
+      node = walker.nextNode()
+    }
+    if (nodes.length === 0) continue
+    blocks.push({ text: nodes.map((text) => text.data).join(''), nodes, el })
+  }
+  return blocks
+}
+
+interface FindTextPoint {
+  node: Text
+  offset: number
+}
+
+/** DOM point for a character offset inside one block; null on a stale block. */
+function findTextPoint(block: FindTextBlock, target: number): FindTextPoint | null {
+  if (target === block.text.length) {
+    const last = block.nodes[block.nodes.length - 1]
+    return last ? { node: last, offset: last.data.length } : null
+  }
+  let base = 0
+  for (const node of block.nodes) {
+    const end = base + node.data.length
+    if (target >= base && target < end) return { node, offset: target - base }
+    base = end
+  }
+  return null
+}
+
+function findRange(match: FindMatch): Range | null {
+  const block = findBlocks?.[match.blockIndex]
+  if (!block) return null
+  const start = findTextPoint(block, match.start)
+  const end = findTextPoint(block, match.end)
+  if (!start || !end) return null
+  const range = document.createRange()
+  range.setStart(start.node, start.offset)
+  range.setEnd(end.node, end.offset)
+  return range
+}
+
+function clearFindHighlights() {
+  findHighlights?.delete(FIND_HIGHLIGHT_ALL)
+  findHighlights?.delete(FIND_HIGHLIGHT_ACTIVE)
+}
+
+function paintFindHighlights() {
+  if (!findHighlights) return
+  const ranges: Range[] = []
+  for (const match of findResults) {
+    const range = findRange(match)
+    if (range) ranges.push(range)
+  }
+  if (ranges.length === 0) {
+    clearFindHighlights()
+    return
+  }
+  const activeResult =
+    findActiveIndex.value >= 0 ? findResults[findActiveIndex.value] : undefined
+  const activeRange = activeResult ? findRange(activeResult) : null
+  try {
+    const allHighlight = new Highlight(...ranges)
+    allHighlight.priority = 0
+    findHighlights.set(FIND_HIGHLIGHT_ALL, allHighlight)
+    if (activeRange) {
+      const activeHighlight = new Highlight(activeRange)
+      // paint the active hit over the subtle set even where ranges coincide
+      activeHighlight.priority = 1
+      findHighlights.set(FIND_HIGHLIGHT_ACTIVE, activeHighlight)
+    } else {
+      findHighlights.delete(FIND_HIGHLIGHT_ACTIVE)
+    }
+  } catch {
+    // A pathological number of ranges can hit engine limits; the counter and
+    // scroll-to-match are more important than the paint.
+    clearFindHighlights()
+  }
+}
+
+/**
+ * Bring the active match into view with `block: 'nearest'` semantics (a Range
+ * has no scrollIntoView): only move the transcript when the match is outside
+ * the visible band, and align it to the near edge instead of centering it.
+ * Smooth scrolling is skipped under `prefers-reduced-motion: reduce`.
+ */
+function revealActiveMatch() {
+  const match = findActiveIndex.value >= 0 ? findResults[findActiveIndex.value] : undefined
+  const el = scrollEl.value
+  if (!match || !el) return
+  const range = findRange(match)
+  if (!range) return
+  const rect = range.getBoundingClientRect()
+  const view = el.getBoundingClientRect()
+  // A match inside a collapsed detail (e.g. a tool result) has an empty rect;
+  // fall back to the owning block so at least its card is revealed.
+  const block = findBlocks?.[match.blockIndex]
+  const target =
+    rect.width > 0 || rect.height > 0 ? rect : (block?.el.getBoundingClientRect() ?? null)
+  if (!target) return
+
+  let delta = 0
+  if (target.top < view.top + FIND_SCROLL_PAD) {
+    delta = target.top - view.top - FIND_SCROLL_PAD
+  } else if (target.bottom > view.bottom - FIND_SCROLL_PAD) {
+    delta = target.bottom - view.bottom + FIND_SCROLL_PAD
+  }
+  if (delta === 0) return
+  const top = Math.max(0, Math.min(el.scrollTop + delta, el.scrollHeight - el.clientHeight))
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  el.scrollTo({ top, behavior: reduceMotion ? 'auto' : 'smooth' })
+}
+
+/** Re-match the cached blocks; `resetActive` selects the first match afresh. */
+function rebuildFind(resetActive: boolean) {
+  if (findBlocks === null) findBlocks = collectFindBlocks()
+  findResults = findMatches(findBlocks, findQuery.value, {
+    caseSensitive: findCaseSensitive.value,
+  })
+  const total = findResults.length
+  findTotal.value = total
+  if (total === 0) {
+    findActiveIndex.value = -1
+  } else if (resetActive || findActiveIndex.value < 0 || findActiveIndex.value >= total) {
+    findActiveIndex.value = 0
+  }
+  paintFindHighlights()
+}
+
+function moveFind(direction: 1 | -1) {
+  if (findTotal.value === 0) return
+  findActiveIndex.value =
+    direction === 1
+      ? nextMatch(findActiveIndex.value, findTotal.value)
+      : prevMatch(findActiveIndex.value, findTotal.value)
+  paintFindHighlights()
+  revealActiveMatch()
+}
+
+/** True while a modal or the mobile drawer is above the find bar (Escape order). */
+function findLayerAbove(): boolean {
+  return (
+    document.querySelector('[role="dialog"]') !== null ||
+    document.querySelector('.chat-shell[inert]') !== null
+  )
+}
+
+function openFind() {
+  if (findLayerAbove()) return
+  if (findOpen.value) {
+    findInputEl.value?.focus()
+    findInputEl.value?.select()
+    return
+  }
+  const active = document.activeElement
+  findReturnFocus = active instanceof HTMLElement ? active : null
+  findOpen.value = true
+  void nextTick(() => {
+    if (!findOpen.value) return
+    findInputEl.value?.focus()
+    findInputEl.value?.select()
+    // the bar takes layout height; keep a bottom-pinned reader at the bottom
+    keepPinnedToBottom()
+    rebuildFind(true)
+    revealActiveMatch()
+  })
+}
+
+function closeFind() {
+  if (!findOpen.value) return
+  findOpen.value = false
+  findActiveIndex.value = -1
+  findTotal.value = 0
+  findResults = []
+  findBlocks = null
+  clearFindHighlights()
+  const back = findReturnFocus
+  findReturnFocus = null
+  if (back?.isConnected) back.focus({ preventScroll: true })
+  void nextTick(keepPinnedToBottom)
+}
+
+function onFindEnter(event: KeyboardEvent) {
+  if (event.isComposing) return
+  event.preventDefault()
+  moveFind(event.shiftKey ? -1 : 1)
+}
+
+/**
+ * Window capture phase: Ctrl+F must be claimed before the browser opens its
+ * own find UI, and Escape must reach this layer before the shell's drawer
+ * handler. Both are gated on `findLayerAbove()` so the documented order holds.
+ */
+function onFindKeydown(event: KeyboardEvent) {
+  if (event.defaultPrevented || event.isComposing) return
+  if (event.key === 'Escape') {
+    if (!findOpen.value || findLayerAbove()) return
+    event.preventDefault()
+    closeFind()
+    return
+  }
+  if (event.repeat) return
+  if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return
+  if (event.key.toLowerCase() !== 'f') return
+  if (findLayerAbove()) return
+  event.preventDefault()
+  openFind()
+}
+
+// Typing/toggling re-runs the matcher over the cached blocks and follows the
+// first hit; live transcript updates invalidate the blocks without stealing
+// the reader's position (only the highlight ranges are refreshed).
+watch([findQuery, findCaseSensitive], () => {
+  if (!findOpen.value) return
+  rebuildFind(true)
+  revealActiveMatch()
+})
+
+watch(visibleTimeline, () => {
+  findBlocks = null
+  if (!findOpen.value) return
+  void nextTick(() => {
+    // re-collect after Vue has patched the transcript, even if a keystroke
+    // rebuilt against the previous DOM in the meantime
+    findBlocks = null
+    if (!findOpen.value) return
+    rebuildFind(false)
+  })
+})
+
+/** Shell hooks (session switches remount this component; keeps the bar scriptable). */
+defineExpose({ openFind, closeFind })
+
 // -- per-bubble copy ----------------------------------------------------------
 
 const copiedId = ref<string | null>(null)
@@ -321,9 +657,15 @@ watch(
   { immediate: true },
 )
 
+onMounted(() => {
+  window.addEventListener('keydown', onFindKeydown, true)
+})
+
 onUnmounted(() => {
   if (tickTimer !== undefined) window.clearInterval(tickTimer)
   if (copyTimer !== undefined) window.clearTimeout(copyTimer)
+  window.removeEventListener('keydown', onFindKeydown, true)
+  clearFindHighlights()
 })
 
 const statusLine = computed(() => {
@@ -350,6 +692,60 @@ const statusLine = computed(() => {
 
 <template>
   <div class="chat-view">
+    <div v-if="findOpen" class="find-bar" role="search" aria-label="Find in conversation">
+      <AppIcon name="search" class="find-bar-icon" />
+      <input
+        ref="findInputEl"
+        v-model="findQuery"
+        class="find-input"
+        type="text"
+        placeholder="Find in conversation"
+        aria-label="Find in conversation"
+        autocomplete="off"
+        spellcheck="false"
+        @keydown.enter="onFindEnter"
+      />
+      <span
+        class="find-status"
+        :class="{ 'find-status-empty': findTotal === 0 && findQuery.trim() !== '' }"
+        role="status"
+        aria-live="polite"
+      >{{ findStatus }}</span>
+      <div class="find-actions">
+        <button
+          type="button"
+          class="find-btn"
+          :class="{ 'find-btn-active': findCaseSensitive }"
+          :aria-pressed="findCaseSensitive"
+          title="Match case"
+          aria-label="Match case"
+          @click="findCaseSensitive = !findCaseSensitive"
+        >Aa</button>
+        <button
+          type="button"
+          class="find-btn"
+          title="Previous match (Shift+Enter)"
+          aria-label="Previous match"
+          :disabled="findTotal === 0"
+          @click="moveFind(-1)"
+        >↑</button>
+        <button
+          type="button"
+          class="find-btn"
+          title="Next match (Enter)"
+          aria-label="Next match"
+          :disabled="findTotal === 0"
+          @click="moveFind(1)"
+        >↓</button>
+        <button
+          type="button"
+          class="find-btn find-close"
+          title="Close (Esc)"
+          aria-label="Close find"
+          @click="closeFind"
+        ><AppIcon name="x" /></button>
+      </div>
+    </div>
     <ContextMeter :count="contextCount" />
     <div
       ref="scrollEl"
@@ -641,6 +1037,124 @@ const statusLine = computed(() => {
   font-size: 0.86rem;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* Find bar: one row above the transcript, outside .chat-scroll so matches are
+   never scrolled underneath it. It wraps instead of overflowing on narrow
+   screens, and every control keeps the app's keyboard focus ring. */
+.find-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  flex: 0 0 auto;
+  width: calc(100% - 2.5rem);
+  max-width: var(--composer-max-width);
+  margin: 0.45rem auto 0;
+  padding: 0.35rem 0.65rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-panel);
+  box-shadow: var(--shadow-raised);
+  font-size: var(--text-sm);
+}
+
+.find-bar:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.find-bar-icon {
+  color: var(--text-tertiary);
+}
+
+.find-input {
+  flex: 1 1 12rem;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-sm);
+  padding: 0.15rem 0;
+  outline: none;
+}
+
+.find-input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.find-status {
+  flex: none;
+  min-width: 4.5rem;
+  text-align: right;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.find-status-empty {
+  color: var(--danger);
+}
+
+.find-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.1rem;
+  flex: none;
+  margin-left: auto;
+}
+
+.find-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  height: 26px;
+  padding: 0 0.3rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.find-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.find-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.find-btn-active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* Narrow screens: the actions drop to a second row while the input shrinks
+   (min-width: 0) instead of pushing the bar past the viewport. */
+@media (max-width: 520px) {
+  .find-bar {
+    width: calc(100% - 1.25rem);
+    padding: 0.35rem 0.45rem;
+    gap: 0.25rem;
+  }
+
+  .find-input {
+    flex-basis: 7rem;
+  }
+
+  .find-status {
+    min-width: 3.5rem;
+  }
 }
 </style>
 
