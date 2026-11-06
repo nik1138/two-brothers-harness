@@ -62,3 +62,4 @@ import "./roleendpoints.test.ts";
 import "./sessionsearch.test.ts";
 import "./serversearch.test.ts";
 import "./sessionscommands.test.ts";
+import "./tuifind.test.ts";

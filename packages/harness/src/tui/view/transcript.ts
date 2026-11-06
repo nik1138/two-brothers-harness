@@ -64,6 +64,16 @@ export function latestTranscriptScroll(): TranscriptScroll {
   return { followLatest: true };
 }
 
+/**
+ * Anchor the viewport on one block: its first rendered row becomes the top row
+ * when there is content after it, and the model clamps to the newest rows when
+ * the block is near the end. Used by find navigation to bring the active
+ * match's block on screen without leaving the block-anchored scroll model.
+ */
+export function scrollToBlock(blockId: string): TranscriptScroll {
+  return { followLatest: false, anchorId: blockId, offset: 0 };
+}
+
 export function homeTranscriptScroll(model: TuiModel): TranscriptScroll {
   const first = model.blocks[0];
   return first === undefined

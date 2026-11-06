@@ -100,6 +100,17 @@ import { renderBox } from "./screen.ts";
 import { resolveTheme, type Theme, type ThemeMode } from "./theme.ts";
 import { createDialog, dialogView, handleDialogKey, type DialogState } from "./view/dialog.ts";
 import {
+  activeFindMatch,
+  appendFindText,
+  findBarView,
+  findCorpus,
+  findKey,
+  openFind,
+  refreshFind,
+  setFindQuery,
+  type FindState,
+} from "./view/findbar.ts";
+import {
   createHelpState,
   handleHelpKey,
   helpEntries,
@@ -139,6 +150,7 @@ import type { StatusBarState } from "./view/statusbar.ts";
 import type { Toast, ToastLevel } from "./view/toast.ts";
 import {
   latestTranscriptScroll,
+  scrollToBlock,
   scrollTranscript,
   type TranscriptScroll,
 } from "./view/transcript.ts";
@@ -897,6 +909,12 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   let draftStash: DraftStash = null;
   let scroll: TranscriptScroll = latestTranscriptScroll();
   let overlay: Overlay | null = null;
+  // Find (Ctrl+F) is an inline bar rather than a modal overlay: it keeps the
+  // composer visible, owns the keyboard while open, and restores the exact
+  // pre-find viewport and draft on close.
+  let find: FindState | null = null;
+  let findModel: TuiModel | null = null;
+  let findReturnScroll: TranscriptScroll = latestTranscriptScroll();
   let running = false;
   let turnAbort: AbortController | null = null;
   let turnDone: Promise<void> | null = null;
@@ -1192,7 +1210,12 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   };
 
   function render(): void {
+    refreshFindState();
     const size = terminal.size();
+    const findBar = find === null
+      ? undefined
+      : findBarView(find, { width: size.columns, theme }).lines;
+    const findBlockId = find === null ? undefined : activeFindMatch(find)?.match.blockId;
     const frame = screenView({
       width: size.columns,
       height: size.rows,
@@ -1202,6 +1225,8 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       theme,
       scroll,
       overlay: overlayLines(size.columns, size.rows),
+      ...(findBar !== undefined ? { findBar } : {}),
+      ...(findBlockId !== undefined ? { findBlockId } : {}),
       toasts,
       spinnerTick,
       reducedMotion: process.env.NO_COLOR !== undefined && process.env.NO_COLOR !== "",
@@ -1379,6 +1404,73 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
    */
   const openHistorySearchOverlay = (): void => {
     overlay = { kind: "history-search", state: openHistorySearch(editor.history) };
+  };
+
+  /** Move the viewport to the active find match's block (when there is one). */
+  const syncFindScroll = (): void => {
+    const active = find === null ? undefined : activeFindMatch(find);
+    if (active !== undefined) scroll = scrollToBlock(active.match.blockId);
+  };
+
+  /**
+   * Open the inline find bar over the current transcript. The composer draft,
+   * the editor history and the transcript document are never touched; the
+   * pre-find scroll position is remembered so Escape restores the exact view.
+   * A modal overlay keeps its precedence: Ctrl+F is only handled when no
+   * overlay is open (the caller already routed the key exclusively).
+   */
+  const openFindBar = (initialQuery?: string): void => {
+    if (overlay !== null || find !== null) return;
+    find = openFind(findCorpus(model));
+    findModel = model;
+    findReturnScroll = scroll;
+    if (initialQuery !== undefined && initialQuery.trim() !== "") {
+      find = setFindQuery(find, initialQuery.trim());
+      syncFindScroll();
+    }
+    render();
+  };
+
+  /** Close the find bar, restoring the pre-find viewport exactly. */
+  const closeFindBar = (): void => {
+    if (find === null) return;
+    find = null;
+    findModel = null;
+    scroll = findReturnScroll;
+    render();
+  };
+
+  /**
+   * Re-search after the model changed (streaming deltas, new blocks). The
+   * query and the active index are kept where they still make sense.
+   */
+  const refreshFindState = (): void => {
+    if (find === null || findModel === model) return;
+    find = refreshFind(find, findCorpus(model));
+    findModel = model;
+    syncFindScroll();
+  };
+
+  /** Fold one keypress into the open find bar; Enter/arrows/Esc come from the registry. */
+  const handleFindBarKey = (key: KeyLike): void => {
+    if (find === null) return;
+    const result = findKey(TUI_COMMANDS, find, key);
+    if (result.action === "close") {
+      closeFindBar();
+      return;
+    }
+    find = result.state;
+    if (result.action === "no-match") {
+      pushToast(
+        "info",
+        find.query === ""
+          ? "type a query to search the transcript"
+          : `no matches for "${find.query}"`,
+      );
+    } else if (result.action === "filter" || result.action === "move") {
+      syncFindScroll();
+    }
+    render();
   };
 
   const openModePicker = (): void => {
@@ -1612,6 +1704,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       case "history-search":
         openHistorySearchOverlay();
         break;
+      case "find":
+        openFindBar();
+        break;
       case "mode":
         openModePicker();
         break;
@@ -1756,6 +1851,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       case "retry":
         doRetry();
         return true;
+      case "find":
+        openFindBar(args);
+        return true;
       default:
         return false;
     }
@@ -1898,6 +1996,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       case "history-search":
         openHistorySearchOverlay();
         return true;
+      case "find":
+        openFindBar();
+        return true;
       case "panel":
         toggleSidePanel();
         return true;
@@ -1915,6 +2016,13 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   const handleKey = (key: Key): void => {
     if (overlay !== null) {
       handleOverlayKey(key);
+      return;
+    }
+    // The inline find bar owns the keyboard while it is open: typing edits the
+    // query, Enter/arrows navigate matches and Esc closes the bar (the
+    // overlay-vs-find precedence above keeps modal surfaces first).
+    if (find !== null) {
+      handleFindBarKey(key);
       return;
     }
     const match = resolveKey(TUI_COMMANDS, key, "app");
@@ -1996,7 +2104,16 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         if (activity === QUIT_ARMED_ACTIVITY) activity = "quit cancelled";
       }
       if (event.type === "paste") {
-        if (overlay === null) editor = pasteText(editor, event.text);
+        if (overlay !== null) continue;
+        if (find !== null) {
+          // A paste while finding extends the query as one sanitized line; it
+          // can never reach the composer or submit a turn.
+          find = appendFindText(find, event.text);
+          findModel = model;
+          syncFindScroll();
+        } else {
+          editor = pasteText(editor, event.text);
+        }
         continue;
       }
       handleKey(event.key);

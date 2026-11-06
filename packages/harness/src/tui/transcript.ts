@@ -79,6 +79,12 @@ export interface TranscriptOptions {
   expandedTools?: boolean;
   /** Maximum visual rows of expanded tool detail / preview source lines (default 6). */
   maxToolRows?: number;
+  /**
+   * Block id to mark in the label gutter with `▸` (find's active match). The
+   * marker replaces the label's trailing padding cell, so every row keeps its
+   * exact width and NO_COLOR output still carries the distinction.
+   */
+  activeBlockId?: string;
 }
 
 /**
@@ -346,6 +352,7 @@ export function renderBlock(block: TuiBlock, options: TranscriptOptions): string
   const theme = options.theme ?? plainTheme;
   const label = labelForBlock(block);
   const compact = width <= TRANSCRIPT_LABEL_WIDTH + 8;
+  const active = options.activeBlockId !== undefined && options.activeBlockId === block.id;
 
   // A per-row expanded tool row wins over the legacy `expandedTools` detail
   // view; without either, the row renders a collapsed result preview.
@@ -364,7 +371,8 @@ export function renderBlock(block: TuiBlock, options: TranscriptOptions): string
   if (rows.length === 0) return [];
 
   if (compact) {
-    const labelLine = clipStyled(theme.paint(label.token, label.text), width);
+    const labelText = active ? `▸${label.text}` : label.text;
+    const labelLine = clipStyled(theme.paint(label.token, labelText), width);
     const out = [labelLine];
     for (const row of rows) {
       out.push(row.text === "" ? "" : paintRow(theme, row, width));
@@ -372,8 +380,12 @@ export function renderBlock(block: TuiBlock, options: TranscriptOptions): string
     return out;
   }
 
-  const labelCell = label.text.padEnd(TRANSCRIPT_LABEL_WIDTH, " ");
-  const styledLabel = theme.paint(label.token, labelCell);
+  const labelCell = active
+    ? label.text.padEnd(Math.max(0, TRANSCRIPT_LABEL_WIDTH - 1), " ")
+    : label.text.padEnd(TRANSCRIPT_LABEL_WIDTH, " ");
+  const styledLabel = active
+    ? theme.paint("focus", "▸") + theme.paint(label.token, labelCell)
+    : theme.paint(label.token, labelCell);
   const continuation = " ".repeat(TRANSCRIPT_LABEL_WIDTH);
   const out: string[] = [];
   for (let index = 0; index < rows.length; index += 1) {

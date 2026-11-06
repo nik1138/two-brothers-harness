@@ -8,10 +8,11 @@
  * so a binding can never be documented in two different ways.
  *
  * A chord has a `when` scope: `"always"`, `"composer"` (the editor has focus),
- * `"transcript"` (scrolling), and `"overlay"` (palette/help/pickers). The same
- * physical key may therefore mean different things in different scopes
- * (`Up` = prompt history in the composer, list movement in an overlay) while
- * still having exactly one formatted label per command.
+ * `"transcript"` (scrolling), `"overlay"` (palette/help/pickers) and `"find"`
+ * (the inline transcript find bar). The same physical key may therefore mean
+ * different things in different scopes (`Up` = prompt history in the composer,
+ * list movement in an overlay, previous match in the find bar) while still
+ * having exactly one formatted label per command.
  *
  * Built-in slash commands (`/help`, `/commands`, `/mode`, `/exit`, …) are part
  * of the table; discovered `<name>.md` templates from `commands.ts` are
@@ -21,7 +22,13 @@
  */
 
 /** Where a binding is active. */
-export type CommandWhen = "always" | "app" | "composer" | "transcript" | "overlay";
+export type CommandWhen =
+  | "always"
+  | "app"
+  | "composer"
+  | "transcript"
+  | "overlay"
+  | "find";
 
 /** Help/palette grouping, in display order via {@link COMMAND_GROUPS}. */
 export type CommandGroup =
@@ -222,6 +229,46 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
     when: "app",
   },
   {
+    id: "find",
+    title: "Find in transcript",
+    description: "Search every transcript block, case-insensitively, with live match navigation.",
+    group: "Transcript",
+    slash: "find",
+    argumentHint: "[query]",
+    // Ctrl+F: unbound here, one control byte, outside the XON/XOFF pair, and
+    // the conventional find key. Opening is app-scope only, so a modal
+    // overlay keeps its own keys (palette/help still own their scope).
+    keys: [{ name: "f", ctrl: true }],
+    when: "app",
+  },
+  {
+    id: "find-next",
+    title: "Next transcript match",
+    description: "Jump to the next find match, wrapping to the first.",
+    group: "Transcript",
+    keys: [{ name: "return" }, { name: "down" }],
+    when: "find",
+    palette: false,
+  },
+  {
+    id: "find-prev",
+    title: "Previous transcript match",
+    description: "Jump to the previous find match, wrapping to the last.",
+    group: "Transcript",
+    keys: [{ name: "return", shift: true }, { name: "up" }],
+    when: "find",
+    palette: false,
+  },
+  {
+    id: "find-close",
+    title: "Close find bar",
+    description: "Close the find bar and restore the composer draft and viewport.",
+    group: "Transcript",
+    keys: [{ name: "escape" }],
+    when: "find",
+    palette: false,
+  },
+  {
     id: "list-move",
     title: "Move selection",
     description: "Move the highlighted row in a palette, help or picker.",
@@ -414,20 +461,23 @@ export interface KeyResolution {
   chord: KeyChord;
 }
 
-function scopeMatches(when: CommandWhen, context: "app" | "overlay"): boolean {
+function scopeMatches(when: CommandWhen, context: "app" | "overlay" | "find"): boolean {
   if (context === "overlay") return when === "always" || when === "overlay";
-  return when !== "overlay";
+  // The inline find bar is a typing mode: only its own scope stays live, so
+  // printable input and the find chords never collide with composer keys.
+  if (context === "find") return when === "find";
+  return when !== "overlay" && when !== "find";
 }
 
 /**
  * Resolve a keypress in a scope. `context` is `"app"` (composer/transcript,
- * the default) or `"overlay"` (palette/help/pickers). Registry order is
- * priority order.
+ * the default), `"overlay"` (palette/help/pickers) or `"find"` (the inline
+ * transcript find bar). Registry order is priority order.
  */
 export function resolveKey(
   commands: readonly TuiCommand[],
   key: KeyLike,
-  context: "app" | "overlay" = "app",
+  context: "app" | "overlay" | "find" = "app",
 ): KeyResolution | null {
   for (const command of commands) {
     if (!scopeMatches(command.when ?? "always", context)) continue;

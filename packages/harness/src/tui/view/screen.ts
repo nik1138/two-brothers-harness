@@ -30,6 +30,13 @@ export interface ScreenOptions {
   expandedTools?: boolean;
   composerMaxRows?: number;
   overlay?: readonly string[];
+  /**
+   * Inline find-bar rows rendered between the composer and the status bar
+   * (Ctrl+F). Omitted (or empty) frames are byte-identical to the plain layout.
+   */
+  findBar?: readonly string[];
+  /** Block id of the active find match, marked in the transcript gutter. */
+  findBlockId?: string;
   toasts?: readonly Toast[];
   spinnerTick?: number;
   reducedMotion?: boolean;
@@ -60,14 +67,15 @@ export interface ScreenView {
 }
 
 /**
- * Compose welcome/transcript, composer, two-line status and one overlay layer.
+ * Compose welcome/transcript, composer, an optional inline find bar, the
+ * two-line status and one overlay layer.
  *
  * The side panel (when the layout allows it) shares only the transcript body
  * row: the transcript is composed at `layout.transcriptWidth` and each body
  * row is the transcript row plus the panel row, so the two widths add up to
- * the terminal width exactly. The composer and the status bar are rendered at
- * the full width and never move, and a full-screen overlay suppresses the
- * panel for that frame.
+ * the terminal width exactly. The composer, the find bar and the status bar
+ * are rendered at the full width and never move; a full-screen overlay
+ * suppresses the panel for that frame.
  */
 export function screenView(options: ScreenOptions): ScreenView {
   const width = Math.max(0, Math.floor(options.width));
@@ -82,6 +90,7 @@ export function screenView(options: ScreenOptions): ScreenView {
     ...(activity !== undefined ? { activity } : {}),
   };
   const statusLines = renderStatusBar(statusState, { width, theme });
+  const findBar = options.findBar ?? [];
   const composer = composerView({
     width,
     editor: options.editor,
@@ -92,7 +101,7 @@ export function screenView(options: ScreenOptions): ScreenView {
     maxRows: options.composerMaxRows,
     theme,
   });
-  const bodyHeight = Math.max(0, height - composer.lines.length - statusLines.length);
+  const bodyHeight = Math.max(0, height - composer.lines.length - findBar.length - statusLines.length);
 
   const panelState = options.sidePanel;
   const layout =
@@ -112,6 +121,7 @@ export function screenView(options: ScreenOptions): ScreenView {
     theme,
     scroll: options.scroll,
     expandedTools: options.expandedTools,
+    ...(options.findBlockId !== undefined ? { activeBlockId: options.findBlockId } : {}),
   });
   let body = transcript?.lines ?? renderWelcome({
     width: transcriptWidth,
@@ -147,7 +157,7 @@ export function screenView(options: ScreenOptions): ScreenView {
     width,
     height,
     body,
-    footer: [...composer.lines, ...statusLines],
+    footer: [...composer.lines, ...findBar, ...statusLines],
     overlay,
     overlayAlign: options.overlay === undefined ? "top" : "center",
     bodyAnchor: empty ? "top" : "bottom",
