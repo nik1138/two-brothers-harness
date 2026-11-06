@@ -15,6 +15,10 @@
  *   within {@link REPEAT_GUARD_MS} of the previous one (the window slides so a
  *   held key stays suppressed).
  *
+ * The default window is 400 ms (`REPEAT_GUARD_MS`), which covers the common OS
+ * auto-repeat rates while still allowing a deliberate second Enter after the
+ * operator edits the draft.
+ *
  * Typing a draft between presses changes `text`, so a deliberate second Enter
  * is never swallowed; arrow keys, Left/Right and plain text are never
  * guarded.

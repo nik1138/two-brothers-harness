@@ -23,7 +23,11 @@ import * as path from "node:path";
 
 import { discoverCommands, expandCommand, matchCommand, type Command, type CommandCatalog } from "../commands.ts";
 import { findBaseCommand, type BaseCommand } from "../basecommands.ts";
-import { compactContext, type CompactionSettings } from "../compaction.ts";
+import {
+  compactContext,
+  isCompactionSummary,
+  type CompactionSettings,
+} from "../compaction.ts";
 import {
   DEFAULT_KEEP_RECENT_CHARS,
   DEFAULT_KEEP_RECENT_TOKENS,
@@ -84,6 +88,7 @@ import {
 } from "./editor.ts";
 import {
   BASE_COMMAND_ENTRY_PREFIX,
+  nonAsciiBaseAliasNotice,
   planBaseCommandSubmission,
   tuiBaseCommands,
   tuiBasePaletteEntries,
@@ -113,6 +118,8 @@ import {
 import {
   addNotice,
   addUserBlock,
+  commitEnvelope,
+  createCompactionSummaryModel,
   createTuiModel,
   reduceModelEvent,
   type TuiModel,
@@ -1053,7 +1060,10 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   ];
 
   let mode: Config["mode"] = sessionCfg.mode;
-  let model: TuiModel = createTuiModel();
+  // A resumed compacted session carries `<summary>` context envelopes: show
+  // them as neutral SUMMARY markers (never as an operator message). An
+  // uncompacted context yields the empty model, byte-identical to before.
+  let model: TuiModel = createCompactionSummaryModel(context.events);
   // Tool-result expansion is per row and keyed by call id (or block id), so
   // it survives streaming updates and never depends on the row's position.
   let toolExpansion: ToolExpansionKeys = new Set<string>();
@@ -1966,7 +1976,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
               const sessionFile = path.join(sessionsDir, item.id);
               context = openTuiContext({ ...sessionCfg, sessionFile, resume: true }, options.io);
               sessionCfg = { ...sessionCfg, sessionFile, resume: true };
-              model = createTuiModel();
+              // Seed the neutral compaction markers of the restored context;
+              // the rest of the TUI transcript history is not replayed.
+              model = createCompactionSummaryModel(context.events);
               toolExpansion = new Set<string>();
               // A session switch resets the draft but not durable prompt
               // history or the in-memory stash slot.
@@ -2073,11 +2085,16 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         const changed = await compactContext(context, provider, settings);
         measureContext();
         if (changed) {
+          // Show the fresh summary as a neutral SUMMARY marker (the same block
+          // the inline stream / resume paths produce), never as an operator
+          // message. The visible transcript history itself is not rewritten.
+          const summary = context.events.find(isCompactionSummary);
+          if (summary !== undefined) model = commitEnvelope(model, summary);
           scroll = latestTranscriptScroll();
           const after = context.events.length;
           baseNotice(
             "success",
-            `context compacted: ${eventsBefore} → ${after} events (the visible transcript is unchanged)`,
+            `context compacted: ${eventsBefore} → ${after} events (the visible transcript history is kept; the summary is in context)`,
           );
         } else {
           baseNotice("info", "nothing to compact yet — the context is below the keep-recent budget");
@@ -2575,6 +2592,17 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         "warn",
         "compaction is running — your draft is kept; send it when it finishes",
       );
+      render();
+      return;
+    }
+    // A typed non-ASCII base alias (`/目标 …`) cannot pass matchCommand's ASCII
+    // name gate and would otherwise run as a literal task. Mirror the web rule:
+    // a neutral notice names the canonical ASCII spelling + usage, the composer
+    // text is kept for editing, and no turn starts. Canonical names and ASCII
+    // aliases keep their existing resolver path.
+    const aliasNotice = nonAsciiBaseAliasNotice(editor.text);
+    if (aliasNotice !== null) {
+      model = addNotice(model, "info", aliasNotice.message);
       render();
       return;
     }

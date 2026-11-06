@@ -24,11 +24,17 @@ import {
   expandBaseCommand,
   findBaseCommand,
 } from "../src/basecommands.ts";
-import { COMPACTION_SUMMARY_PREFIX } from "../src/compaction.ts";
+import {
+  COMPACTION_SUMMARY_PREFIX,
+  COMPACTION_SUMMARY_SUFFIX,
+} from "../src/compaction.ts";
 import { resolveConfig } from "../src/config.ts";
+import type { Message } from "../src/protocol.ts";
+import type { StreamEvent } from "../src/runstream.ts";
 import { runTuiApp, type TuiAppOptions } from "../src/tui/app.ts";
 import {
   BASE_COMMAND_ENTRY_PREFIX,
+  nonAsciiBaseAliasNotice,
   planBaseCommandSubmission,
   tuiBaseCommands,
   tuiBasePaletteEntries,
@@ -48,6 +54,17 @@ import {
 } from "../src/tui/keymap.ts";
 import { ANSI } from "../src/tui/render.ts";
 import { stripAnsi } from "../src/tui/screen.ts";
+import { displayWidth } from "../src/tui/text.ts";
+import {
+  SUMMARY_PREVIEW_CHARS,
+  TUI_COMPACTION_SUMMARY_PREFIX,
+  TUI_COMPACTION_SUMMARY_SUFFIX,
+  commitEnvelope,
+  createTuiModel,
+  reduceModelEvent,
+} from "../src/tui/model.ts";
+import { plainTheme, resolveTheme } from "../src/tui/theme.ts";
+import { labelForBlock, renderTranscript } from "../src/tui/transcript.ts";
 import { helpView } from "../src/tui/view/help.ts";
 import {
   commandMentionItems,
@@ -557,9 +574,17 @@ test("/compact compacts the context in place and never submits a task", async ()
       "a compaction-summary envelope replaced the older events",
     );
     assert.ok(
-      lastFrameText(output).includes("unchanged"),
+      lastFrameText(output).includes("kept; the summary is in context"),
       "the notice is honest about the display record",
     );
+    // The summary envelope renders as the neutral SUMMARY system marker, not
+    // as an operator ("YOU") message. (The notice line above also mentions
+    // "context compacted", so match the labelled block row specifically.)
+    const markerRow = lastFrameText(output)
+      .split("\n")
+      .find((line) => line.includes("SUMMARY") && line.includes("context compacted"));
+    assert.ok(markerRow !== undefined, "the summary marker block is rendered");
+    assert.ok(!markerRow.includes("YOU"), "never labelled as the operator");
   } finally {
     await stop(harness, root);
   }
@@ -714,5 +739,210 @@ test("native commands keep winning: /help lists base commands, the picker has no
     assert.ok(lastFrameText(output).includes("/th"), "Shift+Tab dismisses, draft untouched");
   } finally {
     await stop(harness, root);
+  }
+});
+
+// --------------------------------------------------------------------------- //
+// P2 follow-up: non-ASCII typed aliases
+// --------------------------------------------------------------------------- //
+
+test("a typed non-ASCII base alias becomes a picker-only notice, not a task", () => {
+  const notice = nonAsciiBaseAliasNotice("/目标 ship the migration");
+  assert.ok(notice);
+  assert.equal(notice.command.name, "goal");
+  assert.equal(notice.usage, "/goal <objective>");
+  assert.ok(notice.message.includes("use /goal <objective>"), notice.message);
+  assert.ok(notice.message.includes("picker-only"), notice.message);
+  assert.ok(notice.message.includes("目标"), "the typed alias is named for clarity");
+
+  // ASCII aliases keep their normal resolver path (no notice).
+  assert.equal(nonAsciiBaseAliasNotice("/goal ship it"), null);
+  assert.equal(nonAsciiBaseAliasNotice("/objective ship it"), null);
+  assert.equal(nonAsciiBaseAliasNotice("/bug the flow"), null);
+  // Leading whitespace is still a slash line; unknown non-ASCII text is not a
+  // catalogue alias and stays an ordinary literal task.
+  assert.equal(nonAsciiBaseAliasNotice("   /计划 now")?.command.name, "plan");
+  assert.equal(nonAsciiBaseAliasNotice("/未知 x"), null);
+  assert.equal(nonAsciiBaseAliasNotice("plain text"), null);
+  assert.equal(nonAsciiBaseAliasNotice(""), null);
+});
+
+test("alias search in the picker still matches non-ASCII aliases", () => {
+  const items = commandMentionItems(TUI_COMMANDS, [], tuiBaseCommands());
+  assert.deepEqual(
+    filterMentionPickerItems(items, "目标").map((item) => item.name),
+    ["goal"],
+  );
+  assert.deepEqual(
+    filterMentionPickerItems(items, "计划").map((item) => item.name),
+    ["plan"],
+  );
+  assert.deepEqual(
+    filterMentionPickerItems(items, "bug").map((item) => item.name),
+    ["feedback"],
+  );
+});
+
+test("a typed non-ASCII alias shows a neutral notice and keeps the composer text", async () => {
+  const { root } = tmpdir();
+  const harness = startApp(root);
+  const { input, output } = harness;
+  try {
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+    input.type("/目标 ship it");
+    input.enter();
+    assert.ok(await waitFor(() => lastFrameText(output).includes("use /goal <objective>")));
+    assert.ok(lastFrameText(output).includes("picker-only"));
+    assert.ok(lastFrameText(output).includes("/目标 ship it"), "the composer text is kept");
+    assert.ok(!textOf(output).includes("decision:"), "no literal task was submitted");
+    assert.ok(!textOf(output).includes("YOU"), "the alias line never became an operator block");
+  } finally {
+    await stop(harness, root);
+  }
+});
+
+test("ASCII aliases still expand and run normally", async () => {
+  const { root } = tmpdir();
+  const harness = startApp(root);
+  const { input, output } = harness;
+  try {
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+    input.type("/bug the flow is odd");
+    input.enter();
+    assert.ok(await waitFor(() => textOf(output).includes("decision:"), 30_000));
+    assert.ok(await waitIdle(output));
+    assert.ok(
+      textOf(output).includes("The operator left feedback on the last turn: the flow is odd"),
+      "the ASCII alias expanded the feedback template",
+    );
+    assert.ok(!textOf(output).includes("picker-only"), "no notice for an ASCII alias");
+  } finally {
+    await stop(harness, root);
+  }
+});
+
+// --------------------------------------------------------------------------- //
+// P2 follow-up: compaction-summary system block
+// --------------------------------------------------------------------------- //
+
+function summaryMessage(id: string, body: string, seq = 1): Message {
+  return {
+    v: 1,
+    id,
+    seq,
+    ts: "2026-11-07T00:00:00Z",
+    from: "user",
+    to: "senior",
+    kind: "message",
+    payload: { text: `${COMPACTION_SUMMARY_PREFIX}${body}${COMPACTION_SUMMARY_SUFFIX}` },
+  };
+}
+
+test("compaction summaries project as neutral SUMMARY blocks, never operator messages", () => {
+  // The TUI marker mirrors the harness constant exactly (attribution in model.ts).
+  assert.equal(TUI_COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_PREFIX);
+  assert.equal(TUI_COMPACTION_SUMMARY_SUFFIX, COMPACTION_SUMMARY_SUFFIX);
+
+  const body = "## Findings\n\nThe migration is safe.\n\nNext: verify rollback.";
+  const message = summaryMessage("s1", body);
+  const model = commitEnvelope(createTuiModel(), message);
+  const block = model.blocks[0];
+  assert.ok(block !== undefined);
+  if (block === undefined || block.kind !== "summary") {
+    assert.fail(`expected a summary block, got ${block?.kind ?? "none"}`);
+  }
+  assert.ok(!model.blocks.some((candidate) => candidate.kind === "user"));
+  assert.equal(block.preview, "## Findings The migration is safe. Next: verify rollback.");
+  assert.equal(block.chars, body.length);
+  assert.equal(labelForBlock(block).text, "SUMMARY");
+  assert.equal(labelForBlock(block).token, "dim");
+
+  // The compacted stream path (auto-compaction envelope) projects identically.
+  const streamed = reduceModelEvent(createTuiModel(), {
+    type: "envelope",
+    envelope: message,
+    at: "2026-11-07T00:00:00Z",
+  } as StreamEvent).model;
+  assert.equal(streamed.blocks[0]?.kind, "summary");
+
+  const rows = renderTranscript(model, { width: 60, theme: plainTheme });
+  const text = rows.join("\n");
+  assert.ok(text.includes("SUMMARY"));
+  assert.ok(text.includes("context compacted"));
+  assert.ok(text.includes("migration is safe"));
+  assert.ok(!text.includes("YOU"), "the summary is never operator-labelled");
+  for (const row of rows) {
+    assert.ok(!row.includes("\u001b"), "plain NO_COLOR output leaks no ANSI");
+    assert.ok(displayWidth(row) <= 60, JSON.stringify(row));
+  }
+
+  // NO_COLOR is authoritative and byte-identical to the plain theme.
+  const noColor = renderTranscript(model, {
+    width: 60,
+    theme: resolveTheme({ env: { NO_COLOR: "1" } }),
+  });
+  assert.deepEqual(noColor, rows);
+});
+
+test("a long compaction summary renders a bounded preview with an explicit marker", () => {
+  const body = "word ".repeat(2_000);
+  const model = commitEnvelope(createTuiModel(), summaryMessage("s2", body));
+  const block = model.blocks[0];
+  if (block === undefined || block.kind !== "summary") {
+    assert.fail(`expected a summary block, got ${block?.kind ?? "none"}`);
+  }
+  assert.equal(block.preview.length, SUMMARY_PREVIEW_CHARS);
+  assert.ok(block.preview.endsWith("…"));
+  // The body is trimmed by the harness extraction (trailing whitespace).
+  assert.equal(block.chars, body.trim().length);
+
+  const rows = renderTranscript(model, { width: 40, theme: plainTheme });
+  assert.ok(rows.length <= 6, `bounded rows: ${rows.length}`);
+  assert.ok(rows.join("\n").includes("context compacted"));
+  assert.ok(rows.join("\n").includes("… +"), "the hidden-line marker is explicit");
+  for (const row of rows) {
+    assert.ok(displayWidth(row) <= 40, JSON.stringify(row));
+    assert.ok(!row.includes("\u001b"));
+  }
+  // Shrinking the preview budget bounds it further.
+  const tight = renderTranscript(model, { width: 40, theme: plainTheme, maxSummaryRows: 1 });
+  assert.ok(tight.length <= 3);
+});
+
+test("a resumed compacted session shows the SUMMARY block, not a YOU message", async () => {
+  const { root } = tmpdir();
+  const sessionFile = path.join(root, "session.jsonl");
+  const task: Message = {
+    v: 1,
+    id: "u1",
+    seq: 1,
+    ts: "2026-11-07T00:00:00Z",
+    from: "user",
+    to: "senior",
+    kind: "message",
+    payload: { text: "say hello" },
+  };
+  const summary = { ...summaryMessage("s1", "The migration is safe.", 2) };
+  fs.writeFileSync(
+    sessionFile,
+    `${JSON.stringify(task)}\n${JSON.stringify(summary)}\n`,
+    "utf8",
+  );
+  const harness = startApp(root, {
+    cfg: resolveConfig({ provider: "mock", sessionFile, resume: true }),
+  });
+  const { output, input } = harness;
+  try {
+    assert.ok(await waitFor(() => lastFrameText(output).includes("SUMMARY")));
+    const frame = lastFrameText(output);
+    assert.ok(frame.includes("context compacted"));
+    assert.ok(frame.includes("migration is safe"));
+    const markerRow = frame.split("\n").find((line) => line.includes("context compacted"));
+    assert.ok(markerRow !== undefined);
+    assert.ok(!markerRow.includes("YOU"), "the resumed summary is never operator-labelled");
+    assert.ok(!frame.includes("YOU    say hello"), "the summary is not replayed as an operator task");
+    assert.equal(await quit(input, harness.app), 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });

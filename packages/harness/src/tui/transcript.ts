@@ -27,6 +27,7 @@ import type {
   EnvelopeBlock,
   LiveThinking,
   NoticeBlock,
+  SummaryBlock,
   ToolBlock,
   TuiBlock,
   TuiModel,
@@ -54,6 +55,12 @@ export const THINKING_LABEL = "THINKING";
 
 /** Default visible reasoning rows before the `… +N lines` marker. */
 export const DEFAULT_THINKING_MAX_ROWS = 6;
+
+/** Label of the compaction-summary marker block (never the operator). */
+export const SUMMARY_LABEL = "SUMMARY";
+
+/** Default visible preview rows of a compaction-summary block. */
+export const DEFAULT_SUMMARY_MAX_ROWS = 3;
 
 /** Options for {@link renderThinkingBlock}. */
 export interface ThinkingRenderOptions {
@@ -99,6 +106,9 @@ export function labelForBlock(block: TuiBlock): BlockLabel {
         : block.level === "warn"
           ? { text: "WARN", token: "warning" }
           : { text: "INFO", token: "notice" };
+    case "summary":
+      // A compaction summary is machine context: dim system marker, never YOU.
+      return { text: SUMMARY_LABEL, token: "dim" };
     default:
       return { text: "SYS", token: "text" };
   }
@@ -112,6 +122,8 @@ export interface TranscriptOptions {
   expandedTools?: boolean;
   /** Maximum visual rows of expanded tool detail / preview source lines (default 6). */
   maxToolRows?: number;
+  /** Maximum visual rows of a compaction-summary preview (default 3). */
+  maxSummaryRows?: number;
   /**
    * Block id to mark in the label gutter with `▸` (find's active match). The
    * marker replaces the label's trailing padding cell, so every row keeps its
@@ -348,6 +360,21 @@ function userRows(block: UserBlock): ContentRow[] {
   return [{ text: block.text, tone: "user" }];
 }
 
+/**
+ * A compaction-summary marker: the neutral "context compacted" row plus the
+ * bounded preview. Dim/muted only; it can never render as an operator block.
+ */
+function summaryRows(block: SummaryBlock): ContentRow[] {
+  const rows: ContentRow[] = [{ text: "context compacted", tone: "dim" }];
+  if (block.preview !== "") rows.push({ text: block.preview, tone: "muted" });
+  return rows;
+}
+
+/** Visible preview rows of a summary block (default 3). */
+function summaryRowLimit(options: TranscriptOptions): number {
+  return Math.max(1, Math.floor(options.maxSummaryRows ?? DEFAULT_SUMMARY_MAX_ROWS));
+}
+
 /** Collapsed tool rows keep this many source lines before the marker. */
 function toolPreviewLines(options: TranscriptOptions): number {
   return Math.max(1, Math.floor(options.maxToolRows ?? DEFAULT_MAX_TOOL_ROWS));
@@ -372,6 +399,8 @@ function contentRows(
         : detailedToolRows(block);
     case "notice":
       return noticeRows(block);
+    case "summary":
+      return summaryRows(block);
     default:
       return [];
   }
@@ -416,6 +445,18 @@ function boundToolRows(rows: VisualRow[], options: TranscriptOptions): VisualRow
   if (rows.length <= max) return rows;
   const hidden = rows.length - max;
   return [...rows.slice(0, max), { text: `… +${hidden} more lines`, tone: "dim" }];
+}
+
+/**
+ * Bound the compaction-summary preview: keep the marker row plus at most
+ * `maxSummaryRows` preview rows and collapse the rest into one dim
+ * `… +N lines` row, so a long summary can never flood the live transcript.
+ */
+function boundSummaryRows(rows: VisualRow[], options: TranscriptOptions): VisualRow[] {
+  const max = Math.max(1, Math.floor(options.maxSummaryRows ?? DEFAULT_SUMMARY_MAX_ROWS));
+  if (rows.length <= max) return rows;
+  const hidden = rows.length - max;
+  return [...rows.slice(0, max), { text: `… +${hidden} lines`, tone: "dim" }];
 }
 
 /**
@@ -519,6 +560,7 @@ export function renderBlock(block: TuiBlock, options: TranscriptOptions): string
   const contentWidth = compact ? width : Math.max(1, width - TRANSCRIPT_LABEL_WIDTH);
   let rows = visualRows(contentRows(block, options, contentWidth, toolMode), contentWidth);
   if (toolMode === "detail") rows = boundToolRows(rows, options);
+  if (block.kind === "summary") rows = boundSummaryRows(rows, options);
   if (rows.length === 0) return [];
 
   if (compact) {

@@ -15,6 +15,32 @@
  */
 import type { Message } from "../protocol.ts";
 import type { StreamEvent, StreamRole, StreamToolStatus } from "../runstream.ts";
+import {
+  COMPACTION_SUMMARY_PREFIX,
+  COMPACTION_SUMMARY_SUFFIX,
+  compactionSummaryText,
+  isCompactionSummary,
+} from "../compaction.ts";
+
+// Attribution: the two exported TUI marker constants below mirror
+// `packages/harness/src/compaction.ts::COMPACTION_SUMMARY_PREFIX` /
+// `COMPACTION_SUMMARY_SUFFIX` and are imported from that module, never
+// re-spelled, so the TUI projection cannot drift from the harness marker. A
+// `<summary>` envelope is a CONTEXT event, not an operator message.
+/** Mirrors `compaction.ts::COMPACTION_SUMMARY_PREFIX` (exact harness marker). */
+export const TUI_COMPACTION_SUMMARY_PREFIX = COMPACTION_SUMMARY_PREFIX;
+/** Mirrors `compaction.ts::COMPACTION_SUMMARY_SUFFIX` (exact harness marker). */
+export const TUI_COMPACTION_SUMMARY_SUFFIX = COMPACTION_SUMMARY_SUFFIX;
+
+/** Maximum characters of summary text kept in a transcript preview. */
+export const SUMMARY_PREVIEW_CHARS = 240;
+
+/** Collapse a summary body to one bounded, whitespace-normalized paragraph. */
+function summaryPreview(body: string): string {
+  const collapsed = body.split(/\s+/).filter((part) => part !== "").join(" ").trim();
+  if (collapsed.length <= SUMMARY_PREVIEW_CHARS) return collapsed;
+  return `${collapsed.slice(0, SUMMARY_PREVIEW_CHARS - 1)}…`;
+}
 
 /** The two model roles (the operator is represented by `user` blocks). */
 export type TuiRole = "senior" | "junior";
@@ -96,8 +122,31 @@ export interface NoticeBlock extends BlockBase {
   readonly retryable?: boolean;
 }
 
+/**
+ * A compaction-summary marker: the neutral "context compacted" block shown for
+ * the harness's `<summary>…</summary>` context envelope. It is deliberately
+ * NOT a {@link UserBlock} — the envelope is machine-generated context, never
+ * something the operator typed — and it keeps only a bounded preview (the full
+ * summary stays in the shared context, not in the transcript view).
+ */
+export interface SummaryBlock extends BlockBase {
+  readonly kind: "summary";
+  readonly messageId: string;
+  /** Bounded one-paragraph preview of the summary body. */
+  readonly preview: string;
+  /** Character length of the full summary body (honest bound for the view). */
+  readonly chars: number;
+  readonly seq?: number;
+}
+
 /** Every display unit in the transcript. */
-export type TuiBlock = UserBlock | EnvelopeBlock | DecisionBlock | ToolBlock | NoticeBlock;
+export type TuiBlock =
+  | UserBlock
+  | EnvelopeBlock
+  | DecisionBlock
+  | ToolBlock
+  | NoticeBlock
+  | SummaryBlock;
 
 /** Kind of a live token delta for the active provider call. */
 export type LiveTokenKind = "text" | "thinking";
@@ -288,6 +337,15 @@ export type ProjectedMessage =
       readonly at?: string;
     }
   | {
+      readonly kind: "summary";
+      readonly messageId: string;
+      readonly direction: "in";
+      readonly preview: string;
+      readonly chars: number;
+      readonly seq?: number;
+      readonly at?: string;
+    }
+  | {
       readonly kind: "envelope";
       readonly messageId: string;
       readonly role: TuiRole;
@@ -392,6 +450,18 @@ export function projectEnvelope(message: Message): ProjectedMessage {
   };
 
   if (message.from === "user") {
+    // A compaction-summary envelope is machine-generated context, not an
+    // operator message: project it as a neutral, bounded summary block.
+    if (isCompactionSummary(message)) {
+      const body = compactionSummaryText(message) ?? "";
+      return {
+        kind: "summary",
+        direction: "in",
+        preview: summaryPreview(body),
+        chars: body.length,
+        ...common,
+      };
+    }
     const text = textField(payload, "text");
     return {
       kind: "user",
@@ -610,6 +680,24 @@ function replaceOrAppend(
  */
 export function commitEnvelope(model: TuiModel, message: Message): TuiModel {
   const projected = projectEnvelope(message);
+
+  if (projected.kind === "summary") {
+    // Idempotent by message id; a summary never merges into a user block.
+    const index = model.blocks.findIndex(
+      (block) => block.kind === "summary" && block.messageId === projected.messageId,
+    );
+    const id = index === -1 ? nextBlockId(model) : model.blocks[index]?.id ?? nextBlockId(model);
+    const block: SummaryBlock = {
+      kind: "summary",
+      id,
+      messageId: projected.messageId,
+      preview: projected.preview,
+      chars: projected.chars,
+      ...(projected.seq !== undefined ? { seq: projected.seq } : {}),
+      ...(projected.at !== undefined ? { at: projected.at } : {}),
+    };
+    return replaceOrAppend(model, index, block);
+  }
 
   if (projected.kind === "user") {
     const last = model.blocks[model.blocks.length - 1];
@@ -879,7 +967,26 @@ export function blockText(block: TuiBlock): string {
       return [block.args ?? "", block.result ?? ""].filter((part) => part !== "").join("\n");
     case "notice":
       return [block.text, block.details ?? ""].filter((part) => part !== "").join("\n");
+    case "summary":
+      return block.preview;
     default:
       return "";
   }
+}
+
+/**
+ * Seed a model with the compaction-summary markers of a restored context.
+ *
+ * A resumed compacted session always contains exactly the harness marker
+ * envelope(s); they must render as neutral system blocks (never as an operator
+ * message), so the app seeds the transcript view with them instead of replaying
+ * the whole context. An uncompacted context yields the empty model (byte-
+ * identical to the pre-summary behavior).
+ */
+export function createCompactionSummaryModel(events: readonly Message[]): TuiModel {
+  let model = createTuiModel();
+  for (const event of events) {
+    if (isCompactionSummary(event)) model = commitEnvelope(model, event);
+  }
+  return model;
 }

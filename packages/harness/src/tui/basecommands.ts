@@ -103,6 +103,51 @@ export function tuiBasePaletteEntries(
   return [...entriesFor("prompt"), ...entriesFor("action")];
 }
 
+/** A typed non-ASCII alias that names a known base command. */
+export interface NonAsciiBaseAlias {
+  /** The alias exactly as typed (without the leading slash). */
+  alias: string;
+  command: BaseCommand;
+  /** Canonical usage line (`/goal <objective>`). */
+  usage: string;
+  /** Neutral notice naming the canonical ASCII spelling; picker-only aliases. */
+  message: string;
+}
+
+const ASCII_ONLY = /^[\x00-\x7f]*$/;
+
+/**
+ * Detect a typed slash line whose command token is a known *non-ASCII* base
+ * alias (e.g. `/目标 …`). `matchCommand`'s ASCII name gate cannot resolve those,
+ * so without this guard the line would fall through and run as a literal task.
+ *
+ * Mirrors the web rule: the typed alias never becomes a task. The caller shows
+ * the returned neutral notice (canonical ASCII usage + "picker-only" reason)
+ * and keeps the composer text, while canonical names and ASCII aliases keep
+ * flowing through the normal resolver and the picker keeps searching aliases.
+ * Unknown non-ASCII slash text is not a command and stays literal (`null`).
+ */
+export function nonAsciiBaseAliasNotice(input: string): NonAsciiBaseAlias | null {
+  const trimmed = typeof input === "string" ? input.trim() : "";
+  if (!trimmed.startsWith("/")) return null;
+  const token = /^([^\s]+)/.exec(trimmed.slice(1))?.[1] ?? "";
+  // Canonical names and ASCII aliases take the established resolver path.
+  if (token === "" || ASCII_ONLY.test(token)) return null;
+  const command = BASE_COMMANDS.find((candidate) =>
+    candidate.aliases.some((alias) => alias.toLowerCase() === token.toLowerCase()),
+  );
+  if (command === undefined) return null;
+  const usage = baseCommandUsage(command);
+  return {
+    alias: token,
+    command,
+    usage,
+    message:
+      `use ${usage} — "${token}" is a non-ASCII alias and is picker-only; ` +
+      "type the canonical spelling or pick it from the / command picker",
+  };
+}
+
 /** A base prompt command resolved to the turn the TUI should start. */
 export type BaseCommandSubmission =
   | { kind: "run"; task: string; mode: Config["mode"] }
