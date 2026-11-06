@@ -10,7 +10,14 @@
  * - `POST /api/sessions/{name}/compact`: 404/400 name handling, 409 under a
  *   live run, honest `{compacted:false}` on a tiny session, in-place JSONL
  *   rewrite with a summary event + dense seq, and 502 provider failure leaving
- *   the session untouched.
+ *   the session untouched;
+ * - the maintenance guard: a run submitted (either run route) while a
+ *   compaction is inside the summarizer is a 409 and its envelopes are never
+ *   dropped by the rewrite; two concurrent compactions are one 200 + one 409;
+ * - the compact P2s: budgets from the resolved config when
+ *   `ServerOptions.compaction` is unset, a corrupt JSONL as a stable 422
+ *   without paths, and a client disconnect aborting the summarizer while
+ *   releasing the guard.
  *
  * Run with: node --test tests/serverbase.test.ts
  */
@@ -219,6 +226,81 @@ function failingMock(message: string): Provider {
       throw new Error(message);
     },
   };
+}
+
+/**
+ * A mock provider whose first call parks on a gate and honours the abort
+ * signal: the P1/P2 concurrency tests use it to hold a compaction inside the
+ * summarizer while they probe run admission, and to release it on command.
+ */
+interface ControllableMock {
+  provider: Provider;
+  /** Resolves when a provider call reaches the gate. */
+  started: Promise<void>;
+  /** Resolves when the in-flight call observes an abort. */
+  aborted: Promise<void>;
+  release(): void;
+}
+
+function controllableMock(): ControllableMock {
+  const inner = new MockProvider();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  let markAborted!: () => void;
+  const aborted = new Promise<void>((resolve) => {
+    markAborted = resolve;
+  });
+  const provider: Provider = {
+    async chat(
+      messages: ChatMessage[],
+      responseKind?: string,
+      signal?: AbortSignal,
+      options?: ChatOptions,
+    ): Promise<string> {
+      markStarted();
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = (): void => {
+          signal?.removeEventListener("abort", onAbort);
+          markAborted();
+          reject(new Error("summarizer aborted"));
+        };
+        if (signal?.aborted) {
+          onAbort();
+          return;
+        }
+        signal?.addEventListener("abort", onAbort, { once: true });
+        void gate.then(() => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve();
+        });
+      });
+      return inner.chat(messages, responseKind, signal, options);
+    },
+  };
+  return { provider, started, aborted, release: () => release() };
+}
+
+async function waitFor(cond: () => boolean, what: string, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await sleep(10);
+  }
+}
+
+/** A long-enough session fixture for the deterministic keepRecent=300 budget. */
+function seedLongSession(server: RunningServer, name: string): string {
+  const texts = ["Do the long task."];
+  for (let index = 1; index <= 11; index += 1) {
+    texts.push(`Turn ${index}: ${"detail ".repeat(12)}`);
+  }
+  return seedSession(server, name, texts);
 }
 
 async function waitActive(
@@ -504,6 +586,246 @@ test("compact: a summarizer failure is a 502 and leaves the session byte-identic
       beforeBytes,
       "a failed compaction writes nothing",
     );
+  } finally {
+    await server.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// P1: compaction is serialized against run submission
+// ---------------------------------------------------------------------------
+
+test("compact: a run submitted during a compaction is rejected and the rewrite drops nothing", async () => {
+  const gate = controllableMock();
+  const server = await startServer({
+    compaction: { keepRecentChars: 300 },
+    providerOverrides: { senior: gate.provider, junior: gate.provider },
+  });
+  try {
+    const file = seedLongSession(server, "race.jsonl");
+    const beforeBytes = fs.readFileSync(file, "utf-8");
+
+    const pendingCompact = post<{ compacted: boolean; before_events: number; after_events: number }>(
+      server.base,
+      "/api/sessions/race.jsonl/compact",
+    );
+    await gate.started;
+
+    // Run admission must refuse while the session is reserved — for both run
+    // routes, before any session file or run record exists.
+    const background = await post<{ detail?: string }>(server.base, "/api/runs", {
+      task: "intruder task",
+      session: "race.jsonl",
+    });
+    assert.equal(background.status, 409);
+    assert.equal(
+      background.body.detail,
+      "a compaction is in progress for this session; retry in a moment",
+    );
+    const legacy = await post<{ detail?: string }>(server.base, "/api/run", {
+      task: "legacy intruder task",
+      session: "race.jsonl",
+    });
+    assert.equal(legacy.status, 409);
+    assert.equal(legacy.body.detail, background.body.detail);
+    assert.deepEqual((await get(server.base, "/api/runs")).body, []);
+    assert.equal(fs.readFileSync(file, "utf-8"), beforeBytes, "no run touched the session");
+
+    // Release the summarizer: exactly one compaction completes, rewriting the
+    // original snapshot (which never saw the rejected submissions).
+    gate.release();
+    const compacted = await pendingCompact;
+    assert.equal(compacted.status, 200, JSON.stringify(compacted.body));
+    assert.equal(compacted.body.compacted, true);
+    const afterCompact = readSession(server, "race.jsonl");
+    assert.equal(afterCompact.length, compacted.body.after_events);
+    assert.deepEqual(
+      afterCompact.map((event) => event.seq),
+      Array.from({ length: afterCompact.length }, (_, index) => index + 1),
+    );
+    assert.equal(
+      afterCompact.filter((event) => isCompactionSummary(event as unknown as Message)).length,
+      1,
+    );
+    assert.ok(!JSON.stringify(afterCompact).includes("intruder"));
+    assert.ok(!JSON.stringify(afterCompact).includes("legacy intruder"));
+
+    // A run submitted after the release is accepted and appends to the
+    // compacted session with dense seq (the P1 corruption is gone).
+    const record = await runToEnd(server, { task: "after compaction", session: "race.jsonl" });
+    assert.equal(record.status, "completed");
+    const finalEvents = readSession(server, "race.jsonl");
+    assert.deepEqual(
+      finalEvents.map((event) => event.seq),
+      Array.from({ length: finalEvents.length }, (_, index) => index + 1),
+      "resume after compaction keeps dense seq",
+    );
+    assert.ok(
+      finalEvents.some((event) => event.payload?.text === "after compaction"),
+      "the post-compaction run's task is persisted",
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("compact: a second concurrent compaction is a 409 and one summary is written", async () => {
+  const gate = controllableMock();
+  const server = await startServer({
+    compaction: { keepRecentChars: 300 },
+    providerOverrides: { senior: gate.provider, junior: gate.provider },
+  });
+  try {
+    const file = seedLongSession(server, "twice.jsonl");
+
+    const first = post<{ compacted: boolean }>(
+      server.base,
+      "/api/sessions/twice.jsonl/compact",
+    );
+    await gate.started;
+
+    const second = await post<{ detail?: string }>(
+      server.base,
+      "/api/sessions/twice.jsonl/compact",
+    );
+    assert.equal(second.status, 409);
+    assert.equal(second.body.detail, "another compaction is already running for this session");
+
+    gate.release();
+    const firstResult = await first;
+    assert.equal(firstResult.status, 200);
+    assert.equal(firstResult.body.compacted, true);
+
+    const events = readSession(server, "twice.jsonl");
+    assert.equal(
+      events.filter((event) => isCompactionSummary(event as unknown as Message)).length,
+      1,
+      "the rejected compaction never ran",
+    );
+    assert.deepEqual(
+      events.map((event) => event.seq),
+      Array.from({ length: events.length }, (_, index) => index + 1),
+    );
+    assert.equal(server.handle.state.compactions.size, 0, "guard released");
+    assert.equal(fs.readFileSync(file, "utf-8").length > 0, true);
+  } finally {
+    await server.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// P2s: config-derived budgets, corrupt files, client abort
+// ---------------------------------------------------------------------------
+
+test("compact: budgets come from the resolved config when ServerOptions.compaction is unset", async () => {
+  // A serve-level `--compact-keep-recent 300` equivalent: resolved through the
+  // config factory only, no ServerOptions.compaction. The default budget
+  // (40 000 chars) would never cut this 6-event fixture.
+  const server = await startServer({
+    configFactory: () =>
+      resolveConfig({ provider: "mock", mode: "consult", compactKeepRecent: 300 }),
+  });
+  try {
+    const texts = ["Small task."];
+    for (let index = 1; index <= 5; index += 1) {
+      texts.push(`Turn ${index}: ${"detail ".repeat(12)}`);
+    }
+    seedSession(server, "config-budget.jsonl", texts);
+
+    const res = await post<{
+      compacted: boolean;
+      before_events: number;
+      after_events: number;
+    }>(server.base, "/api/sessions/config-budget.jsonl/compact");
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.body.compacted, true, "the resolved config's keep-recent budget applied");
+    assert.ok(res.body.after_events < res.body.before_events);
+    assert.equal(
+      readSession(server, "config-budget.jsonl").filter((event) =>
+        isCompactionSummary(event as unknown as Message),
+      ).length,
+      1,
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("compact: a corrupt session file is a stable 4xx without paths and releases the guard", async () => {
+  const server = await startServer();
+  try {
+    const file = path.join(server.dir, "corrupt.jsonl");
+    fs.writeFileSync(file, "{not json\n{\"also\": \n", "utf-8");
+
+    const res = await post<{ detail?: string }>(
+      server.base,
+      "/api/sessions/corrupt.jsonl/compact",
+    );
+    assert.equal(res.status, 422);
+    assert.equal(res.body.detail, "session file cannot be read; it may be corrupt");
+    assert.ok(!String(res.body.detail).includes(server.dir), "no absolute path leaks");
+    assert.ok(!String(res.body.detail).includes("corrupt.jsonl"));
+    assert.equal(server.handle.state.compactions.size, 0, "the reservation was released");
+    assert.equal(fs.readFileSync(file, "utf-8"), "{not json\n{\"also\": \n", "not rewritten");
+
+    // The server stays healthy and a normal session still compacts (honestly).
+    seedSession(server, "healthy.jsonl", ["Small task.", "A short reply."]);
+    const healthy = await post<Record<string, unknown>>(
+      server.base,
+      "/api/sessions/healthy.jsonl/compact",
+    );
+    assert.equal(healthy.status, 200);
+    assert.deepEqual(healthy.body, { compacted: false, reason: "nothing to compact" });
+  } finally {
+    await server.close();
+  }
+});
+
+test("compact: a client disconnect aborts the summarizer and releases the guard", async () => {
+  const gate = controllableMock();
+  const server = await startServer({
+    compaction: { keepRecentChars: 300 },
+    providerOverrides: { senior: gate.provider, junior: gate.provider },
+  });
+  try {
+    const file = seedLongSession(server, "abort.jsonl");
+    const beforeBytes = fs.readFileSync(file, "utf-8");
+
+    const controller = new AbortController();
+    const pending = fetch(
+      `${server.base}/api/sessions/abort.jsonl/compact`,
+      { method: "POST", signal: controller.signal },
+    )
+      .then((res) => res.text())
+      .catch((exc: unknown) => exc);
+
+    await gate.started;
+    controller.abort();
+    await gate.aborted;
+    await waitFor(
+      () => !server.handle.state.compactions.has("abort.jsonl"),
+      "compaction guard release after abort",
+    );
+    assert.deepEqual([...server.handle.state.compactions], []);
+    assert.equal(
+      fs.readFileSync(file, "utf-8"),
+      beforeBytes,
+      "an aborted compaction writes nothing",
+    );
+    const outcome = await pending;
+    assert.ok(outcome instanceof Error, "the client request was aborted");
+
+    // The session is usable again: a run submitted afterwards is accepted and
+    // appends dense seq to the untouched file.
+    gate.release();
+    const record = await runToEnd(server, { task: "after abort", session: "abort.jsonl" });
+    assert.equal(record.status, "completed");
+    const events = readSession(server, "abort.jsonl");
+    assert.deepEqual(
+      events.map((event) => event.seq),
+      Array.from({ length: events.length }, (_, index) => index + 1),
+    );
+    assert.ok(events.some((event) => event.payload?.text === "after abort"));
   } finally {
     await server.close();
   }

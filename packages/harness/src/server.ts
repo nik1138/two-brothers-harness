@@ -71,11 +71,22 @@
  * - `POST /api/sessions/{name}/compact` manually summarises the older context
  *   of one session (`compaction.ts::compactContext`) through the same provider
  *   construction a run uses, rewriting the session JSONL in place (dense
- *   `seq`, unchanged shape) so a reload shows the summary. 404 unknown
- *   session, 409 while a run for that session is queued/running/waiting, 200
- *   `{compacted: true, before_events, after_events}` or — honestly, not an
- *   error — `{compacted: false, reason: "nothing to compact"}`, and 502 when
- *   the summarizer/provider fails (nothing is written in that case).
+ *   `seq`, unchanged shape) so a reload shows the summary. The session is
+ *   RESERVED synchronously for the whole summarizer call (`state.compactions`,
+ *   released in `finally`): a concurrent compaction is a 409 ("another
+ *   compaction is already running for this session") and run admission
+ *   (`POST /api/runs` / `POST /api/run`) for that session is a 409 ("a
+ *   compaction is in progress for this session; retry in a moment") BEFORE any
+ *   session/run is created, so the rewrite can never drop a concurrently
+ *   admitted run's envelopes. Manual budgets come from
+ *   `ServerOptions.compaction` when set, else from the resolved config's
+ *   compaction fields (`--compact-*` / `--context-window` through the config
+ *   factory). A client disconnect aborts the summarizer; a corrupt/unreadable
+ *   JSONL is a stable 422 ("session file cannot be read; it may be corrupt",
+ *   no path leaked). Statuses: 404 unknown session, 409 live run or reserved
+ *   session, 200 `{compacted: true, before_events, after_events}` or — honestly,
+ *   not an error — `{compacted: false, reason: "nothing to compact"}`, and 502
+ *   when the summarizer/provider fails (nothing is written in that case).
  * - `GET /api/search?q=<query>&limit=<n>` full-text searches every session
  *   document (`src/sessionsearch.ts`, newest session first) and returns the
  *   bounded `SessionSearchResult` hit list. A trimmed query shorter than
@@ -693,6 +704,13 @@ export interface ServerState {
   pluginDiagnostics: string[];
   /** `--mcp-config` file merged under the plugin MCP servers on every run. */
   mcpConfig?: string;
+  /**
+   * Exact session file names with a manual compaction in flight: the
+   * serialization guard shared by the compact route (which reserves/releases)
+   * and run admission (which refuses while reserved). Ephemeral, in-memory
+   * only — never persisted.
+   */
+  compactions: Set<string>;
 }
 
 export interface ServerHandle {
@@ -836,6 +854,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     pluginSelection,
     pluginDiagnostics: [],
     mcpConfig: options.mcpConfig,
+    compactions: new Set<string>(),
   };
 
   // -- helpers ---------------------------------------------------------------
@@ -945,22 +964,54 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   }
 
   /**
-   * Compaction settings for a manual `POST /api/sessions/{name}/compact`: the
-   * server's configured settings (`ServerOptions.compaction`), with the
-   * run-level context window filling in when none is configured — the same
-   * precedence the harness applies to auto compaction (`compactionSettings`).
-   * With nothing configured the budget defaults still apply, so an explicit
-   * `/compact` on a long session is meaningful even when auto compaction is
-   * off; the request never invents a threshold/trigger, it just summarises the
-   * older context.
+   * Compaction settings the *resolved run config* carries: the serve-level
+   * `--compact-*` / `TWO_BROTHERS_COMPACT*` / `--context-window` flags reach
+   * `Config` through the config factory, so a server started with a small
+   * keep-recent budget must honour it on a manual compaction too. Mirrors the
+   * CLI's `compactionOptions` field mapping; unset (0) fields are omitted so
+   * `compaction.ts` defaults apply. The `--compact` force flag is irrelevant to
+   * a manual request, which always asks for one compaction.
+   */
+  function configCompactionSettings(cfg: Config): CompactionSettings {
+    const settings: CompactionSettings = {};
+    if (cfg.compactThreshold > 0) settings.thresholdChars = cfg.compactThreshold;
+    if (cfg.compactKeepRecent > 0) settings.keepRecentChars = cfg.compactKeepRecent;
+    if (cfg.compactThresholdTokens > 0) settings.thresholdTokens = cfg.compactThresholdTokens;
+    if (cfg.contextWindow > 0) settings.contextWindow = cfg.contextWindow;
+    return settings;
+  }
+
+  /**
+   * Compaction settings for a manual `POST /api/sessions/{name}/compact`.
+   *
+   * Precedence: an explicit `ServerOptions.compaction` wins (with the run-level
+   * context window filling in when the options do not set one — the same
+   * precedence the harness applies to auto compaction); otherwise the resolved
+   * config's compaction fields apply (`configCompactionSettings`, so `serve`
+   * flags are no longer ignored); with nothing configured the derived settings
+   * equal the honest `compaction.ts` defaults, so an explicit `/compact` on a
+   * long session stays meaningful even when auto compaction is off.
    */
   function manualCompactionSettings(cfg: Config): CompactionSettings {
     const configured = options.compaction;
-    const configuredWindow = configured?.contextWindow ?? 0;
+    if (configured === undefined) return configCompactionSettings(cfg);
+    const configuredWindow = configured.contextWindow ?? 0;
     const window = configuredWindow > 0 ? configuredWindow : (cfg.contextWindow ?? 0);
-    if (configured === undefined) return window > 0 ? { contextWindow: window } : {};
     if (configuredWindow > 0 || window <= 0) return configured;
     return { ...configured, contextWindow: window };
+  }
+
+  /**
+   * Reject run admission while a manual compaction owns the target session.
+   * Thrown before any session file or run record is created, so the
+   * compaction's JSONL rewrite can never drop a concurrently admitted run's
+   * envelopes. Checked synchronously right before the mutation, so there is no
+   * window for the reservation to appear afterwards.
+   */
+  function assertNotCompacting(name: string): void {
+    if (state.compactions.has(name)) {
+      throw new HttpError(409, "a compaction is in progress for this session; retry in a moment");
+    }
   }
 
   /**
@@ -1601,6 +1652,9 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         prepared.modeOverride === undefined ? raw : { ...raw, mode: prepared.modeOverride };
       const cfg = buildCfg(runReq);
       const name = sessionName(req.session);
+      // A manual compaction owns this session right now: refuse before the run
+      // context is opened or any envelope is appended.
+      assertNotCompacting(name);
       let result;
       try {
         result = await executeRun(
@@ -1799,7 +1853,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       const name = sessionFileName(ctx.params.name);
       const store = storeFor(name);
       if (!store.exists()) throw new HttpError(404, "not found");
-      // Never compact under a live turn: a queued/running/waiting run owns the
+      // Keep the initial state check: a queued/running/waiting run owns the
       // context and would append to (or rewrite) the same session file.
       const live = state.runs.list().some(
         (record) => record.session === name && ACTIVE_STATES.has(String(record.status)),
@@ -1807,30 +1861,65 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       if (live) {
         throw new HttpError(409, "a run is active for this session; stop it before compacting");
       }
-      // Load exactly like a resumed run, then summarise through the same
-      // provider construction a run uses. `compactContext` rewrites the store
-      // only when it actually compacted (temp file + rename, dense `seq`, JSONL
-      // shape untouched), so any failure leaves the session byte-identical.
-      const context = restoreContext(store);
-      let settings: CompactionSettings;
-      let provider: Provider;
-      try {
-        const { cfg, endpoints } = buildCfg({ task: "compact" });
-        settings = manualCompactionSettings(cfg);
-        provider = summarizerProvider(cfg, endpoints, settings.summarizerRole ?? "senior");
-      } catch (exc) {
-        if (exc instanceof HttpError) throw exc;
-        throw new HttpError(502, errorDetail(exc));
+      // Serialize against run admission and other compactions: reserve the
+      // session SYNCHRONOUSLY (no await since the check above) before the first
+      // async step. Run admission reads the same set, so no run can be accepted
+      // between this check and the JSONL rewrite below; the reservation is
+      // released in the `finally` on every path.
+      if (state.compactions.has(name)) {
+        throw new HttpError(409, "another compaction is already running for this session");
       }
-      const before = context.events.length;
-      let compacted: boolean;
+      // A client disconnect aborts the summarizer. The response's `close` fires
+      // only once the response completes or the connection drops; the listener
+      // is removed in the `finally` before the handler returns, so a normal
+      // completion never aborts an already-finished compaction.
+      const abort = new AbortController();
+      const onResponseClose = (): void => {
+        abort.abort();
+      };
+      state.compactions.add(name);
       try {
-        compacted = await compactContext(context, provider, settings);
-      } catch (exc) {
-        throw new HttpError(502, errorDetail(exc));
+        ctx.res.once("close", onResponseClose);
+        // Load exactly like a resumed run, then summarise through the same
+        // provider construction a run uses. `compactContext` rewrites the store
+        // only when it actually compacted (temp file + rename, dense `seq`, JSONL
+        // shape untouched), so any failure leaves the session byte-identical.
+        // A corrupt/unreadable JSONL is a stable 4xx with no path leaked.
+        let context: SharedContext;
+        try {
+          context = restoreContext(store);
+        } catch {
+          throw new HttpError(422, "session file cannot be read; it may be corrupt");
+        }
+        let settings: CompactionSettings;
+        let provider: Provider;
+        try {
+          const { cfg, endpoints } = buildCfg({ task: "compact" });
+          settings = manualCompactionSettings(cfg);
+          provider = summarizerProvider(cfg, endpoints, settings.summarizerRole ?? "senior");
+        } catch (exc) {
+          if (exc instanceof HttpError) throw exc;
+          throw new HttpError(502, errorDetail(exc));
+        }
+        const before = context.events.length;
+        let compacted: boolean;
+        try {
+          compacted = await compactContext(context, provider, settings, abort.signal);
+        } catch (exc) {
+          // An operator disconnect is not a provider failure. The client is
+          // gone, so the status is only for logs/tests; the reservation still
+          // releases through the `finally`.
+          if (abort.signal.aborted) {
+            throw new HttpError(499, "compaction aborted by the client");
+          }
+          throw new HttpError(502, errorDetail(exc));
+        }
+        if (!compacted) return { compacted: false, reason: "nothing to compact" };
+        return { compacted: true, before_events: before, after_events: context.events.length };
+      } finally {
+        ctx.res.off("close", onResponseClose);
+        state.compactions.delete(name);
       }
-      if (!compacted) return { compacted: false, reason: "nothing to compact" };
-      return { compacted: true, before_events: before, after_events: context.events.length };
     }),
   );
 
@@ -2166,6 +2255,11 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       const runReq: RunRequestData =
         prepared.modeOverride === undefined ? req : { ...req, mode: prepared.modeOverride };
       const name = sessionName(req.session);
+      // The final, synchronous admission gate: a manual compaction must never
+      // overlap a run submission (its JSONL rewrite would drop this run's
+      // envelopes). Checked right before the run record exists — nothing has
+      // been created for this request yet.
+      assertNotCompacting(name);
       const broker = new RunApprovalBroker();
       const record = state.runs.submit(
         prepared.task,
@@ -2377,6 +2471,10 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       res.end();
       return;
     }
+    // The client disconnected before the handler settled (e.g. an aborted
+    // compaction): there is nobody to write to, and writing to a destroyed
+    // response would turn the original error into a second failure.
+    if (res.writableEnded || res.destroyed) return;
     if (exc instanceof HttpError) {
       writeJson(res, exc.status, { detail: exc.message });
       return;
