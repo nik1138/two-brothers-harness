@@ -162,7 +162,11 @@ Then open `http://127.0.0.1:8600`:
 2. **Set the models** — the Settings dialog opens from the bottom-left of the
    sidebar; per-role Senior/Junior provider, model, base URL, and API key
    (keys are never echoed back; the server seals them at rest). Runs use the
-   configured models; there is no separate "mock" switch in the UI.
+   configured models; there is no separate "mock" switch in the UI. Settings →
+   **Providers** lists the provider presets by name and opens the selected
+   provider's settings right below it (base URL, masked API key, model ids,
+   advanced wire kind, add/delete); Settings → **Appearance** sets the theme
+   and the Comfortable/Compact density for this device.
 3. **Send a task** in `work` mode. The run proceeds in the background; the
    chat updates live over SSE — live **Thinking** (reasoning) and **Response**
    blocks stream in as the models generate, then resolve into the normal

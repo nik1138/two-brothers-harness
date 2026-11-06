@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Provider presets master–detail in Settings → Providers**: the preset list
+  is now identity-only (name, Senior/Junior role badges, key-state dot,
+  `Customized`/`custom` tags), and the selected provider's settings appear
+  inline directly below its row — Base URL, masked write-only API key, model
+  ids as editable tags, an `Advanced` wire-kind disclosure, dirty-gated
+  `Save changes`, an inline add card, and a delete confirm that names the
+  roles which would switch to Manual. `GET /api/providers` gained additive
+  `seed` and `customized` booleans so a client can tell a pristine built-in
+  seed from an edited override or a custom entry (all other fields and
+  routes unchanged). Pure model in `web/src/providerSettings.ts`, tested in
+  `web/tests/providerSettings.test.ts` (web 195/195).
 - **First-party base commands** (`src/basecommands.ts`): the built-in slash
   commands adapted from the two reference harnesses — prompt templates
   `plan`, `goal`, `feedback` (literal `$ARGUMENTS`/`$1..$9`/`$$` expansion,
@@ -187,6 +198,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Settings → Appearance cards collapsed under Compact density**: the
+  global compact-density rule targeting the sidebar footer's `.theme-option`
+  switch also matched the Appearance dialog's cards (same class name), so with
+  Compact active every card was forced to 24px and its labels/descriptions
+  overflowed the border. The Appearance section now uses its own
+  `.appearance-*` classes and the density rule is scoped to
+  `html[data-density='compact'] .sidebar .theme-option`; a browser-E2E
+  `appearance-density` scenario pins the card geometry in both densities and
+  the preference across a reload.
 - **Manual compaction/run mutual exclusion** (audit P1): `POST
   /api/sessions/{name}/compact` now reserves the session synchronously before
   the summarizer call and releases it in `finally`; run submission for a

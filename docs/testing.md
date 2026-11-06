@@ -149,7 +149,8 @@ The suite (`tests/chat.test.ts`, `tests/timeline.test.ts`,
 `tests/recents.test.ts`, `tests/density.test.ts`, `tests/find.test.ts`,
 `tests/search.test.ts`, `tests/workspaceOrder.test.ts`,
 `tests/mentions.test.ts`, `tests/streaming.test.ts`,
-`tests/basecommands.test.ts`, `tests/composerKeys.test.ts`) covers the
+`tests/basecommands.test.ts`, `tests/composerKeys.test.ts`,
+`tests/providerSettings.test.ts`) covers the
 envelope→group-chat projection, the runtime-event timeline merge, per-session
 unsent drafts, palette building/scoring/filtering, sidebar row status, the MRU
 workspace list, the persisted UI density preference, find-in-transcript
@@ -157,9 +158,13 @@ matching, content-search result shaping plus export helpers, the workspace
 ordering helpers, the composer mention trigger/filter/insert model, the
 bounded live-token streaming accumulator, the base-command catalogue merge
 (sorting, discovered-shadowing, alias search, typed-command resolution,
-compact request shape, old-backend fallback) and the pure composer key
+compact request shape, old-backend fallback), the pure composer key
 contract (IME/repeat-safe submit, `Ctrl/⌘+Enter`, picker accept/dismiss,
-double-`Esc` window). The modules are dependency-free at
+double-`Esc` window), and the Settings → Providers preset model (tolerant
+`seed`/`customized` normalization, inline detail open/selection, draft dirty
+tracking, role usage badges, delete eligibility/impact copy, add-form
+validation, keyboard arithmetic; 195/195 web tests). The modules are
+dependency-free at
 runtime, so plain `node --test` runs them via the `tests/register-ts.mjs`
 bootstrap (a tiny resolve hook for the extensionless imports); `npm test`
 wires that up. The full `web/` gate also includes `npm run build` (see the
@@ -202,9 +207,12 @@ node e2e/run.mjs
 
 Scenarios: group-chat run with the mock provider (distinct role bubbles, no
 raw-protocol leakage), reload/resume, approval card → file on disk →
-changed-file diff (allow and deny paths), stop, and the 390 px mobile drawer
+changed-file diff (allow and deny paths), stop, the 390 px mobile drawer
 (starts closed, chat inert while open, Escape/backdrop close it, focus returns
-to the trigger). Every scenario runs against the TypeScript backend
+to the trigger), and the Appearance-density regression (Settings → Appearance
+cards keep their natural height and unclipped copy under compact density while
+the sidebar footer theme switch shrinks, and the density choice survives a
+reload). Every scenario runs against the TypeScript backend
 (`packages/harness/dist/cli.js serve`, built from this checkout). Fixture-backed
 scenarios drive a scripted OpenAI-compatible model server
 (`e2e/fixtures/scripted-server.mjs`) through the real approval broker, and skip

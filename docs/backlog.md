@@ -405,6 +405,21 @@ Design anchors that already exist:
 
 ## Open items (deferred)
 
+- **Provider preset reset-to-default** — a seed edited in Settings →
+  Providers materializes a stored override, and today the only way to drop it
+  is `DELETE /api/providers/{name}`, which also clears every role
+  `provider_ref` pointing at that name (roles silently fall back to Manual).
+  Add a dedicated `POST /api/providers/{name}/reset` that removes the stored
+  override, keeps role references, and returns the pristine seed; the web
+  detail card then gets a "Reset to default" action (deliberately not shipped
+  in the master–detail round because the DELETE side effect is surprising).
+- **Provider model discovery** — `preset.models` is a manual/suggested list;
+  there is no discovery endpoint (`provider.listModels()` exists in the
+  package and drives the CLI `models` command). Add
+  `POST /api/providers/{name}/discover` (or a GET) that queries the preset's
+  endpoint and returns model ids, and a "Refresh models" control in the
+  Settings → Providers detail card, keeping the honest note about
+  `two-brothers models --base-url <url>` as the offline path.
 - **TUI approval surface (kimi-code parity)** — the TUI has no approval
   panel although `src/permissions.ts` brokers requests and fails closed
   (`web/` renders the cards). Port kimi-code's approval panel shape: typed

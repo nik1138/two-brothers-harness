@@ -119,7 +119,9 @@ server then serves (the npm tarball ships its own copy of that build).
   anthropic, gemini, openrouter, lmstudio, custom) keyed by env-var names,
   `onboard` to write per-role settings, `models` to list an endpoint's models,
   a hand-maintained price table for `cost: $…` estimates, and per-role
-  `--max-tokens` output caps.
+  `--max-tokens` output caps. In the web workspace, Settings → Providers is a
+  master–detail list: provider names first, the selected provider's settings
+  (base URL, masked write-only key, model ids, wire kind) directly below.
 - **Approval broker.** Workspace tools are confined to an operator-registered
   directory: reads auto-allow, while writes, edits, deletes, and shell commands
   park the run on an operator approval. With no broker configured the policy

@@ -63,6 +63,7 @@ The backend is the TypeScript server in `packages/harness`:
 - `src/basecommands.ts` — first-party (`GET /api/commands` → `baseCommands`) slash-command model: normalization/sort/merge with discovered templates (discovered shadows base), alias/description search, `/name args` parsing/resolution and the action dispatch payload; used by `Composer.vue`/`App.vue`
 - `src/composerKeys.ts` — pure composer key contract (IME-safe submit, Ctrl/⌘+Enter, picker accept/dismiss, `?`/Ctrl+⌘+/ chord, double-Escape stop window)
 - `src/shortcuts.ts` — single-source keyboard-shortcut table rendered by the `/help` overlay; `src/download.ts` — shared session export Blob download used by the row menu and `/export`
+- `src/providerSettings.ts` — pure provider-preset model for Settings → Providers: tolerant `seed`/`customized` normalization, inline master–detail open/selection state, draft dirty tracking, role usage badges, delete eligibility/impact copy, add-form validation and list keyboard arithmetic; used by `ProvidersSection.vue`
 - `src/components/` help/status dialogs: `ShortcutHelpDialog` (`/help`, `?`), `SessionStatusDialog` (`/status`), `PermissionInfoDialog` (`/permission`)
 - `vite.config.ts` — dev proxy `/api` → `http://127.0.0.1:8600`
 
@@ -73,7 +74,9 @@ The backend is the TypeScript server in `packages/harness`:
    component library. Do not add further npm packages. Use plain
    `import { NButton, ... } from 'naive-ui'` — Vite tree-shakes it; no
    auto-import plugins. Match the app theme via `theme-overrides`/tokens,
-   not global CSS resets.
+   not global CSS resets. Class names are global: a Settings section must not
+   reuse a sidebar/footer control class (`.theme-option` belongs to the footer
+   switch; Appearance uses its own `.appearance-*` names).
 2. **`npm run build` must keep passing** (outputs `dist/`). The backend serves
    that build, so a broken build breaks the product, not just CI. `npm test`
    runs the chat/timeline projection tests, the draft-store tests, the

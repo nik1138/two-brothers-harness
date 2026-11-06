@@ -32,6 +32,16 @@ A missing model is only a warning in `doctor`; a real run still fails. The
 `node dist/cli.js doctor --provider mock` to confirm the rest of the environment
 while bypassing provider configuration entirely.
 
+## Provider presets and appearance
+
+| Symptom | Why | Fix |
+|---|---|---|
+| Settings → Providers lists a provider but the row has no **Delete** | The list mixes built-in seed presets and custom entries; only custom entries (and stored overrides) have a stored record, so there is no Delete for an untouched built-in | Edit the preset instead, or add a custom provider; resetting an edited built-in to its defaults is a tracked follow-up (today the override can only be dropped via the API `DELETE`, which also clears role references). |
+| A provider's settings card will not save | `base_url` is required and must be a URL; a duplicate name on add is a 409 | Fill a valid base URL; for duplicates pick another id (`A provider already uses this ID.` appears inline). Model ids are free-form strings. |
+| The model ids under a provider differ from what a role actually uses | `preset.models` is a suggestion list for role pickers/onboarding, not the request model | Set the model each role uses in Models & roles (or `--senior-model`/`--junior-model`); to list what an endpoint serves run `node dist/cli.js models --base-url <url>`. |
+| Compact density makes Settings cards look broken / labels overlap the border | A stale build: older bundles had a global `.theme-option` rule that also hit the Appearance cards | Rebuild and reload (`cd web && npm run build`, then refresh the served app); the fix scopes the compact rule to the sidebar footer and the Appearance section uses `.appearance-*` classes. |
+| Theme/density changes do not stick | The preference is stored per device in `localStorage` | Check that storage is not blocked for the origin; theme and density are local UI preferences, not server settings. |
+
 ## Endpoint unreachable, refused, or rate-limited
 
 | Symptom | `doctor` check | Fix |
