@@ -140,9 +140,11 @@ import {
   type UsageTotals,
 } from "./provider.ts";
 import {
+  APPROVAL_DENY_LIMIT,
   clipArgs,
   clipText,
   compactToolResult,
+  normalizeApprovalTarget,
   toolEvidenceLine,
   MAX_EVIDENCE_ENTRIES,
   CLIP_EVIDENCE_CHARS,
@@ -765,8 +767,21 @@ function streamToolStatus(status: string): StreamToolStatus {
  * identical repeat requests are auto-denied. Two denials means the third
  * identical request never wakes the broker (the operator already said no
  * twice; a model that keeps asking must not park the run in `waiting`).
+ *
+ * The canonical value lives in `src/runevents.ts` (the broker enforces it for
+ * every approval path); re-exported here as the harness API. Two layers share
+ * it and never double-count one request:
+ * - `invokeTool` below caps the built-in workspace tools *before* the
+ *   workspace `PermissionManager` reaches its broker, keeping the model-facing
+ *   `status: "denied"` / `auto_denied: true` result shape;
+ * - `RunApprovalBroker` caps every other consumer of the same broker
+ *   (plugin/MCP-contributed approval paths and custom `PermissionManager`s)
+ *   and emits the additive `approval_auto_denied` runtime event.
+ * A workspace tool that trips the harness cap is auto-denied before the
+ * broker sees the request, so the broker counter only ever records real
+ * operator answers.
  */
-export const APPROVAL_DENY_LIMIT = 2;
+export { APPROVAL_DENY_LIMIT };
 
 /**
  * Workspace mutation tools that park on an operator approval, mapped to the
@@ -793,12 +808,13 @@ export interface ApprovalPair {
   command: string;
 }
 
-/** Trim, POSIX-separate and drop a leading "./" so repeat requests match. */
-function normalizeApprovalTarget(raw: string): string {
-  return raw.trim().replace(/\\/g, "/").replace(/^(?:\.\/)+/, "");
-}
-
-/** The cap-tracked pair for one tool call, or null for tools without approvals. */
+/**
+ * The cap-tracked pair for one tool call, or null for tools without approvals.
+ * Mirrors `approvalPairKey`/`approvalMatchTarget` in `runevents.ts` (the
+ * broker-level cap) so the same request shape is counted consistently: the
+ * comparison target is normalized the same way (a shell request compares its
+ * command) and the key is case-folded on Windows.
+ */
 export function approvalPair(
   toolName: string,
   args: Record<string, unknown>,

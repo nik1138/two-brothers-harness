@@ -12,17 +12,17 @@
  * so a UI reload can recover tool/approval history without touching the
  * envelope log. Events are the typed runtime events (run_status / envelope /
  * tool_started / tool_completed / approval_requested / approval_resolved /
- * prompt_audit / run_error / run_end) plus `run_id` and `at` (epoch
- * seconds). Event JSON keeps the Python field names (`run_id`,
- * `approval_id`) so sidecar files stay interchangeable with the Python
- * implementation; `prompt_audit` keeps its camelCase payload
+ * approval_auto_denied / prompt_audit / run_error / run_end) plus `run_id`
+ * and `at` (epoch seconds). Event JSON keeps the Python field names
+ * (`run_id`, `approval_id`) so sidecar files stay interchangeable with the
+ * Python implementation; `prompt_audit` keeps its camelCase payload
  * (`systemChars`/`userChars`) to stay identical to `PromptAuditEntry`.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { Decision, type ApprovalBroker, type ApprovalRequest } from "./permissions.ts";
+import { Action, Decision, type ApprovalBroker, type ApprovalRequest } from "./permissions.ts";
 import type { PromptAuditEntry } from "./harness.ts";
 
 export const CLIP_RESULT_CHARS = 800;
@@ -86,6 +86,23 @@ export interface ApprovalResolvedEvent extends RuntimeEventMeta {
 }
 
 /**
+ * Additive event: an identical approval request was auto-denied by the
+ * broker's operator-denial cap, so it never parked and never emitted an
+ * `approval_requested`. `action` + `target` identify the repeated pair (a
+ * shell request's target is its command), `count` is the number of operator
+ * denials already recorded for that pair when the cap tripped, `limit` is the
+ * configured cap. Consumers that only understand `approval_requested` /
+ * `approval_resolved` can ignore this event type safely.
+ */
+export interface ApprovalAutoDeniedEvent extends RuntimeEventMeta {
+  type: "approval_auto_denied";
+  action: string;
+  target: string;
+  count: number;
+  limit: number;
+}
+
+/**
  * One provider call's prompt/tool-belt audit, streamed as it happens: the
  * payload is `PromptAuditEntry` field for field (names and lengths only,
  * never prompt bodies), so `HarnessResult.promptAudits` and this event stream
@@ -118,6 +135,7 @@ export type RuntimeEvent =
   | EnvelopeEvent
   | ApprovalRequestedEvent
   | ApprovalResolvedEvent
+  | ApprovalAutoDeniedEvent
   | PromptAuditEvent
   | RunErrorEvent
   | RunEndEvent;
@@ -322,8 +340,62 @@ export class RuntimeEventStore {
 // RunApprovalBroker: parks tool coroutines until the operator answers
 // ---------------------------------------------------------------------------
 
+/**
+ * How many operator denials of one identical `(action, target)` approval
+ * request are allowed before identical repeats are auto-denied. Two denials
+ * means the third identical request resolves immediately instead of parking
+ * the run again. The harness-level workspace-tool cap (`harness.ts`) uses the
+ * same value; this constant is the canonical one because the broker is the
+ * layer every approval consumer shares (the harness re-exports it for
+ * compatibility).
+ */
+export const APPROVAL_DENY_LIMIT = 2;
+
+/** Constructor options for `RunApprovalBroker`. */
+export interface RunApprovalBrokerOptions {
+  /**
+   * Operator denials of one identical `(action, target)` pair allowed before
+   * identical repeats are auto-denied. Defaults to `APPROVAL_DENY_LIMIT`;
+   * non-positive or non-finite values fall back to that default.
+   */
+  denyLimit?: number;
+}
+
+/**
+ * Normalize an approval target the way the harness' workspace-tool cap does:
+ * trim, POSIX separators and no leading `./`, so `./a.txt`, `.\\a.txt` and
+ * `a.txt` are one pair.
+ */
+export function normalizeApprovalTarget(raw: string): string {
+  return raw.trim().replace(/\\/g, "/").replace(/^(?:\.\/)+/, "");
+}
+
+/**
+ * The comparison target of one approval request: a shell request's command
+ * (its `target` is typically unset), any other request's target. The harness
+ * `approvalPair` maps workspace tool args onto the same shape.
+ */
+export function approvalMatchTarget(request: ApprovalRequest): string {
+  const action = String(request.action ?? "");
+  const raw =
+    action === Action.SHELL
+      ? String(request.command ?? request.target ?? "")
+      : String(request.target ?? "");
+  return normalizeApprovalTarget(raw);
+}
+
+/**
+ * The broker cap's pairing key: `action\0normalized-target`, case-folded on
+ * Windows (the same convention as the harness' built-in approval pairs).
+ */
+export function approvalPairKey(request: ApprovalRequest): string {
+  const target = approvalMatchTarget(request);
+  const normalized = process.platform === "win32" ? target.toLowerCase() : target;
+  return `${String(request.action ?? "")}\u0000${normalized}`;
+}
+
 /** Events the broker emits into the run's event stream. */
-type ApprovalEvent = ApprovalRequestedEvent | ApprovalResolvedEvent;
+type ApprovalEvent = ApprovalRequestedEvent | ApprovalResolvedEvent | ApprovalAutoDeniedEvent;
 
 interface PendingApproval {
   request: ApprovalRequest;
@@ -342,15 +414,56 @@ function shortId(): string {
  * run is stopped (`denyAll()` / abort signal — a stopped run must never leave
  * a mutation parked mid-approval, so every pending wait resolves as DENY).
  *
+ * Operator-denial repeat cap: the broker records *operator* denials per
+ * identical `(action, target)` pair (a shell request's command is its target).
+ * Once a pair reaches `denyLimit` denials, the next identical `approve()` call
+ * resolves DENY immediately — no pending entry, no `approval_requested` — and
+ * emits one additive `approval_auto_denied` event. Only `respond()` denials
+ * by the operator count: `denyAll()` (stop/cancel/abort) and aborted waits are
+ * cancellations, not operator answers, and never increment the counter. Allow
+ * answers neither count nor reset a pair. This is the broker-level counterpart
+ * of the harness' workspace-tool cap (`APPROVAL_DENY_LIMIT`); the two layers
+ * cannot double-count one request because the harness auto-denies before the
+ * workspace `PermissionManager` reaches this broker.
+ *
  * Implements the `ApprovalBroker` interface from `permissions.ts`, so it plugs
  * straight into `PermissionManager` in place of `CallbackBroker`/`StaticBroker`.
  * Python parity: `approve()` polls a threading.Event; here the same semantics
  * ride on a promise plus an `AbortSignal` listener (no polling).
  */
 export class RunApprovalBroker implements ApprovalBroker {
+  /**
+   * Operator denials of one identical pair allowed before repeats are
+   * auto-denied (validated constructor option; default
+   * `APPROVAL_DENY_LIMIT`).
+   */
+  readonly denyLimit: number;
   private readonly _pending = new Map<string, PendingApproval>();
+  /** Operator-denial counts per `action\0target` pair (see `autoDenials()`). */
+  private readonly _denials = new Map<string, number>();
   private _emit: ((event: ApprovalEvent) => void) | null = null;
   private _signal: AbortSignal | null = null;
+
+  /**
+   * `denyLimit`: non-positive/non-finite values fall back to the default
+   * `APPROVAL_DENY_LIMIT`; a positive number is floored.
+   */
+  constructor(options: RunApprovalBrokerOptions = {}) {
+    const requested = options.denyLimit;
+    this.denyLimit =
+      typeof requested === "number" && Number.isFinite(requested) && requested >= 1
+        ? Math.floor(requested)
+        : APPROVAL_DENY_LIMIT;
+  }
+
+  /**
+   * Read-only snapshot of the operator-denial counts per
+   * `action\0normalized-target` pair (the `approvalPairKey` form). Exposed for
+   * tests and runtime telemetry; callers cannot mutate the broker through it.
+   */
+  autoDenials(): Record<string, number> {
+    return Object.fromEntries(this._denials);
+  }
 
   /** Bind the per-run emit hook and abort signal (created by the worker). */
   attach(
@@ -363,8 +476,28 @@ export class RunApprovalBroker implements ApprovalBroker {
 
   // -- broker protocol -------------------------------------------------------
 
-  /** Park until the operator answers, the run stops (deny), or denyAll(). */
+  /**
+   * Park until the operator answers, the run stops (deny), or denyAll().
+   *
+   * Operator-denial cap: when this exact `(action, target)` pair has already
+   * been denied by the operator `denyLimit` times, resolve DENY immediately
+   * (no pending entry, no `approval_requested`) and emit one
+   * `approval_auto_denied` event. A cancelled run keeps the cancellation path
+   * below — cancellation is not an operator denial and must never trip the
+   * cap.
+   */
   async approve(request: ApprovalRequest): Promise<Decision> {
+    const denials = this._denials.get(approvalPairKey(request)) ?? 0;
+    if (denials >= this.denyLimit && this._signal?.aborted !== true) {
+      this._event({
+        type: "approval_auto_denied",
+        action: String(request.action ?? ""),
+        target: approvalMatchTarget(request),
+        count: denials,
+        limit: this.denyLimit,
+      });
+      return Decision.DENY;
+    }
     const approvalId = shortId();
     const entry: PendingApproval = {
       request,
@@ -447,10 +580,20 @@ export class RunApprovalBroker implements ApprovalBroker {
     return out;
   }
 
-  /** Answer one pending request; `null` if unknown or already answered. */
+  /**
+   * Answer one pending request; `null` if unknown or already answered.
+   *
+   * Only an operator *deny* counts toward the repeat cap (per identical
+   * `(action, target)` pair). Allows neither count nor reset a pair; an
+   * already-answered/unknown id is a no-op and never changes any count.
+   */
   respond(requestId: string, decision: Decision): Decision | null {
     const entry = this._pending.get(requestId);
     if (entry === undefined || entry.answered) return null;
+    if (decision === Decision.DENY) {
+      const key = approvalPairKey(entry.request);
+      this._denials.set(key, (this._denials.get(key) ?? 0) + 1);
+    }
     entry.decision = decision;
     entry.answered = true;
     entry.resolve(decision);
@@ -462,6 +605,10 @@ export class RunApprovalBroker implements ApprovalBroker {
    * Entries are removed here; a parked `approve()` then wakes to an
    * already-resolved entry and returns DENY without emitting again — the
    * resolution event is emitted exactly once, here.
+   *
+   * These are cancellation denials, not operator answers: they never
+   * increment the repeat-cap counters (a stop must not consume the operator's
+   * deny budget for a pair).
    */
   denyAll(reason = "cancelled"): number {
     const entries = [...this._pending.entries()];

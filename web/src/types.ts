@@ -236,6 +236,23 @@ export interface PromptAuditEvent {
   at: number
 }
 
+/**
+ * A repeat approval request for an `(action, target)` pair the operator has
+ * already denied `count` times: the broker auto-denies it without waking the
+ * operator (the run cannot park on the same question forever).
+ */
+export interface ApprovalAutoDeniedEvent {
+  type: 'approval_auto_denied'
+  action: string
+  target: string
+  /** Operator denials recorded for the pair when the cap tripped. */
+  count: number
+  /** Configured deny limit (default 2). */
+  limit: number
+  run_id: string
+  at: number
+}
+
 /** Typed runtime events streamed from GET /api/runs/{id}/events. */
 export type RunEvent =
   | { type: 'run_status'; status: 'queued' | 'running' | 'waiting'; run_id: string; at: number }
@@ -253,6 +270,7 @@ export type RunEvent =
   | ToolCompletedEvent
   | ApprovalRequestedEvent
   | ApprovalResolvedEvent
+  | ApprovalAutoDeniedEvent
   | PromptAuditEvent
 
 /** Response of GET /api/sessions/{name}/events — the runtime sidecar. */
