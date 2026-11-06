@@ -550,6 +550,132 @@ async function scenarioSessionsShow(): Promise<string> {
   }
 }
 
+async function scenarioSessionsSearch(): Promise<string> {
+  const dir = mkTempDir("tb-cli-sessions-search-");
+  try {
+    const created = runCli([
+      "run", "Compare redis and valkey migration",
+      "--provider", "mock",
+      "--session-file", path.join(dir, "alpha.jsonl"),
+    ]);
+    check(created.status === 0, `setup run exit code ${created.status}: ${created.stderr.slice(-300)}`);
+
+    // Human output: `N matches in M sessions` then `<session>  <field>  <snippet>`.
+    const human = runCli(["sessions", "search", "redis", "--sessions-dir", dir]);
+    check(
+      human.status === 0,
+      `sessions search exit code ${human.status}: ${human.stderr.slice(-300)}`,
+    );
+    check(/^\d+ matches in \d+ sessions$/m.test(human.stdout), `search header missing: ${human.stdout.slice(0, 200)}`);
+    check(
+      /alpha\.jsonl  (title|message|decision)  .*redis/i.test(human.stdout),
+      `search hit line missing: ${human.stdout.slice(0, 300)}`,
+    );
+
+    // --json: exactly one SessionSearchResult object.
+    const json = runCli(["sessions", "search", "redis", "--sessions-dir", dir, "--json"]);
+    check(json.status === 0, `sessions search --json exit code ${json.status}: ${json.stderr.slice(-300)}`);
+    let parsed: { query?: unknown; hits?: unknown; scanned_sessions?: unknown };
+    try {
+      parsed = JSON.parse(json.stdout) as typeof parsed;
+    } catch {
+      throw new CheckError(`sessions search --json is not JSON: ${json.stdout.slice(0, 200)}`);
+    }
+    check(parsed.query === "redis", `search JSON query echo is ${String(parsed.query)}`);
+    check(typeof parsed.scanned_sessions === "number", "search JSON misses scanned_sessions");
+    const hits = parsed.hits as Array<Record<string, unknown>>;
+    check(Array.isArray(hits) && hits.length > 0, "search JSON carries no hits");
+    check(hits[0].session === "alpha.jsonl", `unexpected hit session: ${String(hits[0].session)}`);
+    check(
+      typeof hits[0].snippet === "string" && /redis/i.test(hits[0].snippet),
+      `hit snippet misses the query: ${String(hits[0].snippet)}`,
+    );
+    check(
+      ["title", "message", "decision"].includes(String(hits[0].field)),
+      `unexpected hit field: ${String(hits[0].field)}`,
+    );
+
+    const none = runCli(["sessions", "search", "zebra", "--sessions-dir", dir]);
+    check(none.status === 0, `no-match search exit code ${none.status}: ${none.stderr.slice(-300)}`);
+    check(/^no matches$/m.test(none.stdout), `no-match output missing: ${none.stdout.trim()}`);
+
+    const short = runCli(["sessions", "search", "r", "--sessions-dir", dir]);
+    check(short.status === 2, `short-query exit code ${short.status}, expected 2`);
+    check(/query must be at least 2 characters/.test(short.stderr), "short-query diagnostic missing");
+    return "human header/hit, JSON result, no-match 0, short query 2";
+  } finally {
+    rmDir(dir);
+  }
+}
+
+async function scenarioSessionsExport(): Promise<string> {
+  const dir = mkTempDir("tb-cli-sessions-export-");
+  try {
+    const sessionFile = path.join(dir, "export.jsonl");
+    const created = runCli([
+      "run", "Name one benefit of code review",
+      "--provider", "mock",
+      "--session-file", sessionFile,
+    ]);
+    check(created.status === 0, `setup run exit code ${created.status}: ${created.stderr.slice(-300)}`);
+
+    // Default markdown on stdout: title heading + per-envelope markers.
+    const human = runCli(["sessions", "export", "export", "--sessions-dir", dir]);
+    check(human.status === 0, `sessions export exit code ${human.status}: ${human.stderr.slice(-300)}`);
+    check(human.stderr === "", `sessions export wrote to stderr: ${human.stderr.slice(-200)}`);
+    check(
+      /^# Name one benefit of code review$/m.test(human.stdout),
+      `export markdown title missing: ${human.stdout.slice(0, 200)}`,
+    );
+    check(/^- session: export\.jsonl$/m.test(human.stdout), "export markdown session line missing");
+    check(
+      /^## 1\. user → senior · message$/m.test(human.stdout),
+      "export markdown envelope marker missing",
+    );
+    check(/^## 5\. senior → user · decision$/m.test(human.stdout), "export markdown decision marker missing");
+
+    // --format json: the machine-readable document.
+    const json = runCli(["sessions", "export", "export", "--sessions-dir", dir, "--format", "json"]);
+    check(json.status === 0, `sessions export --format json exit code ${json.status}: ${json.stderr.slice(-300)}`);
+    let parsed: { name?: unknown; title?: unknown; envelopes?: unknown };
+    try {
+      parsed = JSON.parse(json.stdout) as typeof parsed;
+    } catch {
+      throw new CheckError(`sessions export --format json is not JSON: ${json.stdout.slice(0, 200)}`);
+    }
+    check(parsed.name === "export.jsonl", `unexpected export name: ${String(parsed.name)}`);
+    check(parsed.title === "Name one benefit of code review", `unexpected export title: ${String(parsed.title)}`);
+    check(Array.isArray(parsed.envelopes) && parsed.envelopes.length === 5, "export JSON envelope list missing");
+
+    // --output writes the file (stdout stays empty, a confirmation goes to stderr).
+    const outputFile = path.join(dir, "session.md");
+    const written = runCli([
+      "sessions", "export", "export.jsonl",
+      "--sessions-dir", dir,
+      "--output", outputFile,
+    ]);
+    check(written.status === 0, `sessions export --output exit code ${written.status}: ${written.stderr.slice(-300)}`);
+    check(written.stdout === "", `sessions export --output wrote to stdout: ${written.stdout.slice(0, 200)}`);
+    check(/^wrote .*session\.md$/m.test(written.stderr), `export confirmation missing: ${written.stderr.trim()}`);
+    check(fs.existsSync(outputFile), "the --output file was not written");
+    const content = fs.readFileSync(outputFile, "utf-8");
+    check(/^# Name one benefit of code review$/m.test(content), "written export title missing");
+    check(/^## 1\. user → senior · message$/m.test(content), "written export envelope marker missing");
+
+    // Missing session is a runtime error: exit 1.
+    const missing = runCli(["sessions", "export", "nope", "--sessions-dir", dir]);
+    check(missing.status === 1, `missing-session export exit code ${missing.status}, expected 1`);
+    check(/session not found: nope/.test(missing.stderr), "missing-session diagnostic missing");
+
+    // A too-short search query is a usage error: exit 2.
+    const short = runCli(["sessions", "search", "x", "--sessions-dir", dir]);
+    check(short.status === 2, `short-query exit code ${short.status}, expected 2`);
+    return "markdown stdout, JSON document, --output file written, missing session 1, short query 2";
+  } finally {
+    rmDir(dir);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -569,6 +695,8 @@ const SCENARIOS: Array<{ name: string; run: () => Promise<string> }> = [
   { name: "stdin", run: scenarioStdin },
   { name: "sessions-json", run: scenarioSessionsJson },
   { name: "sessions-show", run: scenarioSessionsShow },
+  { name: "sessions-search", run: scenarioSessionsSearch },
+  { name: "sessions-export", run: scenarioSessionsExport },
 ];
 
 async function main(): Promise<number> {

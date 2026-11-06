@@ -51,6 +51,16 @@
  * - `GET /api/commands` lists discovered slash commands (name, description,
  *   argumentHint, optional mode, file) with the same kind of diagnostics —
  *   metadata only, never the template bodies.
+ * - `GET /api/search?q=<query>&limit=<n>` full-text searches every session
+ *   document (`src/sessionsearch.ts`, newest session first) and returns the
+ *   bounded `SessionSearchResult` hit list. A trimmed query shorter than
+ *   `SEARCH_MIN_QUERY_CHARS` is a 400 ("query must be at least 2 characters")
+ *   and `limit` is clamped to 1..100 (default 20). Corrupt session files are
+ *   skipped by `loadSessionDocs`, never fatal. `GET
+ *   /api/sessions/{name}/export?format=markdown|json` renders one session as
+ *   a downloadable attachment (`Content-Disposition`, markdown or JSON); an
+ *   unknown format is a 400, a missing/`..`-unsafe name is a 404/400, and a
+ *   HEAD request returns the same headers without a body.
  * - Each run merges the plugin-contributed MCP servers under the configured
  *   `mcpConfig` file (`mergeMcpConfig`: a configured entry wins a name
  *   collision, then the first plugin), connects them, folds the per-role
@@ -93,7 +103,7 @@ import {
   type McpConfigFileShape,
   type McpToolSet,
 } from "./mcp.ts";
-import { SessionMetadataStore } from "./metadata.ts";
+import { deriveTitle, SessionMetadataStore } from "./metadata.ts";
 import { Decision, PermissionManager } from "./permissions.ts";
 import {
   PluginManager,
@@ -104,6 +114,17 @@ import {
 import { mergeSeedPresets, presetApiKey, presetById, type Preset } from "./presets.ts";
 import { emptyUsage, type Provider } from "./provider.ts";
 import { restoreContext, SessionStore } from "./session.ts";
+import {
+  SEARCH_DEFAULT_LIMIT,
+  SEARCH_MAX_LIMIT,
+  SEARCH_MIN_QUERY_CHARS,
+  exportSessionFileName,
+  loadSessionDocs,
+  searchSessions,
+  sessionToJsonString,
+  sessionToMarkdown,
+  type SessionSearchDoc,
+} from "./sessionsearch.ts";
 import {
   PROVIDER_KIND_DEFAULT,
   SettingsStore,
@@ -1029,6 +1050,48 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     return [{ from: "user", kind: "message", payload: { text } }];
   }
 
+  /**
+   * One session as an export document (`src/sessionsearch.ts` shape): envelopes
+   * from the durable store, the sidecar title when present (derived title
+   * otherwise, the same fallback `loadSessionDocs` uses), workspace link and
+   * mtime in Unix seconds for the export header. A missing file is a 404.
+   */
+  function sessionExportDoc(name: string): SessionSearchDoc {
+    const store = storeFor(name);
+    if (!store.exists()) throw new HttpError(404, "not found");
+    const events = store.load();
+    const stem = name.replace(/\.jsonl$/, "");
+    const meta = state.metadata.get(name);
+    const metaTitle = meta !== null && typeof meta.title === "string" ? meta.title.trim() : "";
+    const workspaceId =
+      meta !== null && typeof meta.workspace_id === "string" && meta.workspace_id
+        ? meta.workspace_id
+        : null;
+    let updated: number | null = null;
+    try {
+      updated = Math.floor(fs.statSync(path.join(sessionsDir, name)).mtimeMs / 1000);
+    } catch {
+      updated = null;
+    }
+    return {
+      name,
+      title: metaTitle || deriveTitle(events as unknown as Array<Record<string, any>>, stem),
+      events,
+      workspace_id: workspaceId,
+      updated,
+    };
+  }
+
+  /**
+   * `GET /api/search` limit param: an integer clamped to `1..SEARCH_MAX_LIMIT`,
+   * defaulting to `SEARCH_DEFAULT_LIMIT` when absent or non-numeric.
+   */
+  function searchLimit(raw: string | null): number {
+    const parsed = raw === null || raw.trim() === "" ? Number.NaN : Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed)) return SEARCH_DEFAULT_LIMIT;
+    return Math.min(SEARCH_MAX_LIMIT, Math.max(1, parsed));
+  }
+
   // -- routes: Stage 1 (session files + synchronous run) ---------------------
 
   const routes: Route[] = [];
@@ -1070,6 +1133,50 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       };
     }),
   );
+
+  // -- routes: session search + export (src/sessionsearch.ts) -----------------
+
+  routes.push(
+    compileRoute("GET", "/api/search", (ctx) => {
+      const query = (ctx.query.get("q") ?? "").trim();
+      if (query.length < SEARCH_MIN_QUERY_CHARS) {
+        throw new HttpError(400, "query must be at least 2 characters");
+      }
+      // `loadSessionDocs` is fail-soft: a missing sessions dir yields an empty
+      // corpus and a corrupt session file is skipped with a count.
+      const loaded = loadSessionDocs(sessionsDir);
+      return searchSessions(loaded.docs, query, {
+        limit: searchLimit(ctx.query.get("limit")),
+      });
+    }),
+  );
+
+  // GET serves the export body; HEAD returns the same status/type/disposition
+  // headers without a body (one handler serves both methods).
+  for (const method of ["GET", "HEAD"] as const) {
+    routes.push(
+      compileRoute(method, "/api/sessions/{name}/export", (ctx) => {
+        const name = sessionFileName(ctx.params.name);
+        const requestedFormat = (ctx.query.get("format") ?? "markdown").trim().toLowerCase();
+        if (requestedFormat !== "markdown" && requestedFormat !== "json") {
+          throw new HttpError(400, "format must be markdown or json");
+        }
+        const format: "markdown" | "json" = requestedFormat;
+        const doc = sessionExportDoc(name);
+        const body = format === "markdown" ? sessionToMarkdown(doc) : sessionToJsonString(doc);
+        ctx.res.writeHead(200, {
+          "Content-Type":
+            format === "markdown"
+              ? "text/markdown; charset=utf-8"
+              : "application/json; charset=utf-8",
+          "Content-Disposition": `attachment; filename="${exportSessionFileName(name, format)}"`,
+          "Content-Length": Buffer.byteLength(body, "utf-8"),
+        });
+        ctx.res.end(ctx.req.method === "HEAD" ? undefined : body);
+        return HANDLED;
+      }),
+    );
+  }
 
   routes.push(
     compileRoute("POST", "/api/run", async (ctx) => {

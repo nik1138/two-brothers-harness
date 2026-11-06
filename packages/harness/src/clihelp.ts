@@ -288,6 +288,16 @@ export const FLAGS: Record<string, FlagHelp> = {
     value: "<n>",
     description: "limit the number of rows or events printed",
   },
+  format: {
+    name: "format",
+    value: "<markdown|json>",
+    description: "sessions export format (default markdown)",
+  },
+  output: {
+    name: "output",
+    value: "<path>",
+    description: "write the sessions export to a file instead of stdout ('-' = stdout)",
+  },
   preset: {
     name: "preset",
     value: "<id>",
@@ -611,28 +621,48 @@ defineCommand({
 
 defineCommand({
   name: "sessions",
-  summary: "list stored sessions, or read one session's envelopes",
+  summary: "list, read, search and export stored sessions",
   commandLine: "two-brothers sessions [--sessions-dir <dir>] [--json] [--limit <n>]",
   usage: [
     "sessions [--sessions-dir <dir>] [--json] [--limit <n>]",
     "sessions show <name> [--json] [--limit <n>]",
+    "sessions search <query> [--json] [--limit <n>]",
+    "sessions export <name> [--format markdown|json] [--output <path>]",
   ],
   description:
     "List the JSONL session files of a sessions directory with readable titles " +
     "(derived from the first operator message), envelope counts and the " +
-    "last-modified time. Output-only: it never changes the files. " +
+    "last-modified time. Output-only: it never changes the files. Subcommands: " +
     "`sessions show <name>` prints one session's summary and its protocol " +
-    "envelopes; the name resolves with or without the .jsonl suffix.",
-  flags: ["sessions-dir", "json", "limit", "help"],
+    "envelopes, `sessions search <query>` full-text searches every session " +
+    "(title and envelope text) and `sessions export <name>` renders one " +
+    "session as a Markdown or JSON document. Session names resolve with or " +
+    "without the .jsonl suffix.",
+  flags: ["sessions-dir", "json", "limit", "format", "output", "help"],
   flagNotes: {
-    json: "print a stable JSON array (list) or one JSON object (show) instead of the table",
-    limit: "list: cap the number of rows; show: cap the number of envelopes printed",
+    json: "print JSON instead of human text: a list array, a show object, or the search result",
+    limit:
+      "list: cap the rows; show: cap the envelopes printed; search: cap the hits (1-100)",
+    format: "export format: markdown (default) or json",
+    output:
+      "export destination path; '-' or omitted writes to stdout and prints a 'wrote <path>' note to stderr",
   },
+  details: [
+    "Subcommands:",
+    "  (none)          list session files (default)",
+    "  show <name>     one session's summary and protocol envelopes",
+    "  search <query>  full-text search across every session document",
+    "  export <name>   download one session (markdown by default, or json)",
+  ],
   examples: [
     "two-brothers sessions",
     "two-brothers sessions --sessions-dir sessions --json",
     "two-brothers sessions show s",
     "two-brothers sessions show s.jsonl --json --limit 20",
+    'two-brothers sessions search "redis migration"',
+    "two-brothers sessions search redis --json --limit 5",
+    "two-brothers sessions export s --output session.md",
+    "two-brothers sessions export s.jsonl --format json",
   ],
 });
 

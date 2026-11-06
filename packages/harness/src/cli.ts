@@ -69,6 +69,7 @@ import {
   type McpConfigFileShape,
   type McpToolSet,
 } from "./mcp.ts";
+import { SessionMetadataStore } from "./metadata.ts";
 import { mergeSeedPresets, presetById, presetIds, seedPresets } from "./presets.ts";
 import { toNdjsonLine, type StreamEvent } from "./runstream.ts";
 import {
@@ -90,6 +91,14 @@ import type { RoleEndpoint } from "./runtime.ts";
 import { selftest } from "./selftest.ts";
 import { createServer } from "./server.ts";
 import { restoreContext, SessionError, SessionStore } from "./session.ts";
+import {
+  SEARCH_MIN_QUERY_CHARS,
+  loadSessionDocs,
+  searchSessions,
+  sessionToJsonString,
+  sessionToMarkdown,
+  type SessionSearchDoc,
+} from "./sessionsearch.ts";
 import { discoverSkills, type SkillCatalog } from "./skills.ts";
 import { envPinnedPairs, SettingsStore } from "./settings_store.ts";
 import { runTuiApp } from "./tui/app.ts";
@@ -1679,6 +1688,8 @@ const SESSIONS_OPTIONS = {
   "sessions-dir": { type: "string" as const },
   json: { type: "boolean" as const, default: false },
   limit: { type: "string" as const },
+  format: { type: "string" as const },
+  output: { type: "string" as const },
   ...HELP_OPTIONS,
 } satisfies ParseArgsOptionsConfig;
 
@@ -1861,6 +1872,148 @@ function showSession(
   return 0;
 }
 
+/** Shared diagnostic for a bad `sessions` subcommand invocation: exit 2. */
+function sessionsUsageError(message: string, io: CliIO): number {
+  io.error(`[error] ${message}`);
+  io.error(`Usage: ${commandUsage("sessions")}`);
+  io.error("Run 'two-brothers sessions --help'.");
+  return 2;
+}
+
+/**
+ * `sessions search <query> [--json] [--limit N]`: full-text search over every
+ * session document (`src/sessionsearch.ts`, newest session first). Human
+ * output is a `N matches in M sessions` header plus one
+ * `<session>  <field>  <snippet>` line per hit; `--json` prints the exact
+ * `SessionSearchResult` object. No matches prints "no matches" and exits 0; a
+ * too-short/absent query or a bad flag is a usage error (exit 2).
+ */
+function searchSessionsCommand(
+  sessionsDir: string,
+  args: string[],
+  jsonMode: boolean,
+  limit: number | undefined,
+  io: CliIO,
+): number {
+  const query = args.join(" ").trim();
+  if (!query) {
+    return sessionsUsageError("no search query: sessions search <query> [--json] [--limit <n>]", io);
+  }
+  if (query.length < SEARCH_MIN_QUERY_CHARS) {
+    return sessionsUsageError(
+      `query must be at least ${SEARCH_MIN_QUERY_CHARS} characters`,
+      io,
+    );
+  }
+  // Fail-soft corpus load: a missing sessions dir is an empty corpus and a
+  // corrupt session file is skipped by `loadSessionDocs`.
+  const loaded = loadSessionDocs(sessionsDir);
+  const result = searchSessions(loaded.docs, query, limit === undefined ? {} : { limit });
+  if (jsonMode) {
+    io.log(JSON.stringify(result));
+    return 0;
+  }
+  if (result.hits.length === 0) {
+    io.log("no matches");
+    return 0;
+  }
+  io.log(`${result.hits.length} matches in ${result.scanned_sessions} sessions`);
+  for (const hit of result.hits) {
+    io.log(`${hit.session}  ${hit.field}  ${hit.snippet}`);
+  }
+  return 0;
+}
+
+/**
+ * One session as an export document (`src/sessionsearch.ts` shape), tolerant
+ * like `sessions show`: corrupt lines are skipped, the `<name>.meta.json`
+ * sidecar title wins over the derived one, and the file mtime supplies
+ * `updated` (Unix seconds) for the export header. `null` when unreadable.
+ */
+function exportDocForCli(sessionsDir: string, filePath: string): SessionSearchDoc | null {
+  const name = path.basename(filePath);
+  const scan = scanSessionFile(filePath, name);
+  if (scan.title === "(unreadable)") return null;
+  const stem = name.replace(/\.jsonl$/, "");
+  const meta = new SessionMetadataStore(sessionsDir).get(name);
+  const metaTitle = meta !== null && typeof meta.title === "string" ? meta.title.trim() : "";
+  const workspaceId =
+    meta !== null && typeof meta.workspace_id === "string" && meta.workspace_id
+      ? meta.workspace_id
+      : null;
+  let updated: number | null = null;
+  try {
+    updated = Math.floor(fs.statSync(filePath).mtimeMs / 1000);
+  } catch {
+    updated = null;
+  }
+  return {
+    name,
+    title: metaTitle || scan.title || stem,
+    events: scan.events as unknown as SessionSearchDoc["events"],
+    workspace_id: workspaceId,
+    updated,
+  };
+}
+
+/**
+ * `sessions export <name> [--format markdown|json] [--output <path>]`:
+ * default markdown on stdout; `--output <path>` writes the file and prints a
+ * short `wrote <path>` confirmation to stderr (`--output -` means stdout).
+ * Session names resolve with or without the `.jsonl` suffix. A missing
+ * session is a runtime error (exit 1, the run/selftest convention); a bad
+ * format, missing/extra name or unknown flag is a usage error (exit 2).
+ */
+function exportSessionCommand(
+  sessionsDir: string,
+  args: string[],
+  formatRaw: unknown,
+  outputRaw: unknown,
+  io: CliIO,
+): number {
+  if (args.length === 0) {
+    return sessionsUsageError(
+      "no session name: sessions export <name> [--format markdown|json] [--output <path>]",
+      io,
+    );
+  }
+  if (args.length > 1) {
+    return sessionsUsageError(`unexpected argument: ${args.slice(1).join(" ")}`, io);
+  }
+  const format = (typeof formatRaw === "string" ? formatRaw : "markdown").trim().toLowerCase();
+  if (format !== "markdown" && format !== "json") {
+    return sessionsUsageError(`unknown export format: ${format} (use markdown or json)`, io);
+  }
+  const requested = args[0];
+  const filePath = resolveSessionFile(sessionsDir, requested);
+  if (filePath === null) {
+    io.error(`[error] session not found: ${requested} (in ${path.resolve(sessionsDir)})`);
+    return 1;
+  }
+  const doc = exportDocForCli(sessionsDir, filePath);
+  if (doc === null) {
+    io.error(`[error] cannot read session file: ${filePath}`);
+    return 1;
+  }
+  const body = format === "markdown" ? sessionToMarkdown(doc) : sessionToJsonString(doc);
+  const output = typeof outputRaw === "string" ? outputRaw.trim() : "";
+  if (!output || output === "-") {
+    // the renderers end with exactly one newline; `io.log` adds one itself
+    io.log(body.endsWith("\n") ? body.slice(0, -1) : body);
+    return 0;
+  }
+  try {
+    fs.writeFileSync(output, body, "utf-8");
+  } catch (exc) {
+    io.error(
+      `[error] cannot write ${output}: ${exc instanceof Error ? exc.message : String(exc)}`,
+    );
+    return 1;
+  }
+  io.error(`wrote ${path.resolve(output)}`);
+  return 0;
+}
+
 function doSessions(argv: string[], io: CliIO): number {
   const parsed = parseCommandArgs(argv, SESSIONS_OPTIONS, "sessions", io, true);
   if (parsed === null) return 2;
@@ -1880,14 +2033,32 @@ function doSessions(argv: string[], io: CliIO): number {
   if (subcommand === undefined) {
     return listSessionsCommand(sessionsDir, jsonMode, limitResult.limit, io);
   }
-  if (subcommand !== "show") {
-    // Kept as a thrown argument error (the long-standing contract for extra
-    // positionals, covered by tests/cli.test.ts).
-    throw new Error(
-      `unexpected argument '${subcommand}' (sessions takes only the 'show' subcommand)`,
+  if (subcommand === "show") {
+    return showSession(sessionsDir, positionals.slice(1), jsonMode, limitResult.limit, io);
+  }
+  if (subcommand === "search") {
+    return searchSessionsCommand(
+      sessionsDir,
+      positionals.slice(1),
+      jsonMode,
+      limitResult.limit,
+      io,
     );
   }
-  return showSession(sessionsDir, positionals.slice(1), jsonMode, limitResult.limit, io);
+  if (subcommand === "export") {
+    return exportSessionCommand(
+      sessionsDir,
+      positionals.slice(1),
+      values.format,
+      values.output,
+      io,
+    );
+  }
+  // Kept as a thrown argument error (the long-standing contract for extra
+  // positionals, covered by tests/cli.test.ts).
+  throw new Error(
+    `unexpected argument '${subcommand}' (sessions takes 'list', 'show', 'search' or 'export')`,
+  );
 }
 
 // --------------------------------------------------------------------------- //

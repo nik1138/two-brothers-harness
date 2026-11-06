@@ -60,3 +60,5 @@ import "./completions.test.ts";
 import "./reliability.test.ts";
 import "./roleendpoints.test.ts";
 import "./sessionsearch.test.ts";
+import "./serversearch.test.ts";
+import "./sessionscommands.test.ts";
