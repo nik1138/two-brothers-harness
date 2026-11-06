@@ -10,7 +10,7 @@ import {
   createTuiModel,
 } from "../src/tui/model.ts";
 import type { Message } from "../src/protocol.ts";
-import { styledWidth } from "../src/tui/screen.ts";
+import { styledWidth, stripAnsi } from "../src/tui/screen.ts";
 import { createTheme, plainTheme, resolveTheme } from "../src/tui/theme.ts";
 import { composerView, renderComposer } from "../src/tui/view/composer.ts";
 import {
@@ -31,6 +31,19 @@ import {
   setPickerQuery,
 } from "../src/tui/view/picker.ts";
 import { renderScreen, screenView } from "../src/tui/view/screen.ts";
+import {
+  SIDE_PANEL_MAX_PANEL_WIDTH,
+  SIDE_PANEL_MIN_HEIGHT,
+  SIDE_PANEL_MIN_PANEL_WIDTH,
+  SIDE_PANEL_MIN_WIDTH,
+  sidePanelEntries,
+  sidePanelKeyTips,
+  sidePanelLayout,
+  sidePanelRows,
+  sidePanelView,
+  toggleSidePanelEnabled,
+  type SidePanelState,
+} from "../src/tui/view/sidepanel.ts";
 import { spinnerFrame, renderSpinner, SPINNER_FRAMES } from "../src/tui/view/spinner.ts";
 import {
   fitStatusSegments,
@@ -328,3 +341,258 @@ test("screen: empty and populated frames are exact, themed and overlay-safe", ()
   const noColor = renderScreen({ ...options, theme: resolveTheme({ env: { NO_COLOR: "1" } }) });
   assert.ok(!noColor.join("\n").includes("\u001b"));
 });
+
+// --------------------------------------------------------------------------- //
+// responsive status side panel (P1)
+// --------------------------------------------------------------------------- //
+
+const PANEL_STATE: SidePanelState = {
+  mode: "consult",
+  seniorModel: "senior-x",
+  juniorModel: "junior-y",
+  seniorKind: "openai-compatible",
+  juniorKind: "openai-compatible",
+  provider: "openai",
+  sessionName: "session-1.jsonl",
+  resume: true,
+  cwd: "C:/code/project",
+  contextTokens: 12_500,
+  contextWindow: 200_000,
+  inputTokens: 1_200,
+  outputTokens: 300,
+  cachedTokens: 50,
+  cost: 0.0123,
+  elapsedMs: 65_000,
+  compaction: { mode: "tokens", threshold: 120_000, keepRecent: 10_000 },
+  discovery: {
+    plugins: { loaded: 2, errors: 1 },
+    skills: { shared: 3, senior: 1, junior: 0 },
+    commands: 4,
+    mcp: { configPath: "C:/code/mcp.json", pluginServers: 1 },
+  },
+};
+
+function panelValues(state: SidePanelState): Map<string, string> {
+  return new Map(sidePanelEntries(state).map((cell) => [cell.label, cell.value]));
+}
+
+test("side panel: visible only at 100x30 and up, and widths always add up", () => {
+  const narrow = sidePanelLayout(80, 24);
+  assert.equal(narrow.visible, false);
+  assert.equal(narrow.reason, "narrow");
+  assert.equal(narrow.panelWidth, 0);
+  assert.equal(narrow.transcriptWidth, 80, "80x24 keeps the full transcript width");
+
+  const short = sidePanelLayout(120, SIDE_PANEL_MIN_HEIGHT - 1);
+  assert.equal(short.visible, false);
+  assert.equal(short.reason, "short");
+  assert.equal(short.transcriptWidth, 120);
+
+  for (const [width, height] of [[100, 30], [140, 40], [220, 60]] as const) {
+    const layout = sidePanelLayout(width, height);
+    assert.equal(layout.visible, true, `${width}x${height}`);
+    assert.equal(layout.reason, "visible");
+    assert.equal(layout.transcriptWidth + layout.panelWidth, width);
+    assert.ok(layout.panelWidth >= SIDE_PANEL_MIN_PANEL_WIDTH);
+    assert.ok(layout.panelWidth <= SIDE_PANEL_MAX_PANEL_WIDTH);
+    assert.ok(layout.transcriptWidth >= 60, "the transcript is never starved");
+  }
+  assert.equal(sidePanelLayout(SIDE_PANEL_MIN_WIDTH, 20).visible, true);
+  assert.equal(sidePanelLayout(SIDE_PANEL_MIN_WIDTH - 1, 40).visible, false);
+
+  const disabled = sidePanelLayout(120, 40, { enabled: false });
+  assert.equal(disabled.visible, false);
+  assert.equal(disabled.reason, "disabled");
+  assert.equal(disabled.transcriptWidth, 120);
+  assert.equal(sidePanelLayout(120, 40, { overlayOpen: true }).reason, "overlay");
+
+  for (const [width, height] of [[0, 0], [1, 1], [99, 19], [100, 19]] as const) {
+    const layout = sidePanelLayout(width, height);
+    assert.equal(layout.transcriptWidth, width);
+    assert.equal(layout.panelWidth, 0);
+  }
+});
+
+test("side panel: exact box geometry, width-safe rows and ellipsis truncation", () => {
+  for (const width of [SIDE_PANEL_MIN_PANEL_WIDTH, 34, SIDE_PANEL_MAX_PANEL_WIDTH]) {
+    const rows = sidePanelView(PANEL_STATE, { width, height: 21 });
+    assert.equal(rows.length, 21);
+    for (const row of rows) {
+      assert.equal(styledWidth(row), width, JSON.stringify(row));
+      assert.ok(!row.includes("\u001b"), "plain rendering leaks no ANSI");
+    }
+  }
+  const text = sidePanelView(PANEL_STATE, { width: 34, height: 21 }).join("\n");
+  assert.ok(text.includes("STATUS"), "box title");
+  assert.ok(text.includes("╭") && text.includes("╯"), "box drawing matches the other views");
+
+  const long = sidePanelView(
+    { ...PANEL_STATE, cwd: `C:/code/${"x".repeat(120)}` },
+    { width: 34, height: 21 },
+  ).join("\n");
+  assert.ok(long.includes("…"), "long values truncate with an ellipsis");
+  for (const row of long.split("\n")) assert.ok(styledWidth(row) <= 34);
+
+  // A hostile value never reaches the terminal as a control sequence.
+  const hostile = sidePanelRows(
+    { ...PANEL_STATE, cwd: `\u001b[31mred\u0007/${"y".repeat(40)}` },
+    26,
+  );
+  for (const row of hostile) {
+    assert.ok(!row.includes("\u001b"), "no ANSI leakage");
+    assert.ok(styledWidth(row) <= 26);
+  }
+
+  // Degenerate sizes stay exact so a resize can never emit a torn frame.
+  for (const [width, height] of [[0, 0], [1, 1], [2, 3], [3, 2], [4, 4], [10, 2]] as const) {
+    const rows = sidePanelView(PANEL_STATE, { width, height });
+    assert.equal(rows.length, height, `${width}x${height}`);
+    for (const row of rows) assert.ok(styledWidth(row) <= width);
+  }
+});
+
+test("side panel: known values reuse the status formatters", () => {
+  const values = panelValues(PANEL_STATE);
+  assert.equal(values.get("MODE"), "consult");
+  assert.equal(values.get("SENIOR"), "senior-x · openai-compatible");
+  assert.equal(values.get("JUNIOR"), "junior-y · openai-compatible");
+  assert.equal(values.get("PROVIDER"), "openai");
+  assert.equal(values.get("SESSION"), "session-1.jsonl · resume");
+  assert.equal(values.get("CWD"), "C:/code/project");
+  assert.equal(values.get("CONTEXT"), "12.5k / 200k");
+  assert.equal(values.get("TOKENS"), "in 1.2k · out 300");
+  assert.equal(values.get("CACHE"), "50");
+  assert.equal(values.get("COST"), "$0.0123");
+  assert.equal(values.get("ELAPSED"), "1m 5s");
+  assert.equal(values.get("COMPACT"), "auto 120k tok · keep 10.0k");
+  assert.equal(values.get("PLUGINS"), "2 loaded · 1 error");
+  assert.equal(values.get("SKILLS"), "shared 3 · senior 1 · junior 0");
+  assert.equal(values.get("COMMANDS"), "4");
+  assert.equal(values.get("MCP"), "mcp.json · 1 plugin");
+
+  const running = panelValues({ ...PANEL_STATE, running: true });
+  assert.equal(running.get("MODE"), "consult · running");
+
+  assert.deepEqual(sidePanelKeyTips(), ["Ctrl+P commands · ? help", "Ctrl+T tools · Ctrl+B panel"]);
+});
+
+test("side panel: unknown values stay honest and never invent numbers", () => {
+  const values = panelValues({ mode: "work", cost: null });
+  assert.equal(values.get("SENIOR"), "(unset)");
+  assert.equal(values.get("JUNIOR"), "(unset)");
+  assert.equal(values.get("PROVIDER"), "unknown");
+  assert.equal(values.get("SESSION"), "in-memory");
+  assert.equal(values.get("CWD"), "unknown");
+  assert.equal(values.get("CONTEXT"), "unknown / unknown");
+  assert.equal(values.get("TOKENS"), "unknown");
+  assert.equal(values.get("CACHE"), "unknown");
+  assert.equal(values.get("COST"), "cost unknown");
+  assert.equal(values.get("ELAPSED"), "unknown");
+  assert.equal(values.get("COMPACT"), "unknown");
+  assert.equal(values.get("PLUGINS"), "unknown");
+  assert.equal(values.get("SKILLS"), "unknown");
+  assert.equal(values.get("COMMANDS"), "unknown");
+  assert.equal(values.get("MCP"), "unknown");
+  for (const cell of sidePanelEntries({ mode: "work", cost: null })) {
+    assert.ok(!/\$\d/.test(cell.value), "an unknown price is never fabricated");
+  }
+
+  // A configured "off" and an empty MCP set are facts, not unknowns.
+  const off = panelValues({ mode: "work", compaction: { mode: "off" }, discovery: { mcp: {} } });
+  assert.equal(off.get("COMPACT"), "off");
+  assert.equal(off.get("MCP"), "none configured");
+});
+
+test("screen: 80x24 is byte-identical, 100x30 and 140x40 gain the right-hand panel", () => {
+  const model = addUserBlock(createTuiModel(), "hello");
+  const base = {
+    model,
+    editor: createEditor("draft"),
+    status: { mode: "consult", seniorModel: "s", juniorModel: "j", sessionName: "s1", cwd: "/work" },
+    theme: plainTheme,
+  } as const;
+  const compact = screenView({ ...base, width: 80, height: 24 });
+  const withState = screenView({ ...base, width: 80, height: 24, sidePanel: PANEL_STATE });
+  assert.deepEqual(withState.lines, compact.lines, "a hidden panel changes nothing");
+  assert.equal(withState.sidePanel?.layout.visible, false);
+  assert.equal(compact.sidePanel, null);
+
+  for (const [width, height] of [[100, 30], [140, 40]] as const) {
+    const frame = screenView({ ...base, width, height, sidePanel: PANEL_STATE });
+    const panel = frame.sidePanel;
+    assert.ok(panel !== null, `${width}x${height} reports a panel layout`);
+    assert.equal(panel.layout.visible, true, `${width}x${height}`);
+    assert.equal(panel.layout.transcriptWidth + panel.layout.panelWidth, width);
+    assertRows(frame.lines, width, height);
+    assert.ok(frame.lines.join("\n").includes("STATUS"), `${width}x${height} shows the panel`);
+    const bodyTop = stripAnsi(frame.lines[0] ?? "");
+    assert.equal(
+      bodyTop[panel.layout.transcriptWidth],
+      "╭",
+      "the panel box starts right after the transcript",
+    );
+  }
+
+  // Composer and status bar keep the full width and never move.
+  const wide = screenView({ ...base, width: 100, height: 30, sidePanel: PANEL_STATE });
+  const plainWide = screenView({ ...base, width: 100, height: 30 });
+  const footerRows = wide.composer.lines.length + wide.statusLines.length;
+  assert.deepEqual(
+    wide.lines.slice(-footerRows),
+    plainWide.lines.slice(-footerRows),
+    "the footer is identical with and without the panel",
+  );
+  assert.ok(!wide.lines.slice(-footerRows).join("\n").includes("STATUS"));
+});
+
+test("screen: a full-screen overlay hides the panel without moving the composer", () => {
+  const model = addUserBlock(createTuiModel(), "hello");
+  const base = {
+    model,
+    editor: createEditor("draft"),
+    status: { mode: "consult", seniorModel: "s", juniorModel: "j" },
+    theme: plainTheme,
+    width: 120,
+    height: 30,
+    sidePanel: PANEL_STATE,
+  } as const;
+  const open = screenView(base);
+  const overlaid = screenView({ ...base, overlay: ["DIALOG"] });
+  assert.equal(overlaid.sidePanel?.layout.reason, "overlay");
+  assert.ok(!overlaid.lines.join("\n").includes("STATUS"));
+  const footerRows = overlaid.composer.lines.length + overlaid.statusLines.length;
+  assert.deepEqual(
+    overlaid.lines.slice(-footerRows),
+    open.lines.slice(-footerRows),
+    "an overlay does not move the composer or the status bar",
+  );
+  assert.ok(overlaid.lines.join("\n").includes("DIALOG"));
+});
+
+test("side panel: resize recomputes immediately and the toggle choice sticks", () => {
+  const model = createTuiModel();
+  const base = {
+    model,
+    editor: createEditor(""),
+    status: { mode: "consult", seniorModel: "s", juniorModel: "j", cwd: "/work" },
+    theme: plainTheme,
+    sidePanel: PANEL_STATE,
+  } as const;
+  const small = screenView({ ...base, width: 90, height: 24 });
+  const large = screenView({ ...base, width: 120, height: 30 });
+  const back = screenView({ ...base, width: 90, height: 24 });
+  assert.ok(!small.lines.join("\n").includes("STATUS"), "narrow frames have no panel");
+  assert.ok(large.lines.join("\n").includes("STATUS"), "a wider frame gains the panel");
+  assert.deepEqual(back.lines, small.lines, "shrinking restores the exact earlier frame");
+
+  assert.equal(toggleSidePanelEnabled(null), false, "the first press hides a size-driven panel");
+  assert.equal(toggleSidePanelEnabled(true), false);
+  assert.equal(toggleSidePanelEnabled(false), true);
+
+  const off = screenView({ ...base, width: 120, height: 30, sidePanelEnabled: false });
+  assert.equal(off.sidePanel?.layout.reason, "disabled");
+  assert.ok(!off.lines.join("\n").includes("STATUS"));
+  const on = screenView({ ...base, width: 120, height: 30, sidePanelEnabled: true });
+  assert.ok(on.lines.join("\n").includes("STATUS"));
+});
+

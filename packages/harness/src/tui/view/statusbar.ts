@@ -31,11 +31,21 @@ export interface StatusBarOptions {
   theme?: Theme;
 }
 
-function count(value: number): string {
+/** Compact count used by the status bar and the side panel (`12.5k`, `1.2m`). */
+export function formatCount(value: number): string {
   const safe = Number.isFinite(value) ? Math.max(0, value) : 0;
   if (safe < 1_000) return String(Math.floor(safe));
   if (safe < 1_000_000) return `${(safe / 1_000).toFixed(safe < 100_000 ? 1 : 0)}k`;
   return `${(safe / 1_000_000).toFixed(safe < 10_000_000 ? 1 : 0)}m`;
+}
+
+/**
+ * `$0.0123` for a known run cost, `null` when the price cannot be attributed
+ * to the run's models (the caller prints the honest `cost unknown` marker).
+ */
+export function formatCost(value: number | null): string | null {
+  if (value === null || !Number.isFinite(value)) return null;
+  return `$${Math.max(0, value).toFixed(4)}`;
 }
 
 /** Deterministic compact elapsed time; the caller supplies the measurement. */
@@ -70,23 +80,24 @@ export function statusBarSegments(state: StatusBarState): [StatusSegment[], Stat
     second.push({ text: state.activity.trim(), tone: state.running === true ? "warning" : "notice" });
   }
   if (state.contextTokens !== undefined || state.contextWindow !== undefined) {
-    const used = state.contextTokens === undefined ? "?" : count(state.contextTokens);
-    const total = state.contextWindow === undefined ? "?" : count(state.contextWindow);
+    const used = state.contextTokens === undefined ? "?" : formatCount(state.contextTokens);
+    const total = state.contextWindow === undefined ? "?" : formatCount(state.contextWindow);
     second.push({ text: `context ${used}/${total}`, tone: "muted" });
   }
   if (state.inputTokens !== undefined || state.outputTokens !== undefined) {
     second.push({
-      text: `tokens ${count(state.inputTokens ?? 0)} in · ${count(state.outputTokens ?? 0)} out`,
+      text: `tokens ${formatCount(state.inputTokens ?? 0)} in · ${formatCount(state.outputTokens ?? 0)} out`,
       tone: "muted",
     });
   }
   if (state.cachedTokens !== undefined) {
-    second.push({ text: `cache ${count(state.cachedTokens)}`, tone: "muted" });
+    second.push({ text: `cache ${formatCount(state.cachedTokens)}`, tone: "muted" });
   }
   if (state.cost !== undefined) {
+    const amount = state.cost === null ? null : formatCost(state.cost);
     second.push({
-      text: state.cost === null ? "cost unknown" : `cost $${Math.max(0, state.cost).toFixed(4)}`,
-      tone: state.cost === null ? "warning" : "muted",
+      text: amount === null ? "cost unknown" : `cost ${amount}`,
+      tone: amount === null ? "warning" : "muted",
     });
   }
   if (state.elapsedMs !== undefined) {

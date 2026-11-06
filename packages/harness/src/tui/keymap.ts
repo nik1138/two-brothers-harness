@@ -291,6 +291,18 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
     when: "always",
   },
   {
+    id: "panel",
+    title: "Status panel",
+    description: "Show or hide the right-hand status panel on wide terminals.",
+    group: "Settings",
+    slash: "panel",
+    // Ctrl+B: unbound here, one control byte, and outside the terminal's
+    // XON/XOFF pair (Ctrl+Q / Ctrl+S), so it can never pause output. The
+    // app-scope binding leaves overlays to their own keys.
+    keys: [{ name: "b", ctrl: true }],
+    when: "app",
+  },
+  {
     id: "settings",
     title: "Settings and onboarding",
     description: "Open provider setup and application settings.",

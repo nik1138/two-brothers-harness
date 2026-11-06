@@ -23,7 +23,11 @@ import * as path from "node:path";
 
 import { discoverCommands, expandCommand, matchCommand, type Command, type CommandCatalog } from "../commands.ts";
 import type { CompactionSettings } from "../compaction.ts";
-import { estimateTokens } from "../compaction.ts";
+import {
+  DEFAULT_KEEP_RECENT_CHARS,
+  DEFAULT_KEEP_RECENT_TOKENS,
+  estimateTokens,
+} from "../compaction.ts";
 import { validateRunConfig, type Config } from "../config.ts";
 import { estimateCost } from "../cost.ts";
 import { SharedContext } from "../context.ts";
@@ -122,6 +126,15 @@ import {
   type PickerState,
 } from "./view/picker.ts";
 import { screenView } from "./view/screen.ts";
+import {
+  SIDE_PANEL_MIN_HEIGHT,
+  SIDE_PANEL_MIN_WIDTH,
+  sidePanelLayout,
+  toggleSidePanelEnabled,
+  type SidePanelCompaction,
+  type SidePanelDiscovery,
+  type SidePanelState,
+} from "./view/sidepanel.ts";
 import type { StatusBarState } from "./view/statusbar.ts";
 import type { Toast, ToastLevel } from "./view/toast.ts";
 import {
@@ -901,6 +914,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   let toasts: Toast[] = [];
   let themeMode: ThemeMode | null = null;
   let theme: Theme = resolveTheme({ mode: themeMode });
+  // The `panel` registry command's choice for this run: null = no choice yet
+  // (the panel follows the terminal size), false = hidden, true = shown.
+  let sidePanelChoice: boolean | null = null;
 
   const sessionName = (): string =>
     sessionCfg.sessionFile ? path.basename(sessionCfg.sessionFile) : "in-memory";
@@ -1007,6 +1023,120 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         : {}),
   });
 
+  /** The compaction configuration as the harness will see it (no new math). */
+  const sidePanelCompaction = (): SidePanelCompaction => {
+    const settings = compactionOptions(sessionCfg);
+    if (settings === undefined) return { mode: "off" };
+    const tokenMode =
+      (settings.thresholdTokens ?? 0) > 0 || (settings.contextWindow ?? 0) > 0;
+    const summary: SidePanelCompaction = { mode: tokenMode ? "tokens" : "chars" };
+    if (settings.force === true) summary.force = true;
+    if (tokenMode) {
+      const threshold =
+        (settings.thresholdTokens ?? 0) > 0 ? settings.thresholdTokens : settings.contextWindow;
+      if (threshold !== undefined && threshold > 0) summary.threshold = threshold;
+      summary.keepRecent = DEFAULT_KEEP_RECENT_TOKENS;
+    } else {
+      if ((settings.thresholdChars ?? 0) > 0) summary.threshold = settings.thresholdChars;
+      summary.keepRecent = settings.keepRecentChars ?? DEFAULT_KEEP_RECENT_CHARS;
+    }
+    return summary;
+  };
+
+  /** Discovery counts the session already loaded (plugins/skills/commands/MCP). */
+  const sidePanelDiscovery = (): SidePanelDiscovery => {
+    const plugins = resources.plugins;
+    const skills = resources.skills.skills;
+    const pluginServers =
+      plugins === null
+        ? 0
+        : [...plugins.plugins.values()].reduce(
+            (total, plugin) => total + plugin.mcpServers.length,
+            0,
+          );
+    return {
+      ...(plugins !== null
+        ? { plugins: { loaded: plugins.plugins.size, errors: plugins.errors.length } }
+        : {}),
+      skills: {
+        shared: skills.filter((skill) => skill.scope === "shared").length,
+        senior: skills.filter((skill) => skill.scope === "senior").length,
+        junior: skills.filter((skill) => skill.scope === "junior").length,
+      },
+      commands: resources.commands.commands.length,
+      mcp: {
+        ...(options.mcpConfig !== undefined ? { configPath: options.mcpConfig } : {}),
+        pluginServers,
+      },
+    };
+  };
+
+  const sidePanelState = (): SidePanelState => ({
+    mode,
+    seniorModel: sessionCfg.seniorModel,
+    juniorModel: sessionCfg.juniorModel,
+    seniorKind: sessionCfg.seniorKind || sessionCfg.kind,
+    juniorKind: sessionCfg.juniorKind || sessionCfg.kind,
+    provider: sessionCfg.provider,
+    sessionName: sessionName(),
+    resume: sessionCfg.resume,
+    cwd,
+    running,
+    ...(contextTokens !== null ? { contextTokens } : {}),
+    ...(sessionCfg.contextWindow > 0 ? { contextWindow: sessionCfg.contextWindow } : {}),
+    ...(usage !== null
+      ? {
+          inputTokens: usage.input,
+          outputTokens: usage.output,
+          cachedTokens: usage.cached,
+        }
+      : {}),
+    cost,
+    ...(running
+      ? { elapsedMs: Date.now() - turnStartedAt }
+      : lastElapsedMs !== undefined
+        ? { elapsedMs: lastElapsedMs }
+        : {}),
+    compaction: sidePanelCompaction(),
+    discovery: sidePanelDiscovery(),
+  });
+
+  /**
+   * The `panel` command: flip the in-memory choice and say honestly whether
+   * the terminal is big enough for the panel to appear right now.
+   */
+  const toggleSidePanel = (): void => {
+    sidePanelChoice = toggleSidePanelEnabled(sidePanelChoice);
+    const shown = sidePanelChoice === true;
+    const size = terminal.size();
+    const fits = sidePanelLayout(size.columns, size.rows).visible;
+    if (shown && !fits) {
+      pushToast(
+        "info",
+        `status panel needs ${SIDE_PANEL_MIN_WIDTH}×${SIDE_PANEL_MIN_HEIGHT} — ` +
+          "it appears when the terminal grows",
+      );
+    } else if (shown) {
+      pushToast("info", "status panel shown");
+    } else {
+      pushToast(
+        "info",
+        fits
+          ? "status panel hidden"
+          : "status panel hidden — this terminal is too small to show it",
+      );
+    }
+    render();
+  };
+
+  /** Transcript columns after the panel (full width whenever it is hidden). */
+  const transcriptWidth = (): number => {
+    const size = terminal.size();
+    return sidePanelLayout(size.columns, size.rows, {
+      enabled: sidePanelChoice !== false,
+    }).transcriptWidth;
+  };
+
   function transcriptBodyHeight(): number {
     const size = terminal.size();
     return Math.max(1, size.rows - 14);
@@ -1075,6 +1205,8 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       toasts,
       spinnerTick,
       reducedMotion: process.env.NO_COLOR !== undefined && process.env.NO_COLOR !== "",
+      sidePanel: sidePanelState(),
+      sidePanelEnabled: sidePanelChoice !== false,
     });
     terminal.render(frame.lines.join("\n"));
   }
@@ -1492,6 +1624,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       case "theme":
         cycleTheme();
         break;
+      case "panel":
+        toggleSidePanel();
+        break;
       case "settings":
         openSettingsDialog();
         break;
@@ -1610,6 +1745,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         return true;
       case "theme":
         cycleTheme(args);
+        return true;
+      case "panel":
+        toggleSidePanel();
         return true;
       case "settings":
         if (!gateIdleCommand(command)) return true;
@@ -1760,6 +1898,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       case "history-search":
         openHistorySearchOverlay();
         return true;
+      case "panel":
+        toggleSidePanel();
+        return true;
       case "cancel":
       case "exit":
         cancelKey();
@@ -1796,14 +1937,14 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         break;
       case "scroll-prev":
         scroll = scrollTranscript(model, scroll, -pageSize(), {
-          width: terminal.size().columns,
+          width: transcriptWidth(),
           height: transcriptBodyHeight(),
           theme,
         });
         break;
       case "scroll-next":
         scroll = scrollTranscript(model, scroll, pageSize(), {
-          width: terminal.size().columns,
+          width: transcriptWidth(),
           height: transcriptBodyHeight(),
           theme,
         });

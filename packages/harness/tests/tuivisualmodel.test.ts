@@ -25,6 +25,7 @@ import {
   TUI_COMMANDS,
   documentEntries,
   findCommand,
+  findSlashCommand,
   formatKeys,
   matchChord,
   paletteEntries,
@@ -642,6 +643,43 @@ test("keymap: Ctrl+T toggles tool expansion and conflicts with no other binding"
   assert.ok(paletteEntries(TUI_COMMANDS).some((entry) => entry.id === "tool-expand"));
   assert.ok(documentEntries(TUI_COMMANDS).some((entry) => entry.id === "tool-expand"));
   assert.match(tuiHelpLines(TUI_COMMANDS).join("\n"), /Ctrl\+T\s+Show every line/);
+  assert.ok(
+    !TUI_COMMANDS.some((candidate) =>
+      (candidate.keys ?? []).some(
+        (chord) => chord.ctrl === true && /^[sq]$/i.test(chord.name),
+      ),
+    ),
+    "Ctrl+S / Ctrl+Q (XON/XOFF) stay unbound",
+  );
+});
+
+test("keymap: Ctrl+B toggles the status panel and conflicts with no other binding", () => {
+  const command = findCommand(TUI_COMMANDS, "panel");
+  assert.ok(command);
+  assert.equal(command.title, "Status panel");
+  assert.equal(command.group, "Settings");
+  assert.equal(command.slash, "panel");
+  assert.equal(findSlashCommand(TUI_COMMANDS, "panel")?.id, "panel");
+  assert.equal(formatKeys(command), "Ctrl+B");
+
+  const key = { name: "b", ctrl: true, raw: "\u0002" };
+  assert.equal(resolveKey(TUI_COMMANDS, key)?.command.id, "panel");
+  assert.equal(
+    resolveKey(TUI_COMMANDS, key, "overlay"),
+    null,
+    "the panel chord is app-scope only; an overlay keeps its own keys",
+  );
+  const conflicts = TUI_COMMANDS.filter(
+    (candidate) =>
+      candidate.id !== "panel" &&
+      (candidate.keys ?? []).some((chord) => matchChord(chord, key)),
+  );
+  assert.deepEqual(conflicts.map((candidate) => candidate.id), []);
+
+  assert.ok(paletteEntries(TUI_COMMANDS).some((entry) => entry.id === "panel"));
+  assert.ok(documentEntries(TUI_COMMANDS).some((entry) => entry.id === "panel"));
+  assert.match(tuiHelpLines(TUI_COMMANDS).join("\n"), /Ctrl\+B\s+Show or hide the right-hand status panel/);
+  assert.match(tuiHelpLines(TUI_COMMANDS).join("\n"), /\/panel\s+Show or hide/);
   assert.ok(
     !TUI_COMMANDS.some((candidate) =>
       (candidate.keys ?? []).some(
