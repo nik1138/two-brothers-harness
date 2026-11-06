@@ -25,6 +25,7 @@
 import type {
   DecisionBlock,
   EnvelopeBlock,
+  LiveThinking,
   NoticeBlock,
   ToolBlock,
   TuiBlock,
@@ -47,6 +48,20 @@ export const TRANSCRIPT_LABEL_WIDTH = 8;
 
 /** Default number of collapsed tool-result lines (and of bounded detail rows). */
 export const DEFAULT_MAX_TOOL_ROWS = 6;
+
+/** Label of the live reasoning block (exactly the 8-cell label gutter). */
+export const THINKING_LABEL = "THINKING";
+
+/** Default visible reasoning rows before the `… +N lines` marker. */
+export const DEFAULT_THINKING_MAX_ROWS = 6;
+
+/** Options for {@link renderThinkingBlock}. */
+export interface ThinkingRenderOptions {
+  width: number;
+  theme?: Theme;
+  /** Visible reasoning rows (default {@link DEFAULT_THINKING_MAX_ROWS}). */
+  maxRows?: number;
+}
 
 /** Label + semantic tone for one block. */
 export interface BlockLabel {
@@ -189,7 +204,7 @@ export function withToolExpansion(model: TuiModel, keys: ToolExpansionKeys): Tui
     expanded = true;
     return clone;
   });
-  return expanded ? { blocks, nextId: model.nextId } : model;
+  return expanded ? { ...model, blocks } : model;
 }
 
 function toolSummary(block: ToolBlock): string {
@@ -423,6 +438,62 @@ function paintRow(theme: Theme, row: VisualRow, width: number): string {
         : theme.paint(row.tone, row.text)
       : paintSpans(theme, row.tone ?? "text", row.spans);
   return clipStyled(text, width);
+}
+
+/**
+ * Render the live reasoning (thinking) block shown above the streaming
+ * response while a provider call runs.
+ *
+ * The block reuses the transcript's label gutter (`THINKING` is exactly the
+ * 8-cell label), wraps with the same grapheme/width helpers as every other
+ * row, and is deliberately compact: only the last `maxRows` content rows are
+ * visible, older ones collapse into one explicit `… +N lines` marker, and a
+ * trailing `…` row marks reasoning that is still arriving (`streaming`). The
+ * text is painted through the theme only (dim label/markers, muted body), so
+ * `NO_COLOR` output is the same readable rows without a single escape byte.
+ * Rows are guaranteed no wider than `options.width` and never padded.
+ */
+export function renderThinkingBlock(
+  thinking: LiveThinking,
+  options: ThinkingRenderOptions,
+): string[] {
+  const width = Math.max(0, Math.floor(options.width));
+  if (width === 0) return [];
+  const theme = options.theme ?? plainTheme;
+  const compact = width <= TRANSCRIPT_LABEL_WIDTH + 8;
+  // The label fills the whole 8-cell gutter, so the live block keeps one
+  // separator cell before its content to stay readable in NO_COLOR output.
+  const gutters = compact ? 0 : 1;
+  const contentWidth = compact ? width : Math.max(1, width - TRANSCRIPT_LABEL_WIDTH - gutters);
+  const maxRows = Math.max(1, Math.floor(options.maxRows ?? DEFAULT_THINKING_MAX_ROWS));
+  const allRows = wrapDisplay(thinking.text, contentWidth);
+  const hidden = Math.max(0, allRows.length - maxRows);
+  const visible = hidden > 0 ? allRows.slice(allRows.length - maxRows) : allRows;
+
+  const rows: ContentRow[] = [];
+  if (hidden > 0) rows.push({ text: `… +${hidden} lines`, tone: "dim" });
+  for (const row of visible) rows.push({ text: row, tone: "muted" });
+  if (thinking.streaming) rows.push({ text: "…", tone: "dim" });
+  if (rows.length === 0) return [];
+
+  if (compact) {
+    const out = [clipStyled(theme.paint("dim", THINKING_LABEL), width)];
+    for (const row of rows) {
+      out.push(row.text === "" ? "" : clipStyled(theme.paint(row.tone ?? "text", row.text), width));
+    }
+    return out;
+  }
+  const out: string[] = [];
+  const continuation = " ".repeat(TRANSCRIPT_LABEL_WIDTH + gutters);
+  rows.forEach((row, index) => {
+    const prefix =
+      index === 0
+        ? theme.paint("dim", THINKING_LABEL) + " ".repeat(gutters)
+        : continuation;
+    const text = row.text === "" ? "" : clipStyled(theme.paint(row.tone ?? "text", row.text), contentWidth);
+    out.push(prefix + text);
+  });
+  return out;
 }
 
 /** Render one block to rows no wider than `options.width`. */

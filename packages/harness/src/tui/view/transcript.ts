@@ -1,6 +1,13 @@
-import type { TuiModel } from "../model.ts";
+import { isStreamingBlock, type TuiModel } from "../model.ts";
 import { fitStyled } from "../screen.ts";
-import { renderBlock, type TranscriptOptions } from "../transcript.ts";
+import {
+  renderBlock,
+  renderThinkingBlock,
+  type TranscriptOptions,
+} from "../transcript.ts";
+
+/** Stable pseudo block id of the live reasoning rows (never a document block). */
+export const LIVE_THINKING_BLOCK_ID = "live-thinking";
 
 /** A stable viewport position. `followLatest` pins the view to the newest row. */
 export interface TranscriptScroll {
@@ -29,14 +36,40 @@ interface PositionedRow {
   text: string;
 }
 
+/**
+ * Position block rows in document order, splicing the live reasoning rows in
+ * just above the active streaming response block (or at the very end when the
+ * response has not started yet). Thinking is live-only, so it never changes
+ * the block document: it is an extra row group anchored by
+ * {@link LIVE_THINKING_BLOCK_ID}, separated by the usual blank row.
+ */
 function positionedRows(model: TuiModel, options: TranscriptOptions): PositionedRow[] {
   const rows: PositionedRow[] = [];
-  for (const block of model.blocks) {
+  const blocks = model.blocks;
+  const thinking = model.liveThinking;
+  const last = blocks[blocks.length - 1];
+  const streamingLastIndex =
+    last !== undefined && thinking !== undefined && isStreamingBlock(last) ? blocks.length - 1 : -1;
+  let thinkingInserted = false;
+  const insertThinking = (): void => {
+    thinkingInserted = true;
+    if (thinking === undefined) return;
+    const rendered = renderThinkingBlock(thinking, {
+      width: options.width,
+      ...(options.theme !== undefined ? { theme: options.theme } : {}),
+    });
+    if (rendered.length === 0) return;
+    if (rows.length > 0) rows.push({ blockId: LIVE_THINKING_BLOCK_ID, text: "" });
+    for (const text of rendered) rows.push({ blockId: LIVE_THINKING_BLOCK_ID, text });
+  };
+  blocks.forEach((block, index) => {
+    if (index === streamingLastIndex) insertThinking();
     const rendered = renderBlock(block, options);
-    if (rendered.length === 0) continue;
+    if (rendered.length === 0) return;
     if (rows.length > 0) rows.push({ blockId: block.id, text: "" });
     for (const text of rendered) rows.push({ blockId: block.id, text });
-  }
+  });
+  if (!thinkingInserted) insertThinking();
   return rows;
 }
 

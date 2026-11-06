@@ -31,6 +31,12 @@ export interface ScreenOptions {
   composerMaxRows?: number;
   overlay?: readonly string[];
   /**
+   * Inline `/` command and `@skill:` mention picker rows rendered above the
+   * composer (the inline footer slot family of the find bar). Omitted (or
+   * empty) frames are byte-identical to the plain layout.
+   */
+  mentionPicker?: readonly string[];
+  /**
    * Inline find-bar rows rendered between the composer and the status bar
    * (Ctrl+F). Omitted (or empty) frames are byte-identical to the plain layout.
    */
@@ -67,13 +73,13 @@ export interface ScreenView {
 }
 
 /**
- * Compose welcome/transcript, composer, an optional inline find bar, the
- * two-line status and one overlay layer.
+ * Compose welcome/transcript, an optional inline mention picker, the composer,
+ * an optional inline find bar, the two-line status and one overlay layer.
  *
  * The side panel (when the layout allows it) shares only the transcript body
  * row: the transcript is composed at `layout.transcriptWidth` and each body
  * row is the transcript row plus the panel row, so the two widths add up to
- * the terminal width exactly. The composer, the find bar and the status bar
+ * the terminal width exactly. The picker, composer, find bar and status bar
  * are rendered at the full width and never move; a full-screen overlay
  * suppresses the panel for that frame.
  */
@@ -90,6 +96,7 @@ export function screenView(options: ScreenOptions): ScreenView {
     ...(activity !== undefined ? { activity } : {}),
   };
   const statusLines = renderStatusBar(statusState, { width, theme });
+  const mentionPicker = options.mentionPicker ?? [];
   const findBar = options.findBar ?? [];
   const composer = composerView({
     width,
@@ -101,7 +108,10 @@ export function screenView(options: ScreenOptions): ScreenView {
     maxRows: options.composerMaxRows,
     theme,
   });
-  const bodyHeight = Math.max(0, height - composer.lines.length - findBar.length - statusLines.length);
+  const bodyHeight = Math.max(
+    0,
+    height - composer.lines.length - mentionPicker.length - findBar.length - statusLines.length,
+  );
 
   const panelState = options.sidePanel;
   const layout =
@@ -114,7 +124,7 @@ export function screenView(options: ScreenOptions): ScreenView {
   const panelOpen = layout !== null && layout.visible && panelState !== undefined;
   const transcriptWidth = layout !== null && panelOpen ? layout.transcriptWidth : width;
 
-  const empty = options.model.blocks.length === 0;
+  const empty = options.model.blocks.length === 0 && options.model.liveThinking === undefined;
   const transcript = empty ? null : transcriptView(options.model, {
     width: transcriptWidth,
     height: bodyHeight,
@@ -157,7 +167,7 @@ export function screenView(options: ScreenOptions): ScreenView {
     width,
     height,
     body,
-    footer: [...composer.lines, ...findBar, ...statusLines],
+    footer: [...mentionPicker, ...composer.lines, ...findBar, ...statusLines],
     overlay,
     overlayAlign: options.overlay === undefined ? "top" : "center",
     bodyAnchor: empty ? "top" : "bottom",

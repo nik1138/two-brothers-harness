@@ -311,6 +311,22 @@ export function insertText(
   return replaceRange(state, state.cursor, state.cursor, text, options);
 }
 
+/**
+ * Replace the grapheme range `[start, end)` with `text` as one edit; the
+ * cursor lands right after the replacement. Used by the inline mention/command
+ * pickers to rewrite the trigger token without touching the rest of the draft.
+ * Out-of-range indices are clamped and never throw.
+ */
+export function replaceTextRange(
+  state: EditorState,
+  start: number,
+  end: number,
+  text: string,
+  options: EditorOptions = {},
+): EditorState {
+  return replaceRange(state, start, end, text, options);
+}
+
 const PASTE_START = "\u001b[200~";
 const PASTE_END = "\u001b[201~";
 // C0 controls except tab and newline; CR is normalized before this runs.

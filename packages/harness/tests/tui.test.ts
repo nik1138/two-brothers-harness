@@ -99,7 +99,7 @@ function message(
 }
 
 function tokenEvent(role: "senior" | "junior", delta: string): StreamEvent {
-  return { type: "token", role, delta, at: "2026-11-04T00:00:00Z" };
+  return { type: "token", role, kind: "text", delta, at: "2026-11-04T00:00:00Z" };
 }
 
 function envelopeEvent(from: string, kind: string, payload: Record<string, unknown>): StreamEvent {

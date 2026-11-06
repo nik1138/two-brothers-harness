@@ -8,8 +8,9 @@
  * so a binding can never be documented in two different ways.
  *
  * A chord has a `when` scope: `"always"`, `"composer"` (the editor has focus),
- * `"transcript"` (scrolling), `"overlay"` (palette/help/pickers) and `"find"`
- * (the inline transcript find bar). The same physical key may therefore mean
+ * `"transcript"` (scrolling), `"overlay"` (palette/help/pickers), `"find"`
+ * (the inline transcript find bar) and `"mention"` (the inline `/` command and
+ * `@skill:` mention pickers). The same physical key may therefore mean
  * different things in different scopes (`Up` = prompt history in the composer,
  * list movement in an overlay, previous match in the find bar) while still
  * having exactly one formatted label per command.
@@ -28,7 +29,8 @@ export type CommandWhen =
   | "composer"
   | "transcript"
   | "overlay"
-  | "find";
+  | "find"
+  | "mention";
 
 /** Help/palette grouping, in display order via {@link COMMAND_GROUPS}. */
 export type CommandGroup =
@@ -204,6 +206,7 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
     title: "Stash or restore draft",
     description: "Stash the composer draft, or bring the stashed draft back.",
     group: "Composer",
+    slash: "stash",
     // Ctrl+O: unused, produces one control byte, and falls outside the
     // terminal's XON/XOFF pair (Ctrl+Q / Ctrl+S), so it can never pause output.
     keys: [{ name: "o", ctrl: true }],
@@ -294,6 +297,39 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
     keys: [{ name: "escape" }],
     when: "overlay",
     palette: false,
+  },
+  // The inline `/` command and `@skill:` mention pickers are a typing mode of
+  // the composer, so their keys live in their own scope and can never collide
+  // with prompt history, overlay movement or the find bar.
+  {
+    id: "mention-move",
+    title: "Move picker selection",
+    description: "Move the highlighted row in the command or skill picker.",
+    group: "Lists",
+    keys: [{ name: "up" }, { name: "down" }],
+    when: "mention",
+    palette: false,
+    document: false,
+  },
+  {
+    id: "mention-accept",
+    title: "Insert picker item",
+    description: "Insert the highlighted command or skill token into the composer.",
+    group: "Lists",
+    keys: [{ name: "return" }, { name: "tab" }],
+    when: "mention",
+    palette: false,
+    document: false,
+  },
+  {
+    id: "mention-close",
+    title: "Close picker",
+    description: "Dismiss the command or skill picker and keep the typed draft.",
+    group: "Lists",
+    keys: [{ name: "escape" }],
+    when: "mention",
+    palette: false,
+    document: false,
   },
   {
     id: "mode",
@@ -461,23 +497,29 @@ export interface KeyResolution {
   chord: KeyChord;
 }
 
-function scopeMatches(when: CommandWhen, context: "app" | "overlay" | "find"): boolean {
+function scopeMatches(
+  when: CommandWhen,
+  context: "app" | "overlay" | "find" | "mention",
+): boolean {
   if (context === "overlay") return when === "always" || when === "overlay";
-  // The inline find bar is a typing mode: only its own scope stays live, so
-  // printable input and the find chords never collide with composer keys.
+  // The inline find bar and mention picker are typing modes: only their own
+  // scope stays live, so printable input and their chords never collide with
+  // composer keys or each other.
   if (context === "find") return when === "find";
-  return when !== "overlay" && when !== "find";
+  if (context === "mention") return when === "mention";
+  return when !== "overlay" && when !== "find" && when !== "mention";
 }
 
 /**
  * Resolve a keypress in a scope. `context` is `"app"` (composer/transcript,
- * the default), `"overlay"` (palette/help/pickers) or `"find"` (the inline
- * transcript find bar). Registry order is priority order.
+ * the default), `"overlay"` (palette/help/pickers), `"find"` (the inline
+ * transcript find bar) or `"mention"` (the inline `/` and `@skill:` pickers).
+ * Registry order is priority order.
  */
 export function resolveKey(
   commands: readonly TuiCommand[],
   key: KeyLike,
-  context: "app" | "overlay" | "find" = "app",
+  context: "app" | "overlay" | "find" | "mention" = "app",
 ): KeyResolution | null {
   for (const command of commands) {
     if (!scopeMatches(command.when ?? "always", context)) continue;

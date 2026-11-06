@@ -47,6 +47,12 @@ import type { StreamEvent } from "../runstream.ts";
 import { restoreContext, SessionError, SessionStore } from "../session.ts";
 import { envPinnedPairs } from "../settings_store.ts";
 import { discoverSkills, type SkillCatalog } from "../skills.ts";
+import {
+  MENTION_MAX_SKILLS,
+  MENTION_MAX_TOTAL_CHARS,
+  parseMentions,
+  renderSkillLoadedBlock,
+} from "../mentions.ts";
 import type { Tool } from "../provider.ts";
 
 import {
@@ -56,6 +62,7 @@ import {
   insertText,
   pasteText,
   recordHistory,
+  replaceTextRange,
   setEditorText,
   takeSubmission,
   type EditorOptions,
@@ -117,6 +124,14 @@ import {
   helpView,
   type HelpState,
 } from "./view/help.ts";
+import {
+  detectMentionTrigger,
+  mentionPickerKey,
+  mentionPickerView,
+  openMentionPicker,
+  updateMentionPicker,
+  type MentionPickerState,
+} from "./view/mentionpicker.ts";
 import {
   historySearchView,
   openHistorySearch,
@@ -503,6 +518,76 @@ export function resolveTuiInput(input: string, commands: CommandCatalog): TuiAct
       : { type: "run", task, mode: found.mode };
   }
   return { type: "run", task: trimmed };
+}
+
+// --------------------------------------------------------------------------- //
+// composer mentions (@skill:<name>)
+// --------------------------------------------------------------------------- //
+
+/** A validated skill attachment: the exact context message texts to append. */
+export interface SkillAttachmentPlan {
+  /** Attached skill names, in mention order (already deduped). */
+  names: string[];
+  /** `renderSkillLoadedBlock(name, body)` texts, parallel to `names`. */
+  blocks: string[];
+  /** Total block characters (bounded by `MENTION_MAX_TOTAL_CHARS`). */
+  totalChars: number;
+}
+
+/** Result of validating a task's `@skill:<name>` mentions. */
+export type SkillMentionResolution =
+  | { ok: true; plan: SkillAttachmentPlan }
+  | { ok: false; errors: string[] };
+
+/**
+ * Validate the `@skill:<name>` mentions of one task against the discovered
+ * catalog, the same rules the submit path needs: unknown names and role-scoped
+ * skills are refused (only shared skills are operator-attachable), and
+ * `MENTION_MAX_SKILLS` / `MENTION_MAX_TOTAL_CHARS` bound the cost. File
+ * mentions (`@rel/path`) are deliberately ignored here: the TUI runs have no
+ * workspace, so they stay literal task text. Pure: no context access.
+ */
+export function resolveSkillMentions(
+  task: string,
+  catalog: SkillCatalog,
+): SkillMentionResolution {
+  const parsed = parseMentions(task);
+  if (parsed.skills.length === 0) {
+    return { ok: true, plan: { names: [], blocks: [], totalChars: 0 } };
+  }
+  const errors: string[] = [];
+  if (parsed.skills.length > MENTION_MAX_SKILLS) {
+    errors.push(
+      `too many skill mentions (${parsed.skills.length}); at most ${MENTION_MAX_SKILLS} per task`,
+    );
+  }
+  const names: string[] = [];
+  const blocks: string[] = [];
+  for (const name of parsed.skills) {
+    const skill = catalog.skills.find((candidate) => candidate.name === name);
+    if (skill === undefined) {
+      errors.push(
+        `unknown skill: @skill:${name} (type @ in the composer to list the shared skills)`,
+      );
+      continue;
+    }
+    if (skill.scope !== "shared") {
+      errors.push(
+        `skill "${name}" is ${skill.scope}-scoped; only shared skills can be attached by the operator`,
+      );
+      continue;
+    }
+    names.push(name);
+    blocks.push(renderSkillLoadedBlock(name, skill.body));
+  }
+  const totalChars = blocks.reduce((total, block) => total + block.length, 0);
+  if (totalChars > MENTION_MAX_TOTAL_CHARS) {
+    errors.push(
+      `attached skill content is too large (${totalChars} > ${MENTION_MAX_TOTAL_CHARS} chars)`,
+    );
+  }
+  if (errors.length > 0) return { ok: false, errors };
+  return { ok: true, plan: { names, blocks, totalChars } };
 }
 
 // --------------------------------------------------------------------------- //
@@ -915,6 +1000,10 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   let find: FindState | null = null;
   let findModel: TuiModel | null = null;
   let findReturnScroll: TranscriptScroll = latestTranscriptScroll();
+  // The inline `/` command and `@skill:` mention picker. It owns the composer
+  // keys while open, mirrors its filter into the draft, and is hidden whenever
+  // a modal overlay is up.
+  let mention: MentionPickerState | null = null;
   let running = false;
   let turnAbort: AbortController | null = null;
   let turnDone: Promise<void> | null = null;
@@ -1216,6 +1305,11 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       ? undefined
       : findBarView(find, { width: size.columns, theme }).lines;
     const findBlockId = find === null ? undefined : activeFindMatch(find)?.match.blockId;
+    // The inline picker is a composer affordance, never a modal surface: it is
+    // hidden while any overlay is up.
+    const mentionRows = overlay === null && mention !== null
+      ? mentionPickerView(mention, { width: size.columns, theme }).lines
+      : undefined;
     const frame = screenView({
       width: size.columns,
       height: size.rows,
@@ -1225,6 +1319,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       theme,
       scroll,
       overlay: overlayLines(size.columns, size.rows),
+      ...(mentionRows !== undefined ? { mentionPicker: mentionRows } : {}),
       ...(findBar !== undefined ? { findBar } : {}),
       ...(findBlockId !== undefined ? { findBlockId } : {}),
       toasts,
@@ -1237,11 +1332,33 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   }
 
   const onStreamEvent = (event: StreamEvent): void => {
+    const previousThinking = model.liveThinking;
     const reduced = reduceModelEvent(model, event);
     model = reduced.model;
     if (reduced.status !== undefined) activity = reduced.status;
     const now = Date.now();
-    if (event.type !== "token" || now - lastRenderAt >= TOKEN_RENDER_MS) {
+    // A new reasoning buffer (first thinking delta, or a new call after the
+    // previous one's text) must paint immediately even when provider deltas
+    // arrive in a burst; the first visible-text delta that completes the
+    // reasoning does the same so the live "…" marker settles at once. Every
+    // other token delta keeps the existing 40 ms render throttle.
+    const startedThinking =
+      event.type === "token" &&
+      event.kind === "thinking" &&
+      model.liveThinking !== undefined &&
+      (previousThinking === undefined ||
+        previousThinking.role !== model.liveThinking.role ||
+        previousThinking.streaming === false);
+    const settledThinking =
+      event.type === "token" &&
+      event.kind !== "thinking" &&
+      previousThinking?.streaming === true;
+    if (
+      startedThinking ||
+      settledThinking ||
+      event.type !== "token" ||
+      now - lastRenderAt >= TOKEN_RENDER_MS
+    ) {
       lastRenderAt = now;
       render();
     }
@@ -1256,14 +1373,29 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
    * history (raw composer text, a CLI task, or a palette template) and is
    * deliberately separate from the expanded `task`. Only a turn that actually
    * starts records history; retry replays the same task without a new entry.
+   * Returns false when the turn was refused (mention validation or a defensive
+   * running guard) and nothing was recorded.
    */
-  const executeTurn = (task: string, turnMode: Config["mode"], prompt?: string): void => {
+  const executeTurn = (task: string, turnMode: Config["mode"], prompt?: string): boolean => {
     if (running) {
       // Defensive only — submitEditor refuses before reaching here, so the
       // caller's draft is never dropped by this guard.
       model = addNotice(model, "warn", "a turn is still running — wait for it to finish");
       render();
-      return;
+      return false;
+    }
+    // Validate `@skill:` mentions before anything is recorded or started: an
+    // unknown or role-scoped skill refuses the whole task (the same rule the
+    // server path enforces). File mentions stay literal text — the TUI has no
+    // workspace to attach them from.
+    const attachment = resolveSkillMentions(task, resources.skills);
+    if (!attachment.ok) {
+      for (const error of attachment.errors) {
+        model = addNotice(model, "error", error);
+      }
+      activity = "skill mention refused — fix the task and send it again";
+      render();
+      return false;
     }
     if (prompt !== undefined) rememberPrompt(prompt);
     model = addUserBlock(model, task);
@@ -1275,6 +1407,32 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     activity = `running (${turnMode})…`;
     const controller = new AbortController();
     turnAbort = controller;
+    // Attach the validated skill bodies to the shared context BEFORE the run.
+    // The operator task is appended first so `renderTranscript`'s [[TASK]]
+    // extraction is unchanged; `harness.run` sees the task already present and
+    // does not append a duplicate. Identical blocks are never re-attached, so a
+    // retry does not grow the context.
+    if (attachment.plan.blocks.length > 0) {
+      try {
+        const hasMessage = (text: string): boolean =>
+          context.events.some(
+            (event) =>
+              event.from === "user" &&
+              event.kind === "message" &&
+              String(event.payload.text ?? "") === text,
+          );
+        if (!hasMessage(task)) {
+          context.makeAndAppend("user", "senior", "message", { text: task });
+        }
+        for (const block of attachment.plan.blocks) {
+          if (hasMessage(block)) continue;
+          context.makeAndAppend("user", "senior", "message", { text: block });
+        }
+        pushToast("info", `skill attached: ${attachment.plan.names.join(", ")}`);
+      } catch (exc) {
+        model = addNotice(model, "warn", `skill attachment failed: ${messageOf(exc)}`);
+      }
+    }
     render();
     turnDone = (async () => {
       try {
@@ -1369,6 +1527,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     // The turn reports its own errors into the transcript; a rejection here
     // would be a bug, but it must never become an unhandled rejection.
     turnDone.catch(() => {});
+    return true;
   };
 
   const doRetry = (): void => {
@@ -1470,6 +1629,105 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     } else if (result.action === "filter" || result.action === "move") {
       syncFindScroll();
     }
+    render();
+  };
+
+  // --------------------------------------------------------------------- //
+  // inline `/` and `@skill:` picker
+  // --------------------------------------------------------------------- //
+
+  /** The catalogs the inline picker composes its rows from (once per frame). */
+  const mentionCatalogs = (): {
+    commands: typeof TUI_COMMANDS;
+    templates: SlashCommandInfo[];
+    skills: SkillCatalog["skills"];
+  } => ({ commands: TUI_COMMANDS, templates: slashInfos(), skills: resources.skills.skills });
+
+  /** Insert a picked token over the trigger range; the caret lands after it. */
+  const insertMentionItem = (item: { insert: string }): void => {
+    const trigger = mention?.trigger;
+    mention = null;
+    if (trigger === undefined) return;
+    editor = replaceTextRange(editor, trigger.start, trigger.end, item.insert);
+  };
+
+  /**
+   * Re-detect the trigger token at the composer caret and open/refresh/close
+   * the inline picker accordingly. Called after every composer edit, so the
+   * filter text and the draft stay the same string: typing filters, Backspace
+   * narrows, and deleting the trigger closes the picker.
+   */
+  const syncMentionPicker = (): void => {
+    if (overlay !== null || find !== null) {
+      mention = null;
+      return;
+    }
+    const trigger = detectMentionTrigger(editor.text, editor.cursor);
+    if (trigger === null) {
+      mention = null;
+      return;
+    }
+    const triggerRange = { start: trigger.start, end: trigger.end };
+    if (mention === null || mention.kind !== trigger.kind) {
+      mention = openMentionPicker(trigger.kind, trigger.query, mentionCatalogs(), triggerRange);
+    } else {
+      mention = updateMentionPicker(mention, trigger.query, triggerRange);
+    }
+  };
+
+  /**
+   * Fold one keypress into the open mention picker.
+   *
+   * Navigation/accept/close come from the registry's `"mention"` scope; every
+   * other key is mirrored into the editor and the picker is re-detected, so
+   * the filter always equals the typed token. Enter on an *exactly typed*
+   * command name follows the pre-picker behavior and submits it (so `/exit`
+   * + Enter still quits); Tab always inserts. The picker never runs a turn on
+   * its own.
+   */
+  const handleMentionKey = (key: KeyLike): void => {
+    if (mention === null) return;
+    const result = mentionPickerKey(TUI_COMMANDS, mention, key);
+    if (result.action === "close") {
+      mention = null;
+      render();
+      return;
+    }
+    if (result.action === "blocked") {
+      pushToast("warn", result.reason ?? "unavailable");
+      render();
+      return;
+    }
+    if (result.action === "accept" && result.item !== undefined) {
+      const exact =
+        mention.kind === "command" &&
+        result.chordName === "return" &&
+        mention.query.trim().toLowerCase() !== "" &&
+        result.item.name.toLowerCase() === mention.query.trim().toLowerCase();
+      if (exact) {
+        mention = null;
+        submitEditor();
+        render();
+        return;
+      }
+      insertMentionItem(result.item);
+      render();
+      return;
+    }
+    if (result.action === "move") {
+      mention = result.state;
+      render();
+      return;
+    }
+    // Printable/Backspace/other: edit the composer, then re-detect the token.
+    const edited = handleEditorKey(editor, { ...key, raw: key.raw ?? "" });
+    if (edited.action === "cancel") {
+      mention = null;
+      cancelKey();
+      return;
+    }
+    editor = edited.state;
+    syncMentionPicker();
     render();
   };
 
@@ -1844,6 +2102,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       case "panel":
         toggleSidePanel();
         return true;
+      case "stash":
+        toggleStash();
+        return true;
       case "settings":
         if (!gateIdleCommand(command)) return true;
         openSettingsDialog();
@@ -1871,6 +2132,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       render();
       return;
     }
+    const draftBefore = editor;
     const submission = takeSubmission(editor);
     editor = submission.state;
     const text = submission.text;
@@ -1898,7 +2160,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         pushToast("info", `mode: ${mode} — the next turn uses it`);
         break;
       case "run":
-        executeTurn(action.task, action.mode ?? mode, text);
+        // A refused mention (unknown/role-scoped/too many) never started a
+        // turn: restore the exact draft so the operator can fix the token.
+        if (!executeTurn(action.task, action.mode ?? mode, text)) editor = draftBefore;
         break;
     }
   };
@@ -2025,6 +2289,12 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       handleFindBarKey(key);
       return;
     }
+    // The inline `/` command and `@skill:` picker is a composer typing mode:
+    // it owns printable input, Up/Down, Enter/Tab and Esc while open.
+    if (mention !== null) {
+      handleMentionKey(key);
+      return;
+    }
     const match = resolveKey(TUI_COMMANDS, key, "app");
     // A literal "?" with text in the composer is typing, not the help chord —
     // tasks are full of questions. F1 (and "?" on an empty composer) still
@@ -2066,6 +2336,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       default:
         break;
     }
+    // Opening a trigger token is a composer affordance, not a key binding:
+    // after every edit the current line/token decides whether the picker is up.
+    syncMentionPicker();
   };
 
   function isQuitChord(key: Key): boolean {
@@ -2113,6 +2386,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
           syncFindScroll();
         } else {
           editor = pasteText(editor, event.text);
+          syncMentionPicker();
         }
         continue;
       }

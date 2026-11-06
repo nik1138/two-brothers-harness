@@ -99,10 +99,33 @@ export interface NoticeBlock extends BlockBase {
 /** Every display unit in the transcript. */
 export type TuiBlock = UserBlock | EnvelopeBlock | DecisionBlock | ToolBlock | NoticeBlock;
 
+/** Kind of a live token delta for the active provider call. */
+export type LiveTokenKind = "text" | "thinking";
+
+/**
+ * The active provider call's live reasoning buffer.
+ *
+ * This is deliberately NOT a transcript block: reasoning deltas are
+ * observational and never part of the final reply, so the buffer is live-only
+ * and dropped the moment the call settles (envelope, tool event, run end or
+ * cancellation). `streaming` is true while reasoning deltas still arrive and
+ * false once visible reply text has started (the reasoning is complete, the
+ * call is not); a reasoning delta after that means a NEW call started and
+ * replaces the buffer.
+ */
+export interface LiveThinking {
+  readonly role: TuiRole;
+  readonly text: string;
+  /** True while reasoning deltas are still arriving for this call. */
+  readonly streaming: boolean;
+}
+
 /** Immutable transcript document. */
 export interface TuiModel {
   readonly blocks: readonly TuiBlock[];
   readonly nextId: number;
+  /** Live reasoning for the active provider call, when one is streaming. */
+  readonly liveThinking?: LiveThinking;
 }
 
 /** Options shared by block constructors. */
@@ -130,7 +153,7 @@ export function nextBlockId(model: TuiModel): string {
 }
 
 function appendBlock(model: TuiModel, block: TuiBlock): TuiModel {
-  return { blocks: [...model.blocks, block], nextId: model.nextId + 1 };
+  return { ...model, blocks: [...model.blocks, block], nextId: model.nextId + 1 };
 }
 
 function makeBase(model: TuiModel, options: BlockOptions): { id: string; at?: string } {
@@ -235,7 +258,7 @@ export function addToolResult(
       ...(input.result !== undefined ? { result: input.result } : {}),
       ...(input.at !== undefined && existing.at === undefined ? { at: input.at } : {}),
     };
-    return { blocks, nextId: model.nextId };
+    return { ...model, blocks };
   }
 
   const base = makeBase(model, input.at !== undefined ? { at: input.at } : {});
@@ -406,8 +429,48 @@ export function projectEnvelope(message: Message): ProjectedMessage {
   };
 }
 
-function isStreamingBlock(block: TuiBlock): block is EnvelopeBlock | DecisionBlock {
+/** True for a block that is still receiving token deltas. */
+export function isStreamingBlock(block: TuiBlock): block is EnvelopeBlock | DecisionBlock {
   return (block.kind === "envelope" || block.kind === "decision") && block.streaming;
+}
+
+/** Drop the live reasoning buffer (a settled call, run end or cancellation). */
+export function clearLiveThinking(model: TuiModel): TuiModel {
+  return model.liveThinking === undefined ? model : { ...model, liveThinking: undefined };
+}
+
+/**
+ * Fold one reasoning delta into the live-thinking buffer.
+ *
+ * A same-role reasoning delta while the previous delta was also reasoning
+ * appends. Anything else means a new provider call started: a reasoning delta
+ * after visible reply text (`text → thinking`), or a role switch, replaces the
+ * buffer instead of concatenating. The completed transcript is always the
+ * envelope; the buffer never enters `blocks`.
+ */
+function appendThinkingDelta(
+  model: TuiModel,
+  input: { role: TuiRole; delta: string },
+): TuiModel {
+  if (input.delta === "") return model;
+  const current = model.liveThinking;
+  if (current !== undefined && current.role === input.role && current.streaming) {
+    return {
+      ...model,
+      liveThinking: { role: current.role, text: current.text + input.delta, streaming: true },
+    };
+  }
+  return {
+    ...model,
+    liveThinking: { role: input.role, text: input.delta, streaming: true },
+  };
+}
+
+/** Visible reply text started: the active call's reasoning is complete. */
+function markThinkingComplete(model: TuiModel): TuiModel {
+  const current = model.liveThinking;
+  if (current === undefined || !current.streaming) return model;
+  return { ...model, liveThinking: { ...current, streaming: false } };
 }
 
 function findDraftIndex(
@@ -495,7 +558,7 @@ export function appendEnvelopeDelta(
     if (block === undefined || block.kind !== "envelope") return model;
     const blocks = model.blocks.slice();
     blocks[index] = { ...block, text: block.text + input.delta, streaming: true };
-    return { blocks, nextId: model.nextId };
+    return { ...model, blocks };
   }
 
   if (
@@ -536,7 +599,7 @@ function replaceOrAppend(
   const id = previous?.id ?? block.id;
   const blocks = model.blocks.slice();
   blocks[index] = { ...block, id };
-  return { blocks, nextId: model.nextId };
+  return { ...model, blocks };
 }
 
 /**
@@ -563,7 +626,7 @@ export function commitEnvelope(model: TuiModel, message: Message): TuiModel {
         messageId: projected.messageId,
         ...(projected.at !== undefined && last.at === undefined ? { at: projected.at } : {}),
       };
-      return { blocks, nextId: model.nextId };
+      return { ...model, blocks };
     }
     const existingUser = model.blocks.findIndex(
       (block) => block.kind === "user" && block.messageId === projected.messageId,
@@ -654,7 +717,7 @@ export function finalizeStreamingDrafts(
       interrupted: true,
     });
   }
-  return changed ? { blocks, nextId: model.nextId } : model;
+  return changed ? { ...model, blocks } : model;
 }
 
 /** Result of folding one stream event into the model. */
@@ -686,8 +749,11 @@ function toolStatus(status: StreamToolStatus): Exclude<ToolStatus, "call"> {
 
 /**
  * Fold one run stream event into the block model. Pure and deterministic:
- * token deltas extend drafts, envelopes commit them, tool events pair, and a
- * terminal run state finalizes any draft that never received its envelope.
+ * token deltas extend drafts by kind (text → the response draft, thinking → a
+ * live-only reasoning buffer), envelopes commit drafts and settle the live
+ * buffers, tool events pair, and a terminal run state finalizes any draft that
+ * never received its envelope. Missing/unknown token kinds are treated as
+ * `"text"` for forward/backward compatibility.
  */
 export function reduceModelEvent(
   model: TuiModel,
@@ -696,20 +762,32 @@ export function reduceModelEvent(
 ): ModelReduceResult {
   const at = options.at ?? event.at;
   switch (event.type) {
-    case "token":
+    case "token": {
+      const kind: LiveTokenKind = event.kind === "thinking" ? "thinking" : "text";
+      if (kind === "thinking") {
+        return {
+          model: appendThinkingDelta(model, {
+            role: roleOf(event.role),
+            delta: event.delta,
+          }),
+        };
+      }
       return {
-        model: appendEnvelopeDelta(model, {
-          role: roleOf(event.role),
-          delta: event.delta,
-          ...(at !== undefined ? { at } : {}),
-        }),
+        model: markThinkingComplete(
+          appendEnvelopeDelta(model, {
+            role: roleOf(event.role),
+            delta: event.delta,
+            ...(at !== undefined ? { at } : {}),
+          }),
+        ),
       };
+    }
     case "envelope":
-      return { model: commitEnvelope(model, event.envelope) };
+      return { model: commitEnvelope(clearLiveThinking(model), event.envelope) };
     case "tool_call":
-      if (event.role === "user") return { model };
+      if (event.role === "user") return { model: clearLiveThinking(model) };
       return {
-        model: addToolCall(model, {
+        model: addToolCall(clearLiveThinking(model), {
           role: roleOf(event.role),
           tool: event.tool,
           ...(event.callId ?? options.callId) !== undefined
@@ -722,9 +800,9 @@ export function reduceModelEvent(
         }),
       };
     case "tool_result":
-      if (event.role === "user") return { model };
+      if (event.role === "user") return { model: clearLiveThinking(model) };
       return {
-        model: addToolResult(model, {
+        model: addToolResult(clearLiveThinking(model), {
           role: roleOf(event.role),
           tool: event.tool,
           status: toolStatus(event.status),
@@ -740,7 +818,7 @@ export function reduceModelEvent(
     case "repair":
       return {
         model: addNotice(
-          model,
+          clearLiveThinking(model),
           "warn",
           `repair: ${event.role} ${event.kind} reply re-asked (strict payload check)`,
           at !== undefined ? { at } : {},
@@ -753,7 +831,7 @@ export function reduceModelEvent(
         event.status === "cancelled"
       ) {
         return {
-          model: finalizeStreamingDrafts(model),
+          model: finalizeStreamingDrafts(clearLiveThinking(model)),
           status:
             event.status === "completed"
               ? "ready — turn completed"
@@ -762,14 +840,14 @@ export function reduceModelEvent(
                 : "turn failed — the session is still open",
         };
       }
-      return { model, status: "running…" };
+      return { model: clearLiveThinking(model), status: "running…" };
     }
     case "result": {
       const usage = event.result.usage ?? {};
       const input = Number(usage.input_tokens ?? 0) || 0;
       const output = Number(usage.output_tokens ?? 0) || 0;
       return {
-        model: finalizeStreamingDrafts(model),
+        model: finalizeStreamingDrafts(clearLiveThinking(model)),
         status: `ready — ${input}/${output} tokens (in/out)`,
       };
     }
