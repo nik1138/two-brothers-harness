@@ -8,8 +8,10 @@ import { test } from 'node:test'
 
 import {
   STOP_GESTURE_WINDOW_MS,
+  canSubmitComposer,
   canUseStopGesture,
   classifyComposerKey,
+  composerLockReason,
   isImeComposing,
   isShortcutHelpChord,
   isStopGesture,
@@ -102,6 +104,25 @@ test('isShortcutHelpChord: ? and Ctrl/Cmd+/ (never inside other modifiers)', () 
   assert.equal(isShortcutHelpChord(key({ key: '?', isComposing: true })), false)
   assert.equal(isShortcutHelpChord(key({ key: 'k', ctrlKey: true })), false)
   assert.equal(isShortcutHelpChord(null), false)
+})
+
+// -- compose lock -------------------------------------------------------------
+
+test('canSubmitComposer: text plus no lock; compaction is its own lock reason', () => {
+  assert.equal(canSubmitComposer({ text: 'ship it' }), true)
+  assert.equal(canSubmitComposer({ text: '   ' }), false)
+  assert.equal(canSubmitComposer({ text: '' }), false)
+  assert.equal(canSubmitComposer(null), false)
+  assert.equal(canSubmitComposer({ busy: true, text: 'ship it' }), false)
+  assert.equal(canSubmitComposer({ waiting: true, text: 'ship it' }), false)
+  assert.equal(canSubmitComposer({ compacting: true, text: 'ship it' }), false)
+  assert.equal(composerLockReason({ compacting: true }), 'compacting')
+  assert.equal(composerLockReason({ waiting: true }), 'waiting')
+  assert.equal(composerLockReason({}), null)
+  // precedence: a working run outranks compaction, which outranks an approval wait
+  assert.equal(composerLockReason({ waiting: true, compacting: true }), 'compacting')
+  assert.equal(composerLockReason({ busy: true, compacting: true, waiting: true }), 'busy')
+  assert.equal(composerLockReason(null), 'busy')
 })
 
 // -- double-escape stop gesture ----------------------------------------------

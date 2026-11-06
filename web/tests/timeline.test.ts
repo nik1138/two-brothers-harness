@@ -8,7 +8,12 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { projectEnvelopes, resetChatProjection } from '../src/chat.ts'
+import {
+  COMPACTION_SUMMARY_PREFIX,
+  COMPACTION_SUMMARY_SUFFIX,
+  projectEnvelopes,
+  resetChatProjection,
+} from '../src/chat.ts'
 import {
   mergeTimeline,
   nextActorLabel,
@@ -146,4 +151,47 @@ test('mergeTimeline: incremental fresh-object replacement never yields undefined
   const tail = after[after.length - 1]?.entry
   assert.ok(tail, 'tail entry defined after appends')
   assert.ok(timestampOf(tail) !== undefined)
+})
+
+test('mergeTimeline: a compaction-summary row merges as a neutral system activity', () => {
+  resetChatProjection([])
+  const events = [
+    {
+      v: 1,
+      id: 'e1',
+      seq: 1,
+      ts: '2026-11-04T21:00:00Z',
+      from: 'user',
+      to: 'senior',
+      kind: 'message',
+      payload: { text: 'do the thing' },
+    },
+    {
+      v: 1,
+      id: 'e2',
+      seq: 2,
+      ts: '2026-11-04T21:05:00Z',
+      from: 'user',
+      to: 'senior',
+      kind: 'message',
+      payload: {
+        text: `${COMPACTION_SUMMARY_PREFIX}Older context summarized.${COMPACTION_SUMMARY_SUFFIX}`,
+      },
+    },
+  ] as never[]
+  const merged = mergeTimeline(projectEnvelopes(events), [])
+  assertTimelineWellFormed(merged, 'compaction summary merge')
+  const systemRows = merged.filter((row) => row.entry.type === 'system')
+  assert.equal(systemRows.length, 1)
+  if (systemRows[0]?.entry.type === 'system') {
+    assert.equal(systemRows[0].entry.activity.label, 'Context compacted')
+    assert.equal(systemRows[0].entry.activity.quiet, true)
+    assert.match(systemRows[0].entry.activity.body ?? '', /Older context summarized/)
+  }
+  // the summary never becomes an operator chat group
+  assert.equal(
+    merged.filter((row) => row.entry.type === 'group' && row.entry.group.author === 'operator')
+      .length,
+    1,
+  )
 })

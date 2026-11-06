@@ -366,6 +366,8 @@ function collectFindBlocks(): FindTextBlock[] {
   if (!root) return []
   const blocks: FindTextBlock[] = []
   for (const el of root.querySelectorAll<HTMLElement>(FIND_TEXT_SELECTOR)) {
+    // internal context rows (compaction summaries) are deliberately not searchable
+    if (el.closest('[data-find-skip]')) continue
     const nodes: Text[] = []
     const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)
     let node = walker.nextNode()
@@ -840,10 +842,24 @@ watch(
           <span class="revision-label">{{ row.entry.label }}</span>
         </div>
 
-        <div v-else-if="row.entry.type === 'system'" class="system-activity" role="note">
+        <div
+          v-else-if="row.entry.type === 'system'"
+          class="system-activity"
+          role="note"
+          :data-find-skip="row.entry.activity.quiet ? 'true' : undefined"
+        >
           <span class="system-activity-dot" aria-hidden="true"></span>
           <span class="system-activity-label">{{ row.entry.activity.label }}</span>
-          <span v-if="row.entry.activity.body" class="system-activity-body">{{
+          <details
+            v-if="row.entry.activity.body && row.entry.activity.quiet"
+            class="system-activity-details"
+          >
+            <summary>Summary</summary>
+            <div class="system-activity-body system-activity-summary">{{
+              row.entry.activity.body
+            }}</div>
+          </details>
+          <span v-else-if="row.entry.activity.body" class="system-activity-body">{{
             row.entry.activity.body
           }}</span>
         </div>
@@ -1093,6 +1109,33 @@ watch(
 
 .system-activity-body {
   min-width: 0;
+}
+
+/* Internal context rows (e.g. a compaction summary): disclosure with a bounded,
+   pre-wrapped body; the row itself is excluded from find. */
+.system-activity-details {
+  min-width: 0;
+}
+
+.system-activity-details summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+}
+
+.system-activity-details summary:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.system-activity-summary {
+  margin: 0.3rem 0 0;
+  max-height: 18rem;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.8rem;
+  line-height: 1.45;
 }
 
 /* Progressive disclosure for per-message technical detail. */

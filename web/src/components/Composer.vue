@@ -9,15 +9,18 @@ import {
   listWorkspaceFiles,
 } from '../api'
 import {
+  MODE_COMMAND_USAGE,
   commandSectionCount,
   commandUsageLine,
   isBaseCommandAction,
   mergeCommandSections,
   parseSubmittedCommand,
+  resolveModeCommandArg,
   resolveTypedCommand,
+  typedCommandNotice,
 } from '../basecommands'
 import type { ComposerCommandRequest } from '../basecommands'
-import { classifyComposerKey } from '../composerKeys'
+import { canSubmitComposer, classifyComposerKey, composerLockReason } from '../composerKeys'
 import type { ComposerKeyInput } from '../composerKeys'
 import { clearDraft, getDraft, setDraft } from '../drafts'
 import {
@@ -58,6 +61,11 @@ const props = defineProps<{
   draftRestore?: { token: number; text: string } | null
   /** The followed run is working (queued/running) — the composer is locked. */
   busy: boolean
+  /**
+   * A manual context compaction is in flight: the draft stays editable but the
+   * composer must not submit (the server rejects a run racing a compaction).
+   */
+  compacting?: boolean
   /**
    * The followed run is parked on an operator approval. The input stays
    * usable for drafting, but sending is blocked until the run finishes.
@@ -225,19 +233,41 @@ function resizeInput() {
   el.style.overflowY = el.scrollHeight > MAX_INPUT_HEIGHT ? 'auto' : 'hidden'
 }
 
-const canSend = computed(() => !props.busy && !props.waiting && task.value.trim().length > 0)
+/** Send availability: text present and no lock (working run / compaction / wait). */
+const canSend = computed(() =>
+  canSubmitComposer({
+    busy: props.busy,
+    waiting: props.waiting,
+    compacting: props.compacting,
+    text: task.value,
+  }),
+)
+
+const lockReason = computed(() =>
+  composerLockReason({
+    busy: props.busy,
+    waiting: props.waiting,
+    compacting: props.compacting,
+  }),
+)
 
 const placeholder = computed(() => {
-  if (props.busy) return 'The brothers are working…'
-  if (props.waiting) return 'Draft the next task…'
+  if (lockReason.value === 'busy') return 'The brothers are working…'
+  if (lockReason.value === 'compacting') return 'Compacting context — sending unlocks when it finishes…'
+  if (lockReason.value === 'waiting') return 'Draft the next task…'
   return 'Describe a task for the two brothers…'
 })
 
 const statusHint = computed(() => {
-  if (props.busy) {
+  if (lockReason.value === 'busy') {
     return props.stopping ? 'Stopping the run…' : 'The brothers are working — stop to interrupt.'
   }
-  if (props.waiting) return 'Drafting only — sending unlocks when this run finishes.'
+  if (lockReason.value === 'compacting') {
+    return 'Compacting context… sending unlocks when it finishes.'
+  }
+  if (lockReason.value === 'waiting') {
+    return 'Drafting only — sending unlocks when this run finishes.'
+  }
   return 'Enter to send · Shift+Enter new line · Ctrl/⌘+Enter send now'
 })
 
@@ -321,9 +351,19 @@ function submit() {
   // submitting always closes the mention picker (the text now owns the task)
   closePicker()
   const text = task.value.trim()
-  // `waiting` keeps the textarea usable for drafting, but a new run cannot
-  // start while this session's run is still alive.
-  if (!text || props.busy || props.waiting) return
+  // Locked states keep the draft intact: a working run, a run parked on an
+  // approval, and an in-flight context compaction (the server rejects a run
+  // that races a compaction, so the composer stays honest and does not send).
+  if (
+    !canSubmitComposer({
+      busy: props.busy,
+      waiting: props.waiting,
+      compacting: props.compacting,
+      text: task.value,
+    })
+  ) {
+    return
+  }
   // a typed `/action` is performed locally instead of becoming a run
   if (interceptCommandSubmit()) return
   emit('submit', { task: text, mode: mode.value, provider: providerForRun.value })
@@ -884,39 +924,64 @@ function interceptCommandSubmit(): boolean {
   const submitted = parseSubmittedCommand(task.value)
   if (!submitted) return false
   const resolution = resolveTypedCommand(baseCommands.value, commands.value, submitted.token)
-  if (resolution.kind === 'base-action') {
+
+  if (resolution.kind === 'base-action' || resolution.kind === 'base-prompt') {
     const command = resolution.command
     const args = submitted.args.trim()
+
+    // Only canonical names and ASCII aliases survive the server's ASCII
+    // `matchCommand` rule. A typed non-ASCII alias must neither run locally nor
+    // be submitted verbatim: name the canonical spelling and keep the draft.
+    if (!resolution.typeable) {
+      emit('notice', typedCommandNotice(resolution) ?? `Use ${commandUsageLine(command)}`)
+      return true
+    }
+
+    if (command.kind === 'action') {
+      if (command.requiresArguments && args === '') {
+        emit('notice', `Usage: ${commandUsageLine(command)}`)
+        return true
+      }
+      if (!isBaseCommandAction(command.action)) {
+        emit('notice', `/${command.name} is not available in the web workspace yet.`)
+        return true
+      }
+      if (command.action === 'mode') {
+        // `/mode <arg>` applies the mode; `/mode` alone opens the control.
+        const modeArg = resolveModeCommandArg(args)
+        if (modeArg.kind === 'invalid') {
+          emit('notice', `Usage: ${MODE_COMMAND_USAGE}`)
+          return true
+        }
+        consumeComposerText()
+        if (modeArg.kind === 'apply') {
+          mode.value = modeArg.mode
+          emit('notice', `Cooperation mode: ${modeArg.mode === 'work' ? 'Work' : 'Consult'}`)
+        } else {
+          openModePicker()
+        }
+        return true
+      }
+      consumeComposerText()
+      emitCommandRequest(command.action, command.name, args, command.requiresArguments)
+      return true
+    }
+
+    // prompt command: fail loudly with the usage line instead of submitting an
+    // empty template; otherwise the server expands it normally
     if (command.requiresArguments && args === '') {
       emit('notice', `Usage: ${commandUsageLine(command)}`)
       return true
     }
-    if (!isBaseCommandAction(command.action)) {
-      emit('notice', `/${command.name} is not available in the web workspace yet.`)
-      return true
-    }
-    consumeComposerText()
-    if (command.action === 'mode') {
-      openModePicker()
-      return true
-    }
-    emitCommandRequest(command.action, command.name, args, command.requiresArguments)
-    return true
+    return false
   }
-  if (
-    resolution.kind === 'base-prompt' &&
-    resolution.command.requiresArguments &&
-    submitted.args.trim() === ''
-  ) {
-    // fail loudly with the usage line instead of submitting an empty template
-    emit('notice', `Usage: ${commandUsageLine(resolution.command)}`)
-    return true
-  }
+
   return false
 }
 
 /** Scroll only the picker list so the active row stays visible. */
-function scrollActiveIntoView(): void {  const list = pickerList.value
+function scrollActiveIntoView(): void {
+  const list = pickerList.value
   const index = pickerActive.value
   if (!list || index < 0) return
   const option = list.querySelector<HTMLElement>(`#${mentionOptionId(index)}`)
@@ -1154,10 +1219,15 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <form class="composer" aria-label="New task" @submit.prevent="submit">
+  <form
+    class="composer"
+    aria-label="New task"
+    :aria-busy="busy || compacting"
+    @submit.prevent="submit"
+  >
     <div
       class="composer-surface"
-      :class="{ 'is-busy': busy, 'is-waiting': waiting }"
+      :class="{ 'is-busy': busy, 'is-waiting': waiting, 'is-compacting': compacting }"
     >
       <!-- @ mentions and / commands: a listbox above the box, driven by the
            textarea's aria-activedescendant while the textarea keeps focus. -->
@@ -1473,6 +1543,12 @@ onBeforeUnmount(() => {
 
 .composer-surface.is-waiting {
   border-color: var(--warning);
+}
+
+/* Compaction in flight: drafting stays possible, sending is locked. */
+.composer-surface.is-compacting {
+  border-color: var(--warning);
+  box-shadow: 0 0 0 1px var(--warning-soft), var(--shadow-raised);
 }
 
 .composer-input {

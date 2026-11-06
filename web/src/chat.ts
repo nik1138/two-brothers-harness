@@ -47,6 +47,8 @@ export interface SystemActivity {
   ts: string
   label: string
   body: string | null
+  /** Internal context traffic: rendered neutrally and kept out of find results. */
+  quiet?: boolean
 }
 
 export type ChatItem =
@@ -106,6 +108,56 @@ function repairActivityOf(env: Envelope): SystemActivity {
     ? `The ${kind} reply did not match the required format — the request was sent again.`
     : 'A reply did not match the required format — the request was sent again.'
   return { id: env.id || `repair-${env.seq}`, seq: env.seq, ts: env.ts, label: 'Reply format repair', body }
+}
+
+// -- context compaction summary (COMPACTION_SUMMARY) --------------------------
+// `/compact` rewrites the session so the older history is replaced by one
+// `message` envelope from "user" whose text wraps the summary in the harness's
+// `<summary>` markers. That envelope is internal context traffic, never the
+// operator's words: the projection renders a neutral "Context compacted"
+// activity with the (clipped) summary body. The marker constants are mirrored
+// from `packages/harness/src/compaction.ts` (COMPACTION_SUMMARY_PREFIX/_SUFFIX,
+// attribution: the harness package — web cannot import package sources); keep
+// them byte-identical. Exported so tests assert the mirror.
+
+export const COMPACTION_SUMMARY_PREFIX =
+  'The conversation history before this point was compacted into the following summary:\n\n<summary>\n'
+export const COMPACTION_SUMMARY_SUFFIX = '\n</summary>'
+
+/** Cap on the rendered summary body (the full text stays in the session file). */
+const COMPACTION_ACTIVITY_MAX_CHARS = 4_000
+
+/** True when a user message text is a compaction-summary context envelope.
+ *  Mirrors `compaction.ts::isCompactionSummary` (prefix-anchored), so a summary
+ *  is never mistaken for operator speech and a mention of the marker inside an
+ *  operator message stays operator text. */
+export function isCompactionSummaryText(text: unknown): text is string {
+  return typeof text === 'string' && text.startsWith(COMPACTION_SUMMARY_PREFIX)
+}
+
+/** Clean, bounded summary body of a compaction envelope (markers stripped). */
+export function compactionSummaryBody(text: unknown): string {
+  if (!isCompactionSummaryText(text)) return ''
+  const inner = text.slice(COMPACTION_SUMMARY_PREFIX.length)
+  const body = (inner.endsWith(COMPACTION_SUMMARY_SUFFIX)
+    ? inner.slice(0, inner.length - COMPACTION_SUMMARY_SUFFIX.length)
+    : inner
+  ).trim()
+  if (body.length <= COMPACTION_ACTIVITY_MAX_CHARS) return body
+  return `${body.slice(0, COMPACTION_ACTIVITY_MAX_CHARS).trimEnd()} … [summary clipped]`
+}
+
+/** Neutral system activity for a compaction-summary envelope. */
+function compactionActivityOf(env: Envelope): SystemActivity {
+  const raw = str((env.payload ?? {})['text']) ?? ''
+  return {
+    id: env.id || `compact-${env.seq}`,
+    seq: env.seq,
+    ts: env.ts,
+    label: 'Context compacted',
+    body: compactionSummaryBody(raw) || null,
+    quiet: true,
+  }
 }
 
 function toMessage(env: Envelope): ChatMessage {
@@ -216,16 +268,21 @@ export function chatProjectionGeneration(): number {
 
 /** Fold one envelope into the projection (the body of the full-pass loop). */
 function appendToProjection(state: ChatProjectionState, env: Envelope) {
-  // Repair re-asks are internal protocol traffic, not operator speech: project
-  // them as a neutral system activity and break the open speaker group.
-  if (
-    env.from === 'user' &&
-    env.kind === 'message' &&
-    isRepairRequestText((env.payload ?? {})['text'])
-  ) {
-    state.group = null
-    state.items.push({ type: 'system', activity: repairActivityOf(env) })
-    return
+  // Repair re-asks and compaction summaries are internal protocol traffic, not
+  // operator speech: project them as neutral system activities and break the
+  // open speaker group.
+  const text = (env.payload ?? {})['text']
+  if (env.from === 'user' && env.kind === 'message') {
+    if (isRepairRequestText(text)) {
+      state.group = null
+      state.items.push({ type: 'system', activity: repairActivityOf(env) })
+      return
+    }
+    if (isCompactionSummaryText(text)) {
+      state.group = null
+      state.items.push({ type: 'system', activity: compactionActivityOf(env) })
+      return
+    }
   }
 
   const author = speakerOf(env.from)
@@ -355,7 +412,8 @@ export function taskOf(events: Envelope[]): string | null {
   for (const env of events) {
     if (env.from === 'user' && env.kind === 'message') {
       const text = str((env.payload as Record<string, unknown>).text)
-      if (text && !isRepairRequestText(text)) return text
+      // internal context envelopes never become the visible task line
+      if (text && !isRepairRequestText(text) && !isCompactionSummaryText(text)) return text
     }
     if (env.kind === 'consult') {
       const task = str((env.payload as Record<string, unknown>).task)

@@ -1957,6 +1957,7 @@ onUnmounted(() => {
         :draft-restore="draftRestore"
         :busy="live"
         :waiting="waiting"
+        :compacting="compactBusy"
         :stopping="stopping"
         :settings-version="settingsVersion"
         @submit="startNewRun"

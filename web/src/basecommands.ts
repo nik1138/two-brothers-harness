@@ -63,12 +63,108 @@ export interface SubmittedCommand {
   args: string
 }
 
+/** How a typed command spelling relates to the catalogue. */
+export type TypedCommandSpelling = 'canonical' | 'ascii-alias' | 'non-ascii-alias' | 'unknown'
+
 /** Resolution of one typed command spelling. */
 export type TypedCommandResolution =
-  | { kind: 'base-action'; command: BaseCommand }
-  | { kind: 'base-prompt'; command: BaseCommand }
-  | { kind: 'discovered'; command: CommandInfo }
-  | { kind: 'unknown' }
+  | {
+      kind: 'base-action' | 'base-prompt'
+      command: BaseCommand
+      spelling: TypedCommandSpelling
+      /** Only canonical names and ASCII aliases may be submitted/run when typed. */
+      typeable: boolean
+      /** The alias spelling that matched, when `spelling` is an alias. */
+      matchedAlias?: string
+    }
+  | { kind: 'discovered'; command: CommandInfo; spelling: 'canonical'; typeable: true }
+  | { kind: 'unknown'; spelling: 'unknown'; typeable: false }
+
+/** True when every character is ASCII (only those aliases survive the server's
+ *  ASCII `matchCommand` rule when typed into a task). */
+export function isTypeableCommandToken(token: unknown): boolean {
+  return typeof token === 'string' && token.length > 0 && /^[\x00-\x7f]+$/.test(token)
+}
+
+/**
+ * Resolve a typed spelling exactly like the server does: an exact discovered
+ * command name wins (it shadows a base command), then a base name, then a base
+ * alias. `spelling`/`typeable` distinguish canonical names and ASCII aliases
+ * (typeable) from non-ASCII aliases that only the picker can activate.
+ */
+export function resolveTypedCommand(
+  baseCommands: readonly BaseCommand[] | null | undefined,
+  commands: readonly CommandInfo[] | null | undefined,
+  token: unknown,
+): TypedCommandResolution {
+  const needle = text(token).replace(/^\/+/, '').toLowerCase()
+  if (!needle) return { kind: 'unknown', spelling: 'unknown', typeable: false }
+  const discovered = normalizeDiscovered(commands).find(
+    (command) => command.name.toLowerCase() === needle,
+  )
+  if (discovered) {
+    return { kind: 'discovered', command: discovered, spelling: 'canonical', typeable: true }
+  }
+  const base = normalizeBaseCommands(baseCommands)
+  const canonical = base.find((command) => command.name.toLowerCase() === needle)
+  if (canonical) {
+    return {
+      kind: canonical.kind === 'action' ? 'base-action' : 'base-prompt',
+      command: canonical,
+      spelling: 'canonical',
+      typeable: true,
+    }
+  }
+  const byAlias = base.find((command) =>
+    command.aliases.some((alias) => alias.toLowerCase() === needle),
+  )
+  if (byAlias) {
+    const matchedAlias =
+      byAlias.aliases.find((alias) => alias.toLowerCase() === needle) ?? needle
+    const typeable = isTypeableCommandToken(matchedAlias)
+    return {
+      kind: byAlias.kind === 'action' ? 'base-action' : 'base-prompt',
+      command: byAlias,
+      spelling: typeable ? 'ascii-alias' : 'non-ascii-alias',
+      typeable,
+      matchedAlias,
+    }
+  }
+  return { kind: 'unknown', spelling: 'unknown', typeable: false }
+}
+
+/**
+ * Notice for a non-typeable typed alias (the server cannot resolve it from the
+ * task text, so it must not be submitted or run locally). Returns null for
+ * typeable/unknown spellings.
+ */
+export function typedCommandNotice(resolution: TypedCommandResolution | null): string | null {
+  if (!resolution || resolution.kind === 'unknown') return null
+  if (resolution.kind === 'discovered' || resolution.typeable) return null
+  const alias = resolution.matchedAlias ? `“${resolution.matchedAlias}”` : 'that alias'
+  return `Use ${commandUsageLine(resolution.command)} — ${alias} is picker-only (non-ASCII alias).`
+}
+
+/** How a typed `/mode` argument is handled. */
+export type ModeArgumentResolution =
+  | { kind: 'apply'; mode: 'consult' | 'work' }
+  | { kind: 'open' }
+  | { kind: 'invalid' }
+
+/** Usage line for the `/mode` action. */
+export const MODE_COMMAND_USAGE = '/mode [consult|work]'
+
+/**
+ * `/mode` with no argument opens the mode control; a valid `consult`/`work`
+ * argument applies it directly; anything else is a usage error (never applied,
+ * never submitted).
+ */
+export function resolveModeCommandArg(args: unknown): ModeArgumentResolution {
+  const value = typeof args === 'string' ? args.trim().toLowerCase() : ''
+  if (!value) return { kind: 'open' }
+  if (value === 'consult' || value === 'work') return { kind: 'apply', mode: value }
+  return { kind: 'invalid' }
+}
 
 /** Payload sent to the shell when a base action is chosen/typed. */
 export interface ComposerCommandRequest {
@@ -273,31 +369,6 @@ export function findBaseCommand(
   return (
     base.find((command) => command.aliases.some((alias) => alias.toLowerCase() === needle)) ?? null
   )
-}
-
-/**
- * Resolve a typed spelling exactly like the server does: an exact discovered
- * command name wins (it shadows a base command), then a base name, then a base
- * alias. Unknown spellings stay verbatim submissions.
- */
-export function resolveTypedCommand(
-  baseCommands: readonly BaseCommand[] | null | undefined,
-  commands: readonly CommandInfo[] | null | undefined,
-  token: unknown,
-): TypedCommandResolution {
-  const needle = text(token).replace(/^\/+/, '').toLowerCase()
-  if (!needle) return { kind: 'unknown' }
-  const discovered = normalizeDiscovered(commands).find(
-    (command) => command.name.toLowerCase() === needle,
-  )
-  if (discovered) return { kind: 'discovered', command: discovered }
-  const base = findBaseCommand(baseCommands, needle)
-  if (base) {
-    return base.kind === 'action'
-      ? { kind: 'base-action', command: base }
-      : { kind: 'base-prompt', command: base }
-  }
-  return { kind: 'unknown' }
 }
 
 /**

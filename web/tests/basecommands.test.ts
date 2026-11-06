@@ -10,15 +10,19 @@ import {
   BASE_COMMAND_ACTIONS,
   BASE_COMMAND_GROUP_LABEL,
   DISCOVERED_COMMAND_GROUP_LABEL,
+  MODE_COMMAND_USAGE,
   baseCommandMatchesQuery,
   commandSectionCount,
   commandUsageLine,
   findBaseCommand,
   isBaseCommandAction,
+  isTypeableCommandToken,
   mergeCommandSections,
   normalizeBaseCommands,
   parseSubmittedCommand,
+  resolveModeCommandArg,
   resolveTypedCommand,
+  typedCommandNotice,
 } from '../src/basecommands.ts'
 import type { ComposerCommandRequest } from '../src/basecommands.ts'
 import { MAX_COMMAND_ITEMS, MENTION_FOOTER_HINT_COMMAND } from '../src/mentions.ts'
@@ -121,25 +125,78 @@ test('findBaseCommand resolves canonical names and aliases case-insensitively', 
   assert.equal(findBaseCommand(null, 'plan'), null)
 })
 
-test('resolveTypedCommand: discovered wins, then base names, then aliases', () => {
+test('resolveTypedCommand: discovered wins, then canonical names, ASCII aliases, non-ASCII aliases', () => {
   const catalog = [
     base({ name: 'plan' }),
-    action('compact', { aliases: ['压缩'] }),
+    action('compact', { aliases: ['压缩', 'squeeze'] }),
     base({ name: 'goal', kind: 'prompt', requiresArguments: true }),
   ]
-  assert.deepEqual(resolveTypedCommand(catalog, [], 'compact'), {
-    kind: 'base-action',
-    command: catalog[1],
-  })
-  assert.equal(resolveTypedCommand(catalog, [], '压缩').kind, 'base-action')
+  const canonical = resolveTypedCommand(catalog, [], 'compact')
+  assert.equal(canonical.kind, 'base-action')
+  assert.equal(canonical.command.name, 'compact')
+  assert.equal(canonical.spelling, 'canonical')
+  assert.equal(canonical.typeable, true)
+  // ASCII aliases stay typeable (the server's ASCII matchCommand rule resolves them)
+  const asciiAlias = resolveTypedCommand(catalog, [], 'squeeze')
+  assert.equal(asciiAlias.kind, 'base-action')
+  assert.equal(asciiAlias.spelling, 'ascii-alias')
+  assert.equal(asciiAlias.typeable, true)
+  assert.equal(asciiAlias.matchedAlias, 'squeeze')
+  // non-ASCII aliases resolve in the picker but cannot be typed as a task
+  const cjkAction = resolveTypedCommand(catalog, [], '压缩')
+  assert.equal(cjkAction.kind, 'base-action')
+  assert.equal(cjkAction.spelling, 'non-ascii-alias')
+  assert.equal(cjkAction.typeable, false)
+  assert.equal(cjkAction.matchedAlias, '压缩')
+  const cjkPrompt = resolveTypedCommand(catalog, [], '计划')
+  assert.equal(cjkPrompt.kind, 'base-prompt')
+  assert.equal(cjkPrompt.typeable, false)
+
   assert.equal(resolveTypedCommand(catalog, [], 'goal').kind, 'base-prompt')
   assert.equal(resolveTypedCommand(catalog, [], 'nope').kind, 'unknown')
-  // a discovered template named like a base action shadows it (no local action)
-  assert.deepEqual(resolveTypedCommand(catalog, [command('compact')], 'compact'), {
-    kind: 'discovered',
-    command: command('compact'),
+  assert.deepEqual(resolveTypedCommand(catalog, [], 'nope'), {
+    kind: 'unknown',
+    spelling: 'unknown',
+    typeable: false,
   })
+  // a discovered template named like a base action shadows it (no local action)
+  const discovered = resolveTypedCommand(catalog, [command('compact')], 'compact')
+  assert.equal(discovered.kind, 'discovered')
+  assert.equal(discovered.typeable, true)
   assert.equal(resolveTypedCommand(catalog, [command('compact')], '/COMPACT').kind, 'discovered')
+})
+
+test('dispatch: a typed non-ASCII alias gets a canonical-spelling notice, never a submit', () => {
+  const catalog = [base({ name: 'goal', aliases: ['目标'], argumentHint: '<objective>' })]
+  const cjk = resolveTypedCommand(catalog, [], '目标')
+  assert.equal(cjk.typeable, false, 'not dispatched as a run')
+  assert.equal(
+    typedCommandNotice(cjk),
+    'Use /goal <objective> — “目标” is picker-only (non-ASCII alias).',
+  )
+  // canonical and ASCII alias spellings dispatch normally (no notice)
+  assert.equal(typedCommandNotice(resolveTypedCommand(catalog, [], 'goal')), null)
+  const ascii = base({ name: 'goal', aliases: ['objective'], argumentHint: '<objective>' })
+  assert.equal(typedCommandNotice(resolveTypedCommand([ascii], [], 'objective')), null)
+  assert.equal(typedCommandNotice(resolveTypedCommand(catalog, [], 'nope')), null)
+  assert.equal(typedCommandNotice(null), null)
+  // a user-message mention still works for picker/alias search (no submit path)
+  assert.equal(isTypeableCommandToken('objective'), true)
+  assert.equal(isTypeableCommandToken('目标'), false)
+  assert.equal(isTypeableCommandToken(''), false)
+})
+
+test('resolveModeCommandArg: empty opens the control, valid applies, invalid is usage', () => {
+  assert.deepEqual(resolveModeCommandArg(''), { kind: 'open' })
+  assert.deepEqual(resolveModeCommandArg('   '), { kind: 'open' })
+  assert.deepEqual(resolveModeCommandArg(undefined), { kind: 'open' })
+  assert.deepEqual(resolveModeCommandArg(7), { kind: 'open' })
+  assert.deepEqual(resolveModeCommandArg('work'), { kind: 'apply', mode: 'work' })
+  assert.deepEqual(resolveModeCommandArg(' CONSULT '), { kind: 'apply', mode: 'consult' })
+  // `auto` is a composer mode but not a valid typed /mode argument
+  assert.deepEqual(resolveModeCommandArg('auto'), { kind: 'invalid' })
+  assert.deepEqual(resolveModeCommandArg('work extra'), { kind: 'invalid' })
+  assert.equal(MODE_COMMAND_USAGE, '/mode [consult|work]')
 })
 
 test('parseSubmittedCommand recognises only one leading /command line', () => {

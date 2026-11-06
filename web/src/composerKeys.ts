@@ -134,3 +134,34 @@ export function canUseStopGesture(context: StopGestureContext | null | undefined
   if (context.outsideConversation) return false
   return true
 }
+
+/** Why the composer cannot submit right now (null = it can). */
+export type ComposerLockReason = 'busy' | 'compacting' | 'waiting' | null
+
+export interface ComposerSendContext {
+  /** A followed run is working. */
+  busy?: boolean
+  /** The followed run is parked on an approval (drafting allowed, sending not). */
+  waiting?: boolean
+  /** A manual context compaction is in flight. */
+  compacting?: boolean
+  text?: string | null
+}
+
+/** Precedence: working run → compaction → approval wait. */
+export function composerLockReason(
+  context: ComposerSendContext | null | undefined,
+): ComposerLockReason {
+  if (!context) return 'busy'
+  if (context.busy) return 'busy'
+  if (context.compacting) return 'compacting'
+  if (context.waiting) return 'waiting'
+  return null
+}
+
+/** True when the draft may be submitted (non-empty text, no lock). */
+export function canSubmitComposer(context: ComposerSendContext | null | undefined): boolean {
+  if (!context) return false
+  if (composerLockReason(context)) return false
+  return typeof context.text === 'string' && context.text.trim().length > 0
+}
