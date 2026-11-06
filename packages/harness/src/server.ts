@@ -16,6 +16,17 @@
  * - Background runs execute on the `RunManager` worker pool; the per-run
  *   `RunApprovalBroker` is reachable through the run record, so the approval
  *   endpoints resolve a mutation parked mid-run.
+ * - `POST /api/runs` accepts an additive optional `stream_tokens` (strict
+ *   boolean, default `false`; non-boolean is a 400). With it, provider
+ *   thinking/text deltas are forwarded to the run's in-memory live-token
+ *   listeners; `GET /api/runs/{run_id}/events` writes them as NAMED SSE frames
+ *   — `event: token` + `data: {"type":"token","run_id","role","kind",
+ *   "delta","at"}` (`at` in epoch seconds, like every typed event) — deliberately
+ *   with NO `id:` line, so the `?after`
+ *   typed-event replay cursor, the existing `id:`-tagged frames, heartbeats
+ *   and the `run_end` close semantics are byte-unchanged. Tokens are
+ *   ephemeral: never persisted to the runtime sidecar, never replayed, and
+ *   only delivered to connections open while the run is producing them.
  * - A run record carries the requested `mode` (the config default when the
  *   request omits it), so a client can retry a failed run with its exact mode.
  * - Run records are in-memory; when a run id is unknown after a backend
@@ -84,6 +95,22 @@
  *   `{"workspaces": [...]}` in the new order (400 naming the non-array,
  *   duplicate, unknown or missing ids; no partial reorder on error).
  *   `DELETE /api/workspaces/{id}` is unchanged.
+ * - `GET /api/workspaces/{id}/files?q=<query>&limit=<n>` lists/ranks the files
+ *   of one registered workspace for the composer `@` picker: a bounded,
+ *   fail-soft index (`workspacefiles.ts`), `limit` clamped to 1..200 (default
+ *   50), response `{workspace_id, files: [{path, size, mtime}], truncated,
+ *   total}` where `truncated` reports a clipped walk or page and `total`
+ *   counts matches before the page; an unknown id is a 404.
+ * - `POST /api/runs` and the legacy `POST /api/run` prepare the operator
+ *   submission (`mentions.ts`): a known leading `/name` expands its slash
+ *   command template — and may override the run mode for that run only; an
+ *   unknown `/name` is submitted verbatim. `@skill:<name>` attaches a shared
+ *   skill body (3 max; role-scoped skills are refused), and `@<path>` attaches
+ *   a workspace file read read-only through `Workspace.read_file` (5 max,
+ *   20 000 chars each, 100 000 total; absolute/`..`/sensitive/missing/binary
+ *   paths are 400s). Rendered `<skill-loaded>`/`<file>` blocks are appended to
+ *   the shared context before the task, so they persist in the session JSONL;
+ *   preparation errors are 400s raised before any session or run exists.
  * - Local-request guards (SECURITY.md: local single-user, loopback only):
  *   while every binding is loopback, requests with a non-loopback `Host`
  *   (DNS-rebinding defense) and state-changing requests with a non-local
@@ -105,7 +132,7 @@ import {
   type Config,
 } from "./config.ts";
 import type { CompactionSettings } from "./compaction.ts";
-import { discoverCommands, type CommandCatalog } from "./commands.ts";
+import { discoverCommands, expandCommand, matchCommand, type CommandCatalog } from "./commands.ts";
 import { SharedContext } from "./context.ts";
 import { TwoBrothersHarness, type HarnessResult, type ToolScopes } from "./harness.ts";
 import {
@@ -116,6 +143,16 @@ import {
   type McpToolSet,
 } from "./mcp.ts";
 import { deriveTitle, SessionMetadataStore } from "./metadata.ts";
+import {
+  MENTION_MAX_FILES,
+  MENTION_MAX_FILE_CHARS,
+  MENTION_MAX_SKILLS,
+  MENTION_MAX_TOTAL_CHARS,
+  normalizeMentionPath,
+  parseMentions,
+  renderFileBlock,
+  renderSkillLoadedBlock,
+} from "./mentions.ts";
 import { Decision, PermissionManager } from "./permissions.ts";
 import {
   PluginManager,
@@ -151,21 +188,31 @@ import {
   resolveRoleEndpoints,
   RunManager,
   RuntimeSettings,
+  type LiveTokenHook,
   type PublicRuntimeSettings,
   type RoleEndpoints,
   type RunJob,
 } from "./runtime.ts";
+import type { StreamEvent, TokenStreamEvent } from "./runstream.ts";
 import {
   Workspace,
   WorkspaceError,
   WorkspaceRegistry,
   type RegisteredWorkspace,
 } from "./workspace.ts";
+import {
+  indexWorkspaceFiles,
+  searchWorkspaceFiles,
+  type WorkspaceFileEntry,
+} from "./workspacefiles.ts";
 
 const MODES = new Set(["consult", "work", "auto"]);
 const PROVIDERS = new Set(["openai", "mock"]);
 const ROLES = ["senior", "junior"] as const;
 const FS_BROWSE_LIMIT = 500;
+/** `GET /api/workspaces/{id}/files` page size: default and hard ceiling. */
+const FILE_SEARCH_DEFAULT_LIMIT = 50;
+const FILE_SEARCH_MAX_LIMIT = 200;
 const BODY_LIMIT_BYTES = 1_000_000;
 const SSE_HEADERS = {
   "Content-Type": "text/event-stream",
@@ -188,6 +235,33 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function errorDetail(exc: unknown): string {
   return exc instanceof Error ? exc.message : String(exc);
+}
+
+/**
+ * One NAMED SSE frame for a live thinking/text token
+ * (`GET /api/runs/{run_id}/events`). Deliberately has no `id:` line: named
+ * token frames are ephemeral side-channel data, so the EventSource
+ * last-event-id / `?after` replay cursor keeps counting only the persisted
+ * typed runtime events. `kind` is always present (`"text"` for anything the
+ * producer did not explicitly tag as reasoning).
+ */
+function tokenSseFrame(runId: string, event: TokenStreamEvent): string {
+  // Every typed runtime event on this stream carries epoch seconds, so the
+  // named token frame does too (the harness token event's `at` is ISO-8601;
+  // convert, falling back to the write time if it were ever malformed).
+  const parsedAt = Date.parse(event.at);
+  const at = Number.isFinite(parsedAt)
+    ? Math.floor(parsedAt / 1000)
+    : Math.floor(Date.now() / 1000);
+  const payload = {
+    type: "token",
+    run_id: runId,
+    role: event.role,
+    kind: event.kind === "thinking" ? "thinking" : "text",
+    delta: event.delta,
+    at,
+  };
+  return `event: token\ndata: ${JSON.stringify(payload)}\n\n`;
 }
 
 // ---------------------------------------------------------------------------
@@ -231,6 +305,12 @@ interface RunRequestData {
   session?: string;
   provider?: string;
   workspace_id?: string;
+  /**
+   * Additive `POST /api/runs` option: stream provider thinking/text deltas as
+   * ephemeral namespaced SSE frames (`event: token`). Strictly boolean when
+   * present; default false (no token frames, wire behavior unchanged).
+   */
+  stream_tokens?: boolean;
 }
 
 function invalidBody(): HttpError {
@@ -264,6 +344,14 @@ function parseRunRequestStrict(body: unknown): RunRequestData {
   }
   if (req.provider !== undefined && !PROVIDERS.has(req.provider)) {
     throw new HttpError(400, "invalid provider");
+  }
+  // `stream_tokens` is an additive background-run option (the sync /api/run
+  // route has no SSE and ignores it). Absent = default false; anything other
+  // than a boolean (null included) is the generic 400.
+  const raw = body as Record<string, unknown>;
+  if (raw.stream_tokens !== undefined) {
+    if (typeof raw.stream_tokens !== "boolean") throw invalidBody();
+    req.stream_tokens = raw.stream_tokens;
   }
   return req;
 }
@@ -927,6 +1015,8 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     onEnvelope?: (message: unknown) => void,
     workspace?: Workspace,
     endpoints?: RoleEndpoints,
+    injections?: string[],
+    onToken?: LiveTokenHook,
   ): Promise<HarnessResult> {
     const store = storeFor(name);
     const context = store.exists() ? restoreContext(store) : new SharedContext(store);
@@ -996,7 +1086,30 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       ...(options.compaction ? { compaction: options.compaction } : {}),
       ...(toolScopes ? { toolScopes } : {}),
       ...(hooks ? { hooks } : {}),
+      // Live thinking/text deltas are only requested when the caller supplied
+      // a token sink (the server does that solely for background runs with
+      // `stream_tokens: true`): the harness requires both options together,
+      // and every `token` stream event is forwarded to the record's ephemeral
+      // SSE listeners. No sink = byte-identical non-streaming provider calls.
+      ...(onToken !== undefined
+        ? {
+            streamTokens: true,
+            onStreamEvent: (event: StreamEvent): void => {
+              if (event.type === "token") onToken(event);
+            },
+          }
+        : {}),
     });
+    // Operator mention injections (`@skill:` / `@file`) are context messages
+    // in their own right: append them BEFORE the task envelope — `harness.run`
+    // appends the task itself — so the persisted transcript order is
+    // [skill/file blocks…, task]. The context store persists them in the
+    // session JSONL; the run-stream hook (when present) mirrors them like any
+    // other published envelope, so a live SSE follower sees them too.
+    for (const block of injections ?? []) {
+      const message = context.makeAndAppend("user", "senior", "message", { text: block });
+      onEnvelope?.(message);
+    }
     try {
       return await harness.run(task, context);
     } finally {
@@ -1027,11 +1140,12 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     name: string,
     req: RunRequestData,
     broker: RunApprovalBroker,
+    injections: string[] = [],
   ): RunJob {
     // The config is built inside the job so a run picks up settings current
     // at start time; the broker binds the per-run emit hook and cancel
     // signal once the worker starts it.
-    return async (signal, onEnvelope) => {
+    return async (signal, onEnvelope, onToken) => {
       const { cfg, endpoints } = buildCfg(req);
       broker.attach(onEnvelope, signal);
       let workspace: Workspace | undefined;
@@ -1042,7 +1156,19 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         }
         workspace = new Workspace(registered.path, new PermissionManager(null, broker));
       }
-      const result = await executeRun(task, name, cfg, signal, onEnvelope, workspace, endpoints);
+      const result = await executeRun(
+        task,
+        name,
+        cfg,
+        signal,
+        onEnvelope,
+        workspace,
+        endpoints,
+        injections,
+        // Only a streaming submission forwards the record's token hook; every
+        // other run leaves the harness on its non-streaming provider path.
+        req.stream_tokens === true ? onToken : undefined,
+      );
       return {
         cancelled: result.cancelled,
         decision: result.decision,
@@ -1060,6 +1186,174 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
 
   function userMessageEvent(text: string): Array<Record<string, unknown>> {
     return [{ from: "user", kind: "message", payload: { text } }];
+  }
+
+  /** One prepared operator submission: the task plus its mention injections. */
+  interface PreparedSubmission {
+    /** The task as submitted (a known slash command is expanded). */
+    task: string;
+    /** Command `mode`: overrides the request/cooperation mode for this run only. */
+    modeOverride?: "consult" | "work";
+    /** Rendered `<skill-loaded>`/`<file>` blocks, in injection order. */
+    injections: string[];
+  }
+
+  /**
+   * Prepare one operator submission, shared by `POST /api/runs` and the legacy
+   * `POST /api/run`.
+   *
+   * 1. A leading `/name` the slash-command catalogue knows expands its
+   *    template (`matchCommand` + `expandCommand`) and may override the run
+   *    mode; an unknown slash name is submitted verbatim, so tasks may
+   *    legitimately start with `/` (`/usr/bin/...`).
+   * 2. `@skill:<name>` mentions attach the skill body: only `shared` skills may
+   *    be operator mentions; count/unknown/role-scope problems are 400s.
+   * 3. `@<path>` file mentions require the operator's workspace; paths are
+   *    normalised, `..` segments and absolute paths are refused, and content is
+   *    read through `Workspace.read_file` (read-only, confined, sensitive files
+   *    refused) with the standard truncation marker; count/read/total-size
+   *    problems are 400s.
+   *
+   * Injections are skills first (mention order), then files (mention order),
+   * deduped by name/normalised path; the token text stays in `task` for
+   * traceability. Every error is thrown BEFORE the caller creates a session or
+   * a run, so a bad submission leaves nothing half-created.
+   */
+  async function prepareSubmission(req: RunRequestData): Promise<PreparedSubmission> {
+    let task = req.task;
+    let modeOverride: "consult" | "work" | undefined;
+
+    const invocation = matchCommand(task);
+    if (invocation !== null) {
+      const command = commandCatalog().commands.find((entry) => entry.name === invocation.name);
+      if (command !== undefined) {
+        task = expandCommand(command, invocation.args);
+        if (command.mode !== undefined) modeOverride = command.mode;
+      }
+    }
+    // An empty command template must not become an empty task envelope.
+    if (!task.trim()) throw new HttpError(400, "task must not be empty");
+
+    const mentions = parseMentions(task);
+    const injections: string[] = [];
+
+    // -- skills: shared operator mentions only ---------------------------------
+    if (mentions.skills.length > MENTION_MAX_SKILLS) {
+      throw new HttpError(
+        400,
+        `too many skill mentions: ${mentions.skills.length} (max ${MENTION_MAX_SKILLS})`,
+      );
+    }
+    if (mentions.skills.length > 0) {
+      const skills = skillCatalog().skills;
+      for (const name of mentions.skills) {
+        const skill = skills.find((entry) => entry.name === name);
+        if (skill === undefined) throw new HttpError(400, `unknown skill: ${name}`);
+        if (skill.scope !== "shared") {
+          throw new HttpError(
+            400,
+            `role-scoped skills cannot be operator mentions: ${name} (scope: ${skill.scope})`,
+          );
+        }
+        injections.push(renderSkillLoadedBlock(skill.name, skill.body));
+      }
+    }
+
+    // -- files: workspace-confined reads ---------------------------------------
+    if (mentions.files.length > MENTION_MAX_FILES) {
+      throw new HttpError(
+        400,
+        `too many file mentions: ${mentions.files.length} (max ${MENTION_MAX_FILES})`,
+      );
+    }
+    if (mentions.files.length > 0) {
+      if (!req.workspace_id) throw new HttpError(400, "file mentions require a workspace");
+      const registered = state.workspaces.get(req.workspace_id);
+      if (registered === null) throw new HttpError(400, "unknown workspace_id");
+      let workspace: Workspace;
+      try {
+        workspace = new Workspace(registered.path);
+      } catch (exc) {
+        if (exc instanceof WorkspaceError) {
+          throw new HttpError(400, `cannot attach file mentions: ${exc.message}`);
+        }
+        throw exc;
+      }
+      const seen = new Set<string>();
+      for (const raw of mentions.files) {
+        const rel = normalizeMentionPath(raw);
+        if (rel === "") throw new HttpError(400, `cannot attach file "@${raw}": invalid path`);
+        // `Workspace.resolve` confines too, but refuse the classic escapes up
+        // front so the detail names the operator's token deterministically.
+        if (path.isAbsolute(rel) || rel.startsWith("/") || /^[A-Za-z]:[\\/]/.test(rel)) {
+          throw new HttpError(
+            400,
+            `cannot attach file "@${raw}": absolute paths are not allowed: ${rel}`,
+          );
+        }
+        if (rel.split("/").includes("..")) {
+          throw new HttpError(
+            400,
+            `cannot attach file "@${raw}": path escapes the workspace: ${rel}`,
+          );
+        }
+        if (seen.has(rel)) continue; // `@a/x` and `@./a/x` attach once
+        seen.add(rel);
+        // read_file is read-only (auto-allowed) and reports WorkspaceErrors as
+        // a status instead of throwing; those become 400s with the detail.
+        const read = await workspace.read_file(rel, MENTION_MAX_FILE_CHARS);
+        if (read.status !== "ok" || typeof read.content !== "string") {
+          const detail = typeof read.error === "string" ? read.error : "cannot read file";
+          throw new HttpError(400, `cannot attach file "@${raw}": ${detail}`);
+        }
+        if (read.content.includes("\u0000")) {
+          throw new HttpError(400, `cannot attach file "@${raw}": not a text file`);
+        }
+        injections.push(renderFileBlock(rel, read.content, { truncated: read.truncated === true }));
+      }
+    }
+
+    // The cap bounds exactly what is injected: every rendered block (per-file
+    // reads are already capped with the truncation marker).
+    const attached = injections.reduce((sum, block) => sum + block.length, 0);
+    if (attached > MENTION_MAX_TOTAL_CHARS) {
+      throw new HttpError(
+        400,
+        `attached mention content exceeds the ${MENTION_MAX_TOTAL_CHARS}-character limit: ` +
+          `${attached} characters`,
+      );
+    }
+    return { task, modeOverride, injections };
+  }
+
+  /**
+   * `GET /api/workspaces/{id}/files` limit: an integer clamped to 1..200 and
+   * defaulting to 50 when absent or non-numeric (same parsing style as
+   * `searchLimit`).
+   */
+  function fileSearchLimit(raw: string | null): number {
+    const parsed = raw === null || raw.trim() === "" ? Number.NaN : Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed)) return FILE_SEARCH_DEFAULT_LIMIT;
+    return Math.min(FILE_SEARCH_MAX_LIMIT, Math.max(1, parsed));
+  }
+
+  /**
+   * Matching-entry count before the page limit. `searchWorkspaceFiles` ranks
+   * exact basename > basename prefix > basename substring > full-path
+   * substring; every basename tier is also a full-path substring, so a
+   * path-substring count is exactly its match set (a blank query matches all).
+   */
+  function countWorkspaceFileMatches(
+    files: readonly WorkspaceFileEntry[],
+    query: string,
+  ): number {
+    if (query === "") return files.length;
+    const needle = query.toLowerCase();
+    let total = 0;
+    for (const file of files) {
+      if (file.path.replace(/\\/g, "/").toLowerCase().includes(needle)) total += 1;
+    }
+    return total;
   }
 
   /**
@@ -1193,20 +1487,36 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   routes.push(
     compileRoute("POST", "/api/run", async (ctx) => {
       const req = parseRunRequest(await ctx.json());
-      const task = req.task.trim();
-      if (!task) throw new HttpError(400, "task must not be empty");
-      const cfg = buildCfg(req);
+      const rawTask = req.task.trim();
+      if (!rawTask) throw new HttpError(400, "task must not be empty");
+      // Same preparation as POST /api/runs (slash expansion + mention
+      // injection); the sync route runs the expanded task while the metadata
+      // title keeps the operator's raw text.
+      const raw: RunRequestData = { ...req, task: rawTask };
+      const prepared = await prepareSubmission(raw);
+      const runReq: RunRequestData =
+        prepared.modeOverride === undefined ? raw : { ...raw, mode: prepared.modeOverride };
+      const cfg = buildCfg(runReq);
       const name = sessionName(req.session);
       let result;
       try {
-        result = await executeRun(task, name, cfg.cfg, undefined, undefined, undefined, cfg.endpoints);
+        result = await executeRun(
+          prepared.task,
+          name,
+          cfg.cfg,
+          undefined,
+          undefined,
+          undefined,
+          cfg.endpoints,
+          prepared.injections,
+        );
       } catch (exc) {
         if (exc instanceof RunConfigError) throw new HttpError(400, exc.message);
         throw exc;
       }
       state.metadata.ensure(name, {
         workspaceId: req.workspace_id,
-        events: userMessageEvent(task),
+        events: userMessageEvent(rawTask),
       });
       return {
         session: name,
@@ -1259,6 +1569,27 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   routes.push(
     compileRoute("GET", "/api/workspaces", () => {
       return state.workspaces.list();
+    }),
+  );
+
+  routes.push(
+    compileRoute("GET", "/api/workspaces/{id}/files", (ctx) => {
+      const registered = state.workspaces.get(ctx.params.id);
+      if (registered === null) throw new HttpError(404, "not found");
+      const query = (ctx.query.get("q") ?? "").trim();
+      const limit = fileSearchLimit(ctx.query.get("limit"));
+      // Fail-soft bounded walk: a missing/unreadable workspace directory is an
+      // empty index, never an error. `searchWorkspaceFiles` ranks basename
+      // tiers first, then the full path; `total` counts matches before the page.
+      const index = indexWorkspaceFiles(registered.path);
+      const files = searchWorkspaceFiles(index.files, query, { limit });
+      const total = countWorkspaceFileMatches(index.files, query);
+      return {
+        workspace_id: registered.id,
+        files,
+        truncated: index.truncated || files.length < total,
+        total,
+      };
     }),
   );
 
@@ -1681,13 +2012,20 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     compileRoute("POST", "/api/runs", async (ctx) => {
       const req = parseRunRequestStrict(await ctx.json());
       ensureWorkspace(req.workspace_id);
+      // Prepare before creating anything: a slash/mention error must leave no
+      // session and no run behind. A command `mode` overrides the request mode
+      // for this run only (the persisted metadata title keeps the raw text).
+      const prepared = await prepareSubmission(req);
+      const runReq: RunRequestData =
+        prepared.modeOverride === undefined ? req : { ...req, mode: prepared.modeOverride };
       const name = sessionName(req.session);
       const broker = new RunApprovalBroker();
       const record = state.runs.submit(
-        req.task,
+        prepared.task,
         name,
-        buildRunJob(req.task, name, req, broker),
-        effectiveMode(req),
+        buildRunJob(prepared.task, name, runReq, broker, prepared.injections),
+        effectiveMode(runReq),
+        { streamTokens: req.stream_tokens === true },
       );
       record.approvals = broker;
       state.metadata.ensure(name, {
@@ -1773,26 +2111,50 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       }
       let sent = after;
       let closed = false;
+      let unsubscribeTokens: (() => void) | null = null;
       ctx.req.on("close", () => {
         closed = true;
+        unsubscribeTokens?.();
         ctx.res.end();
       });
       ctx.res.writeHead(200, SSE_HEADERS);
+      // Live thinking/text deltas are ephemeral NAMED frames written straight
+      // from the record's in-memory fan-out: no `id:` line, so the `?after`
+      // cursor and the EventSource last-event-id stay on persisted typed
+      // events. The record drops every listener at its terminal state; the
+      // route also unsubscribes on request close and when the replay loop
+      // ends. A token can never be written after `run_end` or a closed
+      // response (both guarded here, and `finish()` closes the registry first).
+      unsubscribeTokens = record.onLiveToken((event) => {
+        if (closed || ctx.res.writableEnded) return;
+        try {
+          ctx.res.write(tokenSseFrame(record.runId, event));
+        } catch {
+          // the response was torn down between the guard and the write
+        }
+      });
       // The loop replays the buffered tail, keeps the connection alive with
       // comment frames, and closes once run_end has been delivered (the
       // client may reconnect with ?after=N).
       void (async () => {
-        while (!closed) {
-          while (sent < record.events.length) {
-            sent += 1;
-            ctx.res.write(`id: ${sent}\ndata: ${JSON.stringify(record.events[sent - 1])}\n\n`);
+        try {
+          while (!closed) {
+            while (sent < record.events.length) {
+              sent += 1;
+              ctx.res.write(`id: ${sent}\ndata: ${JSON.stringify(record.events[sent - 1])}\n\n`);
+            }
+            if (record.isDone && sent >= record.events.length) break;
+            ctx.res.write(": keepalive\n\n");
+            await new Promise((resolve) => setTimeout(resolve, 250));
           }
-          if (record.isDone && sent >= record.events.length) break;
-          ctx.res.write(": keepalive\n\n");
-          await new Promise((resolve) => setTimeout(resolve, 250));
+        } finally {
+          unsubscribeTokens?.();
+          ctx.res.end();
         }
+      })().catch(() => {
+        unsubscribeTokens?.();
         ctx.res.end();
-      })().catch(() => ctx.res.end());
+      });
       return HANDLED;
     }),
   );

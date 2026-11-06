@@ -41,6 +41,7 @@ import { emptyUsage, ProviderAbortError, type UsageTotals } from "./provider.ts"
 import type { ApprovalBroker } from "./permissions.ts";
 import type { RunApprovalBroker, RuntimeEvent } from "./runevents.ts";
 import type { SettingsStore } from "./settings_store.ts";
+import type { TokenStreamEvent } from "./runstream.ts";
 
 export const ACTIVE_STATES: ReadonlySet<string> = new Set(["queued", "running", "waiting"]);
 export const TERMINAL_STATES: ReadonlySet<string> = new Set(["completed", "failed", "cancelled"]);
@@ -55,9 +56,19 @@ export interface RunJobResult {
 }
 
 export type EnvelopeHook = (message: unknown) => void;
+/** Ephemeral live-token listener (the server's SSE bridge); never persisted. */
+export type LiveTokenListener = (event: TokenStreamEvent) => void;
+/** Push one live token delta to a record's ephemeral listeners (fail-soft). */
+export type LiveTokenHook = LiveTokenListener;
+// The third argument is additive: a job that declares only `(signal, onEnvelope)`
+// stays assignable (fewer parameters are allowed), so existing job builders and
+// tests keep compiling unchanged. Only runs created with live tokens enabled
+// have a record that fans the tokens out; for every other run `onToken` is a
+// no-op at the record.
 export type RunJob = (
   signal: AbortSignal,
   onEnvelope: EnvelopeHook,
+  onToken: LiveTokenHook,
 ) => Promise<RunJobResult>;
 export type PersistHook = (session: string, event: RuntimeEvent) => void;
 
@@ -374,12 +385,20 @@ export class RunRecord {
 
   private _resolveDone!: (finished: boolean) => void;
   private _doneFlag = false;
+  /**
+   * Ephemeral live-token fan-out (SSE only). Never persisted: tokens bypass
+   * `events`, the runtime sidecar and `public()`. Closed on `finish()`, so a
+   * listener registered after the terminal state is never called.
+   */
+  private readonly _liveTokenListeners = new Set<LiveTokenListener>();
+  private _liveTokensOpen: boolean;
 
-  constructor(runId: string, session: string, task: string, mode = "") {
+  constructor(runId: string, session: string, task: string, mode = "", liveTokens = false) {
     this.runId = runId;
     this.session = session;
     this.task = task;
     this.mode = mode;
+    this._liveTokensOpen = liveTokens;
     this.done = new Promise<boolean>((resolve) => {
       this._resolveDone = resolve;
     });
@@ -390,9 +409,53 @@ export class RunRecord {
     return this.controller.signal;
   }
 
+  /**
+   * Subscribe to this run's live token deltas. Returns an idempotent
+   * unsubscribe. Only runs submitted with live tokens enabled ever fan out;
+   * a run without them (or one already terminal) returns a no-op unsubscribe
+   * and never calls the listener. Multiple listeners are supported — the
+   * server's SSE route is one per open connection.
+   */
+  onLiveToken(listener: LiveTokenListener): () => void {
+    if (!this._liveTokensOpen) return () => {};
+    this._liveTokenListeners.add(listener);
+    return () => {
+      this._liveTokenListeners.delete(listener);
+    };
+  }
+
+  /**
+   * Push one token to every live listener, fail-soft: a throwing listener is
+   * isolated from the other listeners and from the run, and a listener added
+   * or removed during the fan-out cannot corrupt the iteration. No-op once the
+   * run is terminal (or when live tokens were never enabled).
+   *
+   * @internal Used by the RunManager job plumbing and the SSE bridge; tokens
+   * are deliberately outside `events`/the sidecar.
+   */
+  emitLiveToken(event: TokenStreamEvent): void {
+    if (!this._liveTokensOpen) return;
+    for (const listener of [...this._liveTokenListeners]) {
+      try {
+        listener(event);
+      } catch {
+        // a broken SSE consumer never breaks the run
+      }
+    }
+  }
+
+  /** Drop every live listener; a terminal run accepts no token writes. */
+  private _closeLiveTokens(): void {
+    this._liveTokensOpen = false;
+    this._liveTokenListeners.clear();
+  }
+
   /** Terminal-state notification; resolves `true` once, like `threading.Event`. */
   finish(): void {
     if (this._doneFlag) return;
+    // Terminal first: no token frame may follow run_end, and listeners are
+    // dropped so a late token (or a late subscriber) is a no-op.
+    this._closeLiveTokens();
     this._doneFlag = true;
     this._resolveDone(true);
   }
@@ -458,6 +521,12 @@ class DispatchQueue {
  *
  * `persist(session, event)` — when given — writes every typed event to the
  * session's runtime sidecar (best effort; a failing sink never breaks a run).
+ *
+ * Live token deltas are a separate, deliberately EPHEMERAL channel: a run
+ * submitted with `streamTokens` fans provider `token` stream events out to
+ * `RunRecord.onLiveToken` subscribers (the server's SSE bridge), in memory
+ * only. They never enter `record.events`, the sidecar, `public()` or the
+ * replayable `?after` cursor, and the registry is closed at `finish()`.
  */
 export class RunManager {
   private readonly _workers: number;
@@ -480,8 +549,26 @@ export class RunManager {
 
   // -- submission / queries ---------------------------------------------------
 
-  submit(task: string, session: string, job: RunJob, mode = ""): RunRecord {
-    const record = new RunRecord(shortId(), session, task, mode);
+  /**
+   * Submit a background run. `options.streamTokens` opts this record into the
+   * ephemeral live-token fan-out (`onLiveToken`/`emitLiveToken`); the job is
+   * always handed an `onToken` hook, but a record without that flag silently
+   * drops it, so only runs that asked for streaming reach SSE listeners.
+   */
+  submit(
+    task: string,
+    session: string,
+    job: RunJob,
+    mode = "",
+    options: { streamTokens?: boolean } = {},
+  ): RunRecord {
+    const record = new RunRecord(
+      shortId(),
+      session,
+      task,
+      mode,
+      options.streamTokens === true,
+    );
     record.job = job;
     this._records.set(record.runId, record);
     this._order.push(record.runId);
@@ -638,7 +725,10 @@ export class RunManager {
 
     let result: RunJobResult;
     try {
-      result = await job(record.signal, onEnvelope);
+      // The token hook is always supplied; records not submitted with
+      // `streamTokens` drop it (`emitLiveToken` is a no-op then), so a job can
+      // forward unconditionally without deciding about streaming itself.
+      result = await job(record.signal, onEnvelope, (event) => record.emitLiveToken(event));
     } catch (exc) {
       record.finished = nowSeconds();
       if (record.signal.aborted || exc instanceof ProviderAbortError) {
