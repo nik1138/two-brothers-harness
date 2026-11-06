@@ -402,3 +402,16 @@ export {
 export * from "./sessionsearch.ts";
 export * from "./mentions.ts";
 export * from "./workspacefiles.ts";
+export {
+  BASE_COMMANDS,
+  baseCommandMetadata,
+  baseCommandTokens,
+  baseCommandUsage,
+  expandBaseCommand,
+  findBaseCommand,
+  sortBaseCommands,
+  type BaseCommand,
+  type BaseCommandAction,
+  type BaseCommandKind,
+  type BaseCommandMetadata,
+} from "./basecommands.ts";

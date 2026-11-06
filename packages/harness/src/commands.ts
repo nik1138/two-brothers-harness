@@ -319,7 +319,7 @@ export function discoverCommands(roots: string[]): CommandCatalog {
 }
 
 /**
- * Expand a command body for one invocation.
+ * Expand a prompt-template body for one invocation.
  *
  * Substitution is literal text, in a single pass:
  * - `$ARGUMENTS` → `input` exactly as given (the whole remainder),
@@ -329,14 +329,27 @@ export function discoverCommands(roots: string[]): CommandCatalog {
  * A lone `$`, `$0`, and `$10`+ are left as written (`$10` is `$1` + `0`).
  * Substituted argument text is never rescanned, so an argument containing
  * `$1` stays literal, and no shell or nested command expansion happens.
+ *
+ * Shared by discovered commands ({@link expandCommand}) and first-party base
+ * commands (`basecommands.ts::expandBaseCommand`): both kinds are plain
+ * operator input templates, so the same body and the same input must produce
+ * exactly the same task bytes on every surface.
  */
-export function expandCommand(command: Command, input: string): string {
+export function expandTemplate(body: string, input: string): string {
   const positional = input.trim().split(/\s+/).filter((token) => token !== "");
-  return command.body.replace(/\$(\$|ARGUMENTS|[1-9])/g, (_match, token: string) => {
+  return body.replace(/\$(\$|ARGUMENTS|[1-9])/g, (_match, token: string) => {
     if (token === "$") return "$";
     if (token === "ARGUMENTS") return input;
     return positional[Number(token) - 1] ?? "";
   });
+}
+
+/**
+ * Expand a discovered command body for one invocation
+ * ({@link expandTemplate}'s rules).
+ */
+export function expandCommand(command: Command, input: string): string {
+  return expandTemplate(command.body, input);
 }
 
 /**

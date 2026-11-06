@@ -37,6 +37,7 @@ import "./toolschema.test.ts";
 import "./streaming.test.ts";
 import "./streamingtokens.test.ts";
 import "./commands.test.ts";
+import "./basecommands.test.ts";
 import "./pluginmcp.test.ts";
 import "./skillinvoke.test.ts";
 import "./approvaldeny.test.ts";
