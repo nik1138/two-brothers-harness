@@ -59,3 +59,4 @@ import "./doctor.test.ts";
 import "./completions.test.ts";
 import "./reliability.test.ts";
 import "./roleendpoints.test.ts";
+import "./sessionsearch.test.ts";
