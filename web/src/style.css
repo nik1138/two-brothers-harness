@@ -59,6 +59,11 @@
   --find-active-bg: #9a5b00;
   --find-active-text: #ffffff;
 
+  /* live streaming draft (ephemeral SSE token blocks, see ChatView) */
+  --thinking-bg: #f2f3f6;
+  --thinking-border: #d8dce4;
+  --thinking-text: #5c6370;
+
   /* --- elevation -------------------------------------------------------- */
   --shadow-raised:
     0 1px 2px rgb(16 24 40 / 6%),
@@ -157,6 +162,9 @@
     --find-hit-text: #f2ead2;
     --find-active-bg: #e0a92a;
     --find-active-text: #171a21;
+    --thinking-bg: #141519;
+    --thinking-border: #2a2d35;
+    --thinking-text: #8a909c;
     --shadow-raised:
       0 1px 2px rgb(0 0 0 / 45%),
       0 8px 24px -12px rgb(0 0 0 / 55%);
@@ -204,6 +212,9 @@
   --find-hit-text: #f2ead2;
   --find-active-bg: #e0a92a;
   --find-active-text: #171a21;
+  --thinking-bg: #141519;
+  --thinking-border: #2a2d35;
+  --thinking-text: #8a909c;
   --shadow-raised:
     0 1px 2px rgb(0 0 0 / 45%),
     0 8px 24px -12px rgb(0 0 0 / 55%);
@@ -1399,6 +1410,130 @@ select {
   animation: pulse 1.4s ease-in-out infinite;
 }
 
+/* ---------- live streaming draft (ephemeral SSE token blocks) ---------- */
+
+/* The wrapper is flex:none so a growing draft never collapses in the scroll
+   container; tokens themselves are excluded from the transcript live region
+   (aria-live="off" on the wrapper in ChatView). */
+.stream-live {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+/* Thinking: a dim, bordered, collapsed-by-default card. The whole header is the
+   toggle (real button, aria-expanded); the body is plain pre-wrapped text. */
+.stream-thinking {
+  max-width: 46rem;
+  padding: 0.15rem 0.55rem 0.2rem;
+  border: 1px dashed var(--thinking-border);
+  border-radius: var(--radius-md);
+  background: var(--thinking-bg);
+  color: var(--thinking-text);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.stream-thinking.is-live {
+  border-style: solid;
+}
+
+.stream-thinking-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  padding: 0.3rem 0.1rem;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.stream-thinking-head:hover {
+  color: var(--text-primary);
+}
+
+.stream-thinking-head:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.stream-thinking-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.7;
+}
+
+.stream-thinking.is-live .stream-thinking-dot {
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.stream-thinking-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stream-thinking-chevron {
+  flex: none;
+  opacity: 0.75;
+}
+
+.stream-thinking-body {
+  padding: 0.1rem 0.1rem 0.35rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Response: the same group/bubble/markdown layout as committed Senior/Junior
+   messages, with a subtle live caret after the streamed markdown. */
+.stream-response .stream-md {
+  margin: 0.15rem 0 0;
+}
+
+.stream-state {
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+}
+
+/* The streaming caret is decorative; it blinks unless reduced motion is asked
+   for, in which case it stays as a static bar. */
+.stream-caret {
+  display: inline-block;
+  width: 0.45em;
+  height: 1em;
+  margin-left: 0.12em;
+  vertical-align: text-bottom;
+  background: var(--accent);
+  border-radius: 1px;
+  animation: stream-caret-blink 1s steps(1) infinite;
+}
+
+.stream-clipped {
+  margin: 0.3rem 0 0;
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+}
+
+@keyframes stream-caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
 /* ---------- responsive ---------- */
 
 @media (max-width: 860px) {
@@ -1623,6 +1758,17 @@ html[data-density='compact'] .palette-option {
     transition-duration: 0.01ms !important;
     transition-delay: 0ms !important;
     scroll-behavior: auto !important;
+  }
+
+  /* the streaming caret stays as a static bar and the thinking dot stops
+     pulsing instead of relying on the universal near-zero animation above */
+  .stream-caret,
+  .stream-thinking.is-live .stream-thinking-dot {
+    animation: none !important;
+  }
+
+  .stream-caret {
+    opacity: 0.65;
   }
 
   /* naive-ui declares its overlay transitions (modal mask, dialog body, drawer,

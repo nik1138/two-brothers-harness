@@ -58,6 +58,8 @@ The backend is the TypeScript server in `packages/harness`:
   `index.html`, exposed from Settings → Appearance and the palette)
 - `src/find.ts` — pure find-in-transcript matcher (block offsets, case/whole-word options, wrap helpers) used by `ChatView`'s Ctrl+F bar
 - `src/workspaceOrder.ts` — pure workspace list helpers (safe up/down moves, order comparison, name bounds) used by the sidebar group actions and the rename dialog
+- `src/mentions.ts` — pure composer mention model (`@` skills/files, `/` commands): trigger detection at the caret, filtering/ranking, token serialization (`@skill:name`, `@path`, `/name`) and insertion; used by `Composer.vue`
+- `src/streaming.ts` — pure live-token draft fed by the run SSE named `token` frames: bounded per-role thinking/text buffers, envelope/run-end clearing and render-ready blocks; used by `App.vue`/`ChatView.vue`
 - `vite.config.ts` — dev proxy `/api` → `http://127.0.0.1:8600`
 
 ## Rules specific to this tree

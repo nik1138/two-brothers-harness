@@ -90,6 +90,11 @@ export interface RunRequest {
   /** Existing session for a follow-up; omit to start a new session. */
   session?: string | null
   workspace_id?: string | null
+  /**
+   * Ask the server to emit ephemeral live `token` SSE frames for this run
+   * (named event, not replayed on reconnect). The web client always opts in.
+   */
+  stream_tokens?: boolean
 }
 
 /**
@@ -253,6 +258,21 @@ export interface ApprovalAutoDeniedEvent {
   at: number
 }
 
+/**
+ * One live token delta from the run's named SSE `token` frame. Ephemeral:
+ * never persisted to the run record/sidecar and never replayed by `?after`.
+ * `thinking` deltas are observational reasoning; the reply arrives as the
+ * normal `envelope` event (a missing/unknown `kind` is treated as `text`).
+ */
+export interface TokenEvent {
+  type: 'token'
+  run_id: string
+  role: 'senior' | 'junior' | 'user'
+  kind: 'text' | 'thinking'
+  delta: string
+  at: number
+}
+
 /** Typed runtime events streamed from GET /api/runs/{id}/events. */
 export type RunEvent =
   | { type: 'run_status'; status: 'queued' | 'running' | 'waiting'; run_id: string; at: number }
@@ -266,6 +286,7 @@ export type RunEvent =
       run_id: string
       at: number
     }
+  | TokenEvent
   | ToolStartedEvent
   | ToolCompletedEvent
   | ApprovalRequestedEvent
@@ -326,6 +347,60 @@ export interface FsBrowseResult {
   parent: string | null
   entries: FsEntry[]
   truncated: boolean
+}
+
+/** Scope a discovered skill is offered under (`shared` = both roles). */
+export type SkillScope = 'shared' | 'senior' | 'junior'
+
+/** One discovered skill from GET /api/skills (metadata only, no body). */
+export interface SkillInfo {
+  name: string
+  description: string
+  scope: SkillScope
+  tools: string[]
+  file: string
+}
+
+/** Response of GET /api/skills. */
+export interface SkillListResponse {
+  skills: SkillInfo[]
+  diagnostics: string[]
+}
+
+/** Cooperation mode a slash command can pin for its turn. */
+export type CommandMode = 'consult' | 'work'
+
+/** One discovered slash command from GET /api/commands (metadata only). */
+export interface CommandInfo {
+  name: string
+  description: string
+  /** Frontmatter `argument-hint`, shown beside the name; `""` when absent. */
+  argumentHint: string
+  /** Optional frontmatter `mode` the expanded command runs in. */
+  mode?: CommandMode
+  file: string
+}
+
+/** Response of GET /api/commands. */
+export interface CommandListResponse {
+  commands: CommandInfo[]
+  diagnostics: string[]
+}
+
+/** One workspace file from GET /api/workspaces/{id}/files. */
+export interface WorkspaceFileEntry {
+  /** Path relative to the workspace root, forward slashes. */
+  path: string
+  size: number
+  mtime: number
+}
+
+/** Response of GET /api/workspaces/{id}/files. */
+export interface WorkspaceFileSearchResponse {
+  workspace_id: string
+  files: WorkspaceFileEntry[]
+  truncated: boolean
+  total: number
 }
 
 /** Operator-facing provider preset — never contains API key material. */

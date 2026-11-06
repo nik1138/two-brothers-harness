@@ -10,6 +10,7 @@ import { nextActorLabel, timestampOf } from '../runtime'
 import type { TimelineEntry } from '../runtime'
 import { parseMarkdown } from '../markdown'
 import type { MarkdownBlock, MarkdownInline } from '../markdown'
+import type { StreamingBlocks } from '../streaming'
 import ToolActivity from './ToolActivity.vue'
 import ApprovalCard from './ApprovalCard.vue'
 import PromptAudit from './PromptAudit.vue'
@@ -30,6 +31,12 @@ const props = defineProps<{
   runError?: string | null
   /** Retry handler for the failure card; the button hides when omitted. */
   onRetry?: () => void
+  /**
+   * Live ephemeral draft of the followed run (folded from the SSE `token`
+   * frames by the shell). Null sections are not rendered; the blocks disappear
+   * as soon as the completed envelope lands in the timeline.
+   */
+  streaming?: StreamingBlocks | null
 }>()
 
 const scrollEl = ref<HTMLElement | null>(null)
@@ -688,6 +695,70 @@ const statusLine = computed(() => {
   const label = nextActorLabel(tail) ?? 'Working…'
   return secs !== null ? `${label} · ${secs}s` : label
 })
+
+// -- live streaming draft (ephemeral SSE `token` frames) ----------------------
+// The shell folds the named `token` frames into a bounded draft (thinking and
+// reply separately). These blocks are transient: the completed reply arrives as
+// a normal envelope and replaces them (the shell clears the draft), while
+// run_end/run_error clear it outright. Thinking renders as plain text; the reply
+// goes through the same dependency-free Markdown renderer as committed bubbles,
+// so partial/streaming markdown stays safe.
+
+const streamingThinking = computed(() => props.streaming?.thinking ?? null)
+const streamingText = computed(() => props.streaming?.text ?? null)
+const streamingSpeaker = computed<Speaker>(() => {
+  const role = props.streaming?.role
+  return role === 'user' ? 'operator' : role === 'junior' ? 'junior' : 'senior'
+})
+const streamingMarkdown = computed<MarkdownBlock[]>(() =>
+  streamingText.value ? parseMarkdown(streamingText.value.text) : [],
+)
+
+/** null = auto (open while only thinking, auto-collapsed once text starts). */
+const thinkingUserExpanded = ref<boolean | null>(null)
+const thinkingExpanded = computed(() => {
+  if (thinkingUserExpanded.value !== null) return thinkingUserExpanded.value
+  return streamingText.value === null
+})
+watch(streamingThinking, (next, prev) => {
+  if (!next) {
+    thinkingUserExpanded.value = null
+    return
+  }
+  // a new draft (new role/call) follows the auto rule again; plain appends keep
+  // the operator's manual toggle
+  if (!prev || !next.text.startsWith(prev.text)) thinkingUserExpanded.value = null
+})
+
+function toggleThinking(): void {
+  thinkingUserExpanded.value = !thinkingExpanded.value
+  void nextTick(keepPinnedToBottom)
+}
+
+/** Succinct live-region updates; token deltas themselves are never announced. */
+const streamAnnouncement = ref('')
+watch(streamingThinking, (next, prev) => {
+  if (next && !prev) {
+    streamAnnouncement.value = `${SPEAKER_LABEL[streamingSpeaker.value]} is thinking`
+  }
+})
+watch(streamingText, (next, prev) => {
+  if (next && !prev) {
+    streamAnnouncement.value = `${SPEAKER_LABEL[streamingSpeaker.value]} is responding`
+  } else if (!next && prev) {
+    streamAnnouncement.value = 'Response complete'
+  }
+})
+
+/** Follow live growth only while the reader is already near the bottom. */
+watch(
+  () => (streamingThinking.value?.text.length ?? 0) + (streamingText.value?.text.length ?? 0),
+  async () => {
+    await nextTick()
+    const el = scrollEl.value
+    if (el && nearBottom.value) el.scrollTop = el.scrollHeight
+  },
+)
 </script>
 
 <template>
@@ -861,6 +932,82 @@ const statusLine = computed(() => {
         </section>
       </template>
 
+      <!-- Live streaming draft (ephemeral SSE token frames). aria-live="off"
+           keeps token-by-token updates out of the transcript's polite live
+           region; a separate visually-hidden status announces start/finish. -->
+      <div
+        v-if="streamingThinking || streamingText"
+        class="stream-live"
+        aria-live="off"
+      >
+        <section
+          v-if="streamingThinking"
+          class="stream-thinking"
+          :class="{ 'is-live': streamingThinking.streaming }"
+        >
+          <button
+            type="button"
+            class="stream-thinking-head"
+            :aria-expanded="thinkingExpanded"
+            aria-controls="stream-thinking-body"
+            @click="toggleThinking"
+          >
+            <span class="stream-thinking-dot" aria-hidden="true"></span>
+            <span class="stream-thinking-label">
+              {{ streamingThinking.streaming ? 'Thinking…' : 'Thought for a moment' }}
+            </span>
+            <AppIcon
+              :name="thinkingExpanded ? 'chevron-down' : 'chevron-right'"
+              :size="12"
+              class="stream-thinking-chevron"
+            />
+          </button>
+          <div
+            v-show="thinkingExpanded"
+            id="stream-thinking-body"
+            class="stream-thinking-body"
+          >{{ streamingThinking.text }}</div>
+          <p v-if="streamingThinking.truncated" class="stream-clipped">
+            Earlier reasoning was clipped for length.
+          </p>
+        </section>
+
+        <section
+          v-if="streamingText"
+          class="chat-group stream-response"
+          :class="`side-${streamingSpeaker}`"
+        >
+          <div class="avatar" :class="`avatar-${streamingSpeaker}`" aria-hidden="true">
+            {{ initial(streamingSpeaker) }}
+          </div>
+          <div class="group-content">
+            <header class="group-header">
+              <span class="speaker-name">{{ SPEAKER_LABEL[streamingSpeaker] }}</span>
+              <span class="stream-state">
+                {{ streamingText.streaming ? 'responding…' : 'complete' }}
+              </span>
+            </header>
+            <article class="bubble stream-bubble">
+              <div class="md-body stream-md">
+                <MarkdownBlockView
+                  v-for="(block, k) in streamingMarkdown"
+                  :key="k"
+                  :block="block"
+                />
+                <span
+                  v-if="streamingText.streaming"
+                  class="stream-caret"
+                  aria-hidden="true"
+                ></span>
+              </div>
+              <p v-if="streamingText.truncated" class="stream-clipped">
+                Earlier response text was clipped for length.
+              </p>
+            </article>
+          </div>
+        </section>
+      </div>
+
       <p v-if="statusLine" class="activity-line" aria-live="polite">
         <span class="activity-dot" aria-hidden="true"></span>{{ statusLine }}
       </p>
@@ -884,6 +1031,7 @@ const statusLine = computed(() => {
       </p>
     </template>
     </div>
+    <p class="visually-hidden" role="status" aria-live="polite">{{ streamAnnouncement }}</p>
   </div>
 </template>
 

@@ -1,6 +1,8 @@
 import type {
   ApprovalAnswerRequest,
   ApprovalDecisionView,
+  CommandInfo,
+  CommandListResponse,
   Envelope,
   FsBrowseResult,
   ProviderPreset,
@@ -16,10 +18,17 @@ import type {
   SessionInfo,
   SessionRuntimeEvents,
   SettingsView,
+  SkillInfo,
+  SkillListResponse,
+  TokenEvent,
   Workspace,
   WorkspaceCreateRequest,
+  WorkspaceFileEntry,
+  WorkspaceFileSearchResponse,
 } from './types'
 import { clampSearchLimit } from './search'
+import { clampFileQueryLimit } from './mentions'
+import { isTokenEvent } from './streaming'
 
 export class ApiError extends Error {
   status: number
@@ -171,6 +180,58 @@ export async function reorderWorkspaces(ids: string[]): Promise<Workspace[]> {
     json('PUT', { ids: [...ids] }),
   )
   return Array.isArray(body?.workspaces) ? body.workspaces : []
+}
+
+// -- skills, slash commands & workspace files ---------------------------------
+
+/**
+ * Discovered skills (`GET /api/skills`). Metadata only — bodies are injected by
+ * the server into a run, never served here.
+ */
+export async function listSkills(): Promise<SkillListResponse> {
+  const body = await request<SkillListResponse | SkillInfo[]>('/api/skills')
+  if (Array.isArray(body)) return { skills: body, diagnostics: [] }
+  return {
+    skills: Array.isArray(body?.skills) ? body.skills : [],
+    diagnostics: Array.isArray(body?.diagnostics) ? body.diagnostics : [],
+  }
+}
+
+/** Discovered slash commands (`GET /api/commands`); metadata only. */
+export async function listCommands(): Promise<CommandListResponse> {
+  const body = await request<CommandListResponse | CommandInfo[]>('/api/commands')
+  if (Array.isArray(body)) return { commands: body, diagnostics: [] }
+  return {
+    commands: Array.isArray(body?.commands) ? body.commands : [],
+    diagnostics: Array.isArray(body?.diagnostics) ? body.diagnostics : [],
+  }
+}
+
+/**
+ * Search the files of one registered workspace (`GET /api/workspaces/{id}/files`).
+ * `query` is ranked server-side; a missing endpoint (older backend) rejects with
+ * an `ApiError` whose status lets callers hide the Files group gracefully.
+ */
+export async function listWorkspaceFiles(
+  workspaceId: string,
+  query?: string,
+  limit?: number,
+): Promise<WorkspaceFileSearchResponse> {
+  const q = typeof query === 'string' ? query.trim() : ''
+  const suffix = `?limit=${clampFileQueryLimit(limit)}${q ? `&q=${encodeURIComponent(q)}` : ''}`
+  const body = await request<Partial<WorkspaceFileSearchResponse> | WorkspaceFileEntry[]>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/files${suffix}`,
+  )
+  if (Array.isArray(body)) {
+    return { workspace_id: workspaceId, files: body, truncated: false, total: body.length }
+  }
+  return {
+    workspace_id: typeof body?.workspace_id === 'string' ? body.workspace_id : workspaceId,
+    files: Array.isArray(body?.files) ? body.files : [],
+    truncated: body?.truncated === true,
+    total:
+      typeof body?.total === 'number' && Number.isFinite(body.total) ? body.total : 0,
+  }
 }
 
 // -- settings ---------------------------------------------------------------
@@ -355,6 +416,11 @@ export interface RunEventStreamOptions {
   /** Resume cursor; the server replays every event after it. */
   after?: number
   onEvent: (event: RunEvent, meta: RunEventMeta) => void
+  /**
+   * Ephemeral live token deltas (named SSE `token` frames). They carry no event
+   * id and are not replayed on reconnect, so they never move the cursor.
+   */
+  onToken?: (event: TokenEvent) => void
   /** Fired when the connection drops or the server closes the stream. */
   onError?: (cause: Event) => void
 }
@@ -370,6 +436,10 @@ export interface RunEventStream {
  * Opens the typed event stream for one run. The server closes the stream
  * after `run_end`, so callers should `close()` in `onError`/on completion and
  * reconnect with a fresh `after` cursor if the run is still active.
+ *
+ * Live `token` frames arrive as a separate NAMED event (`event: token`), so
+ * they are handed to `onToken` without touching the default `message` handler,
+ * the `lastEventId` cursor or the reconnect behaviour.
  */
 export function openRunEventStream(
   runId: string,
@@ -388,9 +458,26 @@ export function openRunEventStream(
     }
     options.onEvent(data, { eventId: Number.isFinite(parsed) ? parsed : last, raw: ev.data })
   }
+  /** `event: token` frames are ephemeral; malformed payloads are dropped. */
+  const handleToken = (ev: Event): void => {
+    if (!options.onToken) return
+    let data: unknown
+    try {
+      data = JSON.parse((ev as MessageEvent<string>).data)
+    } catch {
+      return
+    }
+    if (!data || typeof data !== 'object') return
+    if (!isTokenEvent(data)) return
+    options.onToken(data)
+  }
+  source.addEventListener('token', handleToken)
   source.onerror = (ev) => options.onError?.(ev)
   return {
-    close: () => source.close(),
+    close: () => {
+      source.removeEventListener('token', handleToken)
+      source.close()
+    },
     lastEventId: () => last,
   }
 }

@@ -1,13 +1,43 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { NButton, NPopover } from 'naive-ui'
-import { getSettings } from '../api'
+import {
+  ApiError,
+  getSettings,
+  listCommands,
+  listSkills,
+  listWorkspaceFiles,
+} from '../api'
 import { clearDraft, getDraft, setDraft } from '../drafts'
-import type { RunMode, RunProvider, SettingsView } from '../types'
+import {
+  MAX_FILE_ITEMS,
+  MENTION_DEBOUNCE_MS,
+  MENTION_FOOTER_HINT,
+  commandMentionItems,
+  detectMentionTrigger,
+  fileMentionItems,
+  insertMention,
+  mentionPickerHint,
+  skillMentionItems,
+} from '../mentions'
+import type { MentionItem, MentionKind, MentionTrigger } from '../mentions'
+import type {
+  CommandInfo,
+  RunMode,
+  RunProvider,
+  SettingsView,
+  SkillInfo,
+  WorkspaceFileEntry,
+} from '../types'
 
 const props = defineProps<{
   /** Session the composer belongs to; its unsent text is saved under this id. */
   sessionId?: string | null
+  /**
+   * Workspace whose files the `@` picker searches (the selected session's
+   * workspace, or the active sidebar filter for a not-yet-started session).
+   */
+  workspaceId?: string | null
   /**
    * Recovery payload from App: a start request that failed before any run
    * existed. `token` changes on every failure; the text is put back only when
@@ -272,6 +302,8 @@ function scheduleDraftSave() {
 }
 
 function submit() {
+  // submitting always closes the mention picker (the text now owns the task)
+  closePicker()
   const text = task.value.trim()
   // `waiting` keeps the textarea usable for drafting, but a new run cannot
   // start while this session's run is still alive.
@@ -285,15 +317,494 @@ function submit() {
   task.value = ''
 }
 
+// -- @ mention and / command pickers -----------------------------------------
+// Typing `@` opens skills + workspace files, `@skill:` narrows to skills and a
+// line-start `/` opens discovered slash commands. The textarea keeps DOM focus:
+// the popover is a listbox driven by `aria-activedescendant`, and catalogs are
+// fetched lazily (skills/commands once per settings version; files per query
+// with a debounce + monotonic token so stale answers never win).
+
+const mentionListId = 'composer-mention-list'
+const pickerList = ref<HTMLElement | null>(null)
+const pickerTrigger = ref<MentionTrigger | null>(null)
+const pickerActive = ref(-1)
+const pickerOpen = computed(() => pickerTrigger.value !== null)
+/** Escape dismissed this token; further typing re-arms the picker. */
+let pickerDismissed: MentionTrigger | null = null
+
+const skills = ref<SkillInfo[]>([])
+const commands = ref<CommandInfo[]>([])
+const skillsState = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
+const commandsState = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
+let skillsRequest = 0
+let commandsRequest = 0
+
+const files = ref<WorkspaceFileEntry[]>([])
+const filesState = ref<'idle' | 'loading' | 'ready' | 'error' | 'unsupported'>('idle')
+/** Workspace + query the current `files`/`filesState` belong to. */
+const filesWorkspace = ref<string | null>(null)
+const filesQuery = ref('')
+let filesRequest = 0
+let filesTimer: ReturnType<typeof setTimeout> | null = null
+
+const pickerKind = computed<MentionKind | null>(() => pickerTrigger.value?.kind ?? null)
+const pickerQuery = computed(() => pickerTrigger.value?.query ?? '')
+const commandItems = computed(() => commandMentionItems(commands.value, pickerQuery.value))
+const skillItems = computed(() => skillMentionItems(skills.value, pickerQuery.value))
+const fileItems = computed(() => fileMentionItems(files.value))
+
+interface PickerRow {
+  item: MentionItem
+  index: number
+}
+
+interface PickerGroupView {
+  kind: MentionKind
+  label: string
+  rows: PickerRow[]
+}
+
+/** Rendered groups (empty sections are skipped; indices stay flat-consistent). */
+const pickerGroups = computed<PickerGroupView[]>(() => {
+  const kind = pickerKind.value
+  if (!kind) return []
+  const sections: Array<{ kind: MentionKind; label: string; items: MentionItem[] }> =
+    kind === 'command'
+      ? [{ kind: 'command', label: 'Commands', items: commandItems.value }]
+      : [
+          { kind: 'skill', label: 'Skills', items: skillItems.value },
+          ...(kind === 'file'
+            ? [{ kind: 'file' as const, label: 'Files', items: fileItems.value }]
+            : []),
+        ]
+  let index = 0
+  const groups: PickerGroupView[] = []
+  for (const section of sections) {
+    if (!section.items.length) continue
+    groups.push({
+      kind: section.kind,
+      label: section.label,
+      rows: section.items.map((item) => ({ item, index: index++ })),
+    })
+  }
+  return groups
+})
+
+const pickerFlat = computed<MentionItem[]>(() =>
+  pickerGroups.value.flatMap((group) => group.rows.map((row) => row.item)),
+)
+
+const mentionOptionId = (index: number) => `composer-mention-option-${index}`
+const activeOptionId = computed(() => {
+  const item = pickerFlat.value[pickerActive.value]
+  if (!pickerOpen.value || !item || item.disabled) return undefined
+  return mentionOptionId(pickerActive.value)
+})
+
+/** Honest per-section status lines (loading / empty / unavailable). */
+const pickerNotes = computed<string[]>(() => {
+  const kind = pickerKind.value
+  if (!kind) return []
+  const query = pickerQuery.value.trim()
+  const notes: string[] = []
+
+  if (kind === 'skill' || kind === 'file') {
+    const items = skillItems.value
+    if (skillsState.value === 'error') notes.push('Skills are unavailable.')
+    else if (!items.length) {
+      const sharedCount = skills.value.filter((skill) => skill.scope === 'shared').length
+      if (skillsState.value === 'loading') notes.push('Loading skills…')
+      else if (sharedCount === 0) notes.push('No shared skills')
+      else if (query) notes.push('No matching skills')
+    }
+    if (items.some((item) => item.disabled)) {
+      notes.push('Role-scoped skills are model-invoked; only shared skills can be attached.')
+    }
+  }
+
+  if (kind === 'file') {
+    if (!props.workspaceId) {
+      notes.push('Select a workspace to attach files')
+    } else if (filesState.value === 'unsupported') {
+      // older backend: the Files group is hidden gracefully (no error noise)
+    } else if (filesState.value === 'error') {
+      notes.push('Files are unavailable right now.')
+    } else if (!fileItems.value.length) {
+      if (filesState.value === 'loading') notes.push('Searching files…')
+      else notes.push(query ? 'No matching files' : 'No files in this workspace')
+    }
+  }
+
+  if (kind === 'command') {
+    if (commandsState.value === 'error') notes.push('Slash commands are unavailable.')
+    else if (!commandItems.value.length) {
+      if (commandsState.value === 'loading') notes.push('Loading commands…')
+      else notes.push(query ? 'No matching commands' : 'No commands discovered')
+    }
+  }
+
+  return notes
+})
+
+function isMissingEndpoint(cause: unknown): boolean {
+  return (
+    cause instanceof ApiError &&
+    (cause.status === 404 || cause.status === 405 || cause.status === 501)
+  )
+}
+
+function closePicker(): void {
+  if (pickerTrigger.value) {
+    pickerTrigger.value = null
+    pickerActive.value = -1
+    // transient failures retry on the next open; a cached catalog stays cached
+    if (skillsState.value === 'error') skillsState.value = 'idle'
+    if (commandsState.value === 'error') commandsState.value = 'idle'
+    if (filesState.value === 'error') filesState.value = 'idle'
+  }
+  pickerActive.value = -1
+}
+
+function dismissPicker(): void {
+  pickerDismissed = pickerTrigger.value ? { ...pickerTrigger.value } : null
+  closePicker()
+}
+
+// -- catalogs (skills + commands) --------------------------------------------
+
+async function loadSkillsCatalog(): Promise<void> {
+  if (skillsState.value === 'loading' || skillsState.value === 'ready') return
+  const request = ++skillsRequest
+  skillsState.value = 'loading'
+  try {
+    const response = await listSkills()
+    if (request !== skillsRequest) return
+    skills.value = response.skills
+    skillsState.value = 'ready'
+  } catch {
+    if (request !== skillsRequest) return
+    skillsState.value = 'error'
+  }
+}
+
+async function loadCommandsCatalog(): Promise<void> {
+  if (commandsState.value === 'loading' || commandsState.value === 'ready') return
+  const request = ++commandsRequest
+  commandsState.value = 'loading'
+  try {
+    const response = await listCommands()
+    if (request !== commandsRequest) return
+    commands.value = response.commands
+    commandsState.value = 'ready'
+  } catch {
+    if (request !== commandsRequest) return
+    commandsState.value = 'error'
+  }
+}
+
+/** Lazy first-open fetch; cached afterwards until the settings version changes. */
+function ensureCatalogs(): void {
+  if (skillsState.value === 'idle') void loadSkillsCatalog()
+  if (commandsState.value === 'idle') void loadCommandsCatalog()
+}
+
+/** Drop both catalogs so the next open re-discovers them. */
+function resetCatalogs(): void {
+  skillsRequest += 1
+  commandsRequest += 1
+  skills.value = []
+  commands.value = []
+  skillsState.value = 'idle'
+  commandsState.value = 'idle'
+}
+
+// -- workspace files (per query) ---------------------------------------------
+
+function cancelFileSearch(): void {
+  filesRequest += 1
+  if (filesTimer) {
+    clearTimeout(filesTimer)
+    filesTimer = null
+  }
+  if (filesState.value === 'loading') filesState.value = 'idle'
+}
+
+/** Forget the cached file list (workspace/session switch, unmount). */
+function resetFileState(): void {
+  cancelFileSearch()
+  files.value = []
+  filesWorkspace.value = null
+  filesQuery.value = ''
+  filesState.value = 'idle'
+}
+
+function scheduleFileSearch(query: string): void {
+  const workspaceId = props.workspaceId ?? null
+  if (!workspaceId) {
+    cancelFileSearch()
+    files.value = []
+    filesWorkspace.value = null
+    filesQuery.value = ''
+    filesState.value = 'idle'
+    return
+  }
+  if (filesWorkspace.value !== workspaceId) {
+    // a different workspace means different files; never show the old list
+    files.value = []
+    filesState.value = 'idle'
+    filesWorkspace.value = null
+    filesQuery.value = ''
+  }
+  const normalized = query.trim()
+  if (
+    filesWorkspace.value === workspaceId &&
+    filesQuery.value === normalized &&
+    (filesState.value === 'ready' || filesState.value === 'loading')
+  ) {
+    return
+  }
+  if (filesTimer) {
+    clearTimeout(filesTimer)
+    filesTimer = null
+  }
+  filesRequest += 1
+  const request = filesRequest
+  filesWorkspace.value = workspaceId
+  filesQuery.value = normalized
+  filesState.value = 'loading'
+  filesTimer = setTimeout(() => {
+    filesTimer = null
+    void runFileSearch(workspaceId, normalized, request)
+  }, MENTION_DEBOUNCE_MS)
+}
+
+async function runFileSearch(
+  workspaceId: string,
+  query: string,
+  request: number,
+): Promise<void> {
+  try {
+    const response = await listWorkspaceFiles(workspaceId, query, MAX_FILE_ITEMS)
+    if (request !== filesRequest) return // a newer query owns the picker
+    files.value = response.files
+    filesState.value = 'ready'
+  } catch (cause) {
+    if (request !== filesRequest) return
+    files.value = []
+    filesState.value = isMissingEndpoint(cause) ? 'unsupported' : 'error'
+  }
+}
+
+// -- trigger tracking & keyboard ---------------------------------------------
+
+function syncPicker(): void {
+  if (props.busy) {
+    closePicker()
+    return
+  }
+  const el = inputEl.value
+  const value = el ? el.value : task.value
+  const caret =
+    el && typeof el.selectionStart === 'number' ? el.selectionStart : value.length
+  const trigger = detectMentionTrigger(value, caret)
+  if (!trigger) {
+    pickerDismissed = null
+    closePicker()
+    return
+  }
+  // Escape dismissed exactly this token; moving to another token/typing re-arms
+  if (
+    pickerDismissed &&
+    pickerDismissed.kind === trigger.kind &&
+    pickerDismissed.start === trigger.start
+  ) {
+    closePicker()
+    return
+  }
+  pickerDismissed = null
+  const previous = pickerTrigger.value
+  const changed =
+    !previous ||
+    previous.kind !== trigger.kind ||
+    previous.start !== trigger.start ||
+    previous.query !== trigger.query
+  pickerTrigger.value = trigger
+  ensureCatalogs()
+  if (trigger.kind === 'file') scheduleFileSearch(trigger.query)
+  if (changed) {
+    pickerActive.value = -1
+    ensureActive()
+  }
+}
+
+/** The input event owns text changes; typing re-arms a dismissed picker. */
+function onInput(): void {
+  pickerDismissed = null
+  syncPicker()
+}
+
+/**
+ * True for the duration of a press on the picker. The textarea's blur fires
+ * between pointerdown and click; without this guard, mutating the selection
+ * (mouse) would unmount the row before its click handler could insert it.
+ */
+let pickerPressing = false
+
+function onPickerPointerDown(): void {
+  pickerPressing = true
+  window.setTimeout(() => {
+    pickerPressing = false
+  }, 0)
+}
+
+/** Leaving the box (Send, chips, elsewhere) closes the picker. */
+function onTextareaBlur(): void {
+  // a fresh focus should be able to reopen the token (Escape dismissal is
+  // scoped to the current uninterrupted edit)
+  pickerDismissed = null
+  if (pickerPressing) return
+  closePicker()
+}
+
+function firstEnabledIndex(items: MentionItem[], from: number): number {
+  if (!items.length) return -1
+  for (let offset = 0; offset < items.length; offset += 1) {
+    const index = ((from % items.length) + items.length + offset) % items.length
+    if (!items[index]?.disabled) return index
+  }
+  return -1
+}
+
+function ensureActive(): void {
+  const items = pickerFlat.value
+  if (!items.length) {
+    pickerActive.value = -1
+    return
+  }
+  const current = items[pickerActive.value]
+  if (current && !current.disabled) return
+  pickerActive.value = firstEnabledIndex(items, Math.max(pickerActive.value, 0))
+}
+
+function stepPicker(step: number): void {
+  const items = pickerFlat.value
+  if (!items.length) return
+  const enabled: number[] = []
+  for (let index = 0; index < items.length; index += 1) {
+    if (!items[index]?.disabled) enabled.push(index)
+  }
+  if (!enabled.length) {
+    pickerActive.value = -1
+    return
+  }
+  const current = enabled.indexOf(pickerActive.value)
+  const next =
+    current < 0
+      ? step > 0
+        ? 0
+        : enabled.length - 1
+      : (current + step + enabled.length) % enabled.length
+  pickerActive.value = enabled[next] ?? -1
+}
+
+function activePickerItem(): MentionItem | null {
+  const item = pickerFlat.value[pickerActive.value]
+  return item && !item.disabled ? item : null
+}
+
+/** Replace the active token and put focus/caret back on the textarea. */
+function insertPickerItem(item: MentionItem | null): boolean {
+  const trigger = pickerTrigger.value
+  const el = inputEl.value
+  if (!item || item.disabled || !trigger || !item.token || !el) return false
+  const text = el.value
+  const caret = typeof el.selectionStart === 'number' ? el.selectionStart : text.length
+  const result = insertMention(text, caret, trigger, item.token)
+  task.value = result.text
+  closePicker()
+  const restoredCaret = result.caret
+  void nextTick(() => {
+    const textarea = inputEl.value
+    if (!textarea) return
+    textarea.focus()
+    try {
+      textarea.setSelectionRange(restoredCaret, restoredCaret)
+    } catch {
+      // a detached/disabled textarea must never throw while restoring the caret
+    }
+    resizeInput()
+  })
+  return true
+}
+
+/** Scroll only the picker list so the active row stays visible. */
+function scrollActiveIntoView(): void {
+  const list = pickerList.value
+  const index = pickerActive.value
+  if (!list || index < 0) return
+  const option = list.querySelector<HTMLElement>(`#${mentionOptionId(index)}`)
+  if (!option) return
+  const listRect = list.getBoundingClientRect()
+  const optionRect = option.getBoundingClientRect()
+  if (optionRect.top < listRect.top) {
+    list.scrollTop -= listRect.top - optionRect.top
+  } else if (optionRect.bottom > listRect.bottom) {
+    list.scrollTop += optionRect.bottom - listRect.bottom
+  }
+}
+
+/** Keys owned by the open picker; returns true when the event was consumed. */
+function onPickerKeydown(e: KeyboardEvent): boolean {
+  switch (e.key) {
+    case 'Escape':
+      e.preventDefault()
+      e.stopPropagation()
+      dismissPicker()
+      return true
+    case 'ArrowDown':
+      e.preventDefault()
+      stepPicker(1)
+      return true
+    case 'ArrowUp':
+      e.preventDefault()
+      stepPicker(-1)
+      return true
+    case 'Enter': {
+      if (e.shiftKey) return false // Shift+Enter keeps inserting a newline
+      e.preventDefault()
+      if (!insertPickerItem(activePickerItem())) closePicker()
+      return true
+    }
+    case 'Tab': {
+      if (e.shiftKey) return false
+      if (insertPickerItem(activePickerItem())) {
+        e.preventDefault()
+        return true
+      }
+      closePicker()
+      return false
+    }
+    default:
+      return false
+  }
+}
+
 function onKeydown(e: KeyboardEvent) {
+  // let an IME finish its composition instead of acting on a partial word
+  if (e.isComposing || e.keyCode === 229) return
+  // an open picker owns Enter (never submit), arrows, Tab and Esc
+  if (pickerOpen.value && onPickerKeydown(e)) return
   // while waiting Enter must stay a newline — the text is a draft, not a task
   if (props.busy || props.waiting) return
   if (e.key !== 'Enter' || e.shiftKey) return
-  // let an IME finish its composition instead of submitting a partial word
-  if (e.isComposing || e.keyCode === 229) return
   e.preventDefault()
   submit()
 }
+
+watch(pickerFlat, ensureActive)
+watch(pickerActive, () => {
+  void nextTick(scrollActiveIntoView)
+})
 
 // -- mode popover -------------------------------------------------------------
 
@@ -365,11 +876,24 @@ watch(task, scheduleDraftSave)
 watch(
   () => props.sessionId,
   (next, prev) => {
+    // a session switch cancels any picker tied to the previous draft
+    closePicker()
+    pickerDismissed = null
+    resetFileState()
     // `task` still holds the previous state's text here: save it under the old
     // id (or remember it when there was no session), then swap the box.
     flushDraft(prev)
     if (!prev && next) adoptOrRestore(next)
     else restoreDraft(next)
+  },
+)
+// The composer's @ file picker follows the selected session's workspace (or the
+// sidebar filter for a session that does not exist yet).
+watch(
+  () => props.workspaceId,
+  () => {
+    resetFileState()
+    if (pickerOpen.value && pickerKind.value === 'file') scheduleFileSearch(pickerQuery.value)
   },
 )
 // A start request that threw before creating a run: App hands the task back.
@@ -398,9 +922,15 @@ watch(
     if (!busy) return
     modeOpen.value = false
     modelOpen.value = false
+    // the textarea is disabled while a run works — no picker can stay open
+    closePicker()
   },
 )
-watch(() => props.settingsVersion, checkSettings)
+watch(() => props.settingsVersion, () => {
+  resetCatalogs()
+  if (pickerOpen.value) ensureCatalogs()
+  void checkSettings()
+})
 
 onMounted(() => {
   // a mounted composer may already have a session (restored selection on load)
@@ -414,6 +944,10 @@ onBeforeUnmount(() => {
   // synchronous last write: the debounce may still be pending
   flushDraft()
   settingsRequest++
+  cancelFileSearch()
+  skillsRequest++
+  commandsRequest++
+  pickerDismissed = null
   window.removeEventListener('resize', resizeInput)
 })
 </script>
@@ -424,16 +958,81 @@ onBeforeUnmount(() => {
       class="composer-surface"
       :class="{ 'is-busy': busy, 'is-waiting': waiting }"
     >
+      <!-- @ mentions and / commands: a listbox above the box, driven by the
+           textarea's aria-activedescendant while the textarea keeps focus. -->
+      <div
+        v-if="pickerOpen"
+        class="mention-picker"
+        data-composer-mentions
+        @pointerdown="onPickerPointerDown"
+      >
+        <div
+          :id="mentionListId"
+          ref="pickerList"
+          class="mention-list"
+          role="listbox"
+          :aria-label="mentionPickerHint(pickerKind ?? 'file')"
+        >
+          <div
+            v-for="group in pickerGroups"
+            :key="group.kind"
+            class="mention-group"
+            role="group"
+            :aria-labelledby="`composer-mention-${group.kind}-label`"
+          >
+            <div
+              :id="`composer-mention-${group.kind}-label`"
+              class="mention-group-label"
+            >
+              {{ group.label }}
+              <span class="mention-group-count">{{ group.rows.length }}</span>
+            </div>
+            <div
+              v-for="row in group.rows"
+              :id="mentionOptionId(row.index)"
+              :key="row.item.id"
+              class="mention-option"
+              :class="{ 'is-disabled': row.item.disabled }"
+              role="option"
+              :aria-disabled="row.item.disabled || undefined"
+              :aria-selected="pickerActive === row.index"
+              :title="row.item.token || row.item.label"
+              @mousedown.prevent
+              @click="insertPickerItem(row.item)"
+            >
+              <span class="mention-option-label">{{ row.item.label }}</span>
+              <span v-if="row.item.hint" class="mention-option-hint">{{ row.item.hint }}</span>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="pickerNotes.length" class="mention-notes" role="status">
+          <p v-for="note in pickerNotes" :key="note" class="mention-note">{{ note }}</p>
+        </div>
+
+        <div class="mention-foot">{{ MENTION_FOOTER_HINT }}</div>
+      </div>
+
       <textarea
         id="composer-input"
         ref="inputEl"
         v-model="task"
         class="composer-input"
         rows="1"
+        role="combobox"
         aria-label="Task for the two brothers"
+        aria-autocomplete="list"
+        :aria-expanded="pickerOpen"
+        :aria-controls="pickerOpen ? mentionListId : undefined"
+        :aria-activedescendant="activeOptionId"
         :placeholder="placeholder"
         :disabled="busy"
         @keydown="onKeydown"
+        @input="onInput"
+        @keyup="syncPicker"
+        @click="syncPicker"
+        @select="syncPicker"
+        @blur="onTextareaBlur"
       ></textarea>
 
       <div class="composer-controls">
@@ -625,7 +1224,10 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="composer-foot">
-        <span v-if="settingsMissing" class="composer-hint is-warn">{{ settingsHint }}</span>
+        <span v-if="pickerOpen" class="composer-hint" role="status">
+          {{ MENTION_FOOTER_HINT }}
+        </span>
+        <span v-else-if="settingsMissing" class="composer-hint is-warn">{{ settingsHint }}</span>
         <span v-else class="composer-hint" role="status">{{ statusHint }}</span>
       </div>
     </div>
@@ -643,6 +1245,7 @@ onBeforeUnmount(() => {
 }
 
 .composer-surface {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 0.45rem;
@@ -852,6 +1455,137 @@ onBeforeUnmount(() => {
   color: var(--warning);
 }
 
+/* @ mention / / command picker: anchored above the composer surface so it
+   never pushes the transcript layout; the textarea keeps focus. */
+.mention-picker {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 0.45rem);
+  left: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  max-height: min(20rem, 52vh);
+  overflow: hidden;
+  background: var(--surface-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-raised);
+}
+
+.mention-list {
+  flex: 1;
+  min-height: 0;
+  padding: 0.3rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.mention-group + .mention-group {
+  margin-top: 0.15rem;
+  padding-top: 0.15rem;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.mention-group-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.3rem 0.5rem 0.2rem;
+  font-size: 0.68rem;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.mention-group-count {
+  font-weight: 500;
+  letter-spacing: 0;
+  opacity: 0.8;
+}
+
+.mention-option {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  padding: 0.4rem 0.5rem;
+  font-size: 0.83rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  user-select: none;
+}
+
+.mention-option:hover {
+  background: var(--surface-hover);
+}
+
+.mention-option[aria-selected='true'] {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 2px var(--focus-ring);
+}
+
+.mention-option-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mention-option[aria-selected='true'] .mention-option-label {
+  font-weight: 600;
+}
+
+.mention-option-hint {
+  flex: none;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+}
+
+.mention-option.is-disabled {
+  color: var(--text-secondary);
+  cursor: default;
+  opacity: 0.6;
+}
+
+.mention-option.is-disabled:hover {
+  background: transparent;
+}
+
+.mention-notes {
+  flex: none;
+  padding: 0.35rem 0.6rem;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.mention-note {
+  margin: 0;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  color: var(--text-secondary);
+}
+
+.mention-note + .mention-note {
+  margin-top: 0.15rem;
+}
+
+.mention-foot {
+  flex: none;
+  padding: 0.35rem 0.6rem;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 0.7rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-top: 1px solid var(--border-subtle);
+}
+
 /* popover content (teleported by naive-ui) */
 .menu-heading {
   margin: 0;
@@ -1018,6 +1752,10 @@ onBeforeUnmount(() => {
 
   .chip-caption {
     display: none;
+  }
+
+  .mention-picker {
+    max-height: min(16rem, 46vh);
   }
 }
 </style>

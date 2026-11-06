@@ -36,6 +36,7 @@ import type {
   RunUsage,
   SessionInfo,
   SettingsView,
+  TokenEvent,
   Workspace,
 } from './types'
 import { projectEnvelopes, sessionTitle, taskOf } from './chat'
@@ -43,6 +44,17 @@ import { buildPaletteItems, PALETTE_SESSION_PREFIX, PALETTE_WORKSPACE_PREFIX } f
 import type { PaletteItem } from './palette'
 import { contentItemSession } from './search'
 import { isSameOrder, moveWorkspaceId } from './workspaceOrder'
+import {
+  STREAMING_MAX_CHARS,
+  applyRuntimeEvent,
+  applyToken,
+  createStreamingState,
+  hasStreamingDraft,
+  isTokenEvent,
+  resetStreaming,
+  streamingBlocks,
+} from './streaming'
+import type { StreamingState } from './streaming'
 import {
   changedFilesOf,
   mergeTimeline,
@@ -94,6 +106,10 @@ interface LiveRun {
 /** Every live run known to this app, keyed by session — the backend pool may
  * run several sessions at once. */
 const liveRuns = ref<Record<string, LiveRun>>({})
+/** Live token draft of the followed run (ephemeral SSE `token` frames). */
+const streamingState = ref<StreamingState>(createStreamingState())
+/** Render-ready live draft; null sections are not shown by ChatView. */
+const streamingView = computed(() => streamingBlocks(streamingState.value))
 /** The run this app follows: the live run of the selected session, if any.
  * Footer, stop, and the event stream all target this run; runs on other
  * sessions keep running in the background and only appear in liveRuns. */
@@ -247,6 +263,20 @@ const visibleSessions = computed(() =>
     ? sessions.value
     : sessions.value.filter((s) => s.workspace_id === workspaceFilter.value),
 )
+
+/**
+ * Workspace the composer's `@` file picker searches: the selected session's
+ * linked workspace, else the sidebar filter (a session started under it will
+ * belong to that workspace).
+ */
+const composerWorkspaceId = computed<string | null>(() => {
+  const name = selected.value
+  if (name) {
+    const session = sessions.value.find((item) => item.name === name)
+    if (session?.workspace_id) return session.workspace_id
+  }
+  return workspaceFilter.value === 'all' ? null : workspaceFilter.value
+})
 
 /** Recent workspaces that still exist, newest first (the finder/dialog quick picks). */
 const recentWorkspaces = computed<Workspace[]>(() => {
@@ -557,6 +587,74 @@ function closeStream() {
   }
 }
 
+// -- live token draft (ephemeral SSE `token` frames) -------------------------
+// The followed run's stream also emits named `token` frames while a model is
+// generating (reasoning + reply deltas). They are not replayed, carry no id, and
+// never touch the typed-event cursor: they only feed a disposable draft. Token
+// batches are coalesced onto the next animation frame so a fast stream cannot
+// re-render the transcript once per delta; the queue itself is bounded too, so
+// a hidden tab (no animation frames) cannot grow it without limit.
+
+let streamFrame: number | null = null
+let pendingStreamTokens: TokenEvent[] = []
+let pendingStreamChars = 0
+
+/** Apply the buffered token delta batch to the draft right now. */
+function flushStreamTokens(): void {
+  if (streamFrame !== null) {
+    window.cancelAnimationFrame(streamFrame)
+    streamFrame = null
+  }
+  if (pendingStreamTokens.length === 0) return
+  const batch = pendingStreamTokens
+  pendingStreamTokens = []
+  pendingStreamChars = 0
+  let next = streamingState.value
+  for (const token of batch) next = applyToken(next, token)
+  streamingState.value = next
+}
+
+/** Clear the live draft and drop any buffered tokens/frame. */
+function resetStreamingDraft(): void {
+  pendingStreamTokens = []
+  pendingStreamChars = 0
+  if (streamFrame !== null) {
+    window.cancelAnimationFrame(streamFrame)
+    streamFrame = null
+  }
+  if (hasStreamingDraft(streamingState.value)) streamingState.value = resetStreaming()
+}
+
+/** Queue one live token for the followed run; ignores other runs entirely. */
+function queueStreamToken(token: TokenEvent): void {
+  const run = activeRun.value
+  if (!run || token.run_id !== run.run_id) return
+  pendingStreamTokens.push(token)
+  pendingStreamChars += token.delta.length
+  // a hidden/backgrounded tab may never run an animation frame: flush early
+  if (pendingStreamChars > STREAMING_MAX_CHARS) {
+    flushStreamTokens()
+    return
+  }
+  if (streamFrame !== null) return
+  streamFrame = window.requestAnimationFrame(() => {
+    streamFrame = null
+    flushStreamTokens()
+  })
+}
+
+/**
+ * Fold the typed runtime events that end a live draft into the streaming state:
+ * a completed envelope replaces its role's draft, terminal events clear it.
+ */
+function applyStreamingEvent(event: RunEvent): void {
+  if (!event) return
+  if (event.type !== 'envelope' && event.type !== 'run_end' && event.type !== 'run_error') return
+  flushStreamTokens()
+  const next = applyRuntimeEvent(streamingState.value, event)
+  if (next !== streamingState.value) streamingState.value = next
+}
+
 function reportError(message: string) {
   errors.value = [...errors.value.filter((e) => e !== message), message].slice(-3)
   window.setTimeout(() => {
@@ -687,7 +785,11 @@ function finalizeRun(runId: string, status: RunStatus, error: string | null) {
   const entry = Object.values(liveRuns.value).find((r) => r.run_id === runId)
   if (!entry) return
   const wasFollowed = entry.session === selected.value
-  if (wasFollowed) closeStream()
+  if (wasFollowed) {
+    closeStream()
+    // the draft is ephemeral: the persisted transcript/timeline takes over now
+    resetStreamingDraft()
+  }
   const rest = { ...liveRuns.value }
   delete rest[entry.session]
   liveRuns.value = rest
@@ -760,6 +862,9 @@ function handleRunEvent(runId: string, raw: string, eventId: string) {
   } catch {
     return
   }
+  // keep the live draft in step with the typed events (envelope completes a
+  // draft, run_end/run_error clear it) before the switch handles the event
+  applyStreamingEvent(data)
   switch (data.type) {
     case 'run_status':
       if (data.status === 'queued' || data.status === 'running' || data.status === 'waiting') {
@@ -804,6 +909,17 @@ function connectEvents(runId: string) {
   const source = new EventSource(`/api/runs/${runId}/events?after=${getLastEventId(runId)}`)
   es = source
   source.onmessage = (ev) => handleRunEvent(runId, ev.data, ev.lastEventId)
+  // ephemeral live tokens arrive as a NAMED event: they carry no id and are not
+  // replayed, so they never feed the `?after` cursor used above
+  source.addEventListener('token', (event: Event) => {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse((event as MessageEvent<string>).data)
+    } catch {
+      return
+    }
+    if (isTokenEvent(parsed)) queueStreamToken(parsed)
+  })
   source.onerror = () => {
     source.close()
     if (es !== source) return
@@ -861,6 +977,8 @@ function seedRunStartedAt(runId: string) {
 watch(
   () => activeRun.value?.run_id ?? null,
   (runId, prev) => {
+    // switching the followed run (or its session) drops the previous draft
+    if (prev !== runId) resetStreamingDraft()
     if (prev && prev !== runId) closeStream()
     if (!runId) {
       closeStream()
@@ -1033,6 +1151,8 @@ async function refreshWorkspaces(silent = true) {
 async function loadSession(name: string) {
   // a session choice (row click or create) dismisses the mobile drawer
   if (drawerQuery?.matches && !sidebarCollapsed.value) sidebarCollapsed.value = true
+  // never show the previous session's live draft while this one loads
+  resetStreamingDraft()
   loading.value = true
   try {
     const [detail, runtime] = await Promise.all([
@@ -1071,6 +1191,7 @@ async function startNewRun(payload: {
     workspace_id: workspaceFilter.value === 'all' ? null : workspaceFilter.value,
   }
   lastRequest.value = request
+  resetStreamingDraft()
   try {
     const res = await startRun({
       task: request.task,
@@ -1078,6 +1199,8 @@ async function startNewRun(payload: {
       provider: request.provider,
       session: request.session,
       workspace_id: request.workspace_id,
+      // opt into the ephemeral live `token` frames for the followed run
+      stream_tokens: true,
     })
     liveRuns.value = {
       ...liveRuns.value,
@@ -1108,6 +1231,7 @@ async function startNewRun(payload: {
     // The request never became a run, so the submit-time clear must not be the
     // last word: hand the exact task back to the composer (it refuses to
     // overwrite text the operator has typed since).
+    resetStreamingDraft()
     draftRestore.value = {
       token: (draftRestore.value?.token ?? 0) + 1,
       text: request.task,
@@ -1165,7 +1289,8 @@ async function requestStop() {
   try {
     const res = await stopRun(run.run_id)
     // a queued run is cancelled immediately; a running run unwinds and the
-    // run_end event finishes the flow
+    // run_end event finishes the flow. Tokens may stall mid-stop: drop the draft.
+    resetStreamingDraft()
     if (res.status === 'cancelled') finalizeRun(run.run_id, 'cancelled', null)
   } catch (e) {
     stopping.value = false
@@ -1418,6 +1543,7 @@ onUnmounted(() => {
   if (sidebarTimer) clearInterval(sidebarTimer)
   if (reconnectTimer) clearTimeout(reconnectTimer)
   settingsRequest++
+  resetStreamingDraft()
   es?.close()
 })
 </script>
@@ -1538,6 +1664,7 @@ onUnmounted(() => {
         :timeline="timeline"
         :loading="loading"
         :activity="activity"
+        :streaming="streamingView"
         :resolve-approval="resolveApproval"
         :docked-approval-id="pendingApproval?.approvalId ?? null"
         :run-error="runError"
@@ -1572,6 +1699,7 @@ onUnmounted(() => {
       />
       <Composer
         :session-id="selected"
+        :workspace-id="composerWorkspaceId"
         :draft-restore="draftRestore"
         :busy="live"
         :waiting="waiting"
