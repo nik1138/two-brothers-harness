@@ -147,6 +147,8 @@ export {
   type RunJobResult,
   type EnvelopeHook,
   type RunJob,
+  type LiveTokenListener,
+  type LiveTokenHook,
   type PersistHook,
   type RuntimeRoleSettings,
   type PublicRuntimeRoleSettings,
@@ -201,7 +203,10 @@ export {
   GoogleProvider,
   MockProvider,
   MOCK_DELTA_CHARS,
+  MOCK_REASONING,
   emitMockDeltas,
+  emitMockThinking,
+  type ChatDeltaKind,
   type MockScriptStep,
   buildProvider,
 } from "./provider.ts";
@@ -395,3 +400,5 @@ export {
   type ServerHandle,
 } from "./server.ts";
 export * from "./sessionsearch.ts";
+export * from "./mentions.ts";
+export * from "./workspacefiles.ts";
