@@ -112,20 +112,25 @@ session.
   newline while a run waits for approval (the box stays usable for the next
   draft) and is unavailable while the brothers work (the box is locked).
 
-- **Mentions and commands.** Type `@` at a token start for a picker over
+- **Mentions and commands.** Type `@` at a token start for the `@` picker over
   shared skills and workspace files (emails/word-internal `@` never trigger;
   a workspace is needed for files), or `/` at a line start for the slash
-  command picker. The menu lists built-in commands first (priority order)
-  then discovered templates (alphabetical) then skills/files, with action
-  rows badged and described; searching also matches aliases (including the
-  reference Chinese spellings) and descriptions. `↑`/`↓` move,
+  command menu. The `/` menu lists built-in commands first (priority order)
+  then discovered templates (alphabetical), with action rows badged and
+  described; searching also matches aliases (including the reference Chinese
+  spellings) and descriptions. `↑`/`↓` move,
   `Enter`/`Tab` insert `@skill:name `, `@relative/path ` or `/name `,
   `Shift+Tab`/`Esc` dismisses and keeps the draft; while the picker is open
   `Enter` never submits. `@skill:` narrows to skills. Role-scoped
   (senior/junior) skills are listed but not insertable — the server only
   attaches shared operator mentions. Selecting or typing an action command
   (`/compact`, `/export`, `/help`, `/status`, `/permission`, `/mode`, `/new`)
-  performs it locally and never submits it as a run.
+  performs it locally and never submits it as a run; a typed non-ASCII alias
+  (e.g. `/目标`) is answered with a notice naming the canonical spelling
+  instead of being sent, and a typed `/mode consult|work` applies the
+  composer mode (an invalid or missing argument shows the usage). While a
+  manual compaction runs, Send is locked with a "Compacting context…" hint
+  until it finishes.
 
 - **Commands and shortcuts overlay.** `/help`, `?` or `Ctrl+/`/`Cmd+/` opens
   the overlay listing the built-in commands and the shortcut table (send,

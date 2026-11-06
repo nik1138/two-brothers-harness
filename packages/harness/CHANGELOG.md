@@ -45,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accelerated send, picker `Tab`/`Shift+Tab`, escape layering, and a 500 ms
   double-`Esc` stop. Pure modules `web/src/basecommands.ts`,
   `composerKeys.ts`, `shortcuts.ts`, `download.ts`; tests `web/tests/
-  basecommands.test.ts`, `web/tests/composerKeys.test.ts` (web 170/170).
+  basecommands.test.ts`, `web/tests/composerKeys.test.ts` (web 177/177).
 - **TUI built-in commands and picker cleanup**: `src/tui/basecommands.ts`
   adapts the shared catalogue (native keymap commands keep their names,
   discovered templates shadow base ones, built-ins ordered by priority),
@@ -58,7 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rewrites the session, `/export [path]` writes canonical Markdown, `/status`
   and `/permission` show real state only, `/new` starts a fresh in-memory
   session, and refusals are explicit. The help overlay lists the built-ins.
-  Tests: `tests/tuibasecommands.test.ts` (all TUI suites 282/282).
+  Tests: `tests/tuibasecommands.test.ts` (all TUI suites 289/289).
 - **CLI chat REPL built-in commands**: `chat` dispatches the shared catalogue
   before discovered templates — prompt commands run with their mode override
   and usage errors, action commands are performed by the REPL (`/compact`
@@ -187,6 +187,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Manual compaction/run mutual exclusion** (audit P1): `POST
+  /api/sessions/{name}/compact` now reserves the session synchronously before
+  the summarizer call and releases it in `finally`; run submission for a
+  session being compacted is a 409 that creates nothing. Previously a run
+  accepted during the summarizer window could have its envelopes dropped by
+  the compaction rewrite (lost task line, non-dense `seq`). Two concurrent
+  compacts are also serialized (one 200, one 409).
+- **Compact route honesty**: the manual budgets derive from the resolved run
+  config when `ServerOptions.compaction` is unset (serve-level `--compact-*`
+  and `TWO_BROTHERS_COMPACT*` now apply); a client disconnect aborts the
+  provider call (internal 499, no fake 502, no unhandled rejection); a corrupt
+  session file is a stable 422 without leaking paths.
+- **Typed non-ASCII aliases**: the web and the TUI no longer submit/run a
+  typed `/目标 …`-style line (the shared ASCII slash parser can never resolve
+  it) — they show a notice naming the canonical spelling and keep the draft.
+- **Compaction summaries render neutrally**: the web transcript projects a
+  `<summary>…</summary>` envelope as a quiet "Context compacted" system
+  activity (collapsible, clipped, excluded from find/copy), and the TUI shows
+  it as a dim `SUMMARY` block — never as an operator message; a resumed
+  compacted session seeds the same marker in the TUI.
+- **Web `/mode <arg>` and compaction lock**: typed `/mode consult|work`
+  applies the composer mode (invalid/missing shows the usage and submits
+  nothing), and the composer is honestly locked while a compaction runs.
 - **Web workspace (UI shipped in the tarball)**: accessibility and
   keyboard-focus improvements across the chat, sidebar, composer, and
   Settings dialog, plus visible summaries of the effective per-role

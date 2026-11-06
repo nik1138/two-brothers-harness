@@ -111,9 +111,11 @@ discovered `<name>.md` wins over a same-named built-in:
   cannot replace a session in place). A failed `/compact` or `/export` prints
   `compact failed: …` / `export failed: …` and keeps the context intact.
 - `/config` still prints the resolved per-role endpoints. The reference
-  Chinese aliases resolve in the catalogue, the HTTP API and the pickers, but
-  cannot be typed in the REPL: `matchCommand`'s ASCII name rule treats
-  `/目标 …` as an ordinary slash-prefixed task.
+  Chinese aliases resolve in the catalogue, the metadata API and the pickers,
+  but are not **typeable** on any surface: `matchCommand`'s ASCII name rule
+  (shared by the REPL, the TUI and `POST /api/runs`) treats `/目标 …` as an
+  ordinary slash-prefixed task. The web and the TUI now detect that case and
+  answer with a notice naming the canonical spelling instead of sending it.
 
 ### `tui [initial task]`
 
@@ -231,11 +233,15 @@ kinds, and the distinction is honest on every surface:
   where a client has no local compaction.
 
 Names resolve case-insensitively, include English synonyms and the reference
-Chinese spellings (`目标`, `计划`, `反馈`, `压缩`, `权限`, `导出`), and are
-ordered by priority in the pickers. A discovered `<name>.md` template with
-the same name shadows the built-in (deepseek-harness's "exact name wins"
-rule), so an operator can override `/plan` locally. The catalogue is served,
-metadata only, at `GET /api/commands` (`baseCommands`).
+Chinese spellings (`目标`, `计划`, `反馈`, `压缩`, `权限`, `导出`) as
+searchable aliases in the pickers, are ordered by priority, and ship
+canonically in `GET /api/commands`. Only ASCII spellings are typeable — the
+shared slash parser's ASCII name rule governs the REPL, the TUI and
+`POST /api/runs`, and the web/TUI answer a typed non-ASCII alias with a
+canonical-spelling notice instead of sending it. A discovered `<name>.md`
+template with the same name shadows the built-in (deepseek-harness's "exact
+name wins" rule), so an operator can override `/plan` locally. The catalogue
+is served, metadata only, at `GET /api/commands` (`baseCommands`).
 
 ### `sessions`
 
@@ -453,7 +459,7 @@ The backend is a **local single-user workspace server**. API overview:
 | `DELETE /api/sessions/{name}` | delete a session — the JSONL, its `<name>.meta.json` and the runtime sidecar (`200 {"deleted": name}`; 404 on unknown) |
 | `GET /api/sessions/{name}` | all protocol envelopes of one session |
 | `GET /api/sessions/{name}/events` | runtime sidecar events (tool calls, approvals) for browser reload |
-| `POST /api/sessions/{name}/compact` | compact the session in place on demand: the older context is summarized by the configured summarizer role (senior by default) and the session JSONL is rewritten with dense `seq`, so a reload shows the summary. `200 {"compacted": true, "before_events": N, "after_events": M}`; `200 {"compacted": false, "reason": "nothing to compact"}` when there is nothing to cut; 404 unknown session, 400 invalid session name, 409 while a run for that session is active, and 502 with the provider message (nothing written) when summarization fails |
+| `POST /api/sessions/{name}/compact` | compact the session in place on demand: the older context is summarized by the configured summarizer role (senior by default) and the session JSONL is rewritten with dense `seq`, so a reload shows the summary. `200 {"compacted": true, "before_events": N, "after_events": M}`; `200 {"compacted": false, "reason": "nothing to compact"}` when there is nothing to cut; 404 unknown session, 400 invalid session name, 409 while a run for that session is active or another compaction is already running, 422 when the session file is unreadable/corrupt, and 502 with the provider message (nothing written) when summarization fails. A run submitted for a session while it is being compacted is a 409 (`a compaction is in progress for this session; retry in a moment`) — the two operations are mutually exclusive so a run's envelopes can never be lost to the rewrite. The summarizer budgets follow the resolved run config (`--compact-*`/`TWO_BROTHERS_COMPACT*`), an explicit `ServerOptions.compaction` still wins, and a client disconnect aborts the provider call and releases the session |
 | `GET /PUT /api/settings` | per-role Senior/Junior provider/model/base URL/API key (keys are write-only; responses show `api_key_set` only) |
 | `POST /api/runs` | start a background run (`{"task", "mode"?, "session"?, "provider"?, "workspace_id"?, "stream_tokens"?}` → `202 {"run_id", "session", "status"}`); a leading `/name` command is expanded and `@skill:`/`@file` mentions are attached before the run (see [Composer mentions and slash commands](#composer-mentions-and-slash-commands)); `stream_tokens: true` additionally streams live `token` frames on the run SSE endpoint (strict boolean, default off); runs are FIFO — one active, the rest `queued` |
 | `GET /api/runs`, `GET /api/runs/{run_id}` | list runs / run status (`queued`/`running`/`waiting`/`completed`/`failed`/`cancelled`); records carry a per-run `usage` object (`model_calls`, `input_tokens`, `output_tokens`, `cached_tokens`; zeros while running) |
