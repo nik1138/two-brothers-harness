@@ -19,6 +19,8 @@ The CLI is command-driven; these are its help and discovery paths.
 | Resolved configuration | `two-brothers config [--json]` |
 | Local diagnostics | `two-brothers doctor [--json]` |
 | One stored session | `two-brothers sessions show <name> [--json] [--limit N]` |
+| Search stored sessions | `two-brothers sessions search <query> [--json] [--limit N]` |
+| Export a session | `two-brothers sessions export <name> [--format markdown\|json] [--output <path>]` |
 | Completion script | `two-brothers completions <bash\|zsh\|fish\|powershell>` |
 
 `help <command>` and `<command> --help` print the same page; a near-miss
@@ -63,8 +65,16 @@ From a checkout, replace `two-brothers` with `node dist/cli.js` after
 | Dialog | `Esc` | close the topmost dialog |
 | Session actions trigger | `↓` | open the row menu; `↑`/`↓`/`Home`/`End` move, `Esc`/`Tab` close |
 
+The row menu also exports the session as Markdown or JSON (`Export as
+Markdown` / `Export as JSON`); the file downloads with a name derived from the
+session.
+
 - **Palette.** Opens with the search field focused and empty; typing filters
-  sessions, workspaces and actions, grouped in that order. The footer shows
+  sessions, workspaces and actions, grouped in that order. Once the query is
+  at least two characters long, the palette also searches session message
+  content after a short debounce and lists matching hits in a `Messages`
+  group below Sessions; `Enter` on a hit opens that session. A backend
+  without `/api/search` simply hides the group. The footer shows
   `↑ ↓ navigate · Enter select · Esc close` and the match count. `Enter` is
   claimed only while the search field has focus (a focused footer button keeps
   its native behavior) and `Esc` closes from anywhere inside the palette. The
@@ -143,6 +153,7 @@ from the registry at runtime. The TUI is Ctrl-based: terminals do not deliver
 | Keys | Action |
 |---|---|
 | `PgUp` / `PgDn` | Page the transcript without moving the composer cursor. |
+| `Ctrl+F` | Find in the transcript: an inline bar above the status rows. Typing filters live (case-insensitive literal text), `Enter`/`Down` jumps to the next match and `Shift+Enter`/`Up` to the previous one (both wrap); the bar shows `current/total`, marks the active match and scrolls its block into view. `Esc` closes it and restores the composer draft and scroll position exactly. `/find [query]` opens it with a query already typed. |
 | `Ctrl+T` | Expand or collapse the most recent tool result: collapsed shows the first six result lines plus a `… +N more lines` marker, expanded shows the whole result. |
 | `Ctrl+B` | Toggle the status side panel on wide terminals (it needs at least 100 columns and 20 rows; below that the transcript simply uses the full width). `/panel` does the same. |
 
@@ -169,10 +180,13 @@ before it can cancel a turn.
 
 Every registry command also has a typed slash form — even when it has no
 chord — and all are searchable in `Ctrl+P`: `/palette`, `/help` (`/h`),
-`/commands`, `/retry`, `/exit` (`/quit`, `/q`), `/mode consult|work`,
-`/models`, `/sessions`, `/theme dark|light|system`, `/settings`, plus
-discovered `<name>.md` templates. `/models` and `/sessions` refuse while a turn
-runs.
+`/commands`, `/find [query]`, `/retry`, `/exit` (`/quit`, `/q`),
+`/mode consult|work`, `/models`, `/sessions`, `/theme dark|light|system`,
+`/settings`, plus discovered `<name>.md` templates. `/models` and `/sessions`
+refuse while a turn runs. The find bar is an inline input, not a modal: while
+it is open it owns printable keys and the app chords (`Ctrl+P`, `?`, slash
+commands) are inert, exactly like the palette and help overlays; `Esc` closes
+it first.
 
 ## See also
 

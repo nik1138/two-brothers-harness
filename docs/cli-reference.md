@@ -103,7 +103,11 @@ blocking input; Escape/Ctrl+C under a safe precedence (overlay close → cancel
 the running turn → clear the composer → confirm quit). `Ctrl+P` opens the
 command palette, `?` a scrollable help overlay (only while the composer is
 empty; `F1` always opens it), both generated from the same keymap registry as
-`tui --help`. Slash input: `/mode consult|work`, `/models`,
+`tui --help`. `Ctrl+F` (or `/find [query]`) opens find-in-transcript: a live
+case-insensitive filter over the whole transcript with `current/total`,
+`Enter`/`Down` next, `Shift+Enter`/`Up` previous (wrap), the active match
+marked and scrolled into view, and `Esc` restoring the draft and scroll
+position. Slash input: `/mode consult|work`, `/models`,
 `/sessions`, `/theme dark|light|system`, `/settings`, `/retry`, `/help`,
 `/commands`, `/exit`, plus discovered `<name>.md` templates (unknown names are
 never submitted as tasks). `/models` and `/sessions` refuse to change things
@@ -147,6 +151,62 @@ same summary fields plus `events` (the envelope array):
 (`show`, in both human and JSON output; `envelopes` stays the total). An
 unknown session or a missing name is a usage error (exit 2); an unreadable
 session file exits 1.
+
+#### `sessions search <query>`
+
+Full-text search across a sessions directory: session titles plus every
+envelope's payload strings (operator tasks, proposals, reviews, decisions).
+Matching is a case-insensitive literal substring; JSON keys and envelope
+metadata are never matched, and whitespace is collapsed on both sides, so a
+multi-line payload still matches a one-line query.
+
+```powershell
+node dist/cli.js sessions search "valkey migration"
+node dist/cli.js sessions search "rollback" --json --limit 5 --sessions-dir sessions
+```
+
+Human output starts with `N matches in M sessions`, then one
+`<session>  <field>  <snippet>` line per hit (`field` is `title`, `message` or
+`decision`; the snippet is one bounded line centered on the match). `--json`
+prints the exact result object:
+
+```json
+{"query": "rollback", "scanned_sessions": 4, "truncated": false,
+ "hits": [{"session": "20261106-120000.jsonl", "title": "Plan a migration",
+           "field": "message", "seq": 9, "role": "senior", "kind": "decision",
+           "snippet": "…the rollback plan…", "ts": "2026-11-06T09:00:00Z"}]}
+```
+
+Sessions are read newest-first up to the scan caps (200 sessions, 2 000
+envelopes each) and at most 3 hits are returned per session. `--limit N`
+caps the total hits (1–100, default 20); `truncated: true` means a cap
+dropped a real match. A missing directory searches nothing (`0 matches in 0
+sessions`, exit 0); a query shorter than 2 characters is a usage error
+(exit 2); corrupt session files are skipped, never fatal. No matches prints
+`no matches` and exits 0.
+
+#### `sessions export <name> [--format markdown|json] [--output <path>]`
+
+Render one session for reading, sharing or archival. The default format is a
+Markdown transcript: a header (`# <title>`, session name, workspace, updated
+and exported timestamps, envelope count) followed by one
+`## <seq>. <from> → <to> · <kind>` section per envelope with its timestamp and
+a readable payload (message text verbatim; structured payloads as bullet
+fields; nested values as JSON). Each payload is bounded to 20 000 characters
+with an explicit truncation marker. `--format json` prints a stable pretty
+object `{name, title, workspace_id, updated, exported_at, envelopes}` with the
+envelopes verbatim.
+
+```powershell
+node dist/cli.js sessions export session --sessions-dir sessions           # Markdown to stdout
+node dist/cli.js sessions export session --format json --output out.json   # write a file
+```
+
+The name resolves with or without the `.jsonl` suffix; the `--format` value is
+case-insensitive. `--output <path>` writes the body to that file and prints
+`wrote <abs path>` on stderr; `--output -` keeps stdout. A missing session or
+an unwritable output path exits 1; an unknown format or a missing name is a
+usage error (exit 2).
 
 ### `doctor`
 
@@ -265,6 +325,8 @@ The backend is a **local single-user workspace server**. API overview:
 |---|---|
 | `GET /api/workspaces`, `POST /api/workspaces`, `DELETE /api/workspaces/{id}` | registered workspace directories (register/unregister; sessions are untouched) |
 | `GET /api/sessions` | list sessions (`?workspace_id=` filters); titles/workspace links from `<name>.meta.json` sidecars |
+| `GET /api/search?q=&limit=` | full-text search over session titles and envelope payload strings; returns `{query, scanned_sessions, truncated, hits[]}`; `q` shorter than 2 characters is a 400 |
+| `GET /api/sessions/{name}/export?format=markdown\|json` | download one session as Markdown (default) or JSON with `Content-Disposition: attachment`; 404 for an unknown session, 400 for an unknown format (HEAD supported) |
 | `POST /api/sessions` | create a session (`{"title"?, "workspace_id"?}`) |
 | `PATCH /api/sessions/{name}` | rename a session (set a readable title) |
 | `DELETE /api/sessions/{name}` | delete a session — the JSONL, its `<name>.meta.json` and the runtime sidecar (`200 {"deleted": name}`; 404 on unknown) |
@@ -595,12 +657,19 @@ them):
   `run --task-file <path>` feed the task without shell quoting, and
   `run`/`chat --dry-run` print the resolved plan (config, tools, session,
   compaction, limits) with no model call and no session write.
+- **Session search and export** — `sessions search <query>` (human or
+  `--json`, bounded snippets, newest sessions first) and
+  `sessions export <name> [--format markdown|json] [--output <path>]`; the
+  server exposes the same data at `GET /api/search` and
+  `GET /api/sessions/{name}/export`. The web workspace searches message
+  content from the Ctrl+K palette and exports a session from its row menu.
 - **TUI** — `tui [task]` (also the bare interactive `two-brothers`) is a
   zero-dependency full-screen chat in the terminal's alternate screen over
   the same harness and flags: block transcript with textual role labels, a
   multiline grapheme-aware composer with bracketed paste, a two-line status
   bar, Ctrl+P palette / `?` help from one keymap registry, session and model
-  pickers, and non-blocking turns with Escape/Ctrl+C cancellation.
+  pickers, Ctrl+F find-in-transcript, and non-blocking turns with
+  Escape/Ctrl+C cancellation.
 
 ## Examples
 
@@ -648,6 +717,12 @@ node dist/cli.js completions powershell
 node dist/cli.js sessions --sessions-dir sessions --json
 node dist/cli.js sessions show session --sessions-dir sessions
 
+# full-text search across sessions, and export one for reading/sharing
+node dist/cli.js sessions search "migration" --sessions-dir sessions
+node dist/cli.js sessions search "migration" --json --limit 5
+node dist/cli.js sessions export session --sessions-dir sessions
+node dist/cli.js sessions export session --format json --output session.json
+
 # a real provider
 node dist/cli.js run "Task" --provider openai `
   --base-url https://api.deepseek.com/v1 --api-key sk-... `
@@ -660,4 +735,4 @@ node dist/cli.js run "Task" --provider openai `
 |---|---|
 | 0 | success (including `doctor` when no check failed, a `--dry-run` plan, and a missing/empty sessions directory) |
 | 1 | run error (the `errors` array in `--mode json`) / selftest FAIL / `doctor` with at least one failing check / unreadable session file |
-| 2 | usage error: unknown command or option, missing task, shell or session argument, unknown session, invalid flag value, bad config, blank stdin/`--task-file` task, `--dry-run` with `--stream` |
+| 2 | usage error: unknown command or option, missing task, shell or session argument, unknown session, invalid flag value, bad config, blank stdin/`--task-file` task, `--dry-run` with `--stream`, a `sessions search` query shorter than 2 characters, an unknown `sessions export` format |

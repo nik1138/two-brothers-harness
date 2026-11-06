@@ -23,7 +23,7 @@ The script runs:
 6. the hermetic CLI E2E (`node e2e/cli.ts`)
 7. the `typescript/` reference selftest
 8. the `web/` unit tests (`npm test` — chat, timeline, drafts, palette,
-   session-status, recents and density)
+   session-status, recents, density, find and content-search)
 9. the `web/` build
 
 Expected final line: `SMOKE TEST: PASS`. It is an offline pre-flight, not the
@@ -83,18 +83,26 @@ catalog, `sessions --json` / `sessions show`, `models` and `onboard`;
 clock, API keys never rendered), `tests/completions.test.ts` the deterministic
 bash/zsh/fish/PowerShell completion generator, and
 `tests/reliability.test.ts` the hermetic concurrency, restart, approval-race
-and compaction-stress paths. The TUI lanes (`tests/tui*.test.ts`) cover the
-editor, the keymap registry, the terminal, the views and prompt history, with
-the assembled app in `tests/tuiintegration.test.ts`. The TUI lanes and the
-doctor, completions and reliability suites are registered in
+and compaction-stress paths. Session search/export is covered by
+`tests/sessionsearch.test.ts` (the pure module: matching, snippets, caps,
+Markdown/JSON export shapes, tolerant loading), `tests/serversearch.test.ts`
+(the `GET /api/search` and per-session export endpoints over a real
+loopback server) and `tests/sessionscommands.test.ts` (the CLI subcommands and
+their exit codes). The TUI lanes (`tests/tui*.test.ts`) cover the
+editor, the keymap registry, the terminal, the views, prompt history and the
+find-in-transcript overlay, with the assembled app in
+`tests/tuiintegration.test.ts`. The TUI lanes and the doctor, completions,
+reliability and search/export suites are registered in
 `tests/run-all.ts`.
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
-subprocess against the mock provider — **14 scenarios**: consult, chat-repl,
+subprocess against the mock provider — **16 scenarios**: consult, chat-repl,
 help, work, session+resume, mcp, serve, doctor (`--json`), completions
 (`bash`), config (`--json`, masked keys), dry-run (plan text/JSON, no session
-file), stdin (`run -`), sessions-json and sessions-show. CI runs both (see
+file), stdin (`run -`), sessions-json, sessions-show, sessions-search
+(human and `--json`, short-query exit 2) and sessions-export (Markdown
+stdout, `--output` file, missing session exit 1). CI runs both (see
 [CI coverage](#ci-coverage)).
 
 The CLI-ergonomics suite also covers `config`'s provenance precedence
@@ -111,14 +119,16 @@ npm test                # every web suite below (node:test, offline)
 
 The suite (`tests/chat.test.ts`, `tests/timeline.test.ts`,
 `tests/drafts.test.ts`, `tests/palette.test.ts`, `tests/sessionStatus.test.ts`,
-`tests/recents.test.ts`, `tests/density.test.ts`) covers the
-envelope→group-chat projection, the runtime-event timeline merge, per-session
-unsent drafts, palette building/scoring/filtering, sidebar row status, the MRU
-workspace list, and the persisted UI density preference. The modules are
-dependency-free at runtime, so plain `node --test` runs them via the
-`tests/register-ts.mjs` bootstrap (a tiny resolve hook for the extensionless
-imports); `npm test` wires that up. The full `web/` gate also includes
-`npm run build` (see the smoke test above).
+`tests/recents.test.ts`, `tests/density.test.ts`, `tests/find.test.ts`,
+`tests/search.test.ts`) covers the envelope→group-chat projection, the
+runtime-event timeline merge, per-session unsent drafts, palette
+building/scoring/filtering, sidebar row status, the MRU workspace list, the
+persisted UI density preference, find-in-transcript matching, and the
+content-search result shaping plus export filename/download-name helpers. The
+modules are dependency-free at runtime, so plain `node --test` runs them via
+the `tests/register-ts.mjs` bootstrap (a tiny resolve hook for the
+extensionless imports); `npm test` wires that up. The full `web/` gate also
+includes `npm run build` (see the smoke test above).
 
 ## TypeScript reference (`typescript/`)
 

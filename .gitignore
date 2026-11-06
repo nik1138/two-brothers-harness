@@ -21,6 +21,9 @@ mcp-demo-config.json
 dist/
 .e2e-tmp/
 .build-tmp/
+# workspace-local TEMP for builds/tests (vite/esbuild temp cleanup is blocked
+# on the system temp dir on a confined Windows host)
+.tmp/
 .zcode/
 
 # Local research scratch: the whole research/ tree (vendored MIT clones,

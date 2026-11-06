@@ -114,13 +114,17 @@ one command's flags and examples, and `help --all` the full reference; a
 near-miss command or option gets a did-you-mean line, and usage errors exit 2.
 
 `sessions` lists the JSONL files under `--sessions-dir`; `sessions show <name>`
-prints one session's summary and envelopes. Both accept `--json`, and the
-`--limit N` flag caps rows or envelopes.
+prints one session's summary and envelopes; `sessions search <query>`
+full-text searches every session (title and envelope text); and
+`sessions export <name>` renders one session as Markdown (default) or JSON.
+All accept `--json`, and the `--limit N` flag caps rows, envelopes or hits.
 
 ```powershell
 node dist/cli.js help sessions
 node dist/cli.js sessions --sessions-dir sessions --json
 node dist/cli.js sessions show <name> --sessions-dir sessions --limit 20
+node dist/cli.js sessions search "migration" --sessions-dir sessions
+node dist/cli.js sessions export <name> --format markdown --output session.md
 ```
 
 Completion scripts are generated from the same catalog; for an installed
@@ -169,8 +173,11 @@ Then open `http://127.0.0.1:8600`:
 5. **Review the changes** — files touched by tools are collected with their
    unified diffs.
 6. **Jump around with `Ctrl+K`** (`Cmd+K` on macOS) — the command palette
-   searches sessions, workspaces, and actions. The sidebar footer's
-   Light/Dark/System selector sets the theme.
+   searches sessions, workspaces, and actions; from two typed characters it
+   also searches message content across all sessions and lists the hits in a
+   `Messages` group. The sidebar footer's Light/Dark/System selector sets the
+   theme. A session row's `⋯` menu can rename, export as Markdown/JSON, or
+   delete it.
 
 Sessions are plain JSONL files under `--sessions-dir`; each has a
 `<name>.meta.json` sidecar (title, workspace link) and a runtime sidecar in
@@ -189,10 +196,10 @@ node dist/cli.js tui --provider mock
 
 Block transcript with textual role labels, a grapheme-aware multiline
 composer with history and bracketed paste, `Ctrl+R` incremental prompt-history
-search, `Ctrl+O` to stash or restore a draft, Ctrl+P command palette and `?`
-help overlays, session/model pickers, token streaming in place, live resize
-repaint, and non-blocking turns — Escape/Ctrl+C cancel a running turn before
-anything else.
+search, `Ctrl+F` find-in-transcript (with `/find`), `Ctrl+O` to stash or
+restore a draft, Ctrl+P command palette and `?` help overlays, session/model
+pickers, token streaming in place, live resize repaint, and non-blocking
+turns — Escape/Ctrl+C cancel a running turn before anything else.
 
 Full keymap and web palette keys: [Keyboard and shortcuts](keyboard.md).
 

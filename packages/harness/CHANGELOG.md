@@ -19,6 +19,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (a stop resolves pending approvals as deny), give in-flight runs a bounded
   5 s grace window, then end SSE connections and close; flushed session
   JSONL is never touched. Tests: `tests/serveshutdown.test.ts`.
+- **Session search and export**: `src/sessionsearch.ts` searches session
+  titles and envelope payload strings (case-insensitive literal substring,
+  whitespace-collapsed, bounded single-line snippets, newest sessions first,
+  per-session and overall hit caps with an honest `truncated` flag) and
+  renders a session as Markdown (header + one section per envelope, payloads
+  bounded to 20 000 chars) or stable pretty JSON. `loadSessionDocs` reads
+  `<sessions-dir>/*.jsonl` newest-first with metadata titles attached,
+  skipping corrupt files fail-soft. CLI: `sessions search <query> [--json]
+  [--limit N]` and `sessions export <name> [--format markdown|json]
+  [--output <path>]`. Server: `GET /api/search?q=&limit=` and
+  `GET|HEAD /api/sessions/{name}/export?format=` (download headers;
+  400/404 as documented). The web workspace searches message content from
+  the Ctrl+K palette and exports a session from its row menu. Tests:
+  `tests/sessionsearch.test.ts`, `tests/serversearch.test.ts`,
+  `tests/sessionscommands.test.ts`; CLI E2E grew to 16 scenarios.
+- **TUI find-in-transcript**: `Ctrl+F` (or `/find [query]`) opens an inline
+  find bar over the transcript — live literal case-insensitive filtering,
+  `current/total` with an honest `+N` cap, `Enter`/`Down` next and
+  `Shift+Enter`/`Up` previous (wrap), the active match marked in the block
+  gutter and scrolled into view (block anchor), and `Esc` restoring the
+  composer draft and scroll position exactly. `src/tui/view/findbar.ts` is the
+  pure state/render module; the command and its scoped keys live in the shared
+  keymap registry, so `?`/F1 help, `Ctrl+P` and `tui --help` list them.
+  Tests: `tests/tuifind.test.ts`.
 
 ### Security
 
