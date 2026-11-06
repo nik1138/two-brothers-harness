@@ -57,6 +57,7 @@ The backend is the TypeScript server in `packages/harness`:
   (`data-density` on `<html>`, injectable storage, applied pre-paint in
   `index.html`, exposed from Settings → Appearance and the palette)
 - `src/find.ts` — pure find-in-transcript matcher (block offsets, case/whole-word options, wrap helpers) used by `ChatView`'s Ctrl+F bar
+- `src/workspaceOrder.ts` — pure workspace list helpers (safe up/down moves, order comparison, name bounds) used by the sidebar group actions and the rename dialog
 - `vite.config.ts` — dev proxy `/api` → `http://127.0.0.1:8600`
 
 ## Rules specific to this tree

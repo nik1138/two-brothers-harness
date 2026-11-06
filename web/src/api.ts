@@ -152,6 +152,27 @@ export async function removeWorkspace(id: string): Promise<{ removed: string }> 
   })
 }
 
+/** Rename a registered workspace (`PATCH /api/workspaces/{id}`). */
+export async function renameWorkspace(id: string, name: string): Promise<Workspace> {
+  return request<Workspace>(
+    `/api/workspaces/${encodeURIComponent(id)}`,
+    json('PATCH', { name }),
+  )
+}
+
+/**
+ * Persist the workspace order (`PUT /api/workspaces/order`). `ids` must be an
+ * exact permutation of the registered workspace ids; the response carries the
+ * workspaces in the new order.
+ */
+export async function reorderWorkspaces(ids: string[]): Promise<Workspace[]> {
+  const body = await request<{ workspaces?: Workspace[] }>(
+    '/api/workspaces/order',
+    json('PUT', { ids: [...ids] }),
+  )
+  return Array.isArray(body?.workspaces) ? body.workspaces : []
+}
+
 // -- settings ---------------------------------------------------------------
 
 /** Per-role settings patch accepted by `PUT /api/settings`. */

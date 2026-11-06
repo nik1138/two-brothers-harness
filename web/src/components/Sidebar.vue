@@ -5,6 +5,7 @@ import { sessionTitle } from '../chat'
 import type { SessionStatusView } from '../sessionStatus'
 import type { ThemeMode } from '../themeMode'
 import type { SessionInfo, Workspace } from '../types'
+import { orderedWorkspaces } from '../workspaceOrder'
 import AppIcon from './AppIcon.vue'
 import SessionGroup from './SessionGroup.vue'
 import SidebarFooter from './SidebarFooter.vue'
@@ -38,6 +39,10 @@ const emit = defineEmits<{
   openSettings: []
   /** Footer: the user picked a theme preference. */
   themeChange: [mode: ThemeMode]
+  /** Group header menu: rename this workspace (the shell owns the dialog). */
+  renameWorkspace: [workspace: Workspace]
+  /** Group header menu: move this workspace by `delta` slots (-1/+1). */
+  moveWorkspace: [id: string, delta: number]
 }>()
 
 /** Sessions rendered per group before "Show N more". */
@@ -94,35 +99,51 @@ interface DisplayGroup {
   items: SessionInfo[]
 }
 
+/** Defensive, ordered view of the registered workspaces (persisted order). */
+const orderedWorkspaceList = computed(() => orderedWorkspaces(props.workspaces))
+const workspaceIndexById = computed(() => {
+  const index = new Map<string, number>()
+  orderedWorkspaceList.value.forEach((workspace, i) => index.set(workspace.id, i))
+  return index
+})
+
 /**
- * Groups for the list: by workspace under the "All" filter (Unassigned last),
- * a single group otherwise.
+ * Groups for the list: by workspace under the "All" filter, in the persisted
+ * workspace order. Registered workspaces render even before their first session
+ * (so rename/reorder stay reachable and the visible order is the real order);
+ * links to workspaces the backend no longer lists keep an "Unknown workspace"
+ * group, and Unassigned stays last.
  */
 const displayGroups = computed<DisplayGroup[]>(() => {
   if (props.workspaceFilter !== 'all') {
     return [{ key: props.workspaceFilter, label: '', unassigned: false, items: filteredSessions.value }]
   }
-  const out: DisplayGroup[] = []
-  const byKey = new Map<string, DisplayGroup>()
+  const sessionsByKey = new Map<string, SessionInfo[]>()
   for (const s of filteredSessions.value) {
     const key = s.workspace_id ?? ''
-    let group = byKey.get(key)
-    if (!group) {
-      const ws = key ? props.workspaces.find((w) => w.id === key) : undefined
-      group = {
-        key,
-        label: ws ? ws.name : key ? 'Unknown workspace' : 'Unassigned',
-        unassigned: key === '',
-        items: [],
-      }
-      byKey.set(key, group)
-      out.push(group)
-    }
-    group.items.push(s)
+    const list = sessionsByKey.get(key)
+    if (list) list.push(s)
+    else sessionsByKey.set(key, [s])
   }
-  const assigned = out.filter((g) => !g.unassigned)
-  const unassigned = out.filter((g) => g.unassigned)
-  return [...assigned, ...unassigned]
+  const out: DisplayGroup[] = []
+  for (const workspace of orderedWorkspaceList.value) {
+    out.push({
+      key: workspace.id,
+      label: workspace.name,
+      unassigned: false,
+      items: sessionsByKey.get(workspace.id) ?? [],
+    })
+    sessionsByKey.delete(workspace.id)
+  }
+  for (const [key, items] of sessionsByKey) {
+    if (!key) continue
+    out.push({ key, label: 'Unknown workspace', unassigned: false, items })
+  }
+  const unassigned = sessionsByKey.get('')
+  if (unassigned?.length) {
+    out.push({ key: '', label: 'Unassigned', unassigned: true, items: unassigned })
+  }
+  return out
 })
 
 /** Folder headers only make sense in the unfiltered, non-search list. */
@@ -137,6 +158,10 @@ interface GroupView extends DisplayGroup {
   total: number
   hiddenCount: number
   showLess: boolean
+  /** Registered workspace target for the header actions menu, when any. */
+  workspaceId?: string
+  canMoveUp: boolean
+  canMoveDown: boolean
 }
 
 /** Search results stay flat: one unlabelled group with every match. */
@@ -157,6 +182,8 @@ const groupViews = computed<GroupView[]>(() => {
         total: items.length,
         hiddenCount: 0,
         showLess: false,
+        canMoveUp: false,
+        canMoveDown: false,
       },
     ]
   }
@@ -165,6 +192,7 @@ const groupViews = computed<GroupView[]>(() => {
     const collapsed = collapsible && !!collapsedGroups.value[g.key]
     const expanded = !!expandedGroups.value[g.key]
     const shownItems = collapsed ? [] : expanded ? g.items : g.items.slice(0, PREVIEW_LIMIT)
+    const workspaceIndex = g.unassigned ? -1 : (workspaceIndexById.value.get(g.key) ?? -1)
     return {
       ...g,
       listId: `session-list-${i}`,
@@ -175,6 +203,10 @@ const groupViews = computed<GroupView[]>(() => {
       total: g.items.length,
       hiddenCount: collapsed ? 0 : g.items.length - shownItems.length,
       showLess: !collapsed && expanded && g.items.length > PREVIEW_LIMIT,
+      workspaceId: workspaceIndex >= 0 ? g.key : undefined,
+      canMoveUp: workspaceIndex > 0,
+      canMoveDown:
+        workspaceIndex >= 0 && workspaceIndex < orderedWorkspaceList.value.length - 1,
     }
   })
 })
@@ -238,6 +270,19 @@ function onRowDeleted(name: string) {
   focusListFallback()
 }
 
+// -- workspace header actions --------------------------------------------------
+
+/** Header menu chose Rename: hand the registered workspace to the shell. */
+function onGroupRename(id: string) {
+  const workspace = orderedWorkspaceList.value.find((item) => item.id === id)
+  if (workspace) emit('renameWorkspace', workspace)
+}
+
+/** Header menu chose Move: the shell owns the optimistic reorder + API call. */
+function onGroupMove(id: string, delta: number) {
+  emit('moveWorkspace', id, delta)
+}
+
 let narrowViewport: MediaQueryList | null = null
 
 function collapseSidebar() {
@@ -297,7 +342,7 @@ onUnmounted(() => {
             @change="emit('filterWorkspace', ($event.target as HTMLSelectElement).value)"
           >
             <option value="all">All workspaces</option>
-            <option v-for="w in workspaces" :key="w.id" :value="w.id">{{ w.name }}</option>
+            <option v-for="w in orderedWorkspaceList" :key="w.id" :value="w.id">{{ w.name }}</option>
           </select>
           <AppIcon name="chevron-right" class="icon workspace-chevron" />
         </span>
@@ -416,11 +461,16 @@ onUnmounted(() => {
             :selected="selected"
             :live-names="liveNames"
             :statuses="statuses"
+            :workspace-id="g.workspaceId"
+            :can-move-up="g.canMoveUp"
+            :can-move-down="g.canMoveDown"
             @toggle-collapse="toggleGroup(g.key)"
             @toggle-expand="toggleExpand(g.key)"
             @select="emit('select', $event)"
             @refresh="emit('refresh')"
             @deleted="onRowDeleted"
+            @rename-workspace="onGroupRename"
+            @move-workspace="onGroupMove"
           />
         </template>
       </div>

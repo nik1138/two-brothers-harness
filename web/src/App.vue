@@ -21,6 +21,7 @@ import {
   getSettings,
   listSessions,
   listWorkspaces,
+  reorderWorkspaces,
   startRun,
   stopRun,
 } from './api'
@@ -41,6 +42,7 @@ import { projectEnvelopes, sessionTitle, taskOf } from './chat'
 import { buildPaletteItems, PALETTE_SESSION_PREFIX, PALETTE_WORKSPACE_PREFIX } from './palette'
 import type { PaletteItem } from './palette'
 import { contentItemSession } from './search'
+import { isSameOrder, moveWorkspaceId } from './workspaceOrder'
 import {
   changedFilesOf,
   mergeTimeline,
@@ -68,6 +70,7 @@ import Composer from './components/Composer.vue'
 import ErrorToast from './components/ErrorToast.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import WorkspaceDialog from './components/WorkspaceDialog.vue'
+import WorkspaceRenameDialog from './components/WorkspaceRenameDialog.vue'
 import NewSessionDialog from './components/NewSessionDialog.vue'
 import DiffReview from './components/DiffReview.vue'
 import ApprovalCard from './components/ApprovalCard.vue'
@@ -160,6 +163,10 @@ function onSettingsSaved() {
 }
 const workspaceDialogOpen = ref(false)
 const newSessionOpen = ref(false)
+/** Workspace whose rename dialog is open (null = closed). */
+const renameWorkspaceTarget = ref<Workspace | null>(null)
+/** A workspace reorder is in flight; blocks a second optimistic order change. */
+const workspaceMoving = ref(false)
 
 const items = computed(() => projectEnvelopes(events.value))
 const runtimeItems = computed(() => projectRuntimeEvents(runtimeEvents.value))
@@ -1012,6 +1019,11 @@ async function refreshWorkspaces(silent = true) {
     const next = await listWorkspaces()
     workspaces.value = next
     pruneRecents(next.map((workspace) => workspace.id))
+    // a simultaneously running rename could otherwise point at a deleted workspace
+    const renaming = renameWorkspaceTarget.value
+    if (renaming && !next.some((workspace) => workspace.id === renaming.id)) {
+      renameWorkspaceTarget.value = null
+    }
   } catch (e) {
     if (!silent || errors.value.length === 0) reportError(errText(e))
   }
@@ -1166,6 +1178,67 @@ async function requestStop() {
 function onWorkspaceDialogClose() {
   workspaceDialogOpen.value = false
   refreshWorkspaces()
+}
+
+// -- workspace rename & reorder ----------------------------------------------
+// The sidebar group header menu targets one registered workspace at a time;
+// the shell owns the API calls, the optimistic list state and the toasts.
+
+/** Open the rename dialog for a registered workspace. */
+function openWorkspaceRename(workspace: Workspace) {
+  renameWorkspaceTarget.value = workspace
+}
+
+function closeWorkspaceRename() {
+  renameWorkspaceTarget.value = null
+}
+
+/** The dialog saved a new name: swap it into the list in place (order intact). */
+function onWorkspaceRenamed(workspace: Workspace) {
+  workspaces.value = workspaces.value.map((item) =>
+    item.id === workspace.id ? { ...item, ...workspace } : item,
+  )
+  renameWorkspaceTarget.value = null
+}
+
+/** Rename failed: the dialog shows it inline; the shell also raises the toast. */
+function onWorkspaceRenameError(message: string) {
+  reportError(`Rename failed: ${message}`)
+}
+
+/**
+ * Move one workspace up/down in the persisted order. The local list reorders
+ * immediately; the server response (or a background reload) is the truth. On
+ * failure the previous order is restored and the standard toast reports it, so
+ * an older backend without the endpoint degrades to "action offered, nothing
+ * changes".
+ */
+async function onMoveWorkspace(id: string, delta: number) {
+  if (workspaceMoving.value) return
+  const previous = workspaces.value
+  const current = previous.map((workspace) => workspace.id)
+  const next = moveWorkspaceId(current, id, delta)
+  if (isSameOrder(current, next)) return
+
+  const byId = new Map(previous.map((workspace) => [workspace.id, workspace] as const))
+  const optimistic: Workspace[] = []
+  for (const workspaceId of next) {
+    const workspace = byId.get(workspaceId)
+    if (workspace) optimistic.push(workspace)
+  }
+  workspaces.value = optimistic
+  workspaceMoving.value = true
+  try {
+    const saved = await reorderWorkspaces(next)
+    // a well-formed response is the persisted order; keep the optimistic one if
+    // the backend returned an empty/unexpected body
+    if (saved.length) workspaces.value = saved
+  } catch (e) {
+    workspaces.value = previous
+    reportError(`Reorder failed: ${errText(e)}`)
+  } finally {
+    workspaceMoving.value = false
+  }
 }
 
 /** Sidebar deleted a session: drop the selection/view state if it was open, then re-list. */
@@ -1376,6 +1449,8 @@ onUnmounted(() => {
       @new-session="newSessionOpen = true"
       @filter-workspace="onFilterWorkspace"
       @deleted="onSessionDeleted"
+      @rename-workspace="openWorkspaceRename"
+      @move-workspace="onMoveWorkspace"
       :theme-mode="themeMode"
       @open-settings="settingsOpen = true"
       @theme-change="onThemeChange"
@@ -1520,6 +1595,13 @@ onUnmounted(() => {
       @density-change="setDensity"
     />
     <WorkspaceDialog v-if="workspaceDialogOpen" @close="onWorkspaceDialogClose" />
+    <WorkspaceRenameDialog
+      v-if="renameWorkspaceTarget"
+      :workspace="renameWorkspaceTarget"
+      @close="closeWorkspaceRename"
+      @renamed="onWorkspaceRenamed"
+      @error="onWorkspaceRenameError"
+    />
     <NewSessionDialog
       v-if="newSessionOpen"
       :workspaces="workspaces"
