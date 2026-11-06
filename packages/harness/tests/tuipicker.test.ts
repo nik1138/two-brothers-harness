@@ -337,10 +337,18 @@ test("picker rows are width-exact, plain by default and carry the active marker"
   assert.ok(view.lines.join("\n").includes("— "), "wide rows carry the description");
 
   const narrow = mentionPickerView(state, { width: 30 });
-  assert.ok(!narrow.lines.join("\n").includes("— "), "descriptions are dropped when narrow");
+  const narrowItemRows = narrow.lines.filter(
+    (line) => line.startsWith("› ") || /^ {2}\/[a-z]/.test(line),
+  );
+  for (const row of narrowItemRows) {
+    assert.ok(!row.includes("— "), `narrow item rows drop descriptions: ${JSON.stringify(row)}`);
+  }
   assert.equal(renderMentionPicker(state, 40).length, mentionPickerView(state, { width: 40 }).lines.length);
   assert.equal(renderMentionPicker({ ...state, open: false }, 40).length, 0);
-  assert.equal(mentionPickerHints(TUI_COMMANDS), "Up / Down move · Enter / Tab insert · Esc close · type to filter");
+  assert.equal(
+    mentionPickerHints(TUI_COMMANDS),
+    "Up / Down move · Enter / Tab insert · Esc close · Shift+Tab dismiss · type to filter",
+  );
 });
 
 test("skill picker renders scope-disabled rows and the shared-only note", () => {

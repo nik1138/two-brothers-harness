@@ -22,16 +22,18 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { discoverCommands, expandCommand, matchCommand, type Command, type CommandCatalog } from "../commands.ts";
-import type { CompactionSettings } from "../compaction.ts";
+import { findBaseCommand, type BaseCommand } from "../basecommands.ts";
+import { compactContext, type CompactionSettings } from "../compaction.ts";
 import {
   DEFAULT_KEEP_RECENT_CHARS,
   DEFAULT_KEEP_RECENT_TOKENS,
   estimateTokens,
 } from "../compaction.ts";
-import { validateRunConfig, type Config } from "../config.ts";
+import { maxTokensForRole, validateRunConfig, type Config } from "../config.ts";
 import { estimateCost } from "../cost.ts";
 import { SharedContext } from "../context.ts";
 import { TwoBrothersHarness, type ToolScopes } from "../harness.ts";
+import { deriveTitle, SessionMetadataStore } from "../metadata.ts";
 import {
   loadMcpToolSpecs,
   loadMcpTools,
@@ -45,6 +47,11 @@ import type { Message } from "../protocol.ts";
 import type { RoleEndpoint } from "../runtime.ts";
 import type { StreamEvent } from "../runstream.ts";
 import { restoreContext, SessionError, SessionStore } from "../session.ts";
+import {
+  exportSessionFileName,
+  sessionToMarkdown,
+  type SessionSearchDoc,
+} from "../sessionsearch.ts";
 import { envPinnedPairs } from "../settings_store.ts";
 import { discoverSkills, type SkillCatalog } from "../skills.ts";
 import {
@@ -53,6 +60,13 @@ import {
   parseMentions,
   renderSkillLoadedBlock,
 } from "../mentions.ts";
+import {
+  buildProvider,
+  MockProvider,
+  resolveProviderKind,
+  type Provider,
+  type ProviderConfig,
+} from "../provider.ts";
 import type { Tool } from "../provider.ts";
 
 import {
@@ -68,6 +82,16 @@ import {
   type EditorOptions,
   type EditorState,
 } from "./editor.ts";
+import {
+  BASE_COMMAND_ENTRY_PREFIX,
+  planBaseCommandSubmission,
+  tuiBaseCommands,
+  tuiBasePaletteEntries,
+} from "./basecommands.ts";
+import {
+  guardComposerSubmit,
+  type RepeatGuardSnapshot,
+} from "./inputguard.ts";
 import {
   appendHistory,
   defaultTuiHistoryPath,
@@ -155,6 +179,7 @@ import { screenView } from "./view/screen.ts";
 import {
   SIDE_PANEL_MIN_HEIGHT,
   SIDE_PANEL_MIN_WIDTH,
+  sidePanelEntries,
   sidePanelLayout,
   toggleSidePanelEnabled,
   type SidePanelCompaction,
@@ -702,6 +727,45 @@ function mergeScopes(scopes: ToolScopes, bindings: PluginBindings): ToolScopes {
   };
 }
 
+/**
+ * Build one role's provider for a TUI-local action (the manual `/compact`
+ * pass). Mirrors the harness's per-role endpoint construction so it talks to
+ * the same senior endpoint a turn would: a preset kind is intrinsic to its
+ * URL and wins, else the role/run-level kind chain applies. Throws on an
+ * invalid provider configuration; callers report it honestly.
+ */
+function tuiRoleProvider(
+  cfg: Config,
+  role: "senior" | "junior",
+  onWarning?: (line: string) => void,
+): Provider {
+  const endpoint = tuiEndpoints(cfg)[role];
+  const provider = endpoint.provider || cfg.provider;
+  if (provider === "mock") return new MockProvider();
+  if (provider !== "openai") throw new Error(`unknown provider: ${provider}`);
+  const kind = endpoint.kind
+    ? resolveProviderKind({ kind: endpoint.kind, seniorKind: "", juniorKind: "" }, role)
+    : resolveProviderKind(cfg, role);
+  const config: ProviderConfig = {
+    provider,
+    kind,
+    seniorKind: "",
+    juniorKind: "",
+    baseUrl: endpoint.baseUrl || cfg.baseUrl,
+    apiKey: endpoint.apiKey || cfg.apiKey,
+    seniorModel: cfg.seniorModel,
+    juniorModel: cfg.juniorModel,
+    temperature: cfg.temperature,
+    timeout: cfg.timeout,
+    retries: cfg.retries,
+    contextWindow: cfg.contextWindow,
+    maxTokens: maxTokensForRole(cfg, role),
+    model: endpoint.model || (role === "senior" ? cfg.seniorModel : cfg.juniorModel),
+    ...(onWarning !== undefined ? { onWarning } : {}),
+  };
+  return buildProvider(config, role);
+}
+
 interface TurnSetup {
   cfg: Config;
   mode: Config["mode"];
@@ -974,6 +1038,20 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       ...(command.mode ? { mode: command.mode } : {}),
     }));
 
+  /**
+   * First-party base commands this TUI surfaces: native keymap commands and
+   * discovered templates keep their names (they shadow the base catalogue), so
+   * only `/plan`, `/goal`, `/feedback`, `/compact`, `/export`, `/permission`,
+   * `/status` and `/new` are added.
+   */
+  const baseCommandList = (): BaseCommand[] => tuiBaseCommands({ templates: slashInfos() });
+
+  /** Help entries: registry keys + discovered templates + base commands. */
+  const helpOverlayEntries = (): PaletteEntry[] => [
+    ...helpEntries(TUI_COMMANDS, { commands: slashInfos(), running }),
+    ...tuiBasePaletteEntries(baseCommandList()),
+  ];
+
   let mode: Config["mode"] = sessionCfg.mode;
   let model: TuiModel = createTuiModel();
   // Tool-result expansion is per row and keyed by call id (or block id), so
@@ -1005,6 +1083,8 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   // a modal overlay is up.
   let mention: MentionPickerState | null = null;
   let running = false;
+  /** `/compact` is an in-process background pass: turns wait for it. */
+  let compacting = false;
   let turnAbort: AbortController | null = null;
   let turnDone: Promise<void> | null = null;
   let lastFailedTask: { task: string; turnMode: Config["mode"] } | null = null;
@@ -1015,6 +1095,8 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   let lastElapsedMs: number | undefined;
   let activity = "ready — type a task and press Enter";
   let quitArmed = false;
+  /** Last repeat-sensitive keypress (composer submit/mention accept). */
+  let lastRepeatGuard: RepeatGuardSnapshot | null = null;
   let lastRenderAt = 0;
   let spinnerTick = 0;
   let toastSeq = 0;
@@ -1265,7 +1347,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     if (overlay.kind === "help") {
       const boxW = Math.max(30, Math.min(Math.max(columns - 4, 30), 80));
       const boxH = Math.max(8, Math.min(Math.max(rows - 4, 8), 24));
-      const entries = helpEntries(TUI_COMMANDS, { commands: slashInfos(), running });
+      const entries = helpOverlayEntries();
       const lines = helpView(TUI_COMMANDS, overlay.state, entries, {
         width: Math.max(10, boxW - 4),
         height: Math.max(3, boxH - 2),
@@ -1377,10 +1459,16 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
    * running guard) and nothing was recorded.
    */
   const executeTurn = (task: string, turnMode: Config["mode"], prompt?: string): boolean => {
-    if (running) {
+    if (running || compacting) {
       // Defensive only — submitEditor refuses before reaching here, so the
       // caller's draft is never dropped by this guard.
-      model = addNotice(model, "warn", "a turn is still running — wait for it to finish");
+      model = addNotice(
+        model,
+        "warn",
+        compacting
+          ? "compaction is running — wait for it to finish before sending a task"
+          : "a turn is still running — wait for it to finish",
+      );
       render();
       return false;
     }
@@ -1641,7 +1729,13 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     commands: typeof TUI_COMMANDS;
     templates: SlashCommandInfo[];
     skills: SkillCatalog["skills"];
-  } => ({ commands: TUI_COMMANDS, templates: slashInfos(), skills: resources.skills.skills });
+    baseCommands: BaseCommand[];
+  } => ({
+    commands: TUI_COMMANDS,
+    templates: slashInfos(),
+    skills: resources.skills.skills,
+    baseCommands: baseCommandList(),
+  });
 
   /** Insert a picked token over the trigger range; the caret lands after it. */
   const insertMentionItem = (item: { insert: string }): void => {
@@ -1920,8 +2014,350 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     pushToast("info", `theme: ${theme.mode}${theme.color ? "" : " (no color)"}`);
   };
 
+  // --------------------------------------------------------------------- //
+  // first-party base commands (`src/basecommands.ts`)
+  // --------------------------------------------------------------------- //
+
+  /** Show one base-command result as a notice + toast, then repaint. */
+  const baseNotice = (level: ToastLevel, message: string): void => {
+    model = addNotice(
+      model,
+      level === "warn" ? "warn" : level === "error" ? "error" : "info",
+      message,
+    );
+    pushToast(level, message);
+    render();
+  };
+
+  /**
+   * `/compact`: run the same in-process compaction path the harness uses —
+   * `compactContext` through the senior endpoint, rewriting the session file
+   * when the context has one — between turns only. The visible transcript is a
+   * display record and is NOT rewritten; the notice says so honestly.
+   */
+  const compactContextAction = (): void => {
+    if (running) {
+      baseNotice("warn", "cannot compact while a turn is running — wait for it to finish");
+      return;
+    }
+    if (compacting) {
+      baseNotice("info", "compaction is already running");
+      return;
+    }
+    if (context.events.length === 0) {
+      baseNotice("info", "nothing to compact — the shared context is empty");
+      return;
+    }
+    let provider: Provider;
+    try {
+      validateRunConfig(sessionCfg, tuiEndpoints(sessionCfg));
+      provider = tuiRoleProvider(sessionCfg, "senior", onWarning);
+    } catch (exc) {
+      baseNotice("error", `cannot compact: ${messageOf(exc)}`);
+      return;
+    }
+    const eventsBefore = context.events.length;
+    // Manual compaction always honours the configured keep-recent budget,
+    // even when auto-compaction itself is off (no threshold configured).
+    const settings: CompactionSettings = {
+      ...(compactionOptions(sessionCfg) ?? {}),
+      ...(sessionCfg.compactKeepRecent > 0
+        ? { keepRecentChars: sessionCfg.compactKeepRecent }
+        : {}),
+    };
+    compacting = true;
+    activity = "compacting context…";
+    render();
+    void (async () => {
+      try {
+        const changed = await compactContext(context, provider, settings);
+        measureContext();
+        if (changed) {
+          scroll = latestTranscriptScroll();
+          const after = context.events.length;
+          baseNotice(
+            "success",
+            `context compacted: ${eventsBefore} → ${after} events (the visible transcript is unchanged)`,
+          );
+        } else {
+          baseNotice("info", "nothing to compact yet — the context is below the keep-recent budget");
+        }
+      } catch (exc) {
+        baseNotice("error", `compaction failed: ${messageOf(exc)}`);
+      } finally {
+        compacting = false;
+        if (!running) activity = "ready — type a task and press Enter";
+        measureContext();
+        render();
+      }
+    })();
+  };
+
+  /**
+   * `/export [path]`: write the current session as the canonical Markdown
+   * export (`sessionsearch.ts::sessionToMarkdown`). A file-backed session
+   * defaults to `<sessions-dir>/<stem>.md`; an in-memory session needs an
+   * explicit path and is refused honestly otherwise.
+   */
+  const exportSessionAction = (args: string): void => {
+    if (running) {
+      baseNotice("warn", "cannot export while a turn is running — wait for it to finish");
+      return;
+    }
+    if (compacting) {
+      baseNotice("warn", "cannot export while compaction is running");
+      return;
+    }
+    const requested = args.trim();
+    const sessionFile = sessionCfg.sessionFile;
+    if (sessionFile === "" && requested === "") {
+      baseNotice(
+        "warn",
+        "cannot export: this session is in memory only — start the TUI with --session-file, " +
+          "or pass a path: /export <path>",
+      );
+      return;
+    }
+    try {
+      const events = context.events;
+      if (events.length === 0) {
+        baseNotice("info", "nothing to export yet — this session has no events");
+        return;
+      }
+      const name = sessionFile !== "" ? path.basename(sessionFile) : "session.jsonl";
+      const dir = sessionFile !== "" ? path.dirname(sessionFile) : cwd;
+      let title = "";
+      let workspaceId: string | null = null;
+      let updated: number | null = null;
+      if (sessionFile !== "") {
+        try {
+          const meta = new SessionMetadataStore(dir).get(name);
+          if (meta !== null) {
+            title = typeof meta.title === "string" ? meta.title.trim() : "";
+            workspaceId =
+              typeof meta.workspace_id === "string" && meta.workspace_id
+                ? meta.workspace_id
+                : null;
+          }
+          updated = Math.floor(fs.statSync(sessionFile).mtimeMs / 1000);
+        } catch {
+          // title/workspace/mtime are optional export metadata
+        }
+      }
+      if (title === "") {
+        title = deriveTitle(
+          events as unknown as Array<Record<string, unknown>>,
+          name.replace(/\.jsonl$/, ""),
+        );
+      }
+      const doc: SessionSearchDoc = {
+        name,
+        title,
+        events,
+        workspace_id: workspaceId,
+        updated,
+      };
+      const markdown = sessionToMarkdown(doc);
+      const outPath =
+        requested !== ""
+          ? path.resolve(cwd, requested)
+          : path.resolve(dir, exportSessionFileName(name, "markdown"));
+      fs.writeFileSync(outPath, markdown, "utf-8");
+      baseNotice("success", `exported ${events.length} events to ${outPath}`);
+    } catch (exc) {
+      baseNotice("error", `export failed: ${messageOf(exc)}`);
+    }
+  };
+
+  /**
+   * `/permission`: show the approval policy and tool scopes from what the TUI
+   * actually knows. The TUI has no approval broker and no workspace, so those
+   * facts are stated as such instead of implying a policy that does not exist.
+   */
+  const openPermissionDialog = (): void => {
+    const plugins = resources.plugins;
+    const pluginServers =
+      plugins === null
+        ? 0
+        : [...plugins.plugins.values()].reduce(
+            (total, plugin) => total + plugin.mcpServers.length,
+            0,
+          );
+    const pluginTools =
+      plugins === null
+        ? 0
+        : [...plugins.plugins.values()].reduce((total, plugin) => total + plugin.tools.length, 0);
+    const skills = resources.skills.skills;
+    const lines = [
+      "approvals: none in the TUI — tool approvals are a web-run feature; TUI tool calls run inside the turn",
+      "workspace: none — TUI runs are not workspace-bound, so workspace_* tools are unavailable",
+      "tool scopes: built per turn from plugins + MCP (shared / senior / junior belts)",
+      plugins === null
+        ? "plugins: discovery failed"
+        : `plugins: ${plugins.plugins.size} loaded · ${pluginTools} tool(s) · ${plugins.errors.length} error(s)`,
+      `MCP: ${options.mcpConfig !== undefined ? options.mcpConfig : "no --mcp-config"}${
+        pluginServers > 0 ? ` · ${pluginServers} plugin server(s)` : ""
+      }`,
+      `skills: shared ${skills.filter((skill) => skill.scope === "shared").length} · ` +
+        `senior ${skills.filter((skill) => skill.scope === "senior").length} · ` +
+        `junior ${skills.filter((skill) => skill.scope === "junior").length} ` +
+        "(only shared skills are operator-attachable)",
+    ];
+    overlay = {
+      kind: "dialog",
+      state: createDialog({
+        title: "PERMISSIONS",
+        message: "Approval policy and configured tool scopes",
+        details: lines.join("\n"),
+        actions: [{ id: "close", label: "Close" }],
+      }),
+      onAction: () => {},
+    };
+    render();
+  };
+
+  /** `/status`: the existing status surface (the side panel's own rows). */
+  const openStatusDialog = (): void => {
+    const entries = sidePanelEntries(sidePanelState()).filter((entry) => entry.label !== "");
+    const details = entries.map((entry) => `${entry.label}: ${entry.value}`).join("\n");
+    const phase = running ? "running" : compacting ? "compacting" : "idle";
+    overlay = {
+      kind: "dialog",
+      state: createDialog({
+        title: "STATUS",
+        message: `${activity} (${phase})`,
+        details,
+        actions: [{ id: "close", label: "Close" }],
+      }),
+      onAction: () => {},
+    };
+    render();
+  };
+
+  /**
+   * `/new`: start a fresh session. An in-memory TUI has a real fresh-session
+   * path (a new `SharedContext` + cleared display); a file-backed session is
+   * refused honestly because rotating the file needs a new name the TUI does
+   * not collect.
+   */
+  const startNewSessionAction = (): void => {
+    if (running) {
+      baseNotice("warn", "cannot start a new session while a turn is running — cancel it first");
+      return;
+    }
+    if (compacting) {
+      baseNotice("warn", "cannot start a new session while compaction is running");
+      return;
+    }
+    if (sessionCfg.sessionFile !== "") {
+      baseNotice(
+        "warn",
+        "cannot rotate an on-disk session from here — restart the TUI without " +
+          "--session-file/--resume to start a fresh session file",
+      );
+      return;
+    }
+    context = new SharedContext();
+    sessionCfg = { ...sessionCfg, resume: false };
+    model = createTuiModel();
+    toolExpansion = new Set<string>();
+    scroll = latestTranscriptScroll();
+    usage = null;
+    cost = null;
+    lastElapsedMs = undefined;
+    contextTokens = null;
+    lastFailedTask = null;
+    activity = "ready — new in-memory session";
+    baseNotice("success", "new in-memory session started");
+  };
+
+  /** Perform one base `action` command locally (never a turn). */
+  const performBaseAction = (command: BaseCommand, args: string): void => {
+    switch (command.action) {
+      case "compact":
+        compactContextAction();
+        return;
+      case "export":
+        exportSessionAction(args);
+        return;
+      case "permission":
+        openPermissionDialog();
+        return;
+      case "status":
+        openStatusDialog();
+        return;
+      case "new":
+        startNewSessionAction();
+        return;
+      case "help":
+        openHelp();
+        render();
+        return;
+      case "mode": {
+        const requested = args.trim().toLowerCase();
+        if (requested === "consult" || requested === "work") {
+          mode = requested;
+          pushToast("info", `mode: ${mode} — the next turn uses it`);
+          render();
+          return;
+        }
+        openModePicker();
+        render();
+        return;
+      }
+      default:
+        baseNotice("warn", `/${command.name} is not available in the TUI`);
+    }
+  };
+
+  /**
+   * Typed `/name args` dispatch for a base command. Prompt commands expand to
+   * the exact template bytes and start a normal turn (mode override applied);
+   * actions are performed locally and never submitted as a task. A usage error
+   * restores the exact pre-submit draft.
+   */
+  const dispatchBaseCommand = (
+    command: BaseCommand,
+    args: string,
+    promptText: string,
+    draftBefore: EditorState,
+  ): void => {
+    if (command.kind === "action") {
+      performBaseAction(command, args);
+      return;
+    }
+    const submission = planBaseCommandSubmission(command, args, mode);
+    if (submission.kind === "usage") {
+      editor = draftBefore;
+      baseNotice("warn", submission.message);
+      return;
+    }
+    const started = executeTurn(submission.task, submission.mode, promptText);
+    if (!started) editor = draftBefore;
+  };
+
   /** Run a palette/help entry: commands dispatch, templates become tasks. */
   const dispatchEntry = (entry: PaletteEntry): void => {
+    if (entry.kind === "base-command") {
+      const command = findBaseCommand(entry.id.slice(BASE_COMMAND_ENTRY_PREFIX.length));
+      if (command === undefined) return;
+      if (command.kind === "action") {
+        performBaseAction(command, "");
+        return;
+      }
+      if (command.argumentHint !== "") {
+        editor = insertText(editor, `/${command.name} `);
+        render();
+        return;
+      }
+      const submission = planBaseCommandSubmission(command, "", mode);
+      if (submission.kind === "usage") {
+        baseNotice("warn", submission.message);
+        return;
+      }
+      executeTurn(submission.task, submission.mode, `/${command.name}`);
+      return;
+    }
     if (entry.kind === "slash-template") {
       const template = resources.commands.commands.find(
         (c) => c.name === entry.id.slice("template:".length),
@@ -2027,6 +2463,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     const names = [
       ...TUI_COMMANDS.map((c) => c.slash).filter((s): s is string => s !== undefined),
       ...resources.commands.commands.map((c) => c.name),
+      ...baseCommandList().flatMap((command) => [command.name, ...command.aliases]),
     ];
     const unique = [...new Set(names.filter((name) => name.toLowerCase().startsWith(prefix)))];
     if (unique.length === 1 && unique[0] !== undefined && unique[0] !== prefix) {
@@ -2132,6 +2569,15 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       render();
       return;
     }
+    if (compacting && editor.text.trim() !== "") {
+      model = addNotice(
+        model,
+        "warn",
+        "compaction is running — your draft is kept; send it when it finishes",
+      );
+      render();
+      return;
+    }
     const draftBefore = editor;
     const submission = takeSubmission(editor);
     editor = submission.state;
@@ -2142,6 +2588,19 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       const builtin = findSlashCommand(TUI_COMMANDS, matched.name);
       const shadowsTemplate = resources.commands.commands.some((c) => c.name === matched.name);
       if (builtin !== null && !shadowsTemplate && dispatchSlash(builtin, matched.args)) return;
+      // A discovered template shadows a same-named base command; when no
+      // template claims the name, a first-party base command handles it
+      // (prompt → expanded turn, action → performed locally, never a task).
+      const templateExists = resources.commands.commands.some(
+        (template) => template.name === matched.name,
+      );
+      if (!templateExists) {
+        const base = findBaseCommand(matched.name);
+        if (base !== undefined) {
+          dispatchBaseCommand(base, matched.args, text, draftBefore);
+          return;
+        }
+      }
     }
     const action = resolveTuiInput(text, resources.commands);
     switch (action.type) {
@@ -2184,7 +2643,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       return;
     }
     if (overlay.kind === "help") {
-      const entries = helpEntries(TUI_COMMANDS, { commands: slashInfos(), running });
+      const entries = helpOverlayEntries();
       const result = handleHelpKey(TUI_COMMANDS, overlay.state, key, entries);
       overlay = { ...overlay, state: result.state };
       if (result.action === "close") overlay = null;
@@ -2233,6 +2692,10 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       const onAction = overlay.onAction;
       overlay = null;
       onAction(result.actionId);
+    } else if (result.action === "details" || result.action === "move") {
+      // The dialog owns its own selection/details; keep the updated state so
+      // "Press d for details" and action movement actually work.
+      overlay = { ...overlay, state: result.state };
     } else if (result.action === "blocked") {
       pushToast("warn", "unavailable");
     }
@@ -2389,6 +2852,16 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
           syncMentionPicker();
         }
         continue;
+      }
+      // Key-repeat guard: a held Enter/Tab must never send the same submit (or
+      // accept the picker item) twice. Only the composer context is guarded —
+      // modal overlays and the find bar have their own idempotent handlers.
+      if (overlay === null && find === null) {
+        const decision = guardComposerSubmit(lastRepeatGuard, event.key, editor.text, {
+          mentionOpen: mention !== null,
+        });
+        lastRepeatGuard = decision.snapshot;
+        if (decision.suppress) continue;
       }
       handleKey(event.key);
     }

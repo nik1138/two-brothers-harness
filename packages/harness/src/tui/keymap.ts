@@ -41,6 +41,8 @@ export type CommandGroup =
   | "Cooperation"
   | "Session"
   | "Settings"
+  | "Built-in prompts"
+  | "Built-in actions"
   | "Slash commands";
 
 /** Stable group order used by the help view and `tui --help`. */
@@ -52,6 +54,8 @@ export const COMMAND_GROUPS: readonly CommandGroup[] = [
   "Cooperation",
   "Session",
   "Settings",
+  "Built-in prompts",
+  "Built-in actions",
   "Slash commands",
 ];
 
@@ -322,6 +326,18 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
     document: false,
   },
   {
+    id: "mention-dismiss",
+    title: "Dismiss picker",
+    description: "Dismiss the command or skill picker without changing the composer.",
+    group: "Lists",
+    // Shift+Tab: the reverse of the accept chord, leaving printable input
+    // focused; Escape keeps its usual close meaning in the same scope.
+    keys: [{ name: "tab", shift: true }],
+    when: "mention",
+    palette: false,
+    document: false,
+  },
+  {
     id: "mention-close",
     title: "Close picker",
     description: "Dismiss the command or skill picker and keep the typed draft.",
@@ -454,6 +470,8 @@ export interface KeyLike {
   shift?: boolean;
   alt?: boolean;
   raw?: string;
+  /** Terminal-reported auto-repeat flag (when the driver exposes one). */
+  repeat?: boolean;
 }
 
 const NAME_ALIASES: Record<string, string> = {
@@ -602,7 +620,7 @@ export interface PaletteEntry {
   /** `/mode`, `""` when the command has no typed form. */
   slash: string;
   argumentHint: string;
-  kind: "command" | "slash-template";
+  kind: "command" | "slash-template" | "base-command";
   disabled: boolean;
   disabledReason: string;
   /** Template frontmatter mode, `""` when unset. */

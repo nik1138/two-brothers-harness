@@ -2,13 +2,21 @@
  * Pure inline command/skill picker for the TUI composer.
  *
  * Typing `/` at the start of the composer (or at a line start with only
- * whitespace before it) opens an inline picker over the registry's slash
- * commands and the discovered `<name>.md` templates; typing `@` at a token
- * boundary opens the skill picker (`@` plus an optional `skill:` prefix are
- * both accepted as the trigger). Continued typing filters the list, Up/Down
- * move the highlight with wrap-around, Enter/Tab replace the trigger token
- * with the canonical `/name ` or `@skill:name ` token, and Escape closes the
- * picker without touching the rest of the draft.
+ * whitespace before it) opens an inline picker over the registry's native
+ * slash commands, the first-party base commands the surface offers and the
+ * discovered `<name>.md` templates; typing `@` at a token boundary opens the
+ * skill picker (`@` plus an optional `skill:` prefix are both accepted as the
+ * trigger). Continued typing filters the list (aliases are searchable
+ * keywords), Up/Down move the highlight with wrap-around, Enter/Tab replace
+ * the trigger token with the canonical `/name ` or `@skill:name ` token,
+ * Shift+Tab dismisses, and Escape closes the picker without touching the rest
+ * of the draft.
+ *
+ * Rows are grouped and badged by provenance (`TUI commands` / `Built-in
+ * prompts` / `Built-in actions` / `Slash commands`; badge `builtin`, `action`
+ * or `template`), built-ins are ordered by the shared priority/templates
+ * alphabetically, and the footer shows the selected row's usage + description
+ * above the registry-derived key hints.
  *
  * The trigger grammar deliberately mirrors `mentions.ts` so the picker can
  * never produce a token the submit path refuses: a command token is
@@ -20,12 +28,18 @@
  *
  * Rendering is an inline, unboxed list of exact-width rows (the same footer
  * area family as the find bar): a header with the kind/count/filter, optional
- * group headings, one row per command/skill with its argument hint, scope and
- * (wide terminals only) description, a registry-derived hint line, and for
- * skills the one-line "only shared skills can be mentioned" note. No ANSI
- * outside the theme; nothing here throws on hostile input.
+ * group headings, one row per command/skill with its argument hint, badge,
+ * scope and (wide terminals only) description, a selected-row usage hint, the
+ * registry-derived key hints, and for skills the one-line "only shared skills
+ * can be mentioned" note. No ANSI outside the theme; nothing here throws on
+ * hostile input.
  */
 import { graphemes } from "../editor.ts";
+import {
+  baseCommandUsage,
+  sortBaseCommands,
+  type BaseCommand,
+} from "../../basecommands.ts";
 import {
   hintSegments,
   resolveKey,
@@ -70,6 +84,16 @@ export interface MentionPickerItem {
   aliasOf?: string;
   /** Skill scope; absent for command rows. */
   scope?: SkillScope;
+  /**
+   * Row provenance badge: `builtin` (native keymap command or base prompt),
+   * `action` (a base command the surface performs) or `template` (a
+   * discovered `<name>.md`). Absent for skill rows.
+   */
+  badge?: "builtin" | "action" | "template";
+  /** Extra typed spellings that match the filter but never insert. */
+  aliases?: readonly string[];
+  /** Usage form shown in the selected-row hint footer (`/plan <objective>`). */
+  usage?: string;
 }
 
 /** The catalogs the picker composes its rows from. */
@@ -80,6 +104,11 @@ export interface MentionPickerCatalogs {
   templates?: readonly SlashCommandInfo[];
   /** Discovered skills (all scopes; only shared ones are selectable). */
   skills?: readonly Skill[];
+  /**
+   * First-party base commands the surface offers (`src/tui/basecommands.ts`
+   * already filters out native/template-shadowed names).
+   */
+  baseCommands?: readonly BaseCommand[];
 }
 
 /** A detected trigger token in the composer text (grapheme indices). */
@@ -131,6 +160,8 @@ export interface MentionPickerKeyResult {
 const ASCII_WHITESPACE = new Set([" ", "\t", "\n", "\r", "\f", "\v"]);
 const GROUP_ORDER = [
   "TUI commands",
+  "Built-in prompts",
+  "Built-in actions",
   "Slash commands",
   "Shared skills",
   "Role-scoped skills",
@@ -242,10 +273,18 @@ export function detectMentionTrigger(text: string, cursor?: number): MentionTrig
 // catalog composition
 // --------------------------------------------------------------------------- //
 
-/** Registry slash commands (plus aliases) followed by discovered templates. */
+/**
+ * Command rows: native registry slash commands (and their aliases), then the
+ * first-party base commands the surface offers (prompts before actions, by
+ * shared priority), then discovered templates alphabetically. A discovered
+ * template whose name collides with a base command wins and the base row is
+ * dropped (the template shadows it on submit too). Every row carries its
+ * provenance badge so the list is readable at a glance.
+ */
 export function commandMentionItems(
   commands: readonly TuiCommand[] = TUI_COMMANDS,
   templates: readonly SlashCommandInfo[] = [],
+  baseCommands: readonly BaseCommand[] = [],
 ): MentionPickerItem[] {
   const items: MentionPickerItem[] = [];
   for (const command of commands) {
@@ -259,6 +298,7 @@ export function commandMentionItems(
       insert: `/${name} `,
       description: command.description,
       group: "TUI commands",
+      badge: "builtin",
       ...(command.argumentHint !== undefined && command.argumentHint !== ""
         ? { argumentHint: command.argumentHint }
         : {}),
@@ -273,10 +313,39 @@ export function commandMentionItems(
         description: `alias of /${name}`,
         group: "TUI commands",
         aliasOf: `/${name}`,
+        badge: "builtin",
       });
     }
   }
-  for (const template of templates) {
+
+  const templateNames = new Set(templates.map((template) => template.name.toLowerCase()));
+  const sortedTemplates = [...templates].sort((left, right) => left.name.localeCompare(right.name));
+  const availableBase = sortBaseCommands(baseCommands).filter(
+    (command) => !templateNames.has(command.name.toLowerCase()),
+  );
+  // Keep each group contiguous: built-in prompts first, then the actions the
+  // surface performs, each already ordered by the shared priority.
+  const orderedBase = [
+    ...availableBase.filter((command) => command.kind === "prompt"),
+    ...availableBase.filter((command) => command.kind === "action"),
+  ];
+  for (const command of orderedBase) {
+    items.push({
+      id: `base:${command.name}`,
+      kind: "command",
+      name: command.name,
+      title: `/${command.name}`,
+      insert: `/${command.name} `,
+      description: command.description,
+      group: command.kind === "prompt" ? "Built-in prompts" : "Built-in actions",
+      badge: command.kind === "prompt" ? "builtin" : "action",
+      usage: baseCommandUsage(command),
+      ...(command.aliases.length > 0 ? { aliases: [...command.aliases] } : {}),
+      ...(command.argumentHint !== "" ? { argumentHint: command.argumentHint } : {}),
+    });
+  }
+
+  for (const template of sortedTemplates) {
     items.push({
       id: `template:${template.name}`,
       kind: "command",
@@ -285,6 +354,7 @@ export function commandMentionItems(
       insert: `/${template.name} `,
       description: template.description,
       group: "Slash commands",
+      badge: "template",
       ...(template.argumentHint !== undefined && template.argumentHint !== ""
         ? { argumentHint: template.argumentHint }
         : {}),
@@ -330,7 +400,11 @@ export function mentionPickerItems(
   catalogs: MentionPickerCatalogs = {},
 ): MentionPickerItem[] {
   return kind === "command"
-    ? commandMentionItems(catalogs.commands ?? TUI_COMMANDS, catalogs.templates ?? [])
+    ? commandMentionItems(
+        catalogs.commands ?? TUI_COMMANDS,
+        catalogs.templates ?? [],
+        catalogs.baseCommands ?? [],
+      )
     : skillMentionItems(catalogs.skills ?? []);
 }
 
@@ -411,6 +485,9 @@ function mentionHaystack(item: MentionPickerItem): string {
     item.group,
     item.scope ?? "",
     item.aliasOf ?? "",
+    item.badge ?? "",
+    item.usage ?? "",
+    ...(item.aliases ?? []),
   ]
     .join(" ")
     .toLowerCase();
@@ -474,6 +551,7 @@ export function mentionPickerKey(
   if (match !== null) {
     switch (match.command.id) {
       case "mention-close":
+      case "mention-dismiss":
         return { state, action: "close" };
       case "mention-move": {
         const delta = match.chord.name.toLowerCase() === "up" ? -1 : 1;
@@ -518,8 +596,26 @@ export function mentionPickerHints(commands: readonly TuiCommand[] = TUI_COMMAND
     { id: "mention-move", label: "move" },
     { id: "mention-accept", label: "insert" },
     { id: "mention-close", label: "close" },
+    { id: "mention-dismiss", label: "dismiss" },
   ]);
   return derived === "" ? "type to filter" : `${derived} · type to filter`;
+}
+
+/**
+ * One-line hint for the selected row: its usage form plus the description
+ * (and, for a disabled row, why it cannot be used). Rendered as the picker's
+ * selection footer so the operator can read what a row will do before
+ * inserting it; `""` when nothing is selected.
+ */
+export function mentionPickerSelectionHint(item: MentionPickerItem | undefined): string {
+  if (item === undefined) return "";
+  const parts = [item.usage ?? item.title];
+  if (item.description !== "") parts.push(item.description);
+  if (item.argumentHint !== undefined && item.argumentHint !== "" && item.usage === undefined) {
+    parts[0] = `${item.title} ${item.argumentHint}`;
+  }
+  if (item.disabled === true && item.disabledReason !== undefined) parts.push(item.disabledReason);
+  return parts.join(" — ");
 }
 
 // --------------------------------------------------------------------------- //
@@ -588,6 +684,7 @@ function itemRow(
   if (item.argumentHint !== undefined && item.argumentHint !== "") {
     label += ` ${item.argumentHint}`;
   }
+  if (item.badge !== undefined) label += ` [${item.badge}]`;
   if (item.kind === "skill" && item.scope !== undefined && item.scope !== "shared") {
     label += ` [${item.scope}]`;
   }
@@ -626,9 +723,11 @@ export function mentionPickerView(
   const kindLabel = state.kind === "command" ? "COMMANDS" : "SKILLS";
   const filter = state.query === "" ? "" : `  filter: ${state.query}`;
   const header = styledRow(theme, "accent", `${kindLabel} (${filtered.length})${filter}`, columns);
-  const footerRows = [
-    styledRow(theme, "dim", options.hints ?? mentionPickerHints(), columns),
-  ];
+  const footerRows: string[] = [];
+  const selectedItem = selected < 0 ? undefined : filtered[selected];
+  const selectionHint = mentionPickerSelectionHint(selectedItem);
+  if (selectionHint !== "") footerRows.push(styledRow(theme, "muted", selectionHint, columns));
+  footerRows.push(styledRow(theme, "dim", options.hints ?? mentionPickerHints(), columns));
   if (state.kind === "skill") {
     footerRows.push(
       styledRow(

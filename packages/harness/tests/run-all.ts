@@ -76,4 +76,5 @@ import "./servertokens.test.ts";
 import "./thinkingstream.test.ts";
 import "./streamfallback.test.ts";
 import "./tuipicker.test.ts";
+import "./tuibasecommands.test.ts";
 import "./tuithinking.test.ts";

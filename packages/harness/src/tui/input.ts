@@ -30,6 +30,11 @@ export interface Key {
   alt?: boolean;
   /** The raw escape sequence / character (`\r`, `q`, `\x1b[5~`, …). */
   raw: string;
+  /**
+   * Terminal-reported auto-repeat flag when the driver exposes one; omitted
+   * otherwise (the app then debounces identical destructive key events).
+   */
+  repeat?: boolean;
 }
 
 /** One normalized input event. */
@@ -46,6 +51,8 @@ export interface KeypressInput {
   alt?: boolean;
   meta?: boolean;
   sequence?: string;
+  /** Auto-repeat flag some terminals/drivers report (not in Node's types). */
+  repeat?: boolean;
 }
 
 /** `Key.name` used when the legacy {@link InputParser} key view sees a paste. */
@@ -85,6 +92,7 @@ export function normalizeKey(input: KeypressInput): Key {
     ctrl: input.ctrl === true,
     shift: input.shift === true,
     ...(alt ? { alt: true } : {}),
+    ...(input.repeat === true ? { repeat: true } : {}),
     raw,
   };
 }

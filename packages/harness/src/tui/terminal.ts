@@ -112,6 +112,10 @@ export class Terminal {
         shift: key?.shift === true,
         alt: key?.meta === true,
         ...(key?.sequence !== undefined ? { sequence: key.sequence } : {}),
+        // readline's public types do not declare a repeat flag, but some
+        // terminals/drivers forward one; pass it through when present so the
+        // composer submit guard can suppress a held Enter/Tab exactly.
+        ...((key as { repeat?: unknown } | undefined)?.repeat === true ? { repeat: true } : {}),
       });
       for (const event of events) this.deliver(event);
     };
