@@ -639,13 +639,16 @@ export interface HarnessOptions {
   onStreamEvent?: (event: StreamEvent) => void;
   /**
    * Ask providers to stream their replies and emit one `token` stream event
-   * per text delta (`{type: "token", role, delta, at}`), in arrival order.
-   * Only active together with `onStreamEvent` — with no consumer the call is
-   * exactly the non-streaming request, so unset/default behavior (and the
-   * bytes on the wire) stay byte-identical. Token events are additive to the
-   * envelope records; the reply value, usage accounting, repair pass and tool
-   * loop are unchanged, and a mid-stream failure follows the normal retry
-   * rules (deltas already delivered stay delivered).
+   * per delta (`{type: "token", role, kind: "text" | "thinking", delta, at}`),
+   * in arrival order: `kind: "text"` for visible reply text and
+   * `kind: "thinking"` for the model's reasoning deltas. Thinking deltas are
+   * observational — they never enter the reply, the protocol envelopes or the
+   * usage counters. Only active together with `onStreamEvent` — with no
+   * consumer the call is exactly the non-streaming request, so unset/default
+   * behavior (and the bytes on the wire) stay byte-identical. Token events are
+   * additive to the envelope records; the reply value, usage accounting,
+   * repair pass and tool loop are unchanged, and a mid-stream failure follows
+   * the normal retry rules (deltas already delivered stay delivered).
    */
   streamTokens?: boolean;
   /**
@@ -953,19 +956,24 @@ export class TwoBrothersHarness {
   }
 
   /**
-   * The per-call streaming option, defined only when token streaming is
+   * The per-call streaming options, defined only when token streaming is
    * requested AND a stream consumer exists. This is the single provider-call
    * seam: every plain (`chat`) and tool-loop (`chatWithTools`) role call —
    * including overflow retries and the repair re-ask — asks this for its
-   * `ChatOptions`, so token events are uniformly additive and a run without
-   * `streamTokens` passes `undefined` (the pre-streaming call, unchanged).
+   * `ChatOptions`, so text AND thinking token events are uniformly additive
+   * and a run without `streamTokens` passes `undefined` (the pre-streaming
+   * call, unchanged). Both sinks are always provided together; which deltas
+   * actually arrive is the provider/wire's business.
    */
   private streamOptions(role: "senior" | "junior"): ChatOptions | undefined {
     if (this.options.streamTokens !== true || this.options.onStreamEvent === undefined) {
       return undefined;
     }
+    const token = (kind: "text" | "thinking", delta: string): void =>
+      this.emitStream({ type: "token", role, kind, delta, at: nowIso() });
     return {
-      onDelta: (delta: string) => this.emitStream({ type: "token", role, delta, at: nowIso() }),
+      onDelta: (delta: string) => token("text", delta),
+      onThinkingDelta: (delta: string) => token("thinking", delta),
     };
   }
 

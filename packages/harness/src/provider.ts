@@ -40,17 +40,30 @@
  * tool-capable-responder check.
  *
  * Token streaming is observational and opt-in: a call that passes
- * `ChatOptions.onDelta` asks its adapter for the provider's SSE stream
+ * `ChatOptions.onDelta` (visible text) and/or `ChatOptions.onThinkingDelta`
+ * (reasoning/thinking) asks its adapter for the provider's SSE stream
  * (OpenAI-compatible `stream: true`, Anthropic `stream: true`, Gemini
- * `:streamGenerateContent?alt=sse`) and reports every TEXT delta as it
- * arrives. The resolved value is the complete reply — assembled from the
- * stream into the same shape the non-streaming path parses — so callers,
- * usage accounting and the retry loop are unchanged. The per-attempt
- * `AbortController` timeout bounds the WHOLE stream, so a stalled stream is a
- * retryable `ProviderTimeoutError`; a mid-stream transport failure is
- * classified by the same registry as any other transport error. Deltas
- * already delivered stay delivered (a retry re-requests the whole reply);
- * streaming never changes what the attempt eventually returns.
+ * `:streamGenerateContent?alt=sse`) and reports every delta as it arrives,
+ * tagged `"text"` or `"thinking"`. The resolved value is the complete reply —
+ * assembled from the text deltas into the same shape the non-streaming path
+ * parses — so callers, usage accounting and the retry loop are unchanged.
+ * Thinking deltas are kept OUT of the reply content: they accumulate in
+ * `StreamState.thinking` for observers only and never reach `streamResult`,
+ * usage accounting or the returned string. The per-attempt `AbortController`
+ * timeout bounds the WHOLE stream, so a stalled stream is a retryable
+ * `ProviderTimeoutError`; a mid-stream transport failure is classified by the
+ * same registry as any other transport error. Deltas already delivered stay
+ * delivered (a retry re-requests the whole reply); streaming never changes
+ * what the attempt eventually returns.
+ *
+ * Non-SSE fallback: some OpenAI-compatible endpoints (including the repo's
+ * scripted browser-E2E server) ignore `stream: true` and answer with a normal
+ * JSON completion. A streamed attempt whose response is not an SSE stream
+ * (content-type missing or not `text/event-stream`) is parsed as that normal
+ * JSON completion for that attempt — no deltas are emitted, streaming stays
+ * observational — and a response that advertises SSE but is a plain JSON
+ * object (never a frame) is recovered the same way. A successful SSE stream
+ * and every non-streaming request stay byte-identical.
  */
 import type { ChatMessage, ToolCall } from "./context.ts";
 import { extractTask } from "./context.ts";
@@ -98,14 +111,26 @@ export interface ToolChatResponse {
 }
 
 /**
- * Per-call streaming option. When `onDelta` is set the adapter asks the
- * provider for its SSE stream and calls the sink once per TEXT delta, in
- * arrival order. The callback is observational: a throwing sink is ignored,
- * the resolved value is the complete reply, and token usage is recorded
- * exactly as in the non-streaming path.
+ * The two kinds of streamed delta: visible reply text and the model's
+ * reasoning/thinking. Observers receive both; only `text` ever contributes to
+ * the resolved reply.
+ */
+export type ChatDeltaKind = "text" | "thinking";
+
+/**
+ * Per-call streaming options. When `onDelta` and/or `onThinkingDelta` is set
+ * the adapter asks the provider for its SSE stream and calls the sinks once
+ * for delta, in arrival order: `onDelta` for visible reply text,
+ * `onThinkingDelta` for reasoning/thinking deltas. Both callbacks are
+ * observational: a throwing sink is ignored, the resolved value is the
+ * complete reply, token usage is recorded exactly as in the non-streaming
+ * path, and thinking deltas never appear in the reply content. An endpoint
+ * that ignores the stream request answers with a normal JSON completion; it is
+ * parsed as such and no deltas are emitted (see the module header).
  */
 export interface ChatOptions {
   onDelta?: (delta: string) => void;
+  onThinkingDelta?: (delta: string) => void;
 }
 
 export interface ToolChatOptions extends ChatOptions {
@@ -884,13 +909,20 @@ export interface SseFrame {
 
 /**
  * Per-attempt accumulator for a streamed completion. The base owns `text`
- * (every text delta the adapter emits lands here in arrival order); adapters
- * extend the shape with their own usage/tool-call state and cast inside the
- * `streamEvent`/`streamResult` hooks.
+ * (every visible text delta the adapter emits lands here in arrival order) and
+ * `thinking` (reasoning deltas, kept separate and never returned as reply
+ * content); adapters extend the shape with their own usage/tool-call state and
+ * cast inside the `streamEvent`/`streamResult` hooks.
  */
 export interface StreamState {
-  /** Concatenated text deltas, in arrival order. */
+  /** Concatenated visible text deltas, in arrival order. */
   text: string;
+  /**
+   * Concatenated reasoning/thinking deltas, in arrival order. Observational
+   * only: `streamResult` never includes this, so the resolved reply matches
+   * what a non-streaming call would return.
+   */
+  thinking: string;
 }
 
 /** The earliest blank-line frame boundary, or null while a frame is incomplete. */
@@ -927,6 +959,15 @@ function parseSseFrame(block: string): SseFrame | null {
 }
 
 /**
+ * Cap on the as-yet unframed text buffered for the JSON-completion fallback.
+ * A response that advertises SSE but never sends a frame only needs its body
+ * kept while there is no frame yet; anything larger than this (a pathological
+ * endless non-frame stream) keeps the historical empty-stream behavior rather
+ * than growing without bound.
+ */
+const MAX_JSON_FALLBACK_CHARS = 1_000_000;
+
+/**
  * Shared HTTP plumbing for the fetch-based providers: the owned retry loop
  * (at most `retries + 1` attempts, exponential backoff, abortable between
  * attempts and inside the in-flight request, `Retry-After` honored), the
@@ -941,7 +982,10 @@ function parseSseFrame(block: string): SseFrame | null {
  * (or `[DONE]`) completes the stream, and hands the adapter's
  * non-streaming-shaped result to the unchanged `chat`/`chatWithTools` parsing.
  * The attempt timer is only cleared after the stream ends, so the timeout
- * bounds the whole response.
+ * bounds the whole response. An endpoint that ignores the stream request and
+ * answers with a normal JSON completion is accepted via the non-SSE fallback
+ * (`readJsonCompletion` / the EOF check in `consumeStream`): same result shape,
+ * no deltas, same retry/error classification.
  */
 export abstract class BaseHttpProvider implements Provider {
   readonly baseUrl: string;
@@ -1038,17 +1082,19 @@ export abstract class BaseHttpProvider implements Provider {
 
   /** A fresh accumulator for one streamed attempt (adapter-owned shape). */
   protected newStreamState(): StreamState {
-    return { text: "" };
+    return { text: "", thinking: "" };
   }
 
   /**
-   * Consume one SSE frame into `state`, delivering text deltas through
-   * `emit`. Returns true when the adapter knows the stream is complete.
+   * Consume one SSE frame into `state`, delivering deltas through `emit`:
+   * `emit(delta)` for visible text (the default kind), `emit(delta,
+   * "thinking")` for reasoning. Returns true when the adapter knows the stream
+   * is complete.
    */
   protected streamEvent(
     _state: StreamState,
     _frame: SseFrame,
-    _emit: (delta: string) => void,
+    _emit: (delta: string, kind?: ChatDeltaKind) => void,
   ): boolean {
     return false;
   }
@@ -1084,22 +1130,23 @@ export abstract class BaseHttpProvider implements Provider {
    * `retries + 1` attempts, exponential backoff between them, abortable
    * between attempts and inside the in-flight request. Fatal failures throw
    * immediately; a retryable `ProviderHttpError` carrying a `Retry-After`
-   * delay waits that long instead of the scheduled backoff. `onDelta` opts
-   * the attempt into streaming; each attempt re-sends the full request, so no
-   * streaming state survives a retry.
+   * delay waits that long instead of the scheduled backoff. Either streaming
+   * sink (`onDelta` text / `onThinkingDelta` reasoning) opts the attempt into
+   * streaming; each attempt re-sends the full request, so no streaming state
+   * survives a retry.
    */
   protected async complete(
     messages: ChatMessage[],
     tools: Tool[] | undefined,
     signal?: AbortSignal,
-    onDelta?: (delta: string) => void,
+    options?: ChatOptions,
   ): Promise<unknown> {
     const delays = backoffDelays(this.retries, this.backoffBase, this.backoffCap);
     let attempt = 0;
     while (true) {
       this.checkAbort(signal);
       try {
-        const data = await this.attempt(messages, tools, signal, onDelta);
+        const data = await this.attempt(messages, tools, signal, options);
         this.recordUsage(data);
         return data;
       } catch (err) {
@@ -1131,17 +1178,56 @@ export abstract class BaseHttpProvider implements Provider {
   }
 
   /**
+   * True when a response advertises a Server-Sent Events stream. The parser is
+   * chosen from this header: an SSE body must be consumed incrementally (deltas
+   * are the point), so the streaming path never pre-reads it.
+   */
+  private isEventStream(response: Response): boolean {
+    const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
+    return contentType.includes("text/event-stream");
+  }
+
+  /**
+   * Non-streaming fallback for a streamed attempt whose endpoint ignored
+   * `stream: true` and answered with a normal JSON completion (the repo's
+   * scripted browser-E2E server and some OpenAI-compatible gateways do).
+   * Returns the parsed body exactly as the non-streaming path would (the
+   * adapter then parses it normally) and emits no deltas: streaming is
+   * observational. A body that is not valid JSON fails loudly — the existing
+   * retry/error classification decides what happens next — instead of silently
+   * degrading to an empty reply.
+   */
+  private async readJsonCompletion(response: Response): Promise<unknown> {
+    const text = await response.text();
+    const parsed = parseJson(text);
+    if (parsed === undefined) {
+      const preview = text.replace(/\s+/g, " ").trim().slice(0, 200);
+      throw new Error(
+        `non-SSE response from ${this.requestUrl()} is not a JSON completion: ${preview}`,
+      );
+    }
+    return parsed;
+  }
+
+  /**
    * Consume a successful streaming response: split SSE frames, hand each to
    * the adapter, stop at `[DONE]` or when the adapter reports completion, and
    * return the adapter's non-streaming-shaped result. Runs INSIDE the attempt
    * timer, so the per-attempt timeout bounds the whole stream — a stalled
-   * stream aborts the controller and surfaces as a retryable timeout. A
-   * throwing `onDelta` sink is swallowed: streaming is observational.
+   * stream aborts the controller and surfaces as a retryable timeout.
+   *
+   * Two sinks can be active: text deltas accumulate in `state.text` and go to
+   * `onDelta`; thinking deltas accumulate in `state.thinking` (never in the
+   * result) and go to `onThinkingDelta`. A missing sink simply skips delivery;
+   * a throwing sink is swallowed: streaming is observational.
+   *
+   * Non-SSE fallback: when the response advertises SSE but the body is a plain
+   * JSON completion (never an SSE frame — some gateways mislabel it), the
+   * buffered body is parsed and returned like a non-streaming response. An
+   * empty or non-JSON no-frame stream keeps the historical empty result; a
+   * normal SSE stream (frames seen) is untouched.
    */
-  private async consumeStream(
-    response: Response,
-    onDelta: (delta: string) => void,
-  ): Promise<unknown> {
+  private async consumeStream(response: Response, options?: ChatOptions): Promise<unknown> {
     const body = response.body;
     if (body === null) {
       throw new Error(`stream from ${this.streamUrl()} carried no body`);
@@ -1149,16 +1235,34 @@ export abstract class BaseHttpProvider implements Provider {
     const reader = body.getReader();
     const decoder = new TextDecoder();
     const state = this.newStreamState();
-    const emit = (delta: string): void => {
+    const onText = options?.onDelta;
+    const onThinking = options?.onThinkingDelta;
+    const emit = (delta: string, kind: ChatDeltaKind = "text"): void => {
       if (!delta) return;
-      state.text += delta;
+      if (kind === "thinking") state.thinking += delta;
+      else state.text += delta;
+      const sink = kind === "thinking" ? onThinking : onText;
+      if (sink === undefined) return;
       try {
-        onDelta(delta);
+        sink(delta);
       } catch {
         // a broken delta consumer never breaks the completion
       }
     };
     let finished = false;
+    /** SSE frames handed to the adapter so far (DONE excluded). */
+    let framesSeen = 0;
+    /** Body text seen before the first frame, for the JSON fallback; bounded. */
+    let unframed = "";
+    let unframedOverflow = false;
+    const rememberUnframed = (chunk: string): void => {
+      if (framesSeen > 0 || chunk === "") return;
+      if (unframed.length + chunk.length > MAX_JSON_FALLBACK_CHARS) {
+        unframedOverflow = true;
+        return;
+      }
+      unframed += chunk;
+    };
     const dispatch = (block: string): void => {
       if (finished) return;
       const frame = parseSseFrame(block);
@@ -1167,6 +1271,7 @@ export abstract class BaseHttpProvider implements Provider {
         finished = true;
         return;
       }
+      framesSeen += 1;
       finished = this.streamEvent(state, frame, emit);
     };
     try {
@@ -1174,7 +1279,9 @@ export abstract class BaseHttpProvider implements Provider {
       while (!finished) {
         const { value, done } = await reader.read();
         if (done) break;
-        buffer += decoder.decode(value, { stream: true });
+        const chunk = decoder.decode(value, { stream: true });
+        buffer += chunk;
+        rememberUnframed(chunk);
         let boundary = nextSseBoundary(buffer);
         while (boundary !== null && !finished) {
           const block = buffer.slice(0, boundary.start);
@@ -1183,10 +1290,19 @@ export abstract class BaseHttpProvider implements Provider {
           boundary = nextSseBoundary(buffer);
         }
       }
-      buffer += decoder.decode();
+      const tail = decoder.decode();
+      buffer += tail;
+      rememberUnframed(tail);
       if (!finished && buffer.trim() !== "") dispatch(buffer);
     } finally {
       await reader.cancel().catch(() => undefined);
+    }
+    // A response that advertised SSE but carried a plain JSON completion never
+    // produced a frame; recover it as a non-streaming response. Empty/garbage
+    // no-frame streams keep the historical (empty) result.
+    if (!finished && framesSeen === 0 && !unframedOverflow) {
+      const parsed = parseJson(unframed.trim());
+      if (parsed !== undefined) return parsed;
     }
     return this.streamResult(state);
   }
@@ -1196,9 +1312,9 @@ export abstract class BaseHttpProvider implements Provider {
     messages: ChatMessage[],
     tools: Tool[] | undefined,
     signal?: AbortSignal,
-    onDelta?: (delta: string) => void,
+    options?: ChatOptions,
   ): Promise<unknown> {
-    const streaming = onDelta !== undefined;
+    const streaming = options?.onDelta !== undefined || options?.onThinkingDelta !== undefined;
     const url = streaming ? this.streamUrl() : this.requestUrl();
     const controller = new AbortController();
     const cancel = (): void => controller.abort();
@@ -1241,7 +1357,12 @@ export abstract class BaseHttpProvider implements Provider {
         );
       }
       if (!streaming) return (await response.json()) as unknown;
-      return await this.consumeStream(response, onDelta);
+      // Streaming requested but the endpoint answered with a normal JSON
+      // completion (content-type not SSE): accept it like the non-streaming
+      // path for this attempt, emitting no deltas. The fixture/server E2E
+      // compatibility fallback — see the class/module docs.
+      if (!this.isEventStream(response)) return await this.readJsonCompletion(response);
+      return await this.consumeStream(response, options);
     } catch (err) {
       if (signal?.aborted || this.runSignal?.aborted) {
         throw new ProviderAbortError();
@@ -1281,9 +1402,11 @@ interface OpenAIStreamState extends StreamState {
  * `Retry-After` header replaces that attempt's fixed backoff.
  *
  * Streaming: `stream: true` plus `stream_options.include_usage: true`;
- * `choices[0].delta.content` is emitted as it arrives, `data: [DONE]` ends
- * the stream, and the final chunk's `usage` populates the same counters as
- * the non-streaming path. Tool-call fragments are reassembled by `index`.
+ * `choices[0].delta.content` is emitted as visible text,
+ * `delta.reasoning_content`/`delta.reasoning` go to the thinking sink (never
+ * into the reply), `data: [DONE]` ends the stream, and the final chunk's
+ * `usage` populates the same counters as the non-streaming path. Tool-call
+ * fragments are reassembled by `index`.
  */
 export class OpenAICompatibleProvider extends BaseHttpProvider {
   async chat(
@@ -1292,7 +1415,7 @@ export class OpenAICompatibleProvider extends BaseHttpProvider {
     signal?: AbortSignal,
     options?: ChatOptions,
   ): Promise<string> {
-    const data = await this.complete(messages, undefined, signal, options?.onDelta);
+    const data = await this.complete(messages, undefined, signal, options);
     const content = (data as ChatCompletionJson).choices?.[0]?.message?.content;
     if (typeof content !== "string") {
       throw new Error(
@@ -1307,7 +1430,7 @@ export class OpenAICompatibleProvider extends BaseHttpProvider {
     tools: Tool[],
     options: ToolChatOptions = {},
   ): Promise<ToolChatResponse> {
-    const data = await this.complete(messages, tools, options.signal, options.onDelta);
+    const data = await this.complete(messages, tools, options.signal, options);
     const message = (data as ChatCompletionJson).choices?.[0]?.message;
     const content = message?.content;
     return {
@@ -1352,13 +1475,13 @@ export class OpenAICompatibleProvider extends BaseHttpProvider {
   }
 
   protected override newStreamState(): OpenAIStreamState {
-    return { text: "", toolCalls: new Map() };
+    return { text: "", thinking: "", toolCalls: new Map() };
   }
 
   protected override streamEvent(
     state: StreamState,
     frame: SseFrame,
-    emit: (delta: string) => void,
+    emit: (delta: string, kind?: ChatDeltaKind) => void,
   ): boolean {
     const stream = state as OpenAIStreamState;
     const parsed = parseJson(frame.data);
@@ -1370,6 +1493,13 @@ export class OpenAICompatibleProvider extends BaseHttpProvider {
     const delta = choice !== undefined && isRecord(choice.delta) ? choice.delta : undefined;
     if (delta === undefined) return false;
     if (typeof delta.content === "string" && delta.content) emit(delta.content);
+    // Reasoning models expose the model's thinking on a side channel: DeepSeek
+    // and compatible servers use `reasoning_content`, others use `reasoning`.
+    // Both stay out of `content`/`streamResult` — thinking is observational.
+    for (const field of ["reasoning_content", "reasoning"] as const) {
+      const reasoning = delta[field];
+      if (typeof reasoning === "string" && reasoning) emit(reasoning, "thinking");
+    }
     if (Array.isArray(delta.tool_calls)) {
       for (const raw of delta.tool_calls) {
         if (!isRecord(raw)) continue;
@@ -1531,9 +1661,13 @@ function anthropicUsage(data: unknown): Omit<UsageTotals, "model_calls"> {
   };
 }
 
-/** One Anthropic content block being assembled from the stream. */
+/**
+ * One Anthropic content block being assembled from the stream. `thinking`
+ * blocks hold extended-reasoning text: it is reported through the thinking
+ * sink and never appears in the returned content blocks.
+ */
 interface AnthropicStreamBlock {
-  type: "text" | "tool_use";
+  type: "text" | "tool_use" | "thinking";
   text: string;
   /** Accumulated `input_json_delta.partial_json` fragments (tool_use only). */
   json: string;
@@ -1556,9 +1690,10 @@ interface AnthropicStreamState extends StreamState {
  * when a proxy reports an unexpected HTTP status.
  *
  * Streaming: `stream: true`; `content_block_delta` text deltas are emitted as
- * they arrive, `message_delta.usage.output_tokens` completes the usage
- * `message_start` began, `message_stop` ends the stream. `tool_use` blocks
- * reassemble from `content_block_start` + `input_json_delta` fragments.
+ * they arrive (`thinking_delta` blocks go to the thinking sink and never into
+ * the returned content), `message_delta.usage.output_tokens` completes the
+ * usage `message_start` began, `message_stop` ends the stream. `tool_use`
+ * blocks reassemble from `content_block_start` + `input_json_delta` fragments.
  */
 export class AnthropicProvider extends BaseHttpProvider {
   readonly maxTokens: number;
@@ -1574,7 +1709,7 @@ export class AnthropicProvider extends BaseHttpProvider {
     signal?: AbortSignal,
     options?: ChatOptions,
   ): Promise<string> {
-    const data = await this.complete(messages, undefined, signal, options?.onDelta);
+    const data = await this.complete(messages, undefined, signal, options);
     return anthropicCompletion(data, this.requestUrl()).content;
   }
 
@@ -1583,7 +1718,7 @@ export class AnthropicProvider extends BaseHttpProvider {
     tools: Tool[],
     options: ToolChatOptions = {},
   ): Promise<ToolChatResponse> {
-    const data = await this.complete(messages, tools, options.signal, options.onDelta);
+    const data = await this.complete(messages, tools, options.signal, options);
     return anthropicCompletion(data, this.requestUrl());
   }
 
@@ -1596,13 +1731,13 @@ export class AnthropicProvider extends BaseHttpProvider {
   }
 
   protected override newStreamState(): AnthropicStreamState {
-    return { text: "", usage: {}, blocks: new Map() };
+    return { text: "", thinking: "", usage: {}, blocks: new Map() };
   }
 
   protected override streamEvent(
     state: StreamState,
     frame: SseFrame,
-    emit: (delta: string) => void,
+    emit: (delta: string, kind?: ChatDeltaKind) => void,
   ): boolean {
     const stream = state as AnthropicStreamState;
     const parsed = parseJson(frame.data);
@@ -1623,9 +1758,16 @@ export class AnthropicProvider extends BaseHttpProvider {
     if (type === "content_block_start") {
       const index = coerceInt(parsed.index);
       const block = isRecord(parsed.content_block) ? parsed.content_block : {};
-      const type = block.type === "tool_use" ? "tool_use" : "text";
+      // `thinking` blocks carry extended reasoning: they start no reply text
+      // and are only reported through thinking_delta below.
+      const blockType =
+        block.type === "tool_use"
+          ? "tool_use"
+          : block.type === "thinking" || block.type === "redacted_thinking"
+            ? "thinking"
+            : "text";
       const started: AnthropicStreamBlock = {
-        type,
+        type: blockType,
         text: typeof block.text === "string" ? block.text : "",
         json: "",
         id: typeof block.id === "string" ? block.id : "",
@@ -1645,13 +1787,20 @@ export class AnthropicProvider extends BaseHttpProvider {
         id: "",
         name: "",
       };
-      if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
+      if (delta.type === "thinking_delta" && typeof delta.thinking === "string") {
+        block.type = "thinking";
+        // Thinking is reported to the thinking sink only; it is not part of
+        // the assembled content blocks (`streamResult` skips it).
+        if (delta.thinking) emit(delta.thinking, "thinking");
+      } else if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
         block.json += delta.partial_json;
       } else if (typeof delta.text === "string") {
         block.type = "text";
         block.text += delta.text;
         emit(delta.text);
       }
+      // `signature_delta` and any other delta types contribute nothing to the
+      // reply (the signature is replay metadata, not visible text).
       stream.blocks.set(index, block);
       return false;
     }
@@ -1865,9 +2014,10 @@ interface GoogleStreamState extends StreamState {
  *
  * Streaming switches the method to `:streamGenerateContent?alt=sse` (auth
  * stays the `x-goog-api-key` header, so no `key=` query is needed): each
- * chunk's non-thought `parts[].text` is emitted as it arrives, `usageMetadata`
- * is taken from the latest chunk, and the last chunk's `finishReason` is
- * informational only — the HTTP stream's end terminates it.
+ * chunk's non-thought `parts[].text` is emitted as visible text while
+ * `thought: true` parts go to the thinking sink (never into the reply),
+ * `usageMetadata` is taken from the latest chunk, and the last chunk's
+ * `finishReason` is informational only — the HTTP stream's end terminates it.
  */
 export class GoogleProvider extends BaseHttpProvider {
   readonly maxTokens?: number;
@@ -1884,7 +2034,7 @@ export class GoogleProvider extends BaseHttpProvider {
     signal?: AbortSignal,
     options?: ChatOptions,
   ): Promise<string> {
-    const data = await this.complete(messages, undefined, signal, options?.onDelta);
+    const data = await this.complete(messages, undefined, signal, options);
     return googleCompletion(data, this.requestUrl()).content;
   }
 
@@ -1893,7 +2043,7 @@ export class GoogleProvider extends BaseHttpProvider {
     tools: Tool[],
     options: ToolChatOptions = {},
   ): Promise<ToolChatResponse> {
-    const data = await this.complete(messages, tools, options.signal, options.onDelta);
+    const data = await this.complete(messages, tools, options.signal, options);
     return googleCompletion(data, this.requestUrl());
   }
 
@@ -1916,13 +2066,13 @@ export class GoogleProvider extends BaseHttpProvider {
   }
 
   protected override newStreamState(): GoogleStreamState {
-    return { text: "", toolCalls: [] };
+    return { text: "", thinking: "", toolCalls: [] };
   }
 
   protected override streamEvent(
     state: StreamState,
     frame: SseFrame,
-    emit: (delta: string) => void,
+    emit: (delta: string, kind?: ChatDeltaKind) => void,
   ): boolean {
     const stream = state as GoogleStreamState;
     const parsed = parseJson(frame.data);
@@ -1936,8 +2086,12 @@ export class GoogleProvider extends BaseHttpProvider {
     for (const raw of parts) {
       if (!isRecord(raw)) continue;
       const part = raw as GooglePart;
-      // `thought` parts are reasoning, never visible reply text.
-      if (typeof part.text === "string" && part.text && part.thought !== true) emit(part.text);
+      if (typeof part.text === "string" && part.text) {
+        // `thought: true` parts are the model's reasoning: reported to the
+        // thinking sink and never visible reply text.
+        if (part.thought === true) emit(part.text, "thinking");
+        else emit(part.text);
+      }
       if (isRecord(part.functionCall)) {
         stream.toolCalls.push({
           id: String(part.functionCall.id ?? `call-${stream.toolCalls.length + 1}`),
@@ -2021,11 +2175,32 @@ export type MockScriptStep =
 /** Chunk size MockProvider uses to fake a token stream (no wire involved). */
 export const MOCK_DELTA_CHARS = 24;
 
+/**
+ * Deterministic fake reasoning text. MockProvider streams this through
+ * `ChatOptions.onThinkingDelta` (chunked like `MOCK_DELTA_CHARS`) before its
+ * visible reply, when a thinking sink is present. It is never part of the
+ * returned reply/payload.
+ */
+export const MOCK_REASONING =
+  "Think it through: read the request, pick the structured reply shape and keep the answer grounded.";
+
 /** Deliver `text` as fixed-size deltas when a sink is present; else a no-op. */
 export function emitMockDeltas(text: string, onDelta?: (delta: string) => void): void {
   if (onDelta === undefined) return;
   for (let at = 0; at < text.length; at += MOCK_DELTA_CHARS) {
     onDelta(text.slice(at, at + MOCK_DELTA_CHARS));
+  }
+}
+
+/**
+ * Deliver the deterministic mock reasoning as thinking deltas, when a
+ * thinking sink is present. Like `emitMockDeltas`, a call without the sink is
+ * a no-op, so the pre-thinking MockProvider behavior is byte-identical.
+ */
+export function emitMockThinking(onThinkingDelta?: (delta: string) => void): void {
+  if (onThinkingDelta === undefined) return;
+  for (let at = 0; at < MOCK_REASONING.length; at += MOCK_DELTA_CHARS) {
+    onThinkingDelta(MOCK_REASONING.slice(at, at + MOCK_DELTA_CHARS));
   }
 }
 
@@ -2052,6 +2227,9 @@ export class MockProvider implements Provider {
     this.usage.record(...MOCK_USAGE);
     const text = messages.length > 0 ? String(messages[messages.length - 1].content ?? "") : "";
     const payload = this.buildPayload(text, responseKind || "message");
+    // Deterministic fake reasoning first (only when a thinking sink is set),
+    // then the visible reply deltas — the pre-thinking behavior without a sink.
+    emitMockThinking(options?.onThinkingDelta);
     emitMockDeltas(payload, options?.onDelta);
     return payload;
   }
@@ -2062,6 +2240,9 @@ export class MockProvider implements Provider {
     options: ToolChatOptions = {},
   ): Promise<ToolChatResponse> {
     this.usage.record(...MOCK_USAGE);
+    // Every scripted completion reasons first, including a tool-call step, so
+    // a streamed tool loop carries thinking deltas before the call/text.
+    emitMockThinking(options.onThinkingDelta);
     const step = this.steps.shift();
     if (step && "tool" in step) {
       this.stepCounter += 1;

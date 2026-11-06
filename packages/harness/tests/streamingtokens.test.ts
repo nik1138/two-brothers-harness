@@ -610,12 +610,15 @@ test("streamTokens emits token events in call order, additive to envelopes", asy
   assert.ok(tokens.length > 0, "token events were emitted");
   assert.ok(log.length > 0);
 
-  const expected = log.flatMap((call) => call.chunks.map((delta) => ({ role: call.role, delta })));
-  assert.deepEqual(
-    tokens.map((event) => ({ role: event.role, delta: event.delta })),
-    expected,
-    "every delta arrives once, in provider order",
+  const expected = log.flatMap((call) =>
+    call.chunks.map((delta) => ({ role: call.role, kind: "text" as const, delta })),
   );
+  assert.deepEqual(
+    tokens.map((event) => ({ role: event.role, kind: event.kind, delta: event.delta })),
+    expected,
+    "every delta arrives once, in provider order, tagged as visible text",
+  );
+  for (const event of tokens) assert.equal(event.kind, "text", "the fake streams only text deltas");
   assert.equal(
     tokens.map((event) => event.delta).join(""),
     log.map((call) => call.text).join(""),
@@ -659,6 +662,7 @@ test("toNdjsonLine clips a giant token delta under the field bound", () => {
   const line = toNdjsonLine({
     type: "token",
     role: "senior",
+    kind: "text",
     delta: huge,
     at: "2026-11-04T00:00:00Z",
   });
@@ -668,5 +672,6 @@ test("toNdjsonLine clips a giant token delta under the field bound", () => {
   const parsed = JSON.parse(line) as TokenStreamEvent;
   assert.equal(parsed.type, "token");
   assert.equal(parsed.role, "senior");
+  assert.equal(parsed.kind, "text");
   assert.equal(parsed.delta, `<clipped ${huge.length} chars>`);
 });

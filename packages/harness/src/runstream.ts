@@ -16,9 +16,10 @@
  *                         the compaction summary
  *   repair                `repairReply()` — one per repair pass, before the
  *                         repair envelope it appends
- *   token                 the provider's `onDelta` sink, when
+ *   token                 the provider's delta sinks, when
  *                         `HarnessOptions.streamTokens` is on — one per text
- *                         delta, in arrival order (only with a stream
+ *                         OR thinking delta, in arrival order, tagged
+ *                         `kind: "text" | "thinking"` (only with a stream
  *                         consumer; additive to the envelope records)
  *   tool_call/tool_result `invokeTool()` (and the unknown-tool branch of
  *                         `toolLoop()`)
@@ -90,14 +91,22 @@ export interface RepairStreamEvent {
 }
 
 /**
- * One text delta from a streamed provider call (`HarnessOptions.streamTokens`).
- * Deltas arrive in provider order and concatenate to the reply text; a delta
- * longer than {@link STREAM_FIELD_CHARS} is clipped by `toNdjsonLine` like any
- * other string field. Token records are additive to the envelope records.
+ * One provider delta from a streamed call (`HarnessOptions.streamTokens`).
+ * Deltas arrive in provider order; `kind` says whether the delta is visible
+ * reply text (`"text"`) or the model's reasoning (`"thinking"`). Text deltas
+ * concatenate to the reply text; thinking deltas are observational and never
+ * appear in the reply, protocol envelopes or usage counters. New producers
+ * (the harness) always set `kind`; a consumer should treat a missing or
+ * unknown `kind` (older/hand-built records) as `"text"`. A delta longer than
+ * {@link STREAM_FIELD_CHARS} is clipped by `toNdjsonLine` like any other
+ * string field (the `kind` tag survives). Token records are additive to the
+ * envelope records.
  */
 export interface TokenStreamEvent {
   type: "token";
   role: StreamRole;
+  /** `"text"` = visible reply text, `"thinking"` = model reasoning. */
+  kind: "text" | "thinking";
   delta: string;
   at: string;
 }
