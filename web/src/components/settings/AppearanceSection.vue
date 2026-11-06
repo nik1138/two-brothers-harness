@@ -1,9 +1,13 @@
 <script setup lang="ts">
+import type { Density } from '../../density'
 import type { ThemeMode } from '../../themeMode'
 
-defineProps<{ mode: ThemeMode }>()
+defineProps<{ mode: ThemeMode; density: Density }>()
 
-const emit = defineEmits<{ change: [ThemeMode] }>()
+const emit = defineEmits<{
+  change: [ThemeMode]
+  densityChange: [Density]
+}>()
 
 const options: { value: ThemeMode; label: string; description: string }[] = [
   { value: 'light', label: 'Light', description: 'Bright surfaces for daylight.' },
@@ -15,8 +19,21 @@ const options: { value: ThemeMode; label: string; description: string }[] = [
   },
 ]
 
+const densityOptions: { value: Density; label: string; description: string }[] = [
+  {
+    value: 'comfortable',
+    label: 'Comfortable',
+    description: 'Default spacing, easier on the eyes.',
+  },
+  { value: 'compact', label: 'Compact', description: 'Tighter rows, more visible at once.' },
+]
+
 function select(mode: ThemeMode) {
   emit('change', mode)
+}
+
+function selectDensity(density: Density) {
+  emit('densityChange', density)
 }
 </script>
 
@@ -65,6 +82,34 @@ function select(mode: ThemeMode) {
     <p class="settings-note">
       System follows the operating system's light or dark preference and updates when it changes.
     </p>
+
+    <h4 class="settings-subhead">Density</h4>
+    <div class="theme-grid" role="radiogroup" aria-label="Density">
+      <label
+        v-for="option in densityOptions"
+        :key="option.value"
+        class="theme-option"
+        :class="{ selected: density === option.value }"
+      >
+        <input
+          class="theme-input"
+          type="radio"
+          name="density-mode"
+          :value="option.value"
+          :checked="density === option.value"
+          @change="selectDensity(option.value)"
+        />
+        <span class="theme-copy">
+          <span class="theme-name">{{ option.label }}</span>
+          <span class="theme-description">{{ option.description }}</span>
+        </span>
+      </label>
+    </div>
+
+    <p class="settings-note">
+      Density changes row spacing only; it never hides information and is remembered for the next
+      visit.
+    </p>
   </div>
 </template>
 
@@ -85,6 +130,13 @@ function select(mode: ThemeMode) {
 
 .settings-note {
   font-size: 0.75rem;
+}
+
+.settings-subhead {
+  margin: 4px 0 -6px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-primary);
 }
 
 .theme-grid {

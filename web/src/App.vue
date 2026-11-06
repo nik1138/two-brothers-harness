@@ -371,8 +371,8 @@ const paletteShortcut = /Mac|iPhone|iPad|iPod/i.test(navigator.platform) ? '⌘ 
 /** Persisted spacing preference (Comfortable by default); applied as data-density. */
 const density = ref<Density>(readDensity())
 
-/** Density is a palette-exposed preference (Settings → Appearance is read-only
- * for spacing today). The hint marks the active mode. */
+/** Density is exposed from the palette and from Settings → Appearance; the
+ * hint marks the active mode. */
 const densityPaletteActions = computed<PaletteItem[]>(() =>
   (['compact', 'comfortable'] as const).map((value) => ({
     id: `action:density-${value}`,
@@ -1505,9 +1505,11 @@ onUnmounted(() => {
     <SettingsDialog
       v-if="settingsOpen"
       :theme-mode="themeMode"
+      :density="density"
       @close="settingsOpen = false"
       @saved="onSettingsSaved"
       @theme-change="onThemeChange"
+      @density-change="setDensity"
     />
     <WorkspaceDialog v-if="workspaceDialogOpen" @close="onWorkspaceDialogClose" />
     <NewSessionDialog

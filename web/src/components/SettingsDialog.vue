@@ -15,20 +15,23 @@ import type { ProviderPreset, RoleSettingsView } from '../types'
 import { clickInModalBody } from '../modal'
 import { applyThemeAttribute, readThemeMode, resolveDark, saveThemeMode } from '../themeMode'
 import type { ThemeMode } from '../themeMode'
+import { applyDensityAttribute, readDensity, saveDensity } from '../density'
+import type { Density } from '../density'
 import ModelsRolesSection from './settings/ModelsRolesSection.vue'
 import ProvidersSection from './settings/ProvidersSection.vue'
 import PluginsSection from './settings/PluginsSection.vue'
 import AppearanceSection from './settings/AppearanceSection.vue'
 import AdvancedSection from './settings/AdvancedSection.vue'
 
-/** Optional controlled theme mode. When supplied, the host owns live theme
- *  application and this panel only emits `theme-change`. */
-const props = defineProps<{ themeMode?: ThemeMode }>()
+/** Optional controlled theme mode and density. When supplied, the host owns
+ *  live application and this panel only emits the change events. */
+const props = defineProps<{ themeMode?: ThemeMode; density?: Density }>()
 
 const emit = defineEmits<{
   close: []
   saved: []
   'theme-change': [ThemeMode]
+  'density-change': [Density]
 }>()
 
 function onMaskClick(e: MouseEvent) {
@@ -167,6 +170,22 @@ function onThemeChange(mode: ThemeMode) {
     fallbackTheme.value = mode
   }
   emit('theme-change', mode)
+}
+
+// -- density -----------------------------------------------------------------
+
+/** Mirror used only while no `density` prop is bound (standalone mount). */
+const fallbackDensity = ref<Density>(readDensity())
+const activeDensity = computed(() => props.density ?? fallbackDensity.value)
+
+function onDensityChange(density: Density) {
+  if (props.density === undefined) {
+    // No host binding yet: persist and apply locally, like the theme fallback.
+    saveDensity(density)
+    applyDensityAttribute(density)
+    fallbackDensity.value = density
+  }
+  emit('density-change', density)
 }
 
 // -- data --------------------------------------------------------------------
@@ -491,7 +510,12 @@ async function save() {
               role="region"
               aria-label="Appearance"
             >
-              <AppearanceSection :mode="activeTheme" @change="onThemeChange" />
+              <AppearanceSection
+                :mode="activeTheme"
+                :density="activeDensity"
+                @change="onThemeChange"
+                @density-change="onDensityChange"
+              />
             </div>
 
             <div

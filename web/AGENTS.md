@@ -54,7 +54,8 @@ The backend is the TypeScript server in `packages/harness`:
   persisted last-seen map for unread dots; `src/recents.ts` — bounded MRU
   workspace ids in a versioned, fail-soft localStorage list;
   `src/density.ts` — persisted Comfortable/Compact spacing preference
-  (`data-density` on `<html>`, injectable storage, palette-exposed)
+  (`data-density` on `<html>`, injectable storage, applied pre-paint in
+  `index.html`, exposed from Settings → Appearance and the palette)
 - `vite.config.ts` — dev proxy `/api` → `http://127.0.0.1:8600`
 
 ## Rules specific to this tree

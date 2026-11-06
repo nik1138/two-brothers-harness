@@ -48,6 +48,16 @@
         } catch (error) {
           /* storage can be unavailable (private mode / blocked storage) */
         }
+        try {
+          // Pre-paint density: the same key and values as src/density.ts, so a
+          // Compact workspace never flashes Comfortable spacing on load.
+          var density = window.localStorage.getItem('two-brothers.density.v1')
+          if (density === 'compact' || density === 'comfortable') {
+            document.documentElement.setAttribute('data-density', density)
+          }
+        } catch (error) {
+          /* storage can be unavailable (private mode / blocked storage) */
+        }
       })()
     </script>
   </head>
