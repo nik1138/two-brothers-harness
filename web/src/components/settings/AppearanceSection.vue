@@ -44,22 +44,22 @@ function selectDensity(density: Density) {
       remembered for the next visit.
     </p>
 
-    <div class="theme-grid" role="radiogroup" aria-label="Theme">
+    <div class="appearance-grid" role="radiogroup" aria-label="Theme">
       <label
         v-for="option in options"
         :key="option.value"
-        class="theme-option"
+        class="appearance-card"
         :class="{ selected: mode === option.value }"
       >
         <input
-          class="theme-input"
+          class="appearance-input"
           type="radio"
           name="theme-mode"
           :value="option.value"
           :checked="mode === option.value"
           @change="select(option.value)"
         />
-        <span class="theme-preview" :class="`theme-preview--${option.value}`" aria-hidden="true">
+        <span class="appearance-preview" :class="`appearance-preview--${option.value}`" aria-hidden="true">
           <svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor">
             <template v-if="option.value === 'light'">
               <circle cx="8" cy="8" r="2.6" />
@@ -72,9 +72,9 @@ function selectDensity(density: Density) {
             </template>
           </svg>
         </span>
-        <span class="theme-copy">
-          <span class="theme-name">{{ option.label }}</span>
-          <span class="theme-description">{{ option.description }}</span>
+        <span class="appearance-copy">
+          <span class="appearance-name">{{ option.label }}</span>
+          <span class="appearance-description">{{ option.description }}</span>
         </span>
       </label>
     </div>
@@ -84,24 +84,24 @@ function selectDensity(density: Density) {
     </p>
 
     <h4 class="settings-subhead">Density</h4>
-    <div class="theme-grid" role="radiogroup" aria-label="Density">
+    <div class="appearance-grid" role="radiogroup" aria-label="Density">
       <label
         v-for="option in densityOptions"
         :key="option.value"
-        class="theme-option"
+        class="appearance-card"
         :class="{ selected: density === option.value }"
       >
         <input
-          class="theme-input"
+          class="appearance-input"
           type="radio"
           name="density-mode"
           :value="option.value"
           :checked="density === option.value"
           @change="selectDensity(option.value)"
         />
-        <span class="theme-copy">
-          <span class="theme-name">{{ option.label }}</span>
-          <span class="theme-description">{{ option.description }}</span>
+        <span class="appearance-copy">
+          <span class="appearance-name">{{ option.label }}</span>
+          <span class="appearance-description">{{ option.description }}</span>
         </span>
       </label>
     </div>
@@ -139,13 +139,13 @@ function selectDensity(density: Density) {
   color: var(--text-primary);
 }
 
-.theme-grid {
+.appearance-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 10px;
 }
 
-.theme-option {
+.appearance-card {
   position: relative;
   display: flex;
   align-items: center;
@@ -158,22 +158,22 @@ function selectDensity(density: Density) {
   background: var(--surface-panel);
 }
 
-.theme-option:hover {
+.appearance-card:hover {
   background: var(--surface-hover);
 }
 
-.theme-option.selected {
+.appearance-card.selected {
   border-color: var(--accent);
   background: var(--surface-highlight);
   box-shadow: inset 0 0 0 1px var(--accent);
 }
 
-.theme-option:focus-within {
+.appearance-card:focus-within {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
-.theme-input {
+.appearance-input {
   position: absolute;
   inset: 0;
   z-index: 1;
@@ -184,7 +184,7 @@ function selectDensity(density: Density) {
   cursor: pointer;
 }
 
-.theme-preview {
+.appearance-preview {
   flex: none;
   display: inline-flex;
   align-items: center;
@@ -197,33 +197,33 @@ function selectDensity(density: Density) {
   overflow: hidden;
 }
 
-.theme-preview--light {
+.appearance-preview--light {
   background: linear-gradient(135deg, #ffffff 0 55%, #eef0f3 55% 100%);
   color: #b07d10;
 }
 
-.theme-preview--dark {
+.appearance-preview--dark {
   background: linear-gradient(135deg, #1f2026 0 55%, #33353c 55% 100%);
   color: #c9cdd4;
 }
 
-.theme-preview--system {
+.appearance-preview--system {
   background: linear-gradient(90deg, #ffffff 0 50%, #1f2026 50% 100%);
   color: #747b88;
 }
 
-.theme-copy {
+.appearance-copy {
   display: flex;
   flex-direction: column;
   min-width: 0;
 }
 
-.theme-name {
+.appearance-name {
   font-size: 0.82rem;
   font-weight: 600;
 }
 
-.theme-description {
+.appearance-description {
   font-size: 0.7rem;
   line-height: 1.35;
   color: var(--text-secondary);

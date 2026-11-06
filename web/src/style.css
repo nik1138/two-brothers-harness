@@ -1731,7 +1731,10 @@ html[data-density='compact'] .footer-action {
   height: 28px;
 }
 
-html[data-density='compact'] .theme-option {
+/* Sidebar footer theme switch only: Settings cards use their own
+   `.appearance-*` classes, and the `.sidebar` prefix keeps this density rule
+   from reaching any dialog that reuses the segmented-control markup. */
+html[data-density='compact'] .sidebar .theme-option {
   height: 24px;
 }
 

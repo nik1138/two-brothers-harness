@@ -6,6 +6,10 @@
 //   approval-allow scripted fixture: approve a workspace write -> file exists, UI shows diff
 //   approval-deny  scripted fixture: deny the write -> file absent
 //   stop           scripted fixture: stop a slow run -> cancelled state
+//   mobile         390px drawer: open/close/Escape/focus and session select
+//   appearance-density mock provider: Settings -> Appearance cards stay readable
+//                  under compact density; the footer theme switch shrinks and the
+//                  preference survives a reload
 //   real           opt-in (TWO_BROTHERS_REAL_E2E=1): real models via LM Studio
 //
 // Backend: every scenario runs against the TypeScript server
@@ -825,6 +829,149 @@ async function scenarioMobile(runner) {
   }
 }
 
+// -- scenario: Settings -> Appearance under compact density (regression) ---------------
+// Compact density may shrink the sidebar footer theme switch only. The
+// Settings -> Appearance cards (theme + density) must keep their natural
+// height and never clip their copy in either density, and the density choice
+// must survive a reload (the pre-paint bootstrap in index.html restores it).
+
+/** Open Settings -> Appearance and return the dialog + visible section pane. */
+async function openAppearanceSettings(page) {
+  await page.locator('.sidebar-footer .footer-action').click()
+  const dialog = page.locator('[role="dialog"][aria-labelledby="settings-dialog-title"]')
+  await dialog.waitFor({ state: 'visible' })
+  await dialog.getByRole('button', { name: 'Appearance' }).click()
+  const pane = dialog.locator('[role="region"][aria-label="Appearance"]')
+  await pane.waitFor({ state: 'visible' })
+  await pane.locator('.appearance-card').first().waitFor({ state: 'visible' })
+  return { dialog, pane }
+}
+
+/** Measure the Appearance cards and the sidebar footer theme switch. */
+async function measureAppearanceDensity(page) {
+  return page.evaluate(() => {
+    const round = (value) => Math.round(value * 10) / 10
+    const cards = [
+      ...document.querySelectorAll(
+        '[role="region"][aria-label="Appearance"] .appearance-card',
+      ),
+    ]
+    const footer = [...document.querySelectorAll('.sidebar .theme-switch .theme-option')]
+    return {
+      density: document.documentElement.getAttribute('data-density'),
+      cards: cards.map((card) => {
+        const box = card.getBoundingClientRect()
+        const copy = card.querySelector('.appearance-copy')
+        const copyBox = copy ? copy.getBoundingClientRect() : null
+        return {
+          firstWord: (card.textContent ?? '').trim().split(/\s+/)[0] ?? '',
+          height: round(box.height),
+          overflowY: card.scrollHeight - card.clientHeight,
+          copyInside:
+            copyBox === null ||
+            (copyBox.top >= box.top - 0.5 && copyBox.bottom <= box.bottom + 0.5),
+        }
+      }),
+      footerHeights: footer.map((option) => round(option.getBoundingClientRect().height)),
+    }
+  })
+}
+
+async function scenarioAppearanceDensity(runner) {
+  const be = await startBackend({ kind: 'mock' })
+  const context = await browser.newContext()
+  const page = await context.newPage()
+  const consoleGuard = attachConsoleGuard(page)
+  try {
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+
+    // comfortable is the default: the shell writes the attribute on mount
+    const { pane } = await openAppearanceSettings(page)
+    const comfortable = await measureAppearanceDensity(page)
+    assert.equal(comfortable.density, 'comfortable', 'comfortable density is the default')
+    assert.equal(
+      comfortable.cards.length,
+      5,
+      `expected 3 theme + 2 density cards, got ${comfortable.cards.length}`,
+    )
+    for (const card of comfortable.cards) {
+      assert.ok(
+        card.height >= 48,
+        `comfortable Appearance card "${card.firstWord}" is ${card.height}px (expected >= 48)`,
+      )
+      assert.ok(
+        card.overflowY <= 1,
+        `comfortable Appearance card "${card.firstWord}" overflows by ${card.overflowY}px`,
+      )
+      assert.ok(card.copyInside, `comfortable Appearance card "${card.firstWord}" clips its copy`)
+    }
+    const comfortableFooter = comfortable.footerHeights
+    assert.equal(comfortableFooter.length, 3, 'expected three footer theme options')
+    assert.ok(comfortableFooter.every((height) => height > 0), 'footer theme options are measurable')
+
+    // switch density through the Appearance card itself
+    await pane.locator('.appearance-card', { hasText: 'Compact' }).first().click()
+    await page.waitForFunction(
+      () => document.documentElement.getAttribute('data-density') === 'compact',
+      null,
+      { timeout: 5000 },
+    )
+    const compact = await measureAppearanceDensity(page)
+    assert.equal(compact.density, 'compact', 'compact density must be applied')
+    for (const card of compact.cards) {
+      assert.ok(
+        card.height >= 48,
+        `compact density squashed the Appearance card "${card.firstWord}" to ${card.height}px`,
+      )
+      assert.ok(
+        card.overflowY <= 1,
+        `compact Appearance card "${card.firstWord}" overflows by ${card.overflowY}px`,
+      )
+      assert.ok(card.copyInside, `compact Appearance card "${card.firstWord}" clips its copy`)
+    }
+    assert.equal(compact.footerHeights.length, 3, 'expected three footer theme options')
+    for (const height of compact.footerHeights) {
+      assert.ok(height <= 28, `footer theme option is ${height}px (expected <= 28 in compact)`)
+    }
+    assert.ok(
+      compact.footerHeights.every((height, index) => height < comfortableFooter[index]),
+      `footer theme switch must shrink under compact density ` +
+        `(${comfortableFooter.join('px,')}px -> ${compact.footerHeights.join('px,')}px)`,
+    )
+
+    // the preference survives a reload and the cards still render naturally
+    await page.reload()
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    assert.equal(
+      await page.evaluate(() => document.documentElement.getAttribute('data-density')),
+      'compact',
+      'compact density must survive a reload',
+    )
+    await openAppearanceSettings(page)
+    const reloaded = await measureAppearanceDensity(page)
+    assert.equal(reloaded.density, 'compact', 'reloaded document keeps compact density')
+    for (const card of reloaded.cards) {
+      assert.ok(
+        card.height >= 48,
+        `reloaded Appearance card "${card.firstWord}" is ${card.height}px (expected >= 48)`,
+      )
+      assert.ok(card.copyInside, `reloaded Appearance card "${card.firstWord}" clips its copy`)
+    }
+    assert.ok(
+      reloaded.footerHeights.every((height) => height <= 28),
+      `reloaded footer theme options must stay compact (${reloaded.footerHeights.join('px,')}px)`,
+    )
+
+    consoleGuard.assertClean()
+    runner.pass('appearance-density')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(be.dir)
+  }
+}
+
 // -- scenario: real models (opt-in) ---------------------------------------------------
 
 async function scenarioReal(runner) {
@@ -1008,6 +1155,13 @@ async function main() {
           scenarioMobile(currentRunner)
         ),
       },
+      {
+        label: 'appearance-density',
+        run: () => (
+          (currentRunner = makeRunner('appearance-density')),
+          scenarioAppearanceDensity(currentRunner)
+        ),
+      },
     )
     if (realEnabled) {
       blocks.push({
@@ -1021,7 +1175,16 @@ async function main() {
   }
 
   if (!tsAvailable) {
-    for (const name of ['chat', 'resume', 'approval-allow', 'approval-deny', 'stop', 'mobile', 'real']) {
+    for (const name of [
+      'chat',
+      'resume',
+      'approval-allow',
+      'approval-deny',
+      'stop',
+      'mobile',
+      'appearance-density',
+      'real',
+    ]) {
       results.push({
         name,
         status: 'SKIP',
