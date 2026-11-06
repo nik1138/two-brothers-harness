@@ -60,6 +60,10 @@ The backend is the TypeScript server in `packages/harness`:
 - `src/workspaceOrder.ts` — pure workspace list helpers (safe up/down moves, order comparison, name bounds) used by the sidebar group actions and the rename dialog
 - `src/mentions.ts` — pure composer mention model (`@` skills/files, `/` commands): trigger detection at the caret, filtering/ranking, token serialization (`@skill:name`, `@path`, `/name`) and insertion; used by `Composer.vue`
 - `src/streaming.ts` — pure live-token draft fed by the run SSE named `token` frames: bounded per-role thinking/text buffers, envelope/run-end clearing and render-ready blocks; used by `App.vue`/`ChatView.vue`
+- `src/basecommands.ts` — first-party (`GET /api/commands` → `baseCommands`) slash-command model: normalization/sort/merge with discovered templates (discovered shadows base), alias/description search, `/name args` parsing/resolution and the action dispatch payload; used by `Composer.vue`/`App.vue`
+- `src/composerKeys.ts` — pure composer key contract (IME-safe submit, Ctrl/⌘+Enter, picker accept/dismiss, `?`/Ctrl+⌘+/ chord, double-Escape stop window)
+- `src/shortcuts.ts` — single-source keyboard-shortcut table rendered by the `/help` overlay; `src/download.ts` — shared session export Blob download used by the row menu and `/export`
+- `src/components/` help/status dialogs: `ShortcutHelpDialog` (`/help`, `?`), `SessionStatusDialog` (`/status`), `PermissionInfoDialog` (`/permission`)
 - `vite.config.ts` — dev proxy `/api` → `http://127.0.0.1:8600`
 
 ## Rules specific to this tree

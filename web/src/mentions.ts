@@ -10,7 +10,7 @@
  * space when inserted.
  */
 
-import type { CommandInfo, SkillInfo, WorkspaceFileEntry } from './types'
+import type { BaseCommandAction, CommandInfo, SkillInfo, WorkspaceFileEntry } from './types'
 
 /** Options rendered for slash commands (the component's Commands group). */
 export const MAX_COMMAND_ITEMS = 8
@@ -26,6 +26,8 @@ export const MAX_FILE_QUERY_LIMIT = 50
 export const MENTION_DEBOUNCE_MS = 150
 /** Popover footer help line (plain text, no markup). */
 export const MENTION_FOOTER_HINT = '↑↓ navigate · Enter insert · Esc close'
+/** Footer help line for the `/` command menu (Enter may run an action). */
+export const MENTION_FOOTER_HINT_COMMAND = '↑↓ navigate · Enter insert/run · Esc close'
 /** Prefix that narrows an `@` mention to the skill picker. */
 export const SKILL_MENTION_PREFIX = '@skill:'
 
@@ -53,6 +55,14 @@ export interface MentionItem {
   token: string
   /** Listed for context but not insertable (role-scoped skills). */
   disabled: boolean
+  /** `/` command rows only: first-party action the shell performs locally. */
+  action?: BaseCommandAction
+  /** `/` command rows only: true for a first-party (base) command. */
+  base?: boolean
+  /** `/` command rows only: every typed spelling that resolves to this row. */
+  aliases?: string[]
+  /** `/` command rows only: empty arguments are a usage error. */
+  requiresArguments?: boolean
 }
 
 /** Score tiers: exact > prefix > word start > substring. */

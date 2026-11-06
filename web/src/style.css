@@ -1041,6 +1041,61 @@ select {
   padding: 0.1rem 0.3rem;
 }
 
+/* Neutral command notice: composer/menu action results and usage hints. It is
+   informational (never an error) and appears under the chat header, clear of
+   the composer; it does not animate, so reduced motion needs no override. */
+.command-notice {
+  position: fixed;
+  top: calc(var(--chat-header-height, 48px) + 0.6rem);
+  left: 50%;
+  z-index: 3100;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: min(34rem, calc(100vw - 2rem));
+  padding: 0.5rem 0.55rem 0.5rem 0.85rem;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: var(--text-primary);
+  background: var(--surface-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-raised);
+  transform: translateX(-50%);
+}
+
+.command-notice-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.command-notice-close {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font: inherit;
+  font-size: 1rem;
+  line-height: 1;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.command-notice-close:hover {
+  color: var(--text-primary);
+  background: var(--surface-hover);
+}
+
+.command-notice-close:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
 /* ---------- dialogs ---------- */
 
 .modal {

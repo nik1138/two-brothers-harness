@@ -381,10 +381,57 @@ export interface CommandInfo {
   file: string
 }
 
-/** Response of GET /api/commands. */
+/**
+ * What a surface does for a first-party base command. `prompt` commands just
+ * submit their expanded text; `action` commands are performed locally.
+ */
+export type BaseCommandAction =
+  | 'compact'
+  | 'export'
+  | 'permission'
+  | 'help'
+  | 'status'
+  | 'mode'
+  | 'new'
+
+/** `prompt` commands expand to a task; `action` commands are local effects. */
+export type BaseCommandKind = 'prompt' | 'action'
+
+/**
+ * One first-party slash command (`GET /api/commands` → `baseCommands`,
+ * metadata only — never template bodies).
+ */
+export interface BaseCommand {
+  name: string
+  /** Extra typed spellings (English synonyms + the reference Chinese names). */
+  aliases: string[]
+  description: string
+  /** Argument placeholder, e.g. `"<objective>"`; `""` when none. */
+  argumentHint: string
+  kind: BaseCommandKind
+  /** Present for `kind: "action"`: what a surface performs. */
+  action?: BaseCommandAction
+  /** Empty arguments are a usage error when true. */
+  requiresArguments: boolean
+  /** Higher sorts first; ties break on name. */
+  priority: number
+}
+
+/** Response of GET /api/commands (base commands are additive). */
 export interface CommandListResponse {
   commands: CommandInfo[]
+  baseCommands: BaseCommand[]
   diagnostics: string[]
+}
+
+/** Response of POST /api/sessions/{name}/compact. */
+export interface SessionCompactResult {
+  compacted: boolean
+  /** Envelope counts around a successful compaction. */
+  before_events?: number
+  after_events?: number
+  /** Why nothing was compacted (`compacted: false`). */
+  reason?: string
 }
 
 /** One workspace file from GET /api/workspaces/{id}/files. */

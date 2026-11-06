@@ -14,11 +14,13 @@ import type { Density } from './density'
 import {
   ApiError,
   answerRunApproval,
+  compactSession,
   createSession,
   getRun,
   getSession,
   getSessionRuntimeEvents,
   getSettings,
+  listCommands,
   listSessions,
   listWorkspaces,
   reorderWorkspaces,
@@ -26,6 +28,8 @@ import {
   stopRun,
 } from './api'
 import type {
+  BaseCommand,
+  CommandInfo,
   Envelope,
   RoleSettingsView,
   RunEvent,
@@ -39,7 +43,11 @@ import type {
   TokenEvent,
   Workspace,
 } from './types'
+import { isBaseCommandAction } from './basecommands'
+import type { ComposerCommandRequest } from './basecommands'
+import { canUseStopGesture, isShortcutHelpChord, isStopGesture } from './composerKeys'
 import { projectEnvelopes, sessionTitle, taskOf } from './chat'
+import { downloadSessionExport } from './download'
 import { buildPaletteItems, PALETTE_SESSION_PREFIX, PALETTE_WORKSPACE_PREFIX } from './palette'
 import type { PaletteItem } from './palette'
 import { contentItemSession } from './search'
@@ -88,6 +96,9 @@ import DiffReview from './components/DiffReview.vue'
 import ApprovalCard from './components/ApprovalCard.vue'
 import UsageFooter from './components/UsageFooter.vue'
 import CommandPalette from './components/CommandPalette.vue'
+import ShortcutHelpDialog from './components/ShortcutHelpDialog.vue'
+import SessionStatusDialog from './components/SessionStatusDialog.vue'
+import PermissionInfoDialog from './components/PermissionInfoDialog.vue'
 import AppIcon from './components/AppIcon.vue'
 
 const sessions = ref<SessionInfo[]>([])
@@ -160,6 +171,25 @@ const runStartedAt = ref<number | null>(null)
 /** Provider override actually used for sessions started from this app (only known truth). */
 const providerBySession = ref<Record<string, RunProvider>>({})
 const settingsOpen = ref(false)
+/** `/help` overlay (also `?` / Ctrl+⌘+/): commands + keyboard shortcuts. */
+const helpOpen = ref(false)
+/** `/status` overlay. */
+const statusOpen = ref(false)
+/** `/permission` informational overlay. */
+const permissionOpen = ref(false)
+/** Neutral, auto-dismissing command notice (never an error toast). */
+const commandNotice = ref<string | null>(null)
+let commandNoticeTimer: ReturnType<typeof setTimeout> | null = null
+/** Catalogs shown in the help overlay (refreshed when it opens from `?`). */
+const helpCatalog = ref<{ baseCommands: BaseCommand[]; commands: CommandInfo[] }>({
+  baseCommands: [],
+  commands: [],
+})
+const helpCatalogState = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
+/** A `/compact` request is in flight (prevents double submits). */
+const compactBusy = ref(false)
+/** Cooperation mode reported by the composer for the status overlay. */
+const lastCommandMode = ref<RunMode>('consult')
 /** Bumped on every settings save so mounted children (Composer hint) re-check. */
 const settingsVersion = ref(0)
 /**
@@ -198,6 +228,21 @@ const title = computed(() => {
 const task = computed(() => taskOf(events.value))
 /** Operator turns in the selected session: envelopes authored by the user. */
 const turns = computed(() => events.value.filter((e) => e.from === 'user').length)
+/** Selected session's minimal identity for the `/status` overlay. */
+const selectedSessionInfo = computed<{ name: string; title?: string } | null>(() =>
+  selected.value
+    ? { name: selected.value, ...(title.value ? { title: title.value } : {}) }
+    : null,
+)
+/** Selected session's workspace name, when it is linked to a known workspace. */
+const selectedWorkspaceName = computed<string | null>(() => {
+  const name = selected.value
+  if (!name) return null
+  const session = sessions.value.find((item) => item.name === name)
+  const workspaceId = session?.workspace_id
+  if (!workspaceId) return null
+  return workspaces.value.find((workspace) => workspace.id === workspaceId)?.name ?? null
+})
 /** Latest known usage for the selected session, if any. */
 const usageForSelected = computed(() =>
   selected.value ? (runUsageBySession.value[selected.value] ?? null) : null,
@@ -1366,6 +1411,208 @@ async function onMoveWorkspace(id: string, delta: number) {
   }
 }
 
+// -- composer commands, shortcut help & stop gesture --------------------------
+// The `/` menu's first-party actions are performed here; every result is an
+// honest neutral notice (or the standard error toast for real failures).
+
+function dismissNotice(): void {
+  if (commandNoticeTimer) {
+    clearTimeout(commandNoticeTimer)
+    commandNoticeTimer = null
+  }
+  commandNotice.value = null
+}
+
+/** Show one neutral, auto-dismissing notice (command results and usage hints). */
+function showNotice(message: string): void {
+  const text = message.trim()
+  if (!text) return
+  commandNotice.value = text
+  if (commandNoticeTimer) clearTimeout(commandNoticeTimer)
+  commandNoticeTimer = setTimeout(() => {
+    commandNoticeTimer = null
+    commandNotice.value = null
+  }, 6000)
+}
+
+/** Remember a catalogue for the help overlay (base + discovered commands). */
+function setHelpCatalog(baseCommands: BaseCommand[], commands: CommandInfo[]): void {
+  helpCatalog.value = { baseCommands, commands }
+  helpCatalogState.value = 'ready'
+}
+
+/** Fetch the command catalogue for `?`/Ctrl+⌘+/ opens (fail-soft). */
+async function loadHelpCatalog(): Promise<void> {
+  if (helpCatalogState.value === 'loading') return
+  helpCatalogState.value = 'loading'
+  try {
+    const catalog = await listCommands()
+    setHelpCatalog(catalog.baseCommands, catalog.commands)
+  } catch {
+    helpCatalogState.value = 'error'
+  }
+}
+
+function openShortcutHelp(baseCommands?: BaseCommand[], commands?: CommandInfo[]): void {
+  if (Array.isArray(baseCommands) && Array.isArray(commands)) {
+    setHelpCatalog(baseCommands, commands)
+  }
+  helpOpen.value = true
+  if (helpCatalogState.value !== 'ready') void loadHelpCatalog()
+}
+
+/** `/compact`: compact the selected session in place, then reload its transcript. */
+async function runCompactCommand(): Promise<void> {
+  const name = selected.value
+  if (!name) {
+    showNotice('Open a session before using /compact.')
+    return
+  }
+  if (compactBusy.value) {
+    showNotice('A compaction is already running.')
+    return
+  }
+  compactBusy.value = true
+  try {
+    const result = await compactSession(name)
+    if (result.compacted) {
+      const counts =
+        typeof result.before_events === 'number' && typeof result.after_events === 'number'
+          ? ` (${result.before_events} → ${result.after_events} events)`
+          : ''
+      await loadSession(name)
+      showNotice(`Session compacted${counts}.`)
+    } else {
+      showNotice(
+        result.reason
+          ? `Not compacted: ${result.reason}.`
+          : 'Not compacted — there was nothing to compact.',
+      )
+    }
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 409) {
+      showNotice('A run is live on this session — stop it or wait for it to finish, then compact.')
+    } else if (e instanceof ApiError && e.status === 404) {
+      // the session may have been deleted, or this backend may not serve /compact
+      showNotice('Compaction is unavailable for this session (missing session or older backend).')
+    } else {
+      reportError(`Compaction failed: ${errText(e)}`)
+    }
+  } finally {
+    compactBusy.value = false
+  }
+}
+
+/** `/export`: reuse the shared session export download flow (Markdown). */
+async function runExportCommand(): Promise<void> {
+  const name = selected.value
+  if (!name) {
+    showNotice('Open a session before using /export.')
+    return
+  }
+  try {
+    await downloadSessionExport(name, 'markdown')
+    showNotice('Markdown export downloaded.')
+  } catch (e) {
+    reportError(`Export failed: ${errText(e)}`)
+  }
+}
+
+/** One first-party base action chosen from the `/` menu or typed directly. */
+function onComposerCommand(request: ComposerCommandRequest): void {
+  lastCommandMode.value = request.mode
+  const action = request.action
+  if (!isBaseCommandAction(action)) {
+    showNotice(`/${request.name} is not available in the web workspace yet.`)
+    return
+  }
+  switch (action) {
+    case 'compact':
+      void runCompactCommand()
+      break
+    case 'export':
+      void runExportCommand()
+      break
+    case 'help':
+      openShortcutHelp(request.baseCommands, request.commands)
+      break
+    case 'status':
+      if (!selected.value) {
+        showNotice('Open a session to see its status.')
+        break
+      }
+      lastCommandMode.value = request.mode
+      statusOpen.value = true
+      break
+    case 'permission':
+      permissionOpen.value = true
+      break
+    case 'mode':
+      showNotice('Use the Mode control next to the composer to switch cooperation modes.')
+      break
+    case 'new':
+      newSessionOpen.value = true
+      break
+  }
+}
+
+/** `?` or Ctrl/⌘+/ opens the shortcut + command reference. */
+function onHelpShortcut(e: KeyboardEvent): void {
+  if (e.defaultPrevented || e.isComposing || e.keyCode === 229 || e.repeat) return
+  const chord = {
+    key: e.key,
+    shiftKey: e.shiftKey,
+    ctrlKey: e.ctrlKey,
+    metaKey: e.metaKey,
+    altKey: e.altKey,
+    isComposing: e.isComposing,
+    keyCode: e.keyCode,
+    repeat: e.repeat,
+  }
+  if (!isShortcutHelpChord(chord)) return
+  const target = e.target instanceof Element ? e.target : null
+  const editable = !!target?.closest('input, textarea, [contenteditable="true"]')
+  // `?` typed inside a text field is just a question mark; the chord is safe
+  if (editable && !e.ctrlKey && !e.metaKey) return
+  // a dialog already owns the screen (help itself included)
+  if (document.querySelector('[role="dialog"]')) return
+  e.preventDefault()
+  openShortcutHelp()
+}
+
+let lastEscapeAt: number | null = null
+
+/** Double Escape (≤500 ms) inside the conversation stops the followed run. */
+function onStopShortcut(e: KeyboardEvent): void {
+  if (e.key !== 'Escape') return
+  const target = e.target instanceof Element ? e.target : null
+  const approvalFocused = !!target?.closest('.approval, .approval-dock, [role="dialog"]')
+  const inConversation =
+    !target || target === document.body || !!target.closest('.chat-shell')
+  const usable = canUseStopGesture({
+    runActive: runActive.value,
+    composing: e.isComposing || e.keyCode === 229,
+    repeat: e.repeat,
+    defaultPrevented: e.defaultPrevented,
+    dialogOpen: !!document.querySelector('[role="dialog"]'),
+    approvalFocused,
+    drawerOpen: drawerQuery?.matches === true && !sidebarCollapsed.value,
+    outsideConversation: !inConversation,
+  })
+  if (!usable) {
+    lastEscapeAt = null
+    return
+  }
+  const now = Date.now()
+  if (isStopGesture(lastEscapeAt, now)) {
+    lastEscapeAt = null
+    // the existing stop endpoint; requestStop is fail-soft (error toast only)
+    void requestStop()
+  } else {
+    lastEscapeAt = now
+  }
+}
+
 /** Sidebar deleted a session: drop the selection/view state if it was open, then re-list. */
 function onSessionDeleted(name: string) {
   if (selected.value === name) {
@@ -1436,6 +1683,8 @@ function expandSidebar() {
 function collapseDrawer() {
   if (sidebarCollapsed.value) return
   sidebarCollapsed.value = true
+  // the same Escape that closed the drawer must not arm the double-Esc stop
+  lastEscapeAt = null
   if (drawerQuery?.matches) {
     // the expand button is re-created by v-if — focus the fresh element
     nextTick(() => {
@@ -1525,6 +1774,8 @@ onMounted(() => {
   schemeQuery.addEventListener('change', onSchemeChange)
   window.addEventListener('keydown', onDrawerEscape)
   window.addEventListener('keydown', onPaletteShortcut)
+  window.addEventListener('keydown', onHelpShortcut)
+  window.addEventListener('keydown', onStopShortcut)
   refreshSessions(false)
   refreshWorkspaces(false)
   refreshLiveRuns()
@@ -1540,8 +1791,11 @@ onUnmounted(() => {
   schemeQuery.removeEventListener('change', onSchemeChange)
   window.removeEventListener('keydown', onDrawerEscape)
   window.removeEventListener('keydown', onPaletteShortcut)
+  window.removeEventListener('keydown', onHelpShortcut)
+  window.removeEventListener('keydown', onStopShortcut)
   if (sidebarTimer) clearInterval(sidebarTimer)
   if (reconnectTimer) clearTimeout(reconnectTimer)
+  if (commandNoticeTimer) clearTimeout(commandNoticeTimer)
   settingsRequest++
   resetStreamingDraft()
   es?.close()
@@ -1708,10 +1962,25 @@ onUnmounted(() => {
         @submit="startNewRun"
         @stop="requestStop"
         @open-settings="settingsOpen = true"
+        @command="onComposerCommand"
+        @notice="showNotice"
       />
     </div>
 
     <ErrorToast :messages="errors" @dismiss="(i) => errors.splice(i, 1)" />
+
+    <div v-if="commandNotice" class="command-notice" role="status" aria-live="polite">
+      <span class="command-notice-text">{{ commandNotice }}</span>
+      <button
+        type="button"
+        class="command-notice-close"
+        title="Dismiss"
+        aria-label="Dismiss notice"
+        @click="dismissNotice"
+      >
+        ×
+      </button>
+    </div>
 
     <SettingsDialog
       v-if="settingsOpen"
@@ -1744,6 +2013,30 @@ onUnmounted(() => {
       :items="paletteItems"
       @close="paletteOpen = false"
       @select="onPaletteSelect"
+    />
+    <ShortcutHelpDialog
+      v-if="helpOpen"
+      :base-commands="helpCatalog.baseCommands"
+      :commands="helpCatalog.commands"
+      :catalog-state="helpCatalogState"
+      @close="helpOpen = false"
+    />
+    <SessionStatusDialog
+      v-if="statusOpen"
+      :session="selectedSessionInfo"
+      :workspace-name="selectedWorkspaceName"
+      :mode="lastCommandMode"
+      :run-status="activeRun?.status ?? null"
+      :roles="settings"
+      :usage="usageForSelected"
+      :turns="turns"
+      :events="events.length"
+      @close="statusOpen = false"
+    />
+    <PermissionInfoDialog
+      v-if="permissionOpen"
+      @close="permissionOpen = false"
+      @open-settings="permissionOpen = false; settingsOpen = true"
     />
     </div>
     </n-message-provider>

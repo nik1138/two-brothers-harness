@@ -13,6 +13,7 @@ import type {
   RunStart,
   SearchResult,
   SessionCreateRequest,
+  SessionCompactResult,
   SessionDetail,
   SessionExportFormat,
   SessionInfo,
@@ -197,14 +198,34 @@ export async function listSkills(): Promise<SkillListResponse> {
   }
 }
 
-/** Discovered slash commands (`GET /api/commands`); metadata only. */
+/** Discovered slash commands and first-party base commands (`GET /api/commands`). */
 export async function listCommands(): Promise<CommandListResponse> {
   const body = await request<CommandListResponse | CommandInfo[]>('/api/commands')
-  if (Array.isArray(body)) return { commands: body, diagnostics: [] }
+  if (Array.isArray(body)) return { commands: body, baseCommands: [], diagnostics: [] }
+  const record = (body ?? {}) as Partial<CommandListResponse>
   return {
-    commands: Array.isArray(body?.commands) ? body.commands : [],
-    diagnostics: Array.isArray(body?.diagnostics) ? body.diagnostics : [],
+    commands: Array.isArray(record.commands) ? record.commands : [],
+    // additive: an older backend simply does not send base commands
+    baseCommands: Array.isArray(record.baseCommands) ? record.baseCommands : [],
+    diagnostics: Array.isArray(record.diagnostics) ? record.diagnostics : [],
   }
+}
+
+/**
+ * Compact one session's context in place (`POST /api/sessions/{name}/compact`).
+ * A live run rejects with 409; the response reports whether anything changed.
+ */
+export async function compactSession(name: string): Promise<SessionCompactResult> {
+  const body = await request<Partial<SessionCompactResult>>(
+    `/api/sessions/${encodeURIComponent(name)}/compact`,
+    { method: 'POST' },
+  )
+  const record = (body ?? {}) as Partial<SessionCompactResult>
+  const result: SessionCompactResult = { compacted: record.compacted === true }
+  if (typeof record.before_events === 'number') result.before_events = record.before_events
+  if (typeof record.after_events === 'number') result.after_events = record.after_events
+  if (typeof record.reason === 'string' && record.reason) result.reason = record.reason
+  return result
 }
 
 /**

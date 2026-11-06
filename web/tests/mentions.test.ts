@@ -501,13 +501,22 @@ test('listSkills/listCommands: unwrap objects and bare arrays', async () => {
   await withFetch(
     async () => fakeResponse(200, { commands, diagnostics: [] }),
     async () => {
-      assert.deepEqual(await listCommands(), { commands, diagnostics: [] })
+      // `baseCommands` is the additive first-party catalogue ([] on older bodies)
+      assert.deepEqual(await listCommands(), {
+        commands,
+        baseCommands: [],
+        diagnostics: [],
+      })
     },
   )
   await withFetch(
     async () => fakeResponse(200, commands),
     async () => {
-      assert.deepEqual(await listCommands(), { commands, diagnostics: [] })
+      assert.deepEqual(await listCommands(), {
+        commands,
+        baseCommands: [],
+        diagnostics: [],
+      })
     },
   )
 })

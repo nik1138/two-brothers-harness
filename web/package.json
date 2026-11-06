@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
-    "test": "node --import ./tests/register-ts.mjs --test tests/chat.test.ts tests/timeline.test.ts tests/drafts.test.ts tests/palette.test.ts tests/sessionStatus.test.ts tests/recents.test.ts tests/density.test.ts tests/find.test.ts tests/search.test.ts tests/workspaceOrder.test.ts tests/mentions.test.ts tests/streaming.test.ts",
+    "test": "node --import ./tests/register-ts.mjs --test tests/chat.test.ts tests/timeline.test.ts tests/drafts.test.ts tests/palette.test.ts tests/sessionStatus.test.ts tests/recents.test.ts tests/density.test.ts tests/find.test.ts tests/search.test.ts tests/workspaceOrder.test.ts tests/mentions.test.ts tests/streaming.test.ts tests/basecommands.test.ts tests/composerKeys.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {

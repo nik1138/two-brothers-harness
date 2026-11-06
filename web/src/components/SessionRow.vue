@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, useId } from 'vue'
 import { useMessage } from 'naive-ui'
-import { ApiError, deleteSession, exportSession, renameSession } from '../api'
+import { ApiError, deleteSession, renameSession } from '../api'
 import { relativeTime, sessionTitle } from '../chat'
-import { exportDownloadName } from '../search'
+import { downloadSessionExport } from '../download'
 import { deriveSessionStatus } from '../sessionStatus'
 import type { SessionStatusView } from '../sessionStatus'
 import type { SessionExportFormat, SessionInfo } from '../types'
@@ -221,28 +221,6 @@ async function commitRename() {
 
 // -- export -------------------------------------------------------------------
 
-/** Menu label and blob MIME type per download format. */
-const EXPORT_FORMATS: Record<SessionExportFormat, { label: string; mime: string }> = {
-  markdown: { label: 'Export as Markdown', mime: 'text/markdown; charset=utf-8' },
-  json: { label: 'Export as JSON', mime: 'application/json' },
-}
-
-/** Save already-fetched text through a Blob + object URL download. */
-function saveTextFile(text: string, filename: string, mime: string): void {
-  const blob = new Blob([text], { type: mime })
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = filename
-  link.rel = 'noopener'
-  link.style.display = 'none'
-  document.body.appendChild(link)
-  link.click()
-  link.remove()
-  // let the browser start the download before the object URL is invalidated
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
-}
-
 /**
  * Fetch the backend-rendered export and save it under a synthesized filename.
  * Failures stay non-blocking (the row's toast), exactly like rename/delete.
@@ -253,12 +231,7 @@ async function exportFormat(format: SessionExportFormat): Promise<void> {
   // close first: focus goes back to the trigger, which stays enabled
   closeMenu(true)
   try {
-    const text = await exportSession(props.session.name, format)
-    saveTextFile(
-      text,
-      exportDownloadName(props.session.name, format),
-      EXPORT_FORMATS[format].mime,
-    )
+    await downloadSessionExport(props.session.name, format)
     message.success(
       `${format === 'json' ? 'JSON' : 'Markdown'} export downloaded`,
     )

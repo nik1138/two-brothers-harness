@@ -8,12 +8,23 @@ import {
   listSkills,
   listWorkspaceFiles,
 } from '../api'
+import {
+  commandSectionCount,
+  commandUsageLine,
+  isBaseCommandAction,
+  mergeCommandSections,
+  parseSubmittedCommand,
+  resolveTypedCommand,
+} from '../basecommands'
+import type { ComposerCommandRequest } from '../basecommands'
+import { classifyComposerKey } from '../composerKeys'
+import type { ComposerKeyInput } from '../composerKeys'
 import { clearDraft, getDraft, setDraft } from '../drafts'
 import {
   MAX_FILE_ITEMS,
   MENTION_DEBOUNCE_MS,
   MENTION_FOOTER_HINT,
-  commandMentionItems,
+  MENTION_FOOTER_HINT_COMMAND,
   detectMentionTrigger,
   fileMentionItems,
   insertMention,
@@ -22,6 +33,7 @@ import {
 } from '../mentions'
 import type { MentionItem, MentionKind, MentionTrigger } from '../mentions'
 import type {
+  BaseCommand,
   CommandInfo,
   RunMode,
   RunProvider,
@@ -67,6 +79,10 @@ const emit = defineEmits<{
   submit: [payload: { task: string; mode: RunMode; provider: RunProvider | null }]
   stop: []
   openSettings: []
+  /** A first-party base action chosen from the `/` menu or typed directly. */
+  command: [request: ComposerCommandRequest]
+  /** Neutral, composer-local notice for the shell to surface (usage errors…). */
+  notice: [message: string]
 }>()
 
 interface ModeOption {
@@ -222,7 +238,7 @@ const statusHint = computed(() => {
     return props.stopping ? 'Stopping the run…' : 'The brothers are working — stop to interrupt.'
   }
   if (props.waiting) return 'Drafting only — sending unlocks when this run finishes.'
-  return 'Enter to send · Shift+Enter for a new line'
+  return 'Enter to send · Shift+Enter new line · Ctrl/⌘+Enter send now'
 })
 
 const settingsHint = computed(
@@ -308,9 +324,16 @@ function submit() {
   // `waiting` keeps the textarea usable for drafting, but a new run cannot
   // start while this session's run is still alive.
   if (!text || props.busy || props.waiting) return
+  // a typed `/action` is performed locally instead of becoming a run
+  if (interceptCommandSubmit()) return
   emit('submit', { task: text, mode: mode.value, provider: providerForRun.value })
   // The run accepted the text — submit consumes every draft form. A blocked
   // submit returned above, so text and drafts stay intact.
+  consumeComposerText()
+}
+
+/** Clear the whole draft (a submit or a consumed base command). */
+function consumeComposerText() {
   cancelDraftSave()
   clearDraft(props.sessionId)
   unsessionedDraft = ''
@@ -334,6 +357,7 @@ let pickerDismissed: MentionTrigger | null = null
 
 const skills = ref<SkillInfo[]>([])
 const commands = ref<CommandInfo[]>([])
+const baseCommands = ref<BaseCommand[]>([])
 const skillsState = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
 const commandsState = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
 let skillsRequest = 0
@@ -349,7 +373,11 @@ let filesTimer: ReturnType<typeof setTimeout> | null = null
 
 const pickerKind = computed<MentionKind | null>(() => pickerTrigger.value?.kind ?? null)
 const pickerQuery = computed(() => pickerTrigger.value?.query ?? '')
-const commandItems = computed(() => commandMentionItems(commands.value, pickerQuery.value))
+/** `/` menu: built-in base commands + discovered templates, filtered by query. */
+const commandSections = computed(() =>
+  mergeCommandSections(commands.value, baseCommands.value, pickerQuery.value),
+)
+const commandRowCount = computed(() => commandSectionCount(commandSections.value))
 const skillItems = computed(() => skillMentionItems(skills.value, pickerQuery.value))
 const fileItems = computed(() => fileMentionItems(files.value))
 
@@ -359,6 +387,8 @@ interface PickerRow {
 }
 
 interface PickerGroupView {
+  /** Unique per rendered section (aria ids, not just the kind). */
+  id: string
   kind: MentionKind
   label: string
   rows: PickerRow[]
@@ -368,13 +398,23 @@ interface PickerGroupView {
 const pickerGroups = computed<PickerGroupView[]>(() => {
   const kind = pickerKind.value
   if (!kind) return []
-  const sections: Array<{ kind: MentionKind; label: string; items: MentionItem[] }> =
+  const sections: Array<{
+    id: string
+    kind: MentionKind
+    label: string
+    items: MentionItem[]
+  }> =
     kind === 'command'
-      ? [{ kind: 'command', label: 'Commands', items: commandItems.value }]
+      ? commandSections.value.map((section) => ({
+          id: section.id,
+          kind: 'command' as const,
+          label: section.label,
+          items: section.items,
+        }))
       : [
-          { kind: 'skill', label: 'Skills', items: skillItems.value },
+          { id: 'skills', kind: 'skill' as const, label: 'Skills', items: skillItems.value },
           ...(kind === 'file'
-            ? [{ kind: 'file' as const, label: 'Files', items: fileItems.value }]
+            ? [{ id: 'files', kind: 'file' as const, label: 'Files', items: fileItems.value }]
             : []),
         ]
   let index = 0
@@ -382,6 +422,7 @@ const pickerGroups = computed<PickerGroupView[]>(() => {
   for (const section of sections) {
     if (!section.items.length) continue
     groups.push({
+      id: section.id,
       kind: section.kind,
       label: section.label,
       rows: section.items.map((item) => ({ item, index: index++ })),
@@ -400,6 +441,10 @@ const activeOptionId = computed(() => {
   if (!pickerOpen.value || !item || item.disabled) return undefined
   return mentionOptionId(pickerActive.value)
 })
+const pickerFootHint = computed(() =>
+  pickerKind.value === 'command' ? MENTION_FOOTER_HINT_COMMAND : MENTION_FOOTER_HINT,
+)
+const pickerHintLabel = computed(() => mentionPickerHint(pickerKind.value ?? 'file'))
 
 /** Honest per-section status lines (loading / empty / unavailable). */
 const pickerNotes = computed<string[]>(() => {
@@ -436,10 +481,12 @@ const pickerNotes = computed<string[]>(() => {
   }
 
   if (kind === 'command') {
+    const catalogSize = baseCommands.value.length + commands.value.length
     if (commandsState.value === 'error') notes.push('Slash commands are unavailable.')
-    else if (!commandItems.value.length) {
+    else if (commandRowCount.value === 0) {
       if (commandsState.value === 'loading') notes.push('Loading commands…')
-      else notes.push(query ? 'No matching commands' : 'No commands discovered')
+      else if (query && catalogSize > 0) notes.push('No matching commands')
+      else notes.push('No commands available')
     }
   }
 
@@ -495,6 +542,8 @@ async function loadCommandsCatalog(): Promise<void> {
     const response = await listCommands()
     if (request !== commandsRequest) return
     commands.value = response.commands
+    // additive field: an older backend has no base commands at all
+    baseCommands.value = response.baseCommands
     commandsState.value = 'ready'
   } catch {
     if (request !== commandsRequest) return
@@ -514,6 +563,7 @@ function resetCatalogs(): void {
   commandsRequest += 1
   skills.value = []
   commands.value = []
+  baseCommands.value = []
   skillsState.value = 'idle'
   commandsState.value = 'idle'
 }
@@ -737,9 +787,136 @@ function insertPickerItem(item: MentionItem | null): boolean {
   return true
 }
 
+// -- first-party base commands (actions run locally) -------------------------
+// Selecting a base action row (or typing `/action` and pressing Enter) never
+// submits a run: the composer consumes the command text and emits `command` for
+// the shell to perform it. Actions that need arguments are inserted first so
+// the operator can type them; an unsupported action becomes a clear notice.
+
+/** The textarea value is the source of truth (v-model can lag one event). */
+function composerValue(): string {
+  return inputEl.value?.value ?? task.value
+}
+
+function composerCaret(): number {
+  const el = inputEl.value
+  return el && typeof el.selectionStart === 'number'
+    ? el.selectionStart
+    : composerValue().length
+}
+
+/** Replace the consumed command span, keep any other draft text, refocus. */
+function consumeCommandSpan(start: number, caret: number): void {
+  const text = composerValue()
+  const from = Math.min(Math.max(start, 0), text.length)
+  const to = Math.min(Math.max(caret, from), text.length)
+  const next = `${text.slice(0, from)}${text.slice(to)}`
+  task.value = next
+  cancelDraftSave()
+  if (!next.trim()) {
+    clearDraft(props.sessionId)
+    unsessionedDraft = ''
+  }
+  void nextTick(() => {
+    const textarea = inputEl.value
+    if (!textarea) return
+    textarea.focus()
+    try {
+      textarea.setSelectionRange(from, from)
+    } catch {
+      // a detached/disabled textarea must never throw while restoring the caret
+    }
+    resizeInput()
+  })
+}
+
+function emitCommandRequest(
+  action: ComposerCommandRequest['action'],
+  name: string,
+  args: string,
+  requiresArguments: boolean,
+): void {
+  emit('command', {
+    action,
+    name,
+    args,
+    requiresArguments,
+    baseCommands: [...baseCommands.value],
+    commands: [...commands.value],
+    mode: mode.value,
+  })
+}
+
+/** Run one picker row: action rows act/insert locally, everything else inserts. */
+function activatePickerRow(item: MentionItem | null): boolean {
+  if (!item || item.disabled) return false
+  if (item.action !== undefined) {
+    // an action that needs arguments is inserted (`/mode `), never an instant error
+    if (item.requiresArguments) return insertPickerItem(item)
+    return runActionRow(item)
+  }
+  return insertPickerItem(item)
+}
+
+function runActionRow(item: MentionItem): boolean {
+  const action = item.action
+  if (action === undefined || !isBaseCommandAction(action)) return false
+  const trigger = pickerTrigger.value
+  const start = trigger?.kind === 'command' ? trigger.start : 0
+  const caret = composerCaret()
+  closePicker()
+  consumeCommandSpan(start, caret)
+  if (action === 'mode') {
+    // the cooperation mode is a composer-local control
+    openModePicker()
+    return true
+  }
+  emitCommandRequest(action, item.label.replace(/^\//, ''), '', item.requiresArguments === true)
+  return true
+}
+
+/**
+ * A `/command args` line typed directly: base actions run locally, prompt
+ * commands submit (the server expands them). Returns true when the composer
+ * consumed the text instead of submitting a run.
+ */
+function interceptCommandSubmit(): boolean {
+  const submitted = parseSubmittedCommand(task.value)
+  if (!submitted) return false
+  const resolution = resolveTypedCommand(baseCommands.value, commands.value, submitted.token)
+  if (resolution.kind === 'base-action') {
+    const command = resolution.command
+    const args = submitted.args.trim()
+    if (command.requiresArguments && args === '') {
+      emit('notice', `Usage: ${commandUsageLine(command)}`)
+      return true
+    }
+    if (!isBaseCommandAction(command.action)) {
+      emit('notice', `/${command.name} is not available in the web workspace yet.`)
+      return true
+    }
+    consumeComposerText()
+    if (command.action === 'mode') {
+      openModePicker()
+      return true
+    }
+    emitCommandRequest(command.action, command.name, args, command.requiresArguments)
+    return true
+  }
+  if (
+    resolution.kind === 'base-prompt' &&
+    resolution.command.requiresArguments &&
+    submitted.args.trim() === ''
+  ) {
+    // fail loudly with the usage line instead of submitting an empty template
+    emit('notice', `Usage: ${commandUsageLine(resolution.command)}`)
+    return true
+  }
+  return false
+}
+
 /** Scroll only the picker list so the active row stays visible. */
-function scrollActiveIntoView(): void {
-  const list = pickerList.value
+function scrollActiveIntoView(): void {  const list = pickerList.value
   const index = pickerActive.value
   if (!list || index < 0) return
   const option = list.querySelector<HTMLElement>(`#${mentionOptionId(index)}`)
@@ -753,52 +930,61 @@ function scrollActiveIntoView(): void {
   }
 }
 
+function keyInput(e: KeyboardEvent): ComposerKeyInput {
+  return {
+    key: e.key,
+    shiftKey: e.shiftKey,
+    ctrlKey: e.ctrlKey,
+    metaKey: e.metaKey,
+    altKey: e.altKey,
+    isComposing: e.isComposing,
+    keyCode: e.keyCode,
+    repeat: e.repeat,
+  }
+}
+
 /** Keys owned by the open picker; returns true when the event was consumed. */
 function onPickerKeydown(e: KeyboardEvent): boolean {
-  switch (e.key) {
-    case 'Escape':
+  switch (classifyComposerKey(keyInput(e), true)) {
+    case 'picker-close':
       e.preventDefault()
       e.stopPropagation()
       dismissPicker()
       return true
-    case 'ArrowDown':
+    case 'picker-accept':
+      e.preventDefault()
+      if (!activatePickerRow(activePickerItem())) closePicker()
+      return true
+    case 'picker-next':
       e.preventDefault()
       stepPicker(1)
       return true
-    case 'ArrowUp':
+    case 'picker-prev':
       e.preventDefault()
       stepPicker(-1)
       return true
-    case 'Enter': {
-      if (e.shiftKey) return false // Shift+Enter keeps inserting a newline
-      e.preventDefault()
-      if (!insertPickerItem(activePickerItem())) closePicker()
-      return true
-    }
-    case 'Tab': {
-      if (e.shiftKey) return false
-      if (insertPickerItem(activePickerItem())) {
-        e.preventDefault()
-        return true
-      }
-      closePicker()
+    case 'newline':
       return false
-    }
     default:
       return false
   }
 }
 
 function onKeydown(e: KeyboardEvent) {
-  // let an IME finish its composition instead of acting on a partial word
-  if (e.isComposing || e.keyCode === 229) return
-  // an open picker owns Enter (never submit), arrows, Tab and Esc
+  // an open picker owns Enter/Tab/arrows/Escape: Enter/Tab accept, Shift+Enter
+  // keeps the newline, Shift+Tab/Escape close, and Enter can never submit
   if (pickerOpen.value && onPickerKeydown(e)) return
   // while waiting Enter must stay a newline — the text is a draft, not a task
   if (props.busy || props.waiting) return
-  if (e.key !== 'Enter' || e.shiftKey) return
-  e.preventDefault()
-  submit()
+  switch (classifyComposerKey(keyInput(e), false)) {
+    case 'submit':
+    case 'submit-accelerated':
+      e.preventDefault()
+      submit()
+      break
+    default:
+      break
+  }
 }
 
 watch(pickerFlat, ensureActive)
@@ -839,6 +1025,18 @@ function chooseMode(value: RunMode) {
   if (props.busy) return
   mode.value = value
   closeMode(true)
+}
+
+/** Open the existing mode control (used by the `/mode` base action). */
+function openModePicker(): void {
+  if (props.busy) return
+  modeOpen.value = true
+  void nextTick(() => {
+    const checked =
+      modeMenu.value?.querySelector<HTMLInputElement>('input[type="radio"]:checked') ??
+      modeMenu.value?.querySelector<HTMLInputElement>('input[type="radio"]')
+    checked?.focus()
+  })
 }
 
 // -- model route popover ------------------------------------------------------
@@ -938,6 +1136,9 @@ onMounted(() => {
   resizeInput()
   window.addEventListener('resize', resizeInput)
   void checkSettings()
+  // typed `/action` lines are resolved locally, so warm the command catalog
+  // immediately instead of waiting for the picker's first open
+  void loadCommandsCatalog()
 })
 
 onBeforeUnmount(() => {
@@ -971,17 +1172,17 @@ onBeforeUnmount(() => {
           ref="pickerList"
           class="mention-list"
           role="listbox"
-          :aria-label="mentionPickerHint(pickerKind ?? 'file')"
+          :aria-label="pickerHintLabel"
         >
           <div
             v-for="group in pickerGroups"
-            :key="group.kind"
+            :key="group.id"
             class="mention-group"
             role="group"
-            :aria-labelledby="`composer-mention-${group.kind}-label`"
+            :aria-labelledby="`composer-mention-${group.id}-label`"
           >
             <div
-              :id="`composer-mention-${group.kind}-label`"
+              :id="`composer-mention-${group.id}-label`"
               class="mention-group-label"
             >
               {{ group.label }}
@@ -996,11 +1197,12 @@ onBeforeUnmount(() => {
               role="option"
               :aria-disabled="row.item.disabled || undefined"
               :aria-selected="pickerActive === row.index"
-              :title="row.item.token || row.item.label"
+              :title="row.item.hint || row.item.label"
               @mousedown.prevent
-              @click="insertPickerItem(row.item)"
+              @click="activatePickerRow(row.item)"
             >
               <span class="mention-option-label">{{ row.item.label }}</span>
+              <span v-if="row.item.action" class="mention-badge">action</span>
               <span v-if="row.item.hint" class="mention-option-hint">{{ row.item.hint }}</span>
             </div>
           </div>
@@ -1010,7 +1212,7 @@ onBeforeUnmount(() => {
           <p v-for="note in pickerNotes" :key="note" class="mention-note">{{ note }}</p>
         </div>
 
-        <div class="mention-foot">{{ MENTION_FOOTER_HINT }}</div>
+        <div class="mention-foot">{{ pickerFootHint }}</div>
       </div>
 
       <textarea
@@ -1225,7 +1427,7 @@ onBeforeUnmount(() => {
 
       <div class="composer-foot">
         <span v-if="pickerOpen" class="composer-hint" role="status">
-          {{ MENTION_FOOTER_HINT }}
+          {{ pickerFootHint }}
         </span>
         <span v-else-if="settingsMissing" class="composer-hint is-warn">{{ settingsHint }}</span>
         <span v-else class="composer-hint" role="status">{{ statusHint }}</span>
@@ -1536,6 +1738,19 @@ onBeforeUnmount(() => {
 
 .mention-option[aria-selected='true'] .mention-option-label {
   font-weight: 600;
+}
+
+/* `/` action rows: a small chip keeps run-local actions distinct from prompts. */
+.mention-badge {
+  flex: none;
+  padding: 0.02rem 0.32rem;
+  font-size: 0.6rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 999px;
 }
 
 .mention-option-hint {
