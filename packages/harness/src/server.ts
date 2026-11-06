@@ -46,7 +46,11 @@
  *   curated seed table (`presets.ts`) is always present, with stored presets
  *   of the same name layered on top; seed keys resolve through their
  *   `api_key_env` variable at use time and only `api_key_set` leaves the
- *   server.
+ *   server. `GET /api/providers` additively reports, per row, `seed` (the name
+ *   exists in the built-in seed table, case-insensitive) and `customized` (a
+ *   stored preset with that name exists — a PUT-created seed override or a
+ *   POST-created custom provider), so clients can tell an untouched seed from
+ *   an edited one from a custom entry.
  * - `GET /api/plugins` lists the plugins discovered by the PluginManager
  *   (`src/plugins.ts`, the plugins.py port) plus load errors, and additively
  *   `diagnostics` (load-time notes plus the last run's binding notes) when
@@ -194,7 +198,13 @@ import {
   type PluginBindings,
   type PluginDiagnosticEntry,
 } from "./plugins.ts";
-import { mergeSeedPresets, presetApiKey, presetById, type Preset } from "./presets.ts";
+import {
+  isSeedPresetName,
+  mergeSeedPresets,
+  presetApiKey,
+  presetById,
+  type Preset,
+} from "./presets.ts";
 import { emptyUsage, type Provider } from "./provider.ts";
 import { restoreContext, SessionStore } from "./session.ts";
 import {
@@ -2078,7 +2088,24 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   routes.push(
     compileRoute("GET", "/api/providers", () => {
       // Seeds first (display order), stored presets layered on top by name.
-      return { providers: mergedPresets().map(publicPreset) };
+      // Additive `seed`/`customized` flags (old clients ignore them) let a
+      // master-detail UI distinguish the four row states:
+      // - seed: the name exists in the built-in seed table (case-insensitive,
+      //   the same lookup `presetById`/`mergeSeedPresets` use);
+      // - customized: a stored preset with that name exists — a PUT-created
+      //   override of a seed, or a POST-created custom provider.
+      const storedNames = new Set(
+        state.settingsStore
+          .readProviders()
+          .map((preset) => preset.name.trim().toLowerCase()),
+      );
+      return {
+        providers: mergedPresets().map((preset) => ({
+          ...publicPreset(preset),
+          seed: isSeedPresetName(preset.name),
+          customized: storedNames.has(preset.name.trim().toLowerCase()),
+        })),
+      };
     }),
   );
 

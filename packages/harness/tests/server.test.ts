@@ -1579,6 +1579,116 @@ test("provider presets: CRUD, masking, duplicate 409, ref clearing", async () =>
   }
 });
 
+test("provider presets: GET exposes additive seed/customized flags", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tb-provider-flags-"));
+  try {
+    const first = await startServer({ sessionsDir: dir });
+    try {
+      // Fresh server: every listed row is an untouched seed, and the two flags
+      // are appended after the existing fields (order and values unchanged).
+      const seeded = (await get<Record<string, any>>(first.base, "/api/providers")).body
+        .providers as Array<Record<string, any>>;
+      const openai = seeded.find((preset) => preset.name === "openai");
+      assert.ok(openai);
+      assert.deepEqual(Object.keys(openai), [
+        "name",
+        "base_url",
+        "api_key_set",
+        "kind",
+        "models",
+        "seed",
+        "customized",
+      ]);
+      assert.equal(openai.seed, true);
+      assert.equal(openai.customized, false);
+      assert.equal(seeded.find((preset) => preset.name === "custom")?.seed, true);
+      assert.equal(seeded.find((preset) => preset.name === "custom")?.customized, false);
+
+      // A POST-created provider is not a seed; its key is masked, never echoed.
+      const created = await post<Record<string, any>>(first.base, "/api/providers", {
+        name: "Mine",
+        base_url: "http://127.0.0.1:5555/v1",
+        api_key: "provider-secret",
+        models: ["m1"],
+      });
+      assert.equal(created.status, 201);
+      const withCustom = (await get<Record<string, any>>(first.base, "/api/providers")).body
+        .providers as Array<Record<string, any>>;
+      const mine = withCustom.find((preset) => preset.name === "Mine");
+      assert.ok(mine);
+      assert.equal(mine.seed, false);
+      assert.equal(mine.customized, true);
+      assert.equal(mine.api_key_set, true);
+      assert.ok(!JSON.stringify(withCustom).includes("provider-secret"));
+
+      // PUT-editing a seed materializes a stored override: still a seed row,
+      // now customized, and the edited values win in place.
+      const edited = await api<Record<string, any>>(
+        first.base,
+        "PUT",
+        "/api/providers/DeepSeek",
+        { base_url: "https://proxy.example/v1", models: ["deepseek-chat"] },
+      );
+      assert.equal(edited.status, 200);
+      const afterEdit = (await get<Record<string, any>>(first.base, "/api/providers")).body
+        .providers as Array<Record<string, any>>;
+      const deepseek = afterEdit.find((preset) => preset.name === "deepseek");
+      assert.ok(deepseek);
+      assert.equal(deepseek.seed, true);
+      assert.equal(deepseek.customized, true);
+      assert.equal(deepseek.base_url, "https://proxy.example/v1");
+      assert.deepEqual(deepseek.models, ["deepseek-chat"]);
+      assert.equal(
+        afterEdit.filter((preset) => preset.name.toLowerCase() === "deepseek").length,
+        1,
+        "the override replaces the seed row instead of duplicating it",
+      );
+    } finally {
+      await first.close();
+    }
+
+    // The stored override survives a restart over the same sessions directory.
+    const second = await startServer({ sessionsDir: dir });
+    try {
+      const restarted = (await get<Record<string, any>>(second.base, "/api/providers")).body
+        .providers as Array<Record<string, any>>;
+      const deepseek = restarted.find((preset) => preset.name === "deepseek");
+      assert.ok(deepseek);
+      assert.equal(deepseek.seed, true);
+      assert.equal(deepseek.customized, true);
+      assert.equal(deepseek.base_url, "https://proxy.example/v1");
+      assert.deepEqual(deepseek.models, ["deepseek-chat"]);
+      assert.equal(restarted.find((preset) => preset.name === "Mine")?.customized, true);
+      assert.equal(restarted.find((preset) => preset.name === "Mine")?.seed, false);
+
+      // Deleting the override restores the pristine seed row (values included).
+      assert.equal((await api(second.base, "DELETE", "/api/providers/deepseek")).status, 200);
+      const restored = (await get<Record<string, any>>(second.base, "/api/providers")).body
+        .providers as Array<Record<string, any>>;
+      const seedAgain = restored.find((preset) => preset.name === "deepseek");
+      assert.ok(seedAgain);
+      assert.equal(seedAgain.seed, true);
+      assert.equal(seedAgain.customized, false);
+      assert.equal(seedAgain.base_url, "https://api.deepseek.com/v1");
+      assert.deepEqual(seedAgain.models, ["deepseek-chat", "deepseek-reasoner"]);
+
+      // Deleting the custom provider removes the row entirely.
+      assert.equal((await api(second.base, "DELETE", "/api/providers/mine")).status, 200);
+      const final = (await get<Record<string, any>>(second.base, "/api/providers")).body
+        .providers as Array<Record<string, any>>;
+      assert.ok(!final.some((preset) => preset.name === "Mine"));
+      assert.ok(
+        final.every((preset) => preset.customized === false),
+        "only pristine seed rows remain",
+      );
+    } finally {
+      await second.close();
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Misc contract endpoints
 // ---------------------------------------------------------------------------

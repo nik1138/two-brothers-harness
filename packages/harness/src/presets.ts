@@ -130,6 +130,16 @@ export function presetById(id: string): Preset | undefined {
   return loose ? copyPreset(loose) : undefined;
 }
 
+/**
+ * True when `name` is a built-in seed preset id. Reuses
+ * {@link presetById}'s exact-then-case-insensitive lookup, so the server's
+ * `GET /api/providers` `seed` flag can never disagree with
+ * {@link mergeSeedPresets} about which names are built in.
+ */
+export function isSeedPresetName(name: string): boolean {
+  return presetById(name) !== undefined;
+}
+
 /** Seed ids in display order (for onboarding help and error messages). */
 export function presetIds(): string[] {
   return SEED_PRESETS.map((preset) => preset.name);

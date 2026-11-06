@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  isSeedPresetName,
   mergeSeedPresets,
   presetApiKey,
   presetById,
@@ -60,6 +61,17 @@ test("presetById: exact, case-insensitive and unknown lookups", () => {
   assert.equal(presetById("  deepseek  ")?.name, "deepseek");
   assert.equal(presetById("nope"), undefined);
   assert.equal(presetById(""), undefined);
+});
+
+test("isSeedPresetName: the same case-insensitive lookup presetById uses", () => {
+  for (const id of presetIds()) assert.equal(isSeedPresetName(id), true, id);
+  assert.equal(isSeedPresetName("OpenAI"), true);
+  assert.equal(isSeedPresetName("  DEEPSEEK  "), true);
+  assert.equal(isSeedPresetName("lmstudio"), true);
+  assert.equal(isSeedPresetName("mine"), false);
+  assert.equal(isSeedPresetName("openai-proxy"), false);
+  assert.equal(isSeedPresetName(""), false);
+  assert.equal(isSeedPresetName("   "), false);
 });
 
 test("seedPresets: fresh copies (callers cannot corrupt the table)", () => {
