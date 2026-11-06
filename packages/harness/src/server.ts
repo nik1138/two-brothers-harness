@@ -61,7 +61,21 @@
  *   tools, file) with discovery diagnostics — metadata only, never bodies.
  * - `GET /api/commands` lists discovered slash commands (name, description,
  *   argumentHint, optional mode, file) with the same kind of diagnostics —
- *   metadata only, never the template bodies.
+ *   metadata only, never the template bodies. Additively it carries the
+ *   first-party catalogue in `baseCommands` (`basecommands.ts`: name, aliases,
+ *   description, argumentHint, kind, action?, requiresArguments, priority —
+ *   always present, bodies never); a base `prompt` command expands exactly like
+ *   a discovered one on run submission (a discovered same-name template wins),
+ *   and a base `action` command submitted as a task is a 400 telling the
+ *   operator to perform it from the surface.
+ * - `POST /api/sessions/{name}/compact` manually summarises the older context
+ *   of one session (`compaction.ts::compactContext`) through the same provider
+ *   construction a run uses, rewriting the session JSONL in place (dense
+ *   `seq`, unchanged shape) so a reload shows the summary. 404 unknown
+ *   session, 409 while a run for that session is queued/running/waiting, 200
+ *   `{compacted: true, before_events, after_events}` or — honestly, not an
+ *   error — `{compacted: false, reason: "nothing to compact"}`, and 502 when
+ *   the summarizer/provider fails (nothing is written in that case).
  * - `GET /api/search?q=<query>&limit=<n>` full-text searches every session
  *   document (`src/sessionsearch.ts`, newest session first) and returns the
  *   bounded `SessionSearchResult` hit list. A trimmed query shorter than
@@ -103,14 +117,16 @@
  *   counts matches before the page; an unknown id is a 404.
  * - `POST /api/runs` and the legacy `POST /api/run` prepare the operator
  *   submission (`mentions.ts`): a known leading `/name` expands its slash
- *   command template — and may override the run mode for that run only; an
- *   unknown `/name` is submitted verbatim. `@skill:<name>` attaches a shared
- *   skill body (3 max; role-scoped skills are refused), and `@<path>` attaches
- *   a workspace file read read-only through `Workspace.read_file` (5 max,
- *   20 000 chars each, 100 000 total; absolute/`..`/sensitive/missing/binary
- *   paths are 400s). Rendered `<skill-loaded>`/`<file>` blocks are appended to
- *   the shared context before the task, so they persist in the session JSONL;
- *   preparation errors are 400s raised before any session or run exists.
+ *   command template — a discovered template first, then a base `prompt`
+ *   command — and may override the run mode for that run only; a base `action`
+ *   command is a 400, and an unknown `/name` is submitted verbatim. `@skill:<name>`
+ *   attaches a shared skill body (3 max; role-scoped skills are refused), and
+ *   `@<path>` attaches a workspace file read read-only through
+ *   `Workspace.read_file` (5 max, 20 000 chars each, 100 000 total;
+ *   absolute/`..`/sensitive/missing/binary paths are 400s). Rendered
+ *   `<skill-loaded>`/`<file>` blocks are appended to the shared context before
+ *   the task, so they persist in the session JSONL; preparation errors are
+ *   400s raised before any session or run exists.
  * - Local-request guards (SECURITY.md: local single-user, loopback only):
  *   while every binding is loopback, requests with a non-loopback `Host`
  *   (DNS-rebinding defense) and state-changing requests with a non-local
@@ -131,7 +147,14 @@ import {
   validateRunConfig,
   type Config,
 } from "./config.ts";
-import type { CompactionSettings } from "./compaction.ts";
+import {
+  baseCommandMetadata,
+  baseCommandUsage,
+  expandBaseCommand,
+  findBaseCommand,
+  type BaseCommand,
+} from "./basecommands.ts";
+import { compactContext, type CompactionSettings } from "./compaction.ts";
 import { discoverCommands, expandCommand, matchCommand, type CommandCatalog } from "./commands.ts";
 import { SharedContext } from "./context.ts";
 import { TwoBrothersHarness, type HarnessResult, type ToolScopes } from "./harness.ts";
@@ -922,6 +945,49 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   }
 
   /**
+   * Compaction settings for a manual `POST /api/sessions/{name}/compact`: the
+   * server's configured settings (`ServerOptions.compaction`), with the
+   * run-level context window filling in when none is configured — the same
+   * precedence the harness applies to auto compaction (`compactionSettings`).
+   * With nothing configured the budget defaults still apply, so an explicit
+   * `/compact` on a long session is meaningful even when auto compaction is
+   * off; the request never invents a threshold/trigger, it just summarises the
+   * older context.
+   */
+  function manualCompactionSettings(cfg: Config): CompactionSettings {
+    const configured = options.compaction;
+    const configuredWindow = configured?.contextWindow ?? 0;
+    const window = configuredWindow > 0 ? configuredWindow : (cfg.contextWindow ?? 0);
+    if (configured === undefined) return window > 0 ? { contextWindow: window } : {};
+    if (configuredWindow > 0 || window <= 0) return configured;
+    return { ...configured, contextWindow: window };
+  }
+
+  /**
+   * Build the summarizer provider for a manual compaction through the exact
+   * provider construction a run uses (per-role resolved endpoints / presets +
+   * the server's test provider overrides) so the endpoint never grows a second
+   * HTTP client path. A construction failure is a 502: the operator cannot fix
+   * a provider from the request body.
+   */
+  function summarizerProvider(
+    cfg: Config,
+    endpoints: RoleEndpoints,
+    role: "senior" | "junior",
+  ): Provider {
+    try {
+      const harness = new TwoBrothersHarness(cfg, {
+        endpoints,
+        ...(providerOverrides?.senior ? { senior: providerOverrides.senior } : {}),
+        ...(providerOverrides?.junior ? { junior: providerOverrides.junior } : {}),
+      });
+      return role === "senior" ? harness.providers.senior : harness.providers.junior;
+    } catch (exc) {
+      throw new HttpError(502, `cannot build the summarizer provider: ${errorDetail(exc)}`);
+    }
+  }
+
+  /**
    * The seeded preset table with the stored presets layered on top: a stored
    * preset whose name matches a seed replaces it (user edits win), a stored
    * preset with no key of its own keeps the seed's `api_key_env` so editing a
@@ -1199,13 +1265,37 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   }
 
   /**
+   * The 400 for submitting a built-in *action* command as a task. Actions are
+   * performed by a surface (the web composer, the TUI, the CLI), never expanded
+   * into a prompt: this route cannot do anything meaningful with one, so it
+   * says what to do instead rather than submitting an empty turn.
+   */
+  function actionCommandError(command: BaseCommand): HttpError {
+    if (command.action === "compact") {
+      return new HttpError(
+        400,
+        "/compact is a built-in action, not a task: compact this session from the " +
+          "composer/TUI (POST /api/sessions/{name}/compact) instead.",
+      );
+    }
+    return new HttpError(
+      400,
+      `/${command.name} is a built-in action, not a task: perform it in the composer/TUI instead.`,
+    );
+  }
+
+  /**
    * Prepare one operator submission, shared by `POST /api/runs` and the legacy
    * `POST /api/run`.
    *
-   * 1. A leading `/name` the slash-command catalogue knows expands its
-   *    template (`matchCommand` + `expandCommand`) and may override the run
-   *    mode; an unknown slash name is submitted verbatim, so tasks may
-   *    legitimately start with `/` (`/usr/bin/...`).
+   * 1. A leading `/name` resolves in this order: a discovered `<name>.md`
+   *    template first (an operator override keeps priority), then the
+   *    first-party base catalogue. A prompt command — discovered or base —
+   *    expands its template (`matchCommand` + `expandCommand` /
+   *    `expandBaseCommand`) and may override the run mode; an action base
+   *    command is a 400 (a surface performs it), and an unknown slash name is
+   *    submitted verbatim, so tasks may legitimately start with `/`
+   *    (`/usr/bin/...`).
    * 2. `@skill:<name>` mentions attach the skill body: only `shared` skills may
    *    be operator mentions; count/unknown/role-scope problems are 400s.
    * 3. `@<path>` file mentions require the operator's workspace; paths are
@@ -1227,8 +1317,21 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     if (invocation !== null) {
       const command = commandCatalog().commands.find((entry) => entry.name === invocation.name);
       if (command !== undefined) {
+        // A discovered `<name>.md` always wins over a same-named base command.
         task = expandCommand(command, invocation.args);
         if (command.mode !== undefined) modeOverride = command.mode;
+      } else {
+        const base = findBaseCommand(invocation.name);
+        if (base !== undefined) {
+          if (base.kind === "action") throw actionCommandError(base);
+          try {
+            task = expandBaseCommand(base, invocation.args);
+          } catch {
+            // `requiresArguments` (or a malformed catalogue entry): a usage 400.
+            throw new HttpError(400, `usage: ${baseCommandUsage(base)}`);
+          }
+          if (base.mode !== undefined) modeOverride = base.mode;
+        }
       }
     }
     // An empty command template must not become an empty task envelope.
@@ -1692,6 +1795,46 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   );
 
   routes.push(
+    compileRoute("POST", "/api/sessions/{name}/compact", async (ctx) => {
+      const name = sessionFileName(ctx.params.name);
+      const store = storeFor(name);
+      if (!store.exists()) throw new HttpError(404, "not found");
+      // Never compact under a live turn: a queued/running/waiting run owns the
+      // context and would append to (or rewrite) the same session file.
+      const live = state.runs.list().some(
+        (record) => record.session === name && ACTIVE_STATES.has(String(record.status)),
+      );
+      if (live) {
+        throw new HttpError(409, "a run is active for this session; stop it before compacting");
+      }
+      // Load exactly like a resumed run, then summarise through the same
+      // provider construction a run uses. `compactContext` rewrites the store
+      // only when it actually compacted (temp file + rename, dense `seq`, JSONL
+      // shape untouched), so any failure leaves the session byte-identical.
+      const context = restoreContext(store);
+      let settings: CompactionSettings;
+      let provider: Provider;
+      try {
+        const { cfg, endpoints } = buildCfg({ task: "compact" });
+        settings = manualCompactionSettings(cfg);
+        provider = summarizerProvider(cfg, endpoints, settings.summarizerRole ?? "senior");
+      } catch (exc) {
+        if (exc instanceof HttpError) throw exc;
+        throw new HttpError(502, errorDetail(exc));
+      }
+      const before = context.events.length;
+      let compacted: boolean;
+      try {
+        compacted = await compactContext(context, provider, settings);
+      } catch (exc) {
+        throw new HttpError(502, errorDetail(exc));
+      }
+      if (!compacted) return { compacted: false, reason: "nothing to compact" };
+      return { compacted: true, before_events: before, after_events: context.events.length };
+    }),
+  );
+
+  routes.push(
     compileRoute("DELETE", "/api/sessions/{name}", async (ctx) => {
       const safe = sessionFileName(ctx.params.name);
       const store = storeFor(safe);
@@ -1822,7 +1965,10 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   routes.push(
     compileRoute("GET", "/api/commands", () => {
       // Metadata only — the template bodies stay out of the response; the
-      // REPL expands one on demand (`expandCommand`).
+      // REPL expands one on demand (`expandCommand`). `baseCommands` is the
+      // additive first-party catalogue (also present with no command roots):
+      // prompt commands expand on submission, action commands are performed by
+      // a surface and are a 400 when submitted as a task.
       const catalog = commandCatalog();
       return {
         commands: catalog.commands.map((command) => ({
@@ -1832,6 +1978,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
           ...(command.mode ? { mode: command.mode } : {}),
           file: command.file,
         })),
+        baseCommands: baseCommandMetadata(),
         diagnostics: [...catalog.diagnostics],
       };
     }),

@@ -46,6 +46,7 @@ import "./providerwarnings.test.ts";
 import "./cliwiring.test.ts";
 import "./serveshutdown.test.ts";
 import "./apicommands.test.ts";
+import "./serverbase.test.ts";
 import "./integration.test.ts";
 import "./tui.test.ts";
 import "./tuieditor.test.ts";
