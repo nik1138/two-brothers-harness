@@ -332,6 +332,27 @@ Design anchors that already exist:
   fallback returns `"rebuilt": true`; live records omit it. Tests:
   `tests/server.test.ts`.
 
+## Shipped 2026-11-06 (search/export, TUI find, workspace order, TUI styling, broker cap)
+
+- **Session search and export** — `src/sessionsearch.ts` (search over titles +
+  payload text, Markdown/JSON exporters, fail-soft corpus loading),
+  `sessions search`/`sessions export` on the CLI, `GET /api/search` and
+  `GET|HEAD /api/sessions/{name}/export` on the server, Ctrl+K content search
+  and row export in the web workspace. See `docs/cli-reference.md`.
+- **TUI find-in-transcript** — `Ctrl+F` / `/find [query]`, inline bar with
+  wrap navigation, gutters and scroll-to-block; `src/tui/view/findbar.ts`.
+- **TUI span-level Markdown emphasis** — `src/tui/markdownstyle.ts` styled
+  lines/spans + `Theme.paintEmphasis`; `plainTheme`/`NO_COLOR` output stays
+  byte-identical. This closes the long-deferred "inline emphasis styling"
+  item.
+- **Workspace rename and operator ordering** — `WorkspaceRegistry.rename()` /
+  `reorder()`, `PATCH /api/workspaces/{id}` and
+  `PUT /api/workspaces/order`, plus the web sidebar actions menu (rename
+  dialog, move up/down, optimistic reorder).
+- **Broker-level approval-repeat cap** — see the open-items note above; the
+  broker now covers plugin/MCP approval consumers and emits an additive
+  `approval_auto_denied` event.
+
 ## Open items (deferred)
 
 - **`TWO_BROTHERS_JSON` vs bare `--json`** — the flag is now an output
@@ -340,12 +361,15 @@ Design anchors that already exist:
   transcript). Align the env var with the flag — or document the split in
   `docs/cli-reference.md` — once `PROTOCOL.md` (the contract owner
   for the env var) is updated.
-- **Approval repeat cap at the broker** — the harness-level cap covers
-  the built-in workspace tools only. Move the count into the
-  `RunApprovalBroker` (or a `PermissionManager` wrapper) so
-  plugin-contributed tools that request approvals through the same
-  broker are capped too, and expose the auto-denial count as an additive
-  run field if the UI needs it.
+- **Approval repeat cap at the broker** — **shipped 2026-11-06**:
+  `RunApprovalBroker` counts operator denials per identical
+  `(action, normalized target)` pair and auto-denies the next identical
+  request after `APPROVAL_DENY_LIMIT` (default 2), emitting one additive
+  `approval_auto_denied` runtime event instead of parking the run. The
+  harness-level workspace-tool cap is unchanged and preempts the broker for
+  the built-in tools, so the two layers cannot double-count; the broker cap
+  covers plugin/MCP approval consumers. See
+  `tests/approvalbrokerdeny.test.ts` and `packages/harness/CHANGELOG.md`.
 - **Relaxed strict parse** — **shipped** (payload fix 2, 2026-11-04):
   bare/fenced JSON that validates against the zod schema is accepted without
   the byte-stable markers (`relaxedStrictPayload`,

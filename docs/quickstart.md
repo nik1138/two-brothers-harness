@@ -157,7 +157,8 @@ Then open `http://127.0.0.1:8600`:
 
 1. **Register a workspace** with the workspace finder (a directory you pick —
    it is never scanned) and create a session linked to it. Sessions are
-   grouped by workspace in the sidebar.
+   grouped by workspace in the sidebar; each workspace group's `⋯` menu
+   renames it or moves it up/down, and the order is persisted.
 2. **Set the models** — the Settings dialog opens from the bottom-left of the
    sidebar; per-role Senior/Junior provider, model, base URL, and API key
    (keys are never echoed back; the server seals them at rest). Runs use the
@@ -194,7 +195,9 @@ instead. Use `chat` for scripts.
 node dist/cli.js tui --provider mock
 ```
 
-Block transcript with textual role labels, a grapheme-aware multiline
+Block transcript with textual role labels, Markdown bodies (headings, lists,
+fences, diffs, inline bold/italic/code emphasis with theme styling that
+disappears cleanly under `NO_COLOR`), a grapheme-aware multiline
 composer with history and bracketed paste, `Ctrl+R` incremental prompt-history
 search, `Ctrl+F` find-in-transcript (with `/find`), `Ctrl+O` to stash or
 restore a draft, Ctrl+P command palette and `?` help overlays, session/model

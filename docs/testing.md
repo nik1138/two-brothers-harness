@@ -88,12 +88,17 @@ and compaction-stress paths. Session search/export is covered by
 Markdown/JSON export shapes, tolerant loading), `tests/serversearch.test.ts`
 (the `GET /api/search` and per-session export endpoints over a real
 loopback server) and `tests/sessionscommands.test.ts` (the CLI subcommands and
-their exit codes). The TUI lanes (`tests/tui*.test.ts`) cover the
-editor, the keymap registry, the terminal, the views, prompt history and the
-find-in-transcript overlay, with the assembled app in
-`tests/tuiintegration.test.ts`. The TUI lanes and the doctor, completions,
-reliability and search/export suites are registered in
-`tests/run-all.ts`.
+their exit codes). Workspace rename/ordering is covered by
+`tests/workspaceorder.test.ts` (registry unit tests, persistence across
+reload, permutation validation) and `tests/serverworkspaces.test.ts` (the
+`PATCH`/`PUT` endpoints over loopback); the broker approval-repeat cap by
+`tests/approvalbrokerdeny.test.ts`. The TUI lanes (`tests/tui*.test.ts`)
+cover the editor, the keymap registry, the terminal, the views, prompt
+history, the find-in-transcript overlay, and span-level Markdown styling
+(`tests/tuistyle.test.ts` also pins byte-identical NO_COLOR output), with the
+assembled app in `tests/tuiintegration.test.ts`. The TUI lanes and the
+doctor, completions, reliability, search/export, workspace-order and
+broker-cap suites are registered in `tests/run-all.ts`.
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
@@ -120,15 +125,16 @@ npm test                # every web suite below (node:test, offline)
 The suite (`tests/chat.test.ts`, `tests/timeline.test.ts`,
 `tests/drafts.test.ts`, `tests/palette.test.ts`, `tests/sessionStatus.test.ts`,
 `tests/recents.test.ts`, `tests/density.test.ts`, `tests/find.test.ts`,
-`tests/search.test.ts`) covers the envelope→group-chat projection, the
-runtime-event timeline merge, per-session unsent drafts, palette
-building/scoring/filtering, sidebar row status, the MRU workspace list, the
-persisted UI density preference, find-in-transcript matching, and the
-content-search result shaping plus export filename/download-name helpers. The
-modules are dependency-free at runtime, so plain `node --test` runs them via
-the `tests/register-ts.mjs` bootstrap (a tiny resolve hook for the
-extensionless imports); `npm test` wires that up. The full `web/` gate also
-includes `npm run build` (see the smoke test above).
+`tests/search.test.ts`, `tests/workspaceOrder.test.ts`) covers the
+envelope→group-chat projection, the runtime-event timeline merge, per-session
+unsent drafts, palette building/scoring/filtering, sidebar row status, the MRU
+workspace list, the persisted UI density preference, find-in-transcript
+matching, content-search result shaping plus export helpers, and the workspace
+ordering helpers behind the sidebar's rename/reorder menu. The modules are
+dependency-free at runtime, so plain `node --test` runs them via the
+`tests/register-ts.mjs` bootstrap (a tiny resolve hook for the extensionless
+imports); `npm test` wires that up. The full `web/` gate also includes
+`npm run build` (see the smoke test above).
 
 ## TypeScript reference (`typescript/`)
 

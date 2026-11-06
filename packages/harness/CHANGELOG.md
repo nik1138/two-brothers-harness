@@ -43,6 +43,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pure state/render module; the command and its scoped keys live in the shared
   keymap registry, so `?`/F1 help, `Ctrl+P` and `tui --help` list them.
   Tests: `tests/tuifind.test.ts`.
+- **TUI span-level Markdown emphasis**: `src/tui/markdownstyle.ts` is now the
+  single Markdown parser producing width-safe styled lines/spans (bold,
+  italic, inline code, links, headings, lists, quotes, fences, diff markers),
+  and `src/tui/transcript.ts` paints those spans on top of each row's tone
+  through `Theme.paintEmphasis` (all SGR stays in `theme.ts`). Span-preserving
+  wrapping in `src/tui/text.ts` keeps grapheme/East-Asian/emoji widths exact.
+  `plainTheme`/`NO_COLOR` output is byte-identical to the previous plain
+  renderer (frozen baselines plus a 1,200-document fuzz check); a color theme
+  never changes row content or width. Tests: `tests/tuistyle.test.ts`,
+  `tests/tuivisualmodel.test.ts`.
+- **Workspace rename and operator ordering**: `WorkspaceRegistry.rename()`
+  (trimmed, 120-character cap, order unchanged) and `reorder()` (exact
+  permutation validation before any mutation) persist to
+  `sessions/workspaces.json`, and `GET /api/workspaces` returns the operator
+  order. Server: `PATCH /api/workspaces/{id}` and
+  `PUT /api/workspaces/order` (400/404 as documented). The web sidebar gained
+  a per-workspace actions menu (rename dialog, move up/down, optimistic
+  reorder with rollback). Tests: `tests/workspaceorder.test.ts`,
+  `tests/serverworkspaces.test.ts`, `web/tests/workspaceOrder.test.ts`.
+- **Broker-level approval-repeat cap**: `RunApprovalBroker` now counts
+  operator denials per identical `(action, target)` pair (the shell command
+  for shell approvals; target normalization shared with the harness layer)
+  and, after `APPROVAL_DENY_LIMIT` (default 2) denials, auto-denies the next
+  identical request immediately — no pending entry, no `approval_requested` —
+  emitting one additive `approval_auto_denied` runtime event
+  (`{type, action, target, count, limit}`). This covers plugin/MCP approval
+  consumers that the harness-level workspace-tool cap cannot see; the
+  harness cap and its `auto_denied` result shape are unchanged, and
+  allows/cancellations never count. New API: `RunApprovalBrokerOptions`,
+  `approvalPairKey`, `approvalMatchTarget`, `normalizeApprovalTarget`,
+  `broker.autoDenials()`. Tests: `tests/approvalbrokerdeny.test.ts`.
 
 ### Security
 

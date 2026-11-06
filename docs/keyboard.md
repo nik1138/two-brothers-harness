@@ -64,6 +64,15 @@ From a checkout, replace `two-brothers` with `node dist/cli.js` after
 | Mobile drawer | `Esc` | close the drawer when it is the topmost layer |
 | Dialog | `Esc` | close the topmost dialog |
 | Session actions trigger | `↓` | open the row menu; `↑`/`↓`/`Home`/`End` move, `Esc`/`Tab` close |
+| Workspace actions trigger | `↓` | open the workspace group menu (`Rename…`, `Move up`, `Move down`); same keys as the session menu; the trigger is revealed on hover/focus |
+
+The workspace group menu renames a workspace (a small dialog pre-fills and
+selects the name: `Enter` saves, `Esc` cancels, blank names show an inline
+error, names are capped at 120 characters) or moves it up/down in the persisted
+order — `Move up`/`Move down` are disabled at the ends, the list updates
+optimistically and rolls back with a toast if the backend rejects the move.
+The menu only appears in the unfiltered, non-searching list where group
+headers exist, and the trigger never collapses the group.
 
 The row menu also exports the session as Markdown or JSON (`Export as
 Markdown` / `Export as JSON`); the file downloads with a name derived from the

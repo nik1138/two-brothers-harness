@@ -97,8 +97,12 @@ The screen is a block transcript with textual role labels (`YOU`, `SENIOR`,
 `JUNIOR`, `TOOL`, `ERR`/`WARN`/`INFO`), a contained multiline composer
 (grapheme-aware cursor, prompt history, bracketed paste — a pasted newline
 never submits), and a two-line status bar with mode, models, session, cwd,
-context/tokens/cache/cost and key hints. The screen repaints on terminal
-resize and restores the terminal on every exit path. Turns run without
+context/tokens/cache/cost and key hints. Markdown bodies render headings,
+lists, quotes, fenced code, diffs, and inline bold/italic/code/link emphasis
+with theme colors and attributes; under `NO_COLOR` (or a color-free theme)
+the layout and text are byte-identical and only the styling disappears. The
+screen repaints on terminal resize and restores the terminal on every exit
+path. Turns run without
 blocking input; Escape/Ctrl+C under a safe precedence (overlay close → cancel
 the running turn → clear the composer → confirm quit). `Ctrl+P` opens the
 command palette, `?` a scrollable help overlay (only while the composer is
@@ -323,7 +327,9 @@ The backend is a **local single-user workspace server**. API overview:
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/workspaces`, `POST /api/workspaces`, `DELETE /api/workspaces/{id}` | registered workspace directories (register/unregister; sessions are untouched) |
+| `GET /api/workspaces`, `POST /api/workspaces`, `DELETE /api/workspaces/{id}` | registered workspace directories (register/unregister; sessions are untouched); `GET` returns the operator order |
+| `PATCH /api/workspaces/{id}` | rename one workspace (`{"name": "..."}`; trimmed and capped at 120 characters, unchanged order; 400 for a blank name, 404 for an unknown id) |
+| `PUT /api/workspaces/order` | persist the operator's workspace order (`{"ids": ["id1", ...]}` must be an exact permutation → `{"workspaces": [...]}`; 400 for duplicates/unknown/missing ids) |
 | `GET /api/sessions` | list sessions (`?workspace_id=` filters); titles/workspace links from `<name>.meta.json` sidecars |
 | `GET /api/search?q=&limit=` | full-text search over session titles and envelope payload strings; returns `{query, scanned_sessions, truncated, hits[]}`; `q` shorter than 2 characters is a 400 |
 | `GET /api/sessions/{name}/export?format=markdown\|json` | download one session as Markdown (default) or JSON with `Content-Disposition: attachment`; 404 for an unknown session, 400 for an unknown format (HEAD supported) |
