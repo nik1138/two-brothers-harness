@@ -81,6 +81,8 @@ const plugins = ref<string[]>([])
 // provider preset (which supplies base URL + API key) or "Manual".
 const providers = ref<ProviderPreset[]>([])
 const providersError = ref<string | null>(null)
+/** Providers load independently after the role settings; the section shows this. */
+const providersLoading = ref(false)
 
 const connectionOptions = computed(() => [
   { label: 'Manual', value: '' },
@@ -258,10 +260,13 @@ onMounted(async () => {
     loading.value = false
   }
   // presets load independently so a missing /api/providers still shows roles
+  providersLoading.value = true
   try {
     await refreshProviders()
   } catch (e) {
     providersError.value = errText(e)
+  } finally {
+    providersLoading.value = false
   }
 })
 
@@ -485,6 +490,9 @@ async function save() {
               <ProvidersSection
                 :providers="providers"
                 :initial-error="providersError"
+                :loading="providersLoading"
+                :senior-provider-ref="senior.providerRef"
+                :junior-provider-ref="junior.providerRef"
                 @update:providers="onProvidersUpdated"
                 @deleted="onProviderDeleted"
               />

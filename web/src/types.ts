@@ -459,4 +459,15 @@ export interface ProviderPreset {
   kind: string
   /** Manual model list (model discovery is deferred). */
   models: string[]
+  /**
+   * Additive (`GET /api/providers`): the name comes from the built-in seed
+   * table. Older backends omit it — treat a missing flag as `false`.
+   */
+  seed?: boolean
+  /**
+   * Additive: a stored entry exists for this name (a PUT-created override of a
+   * seed, or a POST-created custom provider). Older backends omit it — treat a
+   * missing flag as `true` so an old backend still renders.
+   */
+  customized?: boolean
 }
