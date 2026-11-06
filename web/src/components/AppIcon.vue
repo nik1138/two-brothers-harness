@@ -24,6 +24,7 @@ export const APP_ICON_NAMES = [
   'monitor',
   'warning',
   'refresh',
+  'download',
 ] as const
 
 export type AppIconName = (typeof APP_ICON_NAMES)[number]
@@ -215,6 +216,12 @@ const accessibleLabel = computed(() => props.label?.trim() || undefined)
       <path d="M4 6v5h5" />
       <path d="M4 13a8 8 0 0 0 14.6 4.1" />
       <path d="M20 18v-5h-5" />
+    </template>
+
+    <template v-else-if="resolvedName === 'download'">
+      <path d="M12 4v10.5" />
+      <path d="m7.5 10.5 4.5 4.5 4.5-4.5" />
+      <path d="M5 19.5h14" />
     </template>
   </svg>
 </template>

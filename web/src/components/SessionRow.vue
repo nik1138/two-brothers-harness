@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, useId } from 'vue'
 import { useMessage } from 'naive-ui'
-import { ApiError, deleteSession, renameSession } from '../api'
+import { ApiError, deleteSession, exportSession, renameSession } from '../api'
 import { relativeTime, sessionTitle } from '../chat'
+import { exportDownloadName } from '../search'
 import { deriveSessionStatus } from '../sessionStatus'
 import type { SessionStatusView } from '../sessionStatus'
-import type { SessionInfo } from '../types'
+import type { SessionExportFormat, SessionInfo } from '../types'
 import AppIcon from './AppIcon.vue'
 
 const props = defineProps<{
@@ -55,13 +56,15 @@ const renameInput = ref<HTMLInputElement | null>(null)
 /** Delete is a two-step action: the menu item asks for confirmation for 3s. */
 const confirmDelete = ref(false)
 const busy = ref(false)
+/** An export request is in flight; keeps the row focusable and prevents repeats. */
+const exporting = ref(false)
 let confirmTimer: ReturnType<typeof setTimeout> | null = null
 
 const menuId = `session-menu-${useId()}`
 
-const MENU_WIDTH = 176
-/** Enough for two 30px items plus padding, used only to pick up/down placement. */
-const MENU_HEIGHT = 78
+const MENU_WIDTH = 184
+/** Enough for four 30px items plus gaps/padding, used only to pick placement. */
+const MENU_HEIGHT = 140
 
 function errText(e: unknown): string {
   return e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e)
@@ -77,6 +80,11 @@ function focusMenuItem(index: number | 'last') {
   const items = menuItems()
   const i = index === 'last' ? items.length - 1 : Math.max(0, Math.min(index, items.length - 1))
   items[i]?.focus()
+}
+
+/** Focus the menu item that owns `action` (stable while the item count grows). */
+function focusMenuAction(action: string) {
+  menuRef.value?.querySelector<HTMLElement>(`[data-menu-action="${action}"]`)?.focus()
 }
 
 function cancelConfirmTimer() {
@@ -211,6 +219,56 @@ async function commitRename() {
   }
 }
 
+// -- export -------------------------------------------------------------------
+
+/** Menu label and blob MIME type per download format. */
+const EXPORT_FORMATS: Record<SessionExportFormat, { label: string; mime: string }> = {
+  markdown: { label: 'Export as Markdown', mime: 'text/markdown; charset=utf-8' },
+  json: { label: 'Export as JSON', mime: 'application/json' },
+}
+
+/** Save already-fetched text through a Blob + object URL download. */
+function saveTextFile(text: string, filename: string, mime: string): void {
+  const blob = new Blob([text], { type: mime })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  link.rel = 'noopener'
+  link.style.display = 'none'
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  // let the browser start the download before the object URL is invalidated
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+/**
+ * Fetch the backend-rendered export and save it under a synthesized filename.
+ * Failures stay non-blocking (the row's toast), exactly like rename/delete.
+ */
+async function exportFormat(format: SessionExportFormat): Promise<void> {
+  if (busy.value || exporting.value) return
+  exporting.value = true
+  // close first: focus goes back to the trigger, which stays enabled
+  closeMenu(true)
+  try {
+    const text = await exportSession(props.session.name, format)
+    saveTextFile(
+      text,
+      exportDownloadName(props.session.name, format),
+      EXPORT_FORMATS[format].mime,
+    )
+    message.success(
+      `${format === 'json' ? 'JSON' : 'Markdown'} export downloaded`,
+    )
+  } catch (e) {
+    message.error(`Export failed: ${errText(e)}`)
+  } finally {
+    exporting.value = false
+  }
+}
+
 // -- delete -------------------------------------------------------------------
 
 function askDelete() {
@@ -223,9 +281,9 @@ function askDelete() {
       (document.activeElement as HTMLElement | null)?.getAttribute('aria-label') ===
       'Confirm delete session'
     confirmDelete.value = false
-    if (confirmHeldFocus && menuOpen.value) nextTick(() => focusMenuItem(1))
+    if (confirmHeldFocus && menuOpen.value) nextTick(() => focusMenuAction('delete'))
   }, 3000)
-  nextTick(() => focusMenuItem(1))
+  nextTick(() => focusMenuAction('delete'))
 }
 
 async function doDelete() {
@@ -347,11 +405,36 @@ onUnmounted(() => {
             <span>Rename</span>
           </button>
           <button
+            type="button"
+            role="menuitem"
+            class="row-menu-item"
+            aria-label="Export as Markdown"
+            data-menu-action="export-markdown"
+            :disabled="busy"
+            @click="exportFormat('markdown')"
+          >
+            <AppIcon name="download" class="icon" />
+            <span>Export as Markdown</span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            class="row-menu-item"
+            aria-label="Export as JSON"
+            data-menu-action="export-json"
+            :disabled="busy"
+            @click="exportFormat('json')"
+          >
+            <AppIcon name="download" class="icon" />
+            <span>Export as JSON</span>
+          </button>
+          <button
             v-if="!confirmDelete"
             type="button"
             role="menuitem"
             class="row-menu-item row-menu-danger"
             aria-label="Delete session"
+            data-menu-action="delete"
             :disabled="busy"
             @click="askDelete"
           >
@@ -364,6 +447,7 @@ onUnmounted(() => {
             role="menuitem"
             class="row-menu-item row-menu-danger is-confirm"
             aria-label="Confirm delete session"
+            data-menu-action="delete"
             :disabled="busy"
             @click="doDelete"
           >

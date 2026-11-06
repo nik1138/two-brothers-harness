@@ -9,14 +9,17 @@ import type {
   RunRecord,
   RunRequest,
   RunStart,
+  SearchResult,
   SessionCreateRequest,
   SessionDetail,
+  SessionExportFormat,
   SessionInfo,
   SessionRuntimeEvents,
   SettingsView,
   Workspace,
   WorkspaceCreateRequest,
 } from './types'
+import { clampSearchLimit } from './search'
 
 export class ApiError extends Error {
   status: number
@@ -27,7 +30,11 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
+/**
+ * Perform one API request and map transport/HTTP failures onto `ApiError`.
+ * Resolves to the raw `Response` for callers that do not want JSON (exports).
+ */
+async function requestRaw(url: string, init?: RequestInit): Promise<Response> {
   let res: Response
   try {
     res = await fetch(url, init)
@@ -44,6 +51,11 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     }
     throw new ApiError(detail, res.status)
   }
+  return res
+}
+
+async function request<T>(url: string, init?: RequestInit): Promise<T> {
+  const res = await requestRaw(url, init)
   return (await res.json()) as T
 }
 
@@ -93,6 +105,35 @@ export async function deleteSession(name: string): Promise<{ deleted: string }> 
   return request<{ deleted: string }>(`/api/sessions/${encodeURIComponent(name)}`, {
     method: 'DELETE',
   })
+}
+
+// -- session content search & export -------------------------------------------
+
+/**
+ * Full-text search across all session documents (`GET /api/search`).
+ *
+ * The backend rejects queries shorter than two characters with a 400, so
+ * callers must gate on `shouldSearchContent` (in `./search`) before calling;
+ * `limit` is clamped here so a bad caller cannot ask for an absurd page.
+ */
+export async function searchSessions(query: string, limit?: number): Promise<SearchResult> {
+  const q = encodeURIComponent(query)
+  return request<SearchResult>(`/api/search?q=${q}&limit=${clampSearchLimit(limit)}`)
+}
+
+/**
+ * Download one session as Markdown or JSON (`GET /api/sessions/{name}/export`).
+ * Resolves to the raw body text; the browser needs the caller to save it as a
+ * file (the server also sends `Content-Disposition`).
+ */
+export async function exportSession(
+  name: string,
+  format: SessionExportFormat,
+): Promise<string> {
+  const res = await requestRaw(
+    `/api/sessions/${encodeURIComponent(name)}/export?format=${format}`,
+  )
+  return res.text()
 }
 
 // -- workspaces ---------------------------------------------------------------

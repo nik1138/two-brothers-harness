@@ -1,7 +1,15 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, useId, watch } from 'vue'
+import { computed, nextTick, onUnmounted, ref, useId, watch } from 'vue'
 import { filterPalette } from '../palette'
 import type { PaletteItem } from '../palette'
+import { ApiError, searchSessions } from '../api'
+import {
+  SEARCH_DEBOUNCE_MS,
+  contentItemsFromResult,
+  normalizeSearchQuery,
+  shouldSearchContent,
+} from '../search'
+import type { SearchResult } from '../types'
 import AppDialog from './AppDialog.vue'
 import AppIcon from './AppIcon.vue'
 
@@ -10,6 +18,13 @@ import AppIcon from './AppIcon.vue'
  * workspaces, actions) and toggles `visible`; this component filters per
  * keystroke and drives a standard combobox/listbox: the text input keeps DOM
  * focus while `aria-activedescendant` points at the highlighted option.
+ *
+ * Once the typed query reaches `MIN_CONTENT_QUERY` characters the palette also
+ * debounce-searches session message content (`GET /api/search`) and merges the
+ * hits as a "Messages" group below Sessions. Search responses are guarded by a
+ * monotonic token, so a slow answer for an older query can never replace the
+ * results of a newer one. Backends without the endpoint simply keep the group
+ * hidden (the local session/workspace/action palette never degrades).
  *
  * Success is a selection: emitting `select` does not close the dialog itself —
  * the owner decides what running an item means and then flips `visible`.
@@ -26,9 +41,10 @@ const emit = defineEmits<{
   select: [item: PaletteItem]
 }>()
 
-const KIND_ORDER = ['session', 'workspace', 'action'] as const
+const KIND_ORDER = ['session', 'content', 'workspace', 'action'] as const
 const KIND_LABELS: Record<PaletteItem['kind'], string> = {
   session: 'Sessions',
+  content: 'Messages',
   workspace: 'Workspaces',
   action: 'Actions',
 }
@@ -48,6 +64,129 @@ const listEl = ref<HTMLElement | null>(null)
 const results = computed(() => filterPalette(props.items ?? [], query.value))
 const total = computed(() => (Array.isArray(props.items) ? props.items.length : 0))
 
+// -- session content search ---------------------------------------------------
+// Remote hits are kept apart from `results`: the backend already ranked them,
+// so they are not re-scored against the local palette fields. They are only
+// rendered for the exact query they belong to (`contentQuery`), which is what
+// makes the loading/error/empty states honest while the operator keeps typing.
+
+/** Latest `/api/search` response (null until the first successful answer). */
+const contentResult = ref<SearchResult | null>(null)
+/** Normalized query `contentResult` belongs to ('' = nothing rendered). */
+const contentQuery = ref('')
+/** A debounce or request is in flight for the current query. */
+const contentSearching = ref(false)
+/** The current query's content search failed (non-missing endpoint). */
+const contentFailed = ref(false)
+/** Older backend without `/api/search`: keep the Messages group hidden. */
+const contentUnsupported = ref(false)
+let contentTimer: ReturnType<typeof setTimeout> | null = null
+/** Monotonic request token: only the newest in-flight search may commit. */
+let contentToken = 0
+
+const normalizedQuery = computed(() => normalizeSearchQuery(query.value))
+const contentEnabled = computed(
+  () => !contentUnsupported.value && shouldSearchContent(normalizedQuery.value),
+)
+/** Results exist and belong to exactly the query that is typed right now. */
+const contentReady = computed(
+  () =>
+    contentEnabled.value &&
+    contentResult.value !== null &&
+    contentQuery.value === normalizedQuery.value,
+)
+const contentItems = computed<PaletteItem[]>(() =>
+  contentReady.value ? contentItemsFromResult(contentResult.value) : [],
+)
+
+/** Input copy: don't promise message search on a backend without the endpoint. */
+const searchPlaceholder = computed(() =>
+  contentUnsupported.value
+    ? 'Search sessions, workspaces and actions…'
+    : 'Search sessions, workspaces, messages and actions…',
+)
+
+/** Subtle status line under the list; null when there is nothing to say. */
+const contentStatus = computed<string | null>(() => {
+  if (!contentEnabled.value) return null
+  if (contentSearching.value) return 'Searching messages…'
+  if (contentFailed.value) {
+    return 'Message search is unavailable — showing sessions, workspaces and actions.'
+  }
+  if (!contentReady.value) return null
+  // With no local results either, the list's own empty state already says it;
+  // a second "no message hits" line would just repeat the same fact.
+  if (!contentItems.value.length) {
+    return results.value.length ? `No message hits for “${normalizedQuery.value}”.` : null
+  }
+  return null
+})
+
+/** Drop any pending/committed content search; also invalidates in-flight ones. */
+function cancelContentSearch(): void {
+  contentToken += 1
+  if (contentTimer) {
+    clearTimeout(contentTimer)
+    contentTimer = null
+  }
+  contentSearching.value = false
+  contentResult.value = null
+  contentQuery.value = ''
+}
+
+/** Query condition that means "this backend has no search endpoint". */
+function isMissingSearchEndpoint(cause: unknown): boolean {
+  return (
+    cause instanceof ApiError &&
+    (cause.status === 404 || cause.status === 405 || cause.status === 501)
+  )
+}
+
+/** Restart the debounce for the current query, dropping stale state first. */
+function scheduleContentSearch(): void {
+  contentToken += 1
+  if (contentTimer) {
+    clearTimeout(contentTimer)
+    contentTimer = null
+  }
+  contentResult.value = null
+  contentQuery.value = ''
+  contentFailed.value = false
+  if (!contentEnabled.value) {
+    contentSearching.value = false
+    return
+  }
+  const token = contentToken
+  const normalized = normalizedQuery.value
+  contentSearching.value = true
+  contentTimer = setTimeout(() => {
+    contentTimer = null
+    void runContentSearch(normalized, token)
+  }, SEARCH_DEBOUNCE_MS)
+}
+
+async function runContentSearch(normalized: string, token: number): Promise<void> {
+  try {
+    const result = await searchSessions(normalized)
+    if (token !== contentToken) return // a newer keystroke/close owns the palette
+    contentResult.value = result
+    contentQuery.value = normalized
+    contentSearching.value = false
+  } catch (cause) {
+    if (token !== contentToken) return
+    contentResult.value = null
+    contentQuery.value = ''
+    contentSearching.value = false
+    if (isMissingSearchEndpoint(cause)) {
+      // graceful degrade: no Messages group on an older backend, no error noise
+      contentUnsupported.value = true
+      contentFailed.value = false
+      return
+    }
+    contentFailed.value = true
+  }
+}
+
 interface PaletteGroup {
   kind: PaletteItem['kind']
   label: string
@@ -56,12 +195,15 @@ interface PaletteGroup {
   items: PaletteItem[]
 }
 
-/** Fixed group order (Sessions / Workspaces / Actions), score order inside. */
+/** Fixed group order (Sessions / Messages / Workspaces / Actions), score order inside. */
 const groups = computed<PaletteGroup[]>(() => {
   const groups: PaletteGroup[] = []
   let start = 0
   for (const kind of KIND_ORDER) {
-    const items = results.value.filter((item) => item.kind === kind)
+    const items =
+      kind === 'content'
+        ? contentItems.value
+        : results.value.filter((item) => item.kind === kind)
     if (!items.length) continue
     groups.push({ kind, label: KIND_LABELS[kind], start, items })
     start += items.length
@@ -133,9 +275,14 @@ function onKeydown(event: KeyboardEvent): void {
 watch(
   () => props.visible,
   (open) => {
-    if (!open) return
+    if (!open) {
+      // leave no timer/request behind that could commit into a closed palette
+      cancelContentSearch()
+      return
+    }
     query.value = ''
     activeIndex.value = 0
+    scheduleContentSearch()
     void nextTick(() => {
       if (listEl.value) listEl.value.scrollTop = 0
       inputEl.value?.focus()
@@ -144,17 +291,29 @@ watch(
   { immediate: true },
 )
 
-/** Typing restarts the highlight at the top; shrinking results stay in range. */
+/** Typing restarts the highlight at the top and re-arms the content search. */
 watch(query, () => {
   activeIndex.value = 0
   if (listEl.value) listEl.value.scrollTop = 0
+  scheduleContentSearch()
 })
 
-watch(results, (items) => {
+/** Keep the highlight in range when items are added/removed (async hits too). */
+watch(visibleItems, (items) => {
   if (!items.length) activeIndex.value = -1
   else if (activeIndex.value < 0) activeIndex.value = 0
   else if (activeIndex.value >= items.length) activeIndex.value = items.length - 1
 })
+
+/** Footer counter: local matches stay the denominator; message hits are extra. */
+const countLabel = computed(() => {
+  const base = `${results.value.length} of ${total.value}`
+  const hits = contentItems.value.length
+  if (!hits) return base
+  return `${base} · ${hits} message ${hits === 1 ? 'hit' : 'hits'}`
+})
+
+onUnmounted(cancelContentSearch)
 
 /**
  * Keep the highlighted option inside the list viewport while arrowing through
@@ -201,12 +360,12 @@ watch(activeIndex, async (index) => {
           class="palette-input"
           type="text"
           role="combobox"
-          aria-label="Search sessions, workspaces and actions"
+          aria-label="Search sessions, workspaces, messages and actions"
           aria-autocomplete="list"
           aria-expanded="true"
           :aria-controls="listId"
           :aria-activedescendant="activeDescendant"
-          placeholder="Search sessions, workspaces and actions…"
+          :placeholder="searchPlaceholder"
           autocomplete="off"
           spellcheck="false"
         />
@@ -227,6 +386,7 @@ watch(activeIndex, async (index) => {
         class="palette-list"
         role="listbox"
         aria-label="Command palette results"
+        :aria-busy="contentSearching"
       >
         <template v-if="visibleItems.length">
           <div
@@ -254,18 +414,24 @@ watch(activeIndex, async (index) => {
             </div>
           </div>
         </template>
-        <p v-else class="palette-empty" role="status">
+        <!-- While the first content search for this query is in flight the list
+             stays blank; the status line below the list owns that state. -->
+        <p v-else-if="!contentSearching" class="palette-empty" role="status">
           <template v-if="!total">Nothing to search yet — start a session or add a workspace.</template>
           <template v-else-if="query.trim()">No matches for “{{ query.trim() }}”.</template>
           <template v-else>No commands available.</template>
         </p>
       </div>
 
+      <p v-if="contentStatus" class="palette-search-status" role="status">
+        {{ contentStatus }}
+      </p>
+
       <footer class="palette-footer">
         <span class="palette-keys"><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
         <span class="palette-keys"><kbd>Enter</kbd> select</span>
         <span class="palette-keys"><kbd>Esc</kbd> close</span>
-        <span class="palette-count">{{ visibleItems.length }} of {{ total }}</span>
+        <span class="palette-count">{{ countLabel }}</span>
       </footer>
     </div>
   </AppDialog>
@@ -420,6 +586,18 @@ watch(activeIndex, async (index) => {
   color: var(--text-secondary);
   font-size: 0.86rem;
   text-align: center;
+}
+
+/* Content-search status (searching / unavailable / no hits). Muted one-liner
+   between the list and the footer; the footer's border already separates it. */
+.palette-search-status {
+  flex: none;
+  margin: 0;
+  padding: 0.4rem 0.9rem;
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  line-height: 1.35;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .palette-footer {

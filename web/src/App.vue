@@ -40,6 +40,7 @@ import type {
 import { projectEnvelopes, sessionTitle, taskOf } from './chat'
 import { buildPaletteItems, PALETTE_SESSION_PREFIX, PALETTE_WORKSPACE_PREFIX } from './palette'
 import type { PaletteItem } from './palette'
+import { contentItemSession } from './search'
 import {
   changedFilesOf,
   mergeTimeline,
@@ -420,6 +421,13 @@ function onPaletteSelect(item: PaletteItem) {
         ? item.id.slice(PALETTE_SESSION_PREFIX.length)
         : ''
       // loadSession closes the mobile drawer exactly like a sidebar pick
+      if (name) void loadSession(name)
+      return
+    }
+    case 'content': {
+      // a message hit opens the session it belongs to (exact-message scroll is
+      // intentionally out of scope — one clean jump is enough)
+      const name = contentItemSession(item)
       if (name) void loadSession(name)
       return
     }

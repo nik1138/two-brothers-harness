@@ -37,6 +37,42 @@ export interface SessionDetail {
   workspace_id?: string
 }
 
+/** Where a `/api/search` hit matched: the session title or an envelope body. */
+export type SearchHitField = 'title' | 'message' | 'decision'
+
+/** One content-search hit over all session documents (`GET /api/search`). */
+export interface SearchHit {
+  /** Session file name, e.g. "20260101-120000.jsonl". */
+  session: string
+  /** Readable session title; may be empty for legacy sessions. */
+  title: string
+  field: SearchHitField
+  /** Envelope seq for message/decision hits; null for title hits. */
+  seq: number | null
+  /** Envelope author (`from`) for message hits; null for title hits. */
+  role: string | null
+  /** Envelope kind (`message`, `decision`, …); null for title hits. */
+  kind: string | null
+  /** Bounded single-line context around the match. */
+  snippet: string
+  /** Envelope timestamp, when present. */
+  ts: string | null
+}
+
+/** Response of `GET /api/search?q=<query>&limit=<n>`. */
+export interface SearchResult {
+  /** Trimmed query the backend actually searched. */
+  query: string
+  /** Number of session files scanned (may be capped by the backend). */
+  scanned_sessions: number
+  /** True when a cap clipped the scan or the hit list. */
+  truncated: boolean
+  hits: SearchHit[]
+}
+
+/** Download format of `GET /api/sessions/{name}/export?format=…`. */
+export type SessionExportFormat = 'markdown' | 'json'
+
 export interface Workspace {
   id: string
   name: string

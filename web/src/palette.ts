@@ -10,10 +10,17 @@
 
 export interface PaletteItem {
   id: string
-  kind: 'session' | 'workspace' | 'action'
+  /**
+   * `content` items are remote session-message hits from `search.ts`; they are
+   * appended by `CommandPalette.vue` instead of `buildPaletteItems` so the
+   * static/owner-built list stays synchronous.
+   */
+  kind: 'session' | 'workspace' | 'action' | 'content'
   label: string
   hint?: string
   keywords?: string[]
+  /** Session file name for `kind: 'content'` hits (`search.ts` fills it). */
+  session?: string
 }
 
 /** Item id prefixes, so the owner can recover the session name / workspace id. */
