@@ -72,6 +72,18 @@
  *   this module, never cwd): the packaged `<package>/web` copy that
  *   `scripts/sync-web.mjs` places in the npm tarball, then the repo layout
  *   `<repo>/web/dist`. Overridable via `webDist`.
+ * - `GET /api/workspaces` lists operator-registered workspaces in their
+ *   operator-set order; `POST /api/workspaces` registers one (201),
+ *   `PATCH /api/workspaces/{id}` renames one (200 with the updated object:
+ *   a missing or blank name is a 400 "name must not be empty", a
+ *   non-string name the generic 400 "invalid request body", an unknown id
+ *   a 404, and a name over 120 characters is capped rather than rejected —
+ *   the route echoes the stored, trimmed/capped name),
+ *   and `PUT /api/workspaces/order` takes `{"ids": [...]}`, which must be
+ *   an exact permutation of the registered ids, and returns
+ *   `{"workspaces": [...]}` in the new order (400 naming the non-array,
+ *   duplicate, unknown or missing ids; no partial reorder on error).
+ *   `DELETE /api/workspaces/{id}` is unchanged.
  * - Local-request guards (SECURITY.md: local single-user, loopback only):
  *   while every binding is loopback, requests with a non-loopback `Host`
  *   (DNS-rebinding defense) and state-changing requests with a non-local
@@ -1264,6 +1276,46 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         throw exc;
       }
       return new Respond(201, created);
+    }),
+  );
+
+  routes.push(
+    compileRoute("PUT", "/api/workspaces/order", async (ctx) => {
+      const body = await ctx.json();
+      const ids = body.ids;
+      if (!Array.isArray(ids)) throw new HttpError(400, "ids must be an array");
+      if (ids.some((id) => typeof id !== "string")) {
+        throw new HttpError(400, "ids must be an array of strings");
+      }
+      let ordered: RegisteredWorkspace[];
+      try {
+        ordered = state.workspaces.reorder(ids as string[]);
+      } catch (exc) {
+        if (exc instanceof WorkspaceError) throw new HttpError(400, exc.message);
+        throw exc;
+      }
+      return { workspaces: ordered };
+    }),
+  );
+
+  routes.push(
+    compileRoute("PATCH", "/api/workspaces/{id}", async (ctx) => {
+      // 404 first (house style, like PATCH /api/sessions/{name}): a rename
+      // target that no longer exists is "not found" regardless of the body.
+      if (!state.workspaces.get(ctx.params.id)) throw new HttpError(404, "not found");
+      const body = await ctx.json();
+      const name = optionalString(body, "name");
+      if (name === undefined || !name.trim()) {
+        throw new HttpError(400, "name must not be empty");
+      }
+      // The registry trims and caps the name (120 chars); a long name is
+      // stored truncated and the stored value comes back in the 200 body.
+      try {
+        return state.workspaces.rename(ctx.params.id, name);
+      } catch (exc) {
+        if (exc instanceof WorkspaceError) throw new HttpError(400, exc.message);
+        throw exc;
+      }
     }),
   );
 

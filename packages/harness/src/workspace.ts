@@ -1279,6 +1279,12 @@ export interface RegisteredWorkspace {
   path: string;
 }
 
+/**
+ * Stored workspace-name cap (`rename` trims to it instead of rejecting a long
+ * name; the operator sees the stored value come back).
+ */
+export const WORKSPACE_NAME_MAX_CHARS = 120;
+
 /** `re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")` or "workspace". */
 function slugify(text: string): string {
   const slug = text
@@ -1384,5 +1390,48 @@ export class WorkspaceRegistry {
     if (!this._workspaces.delete(workspaceId)) return false;
     this.persist();
     return true;
+  }
+
+  /**
+   * Rename one registered workspace. The name is trimmed and capped at
+   * `WORKSPACE_NAME_MAX_CHARS` (a long name is stored truncated, never
+   * rejected); registration order is unchanged. Throws `WorkspaceError` for
+   * an unknown id or a blank name.
+   */
+  rename(workspaceId: string, name: string): RegisteredWorkspace {
+    const existing = this._workspaces.get(workspaceId);
+    if (existing === undefined) throw new WorkspaceError(`unknown workspace: ${workspaceId}`);
+    const trimmed = name.trim();
+    if (!trimmed) throw new WorkspaceError("name must not be empty");
+    // Code points so a name that ends on an astral character is never split.
+    const capped = [...trimmed].slice(0, WORKSPACE_NAME_MAX_CHARS).join("");
+    const updated: RegisteredWorkspace = { ...existing, name: capped };
+    // Map#set on an existing key keeps its insertion position.
+    this._workspaces.set(workspaceId, updated);
+    this.persist();
+    return { ...updated };
+  }
+
+  /**
+   * Operator-controlled ordering: `ids` must be an exact permutation of the
+   * registered ids. Validated fully before anything is mutated, so an error
+   * never leaves a partial order behind; success persists and returns the
+   * whole list in the new order.
+   */
+  reorder(ids: string[]): RegisteredWorkspace[] {
+    const seen = new Set<string>();
+    for (const id of ids) {
+      if (seen.has(id)) throw new WorkspaceError(`duplicate workspace id: ${id}`);
+      if (!this._workspaces.has(id)) throw new WorkspaceError(`unknown workspace: ${id}`);
+      seen.add(id);
+    }
+    for (const id of this._workspaces.keys()) {
+      if (!seen.has(id)) throw new WorkspaceError(`missing workspace: ${id}`);
+    }
+    const ordered = ids.map((id) => this._workspaces.get(id) as RegisteredWorkspace);
+    this._workspaces.clear();
+    for (const ws of ordered) this._workspaces.set(ws.id, ws);
+    this.persist();
+    return this.list();
   }
 }

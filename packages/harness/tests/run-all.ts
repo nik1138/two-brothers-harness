@@ -64,4 +64,6 @@ import "./serversearch.test.ts";
 import "./sessionscommands.test.ts";
 import "./tuifind.test.ts";
 import "./tuistyle.test.ts";
+import "./workspaceorder.test.ts";
+import "./serverworkspaces.test.ts";
 import "./approvalbrokerdeny.test.ts";
