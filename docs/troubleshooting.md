@@ -90,6 +90,16 @@ node dist/cli.js serve --port 8600 --sessions-dir sessions
 |---|---|---|
 | `tui needs an interactive terminal — stdin/stdout are not TTYs` (exit 2) | none — `doctor` cannot test a TTY | Run `tui`, or a bare `two-brothers`, from a real terminal. For piped, redirected or CI sessions use `chat` instead. |
 
+## Streaming and composer mentions
+
+| Symptom | Why | Fix |
+|---|---|---|
+| The web chat shows no live Thinking/Response blocks while a run works | The run was started without `stream_tokens`, the follow connection was opened after the deltas were sent (tokens are live-only, never replayed), or the provider returned a normal JSON completion instead of an SSE stream | Refresh/reopen the run view; streaming is enabled by the web client automatically. A provider that ignores `stream: true` still runs normally (the adapter falls back to the JSON completion) — it just cannot produce live deltas. Reasoning appears only if the endpoint reports it (`reasoning_content`, `thinking_delta` or `thought` parts). |
+| `POST /api/runs` returns 400 `stream_tokens` / `invalid request body` | `stream_tokens` is a strict boolean | Send `true` or `false` (or omit it); the web client sends `true` automatically. |
+| Typing `@` inserts nothing useful / a root-level file is not attached | File mentions must be path-like: nested paths `@src/a.ts`, root files `@./README.md`. A bare `@README.md` is treated as ordinary text | Pick the file from the picker (it serializes correctly); the server also rejects absolute paths, `..` escapes and sensitive files. |
+| Mention submit fails with `unknown skill`, `role-scoped skills cannot be operator mentions`, `file mentions require a workspace`, `cannot attach file`, or a count-cap error | The server validates mentions before creating the run; these are the documented 400s | Use a shared skill (`scope: shared`), attach files only to workspace-bound runs, and stay inside the caps: 3 skills, 5 files, 20 000 chars per file, 100 000 chars of attachments in total. The composer picker only lists insertable entries. |
+| A `/name` task runs as literal text instead of expanding | Slash expansion only applies to a *discovered* command name (`commands/<name>.md`); unknown or path-like slash lines are ordinary tasks | Check the command exists (`GET /api/commands` or `?` help / the TUI picker), or add the template file to a commands root. |
+
 ## Usage errors and exit codes
 
 Usage errors are rejected before `doctor` runs, so they have no check id.

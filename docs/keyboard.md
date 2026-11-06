@@ -60,6 +60,7 @@ From a checkout, replace `two-brothers` with `node dist/cli.js` after
 | Sidebar search | `Esc` | clear the query, then close search |
 | Composer | `Enter` | send the task |
 | Composer | `Shift+Enter` | insert a newline |
+| Composer `@` / line-start `/` | open the mention or command picker; `↑`/`↓` move, `Enter`/`Tab` insert, `Esc` dismiss (the draft is kept) |
 | Approval card | `y` / `n` | allow / deny while the card has focus |
 | Mobile drawer | `Esc` | close the drawer when it is the topmost layer |
 | Dialog | `Esc` | close the topmost dialog |
@@ -105,6 +106,23 @@ session.
   newline while a run waits for approval (the box stays usable for the next
   draft) and is unavailable while the brothers work (the box is locked); an
   IME composition never submits.
+
+- **Mentions and commands.** Type `@` at a token start for a picker over
+  shared skills and workspace files (emails/word-internal `@` never trigger;
+  a workspace is needed for files), or `/` at a line start for the slash
+  command picker. `↑`/`↓` move, `Enter`/`Tab` insert `@skill:name `,
+  `@relative/path ` or `/name `, `Esc` dismisses and keeps the draft; while
+  the picker is open `Enter` never submits. `@skill:` narrows to skills.
+  Role-scoped (senior/junior) skills are listed but not insertable — the
+  server only attaches shared operator mentions.
+
+- **Live thinking and response.** While a followed run generates, a dim
+  collapsible **Thinking** block streams the model's reasoning and
+  auto-collapses when visible reply text starts; a **Response** block renders
+  the reply (markdown) with a streaming caret. Both disappear when the
+  completed envelope arrives (the normal bubble takes over). Reasoning is
+  observational: it is never persisted, never part of the reply, and never
+  searched by Ctrl+F.
 
 - **Stop and approvals.** Stop is the composer's Stop button (Tab to it, press
   `Enter`/`Space`); it is cooperative and denies pending approvals. The docked
@@ -156,12 +174,15 @@ from the registry at runtime. The TUI is Ctrl-based: terminals do not deliver
 | `Up` / `Down` | Recall earlier submitted tasks; on a multi-line draft they move within the draft until the cursor reaches the first or last line. The live draft is preserved and restored when you come back to it. |
 | `Ctrl+R` | Incremental prompt-history search, newest first; accepting puts the entry back in the composer. |
 | `Ctrl+O` | Stash the draft, or restore the stashed draft. |
+| `/` (line start) | Inline command picker over the built-in commands and discovered `<name>.md` templates. `↑`/`↓` move, `Enter`/`Tab` insert `/name `, `Esc` closes and keeps the draft. |
+| `@` (token start) | Inline skill picker. Shared skills insert `@skill:name `; role-scoped rows are visible but disabled. File mentions are not available in the TUI (terminal runs have no workspace). |
 
 ### Read the transcript
 
 | Keys | Action |
 |---|---|
 | `PgUp` / `PgDn` | Page the transcript without moving the composer cursor. |
+| (streaming) | A live `THINKING` block (dim, bounded to the last six content rows with a `… +N lines` marker) appears above the streaming response while the provider emits reasoning; it clears when the reply/envelope arrives. Reasoning is live-only and never persisted. |
 | `Ctrl+F` | Find in the transcript: an inline bar above the status rows. Typing filters live (case-insensitive literal text), `Enter`/`Down` jumps to the next match and `Shift+Enter`/`Up` to the previous one (both wrap); the bar shows `current/total`, marks the active match and scrolls its block into view. `Esc` closes it and restores the composer draft and scroll position exactly. `/find [query]` opens it with a query already typed. |
 | `Ctrl+T` | Expand or collapse the most recent tool result: collapsed shows the first six result lines plus a `… +N more lines` marker, expanded shows the whole result. |
 | `Ctrl+B` | Toggle the status side panel on wide terminals (it needs at least 100 columns and 20 rows; below that the transcript simply uses the full width). `/panel` does the same. |
@@ -189,13 +210,14 @@ before it can cancel a turn.
 
 Every registry command also has a typed slash form — even when it has no
 chord — and all are searchable in `Ctrl+P`: `/palette`, `/help` (`/h`),
-`/commands`, `/find [query]`, `/retry`, `/exit` (`/quit`, `/q`),
+`/commands`, `/find [query]`, `/retry`, `/stash`, `/exit` (`/quit`, `/q`),
 `/mode consult|work`, `/models`, `/sessions`, `/theme dark|light|system`,
 `/settings`, plus discovered `<name>.md` templates. `/models` and `/sessions`
 refuse while a turn runs. The find bar is an inline input, not a modal: while
 it is open it owns printable keys and the app chords (`Ctrl+P`, `?`, slash
 commands) are inert, exactly like the palette and help overlays; `Esc` closes
-it first.
+it first. The mention picker behaves the same way while open (printable keys
+filter, `Esc` closes).
 
 ## See also
 

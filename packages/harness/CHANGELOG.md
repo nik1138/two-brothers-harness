@@ -74,6 +74,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   allows/cancellations never count. New API: `RunApprovalBrokerOptions`,
   `approvalPairKey`, `approvalMatchTarget`, `normalizeApprovalTarget`,
   `broker.autoDenials()`. Tests: `tests/approvalbrokerdeny.test.ts`.
+- **Composer mentions (`@`) and slash commands (`/`)**: run tasks may now
+  carry `@skill:<name>` and workspace-file mentions (`@<relative/path>`,
+  root-level files serialize as `@./name`). `src/mentions.ts` scans tokens
+  strictly at word boundaries (emails/`@media` are never mentions), renders
+  the byte-stable `<skill-loaded name="…">` and `<file path="…">` blocks
+  with bounded content and truncation markers, and normalizes paths;
+  `src/workspacefiles.ts` provides a bounded, fail-soft workspace file index
+  (hidden/node_modules/sensitive/symlinks excluded, depth/count caps) plus
+  ranking for the `@` picker. Server: `GET /api/workspaces/{id}/files`,
+  and `POST /api/runs` / `POST /api/run` expand a known leading `/name`
+  command (`matchCommand`/`expandCommand`, per-run mode override; unknown
+  slash lines submit verbatim) and inject validated shared-skill and
+  workspace-file blocks into the shared context before the task (role-scoped
+  skills and unsafe paths are refused with actionable 400s, caps
+  `MENTION_MAX_SKILLS`/`MENTION_MAX_FILES`/`MENTION_MAX_TOTAL_CHARS`). The web
+  composer gained accessible `@`/`/` pickers (skills, workspace files,
+  command templates; debounced file search, stale-response guard) and the
+  TUI gained inline `/` and `@skill:` pickers with submit-time validation and
+  context injection. Tests: `tests/mentions.test.ts`,
+  `tests/workspacefiles.test.ts`, `tests/mentionswiring.test.ts`,
+  `tests/tuipicker.test.ts`, `web/tests/mentions.test.ts`.
+- **Thinking and response streaming**: providers now report reasoning deltas
+  separately from visible text — `ChatOptions.onThinkingDelta`,
+  `StreamState.thinking`, `ChatDeltaKind`, and per-adapter mapping
+  (OpenAI-compatible `reasoning_content`/`reasoning`, Anthropic
+  `thinking_delta`, Google `thought` parts; `MockProvider` streams
+  `MOCK_REASONING` when a reasoning sink is present). `HarnessOptions.streamTokens`
+  emits runstream `token` events with `kind: "text" | "thinking"` in arrival
+  order from the single provider seam (plain calls, tool loops, overflow
+  retries, repair re-asks); reasoning is observational and never enters the
+  reply, usage, envelopes or session JSONL. Server:
+  `POST /api/runs {"stream_tokens": true}` (strict boolean, default off) and
+  `GET /api/runs/{run_id}/events` additionally writes named, id-less SSE
+  frames `event: token` with `{type, run_id, role, kind, delta, at}` — the
+  existing typed-event `id`/`?after` replay contract is untouched and tokens
+  are never persisted. The web chat renders a collapsible live **Thinking**
+  block and a streaming **Response** block (markdown, caret) that resolve
+  into the projected envelope when it arrives; the TUI renders a bounded,
+  dim live `THINKING` block above the streaming response. Tests:
+  `tests/thinkingstream.test.ts`, `tests/servertokens.test.ts`,
+  `tests/tuithinking.test.ts`, `web/tests/streaming.test.ts`.
 
 ### Security
 

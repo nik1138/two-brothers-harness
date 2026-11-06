@@ -164,9 +164,15 @@ Then open `http://127.0.0.1:8600`:
    (keys are never echoed back; the server seals them at rest). Runs use the
    configured models; there is no separate "mock" switch in the UI.
 3. **Send a task** in `work` mode. The run proceeds in the background; the
-   chat updates live over SSE and you can send follow-up messages, stop the
-   run, or just reload the page (progress is recovered from the runtime
-   sidecar).
+   chat updates live over SSE — live **Thinking** (reasoning) and **Response**
+   blocks stream in as the models generate, then resolve into the normal
+   conversation bubbles. You can send follow-up messages, stop the run, or
+   just reload the page (progress is recovered from the runtime sidecar).
+   In the composer, `@` opens a picker over shared skills and workspace files
+   and `/` at the start of a line opens the slash-command picker; selecting an
+   item inserts `@skill:name`, `@relative/path` or `/name` into the task, and
+   the server attaches the mentioned skill bodies/files to the shared context
+   and expands command templates before the run starts.
 4. **Approve mutations.** Reads inside the workspace are free, but every
    write/edit/delete/shell command docks an approval card in the chat —
    allow or deny there to resume the run. On narrow screens the sidebar
@@ -201,8 +207,12 @@ disappears cleanly under `NO_COLOR`), a grapheme-aware multiline
 composer with history and bracketed paste, `Ctrl+R` incremental prompt-history
 search, `Ctrl+F` find-in-transcript (with `/find`), `Ctrl+O` to stash or
 restore a draft, Ctrl+P command palette and `?` help overlays, session/model
-pickers, token streaming in place, live resize repaint, and non-blocking
-turns — Escape/Ctrl+C cancel a running turn before anything else.
+pickers, live **THINKING** and response blocks from token streaming, live
+resize repaint, and non-blocking turns — Escape/Ctrl+C cancel a running turn
+before anything else. Typing `/` at the start of the composer opens the
+command picker and `@` opens the skill picker; `@skill:name` mentions are
+validated and attached to the shared context before the turn runs (file
+mentions are web-only because terminal runs have no workspace).
 
 Full keymap and web palette keys: [Keyboard and shortcuts](keyboard.md).
 

@@ -23,7 +23,8 @@ The script runs:
 6. the hermetic CLI E2E (`node e2e/cli.ts`)
 7. the `typescript/` reference selftest
 8. the `web/` unit tests (`npm test` — chat, timeline, drafts, palette,
-   session-status, recents, density, find and content-search)
+   session-status, recents, density, find, content-search, mentions and
+   streaming)
 9. the `web/` build
 
 Expected final line: `SMOKE TEST: PASS`. It is an offline pre-flight, not the
@@ -88,7 +89,16 @@ and compaction-stress paths. Session search/export is covered by
 Markdown/JSON export shapes, tolerant loading), `tests/serversearch.test.ts`
 (the `GET /api/search` and per-session export endpoints over a real
 loopback server) and `tests/sessionscommands.test.ts` (the CLI subcommands and
-their exit codes). Workspace rename/ordering is covered by
+their exit codes). Composer mentions/slash commands are covered by
+`tests/mentions.test.ts` (token scanning, blocks, path normalization),
+`tests/workspacefiles.test.ts` (bounded file index + picker ranking),
+`tests/mentionswiring.test.ts` (the files endpoint and run-submission
+expansion/injection over loopback) and `tests/tuipicker.test.ts` (the TUI
+pickers + skill-attachment validation). Thinking/response streaming is covered
+by `tests/thinkingstream.test.ts` (provider splits for all three wire families
+and harness token kinds), `tests/servertokens.test.ts` (named live token SSE
+frames, no persistence/replay) and `tests/tuithinking.test.ts` (the TUI live
+THINKING block). Workspace rename/ordering is covered by
 `tests/workspaceorder.test.ts` (registry unit tests, persistence across
 reload, permutation validation) and `tests/serverworkspaces.test.ts` (the
 `PATCH`/`PUT` endpoints over loopback); the broker approval-repeat cap by
@@ -125,16 +135,18 @@ npm test                # every web suite below (node:test, offline)
 The suite (`tests/chat.test.ts`, `tests/timeline.test.ts`,
 `tests/drafts.test.ts`, `tests/palette.test.ts`, `tests/sessionStatus.test.ts`,
 `tests/recents.test.ts`, `tests/density.test.ts`, `tests/find.test.ts`,
-`tests/search.test.ts`, `tests/workspaceOrder.test.ts`) covers the
+`tests/search.test.ts`, `tests/workspaceOrder.test.ts`,
+`tests/mentions.test.ts`, `tests/streaming.test.ts`) covers the
 envelope→group-chat projection, the runtime-event timeline merge, per-session
 unsent drafts, palette building/scoring/filtering, sidebar row status, the MRU
 workspace list, the persisted UI density preference, find-in-transcript
-matching, content-search result shaping plus export helpers, and the workspace
-ordering helpers behind the sidebar's rename/reorder menu. The modules are
-dependency-free at runtime, so plain `node --test` runs them via the
-`tests/register-ts.mjs` bootstrap (a tiny resolve hook for the extensionless
-imports); `npm test` wires that up. The full `web/` gate also includes
-`npm run build` (see the smoke test above).
+matching, content-search result shaping plus export helpers, the workspace
+ordering helpers, the composer mention trigger/filter/insert model, and the
+bounded live-token streaming accumulator. The modules are dependency-free at
+runtime, so plain `node --test` runs them via the `tests/register-ts.mjs`
+bootstrap (a tiny resolve hook for the extensionless imports); `npm test`
+wires that up. The full `web/` gate also includes `npm run build` (see the
+smoke test above).
 
 ## TypeScript reference (`typescript/`)
 

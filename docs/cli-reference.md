@@ -111,7 +111,16 @@ empty; `F1` always opens it), both generated from the same keymap registry as
 case-insensitive filter over the whole transcript with `current/total`,
 `Enter`/`Down` next, `Shift+Enter`/`Up` previous (wrap), the active match
 marked and scrolled into view, and `Esc` restoring the draft and scroll
-position. Slash input: `/mode consult|work`, `/models`,
+position. Typing `/` at the start of the composer (or a line start) opens an
+inline command picker over the built-in commands and discovered templates;
+typing `@` at a token boundary opens a skill picker (shared skills are
+selectable, role-scoped rows are shown disabled). `Enter`/`Tab` insert
+`/name ` or `@skill:name ` and `Esc` closes without touching the draft.
+When a provider streams reasoning, a bounded dim `THINKING` block appears
+above the streaming response for that call and disappears when the completed
+reply arrives — reasoning is observational and never persisted or treated as
+part of the reply. File mentions are web-only (terminal runs have no
+workspace). Slash input: `/mode consult|work`, `/models`,
 `/sessions`, `/theme dark|light|system`, `/settings`, `/retry`, `/help`,
 `/commands`, `/exit`, plus discovered `<name>.md` templates (unknown names are
 never submitted as tasks). `/models` and `/sessions` refuse to change things
@@ -122,6 +131,37 @@ renders token deltas in place while a turn runs.
 node dist/cli.js tui --provider mock
 node dist/cli.js tui "Plan a migration from Redis to Valkey" --provider mock
 ```
+
+### Composer mentions and slash commands
+
+The web composer and the TUI turn typed mentions and commands into run
+context, and the server applies the same rules to `POST /api/runs` /
+`POST /api/run` so any client can use them:
+
+- **`/name args`** — if the leading token is a discovered command
+  (`commands/<name>.md`, also `--commands-dir` / `TWO_BROTHERS_COMMANDS_DIR`
+  roots), the template is expanded (`$ARGUMENTS`, `$1`..`$9`, `$$`) and the
+  command's frontmatter `mode` overrides the run mode for that run; an
+  unknown or path-like slash line (e.g. `/usr/bin/env …`) is submitted as a
+  normal task.
+- **`@skill:<name>`** — attaches the body of a discovered **shared** skill as
+  a `<skill-loaded name="…">` context message before the task. Unknown names,
+  role-scoped (`senior`/`junior`) skills and more than
+  `MENTION_MAX_SKILLS` (3) are a 400.
+- **`@<relative/path>` / `@./<path>`** — attaches a file from the run's
+  workspace as a `<file path="…">` context message (bounded to
+  `MENTION_MAX_FILE_CHARS` per file with a truncation marker, at most
+  `MENTION_MAX_FILES` (5), total attached content ≤
+  `MENTION_MAX_TOTAL_CHARS` (100 000) chars). Requires `workspace_id`;
+  absolute paths, `..` escapes, sensitive files, binaries and missing files
+  are a 400. Web root-level files serialize as `@./README.md` so they stay
+  unambiguous.
+
+Mention tokens stay in the task text (traceability); the attached blocks are
+separate `message` envelopes persisted in the session JSONL before the task.
+The TUI supports `/` and `@skill:` (no workspace, so file mentions stay
+literal text). Discovered metadata is served at `GET /api/skills`,
+`GET /api/commands` and `GET /api/workspaces/{id}/files` (never bodies).
 
 ### `sessions`
 
@@ -328,6 +368,7 @@ The backend is a **local single-user workspace server**. API overview:
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/workspaces`, `POST /api/workspaces`, `DELETE /api/workspaces/{id}` | registered workspace directories (register/unregister; sessions are untouched); `GET` returns the operator order |
+| `GET /api/workspaces/{id}/files?q=&limit=` | bounded file index of one workspace for the composer `@` picker (`{workspace_id, files: [{path, size, mtime}], truncated, total}`; forward-slash relative paths, hidden/node_modules/sensitive/symlink entries excluded, `limit` 1–200 default 50; 404 unknown workspace) |
 | `PATCH /api/workspaces/{id}` | rename one workspace (`{"name": "..."}`; trimmed and capped at 120 characters, unchanged order; 400 for a blank name, 404 for an unknown id) |
 | `PUT /api/workspaces/order` | persist the operator's workspace order (`{"ids": ["id1", ...]}` must be an exact permutation → `{"workspaces": [...]}`; 400 for duplicates/unknown/missing ids) |
 | `GET /api/sessions` | list sessions (`?workspace_id=` filters); titles/workspace links from `<name>.meta.json` sidecars |
@@ -339,17 +380,17 @@ The backend is a **local single-user workspace server**. API overview:
 | `GET /api/sessions/{name}` | all protocol envelopes of one session |
 | `GET /api/sessions/{name}/events` | runtime sidecar events (tool calls, approvals) for browser reload |
 | `GET /PUT /api/settings` | per-role Senior/Junior provider/model/base URL/API key (keys are write-only; responses show `api_key_set` only) |
-| `POST /api/runs` | start a background run (`{"task", "mode"?, "session"?, "provider"?, "workspace_id"?}` → `202 {"run_id", "session", "status"}`); runs are FIFO — one active, the rest `queued` |
+| `POST /api/runs` | start a background run (`{"task", "mode"?, "session"?, "provider"?, "workspace_id"?, "stream_tokens"?}` → `202 {"run_id", "session", "status"}`); a leading `/name` command is expanded and `@skill:`/`@file` mentions are attached before the run (see [Composer mentions and slash commands](#composer-mentions-and-slash-commands)); `stream_tokens: true` additionally streams live `token` frames on the run SSE endpoint (strict boolean, default off); runs are FIFO — one active, the rest `queued` |
 | `GET /api/runs`, `GET /api/runs/{run_id}` | list runs / run status (`queued`/`running`/`waiting`/`completed`/`failed`/`cancelled`); records carry a per-run `usage` object (`model_calls`, `input_tokens`, `output_tokens`, `cached_tokens`; zeros while running) |
 | `POST /api/runs/{run_id}/stop` | cooperative stop (pending approvals are denied) |
-| `GET /api/runs/{run_id}/events?after=N` | SSE of typed runtime events (`run_status`, `envelope`, `tool_started`, `tool_completed`, `approval_requested`, `approval_resolved`, `run_error`, `run_end`); reconnectable via `after` |
+| `GET /api/runs/{run_id}/events?after=N` | SSE of typed runtime events (`run_status`, `envelope`, `tool_started`, `tool_completed`, `approval_requested`, `approval_resolved`, `run_error`, `run_end`); reconnectable via `after`. When the run was started with `stream_tokens`, the same stream additionally carries ephemeral named `token` frames (`event: token`, data `{type, run_id, role, kind: "text"\\|"thinking", delta, at}`) with no SSE id — they are live-only, never persisted and never replayed |
 | `GET /api/runs/{run_id}/approvals`, `POST /api/runs/{run_id}/approvals/{id}` | list/answer pending operator approvals (`{"allow": bool}`) |
 | `GET /api/providers`, `PUT /api/providers/{seed}` | provider presets (seeded: openai, deepseek, anthropic, gemini, openrouter, lmstudio, custom); keys are never returned — responses carry `api_key_set` only |
 | `GET /api/plugins` | discovered plugins (`name`, `description`, `roles`, load `errors`, `diagnostics`) |
 | `GET /api/skills` | discovered skills metadata (`name`, `description`, `scope`, `tools`, `file`) — never bodies |
 | `GET /api/commands` | discovered slash-command metadata (`name`, `description`, `argumentHint`, `mode?`, `file`) — never bodies |
 | `GET /api/fs/browse` | browse the filesystem for workspace registration (UI helper) |
-| `POST /api/run` | legacy synchronous run (body `{"task", "mode"?, "session"?, "provider"?}` → `{"session", "events", "decision"}`) |
+| `POST /api/run` | legacy synchronous run (body `{"task", "mode"?, "session"?, "provider"?}` → `{"session", "events", "decision"}`); slash commands and mentions are expanded the same way, but there is no token streaming |
 | `GET /api/stream?session=<name>` | legacy SSE tail of a session file |
 
 In `work` mode, a run with a `workspace_id` gives the junior confined

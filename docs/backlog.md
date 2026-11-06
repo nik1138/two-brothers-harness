@@ -353,8 +353,35 @@ Design anchors that already exist:
   broker now covers plugin/MCP approval consumers and emits an additive
   `approval_auto_denied` event.
 
+## Shipped 2026-11-07 (composer mentions, live thinking streaming)
+
+- **Composer mentions and slash commands** — `src/mentions.ts` (token
+  scanning/blocks/path normalization), `src/workspacefiles.ts` (bounded file
+  index + picker ranking), `GET /api/workspaces/{id}/files`, run-submission
+  slash expansion and `@skill:`/`@file` context injection in the server, web
+  composer `@`/`/` pickers, TUI `/` and `@skill:` pickers with injection. See
+  `docs/cli-reference.md` → "Composer mentions and slash commands".
+- **Thinking/response streaming** — provider reasoning deltas
+  (`ChatOptions.onThinkingDelta`, OpenAI-compatible/Anthropic/Google
+  adapters), harness/runstream `token.kind`, `POST /api/runs
+  {"stream_tokens": true}` with named ephemeral SSE `event: token` frames,
+  web live Thinking/Response blocks and the TUI live `THINKING` block. See
+  `packages/harness/CHANGELOG.md`.
+
 ## Open items (deferred)
 
+- **Reasoning persistence and passback** — thinking/reasoning deltas are
+  currently observational and live-only: they are not persisted, not
+  replayable after a reload/reconnect, and not passed back to providers on
+  tool-loop turns. Two follow-ups: (1) persist an additive reasoning summary
+  in the runtime sidecar (or a protocol field, which would be a contract
+  change) so the thinking block survives reload; (2) Anthropic extended
+  thinking with tool use expects signed thinking blocks passed back on
+  assistant turns — capture and replay them in the Anthropic adapter if
+  thinking-enabled tool loops are offered as a supported configuration.
+- **TUI file mentions** — `@file` mentions need a workspace-bound TUI run
+  path; today terminal runs have no workspace, so `@relative/path` stays
+  literal task text.
 - **`TWO_BROTHERS_JSON` vs bare `--json`** — the flag is now an output
   mode (the `--mode json` object), while the env var keeps its
   `PROTOCOL.md` contract (decision as JSON on the last line, after the
