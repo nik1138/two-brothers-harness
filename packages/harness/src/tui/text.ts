@@ -28,6 +28,11 @@
  * derives from Unicode's EastAsianWidth.txt (Unicode License v3). This is a
  * fresh implementation for this package; the lane report records the exact
  * attribution needed for NOTICE.
+ *
+ * Span-preserving layout: {@link wrapRuns} and {@link truncateRuns} run the
+ * same width/grapheme rules as {@link wrapText}/{@link truncateToWidth} but
+ * carry an opaque per-run style through the break, so a renderer can add
+ * emphasis after the layout is final.
  */
 
 /** Options shared by the width helpers. */
@@ -532,4 +537,205 @@ export function wrapText(text: string, width: number, options: WidthOptions = {}
     rows.push(...wrapParagraph(paragraph, columns));
   }
   return rows;
+}
+
+// --------------------------------------------------------------------------- //
+// span-preserving layout
+// --------------------------------------------------------------------------- //
+
+/**
+ * One styled run of text for the span-preserving layout helpers. The style is
+ * opaque here: {@link wrapRuns} and {@link truncateRuns} only carry it through
+ * segmenting/cutting, so the same display-width rules serve Markdown emphasis
+ * or any future styling model.
+ *
+ * The input contract matches the plain helpers: runs must be one already
+ * sanitized line (ANSI escapes, tabs, CRLF and C0/C1 controls removed with
+ * {@link sanitizeText}). The Markdown span renderer sanitizes its source
+ * before it builds runs, so no styling marker can smuggle a control byte past
+ * the width math.
+ */
+export interface StyledRun<Style = string> {
+  text: string;
+  style?: Style;
+}
+
+interface StyledGrapheme<Style> {
+  grapheme: string;
+  style?: Style;
+  width: number;
+}
+
+/**
+ * Segment styled runs into graphemes, remembering each grapheme's style.
+ * The runs are joined first and segmented once, exactly like the plain
+ * helpers segment the flattened text, so a grapheme cluster that happens to
+ * span a run boundary (e.g. a combining mark after a styled run) is still one
+ * width unit and is never split; it inherits the style of its first code unit.
+ */
+function styledGraphemes<Style>(runs: readonly StyledRun<Style>[]): StyledGrapheme<Style>[] {
+  const texts: string[] = [];
+  const ranges: { start: number; end: number; style?: Style }[] = [];
+  let offset = 0;
+  for (const run of runs) {
+    const text = typeof run.text === "string" ? run.text : "";
+    texts.push(text);
+    ranges.push({ start: offset, end: offset + text.length, style: run.style });
+    offset += text.length;
+  }
+  const out: StyledGrapheme<Style>[] = [];
+  let rangeIndex = 0;
+  let position = 0;
+  for (const grapheme of graphemes(texts.join(""))) {
+    while (rangeIndex < ranges.length && (ranges[rangeIndex]?.end ?? 0) <= position) {
+      rangeIndex += 1;
+    }
+    out.push({ grapheme, style: ranges[rangeIndex]?.style, width: graphemeWidth(grapheme) });
+    position += grapheme.length;
+  }
+  return out;
+}
+
+/** Rebuild runs from styled graphemes, merging adjacent same-style runs. */
+function styledRuns<Style>(records: readonly StyledGrapheme<Style>[]): StyledRun<Style>[] {
+  const out: StyledRun<Style>[] = [];
+  for (const record of records) {
+    if (record.grapheme === "") continue;
+    const last = out[out.length - 1];
+    if (last !== undefined && last.style === record.style) {
+      last.text += record.grapheme;
+      continue;
+    }
+    const run: StyledRun<Style> = { text: record.grapheme };
+    if (record.style !== undefined) run.style = record.style;
+    out.push(run);
+  }
+  return out;
+}
+
+function styledWidth<Style>(records: readonly StyledGrapheme<Style>[]): number {
+  let width = 0;
+  for (const record of records) width += record.width;
+  return width;
+}
+
+function trimStyledTrailingSpaces<Style>(
+  records: readonly StyledGrapheme<Style>[],
+): StyledGrapheme<Style>[] {
+  let end = records.length;
+  while (end > 0 && records[end - 1]?.grapheme === " ") end -= 1;
+  return records.slice(0, end);
+}
+
+/** Cut styled graphemes to at most `limit` columns (never split a grapheme). */
+function cutStyled<Style>(
+  records: readonly StyledGrapheme<Style>[],
+  limit: number,
+): StyledRun<Style>[] {
+  const kept: StyledGrapheme<Style>[] = [];
+  let width = 0;
+  for (const record of records) {
+    if (width + record.width > limit) break;
+    kept.push(record);
+    width += record.width;
+  }
+  return styledRuns(kept);
+}
+
+/**
+ * Greedy word-wrap of styled runs to `width` columns, mirroring
+ * {@link wrapText}'s paragraph algorithm exactly: the space at a break is
+ * consumed, words longer than the width are hard-split at grapheme
+ * boundaries, and a wide cluster that cannot fit a one-cell row becomes `…`.
+ *
+ * Every returned row keeps each run's style only on its own graphemes, so a
+ * colour theme can paint emphasis after wrapping. `rows.map(join)` equals
+ * `wrapText(plainText, width)` for the same sanitized input — the property
+ * test in `tests/tuistyle.test.ts` pins that equivalence.
+ */
+export function wrapRuns<Style>(
+  runs: readonly StyledRun<Style>[],
+  width: number,
+): StyledRun<Style>[][] {
+  const columns = Number.isFinite(width) && width >= 1 ? Math.floor(width) : 1;
+  const all = styledGraphemes(runs);
+  const rows: StyledGrapheme<Style>[][] = [];
+  let line: StyledGrapheme<Style>[] = [];
+  let lineWidth = 0;
+
+  for (const record of all) {
+    if (lineWidth + record.width <= columns) {
+      line.push(record);
+      lineWidth += record.width;
+      continue;
+    }
+
+    // A space at the break point is consumed instead of starting a row.
+    if (record.grapheme === " ") {
+      if (line.length > 0) rows.push(trimStyledTrailingSpaces(line));
+      line = [];
+      lineWidth = 0;
+      continue;
+    }
+
+    // Prefer breaking at the last space in the current row.
+    let breakAt = -1;
+    for (let index = line.length - 1; index >= 0; index -= 1) {
+      if (line[index]?.grapheme === " ") {
+        breakAt = index;
+        break;
+      }
+    }
+    if (breakAt > 0) {
+      rows.push(trimStyledTrailingSpaces(line.slice(0, breakAt)));
+      line = line.slice(breakAt + 1);
+      while (line.length > 0 && line[0]?.grapheme === " ") line.shift();
+      lineWidth = styledWidth(line);
+    }
+
+    if (lineWidth + record.width > columns) {
+      if (line.length > 0) {
+        rows.push(trimStyledTrailingSpaces(line));
+        line = [];
+        lineWidth = 0;
+      }
+      if (record.width > columns) {
+        // An indivisible wide cluster cannot fit a one-cell row: keep the row
+        // within the terminal and make the substitution visible, as wrapText does.
+        rows.push([{ grapheme: "…", width: 1 }]);
+        continue;
+      }
+    }
+
+    line.push(record);
+    lineWidth += record.width;
+  }
+
+  if (line.length > 0) rows.push(trimStyledTrailingSpaces(line));
+  return (rows.length > 0 ? rows : [[]]).map(styledRuns);
+}
+
+/**
+ * Shorten styled runs to at most `width` columns, mirroring
+ * {@link truncateToWidth}'s cut: the last `ellipsis` (default `…`) is reserved
+ * and appended when content is dropped, whole graphemes are kept or dropped
+ * (never split), and the cut keeps each surviving run's style. `width <= 0`
+ * yields no runs.
+ */
+export function truncateRuns<Style>(
+  runs: readonly StyledRun<Style>[],
+  width: number,
+  ellipsis: string = "…",
+): StyledRun<Style>[] {
+  const limit = Number.isFinite(width) && width > 0 ? Math.floor(width) : 0;
+  if (limit === 0) return [];
+  const records = styledGraphemes(runs);
+  if (styledWidth(records) <= limit) return runs.map((run) => ({ ...run }));
+
+  const suffix = typeof ellipsis === "string" ? ellipsis : "";
+  if (suffix === "") return cutStyled(records, limit);
+  const suffixRecords = styledGraphemes<Style>([{ text: suffix }]);
+  const suffixWidth = styledWidth(suffixRecords);
+  if (suffixWidth >= limit) return cutStyled(suffixRecords, limit);
+  return [...cutStyled(records, limit - suffixWidth), { text: suffix }];
 }

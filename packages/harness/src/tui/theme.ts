@@ -42,12 +42,26 @@ export type ThemeToken =
 /** SGR opening sequence per token. Empty string means "no styling". */
 export type ThemeTokens = Readonly<Record<ThemeToken, string>>;
 
+/**
+ * Semantic inline emphasis a view can layer on top of a token: Markdown
+ * `**bold**`, `*italic*`, `` `code` ``, link text and structural markers.
+ * The escape sequences for these live only in this file, so no view spells
+ * raw ANSI and `NO_COLOR`/`plainTheme` drops every attribute.
+ */
+export type EmphasisStyle = "bold" | "italic" | "code" | "link" | "marker";
+
 /** A resolved theme. `paint` is the only way views emit color. */
 export interface Theme {
   readonly mode: ThemeMode;
   readonly color: boolean;
   readonly tokens: ThemeTokens;
   paint(token: ThemeToken, text: string): string;
+  /**
+   * Paint `text` with a token color plus an optional inline emphasis. One
+   * open sequence (attributes then color) and one reset keep nesting and
+   * clipping safe; `emphasis` undefined is exactly {@link Theme.paint}.
+   */
+  paintEmphasis(token: ThemeToken, emphasis: EmphasisStyle | undefined, text: string): string;
   bold(text: string): string;
   dim(text: string): string;
   inverse(text: string): string;
@@ -55,6 +69,15 @@ export interface Theme {
 
 /** Reset code appended after every painted run. */
 export const RESET = "\x1b[0m";
+
+/** SGR attribute opening per emphasis style (reset is shared with paint). */
+const EMPHASIS_SGR: Readonly<Record<EmphasisStyle, string>> = {
+  bold: "\x1b[1m",
+  italic: "\x1b[3m",
+  code: "\x1b[2m",
+  link: "\x1b[4m",
+  marker: "\x1b[2m",
+};
 
 const MODES: readonly ThemeMode[] = ["dark", "light", "ansi16"];
 
@@ -169,11 +192,23 @@ function makeTheme(mode: ThemeMode, color: boolean): Theme {
     const open = tokens[token];
     return open === "" ? text : `${open}${text}${RESET}`;
   };
+  const paintEmphasis = (
+    token: ThemeToken,
+    emphasis: EmphasisStyle | undefined,
+    text: string,
+  ): string => {
+    if (!color || text === "") return text;
+    const attribute = emphasis === undefined ? "" : EMPHASIS_SGR[emphasis];
+    const open = tokens[token];
+    if (attribute === "" && open === "") return text;
+    return `${attribute}${open}${text}${RESET}`;
+  };
   return {
     mode,
     color,
     tokens,
     paint,
+    paintEmphasis,
     bold: (text: string): string => (color && text !== "" ? `\x1b[1m${text}${RESET}` : text),
     dim: (text: string): string => (color && text !== "" ? `\x1b[2m${text}${RESET}` : text),
     inverse: (text: string): string => (color && text !== "" ? `\x1b[7m${text}${RESET}` : text),

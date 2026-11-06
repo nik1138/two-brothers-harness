@@ -37,6 +37,7 @@ import {
   composeScreen,
   renderBox,
   sanitizeDisplayText,
+  stripAnsi,
   styledWidth,
   wrapDisplay,
 } from "../src/tui/screen.ts";
@@ -419,6 +420,56 @@ test("transcript: assistant bodies are markdown while user and tool rows stay li
   assert.ok(all.includes("- not a list"), "tool text is not reinterpreted");
   const raw = renderBlock(model.blocks[1]!, { width: 60, theme: plainTheme });
   for (const row of raw) assert.ok(!row.includes(ESC), "markdown output is plain text");
+});
+
+test("transcript: inline emphasis is theme-painted while NO_COLOR stays byte-identical", () => {
+  const body = "Use **bold**, *italic*, `code` and [docs](https://example.com/a).";
+  const model = commitEnvelope(
+    createTuiModel(),
+    message("m-emphasis", "senior", "message", { text: body }),
+  );
+  const block = model.blocks[0]!;
+  const plainRows = renderBlock(block, { width: 80, theme: plainTheme });
+  const expected = renderMarkdown(body, 72).map(
+    (row, index) => (index === 0 ? "SENIOR  " : "        ") + row,
+  );
+  assert.deepEqual(plainRows, expected);
+  for (const row of plainRows) assert.ok(!row.includes(ESC), "NO_COLOR rows carry no escapes");
+
+  const themed = renderBlock(block, { width: 80, theme: createTheme("dark") });
+  const text = themed.join("\n");
+  for (const sgr of ["\u001b[1m", "\u001b[3m", "\u001b[2m", "\u001b[4m"]) {
+    assert.ok(text.includes(sgr), `emphasis ${JSON.stringify(sgr)} is painted`);
+  }
+  assert.deepEqual(themed.map(stripAnsi), plainRows, "colour never changes the content");
+  assert.deepEqual(
+    renderBlock(block, { width: 80, theme: resolveTheme({ env: { NO_COLOR: "1" } }) }),
+    plainRows,
+  );
+});
+
+test("transcript: styled emphasis rows stay width-safe at every width", () => {
+  const model = commitEnvelope(
+    createTuiModel(),
+    message("m-wide-style", "junior", "deliverable", {
+      result:
+        "## 标题\n\nUse **你好世界** and *👨‍👩‍👧‍👦* with `代码` and [docs](https://example.com/a).\n\n```diff\n-old\n+new\n```",
+    }),
+  );
+  const block = model.blocks[0]!;
+  const theme = createTheme("ansi16");
+  for (const width of [1, 2, 4, 9, 16, 40, 80]) {
+    const plainRows = renderBlock(block, { width, theme: plainTheme });
+    const themedRows = renderBlock(block, { width, theme });
+    assert.equal(themedRows.length, plainRows.length, `row count @${width}`);
+    for (let index = 0; index < plainRows.length; index += 1) {
+      assert.deepEqual(stripAnsi(themedRows[index] ?? ""), plainRows[index], `content @${width}`);
+      assert.ok(
+        styledWidth(themedRows[index] ?? "") <= width,
+        `${JSON.stringify(themedRows[index])} exceeds ${width}`,
+      );
+    }
+  }
 });
 
 // --------------------------------------------------------------------------- //

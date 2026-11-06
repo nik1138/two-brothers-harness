@@ -9,6 +9,12 @@
  * differently when color is enabled.
  *
  * The view only wraps/windows; it never shortens the model's committed text.
+ * Assistant/junior/senior bodies are Markdown, so their rows carry span-level
+ * emphasis from `markdownstyle.ts` (`**bold**`, `*italic*`, `` `code` ``,
+ * links, headings, fences, diff markers): the row keeps its role tone and the
+ * spans layer a theme emphasis on top. Under `NO_COLOR` the emphasis is the
+ * identity, so every row is exactly the plain label + Markdown text.
+ *
  * Tool detail is progressive: a collapsed row shows the newest result's first
  * `maxToolRows` lines (default 6) plus a `… +N more lines` marker, and a row
  * expanded by the app shows every line. Expansion state is per tool row,
@@ -25,8 +31,15 @@ import type {
   TuiModel,
   UserBlock,
 } from "./model.ts";
-import { renderMarkdown } from "./markdown.ts";
+import {
+  renderMarkdownStyled,
+  styledLineText,
+  styledSpansText,
+  type StyledLine,
+  type StyledSpan,
+} from "./markdownstyle.ts";
 import { clipStyled, wrapDisplay } from "./screen.ts";
+import { displayWidth, wrapRuns } from "./text.ts";
 import { plainTheme, type Theme, type ThemeToken } from "./theme.ts";
 
 /** Minimum label column for the inline transcript layout. */
@@ -44,6 +57,11 @@ export interface BlockLabel {
 interface ContentRow {
   text: string;
   tone?: ThemeToken;
+  /**
+   * Inline emphasis runs (already wrapped to the content width); `text` is
+   * exactly their concatenation, so the plain join is the NO_COLOR row.
+   */
+  spans?: readonly StyledSpan[];
 }
 
 /** The textual label for a block (always present, color-independent). */
@@ -242,25 +260,57 @@ function decisionRows(block: DecisionBlock): ContentRow[] {
 }
 
 /**
- * Theme tone for a Markdown row that carries a unified-diff marker, or
- * undefined for ordinary rows. A marked row always repeats its sign
- * (`- -old`, `+ +new`, `@@ @@ …`), so a Markdown bullet (`- item`) never
- * matches.
+ * Theme tone for one styled Markdown row. Fence labels and code rows get the
+ * muted "code" treatment, rules the border tone, and a unified-diff row its
+ * diff tone: a marked row's first span is the structural `marker` span (`- `,
+ * `+ `, `@@ `), so the tone is read from structure instead of re-parsing the
+ * flattened text. Every other row keeps the role's tone.
  */
-function diffRowTone(text: string): ThemeToken | undefined {
-  if (text.startsWith("@@ @@")) return "muted";
-  if (text.startsWith("- -")) return "error";
-  if (text.startsWith("+ +")) return "success";
-  return undefined;
+function styledRowTone(line: StyledLine, base: ThemeToken): ThemeToken {
+  switch (line.kind) {
+    case "fenceOpen":
+    case "fenceClose":
+    case "code":
+      return "muted";
+    case "rule":
+      return "border";
+    case "diff": {
+      const marker = line.spans[0];
+      if (marker === undefined || marker.style !== "marker") return base;
+      if (marker.text === "@@ ") return "muted";
+      if (marker.text === "- ") return "error";
+      if (marker.text === "+ ") return "success";
+      return base;
+    }
+    default:
+      return base;
+  }
+}
+
+/**
+ * Give a row's structural kinds their emphasis: headings and fence labels are
+ * bold, while an explicit inline style (code, link, marker) keeps its own
+ * treatment. Rows are already wrapped, so this never changes the text width.
+ */
+function emphasizedSpans(line: StyledLine): readonly StyledSpan[] {
+  const emphasis =
+    line.kind === "heading" || line.kind === "fenceOpen" || line.kind === "fenceClose"
+      ? "bold"
+      : undefined;
+  if (emphasis === undefined) return line.spans;
+  return line.spans.map((span) =>
+    span.style === undefined ? { text: span.text, style: emphasis } : span,
+  );
 }
 
 function envelopeRows(block: EnvelopeBlock, width: number): ContentRow[] {
   const tone: ThemeToken = block.role === "junior" ? "junior" : "senior";
   // Assistant message bodies are Markdown; every other block kind stays
   // literal so user intent and tool output are never reinterpreted.
-  const rows: ContentRow[] = renderMarkdown(block.text, width).map((text) => ({
-    text,
-    tone: diffRowTone(text) ?? tone,
+  const rows: ContentRow[] = renderMarkdownStyled(block.text, width).map((line) => ({
+    text: styledLineText(line),
+    tone: styledRowTone(line, tone),
+    spans: emphasizedSpans(line),
   }));
   if (block.interrupted === true) {
     rows.push({ text: "[interrupted — partial reply]", tone: "warning" });
@@ -315,11 +365,24 @@ function contentRows(
 interface VisualRow {
   text: string;
   tone?: ThemeToken;
+  spans?: readonly StyledSpan[];
 }
 
 function visualRows(rows: readonly ContentRow[], width: number): VisualRow[] {
   const out: VisualRow[] = [];
   for (const row of rows) {
+    if (row.spans !== undefined) {
+      // Markdown rows arrive already wrapped to `width`; only re-wrap an
+      // over-wide styled row so styling is never lost to a plain wrap.
+      if (displayWidth(row.text) <= width) {
+        out.push({ text: row.text, tone: row.tone, spans: row.spans });
+        continue;
+      }
+      for (const spans of wrapRuns(row.spans, width)) {
+        out.push({ text: styledSpansText(spans), tone: row.tone, spans });
+      }
+      continue;
+    }
     const wrapped = wrapDisplay(row.text, width);
     for (const line of wrapped) {
       out.push(row.tone === undefined ? { text: line } : { text: line, tone: row.tone });
@@ -340,8 +403,25 @@ function boundToolRows(rows: VisualRow[], options: TranscriptOptions): VisualRow
   return [...rows.slice(0, max), { text: `… +${hidden} more lines`, tone: "dim" }];
 }
 
+/**
+ * Paint the row's base tone under the spans' inline emphasis. With
+ * `plainTheme` every call is the identity, so the joined text is exactly the
+ * plain row; a color theme emits one open/reset pair per span and no escape
+ * ever escapes the theme layer.
+ */
+function paintSpans(theme: Theme, token: ThemeToken, spans: readonly StyledSpan[]): string {
+  let text = "";
+  for (const span of spans) text += theme.paintEmphasis(token, span.style, span.text);
+  return text;
+}
+
 function paintRow(theme: Theme, row: VisualRow, width: number): string {
-  const text = row.tone === undefined ? row.text : theme.paint(row.tone, row.text);
+  const text =
+    row.spans === undefined
+      ? row.tone === undefined
+        ? row.text
+        : theme.paint(row.tone, row.text)
+      : paintSpans(theme, row.tone ?? "text", row.spans);
   return clipStyled(text, width);
 }
 
