@@ -368,7 +368,79 @@ Design anchors that already exist:
   web live Thinking/Response blocks and the TUI live `THINKING` block. See
   `packages/harness/CHANGELOG.md`.
 
+## Shipped 2026-11-07 (first-party base commands + command-surface cleanup)
+
+- **Base-command catalogue** — `src/basecommands.ts`: the built-in slash
+  commands adapted from deepseek-harness's six builtin identities and
+  kimi-code's TUI slash-command registry, split into `prompt` templates
+  (`plan`, `goal`, `feedback`; literal `$ARGUMENTS` expansion, `consult` mode,
+  `requiresArguments` usage errors) and `action` commands a surface performs
+  (`compact`, `export`, `permission`, `status`, `mode`, `new`, `help`).
+  English + reference Chinese aliases, priority ordering, serializable
+  metadata for `GET /api/commands`; a discovered `<name>.md` shadows a base
+  name. `expandTemplate` is shared with discovered commands so both render
+  identical task bytes.
+- **Server** — additive `baseCommands` in `GET /api/commands`; base prompt
+  expansion + mode override and an actionable 400 for action commands in run
+  submission (both `POST /api/runs` and legacy `/api/run`);
+  `POST /api/sessions/{name}/compact` for on-demand compaction (404/400/409/
+  honest no-op/502, dense-`seq` in-place rewrite). See
+  `docs/cli-reference.md` → "Built-in commands".
+- **Web** — built-in group in the composer `/` menu (priority order, action
+  badges, alias/description search, discovered-shadows-base, old-backend
+  fallback), local action dispatch (compact via the new route with reload,
+  export via the shared download, help/status/permission dialogs, mode, new),
+  a commands & shortcuts overlay (`/help`, `?`, `Ctrl/⌘+/`), the composer key
+  contract (IME/repeat-safe submit, `Ctrl/⌘+Enter`, picker `Tab`/`Shift+Tab`,
+  `Esc` layering) and 500 ms double-`Esc` stop.
+- **TUI** — built-in commands in the `/` picker and help overlay with honest
+  local actions (compact/export/status/permission, refusals where a surface
+  cannot act), native keymap commands still winning, picker grouping/badges/
+  alias search/hint footer, and `Tab`/`Shift+Tab` accept/dismiss in the
+  pickers.
+- **CLI** — the `chat` REPL dispatches prompt commands (plan/goal/feedback
+  with mode override and usage errors) and performs `/compact`, `/export`,
+  `/status`, `/permission`, `/mode`, `/help`/`/commands` locally; `/new` is
+  refused with guidance; `help chat` documents the surface.
+
 ## Open items (deferred)
+
+- **TUI approval surface (kimi-code parity)** — the TUI has no approval
+  panel although `src/permissions.ts` brokers requests and fails closed
+  (`web/` renders the cards). Port kimi-code's approval panel shape: typed
+  detail blocks (diff / file content / shell / invocation), numbered
+  decisions, `Esc` reject, a full-screen preview (`Ctrl+E`, reusing
+  `workspace.ts::makeDiff`), and an inline feedback field when the request
+  requires one.
+- **`allow_session` approval scope** — an "always allow this action for this
+  session" decision through `RunApprovalBroker` + the server route + the web
+  card, persisted in `sessions/settings.json` (never in the session log), with
+  the fail-closed default and the denial-cap behavior unchanged.
+- **Queue visibility / composer driver** — the server runs one run at a time
+  per session and has no mid-turn injection, so only the *queue* half is
+  portable: show submissions that will be sent after the current turn (honest
+  copy — never "steered"), with remove/send-now rows. `steer` stays a
+  non-goal until the harness accepts mid-turn input.
+- **Todo / plan panel** — neither surface shows the cooperation plan as a
+  live artifact; kimi-code's todo card (status markers + "+N more" tail) and
+  DSH's plan-mode review are the references. Needs a session-visible plan
+  source before the panel is worth building.
+- **Step folding** — collapse older thinking/tool steps into a one-line
+  summary ("thinking N times, called M tools, K messages") on both surfaces;
+  kimi-code's `step-summary.ts` is the reference. Pure function shared by
+  `tui/transcript.ts` and `web/src/runtime.ts`.
+- **Web design-token / empty-state pass** — kimi-code's role-named CSS
+  token layer (~870 custom properties, diff colors, composer radius, easing)
+  and its single `.ui-empty` pattern could tighten the web chrome; the empty
+  hero (headline + workspace chip + preset picker) is missing on the web.
+- **Composer status seats** — DSH's second composer row (context ring with a
+  system/tools/messages breakdown, model and permission seats) against our
+  `ContextMeter` + `PromptAuditEntry` data; the breakdown is derivable from
+  the existing prompt audits without a protocol change.
+- **TUI footer tips + transient hints** — kimi-code's footer slot system
+  (mode/goal/model/tasks/environment/cwd/git/tips, skipped when empty) with
+  a weighted tip rotation and a separate transient-hint line; our
+  `StatusBarState.hints` already exists.
 
 - **Reasoning persistence and passback** — thinking/reasoning deltas are
   currently observational and live-only: they are not persisted, not

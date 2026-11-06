@@ -169,10 +169,16 @@ Then open `http://127.0.0.1:8600`:
    conversation bubbles. You can send follow-up messages, stop the run, or
    just reload the page (progress is recovered from the runtime sidecar).
    In the composer, `@` opens a picker over shared skills and workspace files
-   and `/` at the start of a line opens the slash-command picker; selecting an
-   item inserts `@skill:name`, `@relative/path` or `/name` into the task, and
-   the server attaches the mentioned skill bodies/files to the shared context
-   and expands command templates before the run starts.
+   and `/` at the start of a line opens the command menu — built-in commands
+   first (`plan`, `goal`, `feedback`, then the actions `compact`, `export`,
+   `permission`, `status`, `mode`, `new`, `help`), then your own discovered
+   `<name>.md` templates (a template shadows a built-in of the same name).
+   Selecting an item inserts `@skill:name`, `@relative/path` or `/name` into
+   the task; the server attaches the mentioned skill bodies/files to the
+   shared context and expands prompt templates before the run starts. Action
+   commands run locally — `/compact` summarizes older context through the
+   configured models, `/export` downloads the session as Markdown, `/help`
+   (also `?` or `Ctrl+/`) opens the commands-and-shortcuts overlay.
 4. **Approve mutations.** Reads inside the workspace are free, but every
    write/edit/delete/shell command docks an approval card in the chat —
    allow or deny there to resume the run. On narrow screens the sidebar
@@ -210,9 +216,13 @@ restore a draft, Ctrl+P command palette and `?` help overlays, session/model
 pickers, live **THINKING** and response blocks from token streaming, live
 resize repaint, and non-blocking turns — Escape/Ctrl+C cancel a running turn
 before anything else. Typing `/` at the start of the composer opens the
-command picker and `@` opens the skill picker; `@skill:name` mentions are
-validated and attached to the shared context before the turn runs (file
-mentions are web-only because terminal runs have no workspace).
+command menu (the TUI's own commands, then built-in prompts/actions, then
+discovered templates) and `@` opens the skill picker; `@skill:name` mentions
+are validated and attached to the shared context before the turn runs (file
+mentions are web-only because terminal runs have no workspace). A built-in
+action like `/compact`, `/export [path]`, `/status` or `/permission` is
+performed by the TUI and never submitted as a task; `/plan <objective>`
+expands and runs that turn.
 
 Full keymap and web palette keys: [Keyboard and shortcuts](keyboard.md).
 

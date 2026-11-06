@@ -95,7 +95,12 @@ server then serves (the npm tarball ships its own copy of that build).
 - **Slash commands.** Markdown prompt templates with `description`,
   `argument-hint`, and an optional mode; `/name args` expands `$ARGUMENTS`,
   `$1`..`$9`, and `$$` literally in the chat REPL and the TUI, and metadata is
-  served at `GET /api/commands`.
+  served at `GET /api/commands`. First-party **built-in commands** ship too
+  (`plan`, `goal`, `feedback`, `compact`, `export`, `permission`, `status`,
+  `mode`, `new`, `help`): prompt commands expand like templates with a mode
+  override, action commands are performed by the surface and never submitted,
+  a discovered template shadows a built-in of the same name, and
+  `POST /api/sessions/{name}/compact` compacts one session on demand.
 - **Context compaction.** pi's compaction algorithm on our envelope format:
   char budgets and token budgets (`--context-window`,
   `--compact-threshold-tokens`), incremental summaries via
@@ -125,15 +130,21 @@ server then serves (the npm tarball ships its own copy of that build).
 - **Web workspace.** A Vue 3 + Vite group chat (Operator / Senior / Junior)
   with registered workspaces, workspace-grouped sessions, background runs
   over SSE, docked approval cards (a mobile drawer below the breakpoint),
-  runtime sidecars, and changed-file diffs.
+  runtime sidecars, and changed-file diffs. The composer has a `@` mention
+  picker and a `/` command menu (built-ins first, then your templates), the
+  built-in actions run locally (`/compact`, `/export`, `/help`, `/status`,
+  `/permission`, …), and `?`/`Ctrl+/` opens the commands-and-shortcuts overlay.
 - **TUI.** A bare interactive `two-brothers` (or `tui [task]`) is a
   zero-dependency full-screen chat in the terminal's alternate screen, over
   the same harness and the same flags: block transcript with textual role
   labels, grapheme-aware multiline composer with history and bracketed paste,
   Ctrl+P command palette and `?` help from one keymap registry, session and
   model pickers, token streaming in place, live resize repaint, and
-  non-blocking turns with Escape/Ctrl+C cancellation. Piped no-arg
-  invocations print the usage screen instead.
+  non-blocking turns with Escape/Ctrl+C cancellation. The `/` picker lists
+  the built-in commands (badged) plus discovered templates, Tab/Shift+Tab
+  accept/dismiss, and actions like `/compact`/`/export` are performed in the
+  TUI rather than submitted. Piped no-arg invocations print the usage screen
+  instead.
 - **Protocol reference.** [`typescript/`](typescript/) is a zero-dependency
   implementation of `PROTOCOL.md` (no npm packages, no build step) that
   documents the contract.

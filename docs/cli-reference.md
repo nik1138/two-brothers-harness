@@ -86,6 +86,35 @@ words, and `$$` is a literal `$`; expansion is literal text only (no shell,
 no re-expansion). Diagnostics print under `--verbose`. The same metadata is
 served at `GET /api/commands`.
 
+#### Built-in REPL commands
+
+The REPL also dispatches the first-party commands (see
+[Built-in commands](#built-in-commands) for the shared catalogue); a
+discovered `<name>.md` wins over a same-named built-in:
+
+- **Prompt** — `/plan <objective>`, `/goal <objective>` and
+  `/feedback [notes]` expand to a task and run as that turn, with the
+  command's `consult` mode override. ASCII aliases work too (`/objective`,
+  `/review`, `/bug`); a missing required argument prints
+  `usage: /plan <objective>` and submits nothing.
+- **Action** — performed by the REPL, never submitted: `/compact` (compact the
+  in-memory context with the configured summarizer and REPL compaction
+  budgets; with `--session-file` the rewritten session is persisted with
+  dense `seq`, so `--resume` keeps working; prints `compacted: N → M
+  envelopes` or `nothing to compact`), `/export [path]` (Markdown export,
+  default `<session stem>.md` in the cwd), `/status` (session/mode/context
+  and resolved roles), `/permission` (the fail-closed approval policy and the
+  configured tool scopes), `/mode [consult|work]` (show or switch the REPL
+  mode for following turns), and `/help` / `/commands` (built-ins grouped
+  prompt/action with hints and aliases, then the discovered templates).
+  `/new` is refused with a pointer to starting a new `chat` (the line REPL
+  cannot replace a session in place). A failed `/compact` or `/export` prints
+  `compact failed: …` / `export failed: …` and keeps the context intact.
+- `/config` still prints the resolved per-role endpoints. The reference
+  Chinese aliases resolve in the catalogue, the HTTP API and the pickers, but
+  cannot be typed in the REPL: `matchCommand`'s ASCII name rule treats
+  `/目标 …` as an ordinary slash-prefixed task.
+
 ### `tui [initial task]`
 
 Full-screen interactive chat in the terminal's alternate screen, over the
@@ -112,10 +141,13 @@ case-insensitive filter over the whole transcript with `current/total`,
 `Enter`/`Down` next, `Shift+Enter`/`Up` previous (wrap), the active match
 marked and scrolled into view, and `Esc` restoring the draft and scroll
 position. Typing `/` at the start of the composer (or a line start) opens an
-inline command picker over the built-in commands and discovered templates;
-typing `@` at a token boundary opens a skill picker (shared skills are
-selectable, role-scoped rows are shown disabled). `Enter`/`Tab` insert
-`/name ` or `@skill:name ` and `Esc` closes without touching the draft.
+inline command picker: the TUI's own commands first, then built-in prompts and
+built-in actions (rows badged `builtin`/`action`, highlighted-row
+`usage — description` footer), then discovered templates with a `template`
+badge; typing `@` at a token boundary opens a skill picker (shared skills are
+selectable, role-scoped rows are shown disabled). `Enter`/`Tab` insert or run
+the highlighted row, `Shift+Tab`/`Esc` close without touching the draft, and a
+held key cannot repeat a submit.
 When a provider streams reasoning, a bounded dim `THINKING` block appears
 above the streaming response for that call and disappears when the completed
 reply arrives — reasoning is observational and never persisted or treated as
@@ -123,9 +155,19 @@ part of the reply. File mentions are web-only (terminal runs have no
 workspace). Slash input: `/mode consult|work`, `/models`,
 `/sessions`, `/theme dark|light|system`, `/settings`, `/retry`, `/help`,
 `/commands`, `/exit`, plus discovered `<name>.md` templates (unknown names are
-never submitted as tasks). `/models` and `/sessions` refuse to change things
-while a turn runs, and model changes are session-local. `--stream-tokens`
-renders token deltas in place while a turn runs.
+never submitted as tasks). The built-in prompts `/plan <objective>`,
+`/goal <objective>` and `/feedback [notes]` expand and run that turn; the
+built-in actions `/compact` (between turns — compacts through the configured
+senior endpoint and rewrites the session file, the visible transcript is
+unchanged), `/export [path]` (Markdown; in-memory sessions need a path),
+`/status`, `/permission` (real policy facts; the TUI has no approval broker)
+and `/new` (in-memory session; on-disk sessions are refused honestly) are
+performed locally and never submitted as tasks — see
+[Built-in commands](#built-in-commands). A native command always wins its own
+name and a discovered template shadows a same-named built-in. `/models` and
+`/sessions` refuse to change things while a turn runs, and model changes are
+session-local. `--stream-tokens` renders token deltas in place while a turn
+runs.
 
 ```powershell
 node dist/cli.js tui --provider mock
@@ -162,6 +204,38 @@ separate `message` envelopes persisted in the session JSONL before the task.
 The TUI supports `/` and `@skill:` (no workspace, so file mentions stay
 literal text). Discovered metadata is served at `GET /api/skills`,
 `GET /api/commands` and `GET /api/workspaces/{id}/files` (never bodies).
+
+#### Built-in commands
+
+First-party commands ship with the product and work in the web composer, the
+TUI `/` picker, the `chat` REPL and `POST /api/runs` alike. They come in two
+kinds, and the distinction is honest on every surface:
+
+- **Prompt commands** expand to a normal task and are submitted like a
+  discovered template: `/plan <objective>` (agree a plan before changing
+  anything), `/goal <objective>` (set the session goal and its success
+  criteria) and `/feedback [notes]` (turn operator feedback on the last turn
+  into follow-up work). These are built with `consult` cooperation mode and
+  expand `$ARGUMENTS` exactly like a `<name>.md` template. A missing required
+  argument is a usage error (`usage: /plan <objective>`), never an empty turn.
+- **Action commands** are performed by the surface and are never submitted as
+  a task: `/compact` (summarize older context in place), `/export [path]`
+  (session as Markdown), `/permission` (approval policy and tool scopes),
+  `/status` (run/context/session status), `/mode [consult|work]` (cooperation
+  mode), `/new` (fresh session) and `/help` (commands and shortcuts). Web and
+  TUI perform these locally; the `chat` REPL performs the ones that make
+  sense in a line REPL (`/compact`, `/export`, `/status`, `/permission`,
+  `/mode`, `/help`) and refuses the rest with an explanation. Submitting an
+  action command as a run (`POST /api/runs` with `task: "/compact"`) is a 400
+  that points at the surface action; use `POST /api/sessions/{name}/compact`
+  where a client has no local compaction.
+
+Names resolve case-insensitively, include English synonyms and the reference
+Chinese spellings (`目标`, `计划`, `反馈`, `压缩`, `权限`, `导出`), and are
+ordered by priority in the pickers. A discovered `<name>.md` template with
+the same name shadows the built-in (deepseek-harness's "exact name wins"
+rule), so an operator can override `/plan` locally. The catalogue is served,
+metadata only, at `GET /api/commands` (`baseCommands`).
 
 ### `sessions`
 
@@ -379,6 +453,7 @@ The backend is a **local single-user workspace server**. API overview:
 | `DELETE /api/sessions/{name}` | delete a session — the JSONL, its `<name>.meta.json` and the runtime sidecar (`200 {"deleted": name}`; 404 on unknown) |
 | `GET /api/sessions/{name}` | all protocol envelopes of one session |
 | `GET /api/sessions/{name}/events` | runtime sidecar events (tool calls, approvals) for browser reload |
+| `POST /api/sessions/{name}/compact` | compact the session in place on demand: the older context is summarized by the configured summarizer role (senior by default) and the session JSONL is rewritten with dense `seq`, so a reload shows the summary. `200 {"compacted": true, "before_events": N, "after_events": M}`; `200 {"compacted": false, "reason": "nothing to compact"}` when there is nothing to cut; 404 unknown session, 400 invalid session name, 409 while a run for that session is active, and 502 with the provider message (nothing written) when summarization fails |
 | `GET /PUT /api/settings` | per-role Senior/Junior provider/model/base URL/API key (keys are write-only; responses show `api_key_set` only) |
 | `POST /api/runs` | start a background run (`{"task", "mode"?, "session"?, "provider"?, "workspace_id"?, "stream_tokens"?}` → `202 {"run_id", "session", "status"}`); a leading `/name` command is expanded and `@skill:`/`@file` mentions are attached before the run (see [Composer mentions and slash commands](#composer-mentions-and-slash-commands)); `stream_tokens: true` additionally streams live `token` frames on the run SSE endpoint (strict boolean, default off); runs are FIFO — one active, the rest `queued` |
 | `GET /api/runs`, `GET /api/runs/{run_id}` | list runs / run status (`queued`/`running`/`waiting`/`completed`/`failed`/`cancelled`); records carry a per-run `usage` object (`model_calls`, `input_tokens`, `output_tokens`, `cached_tokens`; zeros while running) |
@@ -388,7 +463,7 @@ The backend is a **local single-user workspace server**. API overview:
 | `GET /api/providers`, `PUT /api/providers/{seed}` | provider presets (seeded: openai, deepseek, anthropic, gemini, openrouter, lmstudio, custom); keys are never returned — responses carry `api_key_set` only |
 | `GET /api/plugins` | discovered plugins (`name`, `description`, `roles`, load `errors`, `diagnostics`) |
 | `GET /api/skills` | discovered skills metadata (`name`, `description`, `scope`, `tools`, `file`) — never bodies |
-| `GET /api/commands` | discovered slash-command metadata (`name`, `description`, `argumentHint`, `mode?`, `file`) — never bodies |
+| `GET /api/commands` | discovered slash-command metadata (`name`, `description`, `argumentHint`, `mode?`, `file`) plus the additive first-party `baseCommands` list (`name`, `aliases`, `description`, `argumentHint`, `kind: "prompt"\|"action"`, `action?`, `requiresArguments`, `priority`) — never bodies |
 | `GET /api/fs/browse` | browse the filesystem for workspace registration (UI helper) |
 | `POST /api/run` | legacy synchronous run (body `{"task", "mode"?, "session"?, "provider"?}` → `{"session", "events", "decision"}`); slash commands and mentions are expanded the same way, but there is no token streaming |
 | `GET /api/stream?session=<name>` | legacy SSE tail of a session file |

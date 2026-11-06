@@ -98,7 +98,19 @@ pickers + skill-attachment validation). Thinking/response streaming is covered
 by `tests/thinkingstream.test.ts` (provider splits for all three wire families
 and harness token kinds), `tests/servertokens.test.ts` (named live token SSE
 frames, no persistence/replay) and `tests/tuithinking.test.ts` (the TUI live
-THINKING block). Workspace rename/ordering is covered by
+THINKING block). The first-party command surface is covered by
+`tests/basecommands.test.ts` (catalogue invariants, alias resolution incl. the
+reference Chinese spellings, the `$ARGUMENTS` expansion grammar, usage errors,
+metadata wire form, and byte equality with `expandCommand`),
+`tests/serverbase.test.ts` (additive `baseCommands` in `GET /api/commands`,
+prompt expansion + mode override + usage/action 400s in run submission,
+discovered-template shadowing, and the manual compact route's
+404/400/409/no-op/success/502 paths with an in-place dense-`seq` rewrite),
+`tests/apicommands.test.ts` (the metadata-only catalogue with empty roots),
+`tests/cliwiring.test.ts` section (iv) (the chat REPL prompt/action commands)
+and `tests/tuibasecommands.test.ts` (TUI shadowing/precedence, picker
+grouping/badges, Tab/Shift+Tab, the held-key guard, and fake-TTY action
+flows). Workspace rename/ordering is covered by
 `tests/workspaceorder.test.ts` (registry unit tests, persistence across
 reload, permutation validation) and `tests/serverworkspaces.test.ts` (the
 `PATCH`/`PUT` endpoints over loopback); the broker approval-repeat cap by
@@ -136,13 +148,18 @@ The suite (`tests/chat.test.ts`, `tests/timeline.test.ts`,
 `tests/drafts.test.ts`, `tests/palette.test.ts`, `tests/sessionStatus.test.ts`,
 `tests/recents.test.ts`, `tests/density.test.ts`, `tests/find.test.ts`,
 `tests/search.test.ts`, `tests/workspaceOrder.test.ts`,
-`tests/mentions.test.ts`, `tests/streaming.test.ts`) covers the
+`tests/mentions.test.ts`, `tests/streaming.test.ts`,
+`tests/basecommands.test.ts`, `tests/composerKeys.test.ts`) covers the
 envelope→group-chat projection, the runtime-event timeline merge, per-session
 unsent drafts, palette building/scoring/filtering, sidebar row status, the MRU
 workspace list, the persisted UI density preference, find-in-transcript
 matching, content-search result shaping plus export helpers, the workspace
-ordering helpers, the composer mention trigger/filter/insert model, and the
-bounded live-token streaming accumulator. The modules are dependency-free at
+ordering helpers, the composer mention trigger/filter/insert model, the
+bounded live-token streaming accumulator, the base-command catalogue merge
+(sorting, discovered-shadowing, alias search, typed-command resolution,
+compact request shape, old-backend fallback) and the pure composer key
+contract (IME/repeat-safe submit, `Ctrl/⌘+Enter`, picker accept/dismiss,
+double-`Esc` window). The modules are dependency-free at
 runtime, so plain `node --test` runs them via the `tests/register-ts.mjs`
 bootstrap (a tiny resolve hook for the extensionless imports); `npm test`
 wires that up. The full `web/` gate also includes `npm run build` (see the

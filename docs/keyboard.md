@@ -59,8 +59,12 @@ From a checkout, replace `two-brothers` with `node dist/cli.js` after
 | Palette | `Esc` | close it from anywhere inside |
 | Sidebar search | `Esc` | clear the query, then close search |
 | Composer | `Enter` | send the task |
+| Composer | `Ctrl+Enter` / `Cmd+Enter` | send without waiting (accelerated submit) |
 | Composer | `Shift+Enter` | insert a newline |
-| Composer `@` / line-start `/` | open the mention or command picker; `↑`/`↓` move, `Enter`/`Tab` insert, `Esc` dismiss (the draft is kept) |
+| Composer `@` / line-start `/` | open the mention or command picker; `↑`/`↓` move, `Enter`/`Tab` insert, `Shift+Tab`/`Esc` dismiss (the draft is kept) |
+| Conversation (composer focused) | `Esc` `Esc` (within 500 ms) | stop the followed run; a single `Esc` keeps its normal layering |
+| Anywhere outside a text field | `?` | open the commands & shortcuts overlay |
+| Anywhere | `Ctrl+/` / `Cmd+/` | open the commands & shortcuts overlay |
 | Approval card | `y` / `n` | allow / deny while the card has focus |
 | Mobile drawer | `Esc` | close the drawer when it is the topmost layer |
 | Dialog | `Esc` | close the topmost dialog |
@@ -102,19 +106,31 @@ session.
   `Tab` to one and press `Enter` (or `Space`) to switch; a palette session
   entry does the same from the keyboard. Either way the mobile drawer closes.
 
-- **Composer.** `Enter` sends, `Shift+Enter` breaks the line. `Enter` becomes a
+- **Composer.** `Enter` sends, `Shift+Enter` breaks the line and
+  `Ctrl+Enter`/`Cmd+Enter` sends without waiting. Held-down `Enter` never
+  machine-guns sends, and an IME composition never submits. `Enter` becomes a
   newline while a run waits for approval (the box stays usable for the next
-  draft) and is unavailable while the brothers work (the box is locked); an
-  IME composition never submits.
+  draft) and is unavailable while the brothers work (the box is locked).
 
 - **Mentions and commands.** Type `@` at a token start for a picker over
   shared skills and workspace files (emails/word-internal `@` never trigger;
   a workspace is needed for files), or `/` at a line start for the slash
-  command picker. `↑`/`↓` move, `Enter`/`Tab` insert `@skill:name `,
-  `@relative/path ` or `/name `, `Esc` dismisses and keeps the draft; while
-  the picker is open `Enter` never submits. `@skill:` narrows to skills.
-  Role-scoped (senior/junior) skills are listed but not insertable — the
-  server only attaches shared operator mentions.
+  command picker. The menu lists built-in commands first (priority order)
+  then discovered templates (alphabetical) then skills/files, with action
+  rows badged and described; searching also matches aliases (including the
+  reference Chinese spellings) and descriptions. `↑`/`↓` move,
+  `Enter`/`Tab` insert `@skill:name `, `@relative/path ` or `/name `,
+  `Shift+Tab`/`Esc` dismisses and keeps the draft; while the picker is open
+  `Enter` never submits. `@skill:` narrows to skills. Role-scoped
+  (senior/junior) skills are listed but not insertable — the server only
+  attaches shared operator mentions. Selecting or typing an action command
+  (`/compact`, `/export`, `/help`, `/status`, `/permission`, `/mode`, `/new`)
+  performs it locally and never submits it as a run.
+
+- **Commands and shortcuts overlay.** `/help`, `?` or `Ctrl+/`/`Cmd+/` opens
+  the overlay listing the built-in commands and the shortcut table (send,
+  accelerated send, newline, stop, palette, find, new session, theme,
+  settings, escape layering).
 
 - **Live thinking and response.** While a followed run generates, a dim
   collapsible **Thinking** block streams the model's reasoning and
@@ -125,10 +141,12 @@ session.
   searched by Ctrl+F.
 
 - **Stop and approvals.** Stop is the composer's Stop button (Tab to it, press
-  `Enter`/`Space`); it is cooperative and denies pending approvals. The docked
+  `Enter`/`Space`); it is cooperative and denies pending approvals. Pressing
+  `Esc` twice within 500 ms in the conversation also stops the followed run
+  (fail-soft, blocked while a dialog/approval owns focus or an IME
+  composition is active; a single `Esc` keeps its normal layering). The docked
   approval card is focusable: `y` allows and `n` denies while it has focus,
   both ignored while an input has focus; the Allow/Deny buttons always work.
-  There is no chord for either action.
 
 - **Theme.** The sidebar footer's Light/Dark/System radio group sets the theme
   — Settings → Appearance and the palette's `Theme: …` actions do the same. The
@@ -170,12 +188,13 @@ from the registry at runtime. The TUI is Ctrl-based: terminals do not deliver
 |---|---|
 | `Enter` | Send the composer text as the next task. |
 | `Shift+Enter` or `Ctrl+J` | Insert a newline instead of sending. |
-| `Tab` | Complete a partially typed slash name when exactly one built-in or discovered template matches. |
+| `Tab` | Complete a partially typed slash name when exactly one built-in or discovered template matches; inside an open picker it accepts the highlighted row. |
 | `Up` / `Down` | Recall earlier submitted tasks; on a multi-line draft they move within the draft until the cursor reaches the first or last line. The live draft is preserved and restored when you come back to it. |
 | `Ctrl+R` | Incremental prompt-history search, newest first; accepting puts the entry back in the composer. |
 | `Ctrl+O` | Stash the draft, or restore the stashed draft. |
-| `/` (line start) | Inline command picker over the built-in commands and discovered `<name>.md` templates. `↑`/`↓` move, `Enter`/`Tab` insert `/name `, `Esc` closes and keeps the draft. |
+| `/` (line start) | Inline command picker. It groups the TUI's own commands first, then built-in prompts and built-in actions (each row badged `builtin`/`action`), then discovered `<name>.md` templates with a `usage — description` footer for the highlighted row. `↑`/`↓` move, `Enter`/`Tab` insert or run, `Shift+Tab`/`Esc` closes and keeps the draft. |
 | `@` (token start) | Inline skill picker. Shared skills insert `@skill:name `; role-scoped rows are visible but disabled. File mentions are not available in the TUI (terminal runs have no workspace). |
+| (held key) | A held-down `Enter`/`Tab` cannot repeat a submit: explicit key-repeat events and identical presses on unchanged text within 400 ms are ignored, while a deliberate press after typing is accepted. |
 
 ### Read the transcript
 
@@ -201,6 +220,7 @@ from the registry at runtime. The TUI is Ctrl-based: terminals do not deliver
 | `Up` / `Down` | Move the highlighted row. |
 | `Enter` | Open or run the highlighted item; a disabled row refuses and says why. |
 | `Esc` | Close the overlay and restore the previous focus. |
+| `Tab` / `Shift+Tab` | In the `/` and `@skill:` pickers: accept / dismiss (the text input keeps focus; Left/Right keep editing the draft). |
 
 Overlays receive keys before the composer: while one is open, `Up`/`Down` move
 the selection and never recall composer history, and `Esc` closes the overlay
@@ -218,6 +238,22 @@ it is open it owns printable keys and the app chords (`Ctrl+P`, `?`, slash
 commands) are inert, exactly like the palette and help overlays; `Esc` closes
 it first. The mention picker behaves the same way while open (printable keys
 filter, `Esc` closes).
+
+The first-party built-in commands from the shared catalogue are available next
+to the native set (a native command always wins its own name, and a discovered
+template shadows a same-named built-in):
+
+- **Prompt** — `/plan <objective>`, `/goal <objective>` and
+  `/feedback [notes]` expand to a task and run that turn in `consult` mode;
+  missing required arguments print `usage: /plan <objective>` and submit
+  nothing.
+- **Action** — `/compact` (compacts the context between turns through the
+  configured senior endpoint and rewrites the session file; the visible
+  transcript is unchanged), `/export [path]` (Markdown export; in-memory
+  sessions need an explicit path), `/status` (session/context/panel details),
+  `/permission` (the real fail-closed policy facts — the TUI has no approval
+  broker), and `/new` (a fresh in-memory session; on-disk sessions are refused
+  honestly). Actions never become tasks; a refusal says why.
 
 ## See also
 

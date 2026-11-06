@@ -9,6 +9,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **First-party base commands** (`src/basecommands.ts`): the built-in slash
+  commands adapted from the two reference harnesses — prompt templates
+  `plan`, `goal`, `feedback` (literal `$ARGUMENTS`/`$1..$9`/`$$` expansion,
+  `consult` mode, `requiresArguments` usage errors) and action commands
+  `compact`, `export`, `permission`, `status`, `mode`, `new`, `help` that a
+  surface performs instead of submitting a task. English plus the reference
+  Chinese aliases, priority ordering, `baseCommandUsage`, and
+  `baseCommandMetadata()` for `GET /api/commands`. `expandTemplate` is shared
+  with discovered commands (`expandCommand` delegates), so a `<name>.md`
+  template and a base command with the same body render byte-identical task
+  text; a discovered name shadows its base namesake. Tests:
+  `tests/basecommands.test.ts`.
+- **Server base-command surface**: `GET /api/commands` additively returns
+  `baseCommands` (metadata only); run submission (`POST /api/runs` and legacy
+  `POST /api/run`) expands base prompt commands with their mode override,
+  answers a missing required argument with `400 usage: /plan <objective>`, and
+  answers an action command with a 400 that points at the surface action
+  instead of creating an empty turn; unknown/path-like slash lines stay
+  verbatim. New `POST /api/sessions/{name}/compact` compacts one session on
+  demand (404/400/409 while a run is live, `200 {compacted:true,
+  before_events, after_events}`, an honest `compacted:false` no-op, 502 on
+  summarizer failure with nothing written) and rewrites the JSONL with dense
+  `seq`. Tests: `tests/serverbase.test.ts`, `tests/apicommands.test.ts`.
+- **Web composer command surface and UI cleanup**: the `/` menu merges the
+  built-in catalogue (priority order, `action` badges, alias/description
+  search) with discovered templates (a discovered name shadows its base
+  namesake) and degrades to discovered-only against an older backend; prompt
+  commands insert `/name ` and expand server-side, action commands are
+  performed locally (`/compact` via the new route with a transcript reload,
+  `/export` via the shared download flow, `/help`/`/status`/`/permission`
+  dialogs, `/mode`, `/new`) and never submitted as runs. A single-source
+  commands-and-shortcuts overlay opens on `/help`, `?` and `Ctrl/⌘+/`; the
+  composer key contract is IME- and repeat-safe with `Ctrl/⌘+Enter`
+  accelerated send, picker `Tab`/`Shift+Tab`, escape layering, and a 500 ms
+  double-`Esc` stop. Pure modules `web/src/basecommands.ts`,
+  `composerKeys.ts`, `shortcuts.ts`, `download.ts`; tests `web/tests/
+  basecommands.test.ts`, `web/tests/composerKeys.test.ts` (web 170/170).
+- **TUI built-in commands and picker cleanup**: `src/tui/basecommands.ts`
+  adapts the shared catalogue (native keymap commands keep their names,
+  discovered templates shadow base ones, built-ins ordered by priority),
+  `src/tui/inputguard.ts` stops a held `Enter`/`Tab` from repeat-submitting,
+  and the `/` picker groups `TUI commands -> Built-in prompts -> Built-in
+  actions -> Slash commands` with `builtin`/`action`/`template` badges,
+  alias search, a highlighted-row usage footer and `Tab`/`Shift+Tab`
+  accept/dismiss. Prompt commands expand with the exact shared bytes and mode
+  override; `/compact` runs a real in-process compaction between turns and
+  rewrites the session, `/export [path]` writes canonical Markdown, `/status`
+  and `/permission` show real state only, `/new` starts a fresh in-memory
+  session, and refusals are explicit. The help overlay lists the built-ins.
+  Tests: `tests/tuibasecommands.test.ts` (all TUI suites 282/282).
+- **CLI chat REPL built-in commands**: `chat` dispatches the shared catalogue
+  before discovered templates — prompt commands run with their mode override
+  and usage errors, action commands are performed by the REPL (`/compact`
+  with the configured summarizer and resume-safe dense-`seq` rewrite,
+  `/export [path]`, `/status`, `/permission`, `/mode`, `/help`/`/commands`),
+  `/new` is refused with guidance, and `help chat` documents the surface.
+  Tests: `tests/cliwiring.test.ts`.
 - **Relaxed strict payload parse** (payload fix 2): `relaxedStrictPayload`
   (`src/payloads.ts`) runs before the repair re-ask — a node reply that is a
   bare JSON object or a fenced block without the byte-stable markers is
