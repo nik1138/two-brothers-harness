@@ -52,7 +52,15 @@ import {
   type CompletionSpec,
 } from "./completions.ts";
 import { SharedContext } from "./context.ts";
-import type { CompactionSettings } from "./compaction.ts";
+import { compactContext, estimateTokens, type CompactionSettings } from "./compaction.ts";
+import {
+  BASE_COMMANDS,
+  baseCommandUsage,
+  expandBaseCommand,
+  findBaseCommand,
+  sortBaseCommands,
+  type BaseCommand,
+} from "./basecommands.ts";
 import {
   discoverCommands,
   expandCommand,
@@ -1350,6 +1358,79 @@ async function doRun(argv: string[], io: CliIO): Promise<number> {
   }
 }
 
+// --------------------------------------------------------------------------- //
+// chat REPL: first-party base commands (src/basecommands.ts)
+// --------------------------------------------------------------------------- //
+
+/**
+ * The built-in catalogue as REPL listing lines, grouped prompt then action in
+ * `sortBaseCommands` order, using the same `name — description
+ * (argument-hint)` shape as discovered templates; aliases are listed too so
+ * the Chinese/English spellings are discoverable.
+ */
+function baseCommandListLines(): string[] {
+  const lines: string[] = [];
+  const groups = [
+    { kind: "prompt" as const, heading: "prompt commands (submit a task this turn):" },
+    { kind: "action" as const, heading: "action commands (performed by the REPL):" },
+  ];
+  const ordered = sortBaseCommands(BASE_COMMANDS);
+  for (const group of groups) {
+    lines.push(group.heading);
+    for (const command of ordered) {
+      if (command.kind !== group.kind) continue;
+      const hint = command.argumentHint === "" ? "" : ` (${command.argumentHint})`;
+      const aliases =
+        command.aliases.length === 0 ? "" : ` [aliases: ${command.aliases.join(", ")}]`;
+      lines.push(`  /${command.name} — ${command.description}${hint}${aliases}`);
+    }
+  }
+  return lines;
+}
+
+/**
+ * Compaction settings for an explicit REPL `/compact`: the configured budgets
+ * apply even when no auto trigger is set, because the operator asked for a
+ * compaction by name. `compaction.ts` picks the unit (chars unless a token
+ * threshold/window is configured) and derives the tail/summary budgets.
+ */
+function replCompactionSettings(cfg: Config): CompactionSettings {
+  return {
+    ...(cfg.compactKeepRecent > 0 ? { keepRecentChars: cfg.compactKeepRecent } : {}),
+    ...(cfg.compactThreshold > 0 ? { thresholdChars: cfg.compactThreshold } : {}),
+    ...(cfg.compactThresholdTokens > 0 ? { thresholdTokens: cfg.compactThresholdTokens } : {}),
+    ...(cfg.contextWindow > 0 ? { contextWindow: cfg.contextWindow } : {}),
+  };
+}
+
+/**
+ * The summarizer provider for an explicit REPL `/compact` — built from the
+ * same effective per-role endpoint/config the run path uses (the REPL has no
+ * harness instance between turns, so the provider is built on demand).
+ */
+function replSummarizerProvider(cfg: Config, role: "senior" | "junior", io: CliIO): Provider {
+  const endpoints = cliEndpoints(cfg);
+  const endpoint = endpoints?.[role];
+  return buildProvider(
+    {
+      provider: cfg.provider,
+      kind: resolveProviderKind(cfg, role),
+      baseUrl: endpoint?.baseUrl || cfg.baseUrl,
+      apiKey: endpoint?.apiKey || cfg.apiKey,
+      seniorModel: cfg.seniorModel,
+      juniorModel: cfg.juniorModel,
+      model: endpoint?.model || (role === "senior" ? cfg.seniorModel : cfg.juniorModel),
+      temperature: cfg.temperature,
+      timeout: cfg.timeout,
+      retries: cfg.retries,
+      contextWindow: cfg.contextWindow,
+      maxTokens: maxTokensForRole(cfg, role),
+      onWarning: providerWarningSink(io),
+    },
+    role,
+  );
+}
+
 async function doChat(argv: string[], io: CliIO): Promise<number> {
   const parsed = parseCommandArgs(
     argv,
@@ -1398,19 +1479,8 @@ async function doChat(argv: string[], io: CliIO): Promise<number> {
       );
     }
   }
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  io.log("Two Brothers REPL. Enter a task (empty line or exit to quit).");
-  printResolvedRoles(cfg, io);
-  // `for await` over the interface (not question-per-loop): lines that arrive
-  // while a run is in progress stay buffered, so piped scripts can script the
-  // REPL; question() would drop them. The prompt is only displayed on an
-  // interactive terminal — echoed onto a piped transcript it would glue the
-  // first output line onto the prompt line.
-  const showPrompt = process.stdin.isTTY === true;
-  rl.setPrompt("task> ");
-  if (showPrompt) rl.prompt();
   // One line per discovered command: `name — description (argument-hint)`.
-  const commandList = (): string =>
+  const discoveredCommandList = (): string =>
     commands.commands.length === 0
       ? "  (none discovered: add <name>.md to a commands directory)"
       : commands.commands
@@ -1420,6 +1490,181 @@ async function doChat(argv: string[], io: CliIO): Promise<number> {
               (found.argumentHint ? ` (${found.argumentHint})` : ""),
           )
           .join("\n");
+  // The `/commands` listing: built-in groups (prompt, then action), then the
+  // discovered templates in the long-standing format.
+  const commandList = (): string =>
+    [...baseCommandListLines(), "", "discovered commands:", discoveredCommandList()].join("\n");
+
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  io.log(
+    "Two Brothers REPL. Enter a task (empty line or exit to quit). Type /help for commands.",
+  );
+  printResolvedRoles(cfg, io);
+  // The REPL's default cooperation mode for following turns. A discovered
+  // template's or a built-in prompt command's `mode` overrides it for one turn.
+  let replMode: Config["mode"] = cfg.mode;
+
+  /** `/help`: the REPL commands, then the built-in catalogue, then discovered. */
+  const printReplHelp = (): void => {
+    io.log(
+      "REPL commands:\n" +
+        "  /commands      list built-in and discovered slash commands\n" +
+        "  /config        resolved provider/model/base-url per role\n" +
+        "  /help, /h      this list\n" +
+        "  /mode [consult|work]  show or set the cooperation mode for following turns\n" +
+        "  /exit, /quit   leave (empty line, exit, quit, q also work)\n" +
+        "built-in commands:\n" +
+        baseCommandListLines().join("\n") +
+        "\ndiscovered commands:\n" +
+        discoveredCommandList() +
+        "\nanything else is sent to the brothers as a task",
+    );
+  };
+
+  /** `/export [path]`: this REPL session as Markdown (`sessions export` renderer). */
+  const exportReplSession = (rawArgs: string): void => {
+    const requested = rawArgs.trim();
+    const stem =
+      cfg.sessionFile === "" ? "chat" : path.basename(cfg.sessionFile).replace(/\.jsonl$/, "");
+    const target = requested === "" ? `${stem === "" ? "chat" : stem}.md` : requested;
+    const doc: SessionSearchDoc = {
+      name: cfg.sessionFile === "" ? "chat.jsonl" : path.basename(cfg.sessionFile),
+      title: deriveTitle(context.events as unknown as Array<Record<string, any>>, stem),
+      events: [...context.events],
+      workspace_id: null,
+      updated: Math.floor(Date.now() / 1000),
+    };
+    try {
+      fs.writeFileSync(target, sessionToMarkdown(doc), "utf-8");
+    } catch (exc) {
+      io.error(`export failed: ${exc instanceof Error ? exc.message : String(exc)}`);
+      return;
+    }
+    io.log(`exported: ${path.resolve(target)} (${doc.events.length} envelopes)`);
+  };
+
+  /** `/status`: session identity, cooperation mode, context size and roles. */
+  const printReplStatus = (): void => {
+    const events = context.events;
+    const chars = events.reduce((sum, event) => sum + JSON.stringify(event).length, 0);
+    const approxTokens = estimateTokens(events.map((event) => JSON.stringify(event)).join("\n"));
+    io.log("status:");
+    io.log(
+      `  session: ${cfg.sessionFile === "" ? "(none; in-memory)" : path.resolve(cfg.sessionFile)}`,
+    );
+    io.log(`  mode: ${replMode}`);
+    io.log(`  context: ${events.length} events, ${chars} chars (~${approxTokens} tokens)`);
+    io.log("roles:");
+    printResolvedRoles(cfg, io);
+  };
+
+  /** `/permission`: the fail-closed policy and what this process can scope. */
+  const printReplPermission = (): void => {
+    const mcpConfig = typeof values["mcp-config"] === "string" ? values["mcp-config"].trim() : "";
+    const pluginCount = resources.plugins?.plugins.size ?? 0;
+    io.log("permission:");
+    io.log(
+      "  policy: fail-closed — read-only actions are auto-allowed; mutating actions ask the operator, " +
+        "and with no approval broker an ask is denied",
+    );
+    io.log("  broker: none in the line REPL (there is no operator approval channel)");
+    io.log(
+      "  workspace: none — CLI runs are not workspace-bound, so workspace tools are unavailable",
+    );
+    io.log(
+      `  tool scopes: MCP ${
+        mcpConfig === "" ? "not configured" : `from --mcp-config ${path.resolve(mcpConfig)}`
+      }; plugin tools need a workspace-bound run`,
+    );
+    io.log(`  plugins: ${pluginCount} discovered (hooks apply; plugin tools are inactive here)`);
+  };
+
+  /**
+   * `/compact`: summarize older context between turns; persists an open
+   * `--session-file` through `compactContext`'s store rewrite. Only the line
+   * loop calls this, and it awaits each turn, so a compaction can never run
+   * mid-turn or mid-stream.
+   */
+  const compactReplContext = async (): Promise<void> => {
+    const before = context.events.length;
+    if (before === 0) {
+      io.log("nothing to compact (empty context)");
+      return;
+    }
+    try {
+      validateRunConfig(cfg, cliEndpoints(cfg));
+      const settings = replCompactionSettings(cfg);
+      const provider = replSummarizerProvider(cfg, settings.summarizerRole ?? "senior", io);
+      // `compactContext` rewrites `context.store` (dense seq) when a
+      // `--session-file` is open, so `--resume` keeps working — same as a run.
+      const changed = await compactContext(context, provider, settings);
+      if (!changed) {
+        io.log("nothing to compact");
+        return;
+      }
+      const persisted =
+        context.store === null || cfg.sessionFile === ""
+          ? ""
+          : `; rewrote ${path.resolve(cfg.sessionFile)}`;
+      io.log(`compacted: ${before} → ${context.events.length} envelopes${persisted}`);
+    } catch (exc) {
+      io.error(`compact failed: ${exc instanceof Error ? exc.message : String(exc)}`);
+    }
+  };
+
+  /** Perform one built-in action command locally (never submits a task). */
+  const performBaseAction = async (command: BaseCommand, args: string): Promise<void> => {
+    switch (command.action) {
+      case "compact":
+        await compactReplContext();
+        return;
+      case "export":
+        exportReplSession(args);
+        return;
+      case "status":
+        printReplStatus();
+        return;
+      case "permission":
+        printReplPermission();
+        return;
+      case "mode": {
+        const next = args.trim().toLowerCase();
+        if (next === "") {
+          io.log(`mode: ${replMode}`);
+          return;
+        }
+        if (next !== "consult" && next !== "work") {
+          io.error("usage: /mode [consult|work]");
+          return;
+        }
+        replMode = next;
+        io.log(`mode: ${replMode}`);
+        return;
+      }
+      case "help":
+        printReplHelp();
+        return;
+      case "new":
+        io.log(
+          "new: the line REPL cannot start a fresh session in place; " +
+            "exit (/exit or Ctrl+D) and start a new `two-brothers chat` " +
+            "(serve/web can open new sessions).",
+        );
+        return;
+      default:
+        io.error(`base command /${command.name}: no REPL action configured`);
+        return;
+    }
+  };
+
+  // `for await` over the interface (not question-per-loop): lines that arrive
+  // while a run is in progress stay buffered, so piped scripts can script the
+  // REPL; question() would drop them. The prompt is only displayed on an
+  // interactive terminal — echoed onto a piped transcript it would glue the
+  // first output line onto the prompt line.
+  const showPrompt = process.stdin.isTTY === true;
+  rl.setPrompt("task> ");
+  if (showPrompt) rl.prompt();
   // eslint-disable-next-line no-constant-condition
   for await (const line of rl) {
     const trimmed = line.trim();
@@ -1429,16 +1674,7 @@ async function doChat(argv: string[], io: CliIO): Promise<number> {
       return 0;
     }
     if (command === "/help" || command === "/h") {
-      io.log(
-        "REPL commands:\n" +
-          "  /commands      list discovered slash commands\n" +
-          "  /config        resolved provider/model/base-url per role\n" +
-          "  /help          this list\n" +
-          "  /exit, /quit   leave (empty line, exit, quit, q also work)\n" +
-          "slash commands:\n" +
-          commandList() +
-          "\nanything else is sent to the brothers as a task",
-      );
+      printReplHelp();
       if (showPrompt) rl.prompt();
       continue;
     }
@@ -1454,21 +1690,51 @@ async function doChat(argv: string[], io: CliIO): Promise<number> {
     }
     // Slash commands expand to a task once, literally; an unknown name is a
     // REPL note, never a submitted task, and `null` means "not a command".
+    // A discovered `<name>.md` keeps priority over a same-named base command;
+    // base prompt commands expand and run, base action commands are performed
+    // locally (they are never submitted as tasks).
     const matched = matchCommand(trimmed);
     if (matched !== null) {
-      const found = commands.commands.find((cmd) => cmd.name === matched.name);
-      if (found === undefined) {
-        io.error(
-          `unknown command: ${matched.name} (type /commands to list available commands)`,
-        );
-      } else {
-        await runOnce(cfg, expandCommand(found, matched.args), io, context, {
+      const discovered = commands.commands.find((cmd) => cmd.name === matched.name);
+      if (discovered !== undefined) {
+        await runOnce(cfg, expandCommand(discovered, matched.args), io, context, {
           ...(values["mcp-config"] ? { mcpConfig: values["mcp-config"] } : {}),
           outputMode: "text",
           resources,
-          ...(found.mode ? { mode: found.mode } : {}),
+          ...(discovered.mode ? { mode: discovered.mode } : {}),
         });
         io.log("");
+      } else {
+        const base = findBaseCommand(matched.name);
+        if (base === undefined) {
+          io.error(
+            `unknown command: ${matched.name} (type /commands to list available commands)`,
+          );
+        } else if (base.kind === "prompt") {
+          let task: string | null = null;
+          try {
+            task = expandBaseCommand(base, matched.args);
+          } catch (exc) {
+            if (exc instanceof RangeError) {
+              // Missing required arguments: print the usage line and submit
+              // nothing (the REPL continues with the next line).
+              io.error(`usage: ${baseCommandUsage(base)}`);
+            } else {
+              io.error(`[error] ${exc instanceof Error ? exc.message : String(exc)}`);
+            }
+          }
+          if (task !== null) {
+            await runOnce(cfg, task, io, context, {
+              ...(values["mcp-config"] ? { mcpConfig: values["mcp-config"] } : {}),
+              outputMode: "text",
+              resources,
+              ...(base.mode ? { mode: base.mode } : {}),
+            });
+            io.log("");
+          }
+        } else {
+          await performBaseAction(base, matched.args);
+        }
       }
       if (showPrompt) rl.prompt();
       continue;
@@ -1477,6 +1743,7 @@ async function doChat(argv: string[], io: CliIO): Promise<number> {
       ...(values["mcp-config"] ? { mcpConfig: values["mcp-config"] } : {}),
       outputMode: "text",
       resources,
+      mode: replMode,
     });
     io.log("");
     if (showPrompt) rl.prompt();

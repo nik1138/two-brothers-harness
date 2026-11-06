@@ -1,8 +1,11 @@
 /**
- * CLI wiring for the polish wave: `run --stream --stream-tokens` and the chat
- * REPL's slash-command dispatch. Hermetic: mock providers only, temp
- * directories for sessions/commands, and (for the REPL) a real CLI
- * subprocess driven over piped stdin — the same idiom as `e2e/cli.ts`.
+ * CLI wiring for the polish wave: `run --stream --stream-tokens`, the chat
+ * REPL's slash-command dispatch (discovered templates and the first-party
+ * base commands from `src/basecommands.ts`) and the REPL-performed local
+ * actions (`/compact`, `/export`, `/status`, `/permission`, `/mode`, `/new`).
+ * Hermetic: mock providers only, temp directories for sessions/commands, and
+ * (for the REPL) a real CLI subprocess driven over piped stdin — the same
+ * idiom as `e2e/cli.ts`.
  *
  * Run with: node --test tests/cliwiring.test.ts
  */
@@ -15,6 +18,8 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { main, type CliIO } from "../src/cli.ts";
+import { BASE_COMMANDS } from "../src/basecommands.ts";
+import { COMPACTION_SUMMARY_PREFIX } from "../src/compaction.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 /** The source CLI entry (Node native type stripping runs it directly). */
@@ -197,6 +202,328 @@ test("chat REPL expands /name args, lists /commands and rejects unknown names", 
       tasks.every((text) => !text.includes("/nope")),
       "the unknown command was submitted as a task",
     );
+  } finally {
+    dir.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// (iv) chat REPL: first-party base commands (plan/goal/feedback prompts and
+// compact/export/status/permission/mode/help actions)
+// ---------------------------------------------------------------------------
+
+/** Env vars that would let a developer's shell change the scenario. */
+const PINNED_ENV_KEYS = [
+  "TWO_BROTHERS_PROVIDER",
+  "TWO_BROTHERS_MODE",
+  "TWO_BROTHERS_SESSION_FILE",
+  "TWO_BROTHERS_RESUME",
+  "TWO_BROTHERS_COMMANDS_DIR",
+  "TWO_BROTHERS_COMPACT",
+  "TWO_BROTHERS_COMPACT_THRESHOLD",
+  "TWO_BROTHERS_COMPACT_KEEP_RECENT",
+  "TWO_BROTHERS_COMPACT_THRESHOLD_TOKENS",
+  "TWO_BROTHERS_CONTEXT_WINDOW",
+  "TWO_BROTHERS_STREAM_TOKENS",
+] as const;
+
+interface ChatProcessResult {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+/** Run the source CLI `chat` REPL with a scripted stdin, hermetic env. */
+function runChat(args: string[], input: string, cwd: string): ChatProcessResult {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const key of PINNED_ENV_KEYS) delete env[key];
+  const run = spawnSync(process.execPath, [CLI, "chat", ...args], {
+    cwd,
+    timeout: 90_000,
+    encoding: "utf-8",
+    env,
+    input,
+  });
+  return { status: run.status, stdout: run.stdout ?? "", stderr: run.stderr ?? "" };
+}
+
+interface StoredEvent {
+  seq?: number;
+  from?: string;
+  kind?: string;
+  payload?: { text?: unknown };
+}
+
+function sessionEvents(sessionFile: string): StoredEvent[] {
+  return fs
+    .readFileSync(sessionFile, "utf-8")
+    .split(/\r?\n/)
+    .filter((line) => line.trim() !== "")
+    .map((line) => JSON.parse(line) as StoredEvent);
+}
+
+function eventKinds(sessionFile: string): string[] {
+  return sessionEvents(sessionFile).map((event) => String(event.kind ?? ""));
+}
+
+function basePrompt(name: string): string {
+  const command = BASE_COMMANDS.find((entry) => entry.name === name);
+  assert.ok(command !== undefined, `missing base command ${name}`);
+  return command.template ?? "";
+}
+
+test("chat REPL: /plan and /goal expand to tasks; a bare /plan prints usage only", () => {
+  const dir = tmpdir("tb-cli-baseprompt-");
+  const sessionFile = path.join(dir.root, "s.jsonl");
+  try {
+    const run = runChat(
+      ["--provider", "mock", "--session-file", sessionFile],
+      [
+        "/plan Ship the Redis migration",
+        "/plan",
+        "/goal Keep the scope small",
+        // an English alias resolves to the same base prompt command
+        "/objective Also keep it testable",
+        "",
+      ].join("\n"),
+      dir.root,
+    );
+    assert.equal(run.status, 0, `exit ${run.status}: ${run.stderr.slice(-500)}`);
+
+    const tasks = userMessages(sessionFile);
+    assert.equal(tasks.length, 3, `unexpected tasks: ${JSON.stringify(tasks)}`);
+    assert.equal(
+      tasks[0],
+      basePrompt("plan").replace("$ARGUMENTS", "Ship the Redis migration"),
+    );
+    assert.equal(tasks[1], basePrompt("goal").replace("$ARGUMENTS", "Keep the scope small"));
+    assert.equal(tasks[2], basePrompt("goal").replace("$ARGUMENTS", "Also keep it testable"));
+
+    // missing required arguments: the usage line, no turn, the REPL continues
+    assert.match(run.stderr, /usage: \/plan <objective>/);
+    assert.ok(tasks.every((task) => !task.includes("$ARGUMENTS")));
+
+    // the built-in prompt commands' consult mode overrides the turn
+    assert.deepEqual(eventKinds(sessionFile), [
+      "message",
+      "consult",
+      "proposal",
+      "review",
+      "decision",
+      "message",
+      "consult",
+      "proposal",
+      "review",
+      "decision",
+      "message",
+      "consult",
+      "proposal",
+      "review",
+      "decision",
+    ]);
+  } finally {
+    dir.cleanup();
+  }
+});
+
+test("chat REPL: /mode switches the following turns; prompt commands keep their mode", () => {
+  const dir = tmpdir("tb-cli-basemode-");
+  const sessionFile = path.join(dir.root, "s.jsonl");
+  try {
+    const run = runChat(
+      ["--provider", "mock", "--session-file", sessionFile],
+      [
+        "/mode work",
+        "Do the work-mode task",
+        "/plan A plan for the work-mode conversation",
+        "/mode bogus",
+        "/mode",
+        "",
+      ].join("\n"),
+      dir.root,
+    );
+    assert.equal(run.status, 0, `exit ${run.status}: ${run.stderr.slice(-500)}`);
+
+    // `/mode work` applies to the plain line (work-mode envelopes) ...
+    assert.equal((run.stdout.match(/mode: work/g) ?? []).length, 2, run.stdout);
+    // ... and then /mode with no argument reports it unchanged.
+    assert.match(run.stderr, /usage: \/mode \[consult\|work\]/);
+
+    const tasks = userMessages(sessionFile);
+    assert.equal(tasks[0], "Do the work-mode task");
+    assert.equal(
+      tasks[1],
+      basePrompt("plan").replace("$ARGUMENTS", "A plan for the work-mode conversation"),
+    );
+    assert.deepEqual(eventKinds(sessionFile), [
+      "message",
+      "delegation",
+      "deliverable",
+      "review",
+      "decision",
+      "message",
+      "consult",
+      "proposal",
+      "review",
+      "decision",
+    ]);
+  } finally {
+    dir.cleanup();
+  }
+});
+
+test("chat REPL: /compact compacts a long context and rewrites the session file", () => {
+  const dir = tmpdir("tb-cli-compact-");
+  const sessionFile = path.join(dir.root, "s.jsonl");
+  try {
+    const run = runChat(
+      ["--provider", "mock", "--session-file", sessionFile, "--compact-keep-recent", "80"],
+      "First turn task\n/compact\n\n",
+      dir.root,
+    );
+    assert.equal(run.status, 0, `exit ${run.status}: ${run.stderr.slice(-500)}`);
+    assert.match(run.stdout, /compacted: 5 → 3 envelopes/, run.stdout);
+    assert.match(run.stdout, /rewrote .*s\.jsonl/, run.stdout);
+
+    // dense seq after the rewrite, the task head kept, the summary inserted
+    const events = sessionEvents(sessionFile);
+    assert.equal(events.length, 3);
+    assert.deepEqual(events.map((event) => event.seq), [1, 2, 3]);
+    assert.equal(events[0]?.payload?.text, "First turn task");
+    assert.ok(
+      String(events[1]?.payload?.text ?? "").startsWith(COMPACTION_SUMMARY_PREFIX),
+      "the compaction summary envelope is missing",
+    );
+
+    // the rewritten session resumes cleanly (no new turn, no re-append)
+    const resumed = runChat(
+      ["--provider", "mock", "--session-file", sessionFile, "--resume"],
+      "",
+      dir.root,
+    );
+    assert.equal(resumed.status, 0, `resume exit ${resumed.status}: ${resumed.stderr.slice(-500)}`);
+    assert.match(resumed.stdout, /Two Brothers REPL/);
+    assert.equal(sessionEvents(sessionFile).length, 3);
+  } finally {
+    dir.cleanup();
+  }
+});
+
+test("chat REPL: /compact says nothing to compact when the tail already fits", () => {
+  const dir = tmpdir("tb-cli-compact-short-");
+  const sessionFile = path.join(dir.root, "s.jsonl");
+  try {
+    const run = runChat(
+      ["--provider", "mock", "--session-file", sessionFile],
+      "One short turn\n/compact\n\n",
+      dir.root,
+    );
+    assert.equal(run.status, 0, `exit ${run.status}: ${run.stderr.slice(-500)}`);
+    assert.match(run.stdout, /nothing to compact/, run.stdout);
+    assert.equal(sessionEvents(sessionFile).length, 5);
+  } finally {
+    dir.cleanup();
+  }
+});
+
+test("chat REPL: /export writes the session as Markdown", () => {
+  const dir = tmpdir("tb-cli-export-");
+  const sessionFile = path.join(dir.root, "s.jsonl");
+  try {
+    const run = runChat(
+      ["--provider", "mock", "--session-file", sessionFile],
+      "Name one benefit of code review\n/export export.md\n\n",
+      dir.root,
+    );
+    assert.equal(run.status, 0, `exit ${run.status}: ${run.stderr.slice(-500)}`);
+    assert.match(run.stdout, /exported: .*export\.md \(5 envelopes\)/, run.stdout);
+
+    const exported = fs.readFileSync(path.join(dir.root, "export.md"), "utf-8");
+    assert.ok(exported.startsWith("# Name one benefit of code review\n"), exported.slice(0, 200));
+    assert.ok(exported.includes("- envelopes: 5"), exported);
+    assert.ok(exported.includes("- session: s.jsonl"), exported);
+    assert.ok(exported.includes("## 1. user → senior · message"), exported);
+    assert.ok(exported.includes("Name one benefit of code review"));
+    assert.ok(exported.endsWith("\n") && !exported.endsWith("\n\n"));
+  } finally {
+    dir.cleanup();
+  }
+});
+
+test("chat REPL: /status and /permission report honest local state; /new refuses", () => {
+  const dir = tmpdir("tb-cli-status-");
+  try {
+    const run = runChat(
+      ["--provider", "mock"],
+      "/status\n/permission\n/new\n\n",
+      dir.root,
+    );
+    assert.equal(run.status, 0, `exit ${run.status}: ${run.stderr.slice(-500)}`);
+    const stdout = run.stdout;
+
+    assert.match(stdout, /^status:$/m);
+    assert.match(stdout, /^ {2}session: \(none; in-memory\)$/m);
+    assert.match(stdout, /^ {2}mode: consult$/m);
+    assert.match(stdout, /^ {2}context: 0 events, 0 chars \(~0 tokens\)$/m);
+    assert.match(stdout, /^roles:$/m);
+    assert.match(stdout, /senior: provider=mock model=\(unset\)/);
+
+    assert.match(stdout, /^permission:$/m);
+    assert.match(stdout, /policy: fail-closed/);
+    assert.match(stdout, /broker: none in the line REPL/);
+    assert.match(stdout, /workspace: none — CLI runs are not workspace-bound/);
+    assert.match(stdout, /tool scopes: MCP not configured/);
+    assert.match(stdout, /plugins: 0 discovered/);
+
+    // /new is honest: the line REPL cannot start a fresh session in place
+    assert.match(stdout, /new: the line REPL cannot start a fresh session in place/);
+    assert.match(stdout, /exit \(\/exit or Ctrl\+D\)/);
+  } finally {
+    dir.cleanup();
+  }
+});
+
+test("chat REPL: /help and /commands list built-ins grouped, then discovered templates", () => {
+  const dir = tmpdir("tb-cli-basehelp-");
+  const commandsRoot = path.join(dir.root, "commands");
+  fs.mkdirSync(commandsRoot);
+  writeCommand(
+    commandsRoot,
+    "plan",
+    ["---", "description: Discovered plan", "argument-hint: <topic>", "---", "DISCOVERED PLAN $ARGUMENTS", ""].join(
+      "\n",
+    ),
+  );
+  const sessionFile = path.join(dir.root, "s.jsonl");
+  try {
+    const run = runChat(
+      ["--provider", "mock", "--session-file", sessionFile, "--commands-dir", commandsRoot],
+      "/help\n/commands\n/plan override me\n/nope\n\n",
+      dir.root,
+    );
+    assert.equal(run.status, 0, `exit ${run.status}: ${run.stderr.slice(-500)}`);
+    const stdout = run.stdout;
+
+    // /help keeps the REPL command list and adds both groups
+    assert.match(stdout, /REPL commands:/);
+    assert.match(stdout, /prompt commands \(submit a task this turn\):/);
+    assert.match(stdout, /action commands \(performed by the REPL\):/);
+    assert.ok(stdout.includes("/plan — Agree an ordered"), stdout);
+    assert.ok(stdout.includes("(<objective>)"), stdout);
+    assert.ok(stdout.includes("/compact — Compact the conversation context"), stdout);
+    assert.ok(stdout.includes("/export — Export this session as Markdown ([path])"), stdout);
+    assert.ok(stdout.includes("discovered commands:"), stdout);
+
+    // /commands uses the same listing shape for the discovered template
+    assert.ok(stdout.includes("plan — Discovered plan (<topic>)"), stdout);
+
+    // a discovered template wins over the same-named built-in prompt command
+    const tasks = userMessages(sessionFile);
+    assert.equal(tasks[0], "DISCOVERED PLAN override me");
+
+    // the unknown-name note is unchanged
+    assert.match(run.stderr, /unknown command: nope/);
+    assert.ok(tasks.every((task) => !task.includes("/nope")));
   } finally {
     dir.cleanup();
   }

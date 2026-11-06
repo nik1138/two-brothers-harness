@@ -459,6 +459,9 @@ defineCommand({
   description:
     "Line-based REPL over the cooperation harness. Every non-command line is a " +
     "task; the shared context and an optional --session-file carry across turns. " +
+    "Built-in commands are available on every surface: /plan, /goal and " +
+    "/feedback expand to a task (with a per-turn mode), while /compact, /export, " +
+    "/status, /permission, /mode and /help are performed by the REPL itself. " +
     "An empty line, exit, quit, q, /exit or /quit leaves the REPL. --dry-run " +
     "prints the resolved plan and exits without starting the REPL.",
   flags: [
@@ -500,14 +503,26 @@ defineCommand({
   acceptedFlags: [...SHARED_FLAGS, "dry-run"],
   flagNotes: {
     mode: "cooperation mode consult|work|auto (the run output modes are not accepted here)",
+    "compact-keep-recent":
+      "recent chars kept verbatim by auto-compaction and by the REPL /compact action",
   },
   details: [
     "REPL commands:",
-    "  /help, /h        this list",
-    "  /commands        list discovered slash commands",
+    "  /help, /h        this list (built-in and discovered commands)",
+    "  /commands        list built-in and discovered slash commands",
     "  /config          resolved provider/model/base-url per role",
+    "  /mode [consult|work]  show or set the cooperation mode for following turns",
     "  /exit, /quit     leave (empty line, exit, quit, q also work)",
-    "  /<name> [args]   expand a command from the commands roots",
+    "built-in commands:",
+    "  prompt   /plan <objective>, /goal <objective>, /feedback [notes]",
+    "           expand to a task and run this turn (mode override per turn)",
+    "  action   /compact, /export [path], /status, /permission, /new, /help",
+    "           performed by the REPL, never submitted as a task",
+    "  aliases  /objective, /review, /bug, /clear, /h and the reference",
+    "           Chinese spellings resolve to the same built-in commands",
+    "discovered commands:",
+    "  /<name> [args]   expand a template from the commands roots",
+    "                   (a discovered name wins over a same-named built-in)",
   ],
   examples: [
     "two-brothers chat --provider mock",
