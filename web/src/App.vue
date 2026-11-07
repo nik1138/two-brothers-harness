@@ -81,8 +81,9 @@ import {
   mergeTimeline,
   projectRuntimeEvents,
   runtimeDedupeKey,
+  todosOf,
 } from './runtime'
-import type { ApprovalItem } from './runtime'
+import type { ApprovalItem, PromptAuditItem } from './runtime'
 import {
   deriveSessionStatus,
   loadLastSeen,
@@ -108,12 +109,15 @@ import NewSessionDialog from './components/NewSessionDialog.vue'
 import DiffReview from './components/DiffReview.vue'
 import ApprovalCard from './components/ApprovalCard.vue'
 import QueueDock from './components/QueueDock.vue'
+import TodoPanel from './components/TodoPanel.vue'
 import UsageFooter from './components/UsageFooter.vue'
 import CommandPalette from './components/CommandPalette.vue'
 import ShortcutHelpDialog from './components/ShortcutHelpDialog.vue'
 import SessionStatusDialog from './components/SessionStatusDialog.vue'
 import PermissionInfoDialog from './components/PermissionInfoDialog.vue'
 import AppIcon from './components/AppIcon.vue'
+import WelcomeHero from './components/WelcomeHero.vue'
+import type { HeroStarter } from './components/WelcomeHero.vue'
 
 const sessions = ref<SessionInfo[]>([])
 const workspaces = ref<Workspace[]>([])
@@ -260,6 +264,28 @@ const runtimeItems = computed(() => projectRuntimeEvents(runtimeEvents.value))
 const timeline = computed(() => mergeTimeline(items.value, runtimeItems.value))
 /** Files written/edited by tools, feeding the diff review area. */
 const changedFiles = computed(() => changedFilesOf(runtimeItems.value))
+/**
+ * The selected session's current plan (the latest `todo_updated` snapshot):
+ * last-write-wins over the session's runtime events. `runtimeEvents` is
+ * replaced on session load (replayed from the run sidecar) and only ever
+ * receives the followed run's live events, so this is per-session by
+ * construction; an older backend never emits the event, so the dock stays
+ * absent rather than inventing a plan.
+ */
+const todoPlan = computed(() => todosOf(runtimeEvents.value))
+/**
+ * Latest prompt-audit entry of the selected session (role, node kind, section/
+ * tool names and char lengths). Feeds the composer context seat; absent until a
+ * model call has been audited. Never carries prompt bodies.
+ */
+const latestPromptAudit = computed<PromptAuditItem | null>(() => {
+  const items = runtimeItems.value
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    const item = items[i]
+    if (item.type === 'prompt_audit') return item
+  }
+  return null
+})
 const title = computed(() => {
   if (!selected.value) return ''
   const info = sessions.value.find((s) => s.name === selected.value)
@@ -373,6 +399,53 @@ const recentWorkspaces = computed<Workspace[]>(() => {
   }
   return out
 })
+
+/**
+ * Workspace context the welcome/empty hero shows: the sidebar filter when one is
+ * active, else the selected session's linked workspace (null = all/none).
+ */
+const heroWorkspaceName = computed<string | null>(() => {
+  if (workspaceFilter.value !== 'all') {
+    return (
+      workspaces.value.find((workspace) => workspace.id === workspaceFilter.value)?.name ?? null
+    )
+  }
+  return selectedWorkspaceName.value
+})
+
+/** Editable task suggestions: starters are drafted into the composer, never run directly. */
+const HERO_STARTERS: readonly HeroStarter[] = [
+  {
+    id: 'plan',
+    label: 'Plan a change',
+    description: 'Prefills /plan — add the objective, then send',
+    text: '/plan ',
+  },
+  {
+    id: 'review',
+    label: 'Review the workspace',
+    description: 'Ask for the main risks and next steps in the linked folder',
+    text: 'Review the linked workspace and report the main risks and next steps.',
+  },
+  {
+    id: 'explain',
+    label: 'Explain a change',
+    description: 'Ask what changed and why it matters',
+    text: 'Explain what changed recently and why it matters.',
+  },
+]
+
+/** Shell-requested composer prefill from a hero starter (token = one request). */
+const composerPrefill = ref<{ token: number; text: string } | null>(null)
+let composerPrefillToken = 0
+
+/** Put a starter into the task box (editable, focus at the end; nothing is sent). */
+function prefillComposer(text: string): void {
+  const value = typeof text === 'string' ? text.trimStart() : ''
+  if (!value) return
+  composerPrefillToken += 1
+  composerPrefill.value = { token: composerPrefillToken, text: value }
+}
 
 /**
  * One row state per session, derived from state the shell already owns: the
@@ -979,6 +1052,10 @@ function handleRunEvent(runId: string, raw: string, eventId: string) {
       break
     case 'prompt_audit':
       // per-call audit row; cheap, and it pairs with nothing
+      ingestRuntimeEvent(data)
+      break
+    case 'todo_updated':
+      // display-only plan snapshot: the projection keeps the latest write
       ingestRuntimeEvent(data)
       break
     case 'approval_requested':
@@ -2080,19 +2157,43 @@ onUnmounted(() => {
         :activity="activity"
         :streaming="streamingView"
         :show-prompt-audits="showPromptAudits"
+        :live-run-id="activeRun?.run_id ?? null"
         :resolve-approval="resolveApproval"
         :docked-approval-id="pendingApproval?.approvalId ?? null"
         :run-error="runError"
         :on-retry="retryLastRun"
-      />
+      >
+        <!-- Empty transcript: the hero replaces the bare hint. Slot content is
+             compiled in App scope, so its actions reach the shell state. -->
+        <template #empty>
+          <WelcomeHero
+            variant="empty"
+            :workspace-name="heroWorkspaceName"
+            :workspace-count="workspaces.length"
+            :session-title="title"
+            :models-ready="modelsUsable"
+            :starters="HERO_STARTERS"
+            @starter="prefillComposer"
+            @new-session="newSessionOpen = true"
+            @add-workspace="workspaceDialogOpen = true"
+            @open-help="openShortcutHelp()"
+            @open-settings="settingsOpen = true"
+          />
+        </template>
+      </ChatView>
       <div v-else class="chat-scroll welcome">
-        <div class="welcome-card">
-          <h2>Two Brothers workspace</h2>
-          <p class="muted">
-            A group chat between you, the Senior and the Junior. Pick a session on
-            the left, start a new one, or send a task below to begin a run.
-          </p>
-        </div>
+        <WelcomeHero
+          variant="start"
+          :workspace-name="heroWorkspaceName"
+          :workspace-count="workspaces.length"
+          :models-ready="modelsUsable"
+          :starters="HERO_STARTERS"
+          @starter="prefillComposer"
+          @new-session="newSessionOpen = true"
+          @add-workspace="workspaceDialogOpen = true"
+          @open-help="openShortcutHelp()"
+          @open-settings="settingsOpen = true"
+        />
       </div>
 
       <!-- Queue changes are announced from a persistent live region: the dock
@@ -2103,6 +2204,14 @@ onUnmounted(() => {
       </p>
 
       <DiffReview v-if="selected && changedFiles.length" :files="changedFiles" />
+
+      <!-- The model's plan: display-only and per session (the runtime sidecar
+           replays it on reload). An older backend never emits it → no dock. -->
+      <TodoPanel
+        v-if="selected"
+        :todos="todoPlan"
+        :session="selected"
+      />
 
       <div v-if="pendingApproval" class="approval-dock">
         <p class="approval-dock-label" role="status">
@@ -2139,6 +2248,8 @@ onUnmounted(() => {
         :stopping="stopping"
         :settings-version="settingsVersion"
         :submit-result="submitResult"
+        :latest-audit="latestPromptAudit"
+        :prefill="composerPrefill"
         @submit="startNewRun"
         @stop="requestStop"
         @open-settings="settingsOpen = true"

@@ -1,6 +1,6 @@
 import { chatProjectionGeneration } from './chat'
 import type { ChatItem } from './chat'
-import type { RunEvent, ToolResultCompact } from './types'
+import type { RunEvent, TodoItem, TodoStatus, ToolResultCompact } from './types'
 
 // Projection of typed runtime events (tool calls, approvals, prompt audits)
 // into group-chat items. Components consume RuntimeItem / TimelineEntry and
@@ -178,6 +178,7 @@ function appendToRuntimeProjection(state: RuntimeProjectionState, ev: RunEvent) 
         action: ev.action,
         target: ev.target,
         command: ev.command ?? null,
+        reason: ev.reason ?? undefined,
         at: ev.at,
         runId: ev.run_id,
       }
@@ -496,4 +497,139 @@ export function nextActorLabel(entry: TimelineEntry['entry'] | undefined): strin
   if (g.author === 'senior' && last.kind === 'consult') return 'Junior is working'
   if (g.author === 'junior' && last.kind === 'proposal') return 'Senior is reviewing'
   return null
+}
+
+// -- plan/todo projection (pure) ---------------------------------------------
+
+/** Item rows the collapsed TodoPanel shows before the "+N more" tail. */
+export const TODO_PANEL_COLLAPSED_ROWS = 4
+
+/** Reinforcement internal bound mirrors the package model (never display 500). */
+const TODO_ITEM_CONTENT_MAX = 200
+const TODO_ITEM_COUNT_MAX = 50
+
+/** The panel's bounded selection: visible rows, hidden count, hidden counts. */
+export interface TodoPanelSelection {
+  rows: TodoItem[]
+  hidden: number
+  hiddenCounts: Record<TodoStatus, number>
+}
+
+function emptyTodoCounts(): Record<TodoStatus, number> {
+  return { pending: 0, in_progress: 0, completed: 0 }
+}
+
+function isTodoStatus(value: unknown): value is TodoStatus {
+  return value === 'pending' || value === 'in_progress' || value === 'completed'
+}
+
+/**
+ * Tolerant display copy of one backend snapshot: a malformed sidecar row is
+ * dropped instead of breaking the panel, content is one trimmed line (the
+ * backend already bounds it; this keeps an old/hand-written event safe too).
+ */
+function todoItems(value: unknown): TodoItem[] {
+  if (!Array.isArray(value)) return []
+  const todos: TodoItem[] = []
+  for (const entry of value) {
+    if (todos.length >= TODO_ITEM_COUNT_MAX) break
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+    const record = entry as Record<string, unknown>
+    if (typeof record.content !== 'string') continue
+    const content = record.content.replace(/\s+/g, ' ').trim()
+    if (content === '') continue
+    const bounded =
+      [...content].length <= TODO_ITEM_CONTENT_MAX
+        ? content
+        : `${[...content].slice(0, TODO_ITEM_CONTENT_MAX - 1).join('')}…`
+    todos.push({ content: bounded, status: isTodoStatus(record.status) ? record.status : 'pending' })
+  }
+  return todos
+}
+
+/**
+ * The current plan of one session projection: the LAST `todo_updated` snapshot
+ * in the event list (whole-list replacement, last-write-wins), or [] when no
+ * write exists yet (an older backend never emits the event → no panel).
+ */
+export function todosOf(events: readonly RunEvent[]): TodoItem[] {
+  let latest: TodoItem[] = []
+  for (const event of events) {
+    if (event.type !== 'todo_updated') continue
+    latest = todoItems(event.todos)
+  }
+  return latest
+}
+
+/**
+ * Pick which plan rows the bounded panel shows. A list that fits is shown
+ * whole; otherwise in-progress items come first (what the run is doing now),
+ * then the earliest pending ones (what comes next), then the latest completed
+ * ones (what just finished), returned in the plan's original order. Mirrors
+ * the TUI dock's selection so both surfaces read the same.
+ */
+export function selectTodoRows(
+  todos: readonly TodoItem[],
+  maxRows: number = TODO_PANEL_COLLAPSED_ROWS,
+): TodoPanelSelection {
+  const max = Math.max(1, Math.min(TODO_ITEM_COUNT_MAX, Math.floor(maxRows)))
+  if (todos.length <= max) {
+    return { rows: [...todos], hidden: 0, hiddenCounts: emptyTodoCounts() }
+  }
+  const priority: number[] = []
+  for (let index = 0; index < todos.length; index += 1) {
+    if (todos[index].status === 'in_progress') priority.push(index)
+  }
+  for (let index = 0; index < todos.length; index += 1) {
+    if (todos[index].status === 'pending') priority.push(index)
+  }
+  for (let index = todos.length - 1; index >= 0; index -= 1) {
+    if (todos[index].status === 'completed') priority.push(index)
+  }
+  const picked = new Set(priority.slice(0, max))
+  const rows = todos.filter((_todo, index) => picked.has(index))
+  const hiddenCounts = emptyTodoCounts()
+  for (let index = 0; index < todos.length; index += 1) {
+    if (!picked.has(index)) hiddenCounts[todos[index].status] += 1
+  }
+  return { rows, hidden: todos.length - rows.length, hiddenCounts }
+}
+
+/** The honest expand control copy: `+N more` plus a non-zero distribution. */
+export function todoHiddenLabel(selection: TodoPanelSelection): string {
+  if (selection.hidden <= 0) return ''
+  const parts: string[] = []
+  const { in_progress: active, pending, completed } = selection.hiddenCounts
+  if (active > 0) parts.push(`${active} in progress`)
+  if (pending > 0) parts.push(`${pending} pending`)
+  if (completed > 0) parts.push(`${completed} completed`)
+  return `+${selection.hidden} more${parts.length > 0 ? ` (${parts.join(' · ')})` : ''}`
+}
+
+/** Counts plus the first active entry — the panel header's truthful line. */
+export interface TodoPlanSummary {
+  total: number
+  pending: number
+  inProgress: number
+  completed: number
+  current: TodoItem | null
+}
+
+/** Count the plan's statuses and name the first in-progress entry. */
+export function todoPlanSummary(todos: readonly TodoItem[]): TodoPlanSummary {
+  const summary: TodoPlanSummary = {
+    total: todos.length,
+    pending: 0,
+    inProgress: 0,
+    completed: 0,
+    current: null,
+  }
+  for (const todo of todos) {
+    if (todo.status === 'completed') summary.completed += 1
+    else if (todo.status === 'in_progress') {
+      summary.inProgress += 1
+      if (summary.current === null) summary.current = todo
+    } else summary.pending += 1
+  }
+  return summary
 }

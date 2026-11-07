@@ -6,6 +6,8 @@ import { formatTime, SPEAKER_LABELS, speakerActivityLabel, speakerInitial } from
 import type { ChatGroup, ChatMessage, Speaker } from '../chat'
 import { findMatches, nextMatch, prevMatch } from '../find'
 import type { FindMatch } from '../find'
+import { buildFoldRows } from '../folding'
+import type { FoldRenderRow } from '../folding'
 import { nextActorLabel, timestampOf } from '../runtime'
 import type { TimelineEntry } from '../runtime'
 import { parseMarkdown } from '../markdown'
@@ -43,6 +45,12 @@ const props = defineProps<{
    * cleanly. Rows are absent from the DOM (find/scroll cannot reach them).
    */
   showPromptAudits?: boolean
+  /**
+   * The run this app currently follows. Its tool/audit rows stay expanded; older
+   * completed runs fold into disclosure rows. Null = no run is followed, so all
+   * completed-run activity folds.
+   */
+  liveRunId?: string | null
 }>()
 
 const scrollEl = ref<HTMLElement | null>(null)
@@ -101,15 +109,6 @@ watch(
 
 function verdictClass(m: ChatMessage): string {
   return m.verdict ? `verdict-${m.verdict}` : ''
-}
-
-function entryKey(entry: TimelineEntry['entry'], i: number): string {
-  if (entry.type === 'group') return entry.group.messages[0].id
-  if (entry.type === 'divider') return `divider-${entry.seq}-${i}`
-  if (entry.type === 'system') return entry.activity.id
-  if (entry.type === 'tool') return entry.id
-  if (entry.type === 'prompt_audit') return entry.id
-  return `approval-${entry.approvalId}`
 }
 
 /** Pending approvals surfaced by the dock above the composer hide their
@@ -280,6 +279,37 @@ async function showEarlier() {
   await nextTick()
   if (el) el.scrollTop = Math.max(0, el.scrollHeight - fromTop)
 }
+
+// -- step folding ------------------------------------------------------------
+// Older completed-run tool/audit cards collapse into one muted disclosure row
+// (folding.ts owns the projection and its truthful counts). The followed run and
+// every conversation row stay open; a collapsed group's rows leave the DOM
+// entirely, so the find cache is invalidated on each toggle (see below).
+
+/** Fold-group keys the operator expanded — per mount, i.e. per session. */
+const expandedFolds = ref<ReadonlySet<string>>(new Set())
+
+function toggleFold(key: string): void {
+  const next = new Set(expandedFolds.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  expandedFolds.value = next
+  void nextTick(keepPinnedToBottom)
+}
+
+/** Render rows for the visible slice: transcript entries plus fold rows. */
+const foldRows = computed<FoldRenderRow[]>(() =>
+  buildFoldRows(
+    visibleTimeline.value,
+    {
+      liveRunId: props.liveRunId ?? null,
+      showPromptAudits: auditVisible.value,
+      dockedApprovalId: props.dockedApprovalId ?? null,
+      expanded: expandedFolds.value,
+    },
+    windowStart.value,
+  ),
+)
 
 // -- find in transcript (Ctrl+F / Cmd+F) --------------------------------------
 // Search covers the rendered conversation only: blocks are collected from the
@@ -595,7 +625,12 @@ watch([findQuery, findCaseSensitive], () => {
   revealActiveMatch()
 })
 
-watch(visibleTimeline, () => {
+/**
+ * Drop the cached searchable blocks and, with the bar open, re-collect them
+ * after Vue has patched the transcript. Text that left the DOM (a collapsed fold
+ * group, hidden prompt audits) must not keep matching.
+ */
+function invalidateFindBlocks(): void {
   findBlocks = null
   if (!findOpen.value) return
   void nextTick(() => {
@@ -605,20 +640,18 @@ watch(visibleTimeline, () => {
     if (!findOpen.value) return
     rebuildFind(false)
   })
-})
+}
+
+// A live update appends/replaces rows, so the rendered text changed.
+watch(visibleTimeline, invalidateFindBlocks)
 
 // Toggling the audit preference changes the rendered transcript without
-// changing visibleTimeline, so the cached searchable blocks must be rebuilt:
-// hidden audits must drop out of find results (and reappear when shown).
-watch(auditVisible, () => {
-  findBlocks = null
-  if (!findOpen.value) return
-  void nextTick(() => {
-    findBlocks = null
-    if (!findOpen.value) return
-    rebuildFind(false)
-  })
-})
+// changing visibleTimeline: hidden audits must drop out of find results (and
+// reappear when shown).
+watch(auditVisible, invalidateFindBlocks)
+
+// Expanding/collapsing a fold group adds or removes its rows from the DOM.
+watch(expandedFolds, invalidateFindBlocks)
 
 /** Shell hooks (session switches remount this component; keeps the bar scriptable). */
 defineExpose({ openFind, closeFind })
@@ -850,8 +883,33 @@ watch(
         @click="showEarlier"
       >Show earlier messages ({{ hiddenCount }})</button>
 
-      <template v-for="(row, i) in visibleTimeline" :key="entryKey(row.entry, i + windowStart)">
-        <div v-if="row.entry.type === 'divider'" class="revision-divider" role="separator">
+      <!-- Older completed-run activity folds into one disclosure row per group
+           (folding.ts owns the projection). Collapsed rows leave the DOM, so
+           find/copy see exactly what the transcript renders. -->
+      <template v-for="row in foldRows" :key="row.key">
+        <div v-if="row.type === 'fold'" class="fold-row">
+          <button
+            type="button"
+            class="fold-toggle"
+            :aria-expanded="row.expanded"
+            :aria-label="`${row.expanded ? 'Collapse' : 'Expand'} ${row.summary.label}`"
+            @click="toggleFold(row.key)"
+          >
+            <AppIcon
+              class="fold-chevron"
+              :name="row.expanded ? 'chevron-down' : 'chevron-right'"
+              :size="12"
+            />
+            <span class="fold-ellipsis" aria-hidden="true">…</span>
+            <span class="fold-label">{{ row.summary.label }}</span>
+            <span class="fold-hint" aria-hidden="true">{{
+              row.expanded ? 'collapse' : 'expand'
+            }}</span>
+          </button>
+        </div>
+
+        <template v-else>
+          <div v-if="row.entry.type === 'divider'" class="revision-divider" role="separator">
           <span class="revision-label">{{ row.entry.label }}</span>
         </div>
 
@@ -962,6 +1020,7 @@ watch(
             </div>
           </div>
         </section>
+        </template>
       </template>
 
       <!-- Live streaming draft (ephemeral SSE token frames). aria-live="off"
@@ -1061,9 +1120,13 @@ watch(
         <p class="run-error-text">{{ runError }}</p>
       </article>
 
-      <p v-if="timeline.length === 0 && !runError" class="empty-hint">
-        This session has no messages yet.
-      </p>
+      <!-- Empty transcript: the shell supplies the welcome hero; the fallback
+           stays for hosts that do not pass the slot. -->
+      <template v-if="timeline.length === 0 && !runError">
+        <slot name="empty">
+          <p class="empty-hint">This session has no messages yet.</p>
+        </slot>
+      </template>
     </template>
     </div>
     <p class="visually-hidden" role="status" aria-live="polite">{{ streamAnnouncement }}</p>
@@ -1218,6 +1281,67 @@ watch(
 .show-earlier:hover {
   background: var(--surface-hover);
   color: var(--text-primary);
+}
+
+/* Fold row: one muted disclosure line for a completed run's tool/audit rows.
+   Width-safe — the label ellipsizes instead of wrapping the transcript. */
+.fold-row {
+  display: flex;
+  justify-content: flex-start;
+  width: 100%;
+  margin: 0.1rem 0;
+}
+
+.fold-toggle {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 0.35rem;
+  max-width: 100%;
+  min-width: 0;
+  padding: 0.18rem 0.6rem;
+  font: inherit;
+  font-size: 0.76rem;
+  line-height: 1.3;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px dashed var(--border-subtle);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.fold-toggle:hover {
+  color: var(--text-primary);
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+}
+
+.fold-toggle:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.fold-chevron {
+  flex: none;
+  opacity: 0.7;
+}
+
+.fold-ellipsis {
+  flex: none;
+  font-weight: 700;
+}
+
+.fold-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fold-hint {
+  flex: none;
+  font-size: 0.7rem;
+  opacity: 0.85;
 }
 
 .run-error {

@@ -903,28 +903,10 @@ samp {
 
 /* ---------- welcome ---------- */
 
+/* Landing/empty transcript: the hero (WelcomeHero.vue) owns its panel chrome;
+   the scroll column only centers it. */
 .welcome {
   justify-content: center;
-}
-
-.welcome-card {
-  max-width: 30rem;
-  margin: 0 auto;
-  text-align: center;
-  background: var(--surface-panel);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-  padding: 1.6rem 1.8rem;
-  box-shadow: var(--shadow-raised);
-}
-
-.welcome-card h2 {
-  margin: 0 0 0.5rem;
-}
-
-.welcome-card p {
-  margin: 0;
-  line-height: 1.55;
 }
 
 /* ---------- composer ---------- */

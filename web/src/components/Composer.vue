@@ -22,6 +22,7 @@ import {
 import type { ComposerCommandRequest } from '../basecommands'
 import { canSubmitComposer, classifyComposerKey, composerLockReason } from '../composerKeys'
 import type { ComposerKeyInput, ComposerSendContext } from '../composerKeys'
+import { composerSeats } from '../composerStatus'
 import { clearDraft, getDraft, setDraft } from '../drafts'
 import {
   MAX_FILE_ITEMS,
@@ -35,6 +36,7 @@ import {
   skillMentionItems,
 } from '../mentions'
 import type { MentionItem, MentionKind, MentionTrigger } from '../mentions'
+import type { PromptAuditItem } from '../runtime'
 import type {
   BaseCommand,
   CommandInfo,
@@ -79,6 +81,18 @@ const props = defineProps<{
   waiting?: boolean
   stopping: boolean
   settingsVersion?: number
+  /**
+   * Latest prompt audit of the selected session (per provider call: role, node
+   * kind, section/tool names and character lengths). Feeds the context seat;
+   * nothing is shown until one exists.
+   */
+  latestAudit?: PromptAuditItem | null
+  /**
+   * Shell-requested starter text (welcome/empty-hero suggestions). The token
+   * makes every request distinct; the box replaces its draft with the text,
+   * saves it and focuses the caret at the end so the operator can edit it.
+   */
+  prefill?: { token: number; text: string } | null
   /**
    * Dev/test-only provider injection. The normal composer has no provider
    * control and always submits `provider: null` so the per-role settings (or
@@ -294,6 +308,21 @@ const statusHint = computed(() => {
 
 const settingsHint = computed(
   () => `Set the ${missingLabel.value} in Settings to start a run.`,
+)
+
+/**
+ * Truthful status seats (models · permission expectation · latest audit-derived
+ * context breakdown). Each seat hides itself when its data is unknown, so the
+ * row never shows placeholders or fabricated token counts.
+ */
+const statusSeats = computed(() =>
+  composerSeats({
+    settingsReady: settingsState.value === 'ready',
+    seniorLabel: settings.value ? modelLabel(seniorRoute.value) : null,
+    juniorLabel: settings.value ? modelLabel(juniorRoute.value) : null,
+    workspaceLinked: Boolean(props.workspaceId),
+    latestAudit: props.latestAudit ?? null,
+  }),
 )
 
 // -- unsent draft persistence -------------------------------------------------
@@ -1190,6 +1219,36 @@ watch(
     else restoreDraft(next)
   },
 )
+// Welcome-hero starter: replace the draft with the suggestion, persist it and
+// put the caret at the end so it can be edited before sending. Only the token
+// triggers this, so re-renders and typing are never disturbed.
+watch(
+  () => props.prefill?.token ?? 0,
+  () => {
+    const prefill = props.prefill
+    if (!prefill || typeof prefill.text !== 'string' || prefill.text === '') return
+    // Never discard an unsent draft: a starter fills an empty composer, and an
+    // occupied one keeps the operator's text with an honest notice instead.
+    const current = task.value.trim()
+    if (current !== '' && current !== prefill.text.trim()) {
+      emit('notice', 'The composer already has a draft — clear it to use the starter.')
+      return
+    }
+    cancelDraftSave()
+    restoringDraft = false
+    task.value = prefill.text
+    if (props.sessionId) setDraft(props.sessionId, prefill.text)
+    else unsessionedDraft = prefill.text
+    void nextTick(() => {
+      resizeInput()
+      const el = inputEl.value
+      if (!el) return
+      el.focus()
+      const end = prefill.text.length
+      el.setSelectionRange(end, end)
+    })
+  },
+)
 // The composer's @ file picker follows the selected session's workspace (or the
 // sidebar filter for a session that does not exist yet).
 watch(
@@ -1515,6 +1574,21 @@ onBeforeUnmount(() => {
         </n-button>
       </div>
 
+      <!-- Truthful run status seats (models · permission expectation · latest
+           prompt-audit context). Unknown seats hide themselves. -->
+      <ul v-if="statusSeats.length" class="composer-seats" aria-label="Run status">
+        <li
+          v-for="seat in statusSeats"
+          :key="seat.id"
+          class="composer-seat"
+          :class="`is-${seat.id}`"
+          :title="seat.title"
+        >
+          <span class="seat-label">{{ seat.label }}</span>
+          <span class="seat-value">{{ seat.value }}</span>
+        </li>
+      </ul>
+
       <div class="composer-foot">
         <span v-if="pickerOpen" class="composer-hint" role="status">
           {{ pickerFootHint }}
@@ -1620,6 +1694,58 @@ onBeforeUnmount(() => {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
+}
+
+/* Composer status seats: one compact second row of run facts below the input.
+   Each seat is a label/value pair; absent data removes the seat entirely, so
+   the row never reserves empty placeholders. */
+.composer-seats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.1rem 0.55rem;
+  min-width: 0;
+  margin: 0;
+  padding: 0 0.15rem;
+  list-style: none;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  color: var(--text-secondary);
+}
+
+.composer-seat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.28rem;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.composer-seat + .composer-seat::before {
+  content: '·';
+  margin-right: 0.3rem;
+  opacity: 0.6;
+}
+
+.seat-label {
+  flex: none;
+  font-weight: 600;
+  opacity: 0.9;
+}
+
+.seat-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Narrow widths: the context breakdown is the most verbose seat; hiding it
+   keeps the row a single deterministic line (models + permissions remain). */
+@media (max-width: 640px) {
+  .composer-seat.is-context {
+    display: none;
+  }
 }
 
 .composer-chip {

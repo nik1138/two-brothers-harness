@@ -273,6 +273,34 @@ export interface ApprovalAutoAllowedEvent {
 }
 
 /**
+ * Lifecycle state of one plan/todo entry (the package's `TodoStatus`).
+ */
+export type TodoStatus = 'pending' | 'in_progress' | 'completed'
+
+/**
+ * One entry in the model-maintained plan. The backend sends the complete
+ * sanitized list on every write, so entries need no id (last write wins).
+ */
+export interface TodoItem {
+  /** Short imperative task line (already trimmed/bounded by the backend). */
+  content: string
+  status: TodoStatus
+}
+
+/**
+ * Additive runtime event: the model replaced its whole plan through the
+ * built-in `todo_write` tool. Display state only — never a protocol envelope —
+ * and the latest snapshot on replay is the current plan. Older backends never
+ * emit it, which is why the TodoPanel simply stays absent for them.
+ */
+export interface TodoUpdatedEvent {
+  type: 'todo_updated'
+  todos: TodoItem[]
+  run_id: string
+  at: number
+}
+
+/**
  * One live token delta from the run's named SSE `token` frame. Ephemeral:
  * never persisted to the run record/sidecar and never replayed by `?after`.
  * `thinking` deltas are observational reasoning; the reply arrives as the
@@ -307,6 +335,7 @@ export type RunEvent =
   | ApprovalResolvedEvent
   | ApprovalAutoDeniedEvent
   | ApprovalAutoAllowedEvent
+  | TodoUpdatedEvent
   | PromptAuditEvent
 
 /** Response of GET /api/sessions/{name}/events — the runtime sidecar. */
