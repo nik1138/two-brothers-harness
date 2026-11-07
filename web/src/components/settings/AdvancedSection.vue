@@ -1,5 +1,38 @@
+<script setup lang="ts">
+import { NCheckbox } from 'naive-ui'
+
+/**
+ * Advanced settings. The conversation preference here is device-local (a
+ * persisted web pref, not a server setting): prompt audits are developer
+ * annotations, so they are off by default and the transcript stays clean.
+ */
+const props = withDefaults(
+  defineProps<{
+    showPromptAudits?: boolean
+  }>(),
+  { showPromptAudits: false },
+)
+
+const emit = defineEmits<{
+  'update:show-prompt-audits': [boolean]
+}>()
+</script>
+
 <template>
   <div class="advanced-section">
+    <section class="advanced-card">
+      <h3>Conversation</h3>
+      <n-checkbox
+        :checked="props.showPromptAudits"
+        @update:checked="emit('update:show-prompt-audits', $event)"
+      >
+        Show prompt audits in the conversation
+      </n-checkbox>
+      <p class="advanced-helper">
+        Adds one annotation per model call to the transcript; off by default.
+      </p>
+    </section>
+
     <section class="advanced-card">
       <h3>Development transport</h3>
       <p>
@@ -68,6 +101,11 @@
   font-size: 0.78rem;
   line-height: 1.55;
   color: var(--text-secondary);
+}
+
+/* Helper copy directly under the conversation toggle. */
+.advanced-card .advanced-helper {
+  margin-top: 6px;
 }
 
 .advanced-card p + p {

@@ -119,7 +119,12 @@ test('hints name the role and kind; unknown/absent metadata falls back honestly'
   const [operatorMessage] = contentItemsFromResult(
     result([hit({ role: 'user', kind: 'message', seq: 1 })]),
   )
-  assert.equal(operatorMessage?.hint, 'Operator · message')
+  assert.equal(operatorMessage?.hint, 'You · message')
+
+  const [operatorRoleMessage] = contentItemsFromResult(
+    result([hit({ role: 'operator', kind: 'message', seq: 2 })]),
+  )
+  assert.equal(operatorRoleMessage?.hint, 'You · message')
 
   const [decision] = contentItemsFromResult(
     result([hit({ field: 'decision', role: 'junior', kind: 'decision', seq: 8 })]),

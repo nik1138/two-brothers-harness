@@ -60,6 +60,40 @@ export function speakerOf(from: Envelope['from']): Speaker {
   return from === 'user' ? 'operator' : from
 }
 
+/**
+ * Visible speaker labels. The third seat at the table is the person at the
+ * keyboard, so it reads "You" (the internal speaker id stays `operator`).
+ */
+export const SPEAKER_LABELS: Readonly<Record<Speaker, string>> = {
+  operator: 'You',
+  senior: 'Senior',
+  junior: 'Junior',
+}
+
+/** Label for one speaker row. */
+export function speakerLabel(speaker: Speaker): string {
+  return SPEAKER_LABELS[speaker] ?? speaker
+}
+
+/** One-letter avatar mark matching the visible label. */
+export function speakerInitial(speaker: Speaker): string {
+  return speakerLabel(speaker).charAt(0).toUpperCase()
+}
+
+/**
+ * Present-continuous phrase for live announcements ("You are thinking",
+ * "Senior is responding"). Grammatical for the operator even though the
+ * operator cannot emit stream tokens today.
+ */
+export function speakerActivityLabel(
+  speaker: Speaker,
+  activity: 'thinking' | 'responding',
+): string {
+  if (speaker === 'operator') return activity === 'thinking' ? 'You are thinking' : 'You are responding'
+  return `${speakerLabel(speaker)} is ${activity}`
+}
+
+
 const GROUP_GAP_MS = 10 * 60 * 1000
 
 function str(v: unknown): string | null {

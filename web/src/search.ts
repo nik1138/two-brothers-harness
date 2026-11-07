@@ -36,8 +36,9 @@ export const MAX_CONTENT_SNIPPET_CHARS = 80
 const ROLE_LABELS: Readonly<Record<string, string>> = {
   senior: 'Senior',
   junior: 'Junior',
-  user: 'Operator',
-  operator: 'Operator',
+  // the third seat is the person at the keyboard; the internal id stays "user"
+  user: 'You',
+  operator: 'You',
 }
 
 const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i

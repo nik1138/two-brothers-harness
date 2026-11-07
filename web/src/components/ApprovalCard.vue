@@ -97,7 +97,7 @@ function onKeydown(e: KeyboardEvent) {
   >
     <header class="approval-header">
       <span class="approval-flag">Approval requested</span>
-      <span v-if="pending" class="approval-status approval-waiting">awaiting operator</span>
+      <span v-if="pending" class="approval-status approval-waiting">awaiting you</span>
       <span v-else class="approval-status" :class="allowed ? 'approval-allowed' : 'approval-rejected'">
         {{ allowed ? 'allowed' : 'denied' }}
       </span>

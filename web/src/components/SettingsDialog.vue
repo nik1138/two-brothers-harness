@@ -23,15 +23,21 @@ import PluginsSection from './settings/PluginsSection.vue'
 import AppearanceSection from './settings/AppearanceSection.vue'
 import AdvancedSection from './settings/AdvancedSection.vue'
 
-/** Optional controlled theme mode and density. When supplied, the host owns
- *  live application and this panel only emits the change events. */
-const props = defineProps<{ themeMode?: ThemeMode; density?: Density }>()
+/** Optional controlled theme mode, density and audit preference. When
+ *  supplied, the host owns live application and this panel only emits the
+ *  change events. */
+const props = defineProps<{
+  themeMode?: ThemeMode
+  density?: Density
+  showPromptAudits?: boolean
+}>()
 
 const emit = defineEmits<{
   close: []
   saved: []
   'theme-change': [ThemeMode]
   'density-change': [Density]
+  'show-prompt-audits-change': [boolean]
 }>()
 
 function onMaskClick(e: MouseEvent) {
@@ -532,7 +538,10 @@ async function save() {
               role="region"
               aria-label="Advanced"
             >
-              <AdvancedSection />
+              <AdvancedSection
+                :show-prompt-audits="showPromptAudits ?? false"
+                @update:show-prompt-audits="emit('show-prompt-audits-change', $event)"
+              />
             </div>
           </template>
         </div>

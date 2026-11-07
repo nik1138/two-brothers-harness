@@ -567,7 +567,7 @@ async function scenarioChat(runner) {
     const speakers = new Set(
       await page.locator('.chat-group .speaker-name').allInnerTexts(),
     )
-    for (const who of ['Operator', 'Senior', 'Junior']) {
+    for (const who of ['You', 'Senior', 'Junior']) {
       assert.ok(speakers.has(who), `speaker "${who}" missing (got: ${[...speakers].join(', ')})`)
     }
 
@@ -642,7 +642,7 @@ async function approvalFlow(runner, decision) {
     // let the scripted server drive: provider comes from the backend env
     await sendTask(page, 'Write the hello file in the workspace', { mode: 'work' })
 
-    const card = page.locator('article.approval', { hasText: 'awaiting operator' })
+    const card = page.locator('article.approval', { hasText: 'awaiting you' })
     await card.first().waitFor({ timeout: 30000 })
 
     // the active request is docked above the composer, fully visible and
@@ -1042,7 +1042,7 @@ async function scenarioReal(runner) {
     const decision = page.locator('.chat-group.side-senior .bubble.bubble-highlight')
     await decision.waitFor({ timeout: 30000 })
     const speakers = new Set(await page.locator('.chat-group .speaker-name').allInnerTexts())
-    for (const who of ['Operator', 'Senior', 'Junior']) {
+    for (const who of ['You', 'Senior', 'Junior']) {
       assert.ok(speakers.has(who), `speaker "${who}" missing (got: ${[...speakers].join(', ')})`)
     }
     assert.equal(await decision.count(), 1, 'expected exactly one highlighted senior decision')

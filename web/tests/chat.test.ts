@@ -9,12 +9,17 @@ import { test } from 'node:test'
 import {
   COMPACTION_SUMMARY_PREFIX,
   COMPACTION_SUMMARY_SUFFIX,
+  SPEAKER_LABELS,
   appendEnvelope,
   compactionSummaryBody,
   currentChatItems,
   isCompactionSummaryText,
   isRepairRequestText,
   resetChatProjection,
+  speakerActivityLabel,
+  speakerInitial,
+  speakerLabel,
+  speakerOf,
   taskOf,
   type ChatItem,
 } from '../src/chat.ts'
@@ -92,6 +97,22 @@ test('projection: a generated repair envelope becomes a neutral system activity'
 test('taskOf: skips repair envelopes but keeps the first real operator task', () => {
   assert.equal(taskOf([env(1, REPAIR_TEXT), env(2, 'real task here')]), 'real task here')
   assert.equal(taskOf([env(1, 'first task'), env(2, REPAIR_TEXT)]), 'first task')
+})
+
+test('speaker labels: the operator reads as "You"; live announcements stay grammatical', () => {
+  assert.equal(speakerOf('user'), 'operator')
+  assert.equal(SPEAKER_LABELS.operator, 'You')
+  assert.equal(speakerLabel('operator'), 'You')
+  assert.equal(speakerLabel('senior'), 'Senior')
+  assert.equal(speakerLabel('junior'), 'Junior')
+  assert.equal(speakerInitial('operator'), 'Y', 'avatar mark follows the visible label')
+  assert.equal(speakerInitial('senior'), 'S')
+  assert.equal(speakerInitial('junior'), 'J')
+  // operator cannot stream today, but the phrase must still be grammatical
+  assert.equal(speakerActivityLabel('operator', 'thinking'), 'You are thinking')
+  assert.equal(speakerActivityLabel('operator', 'responding'), 'You are responding')
+  assert.equal(speakerActivityLabel('senior', 'thinking'), 'Senior is thinking')
+  assert.equal(speakerActivityLabel('junior', 'responding'), 'Junior is responding')
 })
 
 // -- compaction summary projection -------------------------------------------

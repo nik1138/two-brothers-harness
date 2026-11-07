@@ -64,6 +64,7 @@ The backend is the TypeScript server in `packages/harness`:
 - `src/composerKeys.ts` — pure composer key contract (IME-safe submit, Ctrl/⌘+Enter, picker accept/dismiss, `?`/Ctrl+⌘+/ chord, double-Escape stop window)
 - `src/shortcuts.ts` — single-source keyboard-shortcut table rendered by the `/help` overlay; `src/download.ts` — shared session export Blob download used by the row menu and `/export`
 - `src/providerSettings.ts` — pure provider-preset model for Settings → Providers: tolerant `seed`/`customized` normalization, inline master–detail open/selection state, draft dirty tracking, role usage badges, delete eligibility/impact copy, add-form validation and list keyboard arithmetic; used by `ProvidersSection.vue`
+- `src/uiPrefs.ts` — persisted device-local conversation preferences (`showPromptAudits`, default off, versioned key + injectable storage) and the pure transcript visibility filter; used by `App.vue`, `ChatView.vue` and Settings → Advanced
 - `src/components/` help/status dialogs: `ShortcutHelpDialog` (`/help`, `?`), `SessionStatusDialog` (`/status`), `PermissionInfoDialog` (`/permission`)
 - `vite.config.ts` — dev proxy `/api` → `http://127.0.0.1:8600`
 

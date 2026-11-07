@@ -2,7 +2,7 @@
 import { computed, defineComponent, h, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import type { PropType, VNode } from 'vue'
 import { NButton } from 'naive-ui'
-import { formatTime } from '../chat'
+import { formatTime, SPEAKER_LABELS, speakerActivityLabel, speakerInitial } from '../chat'
 import type { ChatGroup, ChatMessage, Speaker } from '../chat'
 import { findMatches, nextMatch, prevMatch } from '../find'
 import type { FindMatch } from '../find'
@@ -37,6 +37,12 @@ const props = defineProps<{
    * as soon as the completed envelope lands in the timeline.
    */
   streaming?: StreamingBlocks | null
+  /**
+   * Render per-model-call prompt-audit annotations. Off by default: the
+   * Settings → Advanced preference owns this, so a normal transcript reads
+   * cleanly. Rows are absent from the DOM (find/scroll cannot reach them).
+   */
+  showPromptAudits?: boolean
 }>()
 
 const scrollEl = ref<HTMLElement | null>(null)
@@ -56,17 +62,16 @@ function keepPinnedToBottom() {
   if (el && nearBottom.value) el.scrollTop = el.scrollHeight
 }
 
-const SPEAKER_LABEL: Record<Speaker, string> = {
-  operator: 'Operator',
-  senior: 'Senior',
-  junior: 'Junior',
-}
+const SPEAKER_LABEL: Readonly<Record<Speaker, string>> = SPEAKER_LABELS
 
 function initial(s: Speaker): string {
-  return s === 'operator' ? 'O' : s === 'senior' ? 'S' : 'J'
+  return speakerInitial(s)
 }
 
 const lastTime = computed(() => props.timeline[props.timeline.length - 1]?.time ?? 0)
+
+/** Prompt-audit rows are developer annotations: concealed unless the pref is on. */
+const auditVisible = computed(() => props.showPromptAudits === true)
 
 /**
  * Proxy for shared-context pressure: every projected message counts, plus one
@@ -602,6 +607,19 @@ watch(visibleTimeline, () => {
   })
 })
 
+// Toggling the audit preference changes the rendered transcript without
+// changing visibleTimeline, so the cached searchable blocks must be rebuilt:
+// hidden audits must drop out of find results (and reappear when shown).
+watch(auditVisible, () => {
+  findBlocks = null
+  if (!findOpen.value) return
+  void nextTick(() => {
+    findBlocks = null
+    if (!findOpen.value) return
+    rebuildFind(false)
+  })
+})
+
 /** Shell hooks (session switches remount this component; keeps the bar scriptable). */
 defineExpose({ openFind, closeFind })
 
@@ -716,24 +734,19 @@ const streamingMarkdown = computed<MarkdownBlock[]>(() =>
   streamingText.value ? parseMarkdown(streamingText.value.text) : [],
 )
 
-/** null = auto (open while only thinking, auto-collapsed once text starts). */
-const thinkingUserExpanded = ref<boolean | null>(null)
-const thinkingExpanded = computed(() => {
-  if (thinkingUserExpanded.value !== null) return thinkingUserExpanded.value
-  return streamingText.value === null
-})
-watch(streamingThinking, (next, prev) => {
-  if (!next) {
-    thinkingUserExpanded.value = null
-    return
-  }
-  // a new draft (new role/call) follows the auto rule again; plain appends keep
-  // the operator's manual toggle
-  if (!prev || !next.text.startsWith(prev.text)) thinkingUserExpanded.value = null
+/**
+ * Live thinking starts folded and only the reader opens it: reasoning is a
+ * peek-on-demand block, never an auto-opening one. A new draft (the block
+ * disappears) folds it again; the reply arriving never changes it.
+ */
+const thinkingExpanded = ref(false)
+
+watch(streamingThinking, (next) => {
+  if (!next) thinkingExpanded.value = false
 })
 
 function toggleThinking(): void {
-  thinkingUserExpanded.value = !thinkingExpanded.value
+  thinkingExpanded.value = !thinkingExpanded.value
   void nextTick(keepPinnedToBottom)
 }
 
@@ -741,12 +754,12 @@ function toggleThinking(): void {
 const streamAnnouncement = ref('')
 watch(streamingThinking, (next, prev) => {
   if (next && !prev) {
-    streamAnnouncement.value = `${SPEAKER_LABEL[streamingSpeaker.value]} is thinking`
+    streamAnnouncement.value = speakerActivityLabel(streamingSpeaker.value, 'thinking')
   }
 })
 watch(streamingText, (next, prev) => {
   if (next && !prev) {
-    streamAnnouncement.value = `${SPEAKER_LABEL[streamingSpeaker.value]} is responding`
+    streamAnnouncement.value = speakerActivityLabel(streamingSpeaker.value, 'responding')
   } else if (!next && prev) {
     streamAnnouncement.value = 'Response complete'
   }
@@ -866,7 +879,10 @@ watch(
 
         <ToolActivity v-else-if="row.entry.type === 'tool'" :item="row.entry" />
 
-        <PromptAudit v-else-if="row.entry.type === 'prompt_audit'" :item="row.entry" />
+        <PromptAudit
+          v-else-if="row.entry.type === 'prompt_audit' && auditVisible"
+          :item="row.entry"
+        />
 
         <ApprovalCard
           v-else-if="row.entry.type === 'approval' && !isDockedApproval(row.entry)"
@@ -959,7 +975,10 @@ watch(
         <section
           v-if="streamingThinking"
           class="stream-thinking"
-          :class="{ 'is-live': streamingThinking.streaming }"
+          :class="{
+            'is-live': streamingThinking.streaming,
+            'is-collapsed': !thinkingExpanded,
+          }"
         >
           <button
             type="button"
@@ -1346,6 +1365,19 @@ watch(
   .find-status {
     min-width: 3.5rem;
   }
+}
+
+/* Collapsed thinking is a quiet button row, not a card: the dashed/panel chrome
+   only appears once the reader opens it (or while it is live, so the pulse has
+   a visible home). Kept here (scoped) to avoid touching the shared sheet. */
+.stream-thinking.is-collapsed {
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+}
+
+.stream-thinking.is-collapsed.is-live {
+  border-color: transparent;
 }
 </style>
 

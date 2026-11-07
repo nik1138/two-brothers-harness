@@ -11,6 +11,8 @@ import {
 import type { ThemeMode } from './themeMode'
 import { applyDensityAttribute, readDensity, saveDensity } from './density'
 import type { Density } from './density'
+import { readUiPrefs, saveUiPrefs } from './uiPrefs'
+import type { UiPrefs } from './uiPrefs'
 import {
   ApiError,
   answerRunApproval,
@@ -453,6 +455,16 @@ const paletteOpen = ref(false)
 const paletteShortcut = /Mac|iPhone|iPad|iPod/i.test(navigator.platform) ? '⌘ K' : 'Ctrl K'
 /** Persisted spacing preference (Comfortable by default); applied as data-density. */
 const density = ref<Density>(readDensity())
+
+/** Persisted conversation preferences (prompt audits are hidden by default). */
+const uiPrefs = ref<UiPrefs>(readUiPrefs())
+const showPromptAudits = computed(() => uiPrefs.value.showPromptAudits)
+
+/** Settings → Advanced toggle; applies immediately and persists per device. */
+function setShowPromptAudits(next: boolean): void {
+  if (uiPrefs.value.showPromptAudits === next) return
+  uiPrefs.value = saveUiPrefs({ showPromptAudits: next })
+}
 
 /** Density is exposed from the palette and from Settings → Appearance; the
  * hint marks the active mode. */
@@ -1919,6 +1931,7 @@ onUnmounted(() => {
         :loading="loading"
         :activity="activity"
         :streaming="streamingView"
+        :show-prompt-audits="showPromptAudits"
         :resolve-approval="resolveApproval"
         :docked-approval-id="pendingApproval?.approvalId ?? null"
         :run-error="runError"
@@ -1928,7 +1941,7 @@ onUnmounted(() => {
         <div class="welcome-card">
           <h2>Two Brothers workspace</h2>
           <p class="muted">
-            A group chat between you (the operator), the Senior and the Junior. Pick a session on
+            A group chat between you, the Senior and the Junior. Pick a session on
             the left, start a new one, or send a task below to begin a run.
           </p>
         </div>
@@ -1987,10 +2000,12 @@ onUnmounted(() => {
       v-if="settingsOpen"
       :theme-mode="themeMode"
       :density="density"
+      :show-prompt-audits="showPromptAudits"
       @close="settingsOpen = false"
       @saved="onSettingsSaved"
       @theme-change="onThemeChange"
       @density-change="setDensity"
+      @show-prompt-audits-change="setShowPromptAudits"
     />
     <WorkspaceDialog v-if="workspaceDialogOpen" @close="onWorkspaceDialogClose" />
     <WorkspaceRenameDialog

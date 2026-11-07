@@ -97,7 +97,7 @@ function roleLine(role: 'senior' | 'junior'): string | null {
       </div>
       <div class="status-row">
         <dt>Conversation</dt>
-        <dd>{{ turns }} operator turn{{ turns === 1 ? '' : 's' }} · {{ events }} envelopes</dd>
+        <dd>{{ turns }} turn{{ turns === 1 ? '' : 's' }} from you · {{ events }} envelopes</dd>
       </div>
       <template v-if="usage">
         <div class="status-row">
