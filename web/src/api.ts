@@ -580,6 +580,15 @@ export async function updateProvider(
   return res.provider
 }
 
+/** Restore a customized built-in seed without changing any role provider_ref. */
+export async function resetProvider(name: string): Promise<ProviderPreset> {
+  const res = await request<{ provider: ProviderPreset }>(
+    `/api/providers/${encodeURIComponent(name)}/reset`,
+    { method: 'POST' },
+  )
+  return res.provider
+}
+
 export async function deleteProvider(name: string): Promise<{ removed: string }> {
   return request<{ removed: string }>(`/api/providers/${encodeURIComponent(name)}`, {
     method: 'DELETE',

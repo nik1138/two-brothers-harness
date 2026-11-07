@@ -8,6 +8,7 @@ import {
   createProvider,
   deleteProvider,
   listProviders,
+  resetProvider,
   updateProvider,
 } from '../../api'
 import type { ProviderCreateRequest, ProviderPatchRequest } from '../../api'
@@ -17,6 +18,7 @@ import {
   PROVIDER_KINDS,
   apiKeyPlaceholder,
   apiKeyStateLabel,
+  applyProviderReset,
   applyProviderUpdate,
   cleanModelList,
   isProviderDraftDirty,
@@ -29,6 +31,7 @@ import {
   providerIsCustomizedSeed,
   providerKindLabel,
   providerMoveForKey,
+  providerResetAllowed,
   providerRowSummary,
   providerUsageBadges,
   resolveProviderSelection,
@@ -36,6 +39,7 @@ import {
   validateProviderBaseUrl,
 } from '../../providerSettings'
 import type { ProviderDraft, ProviderView } from '../../providerSettings'
+import AppDialog from '../AppDialog.vue'
 
 /**
  * Settings → Providers as an identity-only master list with the selected
@@ -110,6 +114,12 @@ const draftDirty = computed(() =>
 const pendingClose = ref<'close' | { name: string } | null>(null)
 const pendingDelete = ref(false)
 const deleteError = ref<string | null>(null)
+const pendingReset = ref<string | null>(null)
+const resetError = ref<string | null>(null)
+const completedResetName = ref<string | null>(null)
+const resetTarget = computed(() =>
+  views.value.find((provider) => provider.name === pendingReset.value) ?? null,
+)
 
 const addOpen = ref(false)
 const addName = ref('')
@@ -214,6 +224,8 @@ watch(
       openName.value = null
       pendingClose.value = null
       pendingDelete.value = false
+      pendingReset.value = null
+      resetError.value = null
       detailError.value = null
       resetDraft(null)
     }
@@ -255,6 +267,8 @@ function openDetail(name: string, focusHeading = false): void {
   openName.value = name
   pendingClose.value = null
   pendingDelete.value = false
+  pendingReset.value = null
+  resetError.value = null
   detailError.value = null
   resetDraft(provider)
   if (focusHeading) void nextTick(() => detailHeading.value?.focus())
@@ -265,6 +279,8 @@ function closeDetail(restoreRowFocus = true): void {
   openName.value = null
   pendingClose.value = null
   pendingDelete.value = false
+  pendingReset.value = null
+  resetError.value = null
   detailError.value = null
   resetDraft(null)
   if (restoreRowFocus) void nextTick(() => focusRow(name))
@@ -272,7 +288,7 @@ function closeDetail(restoreRowFocus = true): void {
 
 /** Row activation: open, close (one open at a time), or ask before discarding. */
 function toggleRow(name: string, viaKeyboard = false): void {
-  if (busy.value) return
+  if (busy.value || addBusy.value || pendingReset.value) return
   activeName.value = name
   if (openName.value === name) {
     if (draftDirty.value) {
@@ -329,6 +345,8 @@ function onRowKeydown(event: KeyboardEvent, provider: ProviderView, index: numbe
  */
 function handleSectionEscape(event: KeyboardEvent): void {
   if (event.key !== 'Escape' || event.defaultPrevented) return
+  // The teleported AppDialog owns Escape and focus while reset is confirmed.
+  if (pendingReset.value) return
   const root = sectionRoot.value
   const target = event.target instanceof Node ? event.target : document.activeElement
   if (!root || !target || !root.contains(target)) return
@@ -366,7 +384,7 @@ function onKindChange(value: string): void {
 
 async function saveSelected(): Promise<void> {
   const provider = openProvider.value
-  if (!provider || busy.value) return
+  if (!provider || busy.value || addBusy.value || pendingReset.value) return
   const urlProblem = validateProviderBaseUrl(draft.baseUrl)
   if (urlProblem) {
     detailError.value = urlProblem
@@ -398,7 +416,7 @@ async function saveSelected(): Promise<void> {
 
 async function confirmDelete(): Promise<void> {
   const provider = openProvider.value
-  if (!provider || busy.value) return
+  if (!provider || busy.value || addBusy.value || pendingReset.value) return
   busy.value = true
   deleteError.value = null
   try {
@@ -424,14 +442,68 @@ async function confirmDelete(): Promise<void> {
 }
 
 function requestDelete(): void {
-  if (!openProvider.value || busy.value) return
+  if (!openProvider.value || busy.value || addBusy.value || pendingReset.value) return
   pendingDelete.value = true
   deleteError.value = null
   void nextTick(() => deleteCancelButton.value?.focus())
 }
 
+function requestReset(): void {
+  const provider = openProvider.value
+  if (!provider || busy.value || addBusy.value || pendingReset.value) return
+  if (!providerResetAllowed(provider)) return
+  pendingReset.value = provider.name
+  resetError.value = null
+  completedResetName.value = null
+}
+
+function cancelReset(): void {
+  if (busy.value) return
+  pendingReset.value = null
+  resetError.value = null
+}
+
+function handleResetAfterLeave(): void {
+  const name = completedResetName.value
+  if (!name) return
+  completedResetName.value = null
+  if (openName.value === name) detailHeading.value?.focus()
+  else focusRow(name)
+}
+
+async function confirmReset(): Promise<void> {
+  const name = pendingReset.value
+  if (!name || busy.value || addBusy.value) return
+  const provider = views.value.find((entry) => entry.name === name)
+  if (!providerResetAllowed(provider)) return
+  busy.value = true
+  resetError.value = null
+  try {
+    const restored = await resetProvider(name)
+    const next = applyProviderReset(props.providers, restored)
+    const restoredView = normalizeProviders([restored])[0] ?? null
+    // Reset replaces the override in place; never emit `deleted` or clear role refs.
+    emit('update:providers', next)
+    pendingReset.value = null
+    pendingClose.value = null
+    pendingDelete.value = false
+    detailError.value = null
+    deleteError.value = null
+    if (openName.value === name) resetDraft(restoredView)
+    completedResetName.value = name
+    announce(`Reset ${name} to default. Role assignments remain unchanged.`)
+  } catch (e) {
+    resetError.value =
+      e instanceof ApiError && e.status === 404
+        ? 'This backend does not support Reset to default yet. Your customized values, unsaved edits, and role assignments were not changed.'
+        : errText(e)
+  } finally {
+    busy.value = false
+  }
+}
+
 function openAdd(): void {
-  if (addBusy.value) return
+  if (addBusy.value || busy.value || pendingReset.value) return
   addOpen.value = true
   addNameError.value = null
   addBaseUrlError.value = null
@@ -461,7 +533,7 @@ function onAddKindChange(value: string): void {
 }
 
 async function submitAdd(): Promise<void> {
-  if (addBusy.value) return
+  if (addBusy.value || busy.value || pendingReset.value) return
   const validation = validateAddProviderForm(
     { name: addName.value, baseUrl: addBaseUrl.value },
     views.value.map((provider) => provider.name),
@@ -751,13 +823,17 @@ async function submitAdd(): Promise<void> {
             </div>
 
             <div v-else class="provider-detail-actions">
-              <n-button attr-type="button" :disabled="busy || !draftDirty" @click="closeDetail(true)">
+              <n-button
+                attr-type="button"
+                :disabled="busy || addBusy || !draftDirty"
+                @click="closeDetail(true)"
+              >
                 Cancel
               </n-button>
               <n-button
                 attr-type="button"
                 type="primary"
-                :disabled="busy || !draftDirty"
+                :disabled="busy || addBusy || !draftDirty"
                 :loading="busy"
                 @click="saveSelected"
               >
@@ -765,12 +841,23 @@ async function submitAdd(): Promise<void> {
               </n-button>
               <span class="provider-actions-spacer" />
               <n-button
+                v-if="providerResetAllowed(provider)"
+                attr-type="button"
+                size="small"
+                quaternary
+                type="error"
+                :disabled="busy || addBusy"
+                @click="requestReset"
+              >
+                Reset to default
+              </n-button>
+              <n-button
                 v-if="providerDeleteAllowed(provider)"
                 attr-type="button"
                 size="small"
                 quaternary
                 type="error"
-                :disabled="busy"
+                :disabled="busy || addBusy"
                 @click="requestDelete"
               >
                 Delete
@@ -880,6 +967,43 @@ async function submitAdd(): Promise<void> {
         </div>
       </div>
     </template>
+
+    <AppDialog
+      :show="pendingReset !== null"
+      size="sm"
+      :title="`Reset ${resetTarget?.name ?? 'provider'} to default?`"
+      description="Customized values and the stored override API key will be discarded. Senior and Junior role assignments remain unchanged."
+      :persistent="busy"
+      initial-focus=".provider-reset-cancel"
+      @close="cancelReset"
+      @after-leave="handleResetAfterLeave"
+    >
+      <div class="provider-reset-confirm">
+        <p class="provider-reset-copy">
+          Any unsaved edits in this form will also be discarded. The provider itself is not deleted.
+        </p>
+        <p v-if="resetError" class="provider-reset-error" role="alert">{{ resetError }}</p>
+      </div>
+      <template #footer>
+        <n-button
+          class="provider-reset-cancel"
+          attr-type="button"
+          :disabled="busy"
+          @click="cancelReset"
+        >
+          Cancel
+        </n-button>
+        <n-button
+          attr-type="button"
+          type="error"
+          :loading="busy"
+          :disabled="busy"
+          @click="confirmReset"
+        >
+          {{ busy ? 'Resetting…' : 'Reset to default' }}
+        </n-button>
+      </template>
+    </AppDialog>
 
     <p :id="announcementId" class="visually-hidden" role="status" aria-live="polite">
       {{ announcement }}
@@ -1324,6 +1448,29 @@ async function submitAdd(): Promise<void> {
 
 .provider-delete-error {
   color: var(--danger);
+}
+
+.provider-reset-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.provider-reset-copy,
+.provider-reset-error {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.provider-reset-error {
+  padding: 7px 9px;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+  background: var(--danger-soft);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
 }
 
 .providers-note {

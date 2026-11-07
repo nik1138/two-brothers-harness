@@ -6,8 +6,8 @@
  * side-by-side panes). Everything decision-like lives here so it is testable:
  * normalization of the additive `seed`/`customized` flags (old-backend
  * fallback), selection/open state, dirty tracking, role "used by" badges,
- * delete eligibility and impact copy, add-form validation and list keyboard
- * arithmetic.
+ * delete/reset eligibility and impact copy, add-form validation and list
+ * keyboard arithmetic.
  */
 
 import type { ProviderPreset } from './types'
@@ -164,6 +164,13 @@ export function providerIsCustomizedSeed(
   return !!provider && provider.seed === true && provider.customized === true
 }
 
+/** Reset is only offered for a built-in seed with a stored override. */
+export function providerResetAllowed(
+  provider: Pick<ProviderView, 'seed' | 'customized'> | null | undefined,
+): boolean {
+  return providerIsCustomizedSeed(provider)
+}
+
 /** Roles whose `provider_ref` points at this provider (case-insensitive). */
 export function providerUsageBadges(
   provider: Pick<ProviderView, 'name'>,
@@ -218,9 +225,8 @@ export function apiKeyStateLabel(provider: Pick<ProviderView, 'api_key_set'>): s
 
 /**
  * Delete is only offered where the server accepts it: stored (non-seed)
- * providers. A pure seed DELETE is a 404, and resetting an edited seed has no
- * safe server path yet (DELETE would also clear the role refs), so no reset
- * control is rendered this round.
+ * providers. A pure seed DELETE is a 404; customized seeds use the reset
+ * endpoint instead because DELETE would also clear role refs.
  */
 export function providerDeleteAllowed(
   provider: Pick<ProviderView, 'seed'> | null | undefined,
@@ -338,6 +344,27 @@ export function applyProviderUpdate(
       api_key_set: saved.api_key_set,
       kind: saved.kind,
       models: cleanModelList(saved.models),
+    }
+  })
+}
+
+/** Merge a reset response, replacing stale override flags with the pristine flags. */
+export function applyProviderReset(
+  providers: readonly ProviderPreset[],
+  restored: ProviderPreset,
+): ProviderPreset[] {
+  const name = text(restored.name).toLowerCase()
+  return providers.map((provider) => {
+    if (text(provider.name).toLowerCase() !== name) return provider
+    return {
+      ...provider,
+      name: restored.name || provider.name,
+      base_url: restored.base_url,
+      api_key_set: restored.api_key_set,
+      kind: restored.kind,
+      models: cleanModelList(restored.models),
+      seed: restored.seed === true,
+      customized: restored.customized === true,
     }
   })
 }

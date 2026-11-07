@@ -9,6 +9,7 @@ import {
   PROVIDER_KIND_DEFAULT,
   apiKeyPlaceholder,
   apiKeyStateLabel,
+  applyProviderReset,
   applyProviderUpdate,
   cleanModelList,
   isProviderDraftDirty,
@@ -21,6 +22,7 @@ import {
   providerIsCustomizedSeed,
   providerKindLabel,
   providerMoveForKey,
+  providerResetAllowed,
   providerRowSummary,
   providerUsageBadges,
   resolveProviderSelection,
@@ -129,6 +131,17 @@ test('providerIsCustomizedSeed marks only edited seeds', () => {
   assert.equal(providerIsCustomizedSeed({ seed: true, customized: false }), false)
   assert.equal(providerIsCustomizedSeed({ seed: false, customized: true }), false)
   assert.equal(providerIsCustomizedSeed(null), false)
+})
+
+test('providerResetAllowed: only customized built-in seeds are eligible', () => {
+  assert.equal(providerResetAllowed({ seed: true, customized: true }), true)
+  assert.equal(providerResetAllowed({ seed: true, customized: false }), false)
+  assert.equal(providerResetAllowed({ seed: false, customized: true }), false)
+  assert.equal(providerResetAllowed({ seed: false, customized: false }), false)
+  assert.equal(providerResetAllowed(null), false)
+  // Missing additive flags normalize to a legacy custom provider, not a resettable seed.
+  const [legacy] = normalizeProviders([rawProvider({ seed: undefined, customized: undefined })])
+  assert.equal(providerResetAllowed(legacy), false)
 })
 
 // -- selection & open state ---------------------------------------------------
@@ -321,6 +334,53 @@ test('applyProviderUpdate merges the PUT response and preserves seed flags', () 
   assert.equal(next[0]?.kind, 'anthropic')
   assert.deepEqual(next[0]?.models, ['custom'])
   assert.deepEqual(next[1], current[1], 'other rows untouched')
+})
+
+test('applyProviderReset replaces override values and flags with the pristine response', () => {
+  const current: ProviderPreset[] = [
+    {
+      name: 'deepseek',
+      base_url: 'http://localhost:9999/v1',
+      api_key_set: true,
+      kind: 'anthropic',
+      models: ['custom'],
+      seed: true,
+      customized: true,
+    },
+    {
+      name: 'other',
+      base_url: 'http://o',
+      api_key_set: false,
+      kind: 'openai-compatible',
+      models: [],
+      seed: false,
+      customized: true,
+    },
+  ]
+  const restored: ProviderPreset = {
+    name: 'deepseek',
+    base_url: 'https://api.deepseek.com/v1',
+    api_key_set: false,
+    kind: 'openai-compatible',
+    models: ['deepseek-chat', 'deepseek-chat'],
+    seed: true,
+    customized: false,
+  }
+  const next = applyProviderReset(current, restored)
+  assert.deepEqual(next[0], {
+    ...restored,
+    models: ['deepseek-chat'],
+  })
+  assert.equal(next[0]?.seed, true)
+  assert.equal(next[0]?.customized, false, 'stale override flag is replaced')
+  assert.equal(next[0]?.api_key_set, false, 'stored override key state is replaced')
+  assert.deepEqual(next[1], current[1], 'other rows and role-independent identity stay untouched')
+
+  const [restoredView] = normalizeProviders([next[0]])
+  assert.ok(restoredView)
+  const restoredDraft = providerDraftOf(restoredView)
+  assert.equal(restoredDraft.apiKey, '', 'a stale typed key cannot be resubmitted')
+  assert.equal(isProviderDraftDirty(restoredView, restoredDraft), false)
 })
 
 test('providerRowSummary is identity-only information', () => {
