@@ -5,19 +5,20 @@
  *     user task
  *        │
  *        ▼
- *     senior_open ── consult / delegation
+ *     senior_open ── consult / delegation (read-only belt in consult mode)
  *        │
  *        ▼
- *     junior_answer ── proposal / deliverable (tool loop in work mode)
+ *     junior_answer ── proposal (read-only belt in consult mode) /
+ *                      deliverable (mutating tool loop in work mode)
  *        │
  *        ▼
  *     senior_verify ── read-only tool slice (work mode + tools, bounded)
  *        │
  *        ▼
- *     senior_review ── accept | revise | reject
+ *     senior_review ── accept | revise | reject (read-only belt in consult mode)
  *        │  revise ──► junior_revise ──► senior_review   (bounded by max_rounds)
  *        ▼
- *     senior_decide ── decision
+ *     senior_decide ── decision (plain call, no belt)
  *        │
  *        ▼
  *       END
@@ -61,6 +62,25 @@
  *   `## Using tools`. Every provider call appends a names-and-lengths
  *   `PromptAuditEntry` to `result.promptAudits` and emits the same entry as
  *   a `prompt_audit` runtime event.
+ * - Both brothers may use READ-ONLY tools in consult-mode nodes ("senior and
+ *   junior must use tools"): `senior_open` (consult), the junior proposal
+ *   (`junior_answer` / `junior_revise`) and `senior_review` each run the
+ *   shared bounded tool loop over the role's read-only belt before emitting
+ *   the structured reply — only when the belt is non-empty AND that role's
+ *   provider implements `chatWithTools`. The read-only belt is the role's
+ *   normal belt minus the workspace mutations
+ *   (`workspace_write_file` / `workspace_edit_file` /
+ *   `workspace_delete_file` / `workspace_run_shell`) and minus the
+ *   display-only plan tool, so a senior consult call can never mutate and a
+ *   tool-less configuration keeps the exact pre-tools request path (`ask`:
+ *   no tools on the wire, no extra provider calls, the same prompt
+ *   sections). `senior_decide` deliberately stays a plain call: the review
+ *   immediately before it already ran the read-only checks, and the final
+ *   arbiter statement should read the transcript rather than re-run it.
+ *   Work mode is unchanged: the delegation, the junior's mutating
+ *   deliverable loop, the senior's approval-brokered verify slice
+ *   (including its documented `workspace_run_shell` carve-out) and the
+ *   review/decision calls keep their exact behavior.
  * - Structured-payload discipline (BACKLOG, fixes 1 + 2 + 3): every structured
  *   node reply is checked against the strict zod schema and gets exactly ONE
  *   repair re-ask when it fails. Before the repair runs, the relaxed strict
@@ -275,6 +295,10 @@ function strictReplyCheck(
  * The senior verifies the junior's deliverable with a read-only slice of the
  * workspace: it may inspect files and run tests, but never write/edit/delete.
  * Shell commands still pass through the same permission checks (Stage 5).
+ * This is the WORK-MODE verify slice; its documented approval-brokered
+ * `workspace_run_shell` stays available there. The consult-mode read-only
+ * belt filters {@link WORKSPACE_MUTATION_TOOL_NAMES} instead, so a consult
+ * node never offers the senior any of them.
  */
 export const SENIOR_VERIFY_TOOL_NAMES: ReadonlySet<string> = new Set([
   "workspace_read_file",
@@ -283,10 +307,31 @@ export const SENIOR_VERIFY_TOOL_NAMES: ReadonlySet<string> = new Set([
   "workspace_run_shell",
 ]);
 
+/**
+ * Workspace built-ins that change the workspace or run arbitrary commands.
+ * The consult-mode read-only belt offers none of them to either brother; the
+ * junior's work-mode deliverable belt keeps them (mutating work-mode
+ * behavior is unchanged), and the senior's work-mode verify slice keeps its
+ * documented `workspace_run_shell` carve-out.
+ */
+export const WORKSPACE_MUTATION_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "workspace_write_file",
+  "workspace_edit_file",
+  "workspace_delete_file",
+  "workspace_run_shell",
+]);
+
 /** Hard bound on the junior's tool-calling loop iterations. */
 export const MAX_JUNIOR_TOOL_ITERATIONS = 8;
 /** Hard bound on the senior's verification loop iterations. */
 export const MAX_SENIOR_VERIFY_ITERATIONS = 6;
+/**
+ * Hard bound on a consult-mode node's read-only tool-calling loop (consult,
+ * proposal and review grounding). Four rounds are enough for a
+ * read-inspect-then-answer pass; an exhausted loop still goes through the
+ * ordinary one-shot structured-payload repair, exactly like the work loops.
+ */
+export const MAX_CONSULT_TOOL_ITERATIONS = 4;
 
 const VERIFY_INSTRUCTION =
   "\n\nBefore reviewing, verify the junior's deliverable yourself. Use the " +
@@ -1427,6 +1472,31 @@ export class TwoBrothersHarness {
   }
 
   /**
+   * Whether a node may run a tool loop at all: a non-empty belt AND a provider
+   * that implements `chatWithTools`. This is the single gate that keeps
+   * tool-less configurations on the exact pre-tools request path.
+   */
+  private offersTools(role: "senior" | "junior", tools: readonly Tool[]): boolean {
+    return tools.length > 0 && this.providers[role].chatWithTools !== undefined;
+  }
+
+  /**
+   * The read-only belt a consult-mode node offers its role: the role's normal
+   * belt minus the workspace mutations ({@link WORKSPACE_MUTATION_TOOL_NAMES})
+   * and minus the display-only plan tool. The senior's source belt is its
+   * verify slice, so `shared` / `senior` scoped tools and the legacy
+   * `seniorTools` stay available; the junior's is its full belt, so the
+   * `shared` / `junior` scopes and the legacy `tools` stay available while
+   * every workspace mutation is filtered out.
+   */
+  private consultToolSet(state: CooperationState, role: "senior" | "junior"): Tool[] {
+    const belt = role === "senior" ? this.verificationToolSet(state) : this.toolSet(state);
+    return belt.filter(
+      (tool) => tool.name !== TODO_TOOL_NAME && !WORKSPACE_MUTATION_TOOL_NAMES.has(tool.name),
+    );
+  }
+
+  /**
    * The built-in plan tool (`todo_write`) both brothers receive: a whole-list
    * snapshot with no approval and no workspace access. Invalid arguments are
    * reported as a JSON error result (the tool never throws); a valid call
@@ -1589,13 +1659,15 @@ export class TwoBrothersHarness {
   }
 
   /**
-   * Bounded tool loop shared by the junior's deliverable and the senior's
-   * verification: model → tool calls → tool results, at most `maxIterations`
-   * rounds. Evidence lines (clipped, deduped) are collected for the payload.
-   * `rebuild` rebuilds the opening system+transcript messages after an
-   * overflow compaction, so the retry does not resend the oversized request.
-   * `auditKind` names the node in the prompt audit trail (the wire
-   * `responseKind` stays "deliverable" for both loops).
+   * Bounded tool loop shared by the junior's deliverable, the senior's
+   * verification and the consult-mode read-only nodes: model → tool calls →
+   * tool results, at most `maxIterations` rounds. Evidence lines (clipped,
+   * deduped) are collected for the payload. `rebuild` rebuilds the opening
+   * system+transcript messages after an overflow compaction, so the retry does
+   * not resend the oversized request. `auditKind` names the node in the prompt
+   * audit trail; `wireKind` is the `responseKind` handed to the provider (the
+   * work loops pass `"deliverable"`; the consult loops pass their own node
+   * kind so mock/scripted providers can vary the reply shape).
    *
    * Returns the model's FINAL reply text (the response without tool calls),
    * the tool conversation built so far (the repair pass needs it), and the
@@ -1611,6 +1683,7 @@ export class TwoBrothersHarness {
     messages: ChatMessage[],
     maxIterations: number,
     rebuild: () => ChatMessage[],
+    wireKind = "deliverable",
   ): Promise<{ evidence: string[]; text: string; messages: ChatMessage[] }> {
     const provider = this.providers[role];
     const chatWithTools = provider.chatWithTools?.bind(provider);
@@ -1623,7 +1696,7 @@ export class TwoBrothersHarness {
     // text deltas too (tool-call deltas are not text and never reach the sink).
     const streamOptions = this.streamOptions(role);
     const options = {
-      responseKind: "deliverable",
+      responseKind: wireKind,
       signal: this.options.signal,
       ...streamOptions,
     };
@@ -1666,11 +1739,78 @@ export class TwoBrothersHarness {
     return { evidence, text, messages };
   }
 
+  // -- consult-mode read-only tool nodes --------------------------------------
+
+  /**
+   * Answer one structured consult-mode node. With a non-empty read-only belt
+   * and a tool-capable provider the model may call tools before emitting the
+   * structured reply; otherwise this is exactly the pre-tools plain `ask`
+   * path — no belt on the wire, no extra provider calls and the same
+   * `## Available tools` ("You have no tools…") prompt section, so a
+   * tool-less configuration sends byte-identical requests.
+   */
+  private async consultNode(
+    state: CooperationState,
+    role: "senior" | "junior",
+    kind: string,
+  ): Promise<Record<string, unknown>> {
+    const tools = this.consultToolSet(state, role);
+    if (!this.offersTools(role, tools)) return this.ask(state, role, kind);
+    return (await this.consultWithTools(state, role, kind, tools)).payload;
+  }
+
+  /**
+   * The consult-mode tool loop: the shared bounded `toolLoop` over the role's
+   * read-only belt, then that node's structured reply. The structured reply
+   * keeps the ordinary ONE repair re-ask — the repair request resends the tool
+   * conversation with the bad reply as an assistant turn, so a prose answer
+   * after a tool round repairs exactly like the work-mode deliverable does.
+   * Tool activity rides the existing runtime/stream events; no protocol
+   * envelope, event type or prompt-file byte changes.
+   */
+  private async consultWithTools(
+    state: CooperationState,
+    role: "senior" | "junior",
+    kind: string,
+    tools: Tool[],
+  ): Promise<{ payload: Record<string, unknown>; evidence: string[] }> {
+    const build = (): ChatMessage[] =>
+      state.ctx.renderForRole(role, this.systemPrompt(role, tools, kind));
+    const { evidence, text, messages } = await this.toolLoop(
+      state,
+      role,
+      kind,
+      tools,
+      build(),
+      MAX_CONSULT_TOOL_ITERATIONS,
+      build,
+      kind,
+    );
+    const reply = await this.structuredReply(
+      state,
+      role,
+      kind,
+      messages,
+      String(text),
+      this.lastErrors,
+    );
+    return {
+      payload: sanitizePayload(kind, reply.payload, reply.text, taskOf(state.ctx)),
+      evidence,
+    };
+  }
+
   // -- nodes -----------------------------------------------------------------
 
   private async seniorOpen(state: CooperationState): Promise<NodeResult> {
     const kind = state.mode === "work" ? "delegation" : "consult";
-    const payload = await this.ask(state, "senior", kind);
+    // Consult mode grounds the opening question with the senior's read-only
+    // belt; the work-mode delegation stays a plain call (the junior's tool
+    // loop does the work there, and mutating work-mode behavior is unchanged).
+    const payload =
+      kind === "delegation"
+        ? await this.ask(state, "senior", kind)
+        : await this.consultNode(state, "senior", kind);
     this.append(state, "senior", "junior", kind, payload);
     return "junior_answer";
   }
@@ -1678,12 +1818,17 @@ export class TwoBrothersHarness {
   private async juniorAnswer(state: CooperationState): Promise<NodeResult> {
     const last = state.ctx.events[state.ctx.events.length - 1];
     const kind = last.kind === "delegation" ? "deliverable" : "proposal";
-    const tools = this.toolSet(state);
     let payload: Record<string, unknown>;
-    if (kind === "deliverable" && tools.length > 0 && this.providers.junior.chatWithTools) {
-      payload = await this.juniorWithTools(state, tools);
+    if (kind === "deliverable") {
+      const tools = this.toolSet(state);
+      if (tools.length > 0 && this.providers.junior.chatWithTools) {
+        payload = await this.juniorWithTools(state, tools);
+      } else {
+        payload = await this.ask(state, "junior", kind);
+      }
     } else {
-      payload = await this.ask(state, "junior", kind);
+      // consult-mode proposal: the junior's read-only belt grounds it
+      payload = await this.consultNode(state, "junior", kind);
     }
     this.append(state, "junior", "senior", kind, payload);
     return this.routeAfterJunior(state);
@@ -1766,6 +1911,9 @@ export class TwoBrothersHarness {
     const evidence = state.verifyEvidence;
     const summary = state.verifySummary;
     let payload: Record<string, unknown>;
+    // Consult-mode review grounds itself with the senior's read-only belt;
+    // work mode keeps its post-deliverable verify-evidence path unchanged.
+    let consultedEvidence: string[] = [];
     if (evidence.length > 0) {
       // the senior reviews with its own verification results in view; the
       // block augments only this request, not the shared transcript
@@ -1778,16 +1926,29 @@ export class TwoBrothersHarness {
         return messages;
       };
       payload = await this.askWithMessages(state, "senior", "review", build(), build);
+    } else if (state.mode !== "work") {
+      const tools = this.consultToolSet(state, "senior");
+      if (this.offersTools("senior", tools)) {
+        const grounded = await this.consultWithTools(state, "senior", "review", tools);
+        payload = grounded.payload;
+        consultedEvidence = grounded.evidence;
+      } else {
+        payload = await this.ask(state, "senior", "review");
+      }
     } else {
       payload = await this.ask(state, "senior", "review");
     }
-    if (evidence.length > 0) {
-      // clipped verification lines ground the verdict in actual results
+    const toolEvidence = evidence.length > 0 ? evidence : consultedEvidence;
+    if (toolEvidence.length > 0) {
+      // clipped tool lines ground the verdict in actual results
       payload.points = [
         ...(asList(payload.points)),
-        ...evidence.slice(0, MAX_EVIDENCE_ENTRIES).map((line) => `verify: ${line}`),
+        ...toolEvidence.slice(0, MAX_EVIDENCE_ENTRIES).map((line) => `verify: ${line}`),
       ];
-      const grounding = "Review grounded in senior verification of the workspace.";
+      const grounding =
+        evidence.length > 0
+          ? "Review grounded in senior verification of the workspace."
+          : "Review grounded in the senior's own read-only tool checks.";
       payload.notes = `${String(payload.notes ?? "")} ${grounding}`.trim();
     }
     const verdict = String(payload.verdict ?? "accept");
@@ -1799,13 +1960,21 @@ export class TwoBrothersHarness {
   }
 
   private async juniorRevise(state: CooperationState): Promise<NodeResult> {
-    const payload = await this.ask(state, "junior", "proposal");
+    // A revision is the junior's proposal node: consult mode grounds it with
+    // the read-only belt, work mode keeps the plain pre-tools call.
+    const payload =
+      state.mode === "work"
+        ? await this.ask(state, "junior", "proposal")
+        : await this.consultNode(state, "junior", "proposal");
     this.append(state, "junior", "senior", "proposal", payload);
     state.rounds += 1;
     return "senior_review";
   }
 
   private async seniorDecide(state: CooperationState): Promise<NodeResult> {
+    // Deliberately lean: the review immediately before this node already ran
+    // the read-only checks, and the arbiter's final statement reads the
+    // transcript instead of re-running tools.
     const payload = await this.ask(state, "senior", "decision");
     this.append(state, "senior", "user", "decision", payload);
     state.decision = payload;
