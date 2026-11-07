@@ -2,16 +2,26 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { createEditor } from "../src/tui/editor.ts";
+import { findCommand, formatKeys, hintSegments, TUI_COMMANDS } from "../src/tui/keymap.ts";
 import {
   addNotice,
+  addToolCall,
+  addToolResult,
   addUserBlock,
   appendEnvelopeDelta,
   commitEnvelope,
   createTuiModel,
+  type ToolBlock,
+  type TuiModel,
 } from "../src/tui/model.ts";
 import type { Message } from "../src/protocol.ts";
 import { styledWidth, stripAnsi } from "../src/tui/screen.ts";
 import { createTheme, plainTheme, resolveTheme } from "../src/tui/theme.ts";
+import {
+  toggleNewestToolExpansion,
+  toolExpansionKey,
+  toolFoldHint,
+} from "../src/tui/transcript.ts";
 import { composerView, renderComposer } from "../src/tui/view/composer.ts";
 import {
   createDialog,
@@ -146,6 +156,117 @@ test("status bar: narrow fitting drops whole segments instead of cutting words",
   for (const width of [1, 4, 8, 20, 50]) {
     assertRows(renderStatusBar({ mode: "consult", seniorModel: "long-model-name", juniorModel: "j" }, { width }), width, 2);
   }
+});
+
+// --------------------------------------------------------------------------- //
+// tool-detail folding: footer hint
+// --------------------------------------------------------------------------- //
+
+/** A chord label resolved from the registry, never spelled by a view. */
+function chord(id: string): string {
+  const command = findCommand(TUI_COMMANDS, id);
+  assert.ok(command, `the registry has ${id}`);
+  return formatKeys(command);
+}
+
+/** One tool row with a result, optionally keyed by a call id. */
+function toolModel(callId?: string): TuiModel {
+  let model = addToolCall(createTuiModel(), {
+    role: "junior",
+    tool: "read",
+    ...(callId !== undefined ? { callId } : {}),
+  });
+  model = addToolResult(model, {
+    role: "junior",
+    tool: "read",
+    status: "ok",
+    ...(callId !== undefined ? { callId } : {}),
+    result: "line one\nline two",
+  });
+  return model;
+}
+
+/** The composition `statusState` performs when a tool row is on screen. */
+function composedStatusHints(
+  model: TuiModel,
+  keys: ReadonlySet<string>,
+): string | undefined {
+  const fold = toolFoldHint(model, keys);
+  if (fold === null) return undefined;
+  return hintSegments(TUI_COMMANDS, [
+    { id: fold.commandId, label: fold.label },
+    { id: "palette", label: "commands" },
+    { id: "help", label: "help" },
+  ]);
+}
+
+test("tool fold hint: null without a tool row, then the newest row's state decides", () => {
+  assert.equal(toolFoldHint(createTuiModel(), new Set()), null);
+  assert.equal(toolFoldHint(addUserBlock(createTuiModel(), "hello"), new Set()), null);
+
+  const model = toolModel("call-1");
+  assert.deepEqual(toolFoldHint(model, new Set()), {
+    action: "expand",
+    commandId: "tool-expand",
+    label: "expand tool",
+  });
+
+  const expanded = toggleNewestToolExpansion(model, new Set()).keys;
+  assert.deepEqual(toolFoldHint(model, expanded), {
+    action: "collapse",
+    commandId: "tool-expand",
+    label: "collapse tool",
+  });
+
+  // A newer row that is still collapsed flips the footer back to "expand": the
+  // hint tracks the row the fold press will actually toggle, not any old key.
+  const withNewer = addToolCall(model, { role: "senior", tool: "echo", callId: "call-2" });
+  assert.equal(toolFoldHint(withNewer, expanded)?.action, "expand");
+});
+
+test("tool fold hint: a row without a call id uses its stable block key", () => {
+  const model = toolModel();
+  const block = model.blocks[0] as ToolBlock;
+  assert.equal(toolExpansionKey(block), "block:b1");
+  assert.equal(toolFoldHint(model, new Set())?.action, "expand");
+  assert.equal(toolFoldHint(model, new Set(["block:b1"]))?.label, "collapse tool");
+  // A call-id key never expands a row that has no call id.
+  assert.equal(toolFoldHint(model, new Set(["call:b1"]))?.action, "expand");
+});
+
+test("status bar: a tool row adds the fold hint and keeps the default commands/help hints", () => {
+  assert.equal(chord("tool-expand"), "Ctrl+T");
+  const defaultHints = hintSegments(TUI_COMMANDS, [
+    { id: "palette", label: "commands" },
+    { id: "help", label: "help" },
+  ]);
+  assert.equal(defaultHints, "Ctrl+P commands · ? / F1 help");
+
+  // No tool row: the app passes no hints at all, so the default row is byte-identical.
+  assert.equal(composedStatusHints(createTuiModel(), new Set()), undefined);
+  assert.equal(statusBarSegments({ mode: "consult" })[1].at(-1)?.text, defaultHints);
+
+  const model = toolModel("call-1");
+  const collapsed = composedStatusHints(model, new Set());
+  assert.equal(collapsed, `${chord("tool-expand")} expand tool · ${defaultHints}`);
+  const expanded = composedStatusHints(model, toggleNewestToolExpansion(model, new Set()).keys);
+  assert.equal(expanded, `${chord("tool-expand")} collapse tool · ${defaultHints}`);
+  assert.ok(!expanded?.includes("expand tool"), "the two labels never appear together");
+
+  // The hint is one dim row-two segment, fitted whole like every other segment.
+  const [, second] = statusBarSegments({ mode: "consult", hints: collapsed });
+  assert.deepEqual(second.at(-1), { text: collapsed, tone: "dim" });
+  for (const width of [8, 20, 32, 40, 60, 100, 160]) {
+    assertRows(renderStatusBar({ mode: "consult", hints: collapsed }, { width }), width, 2);
+  }
+  const wide = renderStatusBar({ mode: "consult", hints: collapsed }, { width: 120 });
+  assert.ok(wide[1]?.includes(`${chord("tool-expand")} expand tool`));
+  assert.ok(!wide.join("").includes("\u001b"), "NO_COLOR output carries no escape byte");
+
+  // Too narrow for the whole hint: it is dropped, never cut into a false label.
+  const narrow = renderStatusBar({ mode: "consult", hints: collapsed }, { width: 40 })[1] ?? "";
+  assert.equal(narrow.trimEnd(), "/settings configures models");
+  assert.ok(!narrow.includes(chord("tool-expand")));
 });
 
 test("spinner: frame selection is deterministic, bounded and reduced-motion aware", () => {

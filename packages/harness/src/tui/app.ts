@@ -106,6 +106,7 @@ import {
 } from "./historystore.ts";
 import {
   findSlashCommand,
+  hintSegments,
   isCommandEnabled,
   paletteEntries,
   resolveKey,
@@ -127,6 +128,7 @@ import {
 import {
   newestToolBlock,
   toggleNewestToolExpansion,
+  toolFoldHint,
   withToolExpansion,
   type ToolExpansionKeys,
 } from "./transcript.ts";
@@ -1197,30 +1199,53 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     render();
   };
 
-  const statusState = (): StatusBarState => ({
-    mode,
-    seniorModel: sessionCfg.seniorModel,
-    juniorModel: sessionCfg.juniorModel,
-    sessionName: sessionName(),
-    cwd,
-    running,
-    activity,
-    ...(contextTokens !== null ? { contextTokens } : {}),
-    ...(sessionCfg.contextWindow > 0 ? { contextWindow: sessionCfg.contextWindow } : {}),
-    ...(usage !== null
-      ? {
-          inputTokens: usage.input,
-          outputTokens: usage.output,
-          cachedTokens: usage.cached,
-        }
-      : {}),
-    cost,
-    ...(running
-      ? { elapsedMs: Date.now() - turnStartedAt }
-      : lastElapsedMs !== undefined
-        ? { elapsedMs: lastElapsedMs }
+  /**
+   * The status bar's hint string. With a tool row on screen it leads with the
+   * fold action the newest row's state allows ("expand tool" / "collapse
+   * tool"); the chord comes from the registry, never a literal here. Without a
+   * tool row it returns undefined so the status bar's default hints stay
+   * byte-identical.
+   */
+  const statusHints = (): string | undefined => {
+    const fold = toolFoldHint(model, toolExpansion);
+    if (fold === null) return undefined;
+    return hintSegments(TUI_COMMANDS, [
+      { id: fold.commandId, label: fold.label },
+      // The default pair of `statusBarSegments`, kept alongside the tool hint:
+      // the fold hint is additive, never a replacement.
+      { id: "palette", label: "commands" },
+      { id: "help", label: "help" },
+    ]);
+  };
+
+  const statusState = (): StatusBarState => {
+    const hints = statusHints();
+    return {
+      mode,
+      seniorModel: sessionCfg.seniorModel,
+      juniorModel: sessionCfg.juniorModel,
+      sessionName: sessionName(),
+      cwd,
+      running,
+      activity,
+      ...(contextTokens !== null ? { contextTokens } : {}),
+      ...(sessionCfg.contextWindow > 0 ? { contextWindow: sessionCfg.contextWindow } : {}),
+      ...(usage !== null
+        ? {
+            inputTokens: usage.input,
+            outputTokens: usage.output,
+            cachedTokens: usage.cached,
+          }
         : {}),
-  });
+      cost,
+      ...(running
+        ? { elapsedMs: Date.now() - turnStartedAt }
+        : lastElapsedMs !== undefined
+          ? { elapsedMs: lastElapsedMs }
+          : {}),
+      ...(hints !== undefined ? { hints } : {}),
+    };
+  };
 
   /** The compaction configuration as the harness will see it (no new math). */
   const sidePanelCompaction = (): SidePanelCompaction => {

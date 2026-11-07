@@ -193,6 +193,40 @@ export function toggleNewestToolExpansion(
   return { keys: next, key, expanded };
 }
 
+/** One tool-fold footer hint, derived from the newest row's expansion state. */
+export interface ToolFoldHint {
+  /** What the next fold press does to the newest tool row. */
+  action: "expand" | "collapse";
+  /**
+   * Registry command id that owns the fold chord. The hint never spells the
+   * chord itself; callers resolve this id through `hintSegments`.
+   */
+  commandId: "tool-expand";
+  /** Footer label that matches the action. */
+  label: "expand tool" | "collapse tool";
+}
+
+/**
+ * Footer hint for the newest tool row, or null when the transcript has no tool
+ * row (the caller then keeps its default hints byte-identical).
+ *
+ * The action is read from the same {@link ToolExpansionKeys} set that
+ * {@link withToolExpansion} renders from, and from the same newest-row rule
+ * that {@link toggleNewestToolExpansion} toggles, so the footer states exactly
+ * what the next fold press will do — including the block-id fallback of a row
+ * that has no call id.
+ */
+export function toolFoldHint(
+  input: TuiModel | readonly TuiBlock[],
+  keys: ToolExpansionKeys,
+): ToolFoldHint | null {
+  const newest = newestToolBlock(input);
+  if (newest === undefined) return null;
+  return keys.has(toolExpansionKey(newest))
+    ? { action: "collapse", commandId: "tool-expand", label: "collapse tool" }
+    : { action: "expand", commandId: "tool-expand", label: "expand tool" };
+}
+
 /**
  * Blocks registered here render their tool detail in full (no `maxToolRows`
  * bound). A weak side table keeps {@link withToolExpansion} from mutating the
