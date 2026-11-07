@@ -68,6 +68,7 @@ import {
   type CommandCatalog,
 } from "./commands.ts";
 import { estimateCost, type CostEstimate } from "./cost.ts";
+import { plainCliStyle, resolveCliStyle, type CliStyle } from "./clistyle.ts";
 import { formatDoctorReport, runDoctor } from "./doctor.ts";
 import { TwoBrothersHarness, type PromptAuditEntry, type ToolScopes } from "./harness.ts";
 import {
@@ -111,6 +112,7 @@ import { discoverSkills, type SkillCatalog } from "./skills.ts";
 import { envPinnedPairs, SettingsStore } from "./settings_store.ts";
 import { runTuiApp } from "./tui/app.ts";
 import { tuiHelpLines } from "./tui/keymap.ts";
+import type { ThemeToken } from "./tui/theme.ts";
 
 /**
  * The shared `run` / `chat` / `tui` / `serve` flag table. Exported so the
@@ -232,9 +234,23 @@ function isHelpRequested(values: Record<string, any>): boolean {
   return values.help === true || values.h === true;
 }
 
+/** Paint a transcript role name with its semantic token (`muted` otherwise). */
+function paintRole(style: CliStyle, role: string): string {
+  const token: ThemeToken =
+    role === "user" ? "user" : role === "senior" ? "senior" : role === "junior" ? "junior" : "muted";
+  return style.paint(token, role);
+}
+
+/** Paint the leading `[warn]` marker of a diagnostic line, leaving text intact. */
+function paintWarningPrefix(style: CliStyle, line: string): string {
+  const match = /^\[warn\](\s[\s\S]*)$/.exec(line);
+  if (match === null) return line;
+  return `[${style.paint("warning", "warn")}]${match[1]}`;
+}
+
 /** Print the concise grouped top-level help (bare invocation, `--help`, ...). */
-function printHelp(io: CliIO): void {
-  io.log(renderMainHelp());
+function printHelp(io: CliIO, style: CliStyle = plainCliStyle): void {
+  io.log(renderMainHelp(style));
 }
 
 /**
@@ -243,12 +259,16 @@ function printHelp(io: CliIO): void {
  * stderr; stdout keeps the short usage block the legacy contract expects.
  * Returns exit code 2.
  */
-function reportUnknownCommand(target: string, io: CliIO): number {
+function reportUnknownCommand(
+  target: string,
+  io: CliIO,
+  style: CliStyle = plainCliStyle,
+): number {
   const suggestion = suggestCommand(target);
   io.error(`Unknown command: ${target}`);
   if (suggestion !== null) io.error(`Did you mean '${suggestion}'?`);
   io.error("Run 'two-brothers help' for the command list.");
-  io.log(renderBriefUsage());
+  io.log(renderBriefUsage(style));
   return 2;
 }
 
@@ -314,21 +334,38 @@ function parseCommandArgs(
 /**
  * One line per provider call: the assembled section names, the tool belt
  * offered, and both prompt lengths. Names and sizes only — never bodies.
+ * The role is painted with its transcript token and the node kind is `dim`.
  */
-function renderPromptAudits(audits: PromptAuditEntry[]): string {
+function renderPromptAudits(
+  audits: PromptAuditEntry[],
+  style: CliStyle = plainCliStyle,
+): string {
   if (audits.length === 0) return "";
-  const lines = ["prompt audits:"];
+  const lines = [style.paint("strong", "prompt audits:")];
   for (const audit of audits) {
     const tools = audit.tools.length > 0 ? audit.tools.join(", ") : "(none)";
     lines.push(
-      `  ${audit.role} ${audit.kind}: ${audit.sections.join(" > ")}; tools: ${tools}; ` +
+      `  ${paintRole(style, audit.role)} ${style.dim(audit.kind)}: ` +
+        `${audit.sections.join(" > ")}; tools: ${tools}; ` +
         `system ${audit.systemChars} chars, user ${audit.userChars} chars`,
     );
   }
   return lines.join("\n");
 }
 
-function renderMessages(messages: Array<Record<string, any>>, verbose: boolean): string {
+/**
+ * The human transcript for a `run` (and every chat REPL turn).
+ *
+ * `[role -> role]` headers are painted by role token, the envelope kind is
+ * `dim`, the labelled payload keys are `dim`, a decision value uses the bold
+ * `decision` token and a dissent value the `dissent`/error token; the plain
+ * default keeps the historical bytes unchanged.
+ */
+export function renderMessages(
+  messages: Array<Record<string, any>>,
+  verbose: boolean,
+  style: CliStyle = plainCliStyle,
+): string {
   const out: string[] = [];
   for (const msg of messages) {
     const frm = msg.from;
@@ -337,51 +374,68 @@ function renderMessages(messages: Array<Record<string, any>>, verbose: boolean):
     const payload = msg.payload ?? {};
 
     if (kind === "message" && frm === "user") {
-      out.push(`[user]      ${payload.text ?? ""}`);
+      out.push(`[${paintRole(style, "user")}]      ${payload.text ?? ""}`);
       continue;
     }
 
-    out.push(`[${frm} -> ${to}] ${kind}`);
+    out.push(
+      `[${paintRole(style, frm)} -> ${paintRole(style, to)}] ${style.dim(kind)}`,
+    );
     if (verbose) out.push("    " + JSON.stringify(payload));
 
     if (kind === "consult") {
-      out.push(`    ask: ${payload.ask ?? ""}`);
-      out.push(`    expect: ${payload.expect ?? "proposal"}`);
+      out.push(`    ${style.dim("ask:")} ${payload.ask ?? ""}`);
+      out.push(`    ${style.dim("expect:")} ${payload.expect ?? "proposal"}`);
     } else if (kind === "proposal") {
-      out.push(`    title: ${payload.title ?? ""}`);
-      out.push(`    answer: ${payload.answer ?? ""}`);
-      if (payload.rationale) out.push(`    rationale: ${payload.rationale}`);
-      if (payload.risks) {
-        out.push("    risks:");
-        for (const risk of payload.risks) out.push(`      - ${risk}`);
+      out.push(`    ${style.dim("title:")} ${payload.title ?? ""}`);
+      out.push(`    ${style.dim("answer:")} ${payload.answer ?? ""}`);
+      if (payload.rationale) {
+        out.push(`    ${style.dim("rationale:")} ${payload.rationale}`);
       }
-      out.push(`    confidence: ${payload.confidence ?? ""}`);
+      if (payload.risks) {
+        out.push(`    ${style.dim("risks:")}`);
+        for (const risk of payload.risks) {
+          out.push(`      - ${style.paint("warning", String(risk))}`);
+        }
+      }
+      out.push(`    ${style.dim("confidence:")} ${payload.confidence ?? ""}`);
       if (payload.asks) {
-        out.push("    asks:");
+        out.push(`    ${style.dim("asks:")}`);
         for (const ask of payload.asks) out.push(`      - ${ask}`);
       }
     } else if (kind === "delegation") {
-      out.push(`    work: ${payload.work ?? ""}`);
-      out.push("    acceptance:");
-      for (const acceptance of payload.acceptance ?? []) out.push(`      - ${acceptance}`);
+      out.push(`    ${style.dim("work:")} ${payload.work ?? ""}`);
+      out.push(`    ${style.dim("acceptance:")}`);
+      for (const acceptance of payload.acceptance ?? []) {
+        out.push(`      - ${acceptance}`);
+      }
     } else if (kind === "deliverable") {
-      out.push(`    result: ${payload.result ?? ""}`);
+      out.push(`    ${style.dim("result:")} ${payload.result ?? ""}`);
       if (payload.artifacts) {
-        out.push("    artifacts:");
+        out.push(`    ${style.dim("artifacts:")}`);
         for (const artifact of payload.artifacts) out.push(`      - ${artifact}`);
       }
-      out.push(`    confidence: ${payload.confidence ?? ""}`);
+      out.push(`    ${style.dim("confidence:")} ${payload.confidence ?? ""}`);
     } else if (kind === "review") {
-      out.push(`    verdict: ${payload.verdict ?? ""}`);
-      out.push(`    notes: ${payload.notes ?? ""}`);
+      out.push(`    ${style.dim("verdict:")} ${payload.verdict ?? ""}`);
+      out.push(`    ${style.dim("notes:")} ${payload.notes ?? ""}`);
     } else if (kind === "decision") {
-      out.push(`    decision: ${payload.decision ?? ""}`);
-      out.push(`    rationale: ${payload.rationale ?? ""}`);
-      out.push(`    confidence: ${payload.confidence ?? ""}`);
-      out.push(`    dissent: ${payload.dissent ?? "(none)"}`);
+      out.push(
+        `    ${style.dim("decision:")} ${style.paint("decision", String(payload.decision ?? ""))}`,
+      );
+      out.push(`    ${style.dim("rationale:")} ${payload.rationale ?? ""}`);
+      out.push(`    ${style.dim("confidence:")} ${payload.confidence ?? ""}`);
+      const dissentText = payload.dissent ?? "(none)";
+      const paintedDissent =
+        payload.dissent === undefined || payload.dissent === null
+          ? dissentText
+          : style.paint("dissent", String(dissentText));
+      out.push(`    ${style.dim("dissent:")} ${paintedDissent}`);
       if (payload.accepted_proposals) {
-        out.push("    accepted_proposals:");
-        for (const proposal of payload.accepted_proposals) out.push(`      - ${proposal}`);
+        out.push(`    ${style.dim("accepted_proposals:")}`);
+        for (const proposal of payload.accepted_proposals) {
+          out.push(`      - ${proposal}`);
+        }
       }
     }
   }
@@ -727,13 +781,17 @@ function usageInt(value: unknown): number {
   return Number.isFinite(num) ? num : 0;
 }
 
-function usageLine(usage: UsageView): string {
+/** The token-usage footer: `tokens: in/out (cache N%, M model calls)`. */
+export function usageLine(usage: UsageView, style: CliStyle = plainCliStyle): string {
   const inp = usageInt(usage.input_tokens);
   const out = usageInt(usage.output_tokens);
   const cached = usageInt(usage.cached_tokens);
   const calls = usageInt(usage.model_calls);
   const pct = inp ? Math.min(100, Math.round((cached * 100) / inp)) : 0;
-  return `tokens: ${inp}/${out} (cache ${pct}%, ${calls} model calls)`;
+  return (
+    `${style.paint("muted", "tokens:")} ` +
+    `${inp}/${out} (cache ${pct}%, ${calls} model calls)`
+  );
 }
 
 /**
@@ -753,12 +811,20 @@ export function estimateRunCost(cfg: Config, usage: UsageView): CostEstimate | n
 }
 
 /** `cost: $0.0300 (in 4000 / out 2000 tokens)`, or null when not estimable. */
-export function costLine(cfg: Config, usage: UsageView): string | null {
+export function costLine(
+  cfg: Config,
+  usage: UsageView,
+  style: CliStyle = plainCliStyle,
+): string | null {
   const cost = estimateRunCost(cfg, usage);
   if (cost === null) return null;
   return (
-    `cost: $${cost.totalCost.toFixed(4)} ` +
-    `(in ${usageInt(usage.input_tokens)} / out ${usageInt(usage.output_tokens)} tokens)`
+    `${style.paint("muted", "cost:")} ` +
+    `${style.paint("strong", `$${cost.totalCost.toFixed(4)}`)} ` +
+    style.paint(
+      "muted",
+      `(in ${usageInt(usage.input_tokens)} / out ${usageInt(usage.output_tokens)} tokens)`,
+    )
   );
 }
 
@@ -766,14 +832,19 @@ export function costLine(cfg: Config, usage: UsageView): string | null {
  * A per-run provider diagnostic sink: `[warn]` lines reach stderr (never
  * stdout, so `--mode json` / `--json` / `--stream` stay parseable), at most
  * three per run. These are diagnostics, not `--verbose` output — a slow
- * endpoint should say something without the operator opting in.
+ * endpoint should say something without the operator opting in. The optional
+ * style paints only the leading `[warn]` marker.
  */
-function providerWarningSink(io: CliIO, limit = 3): (line: string) => void {
+function providerWarningSink(
+  io: CliIO,
+  limit = 3,
+  style: CliStyle = plainCliStyle,
+): (line: string) => void {
   let emitted = 0;
   return (line) => {
     if (emitted >= limit) return;
     emitted += 1;
-    io.error(line);
+    io.error(paintWarningPrefix(style, line));
   };
 }
 
@@ -787,6 +858,8 @@ export interface RunOnceOptions {
   streamTokens?: boolean;
   /** Per-turn cooperation mode; a command's frontmatter `mode` overrides it. */
   mode?: Config["mode"];
+  /** Terminal style for the human text mode (machine modes always stay plain). */
+  style?: CliStyle;
 }
 
 async function runOnce(
@@ -798,6 +871,9 @@ async function runOnce(
 ): Promise<number> {
   const { mcpConfig, resources, streamTokens = false } = options;
   const outputMode = options.outputMode ?? "text";
+  // Machine modes (json/stream/print) are byte-pure: even with FORCE_COLOR
+  // the resolved terminal style is replaced by the identity style here.
+  const textStyle = outputMode === "text" ? (options.style ?? plainCliStyle) : plainCliStyle;
   // A command's `mode` applies to this turn only — the shared config object
   // stays untouched for the next REPL turn.
   if (options.mode !== undefined) cfg = { ...cfg, mode: options.mode };
@@ -826,7 +902,12 @@ async function runOnce(
         }
       }
     } catch (exc) {
-      io.error(`[warn] plugins: ${exc instanceof Error ? exc.message : String(exc)}`);
+      io.error(
+        paintWarningPrefix(
+          textStyle,
+          `[warn] plugins: ${exc instanceof Error ? exc.message : String(exc)}`,
+        ),
+      );
     }
   }
   // MCP after the binding pass: the configured `--mcp-config` base first (a
@@ -843,18 +924,30 @@ async function runOnce(
         base = { mcpServers: loadMcpToolSpecs(mcpConfig) };
       } catch (exc) {
         // a missing/invalid config file warns; the run continues text-only
-        io.error(`[warn] MCP: ${exc instanceof Error ? exc.message : String(exc)}`);
+        io.error(
+          paintWarningPrefix(
+            textStyle,
+            `[warn] MCP: ${exc instanceof Error ? exc.message : String(exc)}`,
+          ),
+        );
       }
     }
     const merged = mergeMcpConfig(base, pluginServers);
-    for (const line of merged.diagnostics) io.error(`[warn] ${line}`);
+    for (const line of merged.diagnostics) {
+      io.error(paintWarningPrefix(textStyle, `[warn] ${line}`));
+    }
     try {
       mcp = await loadMcpTools(merged.config);
       toolScopes.shared = mcp.sharedTools;
       toolScopes.senior = mcp.seniorTools;
       toolScopes.junior = mcp.juniorTools;
     } catch (exc) {
-      io.error(`[warn] MCP: ${exc instanceof Error ? exc.message : String(exc)}`);
+      io.error(
+        paintWarningPrefix(
+          textStyle,
+          `[warn] MCP: ${exc instanceof Error ? exc.message : String(exc)}`,
+        ),
+      );
     }
   }
   // Plugin tools join after the MCP scopes (shared/senior/junior buckets).
@@ -862,7 +955,7 @@ async function runOnce(
   try {
     const hasScopes = Object.values(toolScopes).some((list) => list !== undefined);
     const compaction = compactionOptions(cfg);
-    const providerWarnings = providerWarningSink(io);
+    const providerWarnings = providerWarningSink(io, 3, textStyle);
     const native = nativeProviders(cfg, endpoints, providerWarnings);
     const harness = new TwoBrothersHarness(cfg, {
       onProviderWarning: providerWarnings,
@@ -877,8 +970,12 @@ async function runOnce(
     });
     const result = await harness.run(task, context);
     // connections stay open for the whole run; closed in the finally below
-    for (const err of mcp?.errors ?? []) io.error(`[warn] ${err}`);
-    for (const warning of result.warnings) io.error(`[warn] ${warning}`);
+    for (const err of mcp?.errors ?? []) {
+      io.error(paintWarningPrefix(textStyle, `[warn] ${err}`));
+    }
+    for (const warning of result.warnings) {
+      io.error(paintWarningPrefix(textStyle, `[warn] ${warning}`));
+    }
     const failed = result.errors.length > 0;
     if (outputMode === "stream") {
       // every event, the terminal `result` included, already went to stdout
@@ -901,9 +998,11 @@ async function runOnce(
       return failed ? 1 : 0;
     }
     if (outputMode === "print") {
-      for (const err of result.errors) io.error(`[warn] ${err}`);
-      io.error(usageLine(result.usage ?? {})); // stdout carries decision only
-      const cost = costLine(cfg, result.usage ?? {});
+      for (const err of result.errors) {
+        io.error(paintWarningPrefix(textStyle, `[warn] ${err}`));
+      }
+      io.error(usageLine(result.usage ?? {}, textStyle)); // stdout carries decision only
+      const cost = costLine(cfg, result.usage ?? {}, textStyle);
       if (cost) io.error(cost);
       if (cfg.jsonOut) {
         io.log(JSON.stringify(result.decision));
@@ -918,16 +1017,19 @@ async function runOnce(
       renderMessages(
         result.messages as unknown as Array<Record<string, any>>,
         cfg.verbose,
+        textStyle,
       ),
     );
     if (cfg.verbose) {
-      const audits = renderPromptAudits(result.promptAudits);
+      const audits = renderPromptAudits(result.promptAudits, textStyle);
       if (audits) io.log(audits);
     }
-    for (const err of result.errors) io.error(`[warn] ${err}`);
+    for (const err of result.errors) {
+      io.error(paintWarningPrefix(textStyle, `[warn] ${err}`));
+    }
     if (!cfg.jsonOut) {
-      io.log(usageLine(result.usage ?? {}));
-      const cost = costLine(cfg, result.usage ?? {});
+      io.log(usageLine(result.usage ?? {}, textStyle));
+      const cost = costLine(cfg, result.usage ?? {}, textStyle);
       if (cost) io.log(cost);
     }
     if (cfg.jsonOut) io.log(JSON.stringify(result.decision));
@@ -1287,7 +1389,11 @@ function printDryRun(
   return 0;
 }
 
-async function doRun(argv: string[], io: CliIO): Promise<number> {
+async function doRun(
+  argv: string[],
+  io: CliIO,
+  style: CliStyle = plainCliStyle,
+): Promise<number> {
   const parsed = parseCommandArgs(
     argv,
     { ...OPTIONS, ...HELP_OPTIONS, ...RUN_INPUT_OPTIONS },
@@ -1298,7 +1404,7 @@ async function doRun(argv: string[], io: CliIO): Promise<number> {
   if (parsed === null) return 2;
   const { values, positionals } = parsed;
   if (isHelpRequested(values)) {
-    io.log(renderCommandHelp("run"));
+    io.log(renderCommandHelp("run", style));
     return 0;
   }
   const cfg = resolveConfig(argsToConfigArgs(values));
@@ -1348,6 +1454,7 @@ async function doRun(argv: string[], io: CliIO): Promise<number> {
       outputMode: resolveOutputMode(values),
       resources,
       streamTokens,
+      style,
     });
   } catch (exc) {
     if (exc instanceof SessionError) {
@@ -1368,7 +1475,7 @@ async function doRun(argv: string[], io: CliIO): Promise<number> {
  * (argument-hint)` shape as discovered templates; aliases are listed too so
  * the Chinese/English spellings are discoverable.
  */
-function baseCommandListLines(): string[] {
+function baseCommandListLines(style: CliStyle = plainCliStyle): string[] {
   const lines: string[] = [];
   const groups = [
     { kind: "prompt" as const, heading: "prompt commands (submit a task this turn):" },
@@ -1376,13 +1483,16 @@ function baseCommandListLines(): string[] {
   ];
   const ordered = sortBaseCommands(BASE_COMMANDS);
   for (const group of groups) {
-    lines.push(group.heading);
+    lines.push(style.paint("strong", group.heading));
     for (const command of ordered) {
       if (command.kind !== group.kind) continue;
       const hint = command.argumentHint === "" ? "" : ` (${command.argumentHint})`;
       const aliases =
         command.aliases.length === 0 ? "" : ` [aliases: ${command.aliases.join(", ")}]`;
-      lines.push(`  /${command.name} — ${command.description}${hint}${aliases}`);
+      lines.push(
+        `  ${style.paint("accent", `/${command.name}`)} — ${command.description}` +
+          style.paint("dim", `${hint}${aliases}`),
+      );
     }
   }
   return lines;
@@ -1408,7 +1518,12 @@ function replCompactionSettings(cfg: Config): CompactionSettings {
  * same effective per-role endpoint/config the run path uses (the REPL has no
  * harness instance between turns, so the provider is built on demand).
  */
-function replSummarizerProvider(cfg: Config, role: "senior" | "junior", io: CliIO): Provider {
+function replSummarizerProvider(
+  cfg: Config,
+  role: "senior" | "junior",
+  io: CliIO,
+  style: CliStyle = plainCliStyle,
+): Provider {
   const endpoints = cliEndpoints(cfg);
   const endpoint = endpoints?.[role];
   return buildProvider(
@@ -1425,13 +1540,17 @@ function replSummarizerProvider(cfg: Config, role: "senior" | "junior", io: CliI
       retries: cfg.retries,
       contextWindow: cfg.contextWindow,
       maxTokens: maxTokensForRole(cfg, role),
-      onWarning: providerWarningSink(io),
+      onWarning: providerWarningSink(io, 3, style),
     },
     role,
   );
 }
 
-async function doChat(argv: string[], io: CliIO): Promise<number> {
+async function doChat(
+  argv: string[],
+  io: CliIO,
+  style: CliStyle = plainCliStyle,
+): Promise<number> {
   const parsed = parseCommandArgs(
     argv,
     { ...OPTIONS, ...HELP_OPTIONS, ...DRY_RUN_OPTIONS },
@@ -1441,7 +1560,7 @@ async function doChat(argv: string[], io: CliIO): Promise<number> {
   if (parsed === null) return 2;
   const { values } = parsed;
   if (isHelpRequested(values)) {
-    io.log(renderCommandHelp("chat"));
+    io.log(renderCommandHelp("chat", style));
     return 0;
   }
   const cfg = resolveConfig(argsToConfigArgs(values));
@@ -1486,18 +1605,24 @@ async function doChat(argv: string[], io: CliIO): Promise<number> {
       : commands.commands
           .map(
             (found) =>
-              `  ${found.name} — ${found.description}` +
-              (found.argumentHint ? ` (${found.argumentHint})` : ""),
+              `  ${style.paint("accent", found.name)} — ${found.description}` +
+              style.paint("dim", found.argumentHint ? ` (${found.argumentHint})` : ""),
           )
           .join("\n");
   // The `/commands` listing: built-in groups (prompt, then action), then the
   // discovered templates in the long-standing format.
   const commandList = (): string =>
-    [...baseCommandListLines(), "", "discovered commands:", discoveredCommandList()].join("\n");
+    [
+      ...baseCommandListLines(style),
+      "",
+      style.paint("strong", "discovered commands:"),
+      discoveredCommandList(),
+    ].join("\n");
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   io.log(
-    "Two Brothers REPL. Enter a task (empty line or exit to quit). Type /help for commands.",
+    `${style.paint("strong", "Two Brothers REPL.")} Enter a task (empty line or exit to quit). ` +
+      `Type ${style.paint("accent", "/help")} for commands.`,
   );
   printResolvedRoles(cfg, io);
   // The REPL's default cooperation mode for following turns. A discovered
@@ -1507,15 +1632,15 @@ async function doChat(argv: string[], io: CliIO): Promise<number> {
   /** `/help`: the REPL commands, then the built-in catalogue, then discovered. */
   const printReplHelp = (): void => {
     io.log(
-      "REPL commands:\n" +
-        "  /commands      list built-in and discovered slash commands\n" +
-        "  /config        resolved provider/model/base-url per role\n" +
-        "  /help, /h      this list\n" +
-        "  /mode [consult|work]  show or set the cooperation mode for following turns\n" +
-        "  /exit, /quit   leave (empty line, exit, quit, q also work)\n" +
-        "built-in commands:\n" +
-        baseCommandListLines().join("\n") +
-        "\ndiscovered commands:\n" +
+      `${style.paint("strong", "REPL commands:")}\n` +
+        `  ${style.paint("accent", "/commands")}      list built-in and discovered slash commands\n` +
+        `  ${style.paint("accent", "/config")}        resolved provider/model/base-url per role\n` +
+        `  ${style.paint("accent", "/help")}, ${style.paint("accent", "/h")}      this list\n` +
+        `  ${style.paint("accent", "/mode")} [consult|work]  show or set the cooperation mode for following turns\n` +
+        `  ${style.paint("accent", "/exit")}, ${style.paint("accent", "/quit")}   leave (empty line, exit, quit, q also work)\n` +
+        `${style.paint("strong", "built-in commands:")}\n` +
+        baseCommandListLines(style).join("\n") +
+        `\n${style.paint("strong", "discovered commands:")}\n` +
         discoveredCommandList() +
         "\nanything else is sent to the brothers as a task",
     );
@@ -1594,7 +1719,12 @@ async function doChat(argv: string[], io: CliIO): Promise<number> {
     try {
       validateRunConfig(cfg, cliEndpoints(cfg));
       const settings = replCompactionSettings(cfg);
-      const provider = replSummarizerProvider(cfg, settings.summarizerRole ?? "senior", io);
+      const provider = replSummarizerProvider(
+        cfg,
+        settings.summarizerRole ?? "senior",
+        io,
+        style,
+      );
       // `compactContext` rewrites `context.store` (dense seq) when a
       // `--session-file` is open, so `--resume` keeps working — same as a run.
       const changed = await compactContext(context, provider, settings);
@@ -1679,7 +1809,7 @@ async function doChat(argv: string[], io: CliIO): Promise<number> {
       continue;
     }
     if (command === "/commands") {
-      io.log(`commands:\n${commandList()}`);
+      io.log(`${style.paint("strong", "commands:")}\n${commandList()}`);
       if (showPrompt) rl.prompt();
       continue;
     }
@@ -1701,6 +1831,7 @@ async function doChat(argv: string[], io: CliIO): Promise<number> {
           ...(values["mcp-config"] ? { mcpConfig: values["mcp-config"] } : {}),
           outputMode: "text",
           resources,
+          style,
           ...(discovered.mode ? { mode: discovered.mode } : {}),
         });
         io.log("");
@@ -1728,6 +1859,7 @@ async function doChat(argv: string[], io: CliIO): Promise<number> {
               ...(values["mcp-config"] ? { mcpConfig: values["mcp-config"] } : {}),
               outputMode: "text",
               resources,
+              style,
               ...(base.mode ? { mode: base.mode } : {}),
             });
             io.log("");
@@ -1743,6 +1875,7 @@ async function doChat(argv: string[], io: CliIO): Promise<number> {
       ...(values["mcp-config"] ? { mcpConfig: values["mcp-config"] } : {}),
       outputMode: "text",
       resources,
+      style,
       mode: replMode,
     });
     io.log("");
@@ -1773,24 +1906,28 @@ function printResolvedRoles(cfg: Config, io: CliIO): void {
 /** Command help as printed by `<command> --help` / `help <command>`; the TUI
  * additionally prints the key guide generated from the same keymap registry
  * that powers the in-app Ctrl+P palette and `?` overlay. */
-function commandHelpFor(command: string): string {
-  const text = renderCommandHelp(command);
+function commandHelpFor(command: string, style: CliStyle = plainCliStyle): string {
+  const text = renderCommandHelp(command, style);
   if (command !== "tui") return text;
   // tuiHelpLines() already starts with its own "Keys:" heading.
   return `${text}\n\n${tuiHelpLines().join("\n")}`;
 }
 
 /** `tui --help`: the clihelp spec plus the generated key guide. */
-function printTuiHelp(io: CliIO): void {
-  io.log(commandHelpFor("tui"));
+function printTuiHelp(io: CliIO, style: CliStyle = plainCliStyle): void {
+  io.log(commandHelpFor("tui", style));
 }
 
-async function doTui(argv: string[], io: CliIO): Promise<number> {
+async function doTui(
+  argv: string[],
+  io: CliIO,
+  style: CliStyle = plainCliStyle,
+): Promise<number> {
   const parsed = parseCommandArgs(argv, { ...OPTIONS, ...HELP_OPTIONS }, "tui", io, true);
   if (parsed === null) return 2;
   const { values, positionals } = parsed;
   if (isHelpRequested(values)) {
-    printTuiHelp(io);
+    printTuiHelp(io, style);
     return 0;
   }
   if (isOutputMode(values.mode)) {
@@ -2281,12 +2418,16 @@ function exportSessionCommand(
   return 0;
 }
 
-function doSessions(argv: string[], io: CliIO): number {
+function doSessions(
+  argv: string[],
+  io: CliIO,
+  style: CliStyle = plainCliStyle,
+): number {
   const parsed = parseCommandArgs(argv, SESSIONS_OPTIONS, "sessions", io, true);
   if (parsed === null) return 2;
   const { values, positionals } = parsed;
   if (isHelpRequested(values)) {
-    io.log(renderCommandHelp("sessions"));
+    io.log(renderCommandHelp("sessions", style));
     return 0;
   }
   const sessionsDir =
@@ -2362,12 +2503,16 @@ const DOCTOR_OPTIONS = {
  * `doctor: ok` / `doctor: N failed check(s)` summary) or one JSON object.
  * Exit 0 when no check failed, 1 otherwise, 2 on a usage/config error.
  */
-async function doDoctor(argv: string[], io: CliIO): Promise<number> {
+async function doDoctor(
+  argv: string[],
+  io: CliIO,
+  style: CliStyle = plainCliStyle,
+): Promise<number> {
   const parsed = parseCommandArgs(argv, DOCTOR_OPTIONS, "doctor", io);
   if (parsed === null) return 2;
   const { values } = parsed;
   if (isHelpRequested(values)) {
-    io.log(renderCommandHelp("doctor"));
+    io.log(renderCommandHelp("doctor", style));
     return 0;
   }
   let cfg: Config;
@@ -2400,9 +2545,13 @@ async function doDoctor(argv: string[], io: CliIO): Promise<number> {
     io.log(JSON.stringify(report, null, 2));
     return report.ok ? 0 : 1;
   }
-  for (const line of formatDoctorReport(report)) io.log(line);
+  for (const line of formatDoctorReport(report, style)) io.log(line);
   const failed = report.checks.filter((check) => check.status === "fail").length;
-  io.log(report.ok ? "doctor: ok" : `doctor: ${failed} failed check(s)`);
+  io.log(
+    report.ok
+      ? style.paint("success", "doctor: ok")
+      : style.paint("error", `doctor: ${failed} failed check(s)`),
+  );
   return report.ok ? 0 : 1;
 }
 
@@ -2444,12 +2593,16 @@ const CONFIG_OPTIONS = {
  * preset/settings layers; keys are only reported as set/not set. Never makes
  * a provider call. Exit 0, or 2 on a usage/config error.
  */
-function doConfig(argv: string[], io: CliIO): number {
+function doConfig(
+  argv: string[],
+  io: CliIO,
+  style: CliStyle = plainCliStyle,
+): number {
   const parsed = parseCommandArgs(argv, CONFIG_OPTIONS, "config", io);
   if (parsed === null) return 2;
   const { values } = parsed;
   if (isHelpRequested(values)) {
-    io.log(renderCommandHelp("config"));
+    io.log(renderCommandHelp("config", style));
     return 0;
   }
   let cfg: Config;
@@ -2515,12 +2668,16 @@ function completionSpec(): CompletionSpec {
  * `two-brothers completions <bash|zsh|fish|powershell>`: print the generated
  * script on stdout. A missing or unknown shell is a usage error (exit 2).
  */
-function doCompletions(argv: string[], io: CliIO): number {
+function doCompletions(
+  argv: string[],
+  io: CliIO,
+  style: CliStyle = plainCliStyle,
+): number {
   const parsed = parseCommandArgs(argv, HELP_OPTIONS, "completions", io, true);
   if (parsed === null) return 2;
   const { values, positionals } = parsed;
   if (isHelpRequested(values)) {
-    io.log(renderCommandHelp("completions"));
+    io.log(renderCommandHelp("completions", style));
     return 0;
   }
   if (positionals.length > 1) {
@@ -2550,7 +2707,11 @@ function doCompletions(argv: string[], io: CliIO): number {
   return 0;
 }
 
-async function doServe(argv: string[], io: CliIO): Promise<number> {
+async function doServe(
+  argv: string[],
+  io: CliIO,
+  style: CliStyle = plainCliStyle,
+): Promise<number> {
   const parsed = parseCommandArgs(
     argv,
     {
@@ -2567,7 +2728,7 @@ async function doServe(argv: string[], io: CliIO): Promise<number> {
   if (parsed === null) return 2;
   const { values } = parsed;
   if (isHelpRequested(values)) {
-    io.log(renderCommandHelp("serve"));
+    io.log(renderCommandHelp("serve", style));
     return 0;
   }
   const host = values.host ?? "127.0.0.1";
@@ -2683,12 +2844,16 @@ const MODELS_OPTIONS = {
   ...HELP_OPTIONS,
 } satisfies ParseArgsOptionsConfig;
 
-async function doModels(argv: string[], io: CliIO): Promise<number> {
+async function doModels(
+  argv: string[],
+  io: CliIO,
+  style: CliStyle = plainCliStyle,
+): Promise<number> {
   const parsed = parseCommandArgs(argv, MODELS_OPTIONS, "models", io);
   if (parsed === null) return 2;
   const { values } = parsed;
   if (isHelpRequested(values)) {
-    io.log(renderCommandHelp("models"));
+    io.log(renderCommandHelp("models", style));
     return 0;
   }
   const baseUrl = values["base-url"]?.trim() ?? "";
@@ -2793,12 +2958,16 @@ type OnboardRoleSettings = {
   api_key?: string;
 };
 
-async function doOnboard(argv: string[], io: CliIO): Promise<number> {
+async function doOnboard(
+  argv: string[],
+  io: CliIO,
+  style: CliStyle = plainCliStyle,
+): Promise<number> {
   const parsed = parseCommandArgs(argv, ONBOARD_OPTIONS, "onboard", io);
   if (parsed === null) return 2;
   const { values } = parsed;
   if (isHelpRequested(values)) {
-    io.log(renderCommandHelp("onboard"));
+    io.log(renderCommandHelp("onboard", style));
     return 0;
   }
   const sessionsDir = values["sessions-dir"] ?? "sessions";
@@ -2972,7 +3141,11 @@ function packageVersion(): string {
 }
 
 /** `two-brothers help [command]` / `two-brothers help --all`. */
-function doHelp(argv: string[], io: CliIO): number {
+function doHelp(
+  argv: string[],
+  io: CliIO,
+  style: CliStyle = plainCliStyle,
+): number {
   const parsed = parseCommandArgs(
     argv,
     { all: { type: "boolean" as const, default: false }, ...HELP_OPTIONS },
@@ -2983,16 +3156,16 @@ function doHelp(argv: string[], io: CliIO): number {
   if (parsed === null) return 2;
   const { values, positionals } = parsed;
   if (values.all === true) {
-    io.log(renderFullHelp());
+    io.log(renderFullHelp(style));
     return 0;
   }
   if (isHelpRequested(values)) {
-    printHelp(io);
+    printHelp(io, style);
     return 0;
   }
   const target = positionals[0];
   if (target === undefined) {
-    printHelp(io);
+    printHelp(io, style);
     return 0;
   }
   if (positionals.length > 1) {
@@ -3001,59 +3174,74 @@ function doHelp(argv: string[], io: CliIO): number {
     io.error("Run 'two-brothers help --help'.");
     return 2;
   }
-  if (commandHelp(target) === undefined) return reportUnknownCommand(target, io);
-  io.log(commandHelpFor(target));
+  if (commandHelp(target) === undefined) return reportUnknownCommand(target, io, style);
+  io.log(commandHelpFor(target, style));
   return 0;
 }
 
 /** `two-brothers selftest [--help]`: the offline protocol/provider gate. */
-async function doSelftest(argv: string[], io: CliIO): Promise<number> {
+async function doSelftest(
+  argv: string[],
+  io: CliIO,
+  style: CliStyle = plainCliStyle,
+): Promise<number> {
   const parsed = parseCommandArgs(argv, HELP_OPTIONS, "selftest", io);
   if (parsed === null) return 2;
   if (isHelpRequested(parsed.values)) {
-    io.log(renderCommandHelp("selftest"));
+    io.log(renderCommandHelp("selftest", style));
     return 0;
   }
   return selftest();
 }
 
-export async function main(argv: string[], io: CliIO = defaultIO): Promise<number> {
+/**
+ * The CLI entry point. `io` is injectable so tests and embedders can drive it
+ * in-process; `style` is injectable for the same reason. Without an explicit
+ * style, the real process sink resolves the terminal style from stdout/env
+ * while a custom sink stays plain (its bytes are not the operator's terminal).
+ */
+export async function main(
+  argv: string[],
+  io: CliIO = defaultIO,
+  style?: CliStyle,
+): Promise<number> {
+  const cliStyle = style ?? (io === defaultIO ? resolveCliStyle() : plainCliStyle);
   if (argv.length === 0) {
     // Modern-CLI convention: an interactive terminal opens the full TUI
     // (like opencode/kimi bare invocations); piped or CI invocations get
     // the usage screen so scripts keep working.
-    if (process.stdin.isTTY === true) return doTui([], io);
-    printHelp(io);
+    if (process.stdin.isTTY === true) return doTui([], io, cliStyle);
+    printHelp(io, cliStyle);
     return 0;
   }
   const command = argv[0];
-  if (command === "help") return doHelp(argv.slice(1), io);
+  if (command === "help") return doHelp(argv.slice(1), io, cliStyle);
   if (command === "--help" || command === "-h") {
-    printHelp(io);
+    printHelp(io, cliStyle);
     return 0;
   }
   if (command === "--version" || command === "-v") {
     io.log(packageVersion());
     return 0;
   }
-  if (command === "selftest") return doSelftest(argv.slice(1), io);
-  if (command === "sessions") return doSessions(argv.slice(1), io);
-  if (command === "run") return doRun(argv.slice(1), io);
-  if (command === "chat") return doChat(argv.slice(1), io);
-  if (command === "tui") return doTui(argv.slice(1), io);
-  if (command === "serve") return doServe(argv.slice(1), io);
-  if (command === "models") return doModels(argv.slice(1), io);
-  if (command === "onboard") return doOnboard(argv.slice(1), io);
-  if (command === "doctor") return doDoctor(argv.slice(1), io);
-  if (command === "config") return doConfig(argv.slice(1), io);
-  if (command === "completions") return doCompletions(argv.slice(1), io);
+  if (command === "selftest") return doSelftest(argv.slice(1), io, cliStyle);
+  if (command === "sessions") return doSessions(argv.slice(1), io, cliStyle);
+  if (command === "run") return doRun(argv.slice(1), io, cliStyle);
+  if (command === "chat") return doChat(argv.slice(1), io, cliStyle);
+  if (command === "tui") return doTui(argv.slice(1), io, cliStyle);
+  if (command === "serve") return doServe(argv.slice(1), io, cliStyle);
+  if (command === "models") return doModels(argv.slice(1), io, cliStyle);
+  if (command === "onboard") return doOnboard(argv.slice(1), io, cliStyle);
+  if (command === "doctor") return doDoctor(argv.slice(1), io, cliStyle);
+  if (command === "config") return doConfig(argv.slice(1), io, cliStyle);
+  if (command === "completions") return doCompletions(argv.slice(1), io, cliStyle);
   // An option in the command position (`two-brothers --bogus`) is an unknown
   // option; anything else is an unknown command (both exit 2 with a hint).
   if (command.startsWith("-")) {
     reportUnknownOption(command, undefined, io);
     return 2;
   }
-  return reportUnknownCommand(command, io);
+  return reportUnknownCommand(command, io, cliStyle);
 }
 
 /**

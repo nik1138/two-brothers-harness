@@ -32,6 +32,7 @@ import "./skills.test.ts";
 import "./presets.test.ts";
 import "./cost.test.ts";
 import "./cliergonomics.test.ts";
+import "./clistyle.test.ts";
 import "./plugincore.test.ts";
 import "./toolschema.test.ts";
 import "./streaming.test.ts";

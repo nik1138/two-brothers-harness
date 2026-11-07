@@ -128,13 +128,14 @@ broker-cap suites are registered in `tests/run-all.ts`.
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
-subprocess against the mock provider — **16 scenarios**: consult, chat-repl,
+subprocess against the mock provider — **17 scenarios**: consult, chat-repl,
 help, work, session+resume, mcp, serve, doctor (`--json`), completions
 (`bash`), config (`--json`, masked keys), dry-run (plan text/JSON, no session
 file), stdin (`run -`), sessions-json, sessions-show, sessions-search
-(human and `--json`, short-query exit 2) and sessions-export (Markdown
-stdout, `--output` file, missing session exit 1). CI runs both (see
-[CI coverage](#ci-coverage)).
+(human and `--json`, short-query exit 2), sessions-export (Markdown
+stdout, `--output` file, missing session exit 1) and style (FORCE_COLOR/
+NO_COLOR paint matrix, `stripAnsi` byte-identity, machine modes escape-free,
+palette pinning). CI runs both (see [CI coverage](#ci-coverage)).
 
 The CLI-ergonomics suite also covers `config`'s provenance precedence
 (flag > role env > shared env > preset > settings > default) and key masking,

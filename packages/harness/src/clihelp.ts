@@ -12,14 +12,16 @@
  * - did-you-mean suggestions for unknown commands (edit distance ≤ 2) and
  *   unknown options (nearest known flag for that command).
  *
- * Nothing here reads the environment, the filesystem or process state: it is
- * pure data plus rendering, so tests can check it directly and other modules
- * (e.g. a shell-completions generator) can reuse the same command/flag
- * catalog. Keep every command and flag in this file — `cli.ts` must not
- * hard-code help text of its own.
+ * Rendering is pure: the only process state consulted is the wrapping width,
+ * which defaults to `terminalWidth()` (96 columns unless stdout is a real TTY).
+ * The optional `CliStyle` paints semantic tokens (`cli.ts` passes the resolved
+ * terminal style); every renderer defaults to `plainCliStyle`, so tests,
+ * pipes and machine consumers see exactly the same bytes as before. Keep every
+ * command and flag in this file — `cli.ts` must not hard-code help text of
+ * its own.
  */
+import { plainCliStyle, terminalWidth, type CliStyle } from "./clistyle.ts";
 
-const HELP_WIDTH = 96;
 const DESCRIPTION_INDENT = 2;
 
 /** One CLI flag: the long name, an optional value placeholder and a one-line
@@ -974,11 +976,18 @@ function wrapText(text: string, width: number): string[] {
 }
 
 /** Render a paragraph with a hanging indent, one logical line per element. */
-function renderParagraphs(texts: string[], indent = DESCRIPTION_INDENT): string[] {
+function renderParagraphs(
+  texts: string[],
+  style: CliStyle,
+  width: number,
+  indent = DESCRIPTION_INDENT,
+): string[] {
   const lines: string[] = [];
   const pad = " ".repeat(indent);
   for (const text of texts) {
-    for (const line of wrapText(text, HELP_WIDTH - indent)) lines.push(pad + line);
+    for (const line of wrapText(text, Math.max(20, width - indent))) {
+      lines.push(pad + style.paint("muted", line));
+    }
   }
   return lines;
 }
@@ -990,8 +999,60 @@ function flagLabel(flag: FlagHelp): string {
   return short ? `${short}, ${long}` : long;
 }
 
+/** Paint a `--flag <metavar>` label: flag names accent, metavars dim. */
+function paintFlagLabel(label: string, style: CliStyle): string {
+  const match = /^((?:-[^,\s]+, )?--\S+)(\s.*)?$/.exec(label);
+  if (match === null) return style.paint("accent", label);
+  const head = style.paint("accent", match[1]);
+  const tail = match[2] ?? "";
+  const gap = /^\s+/.exec(tail)?.[0] ?? "";
+  const meta = tail.slice(gap.length);
+  return head + gap + (meta === "" ? "" : style.paint("dim", meta));
+}
+
+/**
+ * Inline tokens in prose: the program name, flags and slash commands are
+ * `accent`; `<metavars>` and `[flags]` groups are `dim`; env vars are
+ * `accent`. Plain text is untouched.
+ */
+const INLINE_TOKEN =
+  /(two-brothers|--?[A-Za-z][\w-]*|<[^>]+>|\[--?[^\]]*\]|TWO_BROTHERS_[A-Z0-9_]+|\/[a-z][\w-]*)/g;
+
+function paintInline(text: string, style: CliStyle): string {
+  if (!style.color) return text;
+  return text.replace(INLINE_TOKEN, (token) =>
+    token.startsWith("<") || token.startsWith("[")
+      ? style.paint("dim", token)
+      : style.paint("accent", token),
+  );
+}
+
+/** Paint a rendered invocation, e.g. `two-brothers run "<task>" [flags]`. */
+function paintInvocation(text: string, style: CliStyle): string {
+  const match = /^(two-brothers(?: [a-z][\w-]*)?)([\s\S]*)$/.exec(text);
+  if (match === null) return paintInline(text, style);
+  return style.paint("accent", match[1]) + paintInline(match[2], style);
+}
+
+/**
+ * Paint one already-indented help line: a `Heading:` line is `strong`, any
+ * other line has its inline tokens painted with the semantic tokens.
+ */
+function paintHelpLine(line: string, style: CliStyle): string {
+  const indent = /^\s*/.exec(line)?.[0] ?? "";
+  const body = line.slice(indent.length);
+  if (/^[A-Za-z][^:]*:$/.test(body)) return indent + style.paint("strong", body);
+  return indent + paintInline(body, style);
+}
+
+/** Paint an example line, preserving its leading indentation. */
+function paintExampleLine(line: string, style: CliStyle): string {
+  const indent = /^\s*/.exec(line)?.[0] ?? "";
+  return indent + paintInvocation(line.slice(indent.length), style);
+}
+
 /** Render the `Flags:` block for a command spec. */
-function renderFlags(spec: CommandHelp): string[] {
+function renderFlags(spec: CommandHelp, style: CliStyle, width: number): string[] {
   const names = spec.flags.includes("help") ? spec.flags : [...spec.flags, "help"];
   const entries = names
     .map((name) => {
@@ -1004,36 +1065,46 @@ function renderFlags(spec: CommandHelp): string[] {
     40,
     Math.max(2, ...entries.map((entry) => entry.label.length)),
   );
-  const lines: string[] = ["Flags:"];
+  const lines: string[] = [style.paint("strong", "Flags:")];
   for (const entry of entries) {
     const prefix = `  ${entry.label.padEnd(labelWidth)}  `;
+    const paintedPrefix =
+      `  ${paintFlagLabel(entry.label, style)}` +
+      " ".repeat(Math.max(0, labelWidth - entry.label.length) + 2);
     const continuation = " ".repeat(prefix.length);
-    const width = Math.max(20, HELP_WIDTH - prefix.length);
-    const wrapped = wrapText(entry.description, width);
-    lines.push(prefix + wrapped[0]);
-    for (const extra of wrapped.slice(1)) lines.push(continuation + extra);
+    const descriptionWidth = Math.max(20, width - prefix.length);
+    const wrapped = wrapText(entry.description, descriptionWidth);
+    lines.push(paintedPrefix + style.paint("muted", wrapped[0]));
+    for (const extra of wrapped.slice(1)) {
+      lines.push(continuation + style.paint("muted", extra));
+    }
   }
   return lines;
 }
 
 /** Render a command's help body (usage, description, details, flags, examples). */
-function commandHelpBody(spec: CommandHelp): string[] {
+function commandHelpBody(spec: CommandHelp, style: CliStyle, width: number): string[] {
   const lines: string[] = [];
   spec.usage.forEach((usage, index) => {
-    lines.push(`${index === 0 ? "Usage: " : "       "}two-brothers ${usage}`);
+    const invocation = paintInvocation(`two-brothers ${usage}`, style);
+    lines.push(
+      index === 0
+        ? `${style.paint("strong", "Usage:")} ${invocation}`
+        : `${"       "}${invocation}`,
+    );
   });
   lines.push("");
-  lines.push(...renderParagraphs([spec.description]));
+  lines.push(...renderParagraphs([spec.description], style, width));
   if (spec.details && spec.details.length > 0) {
     lines.push("");
-    lines.push(...spec.details);
+    for (const detail of spec.details) lines.push(paintHelpLine(detail, style));
   }
   lines.push("");
-  lines.push(...renderFlags(spec));
+  lines.push(...renderFlags(spec, style, width));
   if (spec.examples.length > 0) {
     lines.push("");
-    lines.push("Examples:");
-    for (const example of spec.examples) lines.push(`  ${example}`);
+    lines.push(style.paint("strong", "Examples:"));
+    for (const example of spec.examples) lines.push(`  ${paintExampleLine(example, style)}`);
   }
   return lines;
 }
@@ -1042,94 +1113,205 @@ function commandHelpBody(spec: CommandHelp): string[] {
  * `two-brothers help <command>` / `<command> --help`: usage, description,
  * flags and examples for one command, on stdout, exit 0.
  */
-export function renderCommandHelp(name: string): string {
+export function renderCommandHelp(
+  name: string,
+  style: CliStyle = plainCliStyle,
+  width: number = terminalWidth(),
+): string {
   const spec = COMMAND_TABLE[name];
   if (spec === undefined) throw new Error(`help: unknown command '${name}'`);
-  return [...commandHelpBody(spec), "", "Run 'two-brothers help --all' for the full reference."].join(
-    "\n",
-  );
+  return [
+    ...commandHelpBody(spec, style, width),
+    "",
+    paintInline("Run 'two-brothers help --all' for the full reference.", style),
+  ].join("\n");
 }
 
 /** The concise, grouped top-level help screen. */
-export function renderMainHelp(): string {
+export function renderMainHelp(
+  style: CliStyle = plainCliStyle,
+  width: number = terminalWidth(),
+): string {
   const lines: string[] = [
-    "Two Brothers: a senior (arbiter) and a junior (advisor/executor) sharing one context.",
+    style.paint(
+      "strong",
+      "Two Brothers: a senior (arbiter) and a junior (advisor/executor) sharing one context.",
+    ),
     "",
-    "Commands:",
+    style.paint("strong", "Commands:"),
   ];
   const commandColumn = 40;
   for (const name of COMMAND_ORDER) {
     const spec = COMMAND_TABLE[name];
     if (spec === undefined) continue;
     const commandLine = spec.commandLine;
-    if (2 + commandLine.length + 2 + spec.summary.length <= HELP_WIDTH) {
-      lines.push(`  ${commandLine.padEnd(commandColumn)}${spec.summary}`);
+    if (2 + commandLine.length + 2 + spec.summary.length <= width) {
+      lines.push(
+        `  ${style.paint("accent", commandLine.padEnd(commandColumn))}` +
+          style.paint("muted", spec.summary),
+      );
     } else {
-      lines.push(`  ${commandLine}`);
-      lines.push(`  ${" ".repeat(commandColumn)}${spec.summary}`);
+      lines.push(`  ${style.paint("accent", commandLine)}`);
+      lines.push(`  ${" ".repeat(commandColumn)}${style.paint("muted", spec.summary)}`);
     }
   }
   lines.push(
-    `  ${"two-brothers --version".padEnd(commandColumn)}` +
-      "print the @two-brothers/harness version",
+    `  ${style.paint("accent", "two-brothers --version".padEnd(commandColumn))}` +
+      style.paint("muted", "print the @two-brothers/harness version"),
     "",
-    "Common flows:",
-    '  two-brothers run "Plan a migration from Redis to Valkey" --provider mock',
-    '  two-brothers run "Pick a testing scheme" --provider mock --mode json > out.json',
-    "  two-brothers chat --provider mock",
-    "  two-brothers tui --provider mock",
-    "  two-brothers onboard --preset lmstudio --non-interactive",
-    "  two-brothers sessions --sessions-dir ./sessions",
-    "  two-brothers doctor --provider mock",
+    style.paint("strong", "Common flows:"),
+    paintExampleLine(
+      '  two-brothers run "Plan a migration from Redis to Valkey" --provider mock',
+      style,
+    ),
+    paintExampleLine(
+      '  two-brothers run "Pick a testing scheme" --provider mock --mode json > out.json',
+      style,
+    ),
+    paintExampleLine("  two-brothers chat --provider mock", style),
+    paintExampleLine("  two-brothers tui --provider mock", style),
+    paintExampleLine("  two-brothers onboard --preset lmstudio --non-interactive", style),
+    paintExampleLine("  two-brothers sessions --sessions-dir ./sessions", style),
+    paintExampleLine("  two-brothers doctor --provider mock", style),
     "",
-    "Output modes:",
-    "  run: --json / --json-events  one machine-readable JSON object on stdout",
-    "       --stream              NDJSON run events on stdout as they happen",
-    "       --mode print          only the final decision text",
-    "       --stream-tokens       with --stream: token deltas as NDJSON records",
-    "       --verbose             payloads and diagnostics; warnings always go to stderr",
-    "       --dry-run             resolve the run and print the plan; no model calls,",
-    "                             no session written (invalid with --stream)",
-    "       --task-file <path>    read the task from a file; `run -` reads stdin",
+    style.paint("strong", "Output modes:"),
+    paintHelpLine(
+      "  run: --json / --json-events  one machine-readable JSON object on stdout",
+      style,
+    ),
+    paintHelpLine(
+      "       --stream              NDJSON run events on stdout as they happen",
+      style,
+    ),
+    paintHelpLine("       --mode print          only the final decision text", style),
+    paintHelpLine(
+      "       --stream-tokens       with --stream: token deltas as NDJSON records",
+      style,
+    ),
+    paintHelpLine(
+      "       --verbose             payloads and diagnostics; warnings always go to stderr",
+      style,
+    ),
+    paintHelpLine("       --dry-run             resolve the run and print the plan; no model calls,", style),
+    paintHelpLine("                             no session written (invalid with --stream)", style),
+    paintHelpLine("       --task-file <path>    read the task from a file; `run -` reads stdin", style),
     "",
-    "Provider & models:",
-    "  --provider <openai|mock>   --base-url <url>   --api-key <key>",
-    "  --senior-* / --junior-*    per-role endpoints, models and system prompts",
-    "  --provider-kind / --senior-kind / --junior-kind   wire family",
-    "  --timeout <s>              per-attempt HTTP timeout (default 120; raise for slow local models)",
-    "  --retries <n>              retries after a failed model call (default 6; env TWO_BROTHERS_RETRIES)",
-    "  --max-tokens <n>           output-token cap for both roles (env TWO_BROTHERS_MAX_TOKENS)",
-    "  --max-rounds <n>   --temperature <f>   --mode consult|work|auto",
+    style.paint("strong", "Provider & models:"),
+    paintHelpLine(
+      "  --provider <openai|mock>   --base-url <url>   --api-key <key>",
+      style,
+    ),
+    paintHelpLine(
+      "  --senior-* / --junior-*    per-role endpoints, models and system prompts",
+      style,
+    ),
+    paintHelpLine(
+      "  --provider-kind / --senior-kind / --junior-kind   wire family",
+      style,
+    ),
+    paintHelpLine(
+      "  --timeout <s>              per-attempt HTTP timeout (default 120; raise for slow local models)",
+      style,
+    ),
+    paintHelpLine(
+      "  --retries <n>              retries after a failed model call (default 6; env TWO_BROTHERS_RETRIES)",
+      style,
+    ),
+    paintHelpLine(
+      "  --max-tokens <n>           output-token cap for both roles (env TWO_BROTHERS_MAX_TOKENS)",
+      style,
+    ),
+    paintHelpLine(
+      "  --max-rounds <n>   --temperature <f>   --mode consult|work|auto",
+      style,
+    ),
     "",
-    "Sessions & context:",
-    "  --session-file <path>  --resume  --sessions-dir <dir>",
-    "  --compact  --compact-threshold <chars>  --compact-threshold-tokens <n>",
-    "  --compact-keep-recent <chars>  --context-window <n>",
+    style.paint("strong", "Sessions & context:"),
+    paintHelpLine("  --session-file <path>  --resume  --sessions-dir <dir>", style),
+    paintHelpLine(
+      "  --compact  --compact-threshold <chars>  --compact-threshold-tokens <n>",
+      style,
+    ),
+    paintHelpLine(
+      "  --compact-keep-recent <chars>  --context-window <n>",
+      style,
+    ),
     "",
-    "Extensions:",
-    "  --mcp-config <file>  --plugins-dir <dir>  --skills-dir <path>",
-    "  --commands-dir <path>",
+    style.paint("strong", "Extensions:"),
+    paintHelpLine(
+      "  --mcp-config <file>  --plugins-dir <dir>  --skills-dir <path>",
+      style,
+    ),
+    paintHelpLine("  --commands-dir <path>", style),
     "",
-    "Diagnostics & shell integration:",
-    "  two-brothers config [--json]   resolved roles with their sources, roots,",
-    "                                 compaction and limits; keys never printed",
-    "  two-brothers doctor [--json]   check the engine, settings, sessions, roles,",
-    "                                 endpoint, web assets and plugins; exit 1 on a",
-    "                                 failing check, 0 otherwise (warnings pass)",
-    "  two-brothers completions <shell>   bash|zsh|fish|powershell completion script",
-    "                                    on stdout, generated from this catalog",
+    style.paint("strong", "Diagnostics & shell integration:"),
+    paintHelpLine(
+      "  two-brothers config [--json]   resolved roles with their sources, roots,",
+      style,
+    ),
+    paintHelpLine(
+      "                                 compaction and limits; keys never printed",
+      style,
+    ),
+    paintHelpLine(
+      "  two-brothers doctor [--json]   check the engine, settings, sessions, roles,",
+      style,
+    ),
+    paintHelpLine(
+      "                                 endpoint, web assets and plugins; exit 1 on a",
+      style,
+    ),
+    paintHelpLine(
+      "                                 failing check, 0 otherwise (warnings pass)",
+      style,
+    ),
+    paintHelpLine(
+      "  two-brothers completions <shell>   bash|zsh|fish|powershell completion script",
+      style,
+    ),
+    paintHelpLine(
+      "                                    on stdout, generated from this catalog",
+      style,
+    ),
     "",
-    "Environment:",
-    "  Each flag has a TWO_BROTHERS_* counterpart that pins the value for the",
-    "  invocation: TWO_BROTHERS_PROVIDER, TWO_BROTHERS_BASE_URL,",
-    "  TWO_BROTHERS_API_KEY, TWO_BROTHERS_SENIOR_* / TWO_BROTHERS_JUNIOR_*,",
-    "  TWO_BROTHERS_MAX_ROUNDS, TWO_BROTHERS_TEMPERATURE, TWO_BROTHERS_TIMEOUT,",
-    "  TWO_BROTHERS_RETRIES, TWO_BROTHERS_MODE, TWO_BROTHERS_SESSION_FILE,",
-    "  TWO_BROTHERS_MAX_TOKENS, TWO_BROTHERS_MCP_CONFIG, TWO_BROTHERS_PLUGINS_DIR,",
-    "  TWO_BROTHERS_SKILLS_DIR, TWO_BROTHERS_COMMANDS_DIR, TWO_BROTHERS_STREAM_TOKENS.",
+    style.paint("strong", "Environment:"),
+    paintHelpLine(
+      "  Each flag has a TWO_BROTHERS_* counterpart that pins the value for the",
+      style,
+    ),
+    paintHelpLine(
+      "  invocation: TWO_BROTHERS_PROVIDER, TWO_BROTHERS_BASE_URL,",
+      style,
+    ),
+    paintHelpLine(
+      "  TWO_BROTHERS_API_KEY, TWO_BROTHERS_SENIOR_* / TWO_BROTHERS_JUNIOR_*,",
+      style,
+    ),
+    paintHelpLine(
+      "  TWO_BROTHERS_MAX_ROUNDS, TWO_BROTHERS_TEMPERATURE, TWO_BROTHERS_TIMEOUT,",
+      style,
+    ),
+    paintHelpLine(
+      "  TWO_BROTHERS_RETRIES, TWO_BROTHERS_MODE, TWO_BROTHERS_SESSION_FILE,",
+      style,
+    ),
+    paintHelpLine(
+      "  TWO_BROTHERS_MAX_TOKENS, TWO_BROTHERS_MCP_CONFIG, TWO_BROTHERS_PLUGINS_DIR,",
+      style,
+    ),
+    paintHelpLine(
+      "  TWO_BROTHERS_SKILLS_DIR, TWO_BROTHERS_COMMANDS_DIR, TWO_BROTHERS_STREAM_TOKENS.",
+      style,
+    ),
     "",
-    "Run 'two-brothers help <command>' for one command's flags and examples,",
-    "or 'two-brothers help --all' for the full flag and environment reference.",
+    paintInline(
+      "Run 'two-brothers help <command>' for one command's flags and examples,",
+      style,
+    ),
+    paintInline(
+      "or 'two-brothers help --all' for the full flag and environment reference.",
+      style,
+    ),
   );
   return lines.join("\n");
 }
@@ -1140,14 +1322,16 @@ export function renderMainHelp(): string {
  * while the diagnostics belong on stderr — keep this brief instead of dumping
  * the whole help screen.
  */
-export function renderBriefUsage(): string {
+export function renderBriefUsage(style: CliStyle = plainCliStyle): string {
   return [
-    "Two Brothers: a senior (arbiter) and a junior (advisor/executor).",
+    style.paint("strong", "Two Brothers: a senior (arbiter) and a junior (advisor/executor)."),
     "",
-    "Usage:",
-    '  two-brothers run "<task>" [flags]   one cooperation cycle: task -> decision',
+    style.paint("strong", "Usage:"),
+    "  " +
+      paintInvocation('two-brothers run "<task>" [flags]', style) +
+      style.paint("muted", "   one cooperation cycle: task -> decision"),
     "",
-    "Run 'two-brothers help' for the command list.",
+    paintInline("Run 'two-brothers help' for the command list.", style),
   ].join("\n");
 }
 
@@ -1215,40 +1399,71 @@ export const ENVIRONMENT: readonly EnvironmentHelp[] = [
  * `two-brothers help --all`: the complete command/flag/environment reference.
  * Every command's block, then the environment table and the return codes.
  */
-export function renderFullHelp(): string {
+export function renderFullHelp(
+  style: CliStyle = plainCliStyle,
+  width: number = terminalWidth(),
+): string {
   const lines: string[] = [
-    "Two Brothers CLI — full reference.",
+    style.paint("strong", "Two Brothers CLI — full reference."),
     "",
-    "Global invocations:",
-    "  two-brothers --version, -v        print the @two-brothers/harness version",
-    "  two-brothers help [command]       this reference, one command, or the overview",
-    "  two-brothers                      an interactive terminal opens the TUI;",
-    "                                    piped stdin prints the overview",
+    style.paint("strong", "Global invocations:"),
+    paintExampleLine(
+      "  two-brothers --version, -v        print the @two-brothers/harness version",
+      style,
+    ),
+    paintExampleLine(
+      "  two-brothers help [command]       this reference, one command, or the overview",
+      style,
+    ),
+    paintExampleLine(
+      "  two-brothers                      an interactive terminal opens the TUI;",
+      style,
+    ),
+    paintExampleLine(
+      "                                    piped stdin prints the overview",
+      style,
+    ),
     "",
   ];
   for (const name of COMMAND_ORDER) {
     const spec = COMMAND_TABLE[name];
     if (spec === undefined) continue;
-    lines.push(`${spec.name} — ${spec.summary}`, "");
-    lines.push(...commandHelpBody(spec).map((line) => (line ? `  ${line}` : "")));
+    lines.push(
+      `${style.paint("accent", spec.name)} — ${style.paint("muted", spec.summary)}`,
+      "",
+    );
+    lines.push(
+      ...commandHelpBody(spec, style, width).map((line) => (line ? `  ${line}` : "")),
+    );
     lines.push("");
   }
-  lines.push("Environment variables (CLI flags win; env vars pin the value):");
+  lines.push(
+    style.paint("strong", "Environment variables (CLI flags win; env vars pin the value):"),
+  );
   const variableWidth = Math.min(
     48,
     Math.max(2, ...ENVIRONMENT.map((entry) => entry.variable.length)),
   );
   for (const entry of ENVIRONMENT) {
     const note = entry.note ? `  (${entry.note})` : "";
-    lines.push(`  ${entry.variable.padEnd(variableWidth)}  ${entry.flag}${note}`);
+    lines.push(
+      `  ${style.paint("accent", entry.variable.padEnd(variableWidth))}  ` +
+        `${style.paint("accent", entry.flag)}${style.paint("dim", note)}`,
+    );
   }
   lines.push(
     "",
-    "Return codes:",
-    "  0  success (including doctor with no failing check)",
-    "  1  run error (the errors array is non-empty in --mode json) / selftest FAIL /",
-    "     doctor found a failing check",
-    "  2  usage error: unknown command or option, missing task, shell or argument",
+    style.paint("strong", "Return codes:"),
+    paintHelpLine("  0  success (including doctor with no failing check)", style),
+    paintHelpLine(
+      "  1  run error (the errors array is non-empty in --mode json) / selftest FAIL /",
+      style,
+    ),
+    paintHelpLine("     doctor found a failing check", style),
+    paintHelpLine(
+      "  2  usage error: unknown command or option, missing task, shell or argument",
+      style,
+    ),
     "",
   );
   return lines.join("\n");

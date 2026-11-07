@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **TTY-gated semantic color for the human CLI** (`src/clistyle.ts`, reusing
+  the existing `src/tui/theme.ts` token layer; no TUI layout changes): the
+  non-TUI human surfaces now paint semantic tokens — `clihelp` headings,
+  flag labels, metavars and descriptions; the `run` transcript (`[user]` /
+  `[role -> role]` headers, dim kind labels and payload keys, the bold
+  `decision` value, dissent/errors and risk warnings); the `usageLine` /
+  `costLine` footers and prompt audits; the `chat` banner and `/help`
+  headings; and `doctor` status tags (pass=success, warn=warning,
+  fail=error, skip=dim) with strong labels. Color is opt-in and
+  terminal-gated: piped output, a non-empty `NO_COLOR`, `TERM=dumb` and a
+  0/1 color depth stay plain; 2/4/8-bit TTYs get the 16-color palette and a
+  24-bit TTY the dark/light truecolor palette (`TWO_BROTHERS_THEME` selects
+  dark, light or ansi16); `FORCE_COLOR=1|2|3` forces color at
+  16/256/truecolor even when piped and wins over `NO_COLOR`, while
+  `FORCE_COLOR=0|false` stays plain even on a TTY. Machine output modes
+  (`--json`/`--json-events`, `--stream`, `--mode print|json`) are always
+  escape-free; every printer defaults to the identity style, so piped output
+  and existing tests stay byte-identical and `stripAnsi(colored) === plain`
+  holds for every surface. Tests: `tests/clistyle.test.ts` plus the hermetic
+  CLI E2E `style` scenario (`e2e/cli.ts`).
 - **Provider reset to default**: `POST /api/providers/{name}/reset` restores a
   customized built-in seed by deleting only its stored override (legacy
   case-variant duplicates included) — both roles' `provider_ref`, unrelated

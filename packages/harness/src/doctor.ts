@@ -43,6 +43,8 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { Config } from "./config.ts";
+import { plainCliStyle, type CliStyle } from "./clistyle.ts";
+import type { ThemeToken } from "./tui/theme.ts";
 import {
   DEFAULT_PROVIDER_KIND,
   isProviderKind,
@@ -673,11 +675,31 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
  *     [warn] Settings file — C:\...\settings.json not found — it will be created
  *
  * Formatting is deterministic: status, label, and ` — detail` only when a
- * detail exists.
+ * detail exists. The optional `CliStyle` paints the status tag by severity
+ * (pass=success, warn=warning, fail=error, skip=dim) and the label `strong`;
+ * it defaults to `plainCliStyle`, so the rendered bytes are unchanged.
  */
-export function formatDoctorReport(report: DoctorReport): string[] {
+export function formatDoctorReport(
+  report: DoctorReport,
+  style: CliStyle = plainCliStyle,
+): string[] {
+  const tokenFor = (status: DoctorStatus): ThemeToken => {
+    switch (status) {
+      case "pass":
+        return "success";
+      case "warn":
+        return "warning";
+      case "fail":
+        return "error";
+      default:
+        return "dim";
+    }
+  };
   return report.checks.map((check) => {
     const suffix = check.detail ? ` — ${check.detail}` : "";
-    return `[${check.status}] ${check.label}${suffix}`;
+    return (
+      `[${style.paint(tokenFor(check.status), check.status)}] ` +
+      `${style.paint("strong", check.label)}${suffix}`
+    );
   });
 }

@@ -47,14 +47,46 @@ interface CliResult {
   stderr: string;
 }
 
-function runCli(args: string[], timeoutMs = 60_000): CliResult {
+/**
+ * Environment switches that change CLI paint. A hermetic suite must own them:
+ * the caller's terminal (FORCE_COLOR in CI, NO_COLOR locally) must not leak
+ * into the assertions. Each scenario can set them explicitly.
+ */
+const COLOR_ENV_KEYS = [
+  "NO_COLOR",
+  "FORCE_COLOR",
+  "TWO_BROTHERS_THEME",
+  "COLORFGBG",
+  "FORCE_HYPERLINK",
+] as const;
+
+function cliEnv(overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const key of COLOR_ENV_KEYS) delete env[key];
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) delete env[key];
+    else env[key] = value;
+  }
+  return env;
+}
+
+function runCli(
+  args: string[],
+  timeoutMs = 60_000,
+  envOverrides: Record<string, string | undefined> = {},
+): CliResult {
   const run = spawnSync(process.execPath, [CLI, ...args], {
     cwd: CLI_CWD,
     timeout: timeoutMs,
     encoding: "utf-8",
-    env: { ...process.env },
+    env: cliEnv(envOverrides),
   });
   return { status: run.status, stdout: run.stdout ?? "", stderr: run.stderr ?? "" };
+}
+
+/** Strip every SGR sequence (the theme is the only source of escapes). */
+function stripAnsi(text: string): string {
+  return text.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
 /** Envelope kinds in render order from `run` stdout (`[user]` == message). */
@@ -186,7 +218,7 @@ async function scenarioChat(): Promise<string> {
         cwd: CLI_CWD,
         timeout: 60_000,
         encoding: "utf-8",
-        env: { ...process.env },
+        env: cliEnv(),
         input: "Name one benefit of code review\n/config\n/help\n\n",
       },
     );
@@ -321,6 +353,7 @@ async function scenarioServe(): Promise<string> {
   const child = spawn(process.execPath, [CLI, "serve", "--port", String(port), "--sessions-dir", dir], {
     cwd: CLI_CWD,
     stdio: ["ignore", "pipe", "pipe"],
+    env: cliEnv(),
   });
   let stderr = "";
   child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString("utf-8")));
@@ -490,7 +523,7 @@ async function scenarioStdin(): Promise<string> {
       cwd: CLI_CWD,
       timeout: 60_000,
       encoding: "utf-8",
-      env: { ...process.env },
+      env: cliEnv(),
       input: "task from stdin\n",
     },
   );
@@ -676,6 +709,113 @@ async function scenarioSessionsExport(): Promise<string> {
   }
 }
 
+/**
+ * Terminal styling matrix in a real subprocess: FORCE_COLOR paints the human
+ * surfaces and stripping the paint reproduces the plain bytes; NO_COLOR stays
+ * plain; FORCE_COLOR wins over NO_COLOR; the machine output modes
+ * (`--json`, `--stream`, `--mode print`) stay escape-free even under
+ * FORCE_COLOR=3; and the pinned theme selects the 16-color palette.
+ */
+async function scenarioStyle(): Promise<string> {
+  const runArgs = ["run", "Name one benefit of code review", "--provider", "mock"];
+  const plain = runCli(runArgs);
+  check(plain.status === 0, `plain run exit code ${plain.status}: ${plain.stderr.slice(-300)}`);
+  check(!plain.stdout.includes("\x1b"), "piped plain run emitted an escape sequence");
+  check(!plain.stderr.includes("\x1b"), "piped plain run stderr emitted an escape sequence");
+
+  const colored = runCli(runArgs, 60_000, { FORCE_COLOR: "1" });
+  check(
+    colored.status === 0,
+    `colored run exit code ${colored.status}: ${colored.stderr.slice(-300)}`,
+  );
+  check(colored.stdout.includes("\x1b"), "FORCE_COLOR=1 did not paint the transcript");
+  check(
+    stripAnsi(colored.stdout) === plain.stdout,
+    "stripping the paint must reproduce the plain transcript",
+  );
+  check(colored.stdout.includes("\x1b[36m"), "the accent (16-color cyan) token is missing");
+  check(
+    colored.stdout.includes("\x1b[1m\x1b[32m"),
+    "the bold decision (16-color green) token is missing",
+  );
+
+  // FORCE_COLOR wins over NO_COLOR; NO_COLOR alone stays plain.
+  const forcedOverNoColor = runCli(["help"], 60_000, {
+    FORCE_COLOR: "1",
+    NO_COLOR: "1",
+  });
+  check(
+    forcedOverNoColor.stdout.includes("\x1b"),
+    "FORCE_COLOR must win over NO_COLOR (colored help expected)",
+  );
+  const noColor = runCli(["help"], 60_000, { NO_COLOR: "1" });
+  check(!noColor.stdout.includes("\x1b"), "NO_COLOR help emitted an escape sequence");
+  const dumb = runCli(["help"], 60_000, { TERM: "dumb" });
+  check(!dumb.stdout.includes("\x1b"), "TERM=dumb help emitted an escape sequence");
+
+  // Painted help strips back to the plain help screen.
+  const plainHelp = runCli(["help"]);
+  const coloredHelp = runCli(["help"], 60_000, { FORCE_COLOR: "1" });
+  check(
+    stripAnsi(coloredHelp.stdout) === plainHelp.stdout,
+    "stripping the painted help must reproduce the plain help",
+  );
+
+  // Machine output modes are never painted, even with FORCE_COLOR=3.
+  const json = runCli([...runArgs, "--json"], 60_000, { FORCE_COLOR: "3" });
+  check(json.status === 0, `json run exit code ${json.status}: ${json.stderr.slice(-300)}`);
+  check(
+    !json.stdout.includes("\x1b") && !json.stderr.includes("\x1b"),
+    "machine JSON mode leaked an escape sequence",
+  );
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(json.stdout);
+  } catch {
+    throw new CheckError(`json mode stdout is not one object: ${json.stdout.slice(0, 200)}`);
+  }
+  check(typeof parsedJson === "object" && parsedJson !== null, "json mode stdout is not an object");
+
+  const stream = runCli([...runArgs, "--stream"], 60_000, { FORCE_COLOR: "3" });
+  check(stream.status === 0, `stream run exit code ${stream.status}: ${stream.stderr.slice(-300)}`);
+  check(
+    !stream.stdout.includes("\x1b") && !stream.stderr.includes("\x1b"),
+    "stream NDJSON mode leaked an escape sequence",
+  );
+  for (const line of stream.stdout.split(/\r?\n/).filter((line) => line.trim() !== "")) {
+    try {
+      JSON.parse(line);
+    } catch {
+      throw new CheckError(`stream mode line is not JSON: ${line.slice(0, 200)}`);
+    }
+  }
+
+  const print = runCli([...runArgs, "--mode", "print"], 60_000, { FORCE_COLOR: "3" });
+  check(print.status === 0, `print run exit code ${print.status}: ${print.stderr.slice(-300)}`);
+  check(
+    !print.stdout.includes("\x1b") && !print.stderr.includes("\x1b"),
+    "print mode leaked an escape sequence",
+  );
+  check(
+    print.stdout.trim().startsWith("Final decision on"),
+    `print stdout is not decision-only: ${print.stdout.slice(0, 120)}`,
+  );
+
+  // FORCE_COLOR=3 selects truecolor; TWO_BROTHERS_THEME pins the 16-color palette.
+  const truecolor = runCli(["help"], 60_000, { FORCE_COLOR: "3" });
+  check(truecolor.stdout.includes("\x1b[38;2;"), "FORCE_COLOR=3 did not select truecolor");
+  const pinned = runCli(["help"], 60_000, {
+    FORCE_COLOR: "3",
+    TWO_BROTHERS_THEME: "ansi16",
+  });
+  check(
+    pinned.stdout.includes("\x1b[36m") && !pinned.stdout.includes("\x1b[38;2;"),
+    "TWO_BROTHERS_THEME=ansi16 did not pin the 16-color palette",
+  );
+
+  return "FORCE_COLOR paints and strips back; FORCE_COLOR>NO_COLOR; json/stream/print pure; theme pins palette";
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -697,6 +837,7 @@ const SCENARIOS: Array<{ name: string; run: () => Promise<string> }> = [
   { name: "sessions-show", run: scenarioSessionsShow },
   { name: "sessions-search", run: scenarioSessionsSearch },
   { name: "sessions-export", run: scenarioSessionsExport },
+  { name: "style", run: scenarioStyle },
 ];
 
 async function main(): Promise<number> {
