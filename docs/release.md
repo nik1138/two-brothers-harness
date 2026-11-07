@@ -70,9 +70,9 @@ two-brothers run "Plan a migration from Redis to Valkey" --provider mock
 two-brothers serve --port 8600   # http://127.0.0.1:8600 serves the packaged web UI
 ```
 
-Expected: `--version` prints `0.0.1`; the mock run prints a decision with a
-`tokens:` footer and exits 0; `serve` serves the built Vue workspace from the
-tarball (no separate frontend build).
+Expected: `--version` prints `0.0.1`; the mock run prints a decision with the
+compact `tokens … in / … out` usage footer and exits 0; `serve` serves the
+built Vue workspace from the tarball (no separate frontend build).
 
 ## Promote to `latest` and drop the pre-release notes
 

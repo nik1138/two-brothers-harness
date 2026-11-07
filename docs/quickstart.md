@@ -31,7 +31,14 @@ node dist/cli.js run "Plan a migration from Redis to Valkey" --provider mock
 ```
 
 The output is the full conversation: `[user]`, `[senior -> junior] consult`, `[junior -> senior] proposal`,
-`[senior -> junior] review`, `[senior -> user] decision`.
+`[senior -> junior] review`, `[senior -> user] decision`. Each envelope is its own
+block separated by a blank line, model prose renders as width-safe Markdown, and
+the final decision is ruled off with `── decision ──…`. When the run reports
+usage, the transcript ends with a compact footer —
+`tokens 40 in / 20 out · cache 25% · 4 calls · cost $0.0300` — whose segments
+appear only when they are known. Piped output stays plain; `--json`,
+`--json-events`, `--stream` and `--mode print` are machine modes with unchanged
+bytes (see [Human text output](cli-reference.md#human-text-output-ts-package)).
 
 ## 3. Delegation mode
 
@@ -112,6 +119,9 @@ a failing check, see [Troubleshooting](troubleshooting.md).
 `--help` works after every command. `help` prints the overview, `help <command>`
 one command's flags and examples, and `help --all` the full reference; a
 near-miss command or option gets a did-you-mean line, and usage errors exit 2.
+On a real terminal the generated help tables scale their command and flag
+columns to the terminal width; piped output keeps the historical 96-column
+layout.
 
 `sessions` lists the JSONL files under `--sessions-dir`; `sessions show <name>`
 prints one session's summary and envelopes; `sessions search <query>`
@@ -170,15 +180,31 @@ Then open `http://127.0.0.1:8600`:
    the stored override API key are discarded while the Senior/Junior role
    assignments stay unchanged, and the provider itself is not deleted. Against
    a backend without the reset route, the client shows an unsupported message
-   and changes nothing. Settings → **Appearance** sets the theme and the
-   Comfortable/Compact density for this device.
+   and changes nothing. The open provider card's **Refresh models** button is a
+   separate, explicit probe: it asks the endpoint named by the current draft
+   (Base URL and wire kind, plus the API key typed in the form for this one
+   request) which models it reports and lists them without saving anything.
+   Adding them is deliberate too — **Add N to draft**, then **Save changes**;
+   an empty answer ("reported no models") is valid and never erases the saved
+   model list. Only OpenAI-compatible endpoints expose a `/models` listing, so
+   the control answers honestly (unsupported) for Anthropic/Gemini, and a
+   saved/env-backed key is only used when the probed URL is the preset's own
+   endpoint — otherwise type the key for that probe. The offline equivalent is
+   `node dist/cli.js models --base-url <url>`. Settings → **Appearance** sets
+   the theme and the Comfortable/Compact density for this device.
 3. **Send a task** in `work` mode. The run proceeds in the background; the
    chat updates live over SSE — a folded **Thinking** row (reasoning) and the
    **Response** block stream in as the models generate, then resolve into the
    normal conversation bubbles. The Thinking row starts folded — click it to
-   read the reasoning; the reply never pops it open. You can send follow-up
-   messages, stop the run, or
-   just reload the page (progress is recovered from the runtime sidecar).
+   read the reasoning; the reply never pops it open. Submitting while the
+   brothers work is allowed: the send control reads **Queue**, the task joins
+   the server's per-session FIFO and a queue dock above the composer lists the
+   waiting tasks with their `#N` position, a snippet, the queued-at time and a
+   per-row **Stop** (a queued task is cancelled immediately; the dock shows up
+   to five rows plus a `+N more` tail). It is a queue, not steering — a queued
+   task starts only after the current run finishes, in order, and the next one
+   is followed automatically. Stop the active run, or reload the page
+   (progress is recovered from the runtime sidecar), at any time.
    In the composer, `@` opens a picker over shared skills and workspace files
    and `/` at the start of a line opens the command menu — built-in commands
    first (`plan`, `goal`, `feedback`, then the actions `compact`, `export`,
@@ -195,7 +221,17 @@ Then open `http://127.0.0.1:8600`:
    `Show prompt audits in the conversation` toggle when you need them.
 4. **Approve mutations.** Reads inside the workspace are free, but every
    write/edit/delete/shell command docks an approval card in the chat —
-   allow or deny there to resume the run. On narrow screens the sidebar
+   **Allow once** or **Deny** there to resume the run. A third decision,
+   **Always allow this session**, resolves the request now and remembers the
+   identical `(action, target)` pair for the rest of that session, so repeats
+   run without asking (`y` allows once, `n` denies, `a` allows for the session
+   while the card has focus). The grant is saved in the session's settings
+   (`sessions/settings.json`, never in the session log), survives a backend
+   restart for that session, and is removed when the session is deleted; a
+   shell grant stores the approved command line — the same detail the runtime
+   sidecar already records. The fail-closed default is unchanged, and an older
+   backend without session scope answers honestly: "Allowed once — this
+   backend does not support session scope." On narrow screens the sidebar
    becomes a drawer over the chat.
 5. **Review the changes** — files touched by tools are collected with their
    unified diffs.
@@ -245,6 +281,14 @@ the preview and its complete text, expansion is per tool row, and the model
 always keeps the full result. The visual-row truncation follows pi's
 visual-truncate approach (MIT — see
 [Attribution](attribution.md)).
+
+The overlays follow the theme — the palette and help lists paint their headings,
+chords, descriptions and selected row — while `NO_COLOR` output keeps the same
+text; the composer no longer repeats the mode/models line because the status bar
+is the single source for both; a transcript window that starts in the middle of
+a block marks the hidden label with a dim `⋯` in the gutter; and the status bar
+keeps its hints (including `Ctrl+T expand tool`) visible at ordinary terminal
+widths instead of hiding them behind the metrics.
 
 Full keymap and web palette keys: [Keyboard and shortcuts](keyboard.md).
 

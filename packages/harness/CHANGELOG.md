@@ -9,6 +9,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Provider model discovery**: `POST /api/providers/{name}/discover` probes an
+  explicit draft — `{base_url?, kind?, api_key?}` — through
+  `provider.ts::listModels` and returns `200 {models, base_url, kind}` with the
+  ids the endpoint reported (`{id, owned_by?}` objects; an empty list is a
+  valid answer). It is deliberately separate from Apply: it never writes
+  settings or run state, never applies the draft, never persists or echoes the
+  typed key, and resolves the preset's stored/env-backed key server-side only
+  when the probed base URL is the preset's own (trimmed, trailing slashes
+  ignored) — probing a different URL with a saved key and no typed key is a 400
+  so a secret is never sent elsewhere. Unknown provider 404, invalid body or a
+  non-OpenAI-compatible wire kind 400 (only OpenAI-compatible endpoints expose
+  a `/models` listing), upstream failure 502. Settings → Providers gains
+  **Refresh models** on the open detail card: loading/ready/empty/error/
+  unsupported states, a monotonic token so a stale response cannot overwrite a
+  newer probe or a switched draft, an explicit **Add N to draft** (never
+  auto-applies — Save changes is still required), and old-backend fail-soft
+  (404 → unsupported message, nothing changed). Tests: `tests/server.test.ts`
+  discovery section (+7 hermetic loopback tests; suite 59) and
+  `web/tests/providerSettings.test.ts` (+9; suite 29; web 239/239).
+- **`allow_session` approval scope**: an explicit operator decision "Always
+  allow this session" next to allow/deny. `RunApprovalBroker` keeps an
+  in-memory set of `action\0normalized-target` pairs for the run: a matching
+  request resolves ALLOW without parking — the check runs before the denial
+  cap — and emits one additive `approval_auto_allowed` runtime event
+  `{action, target}` instead of `approval_requested`. A stopped/aborted run
+  still denies (the shortcut never bypasses cancellation), and one-shot
+  allows/denials keep their counters. `POST /api/runs/{run_id}/approvals/{id}`
+  accepts an additive `scope: "once" | "session"` (default `once`; anything
+  else, or `session` with a deny, is a 400) and echoes the applied
+  `{approval_id, decision, scope}`. Session scope persists FIRST in
+  `sessions/settings.json` top-level
+  `"approvals": {"<session file>": ["<pair key>", ...]}` (newest-last, capped
+  at 64 per session, atomic write, corrupt/missing section reads as empty = fail
+  closed, cleared on session delete; a run seeds its broker at submit and again
+  at start so a queued run sees allows granted meanwhile) — never in the
+  session JSONL. A shell pair's key contains the full command string, so
+  `settings.json` carries that much of an approved command — the same trust
+  domain as the runtime sidecar; it never contains a key or a prompt body. The
+  web card adds the third button (and `a` on a focused card; `y`/`n` unchanged);
+  an older backend that ignores `scope` is reported honestly as "Allowed once —
+  this backend does not support session scope." Tests:
+  `tests/approvalbrokerdeny.test.ts` (25), `tests/settings.test.ts`,
+  `tests/server.test.ts` approvals section, `web/tests/approvalSession.test.ts`
+  (8; web 239/239).
+- **Web queue visibility**: the composer no longer locks while a run works — a
+  submission joins the backend's per-session FIFO and the send control reads
+  **Queue**; `POST /api/runs` answers `202 {run_id, session, status}` with
+  `status: "queued"` when the session already has a live run. A bounded queue
+  dock above the composer lists the waiting runs with 1-based `#N` positions, a
+  task snippet, a queued-at time and a per-row **Stop** (a queued run is
+  cancelled immediately through the existing stop route; focus is restored when
+  the row disappears), a "+N more" tail beyond the bound, an aria-live summary
+  and honest copy ("they start automatically, in order, after the current run
+  finishes" — never "steering"; there is no mid-turn injection). The next queued
+  run is adopted/followed as soon as the current one ends, run submission
+  bookkeeping is per run id (a failed queued run retries its own task), and an
+  older backend that returns no active run records simply shows no dock. Files:
+  `web/src/queueState.ts` (pure projection),
+  `web/src/components/QueueDock.vue`, `web/src/App.vue`,
+  `web/src/components/Composer.vue`; tests `web/tests/queueState.test.ts`
+  (19; web 239/239).
 - **TTY-gated semantic color for the human CLI** (`src/clistyle.ts`, reusing
   the existing `src/tui/theme.ts` token layer; no TUI layout changes): the
   non-TUI human surfaces now paint semantic tokens — `clihelp` headings,
@@ -221,6 +282,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Human CLI text layout**: `run` (and every `chat` turn) renders the
+  transcript as blank-line-separated envelope blocks, rules off the final
+  decision with a width-capped `── decision ──` label, renders model prose as
+  width-safe Markdown (the TUI's `tui/markdownstyle.ts` renderer; model ANSI and
+  control bytes are sanitized before layout), and replaces the terminal
+  `tokens:`/`cost:` lines with one compact footer
+  (`tokens N in / M out · cache n% · K calls · cost $…`) that appears only when
+  usage exists. New pure module `src/clilayout.ts` (layout, footer, width-capped
+  rule; it spells no escape sequence of its own), `src/clistyle.ts` gains
+  `paintEmphasis`, and generated help tables scale their
+  command/flag/variable columns with the terminal width on a TTY (piped output
+  keeps the historical 96-column column widths; over-long summaries now wrap
+  within that width instead of overflowing it).
+  Piped/`NO_COLOR` text stays plain and `stripAnsi(colored) === plain` still
+  holds; the machine modes (`--json`, `--json-events`, `--stream`,
+  `--mode print`, `--dry-run`) are byte-identical and keep their legacy
+  `tokens:`/`cost:` diagnostics on stderr. Tests: `tests/clistyle.test.ts` (22),
+  `tests/cli.test.ts` (20), and the hermetic CLI E2E human anchors.
+- **TUI polish**: the palette and help overlays paint their inner rows through
+  the theme (headers, chords, descriptions, group labels, unavailable rows, and
+  the selected row as one inverse bar), so they follow the app's palette while
+  `plainTheme` output stays byte-identical; the composer's duplicate
+  `MODE … SENIOR … JUNIOR …` meta row is gone (the two-line status bar is the
+  single source for mode and models); a transcript window that starts inside a
+  block marks the cut with a dim `⋯` in the label gutter (width-safe, the only
+  plain-theme byte change); and the status-bar hint segment moved up in
+  priority (activity → hints → context → tokens → cache → cost → elapsed →
+  settings warning), so `Ctrl+T expand tool` and the default hints appear at
+  ordinary widths (~120 columns). TUI suites: 301 tests.
 - **TUI folded tool-result previews by visual rows**: a collapsed tool row
   now keeps the first `maxToolRows` (default 6) visual rows after width-aware
   wrapping instead of raw logical lines, so one long line cannot fill the

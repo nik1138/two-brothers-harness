@@ -23,6 +23,11 @@ node dist/cli.js run "Plan a migration from Redis to Valkey"
 
 If the task contains spaces, pass it as a single string (quote it in PowerShell).
 
+The human transcript renders as separated, Markdown-rendered envelope blocks
+with a ruled decision and a compact usage footer — see
+[Human text output](#human-text-output-ts-package). The automation modes
+(`--json`, `--json-events`, `--stream`, `--mode print`) keep their exact bytes.
+
 The task can also come from stdin or a file:
 
 ```powershell
@@ -467,12 +472,12 @@ The backend is a **local single-user workspace server**. API overview:
 | `GET /api/sessions/{name}/events` | runtime sidecar events (tool calls, approvals) for browser reload |
 | `POST /api/sessions/{name}/compact` | compact the session in place on demand: the older context is summarized by the configured summarizer role (senior by default) and the session JSONL is rewritten with dense `seq`, so a reload shows the summary. `200 {"compacted": true, "before_events": N, "after_events": M}`; `200 {"compacted": false, "reason": "nothing to compact"}` when there is nothing to cut; 404 unknown session, 400 invalid session name, 409 while a run for that session is active or another compaction is already running, 422 when the session file is unreadable/corrupt, and 502 with the provider message (nothing written) when summarization fails. A run submitted for a session while it is being compacted is a 409 (`a compaction is in progress for this session; retry in a moment`) — the two operations are mutually exclusive so a run's envelopes can never be lost to the rewrite. The summarizer budgets follow the resolved run config (`--compact-*`/`TWO_BROTHERS_COMPACT*`), an explicit `ServerOptions.compaction` still wins, and a client disconnect aborts the provider call and releases the session |
 | `GET /PUT /api/settings` | per-role Senior/Junior provider/model/base URL/API key (keys are write-only; responses show `api_key_set` only) |
-| `POST /api/runs` | start a background run (`{"task", "mode"?, "session"?, "provider"?, "workspace_id"?, "stream_tokens"?}` → `202 {"run_id", "session", "status"}`); a leading `/name` command is expanded and `@skill:`/`@file` mentions are attached before the run (see [Composer mentions and slash commands](#composer-mentions-and-slash-commands)); `stream_tokens: true` additionally streams live `token` frames on the run SSE endpoint (strict boolean, default off); runs are FIFO — one active, the rest `queued` |
+| `POST /api/runs` | start a background run (`{"task", "mode"?, "session"?, "provider"?, "workspace_id"?, "stream_tokens"?}` → `202 {"run_id", "session", "status"}`); a leading `/name` command is expanded and `@skill:`/`@file` mentions are attached before the run (see [Composer mentions and slash commands](#composer-mentions-and-slash-commands)); `stream_tokens: true` additionally streams live `token` frames on the run SSE endpoint (strict boolean, default off); runs are FIFO — one active, the rest `queued`, so a submission for a session that already has a live run is still accepted (`202` with `status: "queued"`) and starts after the earlier one finishes |
 | `GET /api/runs`, `GET /api/runs/{run_id}` | list runs / run status (`queued`/`running`/`waiting`/`completed`/`failed`/`cancelled`); records carry a per-run `usage` object (`model_calls`, `input_tokens`, `output_tokens`, `cached_tokens`; zeros while running) |
-| `POST /api/runs/{run_id}/stop` | cooperative stop (pending approvals are denied) |
-| `GET /api/runs/{run_id}/events?after=N` | SSE of typed runtime events (`run_status`, `envelope`, `tool_started`, `tool_completed`, `approval_requested`, `approval_resolved`, `run_error`, `run_end`); reconnectable via `after`. When the run was started with `stream_tokens`, the same stream additionally carries ephemeral named `token` frames (`event: token`, data `{type, run_id, role, kind: "text"\\|"thinking", delta, at}`) with no SSE id — they are live-only, never persisted and never replayed |
-| `GET /api/runs/{run_id}/approvals`, `POST /api/runs/{run_id}/approvals/{id}` | list/answer pending operator approvals (`{"allow": bool}`) |
-| `GET /api/providers`, `POST /api/providers`, `PUT /api/providers/{seed}`, `POST /api/providers/{name}/reset`, `DELETE /api/providers/{name}` | provider presets (seeded: openai, deepseek, anthropic, gemini, openrouter, lmstudio, custom). `GET` returns `{name, base_url, api_key_set, kind, models}` plus additive `seed` (the name comes from the built-in seed table) and `customized` (a stored override of that name exists), so a client can tell a pristine seed from an edited/custom entry. `POST` creates a custom provider (409 on a duplicate name, including a seed name); `PUT` updates it, and on a seed name materializes a stored override (blank `base_url` is a 400); `DELETE` removes a stored preset/override and clears any role `provider_ref` that pointed at it (a pristine seed is a 404); `POST /api/providers/{name}/reset` restores a customized built-in seed without clearing role references (see below). Keys are never returned — responses carry `api_key_set` only. The Settings → Providers tab is the operator UI for these routes |
+| `POST /api/runs/{run_id}/stop` | cooperative stop (pending approvals are denied); a `queued` run is marked cancelled immediately, without waiting for a worker |
+| `GET /api/runs/{run_id}/events?after=N` | SSE of typed runtime events (`run_status`, `envelope`, `tool_started`, `tool_completed`, `approval_requested`, `approval_resolved`, `approval_auto_allowed`, `approval_auto_denied`, `run_error`, `run_end`); reconnectable via `after`. When the run was started with `stream_tokens`, the same stream additionally carries ephemeral named `token` frames (`event: token`, data `{type, run_id, role, kind: "text"\\|"thinking", delta, at}`) with no SSE id — they are live-only, never persisted and never replayed |
+| `GET /api/runs/{run_id}/approvals`, `POST /api/runs/{run_id}/approvals/{id}` | list/answer pending operator approvals (`{"allow": bool, "scope"?: "once" \| "session"}` → `{approval_id, decision, scope}`; `scope` defaults to `once`, an invalid value or `session` with a deny is a 400, an unknown/already-resolved approval id is a 404). See the session-scope paragraph below |
+| `GET /api/providers`, `POST /api/providers`, `PUT /api/providers/{seed}`, `POST /api/providers/{name}/reset`, `POST /api/providers/{name}/discover`, `DELETE /api/providers/{name}` | provider presets (seeded: openai, deepseek, anthropic, gemini, openrouter, lmstudio, custom). `GET` returns `{name, base_url, api_key_set, kind, models}` plus additive `seed` (the name comes from the built-in seed table) and `customized` (a stored override of that name exists), so a client can tell a pristine seed from an edited/custom entry. `POST` creates a custom provider (409 on a duplicate name, including a seed name); `PUT` updates it, and on a seed name materializes a stored override (blank `base_url` is a 400); `DELETE` removes a stored preset/override and clears any role `provider_ref` that pointed at it (a pristine seed is a 404); `POST /api/providers/{name}/reset` restores a customized built-in seed without clearing role references (see below); `POST /api/providers/{name}/discover` probes a draft endpoint for its model list without saving (see the discovery paragraph below). Keys are never returned — responses carry `api_key_set` only. The Settings → Providers tab is the operator UI for these routes |
 | `GET /api/plugins` | discovered plugins (`name`, `description`, `roles`, load `errors`, `diagnostics`) |
 | `GET /api/skills` | discovered skills metadata (`name`, `description`, `scope`, `tools`, `file`) — never bodies |
 | `GET /api/commands` | discovered slash-command metadata (`name`, `description`, `argumentHint`, `mode?`, `file`) plus the additive first-party `baseCommands` list (`name`, `aliases`, `description`, `argumentHint`, `kind: "prompt"\|"action"`, `action?`, `requiresArguments`, `priority`) — never bodies |
@@ -499,14 +504,62 @@ the stored override API key are discarded while Senior/Junior role
 assignments stay unchanged. Against an older backend without the route, the
 client shows an unsupported message and changes nothing.
 
+**Provider model discovery.** `POST /api/providers/{name}/discover` probes an
+endpoint for the models it reports, using the **current draft** rather than the
+saved preset — an explicit "Refresh models" action, deliberately separate from
+Apply. The body is `{base_url?, kind?, api_key?}`: omitted `base_url`/`kind`
+fall back to the stored preset, and `api_key` is a one-shot typed key for this
+probe only. It writes nothing (no settings, no run state, no catalog) and the
+key value never appears in a response or an error message. A typed key is
+used as-is; without one, the preset's stored/env-backed key is attached
+server-side **only when the probed base URL is the preset's own** (trimmed,
+trailing slashes ignored) — probing a different URL with a saved secret and no
+typed key is a `400` (`a typed API key is required when probing a different base
+URL`) so the secret is never sent to another host. `200 {models, base_url,
+kind}` returns the reported ids (`[{id, owned_by?}, ...]` with the probed
+endpoint/kind echoed); an empty `models` list is a valid answer and must never
+erase a saved catalog. Errors: unknown provider (seeds included)
+`404 {"detail": "not found"}`; invalid JSON/body, an empty or non-`http(s)`
+Base URL, an unknown kind, or a wire kind without an OpenAI-compatible listing
+(`anthropic`/`google`) `400`; an upstream failure (unreachable host, timeout,
+non-2xx, unparseable payload) `502` with the provider's message. Only the
+openai-compatible adapter exposes `GET {base}/models`. The server route is the
+same one the web Settings → Providers **Refresh models** button calls; the
+offline equivalent is `two-brothers models --base-url <url>`.
+
+**Session-scope approvals.** `POST /api/runs/{run_id}/approvals/{id}` answers a
+pending operator approval with `{"allow": bool, "scope"?: "once" | "session"}`
+and returns `{approval_id, decision, scope}`. `scope` is a strict string enum
+defaulting to `once` (older clients keep the one-shot behavior); anything else
+is a `400 invalid request body`, and `scope: "session"` with `allow: false` is a
+`400` (`scope session requires allow`) because a session-wide deny does not
+exist. An unknown or already-resolved approval id is a `404` and persists
+nothing. Session scope persists the request's `(action, normalized target)`
+pair **before** resolving it — a failed settings write is a `500` and nothing is
+allowed — then resolves the parked request ALLOW and records the pair on that
+run's broker. A later identical request in the same run resolves ALLOW without
+parking (checked before the per-pair denial cap) and emits one additive
+`approval_auto_allowed` runtime event `{action, target}` instead of
+`approval_requested`; a stopped run still denies. The pair lives in
+`sessions/settings.json` under the top-level
+`"approvals": {"<session file>": ["<action> + NUL + <normalized target>", ...]}`
+section (newest-last, at most 64 pairs per session, atomic temp-file + rename
+write; a missing/corrupt section reads as empty, so damage fails closed toward
+asking again). A run seeds its broker from that list at submit and again at
+start, so a queued run sees an allow granted while it waited; deleting the
+session clears its list. A shell request's pair key contains the full approved
+command string — the same level of detail the runtime sidecar already records —
+never an API key or prompt body.
+
 In `work` mode, a run with a `workspace_id` gives the junior confined
 workspace tools (`workspace_read_file`, `workspace_list_dir`,
 `workspace_search_text`, `workspace_write_file`, `workspace_edit_file`,
 `workspace_delete_file`, `workspace_run_shell`) rooted at the registered
 directory. Reads auto-allow; mutations and shell commands pause the run on an
-`approval_requested` event until the operator answers. The senior gets
-read-only workspace checks (plus approval-brokered `run_shell`) to verify the
-junior's deliverable before reviewing it. See the
+`approval_requested` event until the operator answers — once, or for the rest of
+the session (see the session-scope paragraph above). The
+senior gets read-only workspace checks (plus approval-brokered `run_shell`) to
+verify the junior's deliverable before reviewing it. See the
 [Quickstart](quickstart.md) for the operator-facing walkthrough.
 
 ### `models`
@@ -748,6 +801,48 @@ metadata only at `GET /api/skills`.
 | `work` | senior delegates (`delegation`) → junior `deliverable` → `review` → `decision` |
 | `auto` | senior chooses; in v0.1 this reduces to `consult` |
 
+## Human text output (TS package)
+
+The default `run` output (and every `chat` turn) is a human transcript with a
+stable, width-safe layout:
+
+- **Separated blocks.** Each protocol envelope is one block — the historical
+  `[from -> to] kind` header line, then indented payload fields — and blocks are
+  separated by one blank line. The operator task keeps its historical
+  `[user]      <task>` line (only wrapping at the terminal width), so scripts
+  anchored on that line keep working.
+- **Ruled decision.** The final decision block is preceded by a labelled rule,
+  `── decision ─────…`, capped at 80 columns and never wider than the terminal.
+- **Markdown bodies.** Model-provided prose (`ask`, `answer`, `rationale`,
+  `result`, `notes`, `decision`, `work`) renders through the TUI's Markdown
+  renderer: headings, lists, quotes, fenced code, diffs, and inline
+  bold/italic/code/link emphasis, wrapped to the available width. Model ANSI
+  escapes and control bytes are stripped before layout, so a reply can never
+  drive the terminal. Titles, numbers and verdicts stay single-line values.
+- **Compact footer.** When the run reports usage, one blank line then a compact
+  footer ends the transcript:
+  `tokens 40 in / 20 out · cache 25% · 4 calls · cost $0.0300`. Segments appear
+  only when known — `cache` only with a recorded cache hit, `cost` only when
+  both roles resolve to one priced model, and no footer at all when the run
+  reported no usage. The legacy `tokens:` / `cost:` diagnostic lines are the
+  print-mode format and stay on stderr there (see
+  [Automation output](#automation-output-ts-package)); the human transcript does
+  not print them.
+- **Widths.** A TTY wraps to its own width; piped/non-TTY output keeps the
+  historical 96-column layout. The text stays plain when color is off
+  (`NO_COLOR`, a pipe, `TERM=dumb`), and `stripAnsi(colored)` reproduces the
+  plain bytes exactly.
+- **Responsive help.** Generated help tables (`help`, `help <command>`,
+  `help --all`, `--help`) scale their command/flag/environment columns with the
+  terminal width on a TTY, so summaries align beside their commands on a wide
+  terminal and descriptions keep room to wrap on a narrow one; a non-TTY keeps
+  the historical 96-column column widths, and a summary that cannot fit that
+  width wraps onto an indented continuation row instead of overflowing it.
+
+Machine output is unaffected: `--json`, `--json-events`, `--stream`,
+`--mode print` and `--dry-run` are byte-identical to their previous formats
+(zero escape bytes, same field shapes and stderr routing).
+
 ## Automation output (TS package)
 
 `run` in the TypeScript package (`packages/harness`) accepts two extra
@@ -801,7 +896,18 @@ them):
   models, a `cost:` line (and `cost` in `--mode json`) from a hand-maintained
   price table, and per-role `--max-tokens` output caps. A customized built-in
   seed can be reset to its canonical default from Settings → Providers
-  without touching the Senior/Junior role assignments.
+  without touching the Senior/Junior role assignments, and **Refresh models**
+  probes the current draft's OpenAI-compatible endpoint through
+  `POST /api/providers/{name}/discover` without saving anything.
+- **Session-scope approvals** — an approval card's **Always allow this session**
+  decision remembers an `(action, target)` pair for that session
+  (`{"scope": "session"}` on the approval route, persisted in
+  `sessions/settings.json` and cleared with the session); one-shot allows and
+  denials, the fail-closed default and the denial cap are unchanged.
+- **Human terminal output** — separated, Markdown-rendered envelope blocks, a
+  ruled decision, a compact usage footer and width-aware help tables (see
+  [Human text output](#human-text-output-ts-package)); machine modes are
+  byte-identical.
 - **Diagnostics and shell completions** — `doctor` reports the local
   environment and provider setup (human report or `--json`, exit 1 on a
   failing check), `config` prints the resolved configuration with per-field

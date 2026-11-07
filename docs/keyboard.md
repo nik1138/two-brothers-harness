@@ -65,7 +65,7 @@ From a checkout, replace `two-brothers` with `node dist/cli.js` after
 | Conversation (composer focused) | `Esc` `Esc` (within 500 ms) | stop the followed run; a single `Esc` keeps its normal layering |
 | Anywhere outside a text field | `?` | open the commands & shortcuts overlay |
 | Anywhere | `Ctrl+/` / `Cmd+/` | open the commands & shortcuts overlay |
-| Approval card | `y` / `n` | allow / deny while the card has focus |
+| Approval card | `y` / `n` / `a` | allow once / deny / always allow this session while the card has focus |
 | Mobile drawer | `Esc` | close the drawer when it is the topmost layer |
 | Dialog | `Esc` | close the topmost dialog |
 | Session actions trigger | `↓` | open the row menu; `↑`/`↓`/`Home`/`End` move, `Esc`/`Tab` close |
@@ -108,9 +108,13 @@ session.
 
 - **Composer.** `Enter` sends, `Shift+Enter` breaks the line and
   `Ctrl+Enter`/`Cmd+Enter` sends without waiting. Held-down `Enter` never
-  machine-guns sends, and an IME composition never submits. `Enter` becomes a
-  newline while a run waits for approval (the box stays usable for the next
-  draft) and is unavailable while the brothers work (the box is locked).
+  machine-guns sends, and an IME composition never submits. Sending stays
+  available while the brothers work — the send control reads **Queue** and the
+  task joins the server's FIFO behind the current run (a queued task is
+  cancelled with its row's **Stop** in the queue dock). `Enter` becomes a
+  newline only while a run waits for approval (the box stays usable for a
+  draft), and a one-task-at-a-time guard keeps a second `Enter` from sending
+  the same text twice before the first submission is accepted.
 
 - **Mentions and commands.** Type `@` at a token start for the `@` picker over
   shared skills and workspace files (emails/word-internal `@` never trigger;
@@ -150,8 +154,12 @@ session.
   `Esc` twice within 500 ms in the conversation also stops the followed run
   (fail-soft, blocked while a dialog/approval owns focus or an IME
   composition is active; a single `Esc` keeps its normal layering). The docked
-  approval card is focusable: `y` allows and `n` denies while it has focus,
-  both ignored while an input has focus; the Allow/Deny buttons always work.
+  approval card is focusable: `y` allows once, `n` denies and `a` allows the
+  identical requests for the rest of the session while it has focus, all
+  ignored while an input has focus; the **Allow once**/**Deny**/**Always allow
+  this session** buttons always work. A session grant saves the
+  `(action, target)` pair in `sessions/settings.json` and is removed with the
+  session; against an older backend the card says it allowed once instead.
 
 - **Theme.** The sidebar footer's Light/Dark/System radio group sets the theme
   — Settings → Appearance and the palette's `Theme: …` actions do the same. The

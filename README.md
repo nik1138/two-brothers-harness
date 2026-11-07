@@ -58,7 +58,9 @@ node dist/cli.js tui --provider mock
 
 The `run` output is the full conversation: `[user]`,
 `[senior -> junior] consult`, `[junior -> senior] proposal`,
-`[senior -> junior] review`, `[senior -> user] decision`.
+`[senior -> junior] review`, `[senior -> user] decision`. Each envelope is a
+separated block, model prose renders as width-safe Markdown, the decision is
+ruled off, and a compact usage footer closes the transcript when usage exists.
 
 With no arguments at all, an interactive terminal opens the TUI directly;
 piped/CI invocations print the usage screen instead.
@@ -121,21 +123,30 @@ server then serves (the npm tarball ships its own copy of that build).
   a hand-maintained price table for `cost: $…` estimates, and per-role
   `--max-tokens` output caps. In the web workspace, Settings → Providers is a
   master–detail list: provider names first, the selected provider's settings
-  (base URL, masked write-only key, model ids, wire kind) directly below. A
-  customized built-in seed has a **Reset to default** action that discards the
-  stored override and its key without touching the Senior/Junior role
-  assignments.
+  (base URL, masked write-only key, model ids, wire kind) directly below, plus
+  **Refresh models** — an explicit probe of the current OpenAI-compatible
+  endpoint that never saves or applies anything (an empty answer is valid; a
+  typed key is one-shot and never stored). A customized built-in seed has a
+  **Reset to default** action that discards the stored override and its key
+  without touching the Senior/Junior role assignments.
 - **Approval broker.** Workspace tools are confined to an operator-registered
   directory: reads auto-allow, while writes, edits, deletes, and shell commands
   park the run on an operator approval. With no broker configured the policy
-  fails closed; stopping a run auto-denies everything still pending.
+  fails closed; stopping a run auto-denies everything still pending. A third
+  decision, **Always allow this session**, remembers an identical
+  `(action, target)` pair for that session (persisted in the session settings,
+  removed with the session) while the fail-closed default and denial cap stay
+  unchanged.
 - **Sessions and resume.** Every envelope is appended to a JSONL session file
   (flushed immediately, dense `seq`); `--resume` rebuilds the shared context,
   and `sessions` lists files with readable titles.
 - **Web workspace.** A Vue 3 + Vite group chat (Operator / Senior / Junior)
   with registered workspaces, workspace-grouped sessions, background runs
   over SSE, docked approval cards (a mobile drawer below the breakpoint),
-  runtime sidecars, and changed-file diffs. The composer has a `@` mention
+  runtime sidecars, and changed-file diffs. A submission made while a run works
+  joins the server's FIFO instead of blocking the composer (Send reads
+  **Queue**), a bounded queue dock shows waiting tasks with per-row Stop, and
+  the next queued run is followed automatically. The composer has a `@` mention
   picker and a `/` command menu (built-ins first, then your templates), the
   built-in actions run locally (`/compact`, `/export`, `/help`, `/status`,
   `/permission`, …), and `?`/`Ctrl+/` opens the commands-and-shortcuts overlay.
@@ -149,8 +160,11 @@ server then serves (the npm tarball ships its own copy of that build).
   live resize repaint, and non-blocking turns with Escape/Ctrl+C
   cancellation. The `/` picker lists the built-in commands (badged) plus
   discovered templates, Tab/Shift+Tab accept/dismiss, and actions like
-  `/compact`/`/export` are performed in the TUI rather than submitted. Piped
-  no-arg invocations print the usage screen instead.
+  `/compact`/`/export` are performed in the TUI rather than submitted. Overlay
+  lists follow the theme, the composer leaves mode/models to the status bar, a
+  dim `⋯` marks a transcript window that starts mid-block, and the status bar
+  keeps its hints visible at ordinary widths. Piped no-arg invocations print the
+  usage screen instead.
 - **Protocol reference.** [`typescript/`](typescript/) is a zero-dependency
   implementation of `PROTOCOL.md` (no npm packages, no build step) that
   documents the contract.

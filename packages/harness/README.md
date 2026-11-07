@@ -79,9 +79,18 @@ A bare interactive `two-brothers` (or `tui [task]`) opens a zero-dependency
 full-screen TUI over the same harness: block transcript, grapheme-aware
 multiline composer, Ctrl+P palette / `?` help, session and model pickers,
 token streaming in place, width-aware folded tool-result previews (six visual
-rows by default; `Ctrl+T` toggles preview/full text), resize repaint, and
-cancellable non-blocking turns. Piped no-arg invocations print the usage
-screen instead; `chat` stays the plain REPL for scripts.
+rows by default; `Ctrl+T` toggles preview/full text), theme-painted overlay
+lists, a dim `⋯` marker when a transcript window starts mid-block, a status bar
+whose hints stay visible at ordinary widths, resize repaint, and cancellable
+non-blocking turns. Piped no-arg invocations print the usage screen instead;
+`chat` stays the plain REPL for scripts.
+
+The human `run`/`chat` text mode renders each envelope as a separated block,
+model prose as width-safe Markdown (sanitized first), the decision behind a
+ruled `── decision ──` line, and, when usage exists, a compact footer such as
+`tokens 40 in / 20 out · cache 25% · 4 calls · cost $0.0300`;
+`--json`, `--json-events`, `--stream` and `--mode print` stay byte-identical
+machine modes.
 
 ## Web workspace
 
@@ -95,12 +104,20 @@ npm tarball ships the built app, so no separate frontend build is needed):
 three-party Operator/Senior/Junior group chat, operator-registered
 workspaces picked through a single finder, workspace-grouped sessions,
 confined junior tools with docked per-mutation approval cards (a mobile
-drawer below the breakpoint), async runs with live SSE progress,
-changed-file diff review, and a bottom-left Settings dialog for the per-role
-provider presets with sealed API keys. A customized built-in seed has
-**Reset to default**, which clears the stored override without touching the
-Senior/Junior role references. Runs use the configured models — the UI has no
-separate "mock" switch.
+drawer below the breakpoint), async runs with live SSE progress, a bounded
+queue dock for submissions made while a run works (Send reads **Queue**;
+per-row Stop cancels a queued run immediately and the next queued run is
+followed automatically), changed-file diff review, and a bottom-left Settings
+dialog for the per-role provider presets with sealed API keys. A customized
+built-in seed has **Reset to default**, which clears the stored override
+without touching the Senior/Junior role references, and the provider detail has
+**Refresh models** — an explicit, non-saving probe of the current draft's
+OpenAI-compatible endpoint (`POST /api/providers/{name}/discover`; an empty
+answer is valid and a typed key is one-shot). An approval card can
+**Always allow this session**, remembering an `(action, target)` pair in the
+session settings while one-shot allow/deny, the denial cap and the fail-closed
+default are unchanged. Runs use the configured models — the UI has no separate
+"mock" switch.
 
 ## Features
 
@@ -114,8 +131,11 @@ separate "mock" switch.
   adapters behind one interface; per-role endpoints; deterministic offline
   `mock`; provider error classification (fail-fast 4xx, `Retry-After`
   honoring, context-overflow detection) ported from pi-ai. Built-in presets
-  can be customized, and `POST /api/providers/{name}/reset` restores a
-  customized built-in seed without touching role references.
+  can be customized, `POST /api/providers/{name}/reset` restores a customized
+  built-in seed without touching role references, and
+  `POST /api/providers/{name}/discover` probes a draft OpenAI-compatible
+  endpoint for its model list without saving (empty answers valid, typed key
+  one-shot).
 - **MCP tool loading** (stdio + streamable HTTP) with role scoping,
   `mcp__server__tool` namespacing, result caps, and per-call timeouts.
 - **Session persistence** as JSONL transcripts (dense `seq`, `--resume`),
@@ -128,8 +148,9 @@ separate "mock" switch.
   the body on demand.
 - **Slash commands**: markdown prompt templates expanded literally in the
   chat REPL and the TUI (`/name args`, `$ARGUMENTS`, `$1`..`$9`).
-- **Server**: HTTP + SSE on plain `node:http`; worker pool, approval
-  broker, settings/secret stores (DPAPI/`plain1:`).
+- **Server**: HTTP + SSE on plain `node:http`; worker pool, approval broker
+  (one-shot or session-scope allows persisted in the settings store),
+  settings/secret stores (DPAPI/`plain1:`).
 
 ## Documentation
 

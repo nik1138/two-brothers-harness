@@ -40,9 +40,34 @@ while bypassing provider configuration entirely.
 | **Reset to default** is missing on an edited built-in, or reports an unsupported backend | The browser is talking to an older backend with no `POST /api/providers/{name}/reset` route | Rebuild and restart the backend from this checkout (`npm run build`, then `serve`). The client's message says the backend does not support reset yet and confirms that customized values, unsaved edits and role assignments were not changed. |
 | **Reset to default** fails with `provider is not customized: <name>` (409) or `only built-in provider presets can be reset: <name>` (400) | Reset applies only to a customized built-in seed: a pristine seed has no stored override, and a custom provider is not a built-in seed | Nothing changed. There is nothing to reset on a pristine seed; edit a custom provider directly, or use Delete to remove it (Delete clears matching role references, which reset never does). |
 | A provider's settings card will not save | `base_url` is required and must be a URL; a duplicate name on add is a 409 | Fill a valid base URL; for duplicates pick another id (`A provider already uses this ID.` appears inline). Model ids are free-form strings. |
-| The model ids under a provider differ from what a role actually uses | `preset.models` is a suggestion list for role pickers/onboarding, not the request model | Set the model each role uses in Models & roles (or `--senior-model`/`--junior-model`); to list what an endpoint serves run `node dist/cli.js models --base-url <url>`. |
+| The model ids under a provider differ from what a role actually uses | `preset.models` is a suggestion list for role pickers/onboarding, not the request model | Set the model each role uses in Models & roles (or `--senior-model`/`--junior-model`); use Settings → Providers → **Refresh models**, or run `node dist/cli.js models --base-url <url>`, to list what an endpoint serves. |
 | Compact density makes Settings cards look broken / labels overlap the border | A stale build: older bundles had a global `.theme-option` rule that also hit the Appearance cards | Rebuild and reload (`cd web && npm run build`, then refresh the served app); the fix scopes the compact rule to the sidebar footer and the Appearance section uses `.appearance-*` classes. |
 | Theme/density changes do not stick | The preference is stored per device in `localStorage` | Check that storage is not blocked for the origin; theme and density are local UI preferences, not server settings. |
+
+## Provider model discovery (Refresh models)
+
+Settings → Providers → **Refresh models** probes the current draft's
+OpenAI-compatible endpoint through `POST /api/providers/{name}/discover` and
+lists what it reports. It never saves the provider and never applies the list —
+adding ids is explicit (**Add N to draft**, then **Save changes**).
+
+| Symptom | Why | Fix |
+|---|---|---|
+| **Refresh models** fails with `Model discovery failed: …` (HTTP 502) | The probe is one bounded request to the draft's Base URL; an unreachable host, wrong path, timeout or auth failure surfaces as a clean 502 with the provider's message. Nothing was saved. | Check the Base URL and that the endpoint is running; many local servers need the `/v1` path (`http://127.0.0.1:1234/v1`). The probe has a short one-shot timeout — for a slow local server list the ids with `node dist/cli.js models --base-url <url>` (add `--api-key`/`--api-key-env` if needed). |
+| The control says discovery is not supported for this provider kind (HTTP 400) | Only the OpenAI-compatible adapter exposes `GET {base}/models`; the Anthropic Messages and Google Gemini APIs have no equivalent listing in this probe. | Use the provider with `kind: openai-compatible` if it really speaks that API (e.g. a proxy), or enter model ids by hand and set the role models. The answer is deliberately honest instead of probing the wrong shape. |
+| HTTP 400 `a typed API key is required when probing a different base URL` | The draft Base URL differs from the preset's saved endpoint while the preset has a saved/env-backed key — sending that secret to a different host is refused before any request. | Type the key for the target endpoint in the API key field; it is used for this one probe and never stored (a blank field still uses the saved key when the URL is the preset's own). |
+| `Model discovery is not supported by this backend. Nothing was changed.` (404) | The browser is talking to an older backend without the discovery route. | Rebuild and restart the backend from this checkout (`npm run build`, then `serve`). The draft and the saved provider are untouched. |
+| `The endpoint reported no models. Your saved model list is unchanged.` | The endpoint answered but served an empty list (no model loaded, or an API that does not list models). | Load a model in the local server, or add model ids by hand. An empty answer is valid and must not erase the saved catalog. |
+
+## Web queue and session-scope approvals
+
+| Symptom | Why | Fix |
+|---|---|---|
+| The composer will not submit while a run works (send stays locked, or reads Send instead of **Queue**) | A stale client bundle: the served app is the built copy, and older builds disabled the composer for the whole run. The backend itself has always queued per session. | Rebuild the web app (`cd web && npm run build`) and restart the backend, then reload. The send control should read **Queue** while a run works. |
+| The queue dock never appears although tasks are queued | The dock is projected from `GET /api/runs` active run records; an older backend that returns none shows no dock (the run still queues server-side). | Rebuild and restart the backend from this checkout. The dock shows up to five waiting rows plus a `+N more` tail. |
+| A queued row's **Stop** reports 404 | The run already left the queue (cancelled or finished elsewhere). | Nothing to cancel — the next pool refresh reconciles the dock. A queued stop otherwise cancels immediately; the active run stops cooperatively. |
+| The approval card shows "Allowed once — this backend does not support session scope." | The backend ignored the additive `scope: "session"` field (older backend that predates session-scope approvals). | The allow applied to that request only — nothing pretends otherwise. Rebuild and restart the backend to use **Always allow this session**. |
+| A session grant asks again after a restart / for another session | Grants are per session file, stored in `sessions/settings.json` under `approvals`, and cleared when the session is deleted; a corrupt settings file reads as empty (fail closed). | Re-allow in the current session; check the session still exists and the settings file is valid JSON. A damaged `approvals` section never silently auto-allows — the card simply asks again. |
 
 ## Endpoint unreachable, refused, or rate-limited
 

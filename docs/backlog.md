@@ -431,31 +431,90 @@ Design anchors that already exist:
   Tests: `tests/tuivisualmodel.test.ts`. See `docs/cli-reference.md` and
   `docs/quickstart.md`.
 
+## Shipped 2026-11-07 (provider discovery, queue visibility, session approvals, terminal polish)
+
+- **Provider model discovery** — `POST /api/providers/{name}/discover` probes
+  the current draft (additive `base_url`/`kind` and a one-shot typed `api_key`;
+  the stored/env-backed key is used only when the draft URL is the preset's own
+  endpoint) through `provider.ts::listModels` and returns
+  `200 {models, base_url, kind}`. It never persists or applies anything, never
+  stores/echoes the typed key, treats an empty list as a valid answer (a saved
+  catalog is never erased), and answers 404 for an unknown provider, 400 for an
+  invalid body or an unsupported wire kind, and 502 for an upstream failure;
+  only OpenAI-compatible endpoints expose a `/models` listing. Settings →
+  Providers gains **Refresh models** with
+  loading/ready/empty/error/unsupported states, a monotonic stale-token guard,
+  an explicit **Add N to draft** (Save changes still required) and old-backend
+  fail-soft (404 → unsupported message, nothing changed). Files:
+  `src/server.ts`, `web/src/providerSettings.ts`,
+  `web/src/components/settings/ProvidersSection.vue`; tests
+  `tests/server.test.ts` (discovery section, hermetic loopback) and
+  `web/tests/providerSettings.test.ts`. The offline path stays
+  `two-brothers models --base-url <url>`.
+- **Queue visibility (web)** — the composer stays usable while a run works:
+  the send control reads **Queue**, `POST /api/runs` accepts the submission
+  behind the session's FIFO with `status: "queued"`, and a bounded queue dock
+  above the composer lists `#N` positions, task snippets, queued-at times and a
+  per-row **Stop** (queued cancel is immediate through the existing stop
+  route), with a `+N more` tail, an aria-live summary and honest copy — a
+  queue, never "steering"; there is no mid-turn injection. The next queued run
+  is adopted/followed on `run_end`, and an older backend with no active run
+  records shows no dock. Files: `web/src/queueState.ts`,
+  `web/src/components/QueueDock.vue`, `web/src/App.vue`,
+  `web/src/components/Composer.vue`; tests `web/tests/queueState.test.ts`.
+- **`allow_session` approval scope** — a third "Always allow this session"
+  decision on the approval card (button; `a` on a focused card, `y`/`n`
+  unchanged). The broker records the `(action, normalized target)` pair for the
+  run, checks it before the denial cap and resolves ALLOW without parking,
+  emitting one additive `approval_auto_allowed` event `{action, target}`
+  instead of `approval_requested`; a stopped run still denies. The route takes
+  `scope: "once" | "session"` (strict enum, 400 invalid or session+deny) and
+  echoes `{approval_id, decision, scope}`. Grants persist in
+  `sessions/settings.json` top-level
+  `"approvals": {"<session file>": ["<pair key>", ...]}` (newest-last, cap 64
+  per session, atomic write, corrupt/missing section reads as empty = fail
+  closed, cleared on session delete; seeded into the broker at run submit and
+  again at start so queued runs see them) — never in the session JSONL. A shell
+  pair stores the full command string, the same trust domain as the runtime
+  sidecar. An older backend falls back honestly to a one-shot allow with a
+  notice; fail-closed defaults and the denial cap are unchanged. Files:
+  `src/runevents.ts`, `src/settings_store.ts`, `src/server.ts`,
+  `web/src/api.ts`, `web/src/components/ApprovalCard.vue`, `web/src/App.vue`;
+  tests `tests/approvalbrokerdeny.test.ts`, `tests/settings.test.ts`,
+  `tests/server.test.ts`, `web/tests/approvalSession.test.ts`.
+- **Human CLI text layout (terminal polish slice 2)** — `run`/`chat` text mode
+  prints blank-line-separated envelope blocks, a width-capped
+  `── decision ──` rule, width-safe Markdown bodies (the TUI's
+  `tui/markdownstyle.ts` renderer; model control/ANSI bytes sanitized first)
+  and the compact footer `tokens N in / M out · cache n% · K calls · cost $…`
+  when usage exists; generated help columns scale with the TTY width (non-TTY
+  keeps 96 columns). `src/clilayout.ts` is the new pure layout module,
+  `src/clistyle.ts` gained `paintEmphasis`. Machine modes
+  (`--json`, `--json-events`, `--stream`, `--mode print`, `--dry-run`) stay
+  byte-identical and the print-mode `tokens:`/`cost:` stderr lines are
+  unchanged. Tests: `tests/clistyle.test.ts` (22),
+  `tests/cli.test.ts` (20), the hermetic CLI E2E human anchors.
+- **TUI polish deltas** — palette/help overlays paint their inner rows through
+  the theme (headers, chords, descriptions, group labels, selected row;
+  `plainTheme` byte-identical), the composer's duplicate MODE/SENIOR/JUNIOR meta
+  row is gone (the status bar is the single source for mode and models), a
+  transcript window that starts mid-block shows a dim `⋯` gutter marker, and
+  the status-bar hint segment moved up in priority (activity → hints → context
+  → tokens → cache → cost → elapsed → settings warning), so `Ctrl+T expand
+  tool` and the default hints fit at ordinary widths (~120 columns). TUI suites:
+  301 tests. Files under `src/tui/`; see `docs/cli-reference.md` and
+  `docs/quickstart.md`.
+
 ## Open items (deferred)
 
-- **Provider model discovery** — `preset.models` is a manual/suggested list;
-  there is no discovery endpoint (`provider.listModels()` exists in the
-  package and drives the CLI `models` command). Add
-  `POST /api/providers/{name}/discover` (or a GET) that queries the preset's
-  endpoint and returns model ids, and a "Refresh models" control in the
-  Settings → Providers detail card, keeping the honest note about
-  `two-brothers models --base-url <url>` as the offline path.
-- **TUI approval surface (kimi-code parity)** — the TUI has no approval
-  panel although `src/permissions.ts` brokers requests and fails closed
-  (`web/` renders the cards). Port kimi-code's approval panel shape: typed
-  detail blocks (diff / file content / shell / invocation), numbered
-  decisions, `Esc` reject, a full-screen preview (`Ctrl+E`, reusing
-  `workspace.ts::makeDiff`), and an inline feedback field when the request
-  requires one.
-- **`allow_session` approval scope** — an "always allow this action for this
-  session" decision through `RunApprovalBroker` + the server route + the web
-  card, persisted in `sessions/settings.json` (never in the session log), with
-  the fail-closed default and the denial-cap behavior unchanged.
-- **Queue visibility / composer driver** — the server runs one run at a time
-  per session and has no mid-turn injection, so only the *queue* half is
-  portable: show submissions that will be sent after the current turn (honest
-  copy — never "steered"), with remove/send-now rows. `steer` stays a
-  non-goal until the harness accepts mid-turn input.
+- **TUI approval surface (kimi-code parity)** — the TUI has no approval panel
+  although `src/permissions.ts` brokers requests and fails closed (`web/`
+  renders the cards). Port kimi-code's approval panel shape: typed detail blocks
+  (diff / file content / shell / invocation), numbered decisions, `Esc` reject,
+  a full-screen preview (`Ctrl+E`, reusing `workspace.ts::makeDiff`), and an
+  inline feedback field when the request requires one. The broker now also
+  supports session-scope allows (shipped 2026-11-07), so a workspace-bound TUI
+  run path would inherit them; the TUI still has no approval broker of its own.
 - **Todo / plan panel** — neither surface shows the cooperation plan as a
   live artifact; kimi-code's todo card (status markers + "+N more" tail) and
   DSH's plan-mode review are the references. Needs a session-visible plan
@@ -475,7 +534,10 @@ Design anchors that already exist:
 - **TUI footer tips + transient hints** — kimi-code's footer slot system
   (mode/goal/model/tasks/environment/cwd/git/tips, skipped when empty) with
   a weighted tip rotation and a separate transient-hint line; our
-  `StatusBarState.hints` already exists.
+  `StatusBarState.hints` already exists. The 2026-11-07 TUI polish round raised
+  the hint segment's priority (activity → hints → metrics → settings warning),
+  so the existing hints are visible at ordinary widths; the weighted tip
+  rotation and the separate transient-hint line remain open.
 
 - **Reasoning persistence and passback** — thinking/reasoning deltas are
   currently observational and live-only: they are not persisted, not
