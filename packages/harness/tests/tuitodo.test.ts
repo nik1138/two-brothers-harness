@@ -27,6 +27,7 @@ import {
   todoPanelView,
   todosFromRuntimeEvents,
 } from "../src/tui/view/todo.ts";
+import { persistTodoSnapshot, todoSnapshotEvent } from "../src/tui/todoPersist.ts";
 
 function todos(): TodoItem[] {
   return [
@@ -245,4 +246,178 @@ test("no plan (or an empty slot) is byte-identical to the pre-plan frame", () =>
   // and the docked panel is the only difference once it exists
   const withPanel = renderScreen({ ...base, todoPanel: todoPanelView(todos(), { width: 80 }).lines });
   assert.notDeepEqual(withPanel, without);
+});
+
+// ---------------------------------------------------------------------------
+// TUI plan durability (TUI turns write plan snapshots to the runtime sidecar)
+// ---------------------------------------------------------------------------
+
+/** The session file name a TUI turn would write for (`.jsonl` included). */
+const SESSION_FILE = "2026-11-07-1-abc.jsonl";
+
+function todoPersistDir(): { root: string; store: RuntimeEventStore; cleanup: () => void } {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-tui-todo-persist-"));
+  const store = new RuntimeEventStore(path.join(root, "runtime"));
+  return { root, store, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
+}
+
+test("a TUI plan snapshot round-trips through a real runtime sidecar", () => {
+  const dir = todoPersistDir();
+  try {
+    const sessionFile = path.join(dir.root, "sessions", SESSION_FILE);
+    const plan: TodoItem[] = [
+      { content: "plan the work", status: "in_progress" },
+      { content: "write the code", status: "pending" },
+    ];
+    assert.equal(
+      persistTodoSnapshot(dir.store, sessionFile, plan, { runId: "tui-turn-1", at: 1_760_000_000 }),
+      true,
+    );
+
+    // On-disk convention: the session name unchanged plus `.events.jsonl`.
+    const onDisk = path.join(dir.root, "runtime", `${SESSION_FILE}.events.jsonl`);
+    assert.ok(fs.existsSync(onDisk), "TUI plan sidecar uses the session file name");
+
+    // A fresh store instance (a TUI restart) replays the same snapshot.
+    const restarted = new RuntimeEventStore(path.join(dir.root, "runtime"));
+    const events = restarted.load(sessionSidecarKey(sessionFile));
+    assert.equal(events.length, 1);
+    assert.deepEqual(Object.keys(events[0]).sort(), ["at", "run_id", "todos", "type"]);
+    assert.equal(events[0].type, "todo_updated");
+    assert.equal(events[0].run_id, "tui-turn-1");
+    assert.equal(events[0].at, 1_760_000_000);
+    assert.deepEqual(todosFromRuntimeEvents(events), plan);
+  } finally {
+    dir.cleanup();
+  }
+});
+
+test("restart semantics: empty sidecar -> [], two writes -> last wins, a clear is durable", () => {
+  const dir = todoPersistDir();
+  try {
+    const sessionFile = path.join(dir.root, SESSION_FILE);
+    const key = sessionSidecarKey(sessionFile);
+
+    // No sidecar yet (first restart of a TUI-only session with no plan write).
+    assert.deepEqual(todosFromRuntimeEvents(new RuntimeEventStore(path.join(dir.root, "runtime")).load(key)), []);
+
+    const first: TodoItem[] = [{ content: "plan", status: "in_progress" }];
+    const second: TodoItem[] = [
+      { content: "plan", status: "completed" },
+      { content: "ship", status: "pending" },
+    ];
+    persistTodoSnapshot(dir.store, sessionFile, first, { runId: "tui-a", at: 10 });
+    persistTodoSnapshot(dir.store, sessionFile, second, { runId: "tui-a", at: 11 });
+
+    // A restart (fresh store) replays the LAST write only.
+    const restarted = new RuntimeEventStore(path.join(dir.root, "runtime"));
+    assert.deepEqual(todosFromRuntimeEvents(restarted.load(key)), second);
+
+    // A cleared plan is a snapshot too: it persists and wins on replay.
+    persistTodoSnapshot(dir.store, sessionFile, [], { runId: "tui-a", at: 12 });
+    const cleared = new RuntimeEventStore(path.join(dir.root, "runtime"));
+    assert.deepEqual(todosFromRuntimeEvents(cleared.load(key)), []);
+  } finally {
+    dir.cleanup();
+  }
+});
+
+test("one sidecar line per plan write and nothing else is persisted", () => {
+  const dir = todoPersistDir();
+  try {
+    const sessionFile = path.join(dir.root, SESSION_FILE);
+    persistTodoSnapshot(dir.store, sessionFile, [{ content: "a", status: "pending" }], {
+      runId: "tui-1",
+      at: 1,
+    });
+    persistTodoSnapshot(dir.store, sessionFile, [{ content: "a", status: "completed" }], {
+      runId: "tui-1",
+      at: 2,
+    });
+    const raw = fs.readFileSync(
+      path.join(dir.root, "runtime", `${SESSION_FILE}.events.jsonl`),
+      "utf-8",
+    );
+    const lines = raw.split(/\r?\n/).filter((line) => line.trim() !== "");
+    assert.equal(lines.length, 2, "one JSON line per todo write");
+    const events = dir.store.load(sessionSidecarKey(sessionFile));
+    assert.ok(events.every((event) => event.type === "todo_updated"));
+  } finally {
+    dir.cleanup();
+  }
+});
+
+test("a torn sidecar line is tolerated and the last valid snapshot still wins", () => {
+  const dir = todoPersistDir();
+  try {
+    const sessionFile = path.join(dir.root, SESSION_FILE);
+    const plan: TodoItem[] = [{ content: "kept plan", status: "in_progress" }];
+    persistTodoSnapshot(dir.store, sessionFile, plan, { runId: "tui-1", at: 1 });
+    // Simulate a crash mid-append: a torn last line with no closing brace.
+    fs.appendFileSync(
+      path.join(dir.root, "runtime", `${SESSION_FILE}.events.jsonl`),
+      '{"type":"todo_updated","todos":[{"content":"torn',
+      "utf-8",
+    );
+    const restarted = new RuntimeEventStore(path.join(dir.root, "runtime"));
+    assert.deepEqual(todosFromRuntimeEvents(restarted.load(sessionSidecarKey(sessionFile))), plan);
+  } finally {
+    dir.cleanup();
+  }
+});
+
+test("plan persistence is fail-soft: an uncreatable store path never throws", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-tui-todo-failsoft-"));
+  try {
+    // A regular file where the sidecar directory must be: mkdir/append must
+    // fail, and the helper must swallow it with one warning.
+    const blocked = path.join(root, "blocked");
+    fs.writeFileSync(blocked, "not a directory", "utf-8");
+    const store = new RuntimeEventStore(path.join(blocked, "runtime"));
+    const warnings: string[] = [];
+    const sessionFile = path.join(root, SESSION_FILE);
+    assert.equal(
+      persistTodoSnapshot(store, sessionFile, [{ content: "x", status: "pending" }], {
+        runId: "tui-1",
+        at: 1,
+        onWarning: (line) => warnings.push(line),
+      }),
+      false,
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /plan persistence failed/);
+    assert.match(warnings[0], new RegExp(SESSION_FILE.replace(/\./g, "\\.")));
+
+    // An in-memory session (no file name) has nothing durable to write to and
+    // is not an error: no write, no warning.
+    const silent: string[] = [];
+    assert.equal(
+      persistTodoSnapshot(store, "", [{ content: "x", status: "pending" }], {
+        runId: "tui-2",
+        at: 2,
+        onWarning: (line) => silent.push(line),
+      }),
+      false,
+    );
+    assert.deepEqual(silent, []);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the persisted event is the compact sanitized shape (no other event types)", () => {
+  const event = todoSnapshotEvent(
+    [
+      { content: "  keep   me  ", status: "weird" },
+      { content: 42, status: "pending" },
+      null,
+    ] as unknown as TodoItem[],
+    { runId: "tui-9", at: 99 },
+  );
+  assert.deepEqual(event, {
+    type: "todo_updated",
+    todos: [{ content: "keep me", status: "pending" }],
+    run_id: "tui-9",
+    at: 99,
+  });
 });

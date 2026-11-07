@@ -53,6 +53,7 @@ import {
 } from "../src/tui/keymap.ts";
 import { createPaletteState, paletteView } from "../src/tui/view/palette.ts";
 import { createHelpState, helpEntries, helpView } from "../src/tui/view/help.ts";
+import { APPROVAL_PARKED_HINT, renderStatusBar } from "../src/tui/view/statusbar.ts";
 import { latestTranscriptScroll, transcriptView } from "../src/tui/view/transcript.ts";
 
 const ESC = "\u001b";
@@ -829,4 +830,43 @@ test("top slice: the mid-block gutter marker is width-safe and theme-painted onl
       `row ${index}`,
     );
   }
+});
+
+// --------------------------------------------------------------------------- //
+// transient status hint slot
+// --------------------------------------------------------------------------- //
+
+test("color: the transient status hint is dim-painted and strips back to plain", () => {
+  const theme = createTheme("dark");
+  const state = {
+    mode: "consult",
+    activity: "waiting for approval: write notes.txt",
+    transientHint: APPROVAL_PARKED_HINT,
+  };
+  const plain = renderStatusBar(state, { width: 120, theme: plainTheme });
+  const themed = renderStatusBar(state, { width: 120, theme });
+  assert.equal(themed.length, 2);
+  assert.deepEqual(themed.map(stripAnsi), plain, "stripping the theme reproduces the plain rows");
+  assert.ok(!plain.join("").includes(ESC), "plain rows carry no escape byte");
+  assert.ok(
+    themed[1]?.includes(`${theme.tokens.dim}${APPROVAL_PARKED_HINT}`),
+    "the quit-path copy is dim-painted",
+  );
+  // A clipped transient (80 columns) keeps the dim run and the exact width.
+  const narrowPlain = renderStatusBar(state, { width: 80, theme: plainTheme });
+  const narrowThemed = renderStatusBar(state, { width: 80, theme });
+  assert.deepEqual(narrowThemed.map(stripAnsi), narrowPlain);
+  for (const row of narrowThemed) assert.equal(styledWidth(row), 80);
+  assert.ok((narrowThemed[1] ?? "").includes(theme.tokens.dim));
+  // The rotating tip lives in the same slot and gets the same dim treatment.
+  const rotation = renderStatusBar(
+    { mode: "consult", activity: "working", hints: "Ctrl+T fold tool output" },
+    { width: 120, theme },
+  );
+  assert.ok((rotation[1] ?? "").includes(`${theme.tokens.dim}Ctrl+T fold tool output`));
+  // NO_COLOR is the identity for the new slot too.
+  assert.deepEqual(
+    renderStatusBar(state, { width: 80, theme: resolveTheme({ env: { NO_COLOR: "1" } }) }),
+    narrowPlain,
+  );
 });

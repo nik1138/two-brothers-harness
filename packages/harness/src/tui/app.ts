@@ -15,11 +15,18 @@
  * `Config`, one shared `SharedContext` (with the same `--session-file` /
  * `--resume` semantics), the same plugin bindings, the same MCP
  * config-plus-plugin merge, and the same hook/skill/compaction wiring.
- * Plugins are re-bound per turn exactly like the chat REPL; skills and slash
- * commands are discovered once per session.
+ * Per-role provider endpoints are resolved from the persisted settings store
+ * (`sessions/settings.json`, the same `SettingsStore`/`RuntimeSettings`/
+ * `resolveRoleEndpoints` stack `serve` uses; see `providers.ts`), with CLI
+ * flags/env as the explicit override and seed presets as the fallback, and are
+ * re-resolved before every turn. Plugins are re-bound per turn exactly like
+ * the chat REPL; skills and slash commands are discovered once per session.
+ * `/provider` (also reached from `/settings`) is the real connect surface: it
+ * persists through the same atomic store and never renders a key value.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { randomUUID } from "node:crypto";
 
 import { discoverCommands, expandCommand, matchCommand, type Command, type CommandCatalog } from "../commands.ts";
 import { findBaseCommand, type BaseCommand } from "../basecommands.ts";
@@ -47,11 +54,10 @@ import {
 } from "../mcp.ts";
 import { PluginManager, type PluginBindings } from "../plugins.ts";
 import { Decision, PermissionManager } from "../permissions.ts";
-import { mergeSeedPresets } from "../presets.ts";
 import type { Message } from "../protocol.ts";
 import { RunApprovalBroker, RuntimeEventStore } from "../runevents.ts";
 import type { RuntimeEvent } from "../runevents.ts";
-import type { RoleEndpoint } from "../runtime.ts";
+import type { RoleEndpoints } from "../runtime.ts";
 import { Workspace } from "../workspace.ts";
 import { sanitizeTodos, type TodoItem } from "../todos.ts";
 import {
@@ -100,6 +106,19 @@ import {
   type EditorState,
 } from "./editor.ts";
 import {
+  createProviderStore,
+  loadTuiProviderState,
+  providerFailureHint,
+  providerModelChoices,
+  providerPresetChoices,
+  providerRoleSummaries,
+  providerRoleSummary,
+  providerSummaryLines,
+  saveTuiProviderConnection,
+  type ProviderConnectRequest,
+  type TuiProviderState,
+} from "./providers.ts";
+import {
   BASE_COMMAND_ENTRY_PREFIX,
   nonAsciiBaseAliasNotice,
   planBaseCommandSubmission,
@@ -118,6 +137,7 @@ import {
   TUI_HISTORY_FILE_ENV,
 } from "./historystore.ts";
 import {
+  composeStatusHints,
   findSlashCommand,
   hintSegments,
   isCommandEnabled,
@@ -186,6 +206,7 @@ import {
   type ApprovalPanelState,
 } from "./view/approval.ts";
 import { sessionSidecarKey, todosFromRuntimeEvents, todoPanelView } from "./view/todo.ts";
+import { persistTodoSnapshot } from "./todoPersist.ts";
 import {
   historySearchView,
   openHistorySearch,
@@ -205,6 +226,14 @@ import {
   type PickerItem,
   type PickerState,
 } from "./view/picker.ts";
+import {
+  createProviderConnectState,
+  providerConnectKey,
+  providerConnectView,
+  setProviderConnectError,
+  type ProviderConnectData,
+  type ProviderConnectState,
+} from "./view/provider.ts";
 import { screenView } from "./view/screen.ts";
 import {
   SIDE_PANEL_MIN_HEIGHT,
@@ -217,6 +246,7 @@ import {
   type SidePanelState,
 } from "./view/sidepanel.ts";
 import type { StatusBarState } from "./view/statusbar.ts";
+import { transientHintFor } from "./view/statusbar.ts";
 import type { Toast, ToastLevel } from "./view/toast.ts";
 import {
   latestTranscriptScroll,
@@ -842,25 +872,9 @@ export function openTuiContext(cfg: Config, io: TuiIO): SharedContext {
   return new SharedContext(store);
 }
 
-/** Per-role endpoints, so role caps and wire kinds apply as in the CLI. */
-function tuiEndpoints(cfg: Config): { senior: RoleEndpoint; junior: RoleEndpoint } {
-  return {
-    senior: {
-      provider: cfg.provider,
-      baseUrl: cfg.seniorBaseUrl || cfg.baseUrl,
-      apiKey: cfg.seniorApiKey || cfg.apiKey,
-      model: cfg.seniorModel,
-    },
-    junior: {
-      provider: cfg.provider,
-      baseUrl: cfg.juniorBaseUrl || cfg.baseUrl,
-      apiKey: cfg.juniorApiKey || cfg.apiKey,
-      model: cfg.juniorModel,
-    },
-  };
-}
-
-/** Compaction settings from the resolved config (same flags as `run`). */
+/**
+ * Compaction settings from the resolved config (same flags as `run`).
+ */
 function compactionOptions(cfg: Config): CompactionSettings | undefined {
   if (
     !cfg.compact &&
@@ -895,29 +909,33 @@ function mergeScopes(scopes: ToolScopes, bindings: PluginBindings): ToolScopes {
 /**
  * Build one role's provider for a TUI-local action (the manual `/compact`
  * pass). Mirrors the harness's per-role endpoint construction so it talks to
- * the same senior endpoint a turn would: a preset kind is intrinsic to its
- * URL and wins, else the role/run-level kind chain applies. Throws on an
+ * the same endpoint a turn would: the resolved endpoint (`providers.ts`) wins,
+ * with the run config as the per-field fallback; a preset kind is intrinsic to
+ * its URL and wins, else the role/run-level kind chain applies. Throws on an
  * invalid provider configuration; callers report it honestly.
  */
 function tuiRoleProvider(
   cfg: Config,
+  endpoints: RoleEndpoints,
   role: "senior" | "junior",
   onWarning?: (line: string) => void,
 ): Provider {
-  const endpoint = tuiEndpoints(cfg)[role];
+  const endpoint = endpoints[role];
   const provider = endpoint.provider || cfg.provider;
   if (provider === "mock") return new MockProvider();
   if (provider !== "openai") throw new Error(`unknown provider: ${provider}`);
   const kind = endpoint.kind
     ? resolveProviderKind({ kind: endpoint.kind, seniorKind: "", juniorKind: "" }, role)
     : resolveProviderKind(cfg, role);
+  const roleBaseUrl = role === "senior" ? cfg.seniorBaseUrl || cfg.baseUrl : cfg.juniorBaseUrl || cfg.baseUrl;
+  const roleApiKey = role === "senior" ? cfg.seniorApiKey || cfg.apiKey : cfg.juniorApiKey || cfg.apiKey;
   const config: ProviderConfig = {
     provider,
     kind,
     seniorKind: "",
     juniorKind: "",
-    baseUrl: endpoint.baseUrl || cfg.baseUrl,
-    apiKey: endpoint.apiKey || cfg.apiKey,
+    baseUrl: endpoint.baseUrl || roleBaseUrl,
+    apiKey: endpoint.apiKey || roleApiKey,
     seniorModel: cfg.seniorModel,
     juniorModel: cfg.juniorModel,
     temperature: cfg.temperature,
@@ -934,6 +952,12 @@ function tuiRoleProvider(
 interface TurnSetup {
   cfg: Config;
   mode: Config["mode"];
+  /**
+   * Effective per-role endpoints for this turn, resolved from the persisted
+   * settings store (+ flags/env) by `providers.ts` — the same resolution
+   * `serve` uses. The harness builds both role providers from these.
+   */
+  endpoints: RoleEndpoints;
   resources: TuiResources;
   mcpConfig?: string;
   streamTokens?: boolean;
@@ -962,7 +986,7 @@ interface TurnHarness {
 /** Build the harness for one turn (the chat REPL's per-turn construction). */
 async function buildTurnHarness(setup: TurnSetup): Promise<TurnHarness> {
   const cfg: Config = setup.mode === setup.cfg.mode ? setup.cfg : { ...setup.cfg, mode: setup.mode };
-  const endpoints = tuiEndpoints(cfg);
+  const endpoints = setup.endpoints;
   validateRunConfig(cfg, endpoints);
 
   let bindings: PluginBindings | null = null;
@@ -1052,6 +1076,7 @@ type Overlay =
       emptyText?: string;
       onAccept: (item: PickerItem) => void;
     }
+  | { kind: "provider"; state: ProviderConnectState; data: ProviderConnectData }
   | { kind: "dialog"; state: DialogState; onAction: (id: string) => void };
 
 interface UsageSnapshot {
@@ -1063,6 +1088,19 @@ interface UsageSnapshot {
 
 const SPINNER_MS = 120;
 const TOKEN_RENDER_MS = 40;
+
+/**
+ * Render budget of one transient status hint: the render that publishes it
+ * consumes one unit, so the copy is visible for a few frames and then the
+ * rotating projection hint returns. Deliberately a render count, never a clock,
+ * so the same interaction sequence is reproducible in tests.
+ */
+const TRANSIENT_HINT_RENDERS = 6;
+
+/** Transient copy after a turn is stopped; the exit chord comes from the registry. */
+export const CANCELLED_TURN_HINT = `turn stopped — ${hintSegments(TUI_COMMANDS, [
+  { id: "exit", label: "exits" },
+])}`;
 
 /** Status-bar text while a quit chord is armed (reset verbatim on disarm). */
 const QUIT_ARMED_ACTIVITY = "quit? press Ctrl+C or Esc again to exit (any other key cancels)";
@@ -1225,22 +1263,52 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   const sessionsDir = options.sessionsDir ?? path.join(cwd, "sessions");
 
   /**
+   * Persisted provider settings + the effective per-role endpoints (the same
+   * `SettingsStore`/`RuntimeSettings`/`resolveRoleEndpoints` stack `serve`
+   * uses; see `providers.ts`). Loaded once at startup and re-resolved before
+   * every turn/compaction, so a provider connected through the web Settings,
+   * `onboard` or a previous TUI run is picked up without a restart — and with
+   * the decrypted stored key, never a flag.
+   */
+  const providerStore = createProviderStore(sessionsDir);
+  /** Per-session `/models` choices: operator-explicit, never persisted. */
+  const sessionModelOverrides: Partial<Record<"senior" | "junior", string>> = {};
+  let providerState: TuiProviderState = loadTuiProviderState({
+    store: providerStore,
+    cfg: sessionCfg,
+  });
+  const refreshProviderState = (): TuiProviderState => {
+    providerState = loadTuiProviderState({
+      store: providerStore,
+      cfg: sessionCfg,
+      modelOverrides: sessionModelOverrides,
+    });
+    return providerState;
+  };
+
+  /**
+   * The runtime sidecar store for plan snapshots. It is the server's store
+   * directory: `serve` runs and TUI turns both write `todo_updated` snapshots
+   * here (the TUI writes only plan snapshots — see `todoPersist.ts`), so the
+   * plan of a session is durable across a TUI restart with the same file.
+   */
+  const runtimeStore = new RuntimeEventStore(path.join(sessionsDir, "runtime"));
+
+  /**
    * The last persisted plan snapshot for one session file, replayed from the
-   * runtime sidecar (`sessions/runtime/<stem>.events.jsonl`) that a
-   * `two-brothers serve` backend writes. Fail-soft: a missing/unreadable
-   * sidecar is an empty plan, never an error. TUI turns do not write the
-   * sidecar, so a plan they produce is kept in memory for this process (see
-   * `planForSession`); only serve-created sessions have a durable sidecar.
+   * session's runtime sidecar (`sessions/runtime/<session file>.events.jsonl`).
+   * Both a `two-brothers serve` backend and this TUI's turns write that
+   * sidecar (TUI turns persist plan snapshots only). Fail-soft: a
+   * missing/unreadable sidecar is an empty plan, never an error.
    */
   function loadSessionTodos(sessionFile: string): TodoItem[] {
-    // `RuntimeEventStore` appends `.events.jsonl` to its key and server session
-    // names include the extension, so a serve-written sidecar is
+    // `RuntimeEventStore` appends `.events.jsonl` to its key and session file
+    // names include the extension, so the sidecar is
     // `sessions/runtime/<session file>.events.jsonl`.
     const name = sessionSidecarKey(sessionFile);
     if (!name) return [];
     try {
-      const store = new RuntimeEventStore(path.join(sessionsDir, "runtime"));
-      return todosFromRuntimeEvents(store.load(name));
+      return todosFromRuntimeEvents(runtimeStore.load(name));
     } catch {
       return [];
     }
@@ -1248,8 +1316,8 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
 
   /**
    * This process's live plan snapshots, keyed by the resolved session file.
-   * The TUI does not persist typed events, so switching sessions back and
-   * forth inside one process must not lose a plan the sidecar never saw.
+   * The sidecar is durable, but the cache keeps session switching instant and
+   * covers in-memory sessions (no file, nothing to persist).
    */
   const planCache = new Map<string, TodoItem[]>();
 
@@ -1300,9 +1368,30 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   // them as neutral SUMMARY markers (never as an operator message). An
   // uncompacted context yields the empty model, byte-identical to before.
   let model: TuiModel = createCompactionSummaryModel(context.events);
+  /**
+   * Provider resolution warnings (a dangling `provider_ref`, an unreadable
+   * settings document): shown honestly at startup and again only when a
+   * per-turn refresh produces a NEW line — never hidden and never spammed.
+   */
+  const providerWarningsSeen = new Set<string>();
+  const showProviderWarnings = (): void => {
+    const warnings = [
+      ...providerState.warnings,
+      ...(providerState.loadError !== undefined ? [providerState.loadError] : []),
+    ];
+    for (const warning of warnings) {
+      if (providerWarningsSeen.has(warning)) continue;
+      providerWarningsSeen.add(warning);
+      model = addNotice(model, "warn", `provider: ${warning}`);
+    }
+  };
+  showProviderWarnings();
+  /** Effective role summaries from the latest provider resolution. */
+  const providerSummaries = () => providerRoleSummaries(providerState, sessionCfg);
   // The current conversation's plan (the latest `todo_updated` snapshot). A
-  // resumed session starts from the runtime sidecar when a serve backend wrote
-  // one; live writes update it and this process remembers it across switches.
+  // resumed session replays the runtime sidecar (written by a serve backend or
+  // by this TUI's own turns); live writes replace it, persist it and are
+  // remembered across session switches.
   let todos: TodoItem[] = planForSession(sessionCfg.sessionFile);
   // Tool-result expansion is per row and keyed by call id (or block id), so
   // it survives streaming updates and never depends on the row's position.
@@ -1344,6 +1433,18 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   let turnStartedAt = 0;
   let lastElapsedMs: number | undefined;
   let activity = "ready — type a task and press Enter";
+  /**
+   * Monotonic turn counter behind the deterministic status-bar tip rotation.
+   * One accepted turn advances the rotation one tip; it is app state, never a
+   * clock or a random source, so the same turn sequence renders the same tips.
+   */
+  let tipStep = 0;
+  /**
+   * One-shot status hint shown for a bounded number of renders after an event
+   * (a stopped turn), then the rotating hint returns. The app owns the event and
+   * the TTL; the pure status bar only renders the text it is given.
+   */
+  let transientHint: { text: string; remaining: number } | null = null;
   let quitArmed = false;
   /** Last repeat-sensitive keypress (composer submit/mention accept). */
   let lastRepeatGuard: RepeatGuardSnapshot | null = null;
@@ -1418,6 +1519,20 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   };
 
   /**
+   * Publish a one-shot status hint for the next few renders. The caller decides
+   * the event and the TTL; the hint takes the status bar's hint slot until it
+   * expires, then the rotating tip returns (no clock, no background timer).
+   */
+  const showTransientHint = (text: string, renders = TRANSIENT_HINT_RENDERS): void => {
+    const clean = text.trim();
+    if (clean === "") {
+      transientHint = null;
+      return;
+    }
+    transientHint = { text: clean, remaining: Math.max(1, Math.floor(renders)) };
+  };
+
+  /**
    * Remember one accepted prompt in the live editor history and the persisted
    * sequence. A blank prompt or a repeat of the newest entry is a no-op, so a
    * seeded entry is never duplicated just because it was submitted again.
@@ -1467,30 +1582,31 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   };
 
   /**
-   * The status bar's hint string. With a tool row on screen it leads with the
-   * fold action the newest row's state allows ("expand tool" / "collapse
-   * tool"); the chord comes from the registry, never a literal here. Without a
-   * tool row it returns undefined so the status bar's default hints stay
-   * byte-identical.
+   * The status bar's projection hint string: one rotating, registry-derived
+   * high-value tip per accepted turn (`tipStep`), led by the fold action the
+   * newest tool row's state allows ("expand tool" / "collapse tool") whenever a
+   * tool row is on screen. Chords come from the registry, never a literal here,
+   * and the fold action is removed from the rotation so it never repeats.
    */
   const statusHints = (): string | undefined => {
     const fold = toolFoldHint(model, toolExpansion);
-    if (fold === null) return undefined;
-    return hintSegments(TUI_COMMANDS, [
-      { id: fold.commandId, label: fold.label },
-      // The default pair of `statusBarSegments`, kept alongside the tool hint:
-      // the fold hint is additive, never a replacement.
-      { id: "palette", label: "commands" },
-      { id: "help", label: "help" },
-    ]);
+    return composeStatusHints(TUI_COMMANDS, tipStep, {
+      running,
+      ...(fold !== null ? { fold: { commandId: fold.commandId, label: fold.label } } : {}),
+    });
   };
 
   const statusState = (): StatusBarState => {
     const hints = statusHints();
+    const [seniorRole, juniorRole] = providerSummaries();
+    const transient = transientHintFor({
+      approvalParked: approval !== null,
+      ...(transientHint !== null ? { transient: transientHint.text } : {}),
+    });
     return {
       mode,
-      seniorModel: sessionCfg.seniorModel,
-      juniorModel: sessionCfg.juniorModel,
+      seniorModel: seniorRole.model,
+      juniorModel: juniorRole.model,
       sessionName: sessionName(),
       cwd,
       running,
@@ -1511,6 +1627,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
           ? { elapsedMs: lastElapsedMs }
           : {}),
       ...(hints !== undefined ? { hints } : {}),
+      ...(transient !== undefined ? { transientHint: transient } : {}),
     };
   };
 
@@ -1562,35 +1679,44 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     };
   };
 
-  const sidePanelState = (): SidePanelState => ({
-    mode,
-    seniorModel: sessionCfg.seniorModel,
-    juniorModel: sessionCfg.juniorModel,
-    seniorKind: sessionCfg.seniorKind || sessionCfg.kind,
-    juniorKind: sessionCfg.juniorKind || sessionCfg.kind,
-    provider: sessionCfg.provider,
-    sessionName: sessionName(),
-    resume: sessionCfg.resume,
-    cwd,
-    running,
-    ...(contextTokens !== null ? { contextTokens } : {}),
-    ...(sessionCfg.contextWindow > 0 ? { contextWindow: sessionCfg.contextWindow } : {}),
-    ...(usage !== null
-      ? {
-          inputTokens: usage.input,
-          outputTokens: usage.output,
-          cachedTokens: usage.cached,
-        }
-      : {}),
-    cost,
-    ...(running
-      ? { elapsedMs: Date.now() - turnStartedAt }
-      : lastElapsedMs !== undefined
-        ? { elapsedMs: lastElapsedMs }
+  const sidePanelState = (): SidePanelState => {
+    const [seniorRole, juniorRole] = providerSummaries();
+    // One shared provider label when both roles agree; otherwise say so
+    // honestly instead of pretending one provider covers both.
+    const provider =
+      seniorRole.provider === juniorRole.provider
+        ? seniorRole.provider
+        : `${seniorRole.provider} / ${juniorRole.provider}`;
+    return {
+      mode,
+      seniorModel: seniorRole.model,
+      juniorModel: juniorRole.model,
+      seniorKind: seniorRole.kind,
+      juniorKind: juniorRole.kind,
+      provider,
+      sessionName: sessionName(),
+      resume: sessionCfg.resume,
+      cwd,
+      running,
+      ...(contextTokens !== null ? { contextTokens } : {}),
+      ...(sessionCfg.contextWindow > 0 ? { contextWindow: sessionCfg.contextWindow } : {}),
+      ...(usage !== null
+        ? {
+            inputTokens: usage.input,
+            outputTokens: usage.output,
+            cachedTokens: usage.cached,
+          }
         : {}),
-    compaction: sidePanelCompaction(),
-    discovery: sidePanelDiscovery(),
-  });
+      cost,
+      ...(running
+        ? { elapsedMs: Date.now() - turnStartedAt }
+        : lastElapsedMs !== undefined
+          ? { elapsedMs: lastElapsedMs }
+          : {}),
+      compaction: sidePanelCompaction(),
+      discovery: sidePanelDiscovery(),
+    };
+  };
 
   /**
    * The `panel` command: flip the in-memory choice and say honestly whether
@@ -1679,6 +1805,15 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         theme,
       }).lines;
     }
+    if (overlay.kind === "provider") {
+      const boxW = Math.max(30, Math.min(Math.max(columns - 8, 30), 76));
+      const boxH = Math.max(10, Math.min(Math.max(rows - 6, 10), 22));
+      return providerConnectView(overlay.state, overlay.data, {
+        width: boxW,
+        height: boxH,
+        theme,
+      }).lines;
+    }
     const boxW = Math.max(30, Math.min(Math.max(columns - 8, 30), 72));
     const boxH = Math.max(8, Math.min(Math.max(rows - 6, 8), 20));
     return dialogView(overlay.state, { width: boxW, height: boxH, theme }).lines;
@@ -1727,6 +1862,14 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       sidePanelEnabled: sidePanelChoice !== false,
     });
     terminal.render(frame.lines.join("\n"));
+    // The transient slot is a bounded render budget, not a timer: this render
+    // showed the hint and consumes one unit, and the rotating tip returns when
+    // the budget runs out (or immediately when no hint is pending).
+    if (transientHint !== null) {
+      transientHint = transientHint.remaining > 1
+        ? { text: transientHint.text, remaining: transientHint.remaining - 1 }
+        : null;
+    }
   }
 
   const onStreamEvent = (event: StreamEvent): void => {
@@ -1919,6 +2062,10 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     model = addUserBlock(model, task);
     scroll = latestTranscriptScroll();
     running = true;
+    // Advance the deterministic footer-tip rotation once per accepted turn.
+    // The step is app state (never a clock), so the same turn sequence always
+    // shows the same tips and tests can reproduce a frame exactly.
+    tipStep += 1;
     quitArmed = false;
     turnStartedAt = Date.now();
     lastRenderAt = 0;
@@ -1972,6 +2119,8 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     // session while the run is still unwinding, and a late plan write must be
     // attributed to (and only displayed for) the session that produced it.
     const turnSessionFile = sessionCfg.sessionFile;
+    // One run id per turn: every plan snapshot this turn persists shares it.
+    const turnRunId = `tui-${randomUUID()}`;
     turnDone = (async () => {
       let turnWorkspace: Workspace | undefined;
       try {
@@ -2002,6 +2151,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
               // not compete with the decision keys.
               mention = null;
               if (find !== null) closeFindBar();
+              // Drop any leftover one-shot hint: while the approval is parked
+              // the transient slot carries the quit-path copy instead.
+              transientHint = null;
               activity = `waiting for approval: ${event.action}${
                 event.target !== undefined && event.target !== "" ? ` ${event.target}` : ""
               }`;
@@ -2032,9 +2184,16 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
           activeBroker = broker;
           turnWorkspace = new Workspace(workspaceRoot, new PermissionManager(null, broker));
         }
+        // Re-resolve the provider settings for THIS turn: a provider connected
+        // in the web workspace / `onboard` / a previous TUI run is picked up
+        // without a restart, and the harness gets the same per-role endpoints
+        // `serve` would build (stored keys included, never flags on the wire).
+        const turnProviders = refreshProviderState();
+        showProviderWarnings();
         const { harness, mcp } = await buildTurnHarness({
           cfg: sessionCfg,
           mode: turnMode,
+          endpoints: turnProviders.endpoints,
           resources,
           ...(options.mcpConfig !== undefined ? { mcpConfig: options.mcpConfig } : {}),
           ...(options.streamTokens === true ? { streamTokens: true } : {}),
@@ -2045,6 +2204,14 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
             // Display-only plan state: the latest snapshot replaces the panel.
             if (event.type === "todo_updated") {
               const snapshot = sanitizeTodos(event.todos);
+              // Durability: persist the snapshot to this turn session's runtime
+              // sidecar (display-only, fail-soft; one line per plan write) so a
+              // TUI restart with the same session file shows the last plan.
+              persistTodoSnapshot(runtimeStore, turnSessionFile, snapshot, {
+                runId: turnRunId,
+                at: Math.floor(Date.now() / 1000),
+                ...(sessionCfg.verbose ? { onWarning } : {}),
+              });
               rememberTodos(turnSessionFile, snapshot);
               if (sessionCfg.sessionFile === turnSessionFile) {
                 todos = snapshot;
@@ -2059,9 +2226,10 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
           usage = usageOf(result.usage);
           lastElapsedMs = Date.now() - turnStartedAt;
           measureContext();
-          const senior = sessionCfg.seniorModel.trim();
+          const senior = turnProviders.endpoints.senior.model.trim() || sessionCfg.seniorModel.trim();
+          const junior = turnProviders.endpoints.junior.model.trim() || sessionCfg.juniorModel.trim();
           const estimate =
-            senior !== "" && senior === sessionCfg.juniorModel.trim()
+            senior !== "" && senior === junior
               ? estimateCost(senior, {
                   promptTokens: usage.input,
                   completionTokens: usage.output,
@@ -2078,6 +2246,11 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
               retryable: true,
             });
           }
+          // A harness-level connection failure is reported through
+          // `result.errors` (not a throw): point at /provider once, keeping the
+          // provider's own message above.
+          const errorsHint = providerFailureHint(result.errors.join("\n"));
+          if (errorsHint !== null) model = addNotice(model, "info", errorsHint);
           if (result.errors.length > 0) {
             lastFailedTask = { task, turnMode };
             activity = "turn completed with errors — /retry re-sends it";
@@ -2100,18 +2273,29 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         if (controller.signal.aborted) {
           model = addNotice(model, "info", "turn cancelled");
           activity = "turn cancelled — the session is still open";
+          // A stopped turn is exactly when the exit path needs restating: the
+          // status hint slot counts down a few renders and then the rotating
+          // tip returns (copy only; the chords themselves are unchanged).
+          showTransientHint(CANCELLED_TURN_HINT);
         } else {
+          // Keep the provider's real error visible; when it reads like a
+          // connection problem, add the actionable path instead of leaving a
+          // generic failure: connect with /provider or pass the endpoint flags.
+          const hint = providerFailureHint(text);
           model = addNotice(model, "error", text, {
             details: `task: ${task}`,
             retryable: true,
           });
-          activity = "turn failed — the session is still open";
+          if (hint !== null) model = addNotice(model, "info", hint);
+          activity = hint !== null
+            ? "provider connection failed — run /provider to connect a provider"
+            : "turn failed — the session is still open";
           if (overlay === null) {
             overlay = {
               kind: "dialog",
               state: createDialog({
-                title: "Turn failed",
-                message: text,
+                title: hint !== null ? "Provider connection failed" : "Turn failed",
+                message: hint !== null ? `${text}\n\n${hint}` : text,
                 details: task,
                 tone: "error",
                 actions: [
@@ -2388,46 +2572,61 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     };
   };
 
+  /**
+   * Why `/models` cannot change a role model right now (null = changeable):
+   * a `TWO_BROTHERS_*` env var or an explicit `--senior-model`/`--junior-model`
+   * flag outranks the in-session choice (the same precedence endpoint
+   * resolution uses in `providers.ts`).
+   */
+  const modelPinReason = (role: "senior" | "junior"): string | null => {
+    if (envPinnedPairs().has(`${role}:model`)) return "pinned by a TWO_BROTHERS_* env var";
+    const flagged = role === "senior" ? sessionCfg.seniorModel : sessionCfg.juniorModel;
+    if (flagged.trim() !== "") return `fixed by --${role}-model for this run`;
+    return null;
+  };
+
   const modelItemsForRole = (role: "senior" | "junior"): PickerItem[] => {
-    const pinned = envPinnedPairs().has(`${role}:model`);
-    const current = (role === "senior" ? sessionCfg.seniorModel : sessionCfg.juniorModel).trim();
+    const pinned = modelPinReason(role);
+    // The effective model (persisted settings + flags/env), so a provider
+    // connected from the web or a preset shows its real current model.
+    const current = providerRoleSummary(providerState, sessionCfg, role).model.trim();
     const items: PickerItem[] = [];
     if (current !== "") {
       items.push({
         id: `keep:${role}`,
         label: `keep current (${current})`,
         description: "no change",
-        ...(pinned ? { disabled: true, disabledReason: "pinned by a TWO_BROTHERS_* env var" } : {}),
+        ...(pinned !== null ? { disabled: true, disabledReason: pinned } : {}),
       });
     }
-    for (const preset of mergeSeedPresets()) {
-      for (const presetModel of preset.models ?? []) {
-        items.push({
-          id: `${role}:${presetModel}`,
-          label: presetModel,
-          description: `${preset.name} preset`,
-          keywords: [preset.name, role],
-          ...(pinned ? { disabled: true, disabledReason: "pinned by a TWO_BROTHERS_* env var" } : {}),
-        });
-      }
+    // Seed AND stored presets: a provider preset connected via `/provider` or
+    // the web Settings contributes its model list here.
+    for (const choice of providerModelChoices(providerState)) {
+      items.push({
+        id: `${role}:${choice.model}`,
+        label: choice.model,
+        description: `${choice.preset} preset`,
+        keywords: [choice.preset, role],
+        ...(pinned !== null ? { disabled: true, disabledReason: pinned } : {}),
+      });
     }
     if (items.length === 0) {
       items.push({
         id: "none",
-        label: "(no presets carry model lists)",
+        label: "(no provider models configured)",
         disabled: true,
-        disabledReason: "configure with --senior-model/--junior-model or two-brothers onboard",
+        disabledReason: "connect a provider with /provider",
       });
     }
     return items;
   };
 
   const applyRoleModel = (role: "senior" | "junior", value: string): void => {
-    sessionCfg =
-      role === "senior"
-        ? { ...sessionCfg, seniorModel: value }
-        : { ...sessionCfg, juniorModel: value };
-    pushToast("success", `${role} model set to ${value} for this session`);
+    // The in-session choice is a direct operator request, so it outranks the
+    // persisted model for the rest of this TUI run (never written to disk).
+    sessionModelOverrides[role] = value;
+    refreshProviderState();
+    pushToast("success", `${role} model set to ${value} for this TUI run (not saved)`);
   };
 
   const openModelPicker = (preselectedRole?: "senior" | "junior"): void => {
@@ -2506,7 +2705,8 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
               // the rest of the TUI transcript history is not replayed.
               model = createCompactionSummaryModel(context.events);
               // The plan belongs to the session: show this process's live
-              // snapshot when there is one, else replay the serve sidecar.
+              // snapshot when there is one, else replay the session sidecar
+              // (serve-written or TUI-written plan snapshots).
               todos = planForSession(sessionFile);
               toolExpansion = new Set<string>();
               // A session switch resets the draft but not durable prompt
@@ -2526,19 +2726,92 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     };
   };
 
+  // --------------------------------------------------------------------- //
+  // provider connection (`/provider`, also reached from /settings)
+  // --------------------------------------------------------------------- //
+
+  /** The `/provider` view data from the latest key-free resolution. */
+  const providerConnectData = (): ProviderConnectData => ({
+    roles: providerRoleSummaries(providerState, sessionCfg),
+    presets: providerPresetChoices(providerState),
+  });
+
+  /** Open the real in-TUI provider connect surface (`/provider`). */
+  const openProviderSurface = (role: "senior" | "junior" = "senior"): void => {
+    if (running || compacting) {
+      baseNotice("warn", "cannot change providers while a turn or compaction is running");
+      return;
+    }
+    refreshProviderState();
+    showProviderWarnings();
+    overlay = {
+      kind: "provider",
+      state: createProviderConnectState(role),
+      data: providerConnectData(),
+    };
+    render();
+  };
+
+  /**
+   * Persist one `/provider` choice through the same atomic settings store the
+   * backend uses. A failure keeps the dialog open with the real error and the
+   * previous state (nothing was written); a success closes it and reports the
+   * new effective connection WITHOUT any key material.
+   */
+  const commitProviderConnect = (request: ProviderConnectRequest): void => {
+    if (overlay?.kind !== "provider") return;
+    const result = saveTuiProviderConnection(providerStore, request, {
+      cfg: sessionCfg,
+      modelOverrides: sessionModelOverrides,
+    });
+    if (result.ok && result.state !== undefined) {
+      providerState = result.state;
+      overlay = null;
+      showProviderWarnings();
+      const summary = providerRoleSummary(providerState, sessionCfg, request.role);
+      const target =
+        request.preset !== undefined
+          ? `preset ${request.preset.name} · ${request.preset.model}`
+          : `manual · ${summary.model} · ${summary.baseUrl}`;
+      baseNotice(
+        "success",
+        `${summary.label} connected: ${target} · API key ${
+          summary.apiKeySet ? "set" : "not set"
+        } — saved to sessions/settings.json`,
+      );
+      return;
+    }
+    const message = result.error ?? "cannot save provider settings";
+    overlay = { ...overlay, state: setProviderConnectError(overlay.state, message) };
+    pushToast("error", message);
+    render();
+  };
+
+  /**
+   * `/settings`: the effective, key-free provider summary for both roles plus
+   * the real connect action (the old copy only said to leave the TUI and run
+   * `onboard`).
+   */
   const openSettingsDialog = (): void => {
+    refreshProviderState();
+    showProviderWarnings();
     overlay = {
       kind: "dialog",
       state: createDialog({
-        title: "Settings",
-        message:
-          "Provider setup is stored per role in sessions/settings.json. " +
-          "Run `two-brothers onboard` outside the TUI for guided setup, or start " +
-          "the TUI with --senior-model/--junior-model (and --base-url/--api-key).",
-        actions: [{ id: "close", label: "Close" }],
+        title: "PROVIDER SETTINGS",
+        // The effective summary is the message (visible immediately); there is
+        // no secret detail to hide behind "d".
+        message: providerSummaryLines(providerState, sessionCfg).join("\n"),
+        actions: [
+          { id: "provider", label: "Connect provider…" },
+          { id: "close", label: "Close" },
+        ],
       }),
-      onAction: () => {},
+      onAction: (id) => {
+        if (id === "provider") openProviderSurface();
+      },
     };
+    render();
   };
 
   const cycleTheme = (explicit?: string): void => {
@@ -2591,8 +2864,10 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     }
     let provider: Provider;
     try {
-      validateRunConfig(sessionCfg, tuiEndpoints(sessionCfg));
-      provider = tuiRoleProvider(sessionCfg, "senior", onWarning);
+      // Re-resolve first so a provider connected in the web Settings is used.
+      const compactState = refreshProviderState();
+      validateRunConfig(sessionCfg, compactState.endpoints);
+      provider = tuiRoleProvider(sessionCfg, compactState.endpoints, "senior", onWarning);
     } catch (exc) {
       baseNotice("error", `cannot compact: ${messageOf(exc)}`);
       return;
@@ -3034,6 +3309,8 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       ...TUI_COMMANDS.map((c) => c.slash).filter((s): s is string => s !== undefined),
       ...resources.commands.commands.map((c) => c.name),
       ...baseCommandList().flatMap((command) => [command.name, ...command.aliases]),
+      // First-party alias for the provider connect surface (see submitEditor).
+      "provider",
     ];
     const unique = [...new Set(names.filter((name) => name.toLowerCase().startsWith(prefix)))];
     if (unique.length === 1 && unique[0] !== undefined && unique[0] !== prefix) {
@@ -3082,12 +3359,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         const words = args.trim().split(/\s+/).filter(Boolean);
         if (words[0] === "senior" || words[0] === "junior") {
           if (words.length >= 2 && words[1] !== undefined) {
-            if (envPinnedPairs().has(`${words[0]}:model`)) {
-              model = addNotice(
-                model,
-                "warn",
-                `${words[0]} model is pinned by a TWO_BROTHERS_* env var and cannot be changed here`,
-              );
+            const pinReason = modelPinReason(words[0]);
+            if (pinReason !== null) {
+              model = addNotice(model, "warn", `${words[0]} model is ${pinReason} and cannot be changed here`);
               return true;
             }
             applyRoleModel(words[0], words[1]);
@@ -3166,6 +3440,12 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     if (text.trim() === "") return;
     const matched = matchCommand(text);
     if (matched !== null) {
+      // `/provider` is the TUI's provider connect surface (the same one behind
+      // `/settings`); it is an app action, never a task or a discovered template.
+      if (matched.name === "provider") {
+        openProviderSurface();
+        return;
+      }
       const builtin = findSlashCommand(TUI_COMMANDS, matched.name);
       const shadowsTemplate = resources.commands.commands.some((c) => c.name === matched.name);
       if (builtin !== null && !shadowsTemplate && dispatchSlash(builtin, matched.args)) return;
@@ -3264,6 +3544,14 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       } else if (result.action === "blocked") {
         pushToast("warn", result.reason ?? "unavailable");
       }
+      return;
+    }
+    if (overlay.kind === "provider") {
+      const result = providerConnectKey(overlay.state, overlay.data, key);
+      overlay = { ...overlay, state: result.state };
+      if (result.action.type === "close") overlay = null;
+      else if (result.action.type === "save") commitProviderConnect(result.action.request);
+      render();
       return;
     }
     const result = handleDialogKey(overlay.state, key);
@@ -3433,7 +3721,20 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         if (activity === QUIT_ARMED_ACTIVITY) activity = "quit cancelled";
       }
       if (event.type === "paste") {
-        if (overlay !== null) continue;
+        if (overlay !== null) {
+          // The provider form has real text fields (Base URL / model / API
+          // key): paste is routed into the field editor, never the composer or
+          // history. Every other overlay ignores pastes.
+          if (overlay.kind === "provider") {
+            const pasted = providerConnectKey(overlay.state, overlay.data, {
+              name: "paste",
+              raw: event.text,
+            });
+            overlay = { kind: "provider", state: pasted.state, data: overlay.data };
+            render();
+          }
+          continue;
+        }
         if (find !== null) {
           // A paste while finding extends the query as one sanitized line; it
           // can never reach the composer or submit a turn.

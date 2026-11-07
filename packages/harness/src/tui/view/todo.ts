@@ -22,9 +22,11 @@ import { plainTheme, type Theme, type ThemeToken } from "../theme.ts";
 
 /**
  * The runtime-sidecar key for one session file. `RuntimeEventStore` appends
- * `.events.jsonl` to the key, and server session names already carry their
- * `.jsonl` extension, so the key is the session file's basename unchanged:
+ * `.events.jsonl` to the key, and session names already carry their `.jsonl`
+ * extension (serve session names and TUI `--session-file` names alike), so the
+ * key is the session file's basename unchanged:
  * `2026-11-07-1-abc.jsonl` -> `sessions/runtime/2026-11-07-1-abc.jsonl.events.jsonl`.
+ * Both a serve backend and a TUI turn's plan-snapshot writes use it.
  */
 export function sessionSidecarKey(sessionFile: string): string {
   return path.basename(sessionFile);

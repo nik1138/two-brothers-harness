@@ -2,7 +2,16 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { createEditor } from "../src/tui/editor.ts";
-import { findCommand, formatKeys, hintSegments, TUI_COMMANDS } from "../src/tui/keymap.ts";
+import {
+  FOOTER_TIPS,
+  TUI_COMMANDS,
+  composeStatusHints,
+  findCommand,
+  footerTips,
+  formatKeys,
+  hintSegments,
+  rotatingFooterTip,
+} from "../src/tui/keymap.ts";
 import {
   addNotice,
   addToolCall,
@@ -56,10 +65,12 @@ import {
 } from "../src/tui/view/sidepanel.ts";
 import { spinnerFrame, renderSpinner, SPINNER_FRAMES } from "../src/tui/view/spinner.ts";
 import {
+  APPROVAL_PARKED_HINT,
   fitStatusSegments,
   formatElapsed,
   renderStatusBar,
   statusBarSegments,
+  transientHintFor,
 } from "../src/tui/view/statusbar.ts";
 import { renderToast, renderToasts } from "../src/tui/view/toast.ts";
 import {
@@ -873,4 +884,157 @@ test("side panel: resize recomputes immediately and the toggle choice sticks", (
   assert.ok(!off.lines.join("\n").includes("STATUS"));
   const on = screenView({ ...base, width: 120, height: 30, sidePanelEnabled: true });
   assert.ok(on.lines.join("\n").includes("STATUS"));
+});
+
+// --------------------------------------------------------------------------- //
+// rotating footer tips (registry-derived) and the transient hint channel
+// --------------------------------------------------------------------------- //
+
+test("footer tips: the registry-derived rotation covers every high-value action once per cycle", () => {
+  const idle = footerTips();
+  assert.ok(idle.length >= 5, "the cycle has several high-value tips");
+  // Every printed hint starts with the chord the registry actually binds.
+  for (const tip of idle) {
+    const command = findCommand(TUI_COMMANDS, tip.id);
+    assert.ok(command !== undefined, tip.id);
+    assert.equal(tip.hint, `${formatKeys(command)} ${tip.label}`, tip.id);
+  }
+  // One full cycle is the ordered list, with a clean wrap and no repeat.
+  assert.deepEqual(
+    idle.map((_, index) => rotatingFooterTip(TUI_COMMANDS, index)),
+    idle.map((tip) => tip.hint),
+  );
+  assert.notEqual(
+    rotatingFooterTip(TUI_COMMANDS, idle.length - 1),
+    rotatingFooterTip(TUI_COMMANDS, idle.length),
+    "the wrap never repeats the last tip",
+  );
+  assert.equal(rotatingFooterTip(TUI_COMMANDS, idle.length), rotatingFooterTip(TUI_COMMANDS, 0));
+  assert.equal(rotatingFooterTip(TUI_COMMANDS, -1), idle.at(-1)?.hint);
+  assert.equal(rotatingFooterTip(TUI_COMMANDS, Number.NaN), rotatingFooterTip(TUI_COMMANDS, 0));
+  // High-value actions are all reachable within one cycle.
+  for (const id of ["tool-expand", "find", "palette", "help"]) {
+    assert.ok(idle.some((tip) => tip.id === id), id);
+  }
+  // A running turn adds the running-only stop tip; idle never advertises it.
+  const running = footerTips(TUI_COMMANDS, { running: true });
+  assert.equal(running.length, idle.length + 1);
+  assert.ok(running.some((tip) => tip.hint === "Esc stop the turn"));
+  assert.ok(!idle.some((tip) => tip.label.includes("stop the turn")));
+  // `exclude` removes a tip from this cycle (a leading fold hint case).
+  assert.ok(!footerTips(TUI_COMMANDS, { exclude: ["tool-expand"] }).some((tip) => tip.id === "tool-expand"));
+  assert.equal(
+    rotatingFooterTip(TUI_COMMANDS, 0, { exclude: ["tool-expand"] }),
+    "Ctrl+F find in transcript",
+  );
+  // A disabled binding leaves the cycle; it returns as soon as it is enabled.
+  const disabledPalette = TUI_COMMANDS.map((command) =>
+    command.id === "palette" ? { ...command, idleOnly: true } : command,
+  );
+  assert.ok(
+    !footerTips(disabledPalette, { running: true }).some((tip) => tip.id === "palette"),
+    "an idle-only binding is not advertised while a turn runs",
+  );
+  assert.ok(
+    footerTips(disabledPalette, { running: false }).some((tip) => tip.id === "palette"),
+    "it is advertised again when idle",
+  );
+  // A registry without these commands advertises nothing rather than a fake chord.
+  assert.deepEqual(footerTips([]), []);
+  assert.equal(rotatingFooterTip([], 7), "");
+  // Only registry commands that exist are advertised: every spec resolves.
+  assert.equal(FOOTER_TIPS.filter((spec) => findCommand(TUI_COMMANDS, spec.id) === undefined).length, 0);
+});
+
+test("footer hints: the tool-fold action leads and never repeats in the rotation", () => {
+  assert.equal(composeStatusHints(TUI_COMMANDS, 0), "Ctrl+T fold tool output");
+  assert.equal(composeStatusHints(TUI_COMMANDS, 1), "Ctrl+F find in transcript");
+  const fold = { commandId: "tool-expand", label: "expand tool" };
+  assert.equal(
+    composeStatusHints(TUI_COMMANDS, 0, { fold }),
+    "Ctrl+T expand tool · Ctrl+F find in transcript",
+  );
+  assert.equal(
+    composeStatusHints(TUI_COMMANDS, 1, { fold: { commandId: "tool-expand", label: "collapse tool" } }),
+    "Ctrl+T collapse tool · Ctrl+P commands",
+  );
+  assert.ok(!composeStatusHints(TUI_COMMANDS, 0, { fold })?.includes("fold tool output"), "no duplicate fold chord");
+  // An unknown fold id degrades to the rotation instead of an empty lead.
+  assert.equal(
+    composeStatusHints(TUI_COMMANDS, 0, { fold: { commandId: "does-not-exist", label: "x" } }),
+    "Ctrl+T fold tool output",
+  );
+  assert.equal(composeStatusHints([], 0), undefined);
+});
+
+test("status bar: the transient hint takes the hint slot, clipped, never displacing activity", () => {
+  const activity = "waiting for approval: write notes.txt";
+  // One hint slot, not two: the transient replaces the projection hint.
+  const [, second] = statusBarSegments({
+    mode: "consult",
+    activity,
+    hints: "Ctrl+P commands",
+    transientHint: APPROVAL_PARKED_HINT,
+  });
+  assert.deepEqual(
+    second.slice(0, 2).map((segment) => segment.text),
+    [activity, APPROVAL_PARKED_HINT],
+  );
+  assert.equal(second[1]?.clip, true, "the transient slot is clipped, not dropped whole");
+  assert.ok(!second.some((segment) => segment.text === "Ctrl+P commands"));
+
+  // At 120 the quit-path copy is whole; at 80 it is clipped with a real ellipsis.
+  const wide = renderStatusBar(
+    { mode: "consult", activity, transientHint: APPROVAL_PARKED_HINT, hints: "Ctrl+T fold tool output" },
+    { width: 120 },
+  )[1] ?? "";
+  assert.equal(wide.trimEnd(), `${activity} · ${APPROVAL_PARKED_HINT}`);
+  const narrow = renderStatusBar(
+    { mode: "consult", activity, transientHint: APPROVAL_PARKED_HINT },
+    { width: 80 },
+  )[1] ?? "";
+  assert.ok(narrow.startsWith(`${activity} · deny to continue`), JSON.stringify(narrow));
+  assert.ok(narrow.trimEnd().endsWith("…"), "the clipped copy ends with an ellipsis");
+  assert.equal(styledWidth(narrow), 80);
+  // At 40 columns the activity alone fills the row: the slot is omitted whole,
+  // never cut to a misleading fragment, and the row never overflows.
+  const tiny = renderStatusBar(
+    { mode: "consult", activity, transientHint: APPROVAL_PARKED_HINT },
+    { width: 40 },
+  )[1] ?? "";
+  assert.equal(tiny.trimEnd(), activity);
+  // Without a transient the rotating hint stays in the same slot.
+  assert.equal(
+    (renderStatusBar(
+      { mode: "consult", activity: "working", seniorModel: "s", juniorModel: "j", hints: "Ctrl+T fold tool output" },
+      { width: 120 },
+    )[1] ?? "").trimEnd(),
+    "working · Ctrl+T fold tool output",
+  );
+  for (const width of [40, 80, 120]) {
+    assertRows(renderStatusBar({ mode: "consult", activity, transientHint: APPROVAL_PARKED_HINT }, { width }), width, 2);
+  }
+
+  // CJK/emoji copy clips on a grapheme boundary and keeps the exact width.
+  for (const width of [40, 60, 80]) {
+    const rows = renderStatusBar(
+      { mode: "consult", activity: "working", transientHint: "拒绝批准以继续 你好 😀 然后按 Ctrl+C 停止" },
+      { width },
+    );
+    assertRows(rows, width, 2);
+    const row = stripAnsi(rows[1] ?? "");
+    assert.ok(row.startsWith("working · 拒绝批准"), JSON.stringify(row));
+    assert.ok(!row.includes("\ufffd"));
+  }
+
+  // The slot choice is deterministic and honest: a parked approval outranks a
+  // one-shot hint; a blank hint is no hint at all.
+  assert.equal(transientHintFor({ approvalParked: true, transient: "x" }), APPROVAL_PARKED_HINT);
+  assert.equal(transientHintFor({ transient: "turn stopped" }), "turn stopped");
+  assert.equal(transientHintFor({ transient: "   " }), undefined);
+  assert.equal(transientHintFor({}), undefined);
+  // The quit-path copy names the documented way out and never invents a chord.
+  assert.match(APPROVAL_PARKED_HINT, /deny/);
+  assert.match(APPROVAL_PARKED_HINT, /Ctrl\+C/);
+  assert.match(APPROVAL_PARKED_HINT, /after it resolves/);
 });

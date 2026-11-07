@@ -3,7 +3,8 @@
  *
  * One table powers everything an operator can discover: the Ctrl+P palette,
  * the `?` help overlay, the `/help` text, slash-command lookup, key matching
- * in the app, and the `tui --help` key guide. Key labels are **derived** from
+ * in the app, the status bar's rotating tip ({@link rotatingFooterTip}) and the
+ * `tui --help` key guide. Key labels are **derived** from
  * the `KeyChord` specs — no view or CLI string may spell a shortcut itself —
  * so a binding can never be documented in two different ways.
  *
@@ -657,6 +658,123 @@ export function hintSegments(
     if (keys !== "") parts.push(`${keys} ${hint.label}`);
   }
   return parts.join(" · ");
+}
+
+// --------------------------------------------------------------------------- //
+// status-bar tip rotation
+// --------------------------------------------------------------------------- //
+
+/** One rotating footer tip: a registry command id plus its action phrase. */
+export interface FooterTipSpec {
+  /** Registry command id; an unknown id is skipped by every resolver here. */
+  id: string;
+  /** Short action phrase shown after the derived chord. */
+  label: string;
+  /** Only meaningful while a turn runs (the tip is hidden when idle). */
+  runningOnly?: boolean;
+}
+
+/**
+ * The ordered, high-value footer tips. Each rotation step shows one tip and a
+ * full cycle covers every available action exactly once, highest value first;
+ * every chord is derived from this registry, so a tip can never document a
+ * binding the app does not have.
+ */
+export const FOOTER_TIPS: readonly FooterTipSpec[] = [
+  { id: "tool-expand", label: "fold tool output" },
+  { id: "find", label: "find in transcript" },
+  { id: "palette", label: "commands" },
+  { id: "help", label: "keys and help" },
+  { id: "history-search", label: "search prompt history" },
+  { id: "panel", label: "status panel" },
+  { id: "cancel", label: "stop the turn", runningOnly: true },
+];
+
+/** Options for the footer-tip rotation. */
+export interface FooterTipOptions {
+  /** A turn is running: running-only tips join and idle-only ones leave. */
+  running?: boolean;
+  /** Command ids to leave out of this cycle (e.g. a fold hint already leading). */
+  exclude?: readonly string[];
+}
+
+/** One resolved tip: the registry command, its phrase and the printed hint. */
+export interface FooterTip {
+  id: string;
+  label: string;
+  hint: string;
+}
+
+/**
+ * Resolve the tips available in the current state, in rotation order. A tip is
+ * skipped when its command is unknown, unbound (no chord) or disabled now, so
+ * the footer never advertises an action the operator cannot take.
+ */
+export function footerTips(
+  commands: readonly TuiCommand[] = TUI_COMMANDS,
+  options: FooterTipOptions = {},
+): FooterTip[] {
+  const tips: FooterTip[] = [];
+  for (const spec of FOOTER_TIPS) {
+    const command = findCommand(commands, spec.id);
+    if (command === undefined) continue;
+    if (spec.runningOnly === true && options.running !== true) continue;
+    if (options.exclude?.includes(spec.id) === true) continue;
+    if (!isCommandEnabled(command, options)) continue;
+    const keys = formatKeys(command);
+    if (keys === "") continue;
+    tips.push({ id: spec.id, label: spec.label, hint: `${keys} ${spec.label}` });
+  }
+  return tips;
+}
+
+/**
+ * Deterministic rotation: `step` modulo the available tip count. Callers supply
+ * the step from state they already own (a turn/activity counter); this module
+ * reads no clock and no randomness, so the same step and state always render
+ * the same tip. Consecutive steps never repeat a tip while two or more are
+ * available, and one full cycle shows every available high-value action once.
+ * Returns `""` when no tip is available so callers can keep their own fallback.
+ */
+export function rotatingFooterTip(
+  commands: readonly TuiCommand[] = TUI_COMMANDS,
+  step = 0,
+  options: FooterTipOptions = {},
+): string {
+  const tips = footerTips(commands, options);
+  if (tips.length === 0) return "";
+  const safeStep = Number.isFinite(step) ? Math.floor(step) : 0;
+  const index = ((safeStep % tips.length) + tips.length) % tips.length;
+  return tips[index]?.hint ?? "";
+}
+
+/** Options for {@link composeStatusHints}. */
+export interface StatusHintOptions extends FooterTipOptions {
+  /** The leading fold action when a tool row is on screen (null otherwise). */
+  fold?: { commandId: string; label: string } | null;
+}
+
+/**
+ * Compose the status bar's row-two hint: one rotating tip, led by the tool-fold
+ * action whenever a tool row is on screen. The fold action is removed from the
+ * rotation so the same chord never appears twice in one hint. Returns
+ * `undefined` when nothing can be advertised (the caller keeps its fallback).
+ */
+export function composeStatusHints(
+  commands: readonly TuiCommand[] = TUI_COMMANDS,
+  step = 0,
+  options: StatusHintOptions = {},
+): string | undefined {
+  const fold = options.fold ?? null;
+  const tip = rotatingFooterTip(commands, step, {
+    ...(options.running !== undefined ? { running: options.running } : {}),
+    ...(fold !== null ? { exclude: [fold.commandId] } : {}),
+  });
+  const foldHint = fold === null
+    ? ""
+    : hintSegments(commands, [{ id: fold.commandId, label: fold.label }]);
+  if (foldHint === "") return tip === "" ? undefined : tip;
+  return tip === "" ? foldHint : `${foldHint} · ${tip}`;
 }
 
 // --------------------------------------------------------------------------- //

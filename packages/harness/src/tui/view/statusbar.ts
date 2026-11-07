@@ -1,6 +1,34 @@
 import { TUI_COMMANDS, hintSegments } from "../keymap.ts";
-import { clipStyled, fitStyled, styledWidth } from "../screen.ts";
+import { clipDisplay, clipStyled, fitStyled, styledWidth } from "../screen.ts";
 import { plainTheme, type Theme, type ThemeToken } from "../theme.ts";
+
+/**
+ * Honest way out while a mutation/shell approval is parked. The approval panel
+ * owns the decision keys, so Ctrl+C is inert until the request is answered:
+ * deny first, the turn continues, and Ctrl+C can then stop it. Copy only — no
+ * key handler reads this constant and no binding changes.
+ */
+export const APPROVAL_PARKED_HINT =
+  "deny to continue — Ctrl+C stops the turn after it resolves";
+
+/** How a transient slot is chosen for one render. */
+export interface TransientHintOptions {
+  /** An approval is parked: its quit-path copy outranks a one-shot hint. */
+  approvalParked?: boolean;
+  /** A one-shot transient hint (e.g. after a stopped turn). */
+  transient?: string | undefined;
+}
+
+/**
+ * Choose the transient status-bar slot: a parked approval always explains the
+ * quit path, otherwise a live one-shot hint wins, otherwise there is none and
+ * the rotating projection hint keeps the row.
+ */
+export function transientHintFor(options: TransientHintOptions): string | undefined {
+  if (options.approvalParked === true) return APPROVAL_PARKED_HINT;
+  const text = options.transient?.trim() ?? "";
+  return text === "" ? undefined : text;
+}
 
 export interface StatusBarState {
   mode: string;
@@ -18,12 +46,26 @@ export interface StatusBarState {
   /** Null is an honest unknown price; undefined omits the cost segment. */
   cost?: number | null;
   elapsedMs?: number;
+  /** The rotating projection hint (or the app's composed tool-fold hint). */
   hints?: string;
+  /**
+   * Higher-priority, one-shot hint (a parked approval, a just-stopped turn).
+   * It replaces the projection hint while present and is width-clipped rather
+   * than dropped, so the actionable copy is never cut into a false label; the
+   * activity segment and the mode/models row are never displaced.
+   */
+  transientHint?: string;
 }
 
 export interface StatusSegment {
   text: string;
   tone: ThemeToken;
+  /**
+   * Fit by clipping into the remaining cells (with a real ellipsis) instead of
+   * being dropped whole. Used by the transient slot, whose actionable copy
+   * should be shown as far as it fits; projection hints stay whole segments.
+   */
+  clip?: boolean;
 }
 
 export interface StatusBarOptions {
@@ -81,17 +123,25 @@ export function statusBarSegments(state: StatusBarState): [StatusSegment[], Stat
   // still fit at ordinary terminal widths; the metrics after it are optional
   // detail that may be dropped first. The "/settings configures models"
   // warning is last because row one already names an unset role as a warning.
+  // A transient hint is the highest-priority occupant of the hint slot: it is
+  // clipped to whatever the activity leaves, and the rotating hint returns once
+  // it expires.
   const second: StatusSegment[] = [];
   if (state.activity?.trim()) {
     second.push({ text: state.activity.trim(), tone: state.running === true ? "warning" : "notice" });
   }
-  second.push({
-    text: state.hints ?? hintSegments(TUI_COMMANDS, [
-      { id: "palette", label: "commands" },
-      { id: "help", label: "help" },
-    ]),
-    tone: "dim",
-  });
+  const transient = state.transientHint?.trim() ?? "";
+  if (transient !== "") {
+    second.push({ text: transient, tone: "dim", clip: true });
+  } else {
+    second.push({
+      text: state.hints ?? hintSegments(TUI_COMMANDS, [
+        { id: "palette", label: "commands" },
+        { id: "help", label: "help" },
+      ]),
+      tone: "dim",
+    });
+  }
   if (state.contextTokens !== undefined || state.contextWindow !== undefined) {
     const used = state.contextTokens === undefined ? "?" : formatCount(state.contextTokens);
     const total = state.contextWindow === undefined ? "?" : formatCount(state.contextWindow);
@@ -122,9 +172,14 @@ export function statusBarSegments(state: StatusBarState): [StatusSegment[], Stat
   return [first, second];
 }
 
+/** Minimum cells worth spending on a clipped segment; below it the slot is omitted. */
+const MIN_CLIP_COLUMNS = 8;
+
 /**
  * Fit as many whole segments as possible, in priority order. An over-wide
- * segment is omitted, never cut in half; later smaller segments may still fit.
+ * projection segment is omitted, never cut in half; later smaller segments may
+ * still fit. A `clip` segment (the transient hint slot) is instead clipped into
+ * whatever cells remain, with a real ellipsis and never mid-grapheme.
  */
 export function fitStatusSegments(
   segments: readonly StatusSegment[],
@@ -137,10 +192,27 @@ export function fitStatusSegments(
   let used = 0;
   for (const segment of segments) {
     if (segment.text === "") continue;
-    const addition = row === "" ? segment.text.length === 0 ? 0 : styledWidth(segment.text) : styledWidth(` · ${segment.text}`);
+    const separator = row === "" ? "" : " · ";
+    const separatorWidth = row === "" ? 0 : styledWidth(separator);
+    const remaining = columns - used - separatorWidth;
+    if (remaining <= 0) continue;
+    if (segment.clip === true) {
+      // The transient slot is clipped, not dropped: show as much actionable
+      // copy as fits, then let the rest of the row continue.
+      if (remaining < MIN_CLIP_COLUMNS) continue;
+      const text = styledWidth(segment.text) <= remaining
+        ? segment.text
+        : clipDisplay(segment.text, remaining);
+      if (text === "") continue;
+      if (row !== "") row += theme.paint("dim", separator);
+      row += theme.paint(segment.tone, text);
+      used += separatorWidth + styledWidth(text);
+      continue;
+    }
+    const addition = separatorWidth + styledWidth(segment.text);
     if (used + addition > columns) continue;
     if (row === "") row += theme.paint(segment.tone, segment.text);
-    else row += theme.paint("dim", " · ") + theme.paint(segment.tone, segment.text);
+    else row += theme.paint("dim", separator) + theme.paint(segment.tone, segment.text);
     used += addition;
   }
   return clipStyled(row, columns);

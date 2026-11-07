@@ -15,7 +15,7 @@ import { test } from "node:test";
 
 import { resolveConfig } from "../src/config.ts";
 import { toNdjsonLine, type ToolCallStreamEvent } from "../src/runstream.ts";
-import { runTuiApp, type TuiIO } from "../src/tui/app.ts";
+import { CANCELLED_TURN_HINT, runTuiApp, type TuiIO } from "../src/tui/app.ts";
 import { stripAnsi } from "../src/tui/render.ts";
 import { ANSI } from "../src/tui/render.ts";
 import { resolveTheme } from "../src/tui/theme.ts";
@@ -110,6 +110,10 @@ function startApp(extra: Partial<Parameters<typeof runTuiApp>[0]> = {}): Harness
 }
 
 const textOf = (output: FakeOutput): string => stripAnsi(output.data);
+
+/** The newest fully rendered frame (rows joined with newlines). */
+const lastFrameText = (output: FakeOutput): string =>
+  stripAnsi(output.data.split(ANSI.cursorHome).at(-1) ?? "");
 
 async function quit(input: FakeInput, app: Promise<number>): Promise<number> {
   // Esc precedence: close overlay → cancel a running turn → clear a draft →
@@ -238,7 +242,14 @@ test("slash commands: /mode, /theme, /settings dialog and retry guard", async ()
   await waitFor(() => textOf(output).toLowerCase().includes("theme: light"));
   input.type("/settings");
   input.enter();
-  assert.ok(await waitFor(() => textOf(output).includes("onboard")), "settings dialog opens");
+  assert.ok(
+    await waitFor(() => textOf(output).includes("PROVIDER SETTINGS")),
+    "provider settings dialog opens",
+  );
+  assert.ok(
+    textOf(output).includes("API key: not set"),
+    "settings shows the effective, key-free connection state",
+  );
   input.key("escape");
   input.type("/retry");
   input.enter();
@@ -285,18 +296,18 @@ test("resize repaints immediately at the new width", async () => {
   assert.equal(code, 0);
 });
 
-test("welcome frame: status hints fit at 80 columns and the composer has no mode/models meta row", async () => {
+test("welcome frame: the rotating status tip fits at 80 columns and the composer has no mode/models meta row", async () => {
   const { app, input, output } = startApp();
   assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
   const text = textOf(output);
-  // The hint segment now outranks optional metrics and the duplicated
-  // "/settings configures models" warning, so at the ordinary 80-column default
-  // it appears on row two instead of being squeezed out.
+  // The hint slot now carries a registry-derived rotating tip (the fold action
+  // first, since no turn has run yet) instead of the old static pair; the tip
+  // outranks optional metrics on the 80-column row.
   assert.ok(
-    text.includes("ready — type a task and press Enter · Ctrl+P commands · ? / F1 help"),
-    "the default palette/help hint is visible on the second status row",
+    text.includes("ready — type a task and press Enter · Ctrl+T fold tool output"),
+    "the first rotating tip is visible on the second status row",
   );
-  const frame = stripAnsi(output.data.split(ANSI.cursorHome).at(-1) ?? "");
+  const frame = lastFrameText(output);
   const lines = frame.split("\n");
   const composerTop = lines.findIndex((line) => line.includes("MESSAGE"));
   assert.ok(composerTop >= 0, "the composer box is rendered");
@@ -432,6 +443,76 @@ test("/models senior <name> applies the model when nothing pins it", async () =>
   input.type("/models senior my-picked-model");
   input.enter();
   await waitFor(() => textOf(output).includes("senior model set to my-picked-model"));
+  const code = await quit(input, app);
+  assert.equal(code, 0);
+});
+
+test("each accepted turn advances the registry-derived status tip", async () => {
+  const { app, input, output } = startApp();
+  assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+  assert.ok(
+    textOf(output).includes("ready — type a task and press Enter · Ctrl+T fold tool output"),
+    "turn zero shows the first tip",
+  );
+
+  input.type("say one");
+  input.enter();
+  // Wait for the completed turn, not just the streamed decision: the tip
+  // advances when the turn is accepted, but the next submission needs idle.
+  assert.ok(
+    await waitFor(() => /ready — \d+\/\d+ tokens/.test(lastFrameText(output)), 30_000),
+    "the first turn completed",
+  );
+  assert.ok(
+    lastFrameText(output).includes("Ctrl+F find in transcript"),
+    "turn one advances to the find tip",
+  );
+  assert.ok(!lastFrameText(output).includes("fold tool output"), "no stale tip repeats");
+
+  input.type("say two");
+  input.enter();
+  assert.ok(
+    await waitFor(
+      () =>
+        /ready — \d+\/\d+ tokens/.test(lastFrameText(output)) &&
+        lastFrameText(output).includes("Ctrl+P commands"),
+      30_000,
+    ),
+    "turn two advances to the palette tip",
+  );
+  // No tool row is on screen, so the projection hint is the tip alone.
+  assert.ok(!lastFrameText(output).includes("expand tool"));
+  const code = await quit(input, app);
+  assert.equal(code, 0);
+});
+
+test("a stopped turn shows a bounded transient hint, then the rotation returns", async () => {
+  const { app, input, output } = startApp();
+  assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+  input.type("say hello");
+  input.enter();
+  // The mock turn advances on microtasks queued behind these keypresses, so the
+  // abort lands while the turn is still running (the same seam the mid-run test
+  // uses); the copy must explain the way out, never change the key handling.
+  input.key("c", { ctrl: true });
+  assert.ok(await waitFor(() => textOf(output).includes("turn cancelled")), "the turn is stopped");
+  assert.ok(
+    await waitFor(() => lastFrameText(output).includes(CANCELLED_TURN_HINT)),
+    "the quit-path copy owns the hint slot once",
+  );
+
+  // The slot has a render budget, not a clock: explicit repaints exhaust it and
+  // the rotating tip (one accepted turn ⇒ the find tip) returns.
+  for (let index = 0; index < 8; index += 1) output.resize(80, 24);
+  assert.ok(
+    await waitFor(() => !lastFrameText(output).includes(CANCELLED_TURN_HINT)),
+    "the transient hint expired",
+  );
+  assert.ok(
+    lastFrameText(output).includes("Ctrl+F find in transcript"),
+    "the rotation returned after the transient slot",
+  );
+  assert.equal(lastFrameText(output).split("\n").length, 24, "the frame geometry is unchanged");
   const code = await quit(input, app);
   assert.equal(code, 0);
 });

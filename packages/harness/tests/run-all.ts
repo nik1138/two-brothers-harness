@@ -82,3 +82,4 @@ import "./tuibasecommands.test.ts";
 import "./tuithinking.test.ts";
 import "./tuiworkspace.test.ts";
 import "./tuitodo.test.ts";
+import "./tuiproviders.test.ts";
