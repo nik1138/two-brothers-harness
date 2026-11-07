@@ -1689,6 +1689,396 @@ test("provider presets: GET exposes additive seed/customized flags", async () =>
   }
 });
 
+test("provider presets: reset restores the canonical seed and preserves refs/settings/plugins", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tb-provider-reset-"));
+  const savedEnvKey = process.env.DEEPSEEK_API_KEY;
+  process.env.DEEPSEEK_API_KEY = "reset-env-secret";
+  const canonical = {
+    name: "deepseek",
+    base_url: "https://api.deepseek.com/v1",
+    api_key_set: true,
+    kind: "openai-compatible",
+    models: ["deepseek-chat", "deepseek-reasoner"],
+    seed: true,
+    customized: false,
+  };
+  let expectedSettings: Record<string, any> = {};
+  let expectedNames: string[] = [];
+  try {
+    const first = await startServer({ sessionsDir: dir });
+    try {
+      const initial = await get<Record<string, any>>(first.base, "/api/providers");
+      assert.equal(initial.status, 200);
+      const seeded = initial.body.providers as Array<Record<string, any>>;
+      const seedNames = seeded.map((preset) => preset.name);
+      assert.deepEqual(seeded.find((preset) => preset.name === "deepseek"), canonical);
+
+      const unrelated = await post<Record<string, any>>(first.base, "/api/providers", {
+        name: "Unrelated",
+        base_url: "http://127.0.0.1:5555/v1",
+        api_key: "unrelated-provider-secret",
+        models: ["unrelated-model"],
+      });
+      assert.equal(unrelated.status, 201);
+      const configured = await api<Record<string, any>>(first.base, "PUT", "/api/settings", {
+        senior: {
+          provider: "mock",
+          model: "senior-before-reset",
+          base_url: "http://127.0.0.1:6001/v1",
+          api_key: "senior-role-secret",
+          provider_ref: "deepseek",
+        },
+        junior: {
+          provider: "mock",
+          model: "junior-before-reset",
+          provider_ref: "deepseek",
+        },
+        plugins: ["notes"],
+      });
+      assert.equal(configured.status, 200);
+      expectedSettings = configured.body;
+      assert.equal(expectedSettings.senior.provider_ref, "deepseek");
+      assert.equal(expectedSettings.junior.provider_ref, "deepseek");
+
+      const customized = await api<Record<string, any>>(first.base, "PUT", "/api/providers/deepseek", {
+        base_url: "https://proxy.example/v1",
+        api_key: "reset-override-secret",
+        kind: "anthropic",
+        models: ["proxy-model", "proxy-model-2"],
+      });
+      assert.equal(customized.status, 200);
+      assert.equal(customized.body.provider.api_key_set, true);
+
+      // Legacy files may contain more than one case-variant override. Reset
+      // must remove all of them, not merely the row that currently wins.
+      const stored = first.handle.state.settingsStore.readProviders();
+      const override = stored.find((preset) => preset.name.toLowerCase() === "deepseek");
+      assert.ok(override);
+      first.handle.state.settingsStore.write(first.handle.state.settings.snapshot(), undefined, [
+        ...stored,
+        { ...override, name: "DeepSeek", api_key: "" },
+        {
+          ...override,
+          name: "DEEPSEEK",
+          base_url: "https://legacy.example/v1",
+          api_key: "",
+          models: ["legacy-model"],
+        },
+      ]);
+
+      const reset = await post<Record<string, any>>(first.base, "/api/providers/DeepSeek/reset");
+      assert.equal(reset.status, 200);
+      assert.deepEqual(reset.body, { provider: canonical });
+      assert.deepEqual(Object.keys(reset.body), ["provider"]);
+      assert.deepEqual(Object.keys(reset.body.provider), [
+        "name",
+        "base_url",
+        "api_key_set",
+        "kind",
+        "models",
+        "seed",
+        "customized",
+      ]);
+      const serializedReset = JSON.stringify(reset.body);
+      for (const secret of ["reset-env-secret", "reset-override-secret"]) {
+        assert.ok(!serializedReset.includes(secret), "reset response must not contain key material");
+      }
+
+      // Both role refs survive in memory and through the public settings view.
+      assert.equal(first.handle.state.settings.public().senior.provider_ref, "deepseek");
+      assert.equal(first.handle.state.settings.public().junior.provider_ref, "deepseek");
+      const settingsAfter = await get<Record<string, any>>(first.base, "/api/settings");
+      assert.deepEqual(settingsAfter.body, expectedSettings);
+
+      const onDisk = fs.readFileSync(path.join(dir, "settings.json"), "utf-8");
+      for (const secret of [
+        "reset-env-secret",
+        "reset-override-secret",
+        "unrelated-provider-secret",
+        "senior-role-secret",
+      ]) {
+        assert.ok(!onDisk.includes(secret), "settings.json must not contain plaintext key material");
+      }
+      const raw = JSON.parse(onDisk) as Record<string, any>;
+      assert.equal(raw.senior.provider_ref, "deepseek");
+      assert.equal(raw.junior.provider_ref, "deepseek");
+      assert.deepEqual(raw.plugins, ["notes"]);
+      const rawProviders = raw.providers as Array<Record<string, any>>;
+      assert.ok(!rawProviders.some((preset) => preset.name.toLowerCase() === "deepseek"));
+      assert.equal(rawProviders.filter((preset) => preset.name === "Unrelated").length, 1);
+      assert.equal(rawProviders[0].base_url, "http://127.0.0.1:5555/v1");
+
+      const listed = await get<Record<string, any>>(first.base, "/api/providers");
+      const providers = listed.body.providers as Array<Record<string, any>>;
+      expectedNames = [...seedNames, "Unrelated"];
+      assert.deepEqual(providers.map((preset) => preset.name), expectedNames);
+      assert.deepEqual(providers.find((preset) => preset.name === "deepseek"), canonical);
+      assert.deepEqual(providers.find((preset) => preset.name === "Unrelated"), {
+        name: "Unrelated",
+        base_url: "http://127.0.0.1:5555/v1",
+        api_key_set: true,
+        kind: "openai-compatible",
+        models: ["unrelated-model"],
+        seed: false,
+        customized: true,
+      });
+    } finally {
+      await first.close();
+    }
+
+    // A fresh server over the same directory sees the pristine seed and the
+    // unchanged role refs/settings; no canonical seed override was persisted.
+    const second = await startServer({ sessionsDir: dir });
+    try {
+      const restartedSettings = await get<Record<string, any>>(second.base, "/api/settings");
+      assert.deepEqual(restartedSettings.body, expectedSettings);
+      assert.equal(second.handle.state.settings.public().senior.provider_ref, "deepseek");
+      assert.equal(second.handle.state.settings.public().junior.provider_ref, "deepseek");
+      const restarted = await get<Record<string, any>>(second.base, "/api/providers");
+      const providers = restarted.body.providers as Array<Record<string, any>>;
+      assert.deepEqual(providers.map((preset) => preset.name), expectedNames);
+      assert.deepEqual(providers.find((preset) => preset.name === "deepseek"), canonical);
+    } finally {
+      await second.close();
+    }
+  } finally {
+    if (savedEnvKey === undefined) delete process.env.DEEPSEEK_API_KEY;
+    else process.env.DEEPSEEK_API_KEY = savedEnvKey;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("provider presets: reset errors are stable and DELETE semantics are unchanged", async () => {
+  const srv = await startServer();
+  try {
+    const pristine = await post<Record<string, any>>(srv.base, "/api/providers/openai/reset");
+    assert.equal(pristine.status, 409);
+    assert.deepEqual(pristine.body, { detail: "provider is not customized: openai" });
+
+    const unknown = await post<Record<string, any>>(srv.base, "/api/providers/Ghost/reset");
+    assert.equal(unknown.status, 404);
+    assert.deepEqual(unknown.body, { detail: "not found" });
+
+    const created = await post<Record<string, any>>(srv.base, "/api/providers", {
+      name: "Mine",
+      base_url: "http://127.0.0.1:5555/v1",
+    });
+    assert.equal(created.status, 201);
+    const nonSeed = await post<Record<string, any>>(srv.base, "/api/providers/mine/reset");
+    assert.equal(nonSeed.status, 400);
+    assert.deepEqual(nonSeed.body, { detail: "only built-in provider presets can be reset: mine" });
+
+    // A failed reset does not remove a custom provider or change DELETE's
+    // existing custom-provider ref clearing behavior.
+    assert.equal(
+      (await api(srv.base, "PUT", "/api/settings", { senior: { provider_ref: "Mine" } })).status,
+      200,
+    );
+    const removedCustom = await api<Record<string, any>>(srv.base, "DELETE", "/api/providers/mine");
+    assert.equal(removedCustom.status, 200);
+    assert.deepEqual(removedCustom.body, { removed: "mine" });
+    assert.equal((await get<Record<string, any>>(srv.base, "/api/settings")).body.senior.provider_ref, null);
+
+    // DELETE of a seed override still restores the seed and clears refs; the
+    // new reset route is the non-destructive operation that preserves them.
+    assert.equal(
+      (await api(srv.base, "PUT", "/api/providers/openai", { base_url: "https://proxy.example/v1" })).status,
+      200,
+    );
+    assert.equal(
+      (await api(srv.base, "PUT", "/api/settings", { senior: { provider_ref: "openai" } })).status,
+      200,
+    );
+    const removedOverride = await api<Record<string, any>>(srv.base, "DELETE", "/api/providers/OpenAI");
+    assert.equal(removedOverride.status, 200);
+    assert.deepEqual(removedOverride.body, { removed: "OpenAI" });
+    assert.equal((await get<Record<string, any>>(srv.base, "/api/settings")).body.senior.provider_ref, null);
+    const providers = (await get<Record<string, any>>(srv.base, "/api/providers")).body
+      .providers as Array<Record<string, any>>;
+    const openai = providers.find((preset) => preset.name === "openai");
+    assert.equal(openai?.base_url, "https://api.openai.com/v1");
+    assert.equal(openai?.seed, true);
+    assert.equal(openai?.customized, false);
+    assert.equal((await api(srv.base, "DELETE", "/api/providers/Ghost")).status, 404);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("provider presets: reset clears a literal stored key and reports the env-backed key as unset", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tb-provider-reset-env-"));
+  // Env isolation: the deepseek seed resolves DEEPSEEK_API_KEY at use time, so
+  // the variable must be absent for this test only (restored in the finally).
+  const savedEnvKey = process.env.DEEPSEEK_API_KEY;
+  delete process.env.DEEPSEEK_API_KEY;
+  const literalSecret = "reset-literal-secret";
+  const canonical = {
+    name: "deepseek",
+    base_url: "https://api.deepseek.com/v1",
+    api_key_set: false,
+    kind: "openai-compatible",
+    models: ["deepseek-chat", "deepseek-reasoner"],
+    seed: true,
+    customized: false,
+  };
+  try {
+    const first = await startServer({ sessionsDir: dir });
+    try {
+      // A literal stored key on the seed override reports as set even though
+      // the seed's env-backed key is absent.
+      const customized = await api<Record<string, any>>(
+        first.base,
+        "PUT",
+        "/api/providers/deepseek",
+        {
+          base_url: "https://proxy.example/v1",
+          api_key: literalSecret,
+          models: ["proxy-model"],
+        },
+      );
+      assert.equal(customized.status, 200);
+      assert.equal(customized.body.provider.api_key_set, true);
+      assert.ok(!JSON.stringify(customized.body).includes(literalSecret));
+
+      const stored = first.handle.state.settingsStore.readProviders();
+      assert.equal(
+        stored.find((preset) => preset.name.toLowerCase() === "deepseek")?.api_key,
+        literalSecret,
+        "the literal key is stored (decrypted in memory)",
+      );
+      const beforeDisk = fs.readFileSync(path.join(dir, "settings.json"), "utf-8");
+      assert.ok(!beforeDisk.includes(literalSecret), "settings.json encrypts the stored key");
+
+      const before = await get<Record<string, any>>(first.base, "/api/providers");
+      const beforePreset = (before.body.providers as Array<Record<string, any>>).find(
+        (preset) => preset.name === "deepseek",
+      );
+      assert.equal(beforePreset?.api_key_set, true);
+      assert.equal(beforePreset?.customized, true);
+      assert.ok(!JSON.stringify(before.body).includes(literalSecret));
+
+      const reset = await post<Record<string, any>>(first.base, "/api/providers/DeepSeek/reset");
+      assert.equal(reset.status, 200);
+      // Back to the canonical seed: no stored key and no env key -> unset.
+      assert.deepEqual(reset.body, { provider: canonical });
+      assert.equal(reset.body.provider.api_key_set, false);
+      assert.ok(
+        !JSON.stringify(reset.body).includes(literalSecret),
+        "the reset response must not echo key material",
+      );
+
+      const after = await get<Record<string, any>>(first.base, "/api/providers");
+      const afterPreset = (after.body.providers as Array<Record<string, any>>).find(
+        (preset) => preset.name === "deepseek",
+      );
+      assert.deepEqual(afterPreset, canonical);
+      assert.ok(!JSON.stringify(after.body).includes(literalSecret));
+
+      const onDisk = fs.readFileSync(path.join(dir, "settings.json"), "utf-8");
+      assert.ok(
+        !onDisk.includes(literalSecret),
+        "settings.json must not contain plaintext key material",
+      );
+      const raw = JSON.parse(onDisk) as Record<string, any>;
+      assert.deepEqual(raw.providers, [], "the canonical seed is never persisted");
+    } finally {
+      await first.close();
+    }
+
+    // Still unset after a restart: neither the override nor an env key came back.
+    const second = await startServer({ sessionsDir: dir });
+    try {
+      const restarted = await get<Record<string, any>>(second.base, "/api/providers");
+      const deepseek = (restarted.body.providers as Array<Record<string, any>>).find(
+        (preset) => preset.name === "deepseek",
+      );
+      assert.deepEqual(deepseek, canonical);
+    } finally {
+      await second.close();
+    }
+  } finally {
+    if (savedEnvKey === undefined) delete process.env.DEEPSEEK_API_KEY;
+    else process.env.DEEPSEEK_API_KEY = savedEnvKey;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("provider presets: reset preserves options-carrying plugin entries in memory and on disk", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tb-provider-reset-plugins-"));
+  // The store accepts `{path, options}` entries; reset rewrites only the
+  // provider section, so the exact entry (options included) must survive.
+  const pluginEntry = { path: "notes", options: { foo: 1 } };
+  try {
+    const first = await startServer({ sessionsDir: dir });
+    try {
+      const configured = await api<Record<string, any>>(first.base, "PUT", "/api/settings", {
+        plugins: [pluginEntry],
+      });
+      assert.equal(configured.status, 200);
+      assert.deepEqual(configured.body.plugins, [pluginEntry]);
+      assert.deepEqual(first.handle.state.pluginSelection, [pluginEntry]);
+
+      const customized = await api<Record<string, any>>(
+        first.base,
+        "PUT",
+        "/api/providers/deepseek",
+        { base_url: "https://proxy.example/v1", models: ["proxy-model"] },
+      );
+      assert.equal(customized.status, 200);
+      const beforeRaw = JSON.parse(
+        fs.readFileSync(path.join(dir, "settings.json"), "utf-8"),
+      ) as Record<string, any>;
+      assert.deepEqual(beforeRaw.plugins, [pluginEntry]);
+
+      const reset = await post<Record<string, any>>(first.base, "/api/providers/DeepSeek/reset");
+      assert.equal(reset.status, 200);
+      const resetPreset = reset.body.provider;
+      assert.equal(resetPreset.name, "deepseek");
+      assert.equal(resetPreset.customized, false);
+      assert.equal(resetPreset.base_url, "https://api.deepseek.com/v1");
+      assert.deepEqual(resetPreset.models, ["deepseek-chat", "deepseek-reasoner"]);
+
+      // In memory: the manager's selection and the stored list keep the exact
+      // options-carrying entry (never flattened to a bare name).
+      assert.deepEqual(first.handle.state.pluginSelection, [pluginEntry]);
+      assert.deepEqual(first.handle.state.settingsStore.readPlugins(), [pluginEntry]);
+      const settingsAfter = await get<Record<string, any>>(first.base, "/api/settings");
+      assert.deepEqual(settingsAfter.body.plugins, [pluginEntry]);
+
+      // On disk: the same entry, and the seed override is gone.
+      const onDisk = JSON.parse(
+        fs.readFileSync(path.join(dir, "settings.json"), "utf-8"),
+      ) as Record<string, any>;
+      assert.deepEqual(onDisk.plugins, [pluginEntry]);
+      assert.ok(
+        !(onDisk.providers as Array<Record<string, any>>).some(
+          (preset) => preset.name.toLowerCase() === "deepseek",
+        ),
+      );
+    } finally {
+      await first.close();
+    }
+
+    // The plugin entry also round-trips through a fresh server over the same dir.
+    const second = await startServer({ sessionsDir: dir });
+    try {
+      assert.deepEqual(second.handle.state.settingsStore.readPlugins(), [pluginEntry]);
+      assert.deepEqual(second.handle.state.pluginSelection, [pluginEntry]);
+      const restarted = await get<Record<string, any>>(second.base, "/api/settings");
+      assert.deepEqual(restarted.body.plugins, [pluginEntry]);
+      const providers = (await get<Record<string, any>>(second.base, "/api/providers")).body
+        .providers as Array<Record<string, any>>;
+      const deepseek = providers.find((preset) => preset.name === "deepseek");
+      assert.equal(deepseek?.customized, false);
+      assert.equal(deepseek?.base_url, "https://api.deepseek.com/v1");
+    } finally {
+      await second.close();
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Misc contract endpoints
 // ---------------------------------------------------------------------------

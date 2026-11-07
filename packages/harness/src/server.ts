@@ -50,7 +50,11 @@
  *   exists in the built-in seed table, case-insensitive) and `customized` (a
  *   stored preset with that name exists — a PUT-created seed override or a
  *   POST-created custom provider), so clients can tell an untouched seed from
- *   an edited one from a custom entry.
+ *   an edited one from a custom entry. `POST /api/providers/{name}/reset`
+ *   removes a seed's stored override (including legacy case-variant
+ *   duplicates), preserves role references, and returns the pristine public
+ *   seed; unknown names are 404, custom providers are 400, and an untouched
+ *   seed is 409. DELETE keeps its existing removal/ref-clearing behavior.
  * - `GET /api/plugins` lists the plugins discovered by the PluginManager
  *   (`src/plugins.ts`, the plugins.py port) plus load errors, and additively
  *   `diagnostics` (load-time notes plus the last run's binding notes) when
@@ -2184,6 +2188,35 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       const savedName = presets[index].name.toLowerCase();
       const merged = mergedPresets().find((p) => p.name.toLowerCase() === savedName);
       return { provider: merged !== undefined ? publicPreset(merged) : publicProvider(presets[index]) };
+    }),
+  );
+
+  routes.push(
+    compileRoute("POST", "/api/providers/{name}/reset", (ctx) => {
+      const seed = presetById(ctx.params.name);
+      const presets = state.settingsStore.readProviders();
+      if (seed === undefined) {
+        if (presets.some((p) => p.name.toLowerCase() === ctx.params.name.toLowerCase())) {
+          throw new HttpError(400, `only built-in provider presets can be reset: ${ctx.params.name}`);
+        }
+        throw new HttpError(404, "not found");
+      }
+      const folded = seed.name.toLowerCase();
+      const remaining = presets.filter((preset) => preset.name.toLowerCase() !== folded);
+      if (remaining.length === presets.length) {
+        throw new HttpError(409, `provider is not customized: ${seed.name}`);
+      }
+      // Reset only the stored override. Role provider_ref values, plugins and
+      // unrelated stored providers stay intact; the canonical seed is never
+      // persisted and returns to its stable position in the merged view.
+      state.settingsStore.write(state.settings.snapshot(), undefined, remaining);
+      return {
+        provider: {
+          ...publicPreset(seed),
+          seed: true,
+          customized: false,
+        },
+      };
     }),
   );
 
