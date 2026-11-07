@@ -150,6 +150,15 @@ import {
   CLIP_EVIDENCE_CHARS,
   type RuntimeEvent,
 } from "./runevents.ts";
+import {
+  sanitizeTodos,
+  summarizeTodos,
+  todoResultText,
+  TODO_TOOL_DESCRIPTION,
+  TODO_TOOL_NAME,
+  TODO_TOOL_PARAMETERS,
+  type TodoItem,
+} from "./todos.ts";
 
 const FALLBACK_TEXT = "The model did not return a structured reply; using the text as is.";
 
@@ -705,6 +714,13 @@ export interface HarnessResult {
    * (compaction) calls are not role prompt calls and stay out of the trail.
    */
   promptAudits: PromptAuditEntry[];
+  /**
+   * The run's latest plan/todo snapshot, when the model wrote one through the
+   * built-in `todo_write` tool (whole-list replacement, last write wins).
+   * Display state only: it never touches the workspace, the context or the
+   * session JSONL; consumers that do not render a plan can ignore it.
+   */
+  todos?: TodoItem[];
 }
 
 interface CooperationState {
@@ -736,6 +752,12 @@ interface CooperationState {
    * a skill is delivered at most once per run.
    */
   injectedSkills: Set<string>;
+  /**
+   * The latest plan/todo snapshot written through the built-in `todo_write`
+   * tool (whole-list replacement, last write wins). UI state only: never read
+   * by the cooperation flow, never persisted in protocol envelopes.
+   */
+  todos: TodoItem[];
 }
 
 type NodeName =
@@ -1359,15 +1381,17 @@ export class TwoBrothersHarness {
    * The junior's belt: the workspace's tool belt (when configured), plus the
    * `shared` and `junior` scopes of the role-scoped registry. The legacy
    * `options.tools` maps into the junior scope, so existing callers keep
-   * their behavior (Python: the junior's `mcp_tools` + workspace tools).
+   * their behavior (Python: the junior's `mcp_tools` + workspace tools). The
+   * built-in plan tool joins last so existing tool order stays stable.
    */
-  private toolSet(): Tool[] {
+  private toolSet(state: CooperationState): Tool[] {
     const scopes = this.options.toolScopes;
     return [
       ...(this.options.workspace?.asTools() ?? []),
       ...(scopes?.shared ?? []),
       ...(scopes?.junior ?? []),
       ...(this.options.tools ?? []),
+      this.todoWriteTool(state),
     ];
   }
 
@@ -1377,9 +1401,9 @@ export class TwoBrothersHarness {
    * (the pre-registry behavior, kept for back-compat), plus the `shared` and
    * `senior` scopes of the role-scoped registry and the legacy
    * `seniorTools` — all unfiltered, like Python's operator-installed senior
-   * plugin tools.
+   * plugin tools — plus the built-in plan tool.
    */
-  private verificationToolSet(): Tool[] {
+  private verificationToolSet(state: CooperationState): Tool[] {
     const scopes = this.options.toolScopes;
     const verifyName = (tool: Tool): boolean => SENIOR_VERIFY_TOOL_NAMES.has(tool.name);
     return [
@@ -1388,7 +1412,54 @@ export class TwoBrothersHarness {
       ...(scopes?.senior ?? []),
       ...(this.options.tools ?? []).filter(verifyName),
       ...(this.options.seniorTools ?? []),
+      this.todoWriteTool(state),
     ];
+  }
+
+  /**
+   * Whether a belt contains tools that justify running the senior verification
+   * pass. The built-in plan tool is display state, not work to verify, so it
+   * alone never enables the pass (tool-less work runs keep their old behavior)
+   * while still joining the belt whenever the pass runs for real tools.
+   */
+  private hasVerifyTools(tools: readonly Tool[]): boolean {
+    return tools.some((tool) => tool.name !== TODO_TOOL_NAME);
+  }
+
+  /**
+   * The built-in plan tool (`todo_write`) both brothers receive: a whole-list
+   * snapshot with no approval and no workspace access. Invalid arguments are
+   * reported as a JSON error result (the tool never throws); a valid call
+   * replaces the run's plan, emits exactly one additive `todo_updated` runtime
+   * event for the UIs, and returns a compact text result.
+   */
+  private todoWriteTool(state: CooperationState): Tool {
+    return {
+      name: TODO_TOOL_NAME,
+      description: TODO_TOOL_DESCRIPTION,
+      parameters: TODO_TOOL_PARAMETERS,
+      execute: (args) => {
+        const raw = args.todos;
+        if (!Array.isArray(raw)) {
+          return JSON.stringify({
+            tool: TODO_TOOL_NAME,
+            status: "error",
+            error: "todo_write: `todos` must be an array of {content, status} objects",
+          });
+        }
+        const todos = sanitizeTodos(raw);
+        if (raw.length > 0 && todos.length === 0) {
+          return JSON.stringify({
+            tool: TODO_TOOL_NAME,
+            status: "error",
+            error: "todo_write: no valid todo entries (each needs a non-empty content string)",
+          });
+        }
+        state.todos = todos;
+        this.emitRuntime({ type: "todo_updated", todos: todos.map((todo) => ({ ...todo })) });
+        return todoResultText(todos);
+      },
+    };
   }
 
   /**
@@ -1607,7 +1678,7 @@ export class TwoBrothersHarness {
   private async juniorAnswer(state: CooperationState): Promise<NodeResult> {
     const last = state.ctx.events[state.ctx.events.length - 1];
     const kind = last.kind === "delegation" ? "deliverable" : "proposal";
-    const tools = this.toolSet();
+    const tools = this.toolSet(state);
     let payload: Record<string, unknown>;
     if (kind === "deliverable" && tools.length > 0 && this.providers.junior.chatWithTools) {
       payload = await this.juniorWithTools(state, tools);
@@ -1663,7 +1734,7 @@ export class TwoBrothersHarness {
     if (
       state.mode === "work" &&
       last.kind === "deliverable" &&
-      this.verificationToolSet().length > 0 &&
+      this.hasVerifyTools(this.verificationToolSet(state)) &&
       this.providers.senior.chatWithTools !== undefined
     ) {
       return "senior_verify";
@@ -1672,7 +1743,7 @@ export class TwoBrothersHarness {
   }
 
   private async seniorVerify(state: CooperationState): Promise<NodeResult> {
-    const tools = this.verificationToolSet();
+    const tools = this.verificationToolSet(state);
     const build = (): ChatMessage[] => [
       { role: "system", content: this.systemPrompt("senior", tools) },
       { role: "user", content: state.ctx.renderTranscript() + VERIFY_INSTRUCTION },
@@ -1817,6 +1888,7 @@ export class TwoBrothersHarness {
       promptAudits: [],
       approvalDenials: new Map(),
       injectedSkills: new Set(),
+      todos: [],
     };
     this.emitStream({ type: "run_status", status: "started", at: nowIso() });
     try {
@@ -1851,6 +1923,9 @@ export class TwoBrothersHarness {
         cancelled: false,
         usage: this.usageSnapshot(),
         promptAudits: state.promptAudits,
+        ...(state.todos.length > 0
+          ? { todos: state.todos.map((todo) => ({ ...todo })) }
+          : {}),
       };
       this.emitStream({ type: "run_status", status: "completed", at: nowIso() });
       this.emitStream({ type: "result", result: this.streamSummary(result, ctx), at: nowIso() });
@@ -1872,6 +1947,9 @@ export class TwoBrothersHarness {
           cancelled: true,
           usage: this.usageSnapshot(),
           promptAudits: state.promptAudits,
+          ...(state.todos.length > 0
+            ? { todos: state.todos.map((todo) => ({ ...todo })) }
+            : {}),
         };
       }
       status = "failed";

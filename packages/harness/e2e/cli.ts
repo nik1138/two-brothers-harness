@@ -188,11 +188,12 @@ async function scenarioConsult(): Promise<string> {
   const dir = mkTempDir("tb-cli-consult-");
   try {
     const sessionFile = path.join(dir, "s.jsonl");
-    const result = runCli([
+    const runArgs = (file: string): string[] => [
       "run", "Name one benefit of code review",
       "--provider", "mock",
-      "--session-file", sessionFile,
-    ]);
+      "--session-file", file,
+    ];
+    const result = runCli(runArgs(sessionFile));
     check(result.status === 0, `exit code ${result.status}: ${result.stderr.slice(-300)}`);
     const kinds = envelopeKinds(result.stdout);
     check(
@@ -213,7 +214,22 @@ async function scenarioConsult(): Promise<string> {
     );
     check(!/^tokens:/m.test(result.stdout), "text mode printed the machine usage footer");
     check(!result.stdout.includes("\x1b"), "piped text output emitted an escape sequence");
-    return `${kinds.length} envelopes (${kinds.join(" -> ")}), ruled decision, compact footer`;
+    // live output is TTY-only: on a pipe the flag must not change one byte
+    // (no activity rows, same transcript, same stderr routing).
+    check(!/^· /m.test(result.stdout), "piped output streamed live activity rows");
+    for (const flag of ["--live", "--no-live"]) {
+      // A fresh session file per flag: the comparison run must not hit the
+      // "session file already exists" guard; the transcript bytes are the same.
+      const forcedFile = path.join(dir, `forced${flag.replace(/^--/, "")}.jsonl`);
+      const forced = runCli([...runArgs(forcedFile), flag]);
+      check(
+        forced.status === 0,
+        `${flag} piped exit code ${forced.status}: ${forced.stderr.slice(-300)}`,
+      );
+      check(forced.stdout === result.stdout, `${flag} changed the piped stdout bytes`);
+      check(forced.stderr === result.stderr, `${flag} changed the piped stderr bytes`);
+    }
+    return `${kinds.length} envelopes (${kinds.join(" -> ")}), ruled decision, compact footer, --live piped bytes unchanged`;
   } finally {
     rmDir(dir);
   }

@@ -12,8 +12,8 @@
  * so a UI reload can recover tool/approval history without touching the
  * envelope log. Events are the typed runtime events (run_status / envelope /
  * tool_started / tool_completed / approval_requested / approval_resolved /
- * approval_auto_denied / approval_auto_allowed / prompt_audit / run_error /
- * run_end) plus `run_id`
+ * approval_auto_denied / approval_auto_allowed / todo_updated / prompt_audit /
+ * run_error / run_end) plus `run_id`
  * and `at` (epoch seconds). Event JSON keeps the Python field names
  * (`run_id`, `approval_id`) so sidecar files stay interchangeable with the
  * Python implementation; `prompt_audit` keeps its camelCase payload
@@ -23,8 +23,15 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { Action, Decision, type ApprovalBroker, type ApprovalRequest } from "./permissions.ts";
+import {
+  Action,
+  Decision,
+  type ApprovalBroker,
+  type ApprovalDetail,
+  type ApprovalRequest,
+} from "./permissions.ts";
 import type { PromptAuditEntry } from "./harness.ts";
+import type { TodoItem } from "./todos.ts";
 
 export const CLIP_RESULT_CHARS = 800;
 export const CLIP_ARG_CHARS = 200;
@@ -76,6 +83,15 @@ export interface ApprovalRequestedEvent extends RuntimeEventMeta {
   action: string;
   target?: string;
   command?: string;
+  /** Why the action needs approval (e.g. a sensitive-path note). */
+  reason?: string;
+  /**
+   * Additive bounded preview of the pending mutation (unified diff for
+   * write/edit, the command for shell). Consumers that only understand the
+   * action/target/command fields can ignore it safely; the field is omitted
+   * when the request carries no detail.
+   */
+  detail?: ApprovalDetail;
 }
 
 /** An approval wait was resolved exactly once (allow/deny, or deny/cancelled). */
@@ -119,6 +135,18 @@ export interface ApprovalAutoAllowedEvent extends RuntimeEventMeta {
 }
 
 /**
+ * Additive event: the model replaced the whole plan/todo list through the
+ * built-in `todo_write` tool. `todos` is the complete sanitized snapshot (the
+ * latest write wins on replay); the event is display state only — it never
+ * touches protocol envelopes, the session JSONL or the workspace. Persisted by
+ * the run sidecar like every typed event, so a UI reload replays it.
+ */
+export interface TodoUpdatedEvent extends RuntimeEventMeta {
+  type: "todo_updated";
+  todos: TodoItem[];
+}
+
+/**
  * One provider call's prompt/tool-belt audit, streamed as it happens: the
  * payload is `PromptAuditEntry` field for field (names and lengths only,
  * never prompt bodies), so `HarnessResult.promptAudits` and this event stream
@@ -153,6 +181,7 @@ export type RuntimeEvent =
   | ApprovalResolvedEvent
   | ApprovalAutoDeniedEvent
   | ApprovalAutoAllowedEvent
+  | TodoUpdatedEvent
   | PromptAuditEvent
   | RunErrorEvent
   | RunEndEvent;
@@ -588,6 +617,10 @@ export class RunApprovalBroker implements ApprovalBroker {
       action: request.action,
       target: request.target,
       command: request.command,
+      ...(request.reason !== undefined && request.reason !== ""
+        ? { reason: request.reason }
+        : {}),
+      ...(request.detail !== undefined ? { detail: request.detail } : {}),
     });
 
     let onAbort: (() => void) | null = null;
@@ -648,6 +681,7 @@ export class RunApprovalBroker implements ApprovalBroker {
         target: entry.request.target ?? null,
         command: entry.request.command ?? null,
         reason: entry.request.reason ?? null,
+        ...(entry.request.detail !== undefined ? { detail: entry.request.detail } : {}),
       });
     }
     return out;

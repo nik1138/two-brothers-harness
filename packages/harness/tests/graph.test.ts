@@ -28,6 +28,7 @@ import {
   type ToolChatResponse,
 } from "../src/provider.ts";
 import { SessionStore } from "../src/session.ts";
+import { TODO_TOOL_NAME } from "../src/todos.ts";
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -326,8 +327,12 @@ test("senior verifies the deliverable with the read-only tool slice", async () =
     // no new envelope kinds: the verification rides inside the review
     assert.deepEqual(kinds(result), ["message", "delegation", "deliverable", "review", "decision"]);
     // the senior got only the read-only workspace slice (no write/edit/delete)
+    // plus the shared built-in plan tool
     const verifyCalls = senior.seenToolNames.filter((names) => names.length > 0);
-    assert.deepEqual(new Set(verifyCalls[verifyCalls.length - 1]), SENIOR_VERIFY_TOOL_NAMES);
+    assert.deepEqual(
+      new Set(verifyCalls[verifyCalls.length - 1]),
+      new Set([...SENIOR_VERIFY_TOOL_NAMES, TODO_TOOL_NAME]),
+    );
     // tool events attribute activity to both brothers
     const actors = new Set(
       events.filter((e) => e.type === "tool_started" || e.type === "tool_completed").map((e) => e.actor),
@@ -392,7 +397,10 @@ test("senior plugin-style extra tools join the verify slice unfiltered", async (
   });
   await harness.run("senior with an extension tool");
   const verifyCalls = senior.seenToolNames.filter((names) => names.length > 0);
-  assert.deepEqual(verifyCalls[verifyCalls.length - 1].sort(), ["notes_save", "workspace_read_file"]);
+  assert.deepEqual(
+    verifyCalls[verifyCalls.length - 1].sort(),
+    ["notes_save", "workspace_read_file", TODO_TOOL_NAME].sort(),
+  );
 });
 
 // ---------------------------------------------------------------------------

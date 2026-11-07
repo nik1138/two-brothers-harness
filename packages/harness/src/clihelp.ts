@@ -205,6 +205,16 @@ export const FLAGS: Record<string, FlagHelp> = {
     description:
       "with --stream: one token NDJSON record per provider text delta (env TWO_BROTHERS_STREAM_TOKENS)",
   },
+  live: {
+    name: "live",
+    description:
+      "stream the human transcript live on a terminal (the default for a TTY; never changes piped or machine output)",
+  },
+  "no-live": {
+    name: "no-live",
+    description:
+      "disable live streaming; print the finished transcript once (the piped behavior); wins over --live",
+  },
   "dry-run": {
     name: "dry-run",
     description:
@@ -269,6 +279,14 @@ export const FLAGS: Record<string, FlagHelp> = {
     name: "commands-dir",
     value: "<path>",
     description: "extra slash-command root, repeatable (env TWO_BROTHERS_COMMANDS_DIR)",
+  },
+  workspace: {
+    name: "workspace",
+    value: "<dir>",
+    description:
+      "bind a tui run to one confined workspace: workspace tools for the junior, " +
+      "read-only verification for the senior, and an approval panel for writes/shell " +
+      "(tui only)",
   },
   host: {
     name: "host",
@@ -403,7 +421,9 @@ defineCommand({
     "it and makes the final decision. Prints the human transcript as separated, " +
     "Markdown-rendered envelope blocks with a compact token-usage footer; when " +
     "both roles resolve to the same priced model the footer also carries the " +
-    "estimated cost. " +
+    "estimated cost. On an interactive terminal each block streams as it is " +
+    "produced, with dim activity lines between blocks (--no-live prints the " +
+    "finished transcript once instead; piped output always does). " +
     "The task comes from the positional argument; a task of `-` reads it from " +
     "stdin (bounded to 1 MiB) and --task-file reads it from a file. --dry-run " +
     "resolves the whole run and prints the plan without calling a model or " +
@@ -430,6 +450,8 @@ defineCommand({
     "retries",
     "mode",
     ...RUN_OUTPUT_FLAGS,
+    "live",
+    "no-live",
     "dry-run",
     "task-file",
     "session-file",
@@ -444,7 +466,7 @@ defineCommand({
     "skills-dir",
     "help",
   ],
-  acceptedFlags: [...SHARED_FLAGS, "dry-run", "task-file"],
+  acceptedFlags: [...SHARED_FLAGS, "live", "no-live", "dry-run", "task-file"],
   flagNotes: {
     mode: "cooperation mode consult|work|auto; run also accepts the output modes print|json",
     "dry-run":
@@ -471,6 +493,8 @@ defineCommand({
     "Built-in commands are available on every surface: /plan, /goal and " +
     "/feedback expand to a task (with a per-turn mode), while /compact, /export, " +
     "/status, /permission, /mode and /help are performed by the REPL itself. " +
+    "On an interactive terminal each turn streams its transcript live like " +
+    "`run` (--no-live prints the finished turn once; piped stdin always does). " +
     "An empty line, exit, quit, q, /exit or /quit leaves the REPL. --dry-run " +
     "prints the resolved plan and exits without starting the REPL.",
   flags: [
@@ -495,6 +519,8 @@ defineCommand({
     "retries",
     "mode",
     "verbose",
+    "live",
+    "no-live",
     "dry-run",
     "session-file",
     "resume",
@@ -509,7 +535,7 @@ defineCommand({
     "commands-dir",
     "help",
   ],
-  acceptedFlags: [...SHARED_FLAGS, "dry-run"],
+  acceptedFlags: [...SHARED_FLAGS, "live", "no-live", "dry-run"],
   flagNotes: {
     mode: "cooperation mode consult|work|auto (the run output modes are not accepted here)",
     "compact-keep-recent":
@@ -548,7 +574,12 @@ defineCommand({
     "Full-screen interactive chat in the terminal's alternate screen over the same " +
     "cooperation harness as run/chat (mock or real providers). A bare " +
     '"two-brothers" in an interactive terminal opens this TUI; a piped stdin is ' +
-    "refused with exit 2 (use chat for scripts). The key guide printed below is " +
+    "refused with exit 2 (use chat for scripts). With --workspace <dir> every turn " +
+    "is bound to that confined workspace: the junior gets the workspace_* tool " +
+    "belt, the senior the read-only verify slice, writes/edits/deletes/shell park " +
+    "the run on an approval panel (1/Y allow once, 2/A allow for this TUI session, " +
+    "3/N/Esc deny, Ctrl+E preview), and composer @path mentions attach workspace " +
+    "files read read-only. The key guide printed below is " +
     "generated from the same registry that powers the in-app Ctrl+P palette and " +
     "the ? help overlay.",
   flags: [
@@ -584,15 +615,19 @@ defineCommand({
     "plugins-dir",
     "skills-dir",
     "commands-dir",
+    "workspace",
     "stream-tokens",
     "help",
   ],
-  acceptedFlags: SHARED_FLAGS,
+  acceptedFlags: [...SHARED_FLAGS, "workspace"],
   flagNotes: {
     mode: "cooperation mode consult|work|auto (print/json are run output modes)",
+    workspace:
+      "confined workspace root for this TUI run (workspace tools + operator approvals)",
   },
   examples: [
     "two-brothers tui --provider mock",
+    "two-brothers tui --workspace ./repo --provider mock",
     'two-brothers tui "Plan a migration from Redis to Valkey" --provider mock',
   ],
 });
@@ -1289,6 +1324,11 @@ export function renderMainHelp(
       "       --verbose             payloads and diagnostics; warnings always go to stderr",
       style,
     ),
+    paintHelpLine(
+      "       --live / --no-live    stream the transcript live on a TTY (default)",
+      style,
+    ),
+    paintHelpLine("                             or print it once (piped output always does)", style),
     paintHelpLine("       --dry-run             resolve the run and print the plan; no model calls,", style),
     paintHelpLine("                             no session written (invalid with --stream)", style),
     paintHelpLine("       --task-file <path>    read the task from a file; `run -` reads stdin", style),

@@ -37,6 +37,28 @@ export const Decision = {
 } as const;
 export type Decision = (typeof Decision)[keyof typeof Decision];
 
+/** Cap on the rendered diff carried by one approval detail (head-preserving). */
+export const APPROVAL_DETAIL_MAX_CHARS = 20_000;
+
+/**
+ * Additive typed preview of a mutating action, so a UI can show the operator
+ * exactly what will change before they approve it. All fields are optional and
+ * bounded: a request without a detail is exactly the previous shape.
+ */
+export interface ApprovalDetail {
+  /** `write` / `edit` / `delete` / `shell` (the requested action). */
+  kind: string;
+  /** Unified diff of the change for write/edit/delete (bounded). */
+  diff?: string;
+  /** Diff line counts, when known. */
+  addedLines?: number;
+  removedLines?: number;
+  /** Shell command to run (Action.SHELL). */
+  command?: string;
+  /** True when `diff` was clipped to the detail cap. */
+  truncated?: boolean;
+}
+
 /** Everything an operator needs to approve or deny one action. */
 export interface ApprovalRequest {
   /** Workspace action being requested. */
@@ -49,6 +71,8 @@ export interface ApprovalRequest {
   reason?: string;
   /** Free-form extra context for the operator. */
   context?: Record<string, unknown>;
+  /** Additive bounded preview (diff/command) for the operator UI. */
+  detail?: ApprovalDetail;
 }
 
 /**

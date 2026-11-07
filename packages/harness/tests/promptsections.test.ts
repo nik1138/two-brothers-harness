@@ -32,6 +32,7 @@ import {
 } from "../src/provider.ts";
 import { loadPrompts } from "../src/prompts.ts";
 import type { PromptAuditEvent, RuntimeEvent } from "../src/runevents.ts";
+import { TODO_TOOL_NAME } from "../src/todos.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const packagePromptsPath = path.resolve(here, "..", "shared", "prompts.json");
@@ -213,7 +214,8 @@ test("work mode: junior deliverable lists shared+junior, not senior; senior veri
   assert.ok(!juniorSystem.includes(seniorName), "the senior scope stays off the junior belt");
   assert.deepEqual(
     deliverable.tools.map((t) => t.name).sort(),
-    [sharedName, juniorName, unscopedName].sort(),
+    [sharedName, juniorName, unscopedName, TODO_TOOL_NAME].sort(),
+    "the built-in plan tool joins the junior belt last",
   );
 
   const verify = log.find((call) => call.role === "senior" && call.tools.length > 0);
@@ -222,7 +224,11 @@ test("work mode: junior deliverable lists shared+junior, not senior; senior veri
   assert.ok(seniorSystem.includes(`- ${sharedName} —`), "shared scope joins the verify slice");
   assert.ok(seniorSystem.includes(`- ${seniorName} —`), "senior scope joins the verify slice");
   assert.ok(!seniorSystem.includes(juniorName), "the junior scope stays off the senior belt");
-  assert.deepEqual(verify.tools.map((t) => t.name).sort(), [sharedName, seniorName].sort());
+  assert.deepEqual(
+    verify.tools.map((t) => t.name).sort(),
+    [sharedName, seniorName, TODO_TOOL_NAME].sort(),
+    "the built-in plan tool also joins the verify slice",
+  );
 
   // plain senior calls (delegation, review, decision) carry no tools and say so
   const plainSenior = log.filter((call) => call.role === "senior" && call.tools.length === 0);
@@ -299,7 +305,10 @@ test("audit trail has one truthful entry per provider call", async () => {
   }
   // the belt is recorded per call, names only (never prompt bodies)
   assert.deepEqual(audits[0].tools, []);
-  assert.ok(audits[1].tools.every((name) => name.startsWith("mcp__")));
+  assert.ok(
+    audits[1].tools.every((name) => name.startsWith("mcp__") || name === TODO_TOOL_NAME),
+    "the junior belt is MCP tools plus the built-in plan tool",
+  );
   assert.deepEqual(Object.keys(audits[1]).sort(), [
     "kind",
     "role",

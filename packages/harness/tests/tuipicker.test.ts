@@ -144,7 +144,13 @@ test("skill trigger fires at token boundaries with an optional skill: prefix", (
 
   // Emails/handles inside a word are not mentions; `@` alone at a boundary is.
   assert.equal(detectMentionTrigger("mail me@example.com"), null);
-  assert.equal(detectMentionTrigger("see @rel/path"), null, "skill tokens have no slash");
+  // A path-like `@` token is the workspace-file picker (it needs a bound
+  // workspace at submit time, but the trigger grammar is workspace-agnostic).
+  const fileToken = detectMentionTrigger("see @rel/path");
+  assert.ok(fileToken);
+  assert.equal(fileToken.kind, "file");
+  assert.equal(fileToken.query, "rel/path");
+  assert.equal(fileToken.start, 4);
   assert.equal(detectMentionTrigger("a @ b", 4), null, "the space after @ ends the token");
 
   // A caret in the middle still reports the whole token for replacement.

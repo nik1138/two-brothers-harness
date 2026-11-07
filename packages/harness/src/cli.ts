@@ -70,17 +70,15 @@ import {
 import { estimateCost, type CostEstimate } from "./cost.ts";
 import { plainCliStyle, resolveCliStyle, terminalWidth, type CliStyle } from "./clistyle.ts";
 import {
-  USER_INDENT,
+  createLiveTranscript,
   humanFooter,
-  renderBullets,
-  renderKeyedBody,
-  renderKeyedLine,
-  renderLabeledRule,
-  renderPlainBlock,
+  paintRole,
+  renderMessages,
   sanitizeOneLine,
 } from "./clilayout.ts";
 import { formatDoctorReport, runDoctor } from "./doctor.ts";
 import { TwoBrothersHarness, type PromptAuditEntry, type ToolScopes } from "./harness.ts";
+import type { RuntimeEvent } from "./runevents.ts";
 import {
   loadMcpToolSpecs,
   loadMcpTools,
@@ -122,7 +120,6 @@ import { discoverSkills, type SkillCatalog } from "./skills.ts";
 import { envPinnedPairs, SettingsStore } from "./settings_store.ts";
 import { runTuiApp } from "./tui/app.ts";
 import { tuiHelpLines } from "./tui/keymap.ts";
-import type { ThemeToken } from "./tui/theme.ts";
 
 /**
  * The shared `run` / `chat` / `tui` / `serve` flag table. Exported so the
@@ -187,10 +184,45 @@ const TASK_FILE_OPTIONS = {
   "task-file": { type: "string" as const },
 } satisfies ParseArgsOptionsConfig;
 
+/**
+ * `tui`-only flags. Like `--dry-run` they stay out of the shared `OPTIONS`
+ * table, so `run`/`chat`/`serve` reject them instead of silently ignoring
+ * them. `--workspace <dir>` binds every TUI turn to one confined workspace
+ * (workspace tools, operator approvals and `@path` attachments).
+ */
+const TUI_OPTIONS = {
+  workspace: { type: "string" as const },
+} satisfies ParseArgsOptionsConfig;
+
 const RUN_INPUT_OPTIONS = {
   ...DRY_RUN_OPTIONS,
   ...TASK_FILE_OPTIONS,
 } satisfies ParseArgsOptionsConfig;
+
+/**
+ * Live-transcript flags, parsed by `run` and `chat` only. Like `--dry-run`
+ * they stay out of the shared `OPTIONS` table, so `serve`/`tui` reject them
+ * instead of silently ignoring them.
+ *
+ * The default is "live only on an interactive stdout": `--live` cannot force
+ * a pipe to stream (piped bytes never change), and `--no-live` is the
+ * explicit opt-out on a terminal. `--no-live` wins when both are given.
+ */
+const LIVE_OPTIONS = {
+  live: { type: "boolean" as const, default: false },
+  "no-live": { type: "boolean" as const, default: false },
+} satisfies ParseArgsOptionsConfig;
+
+/**
+ * The `runOnce` live override from parsed flags: `false` for `--no-live`
+ * (wins when both are given), `true` for `--live`, and `undefined` for the
+ * default "on for a TTY only, never for a pipe or a machine output mode".
+ */
+function liveFlag(values: Record<string, any>): boolean | undefined {
+  if (values["no-live"] === true) return false;
+  if (values.live === true) return true;
+  return undefined;
+}
 
 const FLAG_TO_CONFIG: Record<string, string> = {
   provider: "provider",
@@ -224,15 +256,28 @@ const FLAG_TO_CONFIG: Record<string, string> = {
   "context-window": "contextWindow",
 };
 
-/** Output sink so commands can be driven in-process by tests. */
+/**
+ * Output sink so commands can be driven in-process by tests.
+ *
+ * `isTTY` is the stdout terminal signal used to turn the live transcript on:
+ * it is injectable (tests/embedders can simulate a terminal) and optional —
+ * a custom sink without it is treated as a pipe, so its bytes never change.
+ */
 export interface CliIO {
   log(line: string): void;
   error(line: string): void;
+  /** True when stdout is an interactive terminal (enables live transcript). */
+  readonly isTTY?: boolean;
 }
 
 const defaultIO: CliIO = {
   log: (line) => console.log(line),
   error: (line) => console.error(line),
+  // A getter, not a snapshot: `main` is called once per process but tests and
+  // embedders can flip the terminal state; the live decision must read it then.
+  get isTTY() {
+    return process.stdout.isTTY === true;
+  },
 };
 
 // --------------------------------------------------------------------------- //
@@ -242,13 +287,6 @@ const defaultIO: CliIO = {
 /** `--help` or `-h` was passed (both `parseArgs` keys are checked). */
 function isHelpRequested(values: Record<string, any>): boolean {
   return values.help === true || values.h === true;
-}
-
-/** Paint a transcript role name with its semantic token (`muted` otherwise). */
-function paintRole(style: CliStyle, role: string): string {
-  const token: ThemeToken =
-    role === "user" ? "user" : role === "senior" ? "senior" : role === "junior" ? "junior" : "muted";
-  return style.paint(token, role);
 }
 
 /** Paint the leading `[warn]` marker of a diagnostic line, leaving text intact. */
@@ -363,137 +401,12 @@ function renderPromptAudits(
   return lines.join("\n");
 }
 
-/** A payload list field (the protocol sanitizer guarantees arrays; bail soft). */
-function payloadItems(value: unknown): unknown[] {
-  return Array.isArray(value) ? value : [];
-}
+// The per-envelope renderer, the finished-transcript renderer and the live TTY
+// projection live together in `src/clilayout.ts`, so one implementation feeds
+// piped output, tests and the incremental path. `renderMessages` stays part of
+// this module's surface for existing importers.
+export { renderMessages };
 
-/** Theme tone for a review verdict: `accept` reads as success, rework warns. */
-function verdictTone(value: unknown): ThemeToken | null {
-  const verdict = sanitizeOneLine(value).toLowerCase();
-  if (verdict === "accept") return "success";
-  if (verdict === "revise" || verdict === "reject") return "warning";
-  return null;
-}
-
-/**
- * One envelope block: the `[from -> to] kind` header plus one row per rendered
- * payload field. Model-provided text is sanitized before layout; prose fields
- * render as width-safe Markdown bodies (the TUI's parser), while titles,
- * numbers and verdicts stay single-line values.
- */
-function renderEnvelopeBlock(
-  msg: Record<string, any>,
-  verbose: boolean,
-  style: CliStyle,
-  width: number,
-): string[] {
-  const from = sanitizeOneLine(msg.from);
-  const to = sanitizeOneLine(msg.to);
-  const kind = sanitizeOneLine(msg.kind);
-  const payload: Record<string, unknown> =
-    msg.payload !== null && typeof msg.payload === "object"
-      ? (msg.payload as Record<string, unknown>)
-      : {};
-
-  if (kind === "message" && from === "user") {
-    // Keep text on the historical `[user]      <task>` line: scripts and the
-    // E2E anchors read the task from that line; only long text wraps.
-    const prefix = `[${paintRole(style, "user")}]${" ".repeat(USER_INDENT - "[user]".length)}`;
-    const rows = renderPlainBlock(payload.text, width - USER_INDENT);
-    return rows.map((row, index) =>
-      index === 0 ? `${prefix}${row}` : `${" ".repeat(USER_INDENT)}${row}`,
-    );
-  }
-
-  const block: string[] = [];
-  // The final verdict is the run's product: rule it off so it reads as the
-  // conclusion rather than one more envelope in the pile.
-  if (kind === "decision") block.push(renderLabeledRule("decision", width, style));
-  block.push(`[${paintRole(style, from)} -> ${paintRole(style, to)}] ${style.dim(kind)}`);
-  if (verbose) block.push("    " + JSON.stringify(payload));
-
-  const roleTone: ThemeToken = from === "junior" ? "junior" : "senior";
-
-  if (kind === "consult") {
-    block.push(...renderKeyedBody("ask", payload.ask, width, style, roleTone));
-    block.push(...renderKeyedLine("expect", payload.expect ?? "proposal", width, style));
-  } else if (kind === "proposal") {
-    block.push(...renderKeyedLine("title", payload.title, width, style));
-    block.push(...renderKeyedBody("answer", payload.answer, width, style, roleTone));
-    if (payload.rationale) {
-      block.push(...renderKeyedBody("rationale", payload.rationale, width, style, "muted"));
-    }
-    if (payload.risks) {
-      block.push(...renderBullets("risks", payloadItems(payload.risks), width, style, "warning"));
-    }
-    block.push(...renderKeyedLine("confidence", payload.confidence, width, style));
-    if (payload.asks) {
-      block.push(...renderBullets("asks", payloadItems(payload.asks), width, style));
-    }
-  } else if (kind === "delegation") {
-    block.push(...renderKeyedBody("work", payload.work, width, style, roleTone));
-    block.push(...renderBullets("acceptance", payloadItems(payload.acceptance), width, style));
-  } else if (kind === "deliverable") {
-    block.push(...renderKeyedBody("result", payload.result, width, style, roleTone));
-    if (payload.artifacts) {
-      block.push(...renderBullets("artifacts", payloadItems(payload.artifacts), width, style));
-    }
-    block.push(...renderKeyedLine("confidence", payload.confidence, width, style));
-  } else if (kind === "review") {
-    block.push(
-      ...renderKeyedLine("verdict", payload.verdict, width, style, verdictTone(payload.verdict)),
-    );
-    block.push(...renderKeyedBody("notes", payload.notes, width, style, roleTone));
-  } else if (kind === "decision") {
-    block.push(...renderKeyedBody("decision", payload.decision, width, style, "decision"));
-    block.push(...renderKeyedBody("rationale", payload.rationale, width, style, "muted"));
-    block.push(...renderKeyedLine("confidence", payload.confidence, width, style));
-    block.push(
-      ...renderKeyedLine(
-        "dissent",
-        payload.dissent ?? "(none)",
-        width,
-        style,
-        payload.dissent === undefined || payload.dissent === null ? null : "dissent",
-      ),
-    );
-    if (payload.accepted_proposals) {
-      block.push(
-        ...renderBullets(
-          "accepted_proposals",
-          payloadItems(payload.accepted_proposals),
-          width,
-          style,
-        ),
-      );
-    }
-  }
-  return block;
-}
-
-/**
- * The human transcript for a `run` (and every chat REPL turn).
- *
- * Envelopes render as separate blocks (one blank line between them) with a
- * stable `[from -> to] kind` header, a width-capped rule in front of the
- * decision block, and model prose as width-safe Markdown. `[role -> role]`
- * headers are painted by role token, the envelope kind is `dim`, the labelled
- * payload keys are `dim`, a decision value uses the bold `decision` token and
- * a dissent value the `dissent` token. `width` defaults to
- * {@link terminalWidth}, so piped output keeps the 96-column plain layout and
- * a TTY wraps to its own size; the plain default keeps machine-safe text.
- */
-export function renderMessages(
-  messages: Array<Record<string, any>>,
-  verbose: boolean,
-  style: CliStyle = plainCliStyle,
-  width: number = terminalWidth(),
-): string {
-  return messages
-    .map((msg) => renderEnvelopeBlock(msg, verbose, style, width).join("\n"))
-    .join("\n\n");
-}
 
 function argsToConfigArgs(values: Record<string, any>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
@@ -901,6 +814,59 @@ function providerWarningSink(
   };
 }
 
+/**
+ * Human verb for one provider-call node kind (`consult` → `consulting`), so
+ * the live activity line reads `· senior consulting…` instead of repeating
+ * the protocol kind. Unknown kinds fall back to the kind itself.
+ */
+const ACTIVITY_VERBS: Readonly<Record<string, string>> = {
+  consult: "consulting",
+  delegation: "delegating",
+  proposal: "proposing",
+  deliverable: "delivering",
+  review: "reviewing",
+  verify: "verifying",
+  decision: "deciding",
+  answer: "answering",
+  message: "replying",
+};
+
+/**
+ * The compact live activity row for one typed runtime event, or `null` when
+ * the event has no operator-facing progress (run status, approvals, errors —
+ * the transcript, footer and stderr already report those).
+ *
+ * `prompt_audit` fires immediately before each provider call, so the row is
+ * visible while the model is working rather than only after the reply;
+ * `tool_started` / a non-ok `tool_completed` mirror tool work. The rows are
+ * deliberately plain text (no spinner frames): they stay honest on slow
+ * provider waits, need no terminal cursor control, and are width/color-safe
+ * through `clilayout.ts`.
+ */
+function activityForEvent(event: RuntimeEvent): string | null {
+  switch (event.type) {
+    case "prompt_audit": {
+      const role = sanitizeOneLine(event.role);
+      const kind = sanitizeOneLine(event.kind);
+      const verb = ACTIVITY_VERBS[kind] ?? (kind !== "" ? kind : "working");
+      return `${role} ${verb}…`;
+    }
+    case "tool_started": {
+      const actor = sanitizeOneLine(event.actor);
+      const tool = sanitizeOneLine(event.tool);
+      return actor !== "" ? `${actor} tool ${tool}…` : `tool ${tool}…`;
+    }
+    case "tool_completed": {
+      // A successful call needs no completion row: its start row already said
+      // the tool is running. Errors/denials/blocks are worth an explicit line.
+      if (event.status === "ok") return null;
+      return `tool ${sanitizeOneLine(event.tool)} ${sanitizeOneLine(event.status)}`;
+    }
+    default:
+      return null;
+  }
+}
+
 /** Options for one `runOnce` turn (`run`, and every chat REPL turn). */
 export interface RunOnceOptions {
   /** `--mcp-config` file path. */
@@ -913,6 +879,13 @@ export interface RunOnceOptions {
   mode?: Config["mode"];
   /** Terminal style for the human text mode (machine modes always stay plain). */
   style?: CliStyle;
+  /**
+   * Live-transcript override from `--live`/`--no-live`: `false` never
+   * streams live, `true` may stream when stdout is a TTY, `undefined` keeps
+   * the default (live on a TTY only). Live is always disabled for machine
+   * output modes and for a non-TTY sink, so piped bytes never change.
+   */
+  live?: boolean;
 }
 
 async function runOnce(
@@ -941,6 +914,19 @@ async function runOnce(
     outputMode === "stream"
       ? (event: StreamEvent): void => io.log(toNdjsonLine(event))
       : undefined;
+  // Live transcript: human text mode on an interactive stdout writes every
+  // envelope block and activity line as the harness produces it. A pipe, a
+  // sink without a TTY signal, a machine output mode or `--no-live` keep the
+  // single final render below, so those bytes are unchanged from the
+  // pre-live CLI. `--live` cannot force a pipe to stream live.
+  const live =
+    outputMode === "text" && options.live !== false && io.isTTY === true && !cfg.jsonOut
+      ? createLiveTranscript(io, {
+          style: textStyle,
+          verbose: cfg.verbose,
+          width: terminalWidth(),
+        })
+      : null;
   // Plugin contribution for this run: hooks and MCP server declarations for
   // every run, tools only when the run is workspace-bound (the CLI has no
   // workspace option, so a CLI run gets no plugin tools — a `serve` run over
@@ -1020,6 +1006,18 @@ async function runOnce(
       ...(resources?.skills ? { skills: resources.skills } : {}),
       ...(onStreamEvent ? { onStreamEvent } : {}),
       ...(streamTokens ? { streamTokens: true } : {}),
+      // Live TTY projection (null for pipes/machine modes: no hooks attached,
+      // so those runs stay exactly as before).
+      ...(live !== null
+        ? {
+            onEnvelope: (message: unknown): void =>
+              live.envelope(message as Record<string, any>),
+            onEvent: (event: RuntimeEvent): void => {
+              const line = activityForEvent(event);
+              if (line !== null) live.activity(line);
+            },
+          }
+        : {}),
     });
     const result = await harness.run(task, context);
     // connections stay open for the whole run; closed in the finally below
@@ -1066,13 +1064,19 @@ async function runOnce(
       }
       return failed ? 1 : 0;
     }
-    io.log(
-      renderMessages(
-        result.messages as unknown as Array<Record<string, any>>,
-        cfg.verbose,
-        textStyle,
-      ),
-    );
+    if (live === null) {
+      // Piped/non-TTY output (or `--no-live`): the whole finished transcript,
+      // exactly as before live output existed.
+      io.log(
+        renderMessages(
+          result.messages as unknown as Array<Record<string, any>>,
+          cfg.verbose,
+          textStyle,
+        ),
+      );
+    }
+    // Live mode already printed every envelope block (and activity rows) as
+    // the harness produced them; nothing is re-rendered here.
     if (cfg.verbose) {
       const audits = renderPromptAudits(result.promptAudits, textStyle);
       if (audits) io.log(audits);
@@ -1091,8 +1095,13 @@ async function runOnce(
         terminalWidth(),
       );
       if (footer !== null) {
-        io.log("");
-        io.log(footer);
+        // Live mode reserves the footer for the end (exactly once); the piped
+        // path keeps its historical blank-line + footer layout.
+        if (live !== null) live.foot(footer);
+        else {
+          io.log("");
+          io.log(footer);
+        }
       }
     }
     if (cfg.jsonOut) io.log(JSON.stringify(result.decision));
@@ -1459,7 +1468,7 @@ async function doRun(
 ): Promise<number> {
   const parsed = parseCommandArgs(
     argv,
-    { ...OPTIONS, ...HELP_OPTIONS, ...RUN_INPUT_OPTIONS },
+    { ...OPTIONS, ...HELP_OPTIONS, ...RUN_INPUT_OPTIONS, ...LIVE_OPTIONS },
     "run",
     io,
     true,
@@ -1518,6 +1527,7 @@ async function doRun(
       resources,
       streamTokens,
       style,
+      live: liveFlag(values),
     });
   } catch (exc) {
     if (exc instanceof SessionError) {
@@ -1616,7 +1626,7 @@ async function doChat(
 ): Promise<number> {
   const parsed = parseCommandArgs(
     argv,
-    { ...OPTIONS, ...HELP_OPTIONS, ...DRY_RUN_OPTIONS },
+    { ...OPTIONS, ...HELP_OPTIONS, ...DRY_RUN_OPTIONS, ...LIVE_OPTIONS },
     "chat",
     io,
   );
@@ -1691,6 +1701,9 @@ async function doChat(
   // The REPL's default cooperation mode for following turns. A discovered
   // template's or a built-in prompt command's `mode` overrides it for one turn.
   let replMode: Config["mode"] = cfg.mode;
+  // `chat` turns stream live on an interactive stdout exactly like `run`
+  // turns; a piped stdin (or `--no-live`) keeps the per-turn finished render.
+  const live = liveFlag(values);
 
   /** `/help`: the REPL commands, then the built-in catalogue, then discovered. */
   const printReplHelp = (): void => {
@@ -1895,6 +1908,7 @@ async function doChat(
           outputMode: "text",
           resources,
           style,
+          live,
           ...(discovered.mode ? { mode: discovered.mode } : {}),
         });
         io.log("");
@@ -1923,6 +1937,7 @@ async function doChat(
               outputMode: "text",
               resources,
               style,
+              live,
               ...(base.mode ? { mode: base.mode } : {}),
             });
             io.log("");
@@ -1939,6 +1954,7 @@ async function doChat(
       outputMode: "text",
       resources,
       style,
+      live,
       mode: replMode,
     });
     io.log("");
@@ -1986,7 +2002,13 @@ async function doTui(
   io: CliIO,
   style: CliStyle = plainCliStyle,
 ): Promise<number> {
-  const parsed = parseCommandArgs(argv, { ...OPTIONS, ...HELP_OPTIONS }, "tui", io, true);
+  const parsed = parseCommandArgs(
+    argv,
+    { ...OPTIONS, ...TUI_OPTIONS, ...HELP_OPTIONS },
+    "tui",
+    io,
+    true,
+  );
   if (parsed === null) return 2;
   const { values, positionals } = parsed;
   if (isHelpRequested(values)) {
@@ -2007,12 +2029,14 @@ async function doTui(
     return 2;
   }
   const initialTask = positionals.join(" ").trim();
+  const workspace = typeof values.workspace === "string" ? values.workspace.trim() : "";
   return runTuiApp({
     cfg,
     io,
     pluginsDir: pluginsDirForCli(values),
     skillsRoots: skillsRootsForCli(values),
     commandsRoots: commandsRootsForCli(values),
+    ...(workspace !== "" ? { workspaceRoot: workspace } : {}),
     ...(typeof values["mcp-config"] === "string" && values["mcp-config"].trim()
       ? { mcpConfig: values["mcp-config"] }
       : {}),

@@ -30,7 +30,8 @@ export type CommandWhen =
   | "transcript"
   | "overlay"
   | "find"
-  | "mention";
+  | "mention"
+  | "approval";
 
 /** Help/palette grouping, in display order via {@link COMMAND_GROUPS}. */
 export type CommandGroup =
@@ -347,6 +348,65 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
     palette: false,
     document: false,
   },
+  // A parked approval owns the keyboard (the composer is replaced by the
+  // approval panel), so its answer keys live in their own scope and can never
+  // collide with the composer, the picker or the quit chord.
+  {
+    id: "approval-move",
+    title: "Move approval choice",
+    description: "Move the highlight between the pending approval's decisions.",
+    group: "Cooperation",
+    keys: [{ name: "up" }, { name: "down" }],
+    when: "approval",
+    palette: false,
+    document: false,
+  },
+  {
+    id: "approval-accept",
+    title: "Confirm approval choice",
+    description: "Answer the pending approval with the highlighted decision.",
+    group: "Cooperation",
+    keys: [{ name: "return" }],
+    when: "approval",
+    palette: false,
+    document: false,
+  },
+  {
+    id: "approval-allow",
+    title: "Allow the pending action once",
+    description: "Approve the pending workspace action for this one call.",
+    group: "Cooperation",
+    keys: [{ name: "y" }, { name: "1" }],
+    when: "approval",
+    palette: false,
+  },
+  {
+    id: "approval-allow-session",
+    title: "Allow the pending action for this TUI session",
+    description: "Answer identical requests for the rest of this TUI process (memory only).",
+    group: "Cooperation",
+    keys: [{ name: "a" }, { name: "2" }],
+    when: "approval",
+    palette: false,
+  },
+  {
+    id: "approval-deny",
+    title: "Deny the pending action",
+    description: "Refuse the pending workspace action; Escape denies exactly once.",
+    group: "Cooperation",
+    keys: [{ name: "n" }, { name: "3" }, { name: "escape" }],
+    when: "approval",
+    palette: false,
+  },
+  {
+    id: "approval-preview",
+    title: "Preview the pending change",
+    description: "Open the pending write/edit diff or shell command full-screen.",
+    group: "Cooperation",
+    keys: [{ name: "e", ctrl: true }],
+    when: "approval",
+    palette: false,
+  },
   {
     id: "mode",
     title: "Cooperation mode",
@@ -517,27 +577,29 @@ export interface KeyResolution {
 
 function scopeMatches(
   when: CommandWhen,
-  context: "app" | "overlay" | "find" | "mention",
+  context: "app" | "overlay" | "find" | "mention" | "approval",
 ): boolean {
   if (context === "overlay") return when === "always" || when === "overlay";
-  // The inline find bar and mention picker are typing modes: only their own
-  // scope stays live, so printable input and their chords never collide with
-  // composer keys or each other.
+  // The inline find bar, mention picker and a parked approval are exclusive
+  // keyboard modes: only their own scope stays live, so printable input and
+  // their chords never collide with composer keys or each other.
   if (context === "find") return when === "find";
   if (context === "mention") return when === "mention";
-  return when !== "overlay" && when !== "find" && when !== "mention";
+  if (context === "approval") return when === "approval";
+  return when !== "overlay" && when !== "find" && when !== "mention" && when !== "approval";
 }
 
 /**
  * Resolve a keypress in a scope. `context` is `"app"` (composer/transcript,
  * the default), `"overlay"` (palette/help/pickers), `"find"` (the inline
- * transcript find bar) or `"mention"` (the inline `/` and `@skill:` pickers).
+ * transcript find bar), `"mention"` (the inline `/` and `@skill:` pickers) or
+ * `"approval"` (a parked approval's decision panel).
  * Registry order is priority order.
  */
 export function resolveKey(
   commands: readonly TuiCommand[],
   key: KeyLike,
-  context: "app" | "overlay" | "find" | "mention" = "app",
+  context: "app" | "overlay" | "find" | "mention" | "approval" = "app",
 ): KeyResolution | null {
   for (const command of commands) {
     if (!scopeMatches(command.when ?? "always", context)) continue;

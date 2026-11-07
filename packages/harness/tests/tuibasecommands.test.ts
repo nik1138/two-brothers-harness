@@ -654,9 +654,12 @@ test("/status and /permission open honest dialogs; /new resets memory but refuse
     assert.ok(lastFrameText(output).includes("Approval policy"));
     input.type("d"); // show details
     assert.ok(
-      await waitFor(() => lastFrameText(output).includes("approvals: none in the TUI")),
+      await waitFor(() => lastFrameText(output).includes("approvals: none")),
     );
-    assert.ok(lastFrameText(output).includes("workspace_*"));
+    assert.ok(
+      lastFrameText(output).includes("--workspace"),
+      "the dialog says how to bind a workspace",
+    );
     input.escape();
     assert.ok(await waitFor(() => !lastFrameText(output).includes("PERMISSIONS")));
 

@@ -30,7 +30,10 @@ import {
 } from "../src/clihelp.ts";
 import {
   RULE_MAX_WIDTH,
+  createLiveTranscript,
   humanFooter,
+  renderActivityLine,
+  renderEnvelopeBlock,
   renderLabeledRule,
   ruleWidth,
 } from "../src/clilayout.ts";
@@ -592,4 +595,119 @@ test("clihelp: generated help columns scale with the terminal width", () => {
   for (const line of flagBlockLines("run", 60)) {
     assert.ok(displayWidth(line) <= 60, `flag line over 60: ${JSON.stringify(line)}`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// live transcript: per-envelope renderer, activity rows, one footer
+// ---------------------------------------------------------------------------
+
+test("cli layout: the per-envelope renderer is the whole-transcript block", () => {
+  for (const message of transcript) {
+    assert.equal(
+      renderEnvelopeBlock(message, false, plainCliStyle, FALLBACK_TERMINAL_WIDTH).join("\n"),
+      renderMessages([message], false, plainCliStyle, FALLBACK_TERMINAL_WIDTH),
+    );
+  }
+  // verbose adds the payload JSON row to the same block
+  const verboseBlock = renderEnvelopeBlock(
+    transcript[1],
+    true,
+    plainCliStyle,
+    FALLBACK_TERMINAL_WIDTH,
+  );
+  assert.equal(verboseBlock.length, 4, verboseBlock.join("\n"));
+  assert.match(verboseBlock[1] as string, /^ {4}\{/);
+});
+
+test("cli layout: activity rows are dim, width-capped and sanitized", () => {
+  const plain = renderActivityLine("senior consulting…", plainCliStyle, FALLBACK_TERMINAL_WIDTH);
+  assert.equal(plain, "· senior consulting…");
+  assert.equal(renderActivityLine("", plainCliStyle, FALLBACK_TERMINAL_WIDTH), "");
+  assert.equal(renderActivityLine("   ", plainCliStyle, FALLBACK_TERMINAL_WIDTH), "");
+
+  const colored = renderActivityLine("senior consulting…", ansi16Style(), FALLBACK_TERMINAL_WIDTH);
+  assert.equal(stripAnsi(colored), plain);
+  assert.equal(colored, createTheme("ansi16").dim("· senior consulting…"));
+
+  // a model/tool-supplied control sequence can never reach the terminal
+  const hostile = renderActivityLine("senior\u001b[31m consulting\u0007", plainCliStyle, 96);
+  assert.equal(hostile, "· senior consulting", JSON.stringify(hostile));
+
+  // narrow widths shorten with the shared ellipsis instead of overflowing
+  const long = renderActivityLine("x".repeat(200), plainCliStyle, 40);
+  assert.ok(displayWidth(long) <= 40, `${displayWidth(long)} > 40`);
+  assert.ok(long.endsWith("…"), long);
+});
+
+/** Collect one live transcript's sink calls with a fixed event script. */
+function collectLive(style: CliStyle, width: number): string[] {
+  const lines: string[] = [];
+  const live = createLiveTranscript({ log: (line) => lines.push(line) }, { style, width });
+  live.envelope(transcript[0] as Record<string, any>);
+  live.activity("senior consulting…");
+  live.envelope(transcript[1] as Record<string, any>);
+  live.activity("tool workspace_read_file…"); // no such tool in this fixture: row only
+  live.envelope(transcript[2] as Record<string, any>);
+  live.envelope(transcript[3] as Record<string, any>);
+  live.foot("tokens 40 in / 20 out · 4 calls");
+  return lines;
+}
+
+test("cli layout: the live transcript writes blocks immediately and foots once", () => {
+  const lines: string[] = [];
+  const live = createLiveTranscript(
+    { log: (line) => lines.push(line) },
+    { style: plainCliStyle, width: FALLBACK_TERMINAL_WIDTH },
+  );
+  live.envelope(transcript[0] as Record<string, any>);
+  assert.deepEqual(lines, ["[user]      hello"], "first block is written by the envelope call");
+  assert.equal(live.envelopes, 1);
+  assert.equal(live.activities, 0);
+
+  live.activity("senior consulting…");
+  assert.deepEqual(lines.slice(1), ["· senior consulting…"]);
+  assert.equal(live.activities, 1);
+
+  live.envelope(transcript[1] as Record<string, any>);
+  assert.equal(lines[2], "", "a later block is preceded by one blank row");
+  assert.match(lines[3] as string, /^\[senior -> junior\] consult/);
+  assert.equal(live.envelopes, 2);
+
+  // an empty activity row is a no-op; the footer prints exactly once
+  live.activity("");
+  assert.equal(live.activities, 1);
+  live.foot("tokens 40 in / 20 out · 4 calls");
+  live.foot("tokens 999 in / 999 out · 9 calls");
+  assert.deepEqual(lines.slice(-2), ["", "tokens 40 in / 20 out · 4 calls"]);
+  assert.equal(lines.filter((line) => line.startsWith("tokens ")).length, 1);
+});
+
+test("cli layout: live transcript bytes equal the finished render minus activity", () => {
+  const width = FALLBACK_TERMINAL_WIDTH;
+  const liveText = collectLive(plainCliStyle, width).join("\n");
+  const expected = renderMessages(
+    transcript as Array<Record<string, any>>,
+    false,
+    plainCliStyle,
+    width,
+  );
+  const footer = "tokens 40 in / 20 out · 4 calls";
+  const withoutActivity = liveText
+    .split("\n")
+    .filter((row) => !row.startsWith("· "))
+    .join("\n");
+  assert.equal(withoutActivity, `${expected}\n\n${footer}`);
+  // the live transcript is still width-safe row by row
+  for (const row of liveText.split("\n")) {
+    assert.ok(displayWidth(row) <= width, `${JSON.stringify(row)} > ${width}`);
+  }
+});
+
+test("cli layout: a colored live transcript strips back to the plain one", () => {
+  const plain = collectLive(plainCliStyle, FALLBACK_TERMINAL_WIDTH).join("\n");
+  const coloredLines = collectLive(ansi16Style(), FALLBACK_TERMINAL_WIDTH);
+  const colored = coloredLines.join("\n");
+  assert.ok(colored.includes(ESC), "activity/blocks must paint when color is on");
+  assert.equal(stripAnsi(colored), plain);
+  assert.equal(coloredLines.length, collectLive(plainCliStyle, FALLBACK_TERMINAL_WIDTH).length);
 });

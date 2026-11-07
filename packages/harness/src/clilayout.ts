@@ -7,6 +7,14 @@
  * process state, so a pipe, a test and a TTY all take the same path and
  * `stripAnsi(colored)` always reproduces the plain bytes.
  *
+ * The same per-envelope renderer feeds two projections:
+ *
+ * - {@link renderMessages} — the whole finished transcript as one string
+ *   (piped/non-TTY output, byte-identical to the pre-live behavior);
+ * - {@link createLiveTranscript} — the incremental TTY projection: each
+ *   envelope block and each dim activity line is written to a sink as soon as
+ *   the harness produces it, with the final footer reserved for the end.
+ *
  * Markdown is not re-implemented here: {@link renderMarkdownStyled} in
  * `tui/markdownstyle.ts` is the single parser (the TUI transcript's own
  * renderer), and its source sanitizer strips model-supplied ANSI and control
@@ -18,7 +26,12 @@
  * a rule is never wider than {@link RULE_MAX_WIDTH} columns and never wider
  * than the caller's width, so a narrow terminal never overflows a block.
  */
-import { FALLBACK_TERMINAL_WIDTH, plainCliStyle, type CliStyle } from "./clistyle.ts";
+import {
+  FALLBACK_TERMINAL_WIDTH,
+  plainCliStyle,
+  terminalWidth,
+  type CliStyle,
+} from "./clistyle.ts";
 import {
   renderMarkdownStyled,
   type StyledLine,
@@ -286,4 +299,249 @@ export function humanFooter(
   }
   const line = parts.join(style.paint("dim", FOOTER_SEPARATOR));
   return truncateToWidth(line, columns(width));
+}
+
+// --------------------------------------------------------------------------- //
+// envelope blocks (one renderer for the final and the live projection)
+// --------------------------------------------------------------------------- //
+
+/** Paint a transcript role name with its semantic token (`muted` otherwise). */
+export function paintRole(style: CliStyle, role: string): string {
+  const token: ThemeToken =
+    role === "user" ? "user" : role === "senior" ? "senior" : role === "junior" ? "junior" : "muted";
+  return style.paint(token, role);
+}
+
+/** A payload list field (the protocol sanitizer guarantees arrays; bail soft). */
+function payloadItems(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+/** Theme tone for a review verdict: `accept` reads as success, rework warns. */
+function verdictTone(value: unknown): ThemeToken | null {
+  const verdict = sanitizeOneLine(value).toLowerCase();
+  if (verdict === "accept") return "success";
+  if (verdict === "revise" || verdict === "reject") return "warning";
+  return null;
+}
+
+/**
+ * One envelope block: the `[from -> to] kind` header plus one row per rendered
+ * payload field. Model-provided text is sanitized before layout; prose fields
+ * render as width-safe Markdown bodies (the TUI's parser), while titles,
+ * numbers and verdicts stay single-line values.
+ *
+ * This is the single per-envelope renderer: {@link renderMessages} joins its
+ * blocks for the finished transcript and {@link createLiveTranscript} writes
+ * them as they arrive. Both therefore produce identical bytes per envelope.
+ */
+export function renderEnvelopeBlock(
+  msg: Record<string, any>,
+  verbose: boolean,
+  style: CliStyle,
+  width: number,
+): string[] {
+  const from = sanitizeOneLine(msg.from);
+  const to = sanitizeOneLine(msg.to);
+  const kind = sanitizeOneLine(msg.kind);
+  const payload: Record<string, unknown> =
+    msg.payload !== null && typeof msg.payload === "object"
+      ? (msg.payload as Record<string, unknown>)
+      : {};
+
+  if (kind === "message" && from === "user") {
+    // Keep text on the historical `[user]      <task>` line: scripts and the
+    // E2E anchors read the task from that line; only long text wraps.
+    const prefix = `[${paintRole(style, "user")}]${" ".repeat(USER_INDENT - "[user]".length)}`;
+    const rows = renderPlainBlock(payload.text, width - USER_INDENT);
+    return rows.map((row, index) =>
+      index === 0 ? `${prefix}${row}` : `${" ".repeat(USER_INDENT)}${row}`,
+    );
+  }
+
+  const block: string[] = [];
+  // The final verdict is the run's product: rule it off so it reads as the
+  // conclusion rather than one more envelope in the pile.
+  if (kind === "decision") block.push(renderLabeledRule("decision", width, style));
+  block.push(`[${paintRole(style, from)} -> ${paintRole(style, to)}] ${style.dim(kind)}`);
+  if (verbose) block.push("    " + JSON.stringify(payload));
+
+  const roleTone: ThemeToken = from === "junior" ? "junior" : "senior";
+
+  if (kind === "consult") {
+    block.push(...renderKeyedBody("ask", payload.ask, width, style, roleTone));
+    block.push(...renderKeyedLine("expect", payload.expect ?? "proposal", width, style));
+  } else if (kind === "proposal") {
+    block.push(...renderKeyedLine("title", payload.title, width, style));
+    block.push(...renderKeyedBody("answer", payload.answer, width, style, roleTone));
+    if (payload.rationale) {
+      block.push(...renderKeyedBody("rationale", payload.rationale, width, style, "muted"));
+    }
+    if (payload.risks) {
+      block.push(...renderBullets("risks", payloadItems(payload.risks), width, style, "warning"));
+    }
+    block.push(...renderKeyedLine("confidence", payload.confidence, width, style));
+    if (payload.asks) {
+      block.push(...renderBullets("asks", payloadItems(payload.asks), width, style));
+    }
+  } else if (kind === "delegation") {
+    block.push(...renderKeyedBody("work", payload.work, width, style, roleTone));
+    block.push(...renderBullets("acceptance", payloadItems(payload.acceptance), width, style));
+  } else if (kind === "deliverable") {
+    block.push(...renderKeyedBody("result", payload.result, width, style, roleTone));
+    if (payload.artifacts) {
+      block.push(...renderBullets("artifacts", payloadItems(payload.artifacts), width, style));
+    }
+    block.push(...renderKeyedLine("confidence", payload.confidence, width, style));
+  } else if (kind === "review") {
+    block.push(
+      ...renderKeyedLine("verdict", payload.verdict, width, style, verdictTone(payload.verdict)),
+    );
+    block.push(...renderKeyedBody("notes", payload.notes, width, style, roleTone));
+  } else if (kind === "decision") {
+    block.push(...renderKeyedBody("decision", payload.decision, width, style, "decision"));
+    block.push(...renderKeyedBody("rationale", payload.rationale, width, style, "muted"));
+    block.push(...renderKeyedLine("confidence", payload.confidence, width, style));
+    block.push(
+      ...renderKeyedLine(
+        "dissent",
+        payload.dissent ?? "(none)",
+        width,
+        style,
+        payload.dissent === undefined || payload.dissent === null ? null : "dissent",
+      ),
+    );
+    if (payload.accepted_proposals) {
+      block.push(
+        ...renderBullets(
+          "accepted_proposals",
+          payloadItems(payload.accepted_proposals),
+          width,
+          style,
+        ),
+      );
+    }
+  }
+  return block;
+}
+
+/**
+ * The human transcript for a `run` (and every chat REPL turn).
+ *
+ * Envelopes render as separate blocks (one blank line between them) with a
+ * stable `[from -> to] kind` header, a width-capped rule in front of the
+ * decision block, and model prose as width-safe Markdown. `[role -> role]`
+ * headers are painted by role token, the envelope kind is `dim`, the labelled
+ * payload keys are `dim`, a decision value uses the bold `decision` token and
+ * a dissent value the `dissent` token. `width` defaults to
+ * {@link terminalWidth}, so piped output keeps the 96-column plain layout and
+ * a TTY wraps to its own size; the plain default keeps machine-safe text.
+ */
+export function renderMessages(
+  messages: Array<Record<string, any>>,
+  verbose: boolean,
+  style: CliStyle = plainCliStyle,
+  width: number = terminalWidth(),
+): string {
+  return messages
+    .map((msg) => renderEnvelopeBlock(msg, verbose, style, width).join("\n"))
+    .join("\n\n");
+}
+
+// --------------------------------------------------------------------------- //
+// live transcript (TTY-only projection)
+// --------------------------------------------------------------------------- //
+
+/** The minimal sink a live transcript writes to (`CliIO` is structurally one). */
+export interface TranscriptSink {
+  log(line: string): void;
+}
+
+/**
+ * One dim activity/progress row: `· <text>`. The text is sanitized and the
+ * whole row is capped to the caller's width, so a model/tool name can never
+ * break the terminal or overflow the line. Empty text renders nothing.
+ */
+export function renderActivityLine(
+  text: string,
+  style: CliStyle = plainCliStyle,
+  width: number = FALLBACK_TERMINAL_WIDTH,
+): string {
+  const body = sanitizeOneLine(text);
+  if (body === "") return "";
+  return truncateToWidth(style.dim(`· ${body}`), columns(width));
+}
+
+/** Options for {@link createLiveTranscript} (all injectable for tests). */
+export interface LiveTranscriptOptions {
+  /** Terminal style for the TTY projection (plain for a color-free terminal). */
+  style?: CliStyle;
+  /** Include the per-envelope payload JSON (the `--verbose` transcript form). */
+  verbose?: boolean;
+  /** Wrap/rule width; defaults to the caller's terminal width. */
+  width?: number;
+}
+
+/**
+ * The incremental TTY transcript: envelope blocks and activity lines are
+ * written to the sink as the harness produces them, and the final footer is
+ * written exactly once by {@link LiveTranscript.foot}.
+ *
+ * Byte layout contract (what makes TTY output the same transcript as a pipe):
+ * an envelope block is preceded by one blank row except for the first block;
+ * activity rows are standalone lines with no leading blank; so dropping the
+ * `· ` activity rows from the live output leaves exactly
+ * {@link renderMessages}'s bytes followed by the footer block. No footer is
+ * printed when the run reported no usage (`null`).
+ */
+export interface LiveTranscript {
+  /** Render one appended envelope block immediately. */
+  envelope(msg: Record<string, any>): void;
+  /** Render one activity/progress row immediately (empty text is a no-op). */
+  activity(text: string): void;
+  /** Write the final footer once (a second call is a no-op; `null` is a no-op). */
+  foot(footer: string | null): void;
+  /** Envelope blocks written so far. */
+  readonly envelopes: number;
+  /** Activity rows written so far. */
+  readonly activities: number;
+}
+
+/** Create the incremental TTY transcript writer for one run/turn. */
+export function createLiveTranscript(
+  sink: TranscriptSink,
+  options: LiveTranscriptOptions = {},
+): LiveTranscript {
+  const style = options.style ?? plainCliStyle;
+  const verbose = options.verbose === true;
+  const width = options.width ?? terminalWidth();
+  let envelopes = 0;
+  let activities = 0;
+  let footerPrinted = false;
+  return {
+    get envelopes(): number {
+      return envelopes;
+    },
+    get activities(): number {
+      return activities;
+    },
+    envelope(msg: Record<string, any>): void {
+      const block = renderEnvelopeBlock(msg, verbose, style, width).join("\n");
+      if (envelopes > 0) sink.log("");
+      sink.log(block);
+      envelopes += 1;
+    },
+    activity(text: string): void {
+      const line = renderActivityLine(text, style, width);
+      if (line === "") return;
+      sink.log(line);
+      activities += 1;
+    },
+    foot(footer: string | null): void {
+      if (footer === null || footerPrinted) return;
+      footerPrinted = true;
+      sink.log("");
+      sink.log(footer);
+    },
+  };
 }

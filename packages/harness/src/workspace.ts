@@ -31,8 +31,10 @@ import { randomUUID } from "node:crypto";
 
 import {
   Action,
+  APPROVAL_DETAIL_MAX_CHARS,
   PermissionDenied,
   PermissionManager,
+  type ApprovalDetail,
   type ApprovalRequest,
 } from "./permissions.ts";
 import { ShellRunner } from "./shell.ts";
@@ -369,6 +371,34 @@ export function makeDiff(relPath: string, oldText: string, newText: string, cont
     if (line.startsWith("-") && !line.startsWith("---")) removedLines += 1;
   }
   return { unified, added_lines: addedLines, removed_lines: removedLines };
+}
+
+/** Files above this size are approved by path only (no content preview read). */
+const MAX_APPROVAL_PREVIEW_BYTES = 200_000;
+
+/**
+ * Bounded operator-preview detail for one pending mutation: the unified diff
+ * (as the tool result will carry it) clipped to the shared detail cap. Never
+ * throws and never grows the event beyond `APPROVAL_DETAIL_MAX_CHARS`.
+ */
+function diffDetail(
+  kind: string,
+  relPath: string,
+  oldText: string,
+  newText: string,
+): ApprovalDetail {
+  const diff = makeDiff(relPath, oldText, newText);
+  const truncated = diff.unified.length > APPROVAL_DETAIL_MAX_CHARS;
+  const body = truncated
+    ? diff.unified.slice(0, APPROVAL_DETAIL_MAX_CHARS - 1) + "…"
+    : diff.unified;
+  return {
+    kind,
+    diff: body,
+    addedLines: diff.added_lines,
+    removedLines: diff.removed_lines,
+    ...(truncated ? { truncated: true } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -852,12 +882,19 @@ export class Workspace {
     return this.result(tool, p, status, { error: message });
   }
 
-  private async authorize(action: Action, p: string | null = null, command = "", reason = ""): Promise<void> {
+  private async authorize(
+    action: Action,
+    p: string | null = null,
+    command = "",
+    reason = "",
+    detail?: ApprovalDetail,
+  ): Promise<void> {
     const request: ApprovalRequest = {
       action,
       target: p !== null ? this.display(p) : "",
       command,
       reason,
+      ...(detail !== undefined ? { detail } : {}),
     };
     await this.permissions.require(request);
   }
@@ -1029,7 +1066,13 @@ export class Workspace {
           throw new WorkspaceError(`is a directory: ${rel}`);
         }
         const oldText = fs.existsSync(target) ? fs.readFileSync(target, "utf-8") : null;
-        await this.authorize(Action.WRITE, target);
+        await this.authorize(
+          Action.WRITE,
+          target,
+          "",
+          "",
+          diffDetail("write", this.display(target), oldText ?? "", content),
+        );
         fs.mkdirSync(path.dirname(target), { recursive: true });
         fs.writeFileSync(target, content, "utf-8");
         const result = this.result(tool, target, "ok");
@@ -1073,8 +1116,14 @@ export class Workspace {
         const raw = fs.readFileSync(target, "utf-8");
         const { bom, text } = splitBom(raw);
         const plan = planEdit(text, oldText, newText, replaceAll, rel);
-        await this.authorize(Action.EDIT, target);
         const updated = bom + plan.updated;
+        await this.authorize(
+          Action.EDIT,
+          target,
+          "",
+          "",
+          diffDetail("edit", this.display(target), raw, updated),
+        );
         fs.writeFileSync(target, updated, "utf-8");
         return this.result(tool, target, "ok", {
           replaced: plan.replaced,
@@ -1106,7 +1155,18 @@ export class Workspace {
         if (!fs.statSync(target).isFile()) {
           throw new WorkspaceError(`not a file: ${rel}`);
         }
-        await this.authorize(Action.DELETE, target);
+        // The delete preview shows the removed text as a diff when the file is
+        // small enough to read; a large/binary file is approved by path alone.
+        let detail: ApprovalDetail = { kind: "delete" };
+        try {
+          const size = fs.statSync(target).size;
+          if (size <= MAX_APPROVAL_PREVIEW_BYTES) {
+            detail = diffDetail("delete", this.display(target), fs.readFileSync(target, "utf-8"), "");
+          }
+        } catch {
+          // unreadable stat/read: the approval still names the target
+        }
+        await this.authorize(Action.DELETE, target, "", "", detail);
         fs.unlinkSync(target);
         return this.result(tool, target, "ok", { deleted: true });
       });
@@ -1121,7 +1181,7 @@ export class Workspace {
   /** Run a bounded shell command inside the workspace (approval required). */
   async run_shell(command: string, timeout?: number, signal?: AbortSignal): Promise<WorkspaceResult> {
     try {
-      await this.authorize(Action.SHELL, null, command);
+      await this.authorize(Action.SHELL, null, command, "", { kind: "shell", command });
     } catch (exc) {
       if (exc instanceof PermissionDenied) {
         return { tool: "run_shell", status: "denied", command, error: (exc as Error).message };

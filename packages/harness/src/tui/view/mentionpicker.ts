@@ -1,38 +1,39 @@
 /**
- * Pure inline command/skill picker for the TUI composer.
+ * Pure inline command/skill/file picker for the TUI composer.
  *
  * Typing `/` at the start of the composer (or at a line start with only
  * whitespace before it) opens an inline picker over the registry's native
  * slash commands, the first-party base commands the surface offers and the
  * discovered `<name>.md` templates; typing `@` at a token boundary opens the
  * skill picker (`@` plus an optional `skill:` prefix are both accepted as the
- * trigger). Continued typing filters the list (aliases are searchable
- * keywords), Up/Down move the highlight with wrap-around, Enter/Tab replace
- * the trigger token with the canonical `/name ` or `@skill:name ` token,
- * Shift+Tab dismisses, and Escape closes the picker without touching the rest
- * of the draft.
+ * trigger), and — in a workspace-bound TUI — typing an `@` path that contains
+ * a slash opens the workspace-file picker. Continued typing filters the list
+ * (aliases are searchable keywords), Up/Down move the highlight with
+ * wrap-around, Enter/Tab replace the trigger token with the canonical
+ * `/name `, `@skill:name ` or `@path ` token, Shift+Tab dismisses, and Escape
+ * closes the picker without touching the rest of the draft.
  *
  * Rows are grouped and badged by provenance (`TUI commands` / `Built-in
- * prompts` / `Built-in actions` / `Slash commands`; badge `builtin`, `action`
- * or `template`), built-ins are ordered by the shared priority/templates
- * alphabetically, and the footer shows the selected row's usage + description
- * above the registry-derived key hints.
+ * prompts` / `Built-in actions` / `Slash commands` / `Shared skills` /
+ * `Role-scoped skills` / `Workspace files`), built-ins are ordered by the
+ * shared priority/templates alphabetically, and the footer shows the selected
+ * row's usage + description above the registry-derived key hints.
  *
  * The trigger grammar deliberately mirrors `mentions.ts` so the picker can
  * never produce a token the submit path refuses: a command token is
  * `/` + `[A-Za-z0-9_-]*` on a whitespace-only line prefix; a skill token is
  * `@` + optional `skill:` + `[A-Za-z0-9_-]*` after start-of-text or ASCII
- * whitespace. Everything is grapheme-indexed (the editor's coordinate system),
- * so a picker selection can rewrite the token with the editor API without
- * splitting an emoji or combining sequence.
+ * whitespace; a file token is a whitespace-free `@`-run containing `/` or `\`
+ * (the same convention `scanMentions` uses). Everything is grapheme-indexed
+ * (the editor's coordinate system), so a picker selection can rewrite the
+ * token with the editor API without splitting an emoji or combining sequence.
  *
  * Rendering is an inline, unboxed list of exact-width rows (the same footer
  * area family as the find bar): a header with the kind/count/filter, optional
- * group headings, one row per command/skill with its argument hint, badge,
- * scope and (wide terminals only) description, a selected-row usage hint, the
- * registry-derived key hints, and for skills the one-line "only shared skills
- * can be mentioned" note. No ANSI outside the theme; nothing here throws on
- * hostile input.
+ * group headings, one row per command/skill/file with its argument hint,
+ * badge, scope and (wide terminals only) description, a selected-row usage
+ * hint, the registry-derived key hints, and honest scope notes. No ANSI
+ * outside the theme; nothing here throws on hostile input.
  */
 import { graphemes } from "../editor.ts";
 import {
@@ -48,9 +49,10 @@ import {
   type SlashCommandInfo,
   type TuiCommand,
 } from "../keymap.ts";
-import { skillMentionToken } from "../../mentions.ts";
+import { fileMentionToken, skillMentionToken } from "../../mentions.ts";
 import { sanitizeDisplayText } from "../screen.ts";
 import type { Skill, SkillScope } from "../../skills.ts";
+import type { WorkspaceFileEntry } from "../../workspacefiles.ts";
 import { plainTheme, type Theme, type ThemeToken } from "../theme.ts";
 import {
   dropLastGrapheme,
@@ -61,7 +63,7 @@ import {
 } from "./palette.ts";
 
 /** Which catalog the inline picker is showing. */
-export type MentionPickerKind = "command" | "skill";
+export type MentionPickerKind = "command" | "skill" | "file";
 
 /** One selectable row of the inline picker. */
 export interface MentionPickerItem {
@@ -109,6 +111,11 @@ export interface MentionPickerCatalogs {
    * already filters out native/template-shadowed names).
    */
   baseCommands?: readonly BaseCommand[];
+  /**
+   * Workspace files for the `@path` picker (indexed by `workspacefiles.ts`).
+   * Empty/absent when the TUI is not workspace-bound.
+   */
+  files?: readonly WorkspaceFileEntry[];
 }
 
 /** A detected trigger token in the composer text (grapheme indices). */
@@ -165,6 +172,7 @@ const GROUP_ORDER = [
   "Slash commands",
   "Shared skills",
   "Role-scoped skills",
+  "Workspace files",
 ] as const;
 
 function asString(value: unknown): string {
@@ -228,6 +236,27 @@ export function detectMentionTrigger(text: string, cursor?: number): MentionTrig
         end: tokenEnd,
         query: units.slice(nameStart, caret).join(""),
         token: units.slice(slash, tokenEnd).join(""),
+      };
+    }
+  }
+
+  // ── `@<path>` workspace-file mention token ──
+  // A file token is a whitespace-free `@` run containing `/` or `\` — exactly
+  // the shape `mentions.ts::scanMentions` accepts. A token without a slash yet
+  // falls through to the skill picker, so typing `@` still lists skills.
+  let tokenStart = caret;
+  while (tokenStart > 0 && !/\s/.test(units[tokenStart - 1] ?? "")) tokenStart -= 1;
+  if (units[tokenStart] === "@") {
+    let fileEnd = caret;
+    while (fileEnd < units.length && !/\s/.test(units[fileEnd] ?? "")) fileEnd += 1;
+    const typed = units.slice(tokenStart + 1, caret).join("");
+    if (typed.includes("/") || typed.includes("\\")) {
+      return {
+        kind: "file",
+        start: tokenStart,
+        end: fileEnd,
+        query: typed,
+        token: units.slice(tokenStart, fileEnd).join(""),
       };
     }
   }
@@ -394,18 +423,55 @@ export function skillMentionItems(skills: readonly Skill[] = []): MentionPickerI
   return [...shared.map(toItem), ...scoped.map(toItem)];
 }
 
+/** One-file human size for the picker description (`1.2 kB`, `340 B`). */
+function formatFileSize(size: number): string {
+  const bytes = Number.isFinite(size) && size > 0 ? Math.floor(size) : 0;
+  if (bytes < 1024) return `${bytes} B`;
+  const useKb = bytes < 1024 * 1024;
+  const value = useKb ? bytes / 1024 : bytes / (1024 * 1024);
+  return `${value.toFixed(1)} ${useKb ? "kB" : "MB"}`;
+}
+
+/**
+ * Workspace files for the `@path` picker: one row per indexed file, sorted by
+ * path (the index is already sorted). The row's title/insert token is the
+ * canonical mention spelling (`@src/a.ts`, and `@./README.md` for a root file,
+ * the same normalisation `fileMentionToken` applies), so accepting a row can
+ * never insert a token the submit path refuses.
+ */
+export function fileMentionItems(files: readonly WorkspaceFileEntry[] = []): MentionPickerItem[] {
+  return [...files]
+    .filter((entry) => typeof entry.path === "string" && entry.path !== "")
+    .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0))
+    .map((entry) => {
+      const token = fileMentionToken(entry.path);
+      const normalized = token.slice(1);
+      return {
+        id: `file:${entry.path}`,
+        kind: "file" as const,
+        name: normalized,
+        title: token,
+        insert: `${token} `,
+        description: formatFileSize(entry.size),
+        group: "Workspace files",
+      };
+    });
+}
+
 /** The full catalog for one picker kind. */
 export function mentionPickerItems(
   kind: MentionPickerKind,
   catalogs: MentionPickerCatalogs = {},
 ): MentionPickerItem[] {
-  return kind === "command"
-    ? commandMentionItems(
-        catalogs.commands ?? TUI_COMMANDS,
-        catalogs.templates ?? [],
-        catalogs.baseCommands ?? [],
-      )
-    : skillMentionItems(catalogs.skills ?? []);
+  if (kind === "command") {
+    return commandMentionItems(
+      catalogs.commands ?? TUI_COMMANDS,
+      catalogs.templates ?? [],
+      catalogs.baseCommands ?? [],
+    );
+  }
+  if (kind === "file") return fileMentionItems(catalogs.files ?? []);
+  return skillMentionItems(catalogs.skills ?? []);
 }
 
 // --------------------------------------------------------------------------- //
@@ -720,7 +786,8 @@ export function mentionPickerView(
   }
   const maxRows = Math.max(3, Math.floor(options.maxRows ?? 8));
   const selected = noMatch ? -1 : clamp(Math.floor(state.active), 0, filtered.length - 1);
-  const kindLabel = state.kind === "command" ? "COMMANDS" : "SKILLS";
+  const kindLabel =
+    state.kind === "command" ? "COMMANDS" : state.kind === "skill" ? "SKILLS" : "WORKSPACE FILES";
   const filter = state.query === "" ? "" : `  filter: ${state.query}`;
   const header = styledRow(theme, "accent", `${kindLabel} (${filtered.length})${filter}`, columns);
   const footerRows: string[] = [];
@@ -737,6 +804,15 @@ export function mentionPickerView(
         columns,
       ),
     );
+  } else if (state.kind === "file") {
+    footerRows.push(
+      styledRow(
+        theme,
+        "muted",
+        "The file is read read-only from the bound workspace and attached before the run.",
+        columns,
+      ),
+    );
   }
   const capacity = Math.max(0, maxRows - 1 - footerRows.length);
   const rows: MentionPickerRowRender[] = [];
@@ -745,10 +821,14 @@ export function mentionPickerView(
       ? state.items.length === 0
         ? state.kind === "command"
           ? "No slash commands registered."
-          : "No skills discovered — add <name>/SKILL.md to a skills root."
+          : state.kind === "skill"
+            ? "No skills discovered — add <name>/SKILL.md to a skills root."
+            : "No workspace files indexed — start the TUI with --workspace <dir>."
         : state.kind === "command"
           ? `No commands match "${state.query}".`
-          : `No skills match "${state.query}".`
+          : state.kind === "skill"
+            ? `No skills match "${state.query}".`
+            : `No workspace files match "${state.query}".`
       : "";
     if (message !== "") rows.push({ kind: "text", text: message });
   } else if (capacity > 0) {

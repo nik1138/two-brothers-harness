@@ -37,6 +37,18 @@ export interface ScreenOptions {
    */
   mentionPicker?: readonly string[];
   /**
+   * Docked approval panel rows. When present the panel replaces the composer
+   * (a parked run needs an answer, not a draft) and the remaining footer slots
+   * keep their positions; omitted/empty frames are byte-identical to before.
+   */
+  approvalPanel?: readonly string[];
+  /**
+   * Docked plan/todo panel rows rendered above the composer (below a parked
+   * approval panel). Display-only: the composer keeps its keys. Omitted or
+   * empty frames are byte-identical to the pre-plan layout.
+   */
+  todoPanel?: readonly string[];
+  /**
    * Inline find-bar rows rendered between the composer and the status bar
    * (Ctrl+F). Omitted (or empty) frames are byte-identical to the plain layout.
    */
@@ -73,8 +85,9 @@ export interface ScreenView {
 }
 
 /**
- * Compose welcome/transcript, an optional inline mention picker, the composer,
- * an optional inline find bar, the two-line status and one overlay layer.
+ * Compose welcome/transcript, an optional inline mention picker, the composer
+ * (or the docked approval panel that replaces it), an optional inline find bar,
+ * the two-line status and one overlay layer.
  *
  * The side panel (when the layout allows it) shares only the transcript body
  * row: the transcript is composed at `layout.transcriptWidth` and each body
@@ -97,20 +110,39 @@ export function screenView(options: ScreenOptions): ScreenView {
   };
   const statusLines = renderStatusBar(statusState, { width, theme });
   const mentionPicker = options.mentionPicker ?? [];
+  const approvalPanel = options.approvalPanel ?? [];
+  const todoPanel = options.todoPanel ?? [];
   const findBar = options.findBar ?? [];
-  const composer = composerView({
-    width,
-    editor: options.editor,
-    mode: status.mode,
-    seniorModel: status.seniorModel,
-    juniorModel: status.juniorModel,
-    running: status.running,
-    maxRows: options.composerMaxRows,
-    theme,
-  });
+  const approvalOpen = approvalPanel.length > 0;
+  const composer = approvalOpen
+    ? {
+        lines: [],
+        cursorRow: -1,
+        cursorColumn: 0,
+        inputStart: 0,
+        inputRows: 0,
+        hiddenBefore: 0,
+        hiddenAfter: 0,
+      }
+    : composerView({
+        width,
+        editor: options.editor,
+        mode: status.mode,
+        seniorModel: status.seniorModel,
+        juniorModel: status.juniorModel,
+        running: status.running,
+        maxRows: options.composerMaxRows,
+        theme,
+      });
   const bodyHeight = Math.max(
     0,
-    height - composer.lines.length - mentionPicker.length - findBar.length - statusLines.length,
+    height -
+      composer.lines.length -
+      approvalPanel.length -
+      todoPanel.length -
+      mentionPicker.length -
+      findBar.length -
+      statusLines.length,
   );
 
   const panelState = options.sidePanel;
@@ -167,7 +199,7 @@ export function screenView(options: ScreenOptions): ScreenView {
     width,
     height,
     body,
-    footer: [...mentionPicker, ...composer.lines, ...findBar, ...statusLines],
+    footer: [...mentionPicker, ...approvalPanel, ...todoPanel, ...composer.lines, ...findBar, ...statusLines],
     overlay,
     overlayAlign: options.overlay === undefined ? "top" : "center",
     bodyAnchor: empty ? "top" : "bottom",

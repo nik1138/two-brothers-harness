@@ -6,6 +6,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
+import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -22,6 +23,15 @@ function makeIO(): CliIO & { out: string[]; err: string[] } {
     log: (line) => out.push(line),
     error: (line) => err.push(line),
   };
+}
+
+/**
+ * A sink that reports an interactive stdout: the injectable TTY signal the
+ * live transcript keys on (`CliIO.isTTY`). stdout is not a real terminal in
+ * tests, so this is how live mode is exercised hermetically.
+ */
+function makeTTYIO(): CliIO & { out: string[]; err: string[] } {
+  return { ...makeIO(), isTTY: true };
 }
 
 let fakeSeq = 0;
@@ -388,4 +398,176 @@ test("run: machine output modes stay escape-free under an explicit colored style
   assert.equal(await main([...MOCK_RUN_ARGS, "--mode", "print"], print, ansi16Style()), 0);
   assert.equal(print.out.length, 1);
   assert.ok(print.err.some((line) => line.startsWith("tokens: ")), print.err.join("\n"));
+});
+
+// ---------------------------------------------------------------------------
+// live TTY transcript (run/chat) with byte-identical piped output
+// ---------------------------------------------------------------------------
+
+/** Rows that are human-facing progress rather than transcript content. */
+function withoutActivityRows(text: string): string {
+  return text
+    .split("\n")
+    .filter((row) => !row.startsWith("· "))
+    .join("\n");
+}
+
+function countRows(text: string, pattern: RegExp): number {
+  return text.split("\n").filter((row) => pattern.test(row)).length;
+}
+
+const FOOTER_ROW = /^tokens \d+ in \/ \d+ out · \d+ calls?$/;
+const DECISION_RULE_ROW = /^── decision ─+$/;
+
+test("run: a TTY streams envelope blocks live and prints the footer once", async () => {
+  const piped = makeIO();
+  assert.equal(await main([...MOCK_RUN_ARGS], piped), 0, piped.err.join("\n"));
+  const tty = makeTTYIO();
+  assert.equal(await main([...MOCK_RUN_ARGS], tty), 0, tty.err.join("\n"));
+
+  const pipedText = piped.out.join("\n");
+  const liveText = tty.out.join("\n");
+  // live output arrives in pieces: one sink call per block / activity row,
+  // instead of the single finished-transcript string a pipe gets.
+  assert.ok(
+    tty.out.length > piped.out.length,
+    `live sink calls ${tty.out.length} should exceed ${piped.out.length}`,
+  );
+  // compact activity rows are interleaved before the block they announce
+  const expectActivityBefore = (activity: string, header: string): void => {
+    const activityAt = liveText.indexOf(activity);
+    const headerAt = liveText.indexOf(header);
+    assert.ok(activityAt >= 0, `missing activity row ${activity}`);
+    assert.ok(headerAt >= 0, `missing header ${header}`);
+    assert.ok(activityAt < headerAt, `${activity} must precede ${header}`);
+  };
+  expectActivityBefore("· senior consulting…", "[senior -> junior] consult");
+  expectActivityBefore("· junior proposing…", "[junior -> senior] proposal");
+  expectActivityBefore("· senior reviewing…", "[senior -> junior] review");
+  expectActivityBefore("· senior deciding…", "[senior -> user] decision");
+
+  // the decision rule and the compact footer are printed exactly once
+  assert.equal(countRows(liveText, DECISION_RULE_ROW), 1, "decision rule must print once");
+  assert.equal(countRows(liveText, FOOTER_ROW), 1, "footer must print once");
+  const nonEmpty = liveText.split("\n").filter((row) => row !== "");
+  assert.match(nonEmpty[nonEmpty.length - 1] as string, FOOTER_ROW, "footer is last");
+  // every envelope block appears once (no duplicate final re-render)
+  for (const header of [
+    "[senior -> junior] consult",
+    "[junior -> senior] proposal",
+    "[senior -> junior] review",
+    "[senior -> user] decision",
+  ]) {
+    assert.equal(countRows(liveText, new RegExp(`^${header.replace(/[[\]]/g, "\\$&")}$`)), 1);
+  }
+  // dropping the activity rows reproduces the piped transcript byte for byte
+  assert.equal(withoutActivityRows(liveText), pipedText);
+});
+
+test("run: --no-live and a non-TTY sink keep the finished-transcript output", async () => {
+  const piped = makeIO();
+  assert.equal(await main([...MOCK_RUN_ARGS], piped), 0, piped.err.join("\n"));
+  const pipedText = piped.out.join("\n");
+  assert.ok(!pipedText.split("\n").some((row) => row.startsWith("· ")), "piped output is static");
+
+  const noLive = makeTTYIO();
+  assert.equal(await main([...MOCK_RUN_ARGS, "--no-live"], noLive), 0);
+  assert.equal(noLive.out.join("\n"), pipedText, "--no-live on a TTY must match a pipe");
+  assert.equal(noLive.out.length, piped.out.length, "--no-live renders the transcript once");
+
+  // --live cannot turn a pipe live: the bytes are unchanged
+  const forcedPipe = makeIO();
+  assert.equal(await main([...MOCK_RUN_ARGS, "--live"], forcedPipe), 0);
+  assert.equal(forcedPipe.out.join("\n"), pipedText, "--live on a pipe must be a no-op");
+
+  // --no-live wins when both flags are given
+  const both = makeTTYIO();
+  assert.equal(await main([...MOCK_RUN_ARGS, "--live", "--no-live"], both), 0);
+  assert.equal(both.out.join("\n"), pipedText, "--no-live wins over --live");
+});
+
+test("run: live TTY output strips back to the plain live output", async () => {
+  const plain = makeTTYIO();
+  assert.equal(await main([...MOCK_RUN_ARGS], plain), 0, plain.err.join("\n"));
+  const colored = makeTTYIO();
+  assert.equal(await main([...MOCK_RUN_ARGS], colored, ansi16Style()), 0);
+  const coloredText = colored.out.join("\n");
+  assert.ok(coloredText.includes("\x1b"), "an explicit style must paint live output");
+  assert.equal(stripAnsi(coloredText), plain.out.join("\n"));
+  // activity rows are painted dim; the transcript is untouched by stripping
+  assert.match(coloredText, /\x1b\[2m· senior consulting…\x1b\[0m/);
+});
+
+test("run: machine modes never stream live, even with a TTY sink", async () => {
+  const cases: Array<{ label: string; args: string[] }> = [
+    { label: "--json", args: [...MOCK_RUN_ARGS, "--json"] },
+    { label: "--json-events", args: [...MOCK_RUN_ARGS, "--json-events"] },
+    { label: "--mode print", args: [...MOCK_RUN_ARGS, "--mode", "print"] },
+    { label: "--stream", args: [...MOCK_RUN_ARGS, "--stream"] },
+    { label: "--dry-run", args: [...MOCK_RUN_ARGS, "--dry-run"] },
+  ];
+  for (const { label, args } of cases) {
+    const tty = makeTTYIO();
+    assert.equal(await main(args, tty, ansi16Style()), 0, `${label}: ${tty.err.join("\n")}`);
+    const output = [...tty.out, ...tty.err].join("\n");
+    assert.ok(!output.includes("\x1b"), `${label} leaked an escape sequence on a TTY`);
+    assert.ok(
+      !stripAnsi(output).split("\n").some((row) => row.startsWith("· ")),
+      `${label} emitted a live activity row`,
+    );
+  }
+});
+
+test("help: run and chat document the live flags and the piped behavior", async () => {
+  for (const command of ["run", "chat"]) {
+    const io = makeIO();
+    assert.equal(await main(["help", command], io), 0, io.err.join("\n"));
+    const text = io.out.join("\n");
+    assert.ok(text.includes("--live"), `${command} help does not list --live`);
+    assert.ok(text.includes("--no-live"), `${command} help does not list --no-live`);
+    assert.match(text, /live/i, `${command} help does not explain live output`);
+  }
+});
+
+/**
+ * Drive one piped `chat` REPL turn in-process by swapping `process.stdin` for a
+ * scripted stream (the REPL reads the process stdin directly, so this is the
+ * only way to exercise it without a child process).
+ */
+async function runChatTurn(
+  io: CliIO & { out: string[]; err: string[] },
+  lines: string[],
+): Promise<number> {
+  const original = Object.getOwnPropertyDescriptor(process, "stdin");
+  Object.defineProperty(process, "stdin", {
+    value: Readable.from(lines.map((line) => `${line}\n`)),
+    configurable: true,
+  });
+  try {
+    return await main(["chat", "--provider", "mock"], io);
+  } finally {
+    if (original !== undefined) Object.defineProperty(process, "stdin", original);
+    else delete (process as unknown as { stdin?: unknown }).stdin;
+  }
+}
+
+test("chat: a TTY REPL turn streams live per turn and keeps the footer once", async () => {
+  const lines = ["Name one benefit of code review", ""];
+  const piped = makeIO();
+  assert.equal(await runChatTurn(piped, lines), 0, piped.err.join("\n"));
+  const tty = makeTTYIO();
+  assert.equal(await runChatTurn(tty, lines), 0, tty.err.join("\n"));
+
+  const pipedText = piped.out.join("\n");
+  const liveText = tty.out.join("\n");
+  assert.ok(tty.out.length > piped.out.length, "a live turn writes incrementally");
+  assert.match(liveText, /^· senior consulting…$/m);
+  assert.match(liveText, /^· junior proposing…$/m);
+  assert.equal(countRows(liveText, FOOTER_ROW), 1, "one footer per turn");
+  assert.equal(countRows(liveText, DECISION_RULE_ROW), 1, "one ruled decision per turn");
+  // stripping live activity leaves the same per-turn output a pipe sees
+  assert.equal(withoutActivityRows(liveText), pipedText);
+  // the banner and resolved-role rows are untouched by live mode
+  assert.match(liveText, /Two Brothers REPL\./);
+  assert.match(liveText, /senior: provider=mock model=/);
 });

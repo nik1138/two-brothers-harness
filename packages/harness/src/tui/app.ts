@@ -46,9 +46,18 @@ import {
   type McpToolSet,
 } from "../mcp.ts";
 import { PluginManager, type PluginBindings } from "../plugins.ts";
+import { Decision, PermissionManager } from "../permissions.ts";
 import { mergeSeedPresets } from "../presets.ts";
 import type { Message } from "../protocol.ts";
+import { RunApprovalBroker, RuntimeEventStore } from "../runevents.ts";
+import type { RuntimeEvent } from "../runevents.ts";
 import type { RoleEndpoint } from "../runtime.ts";
+import { Workspace } from "../workspace.ts";
+import { sanitizeTodos, type TodoItem } from "../todos.ts";
+import {
+  indexWorkspaceFiles,
+  type WorkspaceFileEntry,
+} from "../workspacefiles.ts";
 import type { StreamEvent } from "../runstream.ts";
 import { restoreContext, SessionError, SessionStore } from "../session.ts";
 import {
@@ -59,9 +68,13 @@ import {
 import { envPinnedPairs } from "../settings_store.ts";
 import { discoverSkills, type SkillCatalog } from "../skills.ts";
 import {
+  MENTION_MAX_FILE_CHARS,
+  MENTION_MAX_FILES,
   MENTION_MAX_SKILLS,
   MENTION_MAX_TOTAL_CHARS,
+  normalizeMentionPath,
   parseMentions,
+  renderFileBlock,
   renderSkillLoadedBlock,
 } from "../mentions.ts";
 import {
@@ -166,6 +179,14 @@ import {
   type MentionPickerState,
 } from "./view/mentionpicker.ts";
 import {
+  approvalPanelKey,
+  approvalPanelView,
+  approvalPreview,
+  createApprovalPanelState,
+  type ApprovalPanelState,
+} from "./view/approval.ts";
+import { sessionSidecarKey, todosFromRuntimeEvents, todoPanelView } from "./view/todo.ts";
+import {
   historySearchView,
   openHistorySearch,
   searchHistoryKey,
@@ -240,6 +261,14 @@ export interface TuiAppOptions {
   streamTokens?: boolean;
   /** `tui "<task>"`: run this task as soon as the screen opens. */
   initialTask?: string;
+  /**
+   * `tui --workspace <dir>`: bind every turn to this confined workspace. The
+   * junior gets the `workspace_*` tool belt, the senior the read-only verify
+   * slice, mutations/shell park on an operator approval panel, plugins bind
+   * workspace-bound and the composer `@path` picker/attachments use this root.
+   * An invalid root is a startup error (exit 2) before the screen opens.
+   */
+  workspaceRoot?: string;
   /** Working directory shown in the welcome screen and status bar. */
   cwd?: string;
   /** Directory the session picker scans for `.jsonl` sessions. */
@@ -624,6 +653,133 @@ export function resolveSkillMentions(
   return { ok: true, plan: { names, blocks, totalChars } };
 }
 
+/** A validated file attachment: the exact context message texts to append. */
+export interface FileAttachmentPlan {
+  /** Attached workspace-relative paths, in mention order (deduped). */
+  names: string[];
+  /** `renderFileBlock(...)` texts, parallel to `names`. */
+  blocks: string[];
+  /** Total block characters (bounded by `MENTION_MAX_TOTAL_CHARS`). */
+  totalChars: number;
+}
+
+/** Result of validating a task's `@<path>` mentions. */
+export type FileMentionResolution =
+  | { ok: true; plan: FileAttachmentPlan }
+  | { ok: false; errors: string[] };
+
+/**
+ * Read at most `maxBytes` of a file as UTF-8 (bounded synchronous read, the
+ * operator-submission path). Returns the text and whether the file was larger.
+ */
+function readBoundedFileText(target: string, maxBytes: number, size: number): {
+  text: string;
+  truncated: boolean;
+} {
+  const bytes = Math.max(0, Math.min(size, Math.max(0, Math.floor(maxBytes))));
+  if (bytes === 0) return { text: "", truncated: size > 0 };
+  const buffer = Buffer.alloc(bytes);
+  const fd = fs.openSync(target, "r");
+  let read = 0;
+  try {
+    read = fs.readSync(fd, buffer, 0, buffer.length, 0);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const raw = buffer.subarray(0, read).toString("utf-8");
+  const truncated = size > read || raw.length > MENTION_MAX_FILE_CHARS;
+  return {
+    text: raw.length > MENTION_MAX_FILE_CHARS ? raw.slice(0, MENTION_MAX_FILE_CHARS) : raw,
+    truncated,
+  };
+}
+
+/**
+ * Validate the `@<path>` mentions of one task against a bound workspace and
+ * build the `<file path="…">` context blocks, with the same rules the server
+ * path enforces: at most `MENTION_MAX_FILES`, normalised workspace-relative
+ * paths (absolute paths and `..` segments refused), confined reads through
+ * `Workspace.resolve` (sensitive files refused), text files only, per-file
+ * `MENTION_MAX_FILE_CHARS` with the standard truncation marker, and the
+ * `MENTION_MAX_TOTAL_CHARS` aggregate cap. Pure IO on the given workspace;
+ * never throws for a bad mention — those come back as honest errors.
+ */
+export function resolveFileMentions(
+  task: string,
+  workspace: Workspace,
+): FileMentionResolution {
+  const parsed = parseMentions(task);
+  if (parsed.files.length === 0) {
+    return { ok: true, plan: { names: [], blocks: [], totalChars: 0 } };
+  }
+  const errors: string[] = [];
+  if (parsed.files.length > MENTION_MAX_FILES) {
+    errors.push(
+      `too many file mentions (${parsed.files.length}); at most ${MENTION_MAX_FILES} per task`,
+    );
+  }
+  const names: string[] = [];
+  const blocks: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of parsed.files) {
+    const rel = normalizeMentionPath(raw);
+    if (rel === "") {
+      errors.push(`cannot attach file "@${raw}": invalid path`);
+      continue;
+    }
+    if (path.isAbsolute(rel) || rel.startsWith("/") || /^[A-Za-z]:[\\/]/.test(rel)) {
+      errors.push(`cannot attach file "@${raw}": absolute paths are not allowed: ${rel}`);
+      continue;
+    }
+    if (rel.split("/").includes("..")) {
+      errors.push(`cannot attach file "@${raw}": path escapes the workspace: ${rel}`);
+      continue;
+    }
+    if (seen.has(rel)) continue;
+    seen.add(rel);
+    let target: string;
+    try {
+      target = workspace.resolve(rel);
+    } catch (exc) {
+      errors.push(`cannot attach file "@${raw}": ${messageOf(exc)}`);
+      continue;
+    }
+    let size: number;
+    try {
+      const stat = fs.statSync(target);
+      if (!stat.isFile()) {
+        errors.push(`cannot attach file "@${raw}": not a file: ${rel}`);
+        continue;
+      }
+      size = stat.size;
+    } catch (exc) {
+      errors.push(`cannot attach file "@${raw}": ${messageOf(exc)}`);
+      continue;
+    }
+    let read: { text: string; truncated: boolean };
+    try {
+      read = readBoundedFileText(target, MENTION_MAX_FILE_CHARS * 4, size);
+    } catch (exc) {
+      errors.push(`cannot attach file "@${raw}": ${messageOf(exc)}`);
+      continue;
+    }
+    if (read.text.includes("\u0000")) {
+      errors.push(`cannot attach file "@${raw}": not a text file`);
+      continue;
+    }
+    names.push(rel);
+    blocks.push(renderFileBlock(rel, read.text, { truncated: read.truncated }));
+  }
+  const totalChars = blocks.reduce((total, block) => total + block.length, 0);
+  if (totalChars > MENTION_MAX_TOTAL_CHARS) {
+    errors.push(
+      `attached file content is too large (${totalChars} > ${MENTION_MAX_TOTAL_CHARS} chars)`,
+    );
+  }
+  if (errors.length > 0) return { ok: false, errors };
+  return { ok: true, plan: { names, blocks, totalChars } };
+}
+
 // --------------------------------------------------------------------------- //
 // session construction (same shape as cli.ts's chat path)
 // --------------------------------------------------------------------------- //
@@ -782,6 +938,18 @@ interface TurnSetup {
   mcpConfig?: string;
   streamTokens?: boolean;
   signal?: AbortSignal;
+  /**
+   * The turn's confined workspace (`tui --workspace`). Its `workspace_*` tools
+   * become the junior's belt and the senior's read-only verify slice; plugin
+   * bindings see the same workspace.
+   */
+  workspace?: Workspace;
+  /**
+   * Typed runtime events of this turn (the harness `onEvent` hook): the app
+   * watches `todo_updated` for the docked plan panel. Optional so callers that
+   * only stream envelopes stay unchanged.
+   */
+  onRuntimeEvent?: (event: RuntimeEvent) => void;
   onStreamEvent: (event: StreamEvent) => void;
   onWarning: (line: string) => void;
 }
@@ -802,7 +970,7 @@ async function buildTurnHarness(setup: TurnSetup): Promise<TurnHarness> {
     try {
       bindings = await setup.resources.plugins.bindingsFor(
         [...setup.resources.plugins.plugins.keys()],
-        null,
+        setup.workspace ?? null,
       );
       if (cfg.verbose) {
         for (const entry of bindings.diagnostics) {
@@ -843,11 +1011,13 @@ async function buildTurnHarness(setup: TurnSetup): Promise<TurnHarness> {
   const hasScopes = Object.values(toolScopes).some((list) => list !== undefined);
   const compaction = compactionOptions(cfg);
   const harness = new TwoBrothersHarness(cfg, {
+    ...(setup.workspace !== undefined ? { workspace: setup.workspace } : {}),
     ...(hasScopes ? { toolScopes } : {}),
     endpoints,
     ...(compaction ? { compaction } : {}),
     ...(bindings !== null ? { hooks: bindings.hooks } : {}),
     ...(setup.resources.skills.skills.length > 0 ? { skills: setup.resources.skills } : {}),
+    ...(setup.onRuntimeEvent !== undefined ? { onEvent: setup.onRuntimeEvent } : {}),
     onStreamEvent: setup.onStreamEvent,
     ...(setup.streamTokens === true ? { streamTokens: true } : {}),
     ...(setup.signal !== undefined ? { signal: setup.signal } : {}),
@@ -994,6 +1164,20 @@ function usageOf(value: unknown): UsageSnapshot {  const record = (value ?? {}) 
 export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   const input = options.input ?? process.stdin;
   const output = options.output ?? process.stdout;
+  // `tui --workspace <dir>`: validate the confined root before the screen is
+  // built. A bad root is a clear startup error (exit 2) and never opens the
+  // alternate screen; an omitted flag keeps the TUI exactly as before.
+  let workspaceRoot: string | null = null;
+  let mentionWorkspace: Workspace | null = null;
+  if (options.workspaceRoot !== undefined && options.workspaceRoot.trim() !== "") {
+    try {
+      mentionWorkspace = new Workspace(options.workspaceRoot);
+      workspaceRoot = mentionWorkspace.root;
+    } catch (exc) {
+      options.io.error(`[error] ${messageOf(exc)}`);
+      return 2;
+    }
+  }
   // The process-level streams, not just the injected pair: a late console
   // buffer event hits Node's internal SIGWINCH refresh on stderr too.
   guardTtyResizeRefresh(process.stdout);
@@ -1039,6 +1223,56 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
 
   const cwd = options.cwd ?? process.cwd();
   const sessionsDir = options.sessionsDir ?? path.join(cwd, "sessions");
+
+  /**
+   * The last persisted plan snapshot for one session file, replayed from the
+   * runtime sidecar (`sessions/runtime/<stem>.events.jsonl`) that a
+   * `two-brothers serve` backend writes. Fail-soft: a missing/unreadable
+   * sidecar is an empty plan, never an error. TUI turns do not write the
+   * sidecar, so a plan they produce is kept in memory for this process (see
+   * `planForSession`); only serve-created sessions have a durable sidecar.
+   */
+  function loadSessionTodos(sessionFile: string): TodoItem[] {
+    // `RuntimeEventStore` appends `.events.jsonl` to its key and server session
+    // names include the extension, so a serve-written sidecar is
+    // `sessions/runtime/<session file>.events.jsonl`.
+    const name = sessionSidecarKey(sessionFile);
+    if (!name) return [];
+    try {
+      const store = new RuntimeEventStore(path.join(sessionsDir, "runtime"));
+      return todosFromRuntimeEvents(store.load(name));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * This process's live plan snapshots, keyed by the resolved session file.
+   * The TUI does not persist typed events, so switching sessions back and
+   * forth inside one process must not lose a plan the sidecar never saw.
+   */
+  const planCache = new Map<string, TodoItem[]>();
+
+  /** Remember the live plan of `sessionFile` for the rest of this process. */
+  function rememberTodos(sessionFile: string, snapshot: readonly TodoItem[]): void {
+    if (sessionFile === "") return;
+    const key = path.resolve(sessionFile);
+    // Bounded: a long session-hopping process must not grow this map forever.
+    if (!planCache.has(key) && planCache.size >= 32) {
+      const oldest = planCache.keys().next();
+      if (!oldest.done) planCache.delete(oldest.value);
+    }
+    planCache.set(key, [...snapshot]);
+  }
+
+  /** The plan to show for `sessionFile`: this process's snapshot first, else the sidecar. */
+  function planForSession(sessionFile: string): TodoItem[] {
+    if (sessionFile === "") return [];
+    const cached = planCache.get(path.resolve(sessionFile));
+    if (cached !== undefined) return [...cached];
+    return loadSessionTodos(sessionFile);
+  }
+
   const slashInfos = (): SlashCommandInfo[] =>
     resources.commands.commands.map((command: Command) => ({
       name: command.name,
@@ -1066,6 +1300,10 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   // them as neutral SUMMARY markers (never as an operator message). An
   // uncompacted context yields the empty model, byte-identical to before.
   let model: TuiModel = createCompactionSummaryModel(context.events);
+  // The current conversation's plan (the latest `todo_updated` snapshot). A
+  // resumed session starts from the runtime sidecar when a serve backend wrote
+  // one; live writes update it and this process remembers it across switches.
+  let todos: TodoItem[] = planForSession(sessionCfg.sessionFile);
   // Tool-result expansion is per row and keyed by call id (or block id), so
   // it survives streaming updates and never depends on the row's position.
   let toolExpansion: ToolExpansionKeys = new Set<string>();
@@ -1118,6 +1356,35 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   // The `panel` registry command's choice for this run: null = no choice yet
   // (the panel follows the terminal size), false = hidden, true = shown.
   let sidePanelChoice: boolean | null = null;
+  /**
+   * A pending operator approval: set from the turn broker's
+   * `approval_requested`, cleared by `approval_resolved`. While set, the
+   * approval panel replaces the composer and owns the decision keys; closing
+   * an overlay never answers it.
+   */
+  let approval: ApprovalPanelState | null = null;
+  /** The running turn's approval broker — the only approval authority. */
+  let activeBroker: RunApprovalBroker | null = null;
+  /**
+   * `approvalPairKey` pairs the operator allowed "for this session" in this
+   * TUI process. Memory only: seeded into each new per-turn broker so an
+   * identical request does not park again, and never persisted to settings.
+   */
+  const sessionAllows = new Map<string, { action: string; target: string }>();
+
+  /**
+   * The workspace file index for the composer `@path` picker. Re-indexed when
+   * a file picker opens so files created during the session are findable; a
+   * missing/unreadable root yields an empty index (fail-soft).
+   */
+  const workspaceFilesForPicker = (): WorkspaceFileEntry[] => {
+    if (workspaceRoot === null) return [];
+    try {
+      return indexWorkspaceFiles(workspaceRoot).files;
+    } catch {
+      return [];
+    }
+  };
 
   const sessionName = (): string =>
     sessionCfg.sessionFile ? path.basename(sessionCfg.sessionFile) : "in-memory";
@@ -1425,10 +1692,20 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       : findBarView(find, { width: size.columns, theme }).lines;
     const findBlockId = find === null ? undefined : activeFindMatch(find)?.match.blockId;
     // The inline picker is a composer affordance, never a modal surface: it is
-    // hidden while any overlay is up.
-    const mentionRows = overlay === null && mention !== null
+    // hidden while any overlay is up or while an approval owns the footer.
+    const mentionRows = overlay === null && approval === null && mention !== null
       ? mentionPickerView(mention, { width: size.columns, theme }).lines
       : undefined;
+    // A parked approval replaces the composer (the run needs an answer, not a
+    // draft); closing an overlay above it never answers it.
+    const approvalRows = approval === null
+      ? undefined
+      : approvalPanelView(approval, { width: size.columns, theme }).lines;
+    // The model's plan is display-only state: a dock above the composer that
+    // never takes a key and never replaces the composer.
+    const todoRows = todos.length === 0
+      ? undefined
+      : todoPanelView(todos, { width: size.columns, theme }).lines;
     const frame = screenView({
       width: size.columns,
       height: size.rows,
@@ -1438,6 +1715,8 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       theme,
       scroll,
       overlay: overlayLines(size.columns, size.rows),
+      ...(approvalRows !== undefined ? { approvalPanel: approvalRows } : {}),
+      ...(todoRows !== undefined ? { todoPanel: todoRows } : {}),
       ...(mentionRows !== undefined ? { mentionPicker: mentionRows } : {}),
       ...(findBar !== undefined ? { findBar } : {}),
       ...(findBlockId !== undefined ? { findBlockId } : {}),
@@ -1487,6 +1766,106 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     model = addNotice(model, "warn", line);
   };
 
+  // --------------------------------------------------------------------- //
+  // operator approvals (workspace-bound turns only)
+  // --------------------------------------------------------------------- //
+
+  /**
+   * Answer the pending approval through the turn's broker. The app is the only
+   * caller of the broker's operator API; a decision resolves the parked tool
+   * exactly once, and the broker's `approval_resolved` event clears the panel.
+   */
+  const answerApproval = (decision: "allow" | "session" | "deny"): void => {
+    const current = approval;
+    const broker = activeBroker;
+    if (current === null) return;
+    if (broker === null) {
+      approval = null;
+      model = addNotice(model, "warn", "the approval's turn is no longer running");
+      render();
+      return;
+    }
+    const approvalId = current.item.approvalId;
+    if (decision === "session") {
+      // Remember the pair for this TUI process BEFORE resolving, so the next
+      // identical request is auto-allowed; the broker itself stays in-memory.
+      const pair = broker.sessionPairKey(approvalId);
+      if (pair !== null) {
+        sessionAllows.set(pair, {
+          action: current.item.action,
+          target: current.item.target ?? current.item.command ?? "",
+        });
+        broker.allowForSession(approvalId);
+      }
+    } else {
+      broker.respond(approvalId, decision === "allow" ? Decision.ALLOW : Decision.DENY);
+    }
+    render();
+  };
+
+  /** `Ctrl+E`: the full-screen preview for a pending write/edit/shell request. */
+  const openApprovalPreview = (): void => {
+    if (approval === null) return;
+    const preview = approvalPreview(approval.item);
+    if (preview === null) {
+      pushToast("info", "nothing to preview for this approval");
+      render();
+      return;
+    }
+    overlay = {
+      kind: "dialog",
+      state: createDialog({
+        title: preview.title,
+        message: preview.message,
+        details: preview.details,
+        showDetails: true,
+        tone: "warning",
+        actions: [{ id: "close", label: "Close" }],
+      }),
+      // Closing the preview NEVER answers the request: the panel stays parked.
+      onAction: () => {},
+    };
+    render();
+  };
+
+  /** Fold one keypress into the parked approval panel (its own key scope). */
+  const handleApprovalKey = (key: Key): void => {
+    if (approval === null) return;
+    const result = approvalPanelKey(TUI_COMMANDS, approval, key);
+    approval = result.state;
+    switch (result.action) {
+      case "move":
+        render();
+        return;
+      case "preview":
+        openApprovalPreview();
+        return;
+      case "allow":
+        answerApproval("allow");
+        return;
+      case "allow-session":
+        answerApproval("session");
+        return;
+      case "deny":
+        answerApproval("deny");
+        return;
+      default:
+        return;
+    }
+  };
+
+  /**
+   * Resolve every pending approval as deny (turn cancelled / app torn down).
+   * A stopped run must never leave a mutation parked mid-approval; these are
+   * cancellations, not operator answers, so they never consume the deny cap.
+   */
+  const denyPendingApprovals = (reason: string): void => {
+    const broker = activeBroker;
+    activeBroker = null;
+    approval = null;
+    broker?.denyAll(reason);
+  };
+
   /**
    * Start one turn. `prompt` is the user-facing submission to remember in
    * history (raw composer text, a CLI task, or a palette template) and is
@@ -1509,10 +1888,11 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       render();
       return false;
     }
-    // Validate `@skill:` mentions before anything is recorded or started: an
-    // unknown or role-scoped skill refuses the whole task (the same rule the
-    // server path enforces). File mentions stay literal text — the TUI has no
-    // workspace to attach them from.
+    // Validate `@skill:` and `@<path>` mentions before anything is recorded or
+    // started: an unknown or role-scoped skill, or an unresolvable/oversized
+    // file, refuses the whole task (the same rules the server path enforces).
+    // File mentions need the bound workspace; without one they stay literal
+    // task text exactly as before.
     const attachment = resolveSkillMentions(task, resources.skills);
     if (!attachment.ok) {
       for (const error of attachment.errors) {
@@ -1521,6 +1901,19 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       activity = "skill mention refused — fix the task and send it again";
       render();
       return false;
+    }
+    let fileAttachment: FileAttachmentPlan | null = null;
+    if (workspaceRoot !== null && mentionWorkspace !== null) {
+      const files = resolveFileMentions(task, mentionWorkspace);
+      if (!files.ok) {
+        for (const error of files.errors) {
+          model = addNotice(model, "error", error);
+        }
+        activity = "file mention refused — fix the task and send it again";
+        render();
+        return false;
+      }
+      if (files.plan.blocks.length > 0) fileAttachment = files.plan;
     }
     if (prompt !== undefined) rememberPrompt(prompt);
     model = addUserBlock(model, task);
@@ -1532,12 +1925,14 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     activity = `running (${turnMode})…`;
     const controller = new AbortController();
     turnAbort = controller;
-    // Attach the validated skill bodies to the shared context BEFORE the run.
+    // Attach the validated mention blocks to the shared context BEFORE the run.
     // The operator task is appended first so `renderTranscript`'s [[TASK]]
     // extraction is unchanged; `harness.run` sees the task already present and
-    // does not append a duplicate. Identical blocks are never re-attached, so a
-    // retry does not grow the context.
-    if (attachment.plan.blocks.length > 0) {
+    // does not append a duplicate. Skills come first, then files (the server
+    // order), and identical blocks are never re-attached, so a retry does not
+    // grow the context.
+    const fileAttachmentPlan = fileAttachment;
+    if (attachment.plan.blocks.length > 0 || fileAttachmentPlan !== null) {
       try {
         const hasMessage = (text: string): boolean =>
           context.events.some(
@@ -1549,26 +1944,114 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         if (!hasMessage(task)) {
           context.makeAndAppend("user", "senior", "message", { text: task });
         }
-        for (const block of attachment.plan.blocks) {
+        const blocks = [
+          ...attachment.plan.blocks,
+          ...(fileAttachmentPlan?.blocks ?? []),
+        ];
+        for (const block of blocks) {
           if (hasMessage(block)) continue;
           context.makeAndAppend("user", "senior", "message", { text: block });
         }
-        pushToast("info", `skill attached: ${attachment.plan.names.join(", ")}`);
+        const attached: string[] = [];
+        const skillNames = attachment.plan.names;
+        const fileNames = fileAttachmentPlan?.names ?? [];
+        if (fileNames.length === 0) {
+          // Skill-only attachment keeps the exact pre-workspace wording.
+          pushToast("info", `skill attached: ${skillNames.join(", ")}`);
+        } else {
+          if (skillNames.length > 0) attached.push(`skill: ${skillNames.join(", ")}`);
+          attached.push(`file: ${fileNames.join(", ")}`);
+          pushToast("info", `attached ${attached.join(" · ")}`);
+        }
       } catch (exc) {
-        model = addNotice(model, "warn", `skill attachment failed: ${messageOf(exc)}`);
+        model = addNotice(model, "warn", `mention attachment failed: ${messageOf(exc)}`);
       }
     }
     render();
+    // Pin the session this turn belongs to: a resume action can replace the
+    // session while the run is still unwinding, and a late plan write must be
+    // attributed to (and only displayed for) the session that produced it.
+    const turnSessionFile = sessionCfg.sessionFile;
     turnDone = (async () => {
+      let turnWorkspace: Workspace | undefined;
       try {
+        if (workspaceRoot !== null) {
+          // One broker per turn: it emits the approval events the panel renders
+          // and is bound to this turn's abort signal, so stopping the turn
+          // resolves every parked approval as DENY. Session allows granted in
+          // this TUI process are seeded in (memory only, never from settings).
+          const broker = new RunApprovalBroker();
+          broker.seedSessionAllows([...sessionAllows.keys()]);
+          broker.attach((event) => {
+            if (event.type === "approval_requested") {
+              approval = createApprovalPanelState({
+                approvalId: event.approval_id,
+                action: String(event.action ?? ""),
+                ...(event.target !== undefined && event.target !== ""
+                  ? { target: event.target }
+                  : {}),
+                ...(event.command !== undefined && event.command !== ""
+                  ? { command: event.command }
+                  : {}),
+                ...(event.reason !== undefined && event.reason !== ""
+                  ? { reason: event.reason }
+                  : {}),
+                ...(event.detail !== undefined ? { detail: event.detail } : {}),
+              });
+              // The panel owns the footer; the inline picker and find bar must
+              // not compete with the decision keys.
+              mention = null;
+              if (find !== null) closeFindBar();
+              activity = `waiting for approval: ${event.action}${
+                event.target !== undefined && event.target !== "" ? ` ${event.target}` : ""
+              }`;
+              render();
+            } else if (event.type === "approval_resolved") {
+              const resolvedAction = approval?.item.action ?? "request";
+              approval = null;
+              activity =
+                event.reason === "cancelled"
+                  ? "approval cancelled — the turn is stopping"
+                  : `approval ${String(event.decision ?? "denied")}: ${resolvedAction}`;
+              render();
+            } else if (event.type === "approval_auto_allowed") {
+              pushToast(
+                "info",
+                `auto-allowed for this TUI session: ${event.action} ${event.target}`.trim(),
+              );
+              render();
+            } else if (event.type === "approval_auto_denied") {
+              pushToast(
+                "warn",
+                `auto-denied after ${event.count} operator denials: ` +
+                  `${event.action} ${event.target}`.trim(),
+              );
+              render();
+            }
+          }, controller.signal);
+          activeBroker = broker;
+          turnWorkspace = new Workspace(workspaceRoot, new PermissionManager(null, broker));
+        }
         const { harness, mcp } = await buildTurnHarness({
           cfg: sessionCfg,
           mode: turnMode,
           resources,
           ...(options.mcpConfig !== undefined ? { mcpConfig: options.mcpConfig } : {}),
           ...(options.streamTokens === true ? { streamTokens: true } : {}),
+          ...(turnWorkspace !== undefined ? { workspace: turnWorkspace } : {}),
           signal: controller.signal,
           onStreamEvent,
+          onRuntimeEvent: (event) => {
+            // Display-only plan state: the latest snapshot replaces the panel.
+            if (event.type === "todo_updated") {
+              const snapshot = sanitizeTodos(event.todos);
+              rememberTodos(turnSessionFile, snapshot);
+              if (sessionCfg.sessionFile === turnSessionFile) {
+                todos = snapshot;
+                render();
+              }
+            }
+          },
           onWarning,
         });
         try {
@@ -1644,6 +2127,11 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         }
         lastFailedTask = { task, turnMode };
       } finally {
+        // A turn that ends with anything still parked must deny it: the
+        // broker's abort listener already denies a cancellation, and a normal
+        // finish has nothing parked. Clearing the broker keeps a stale panel
+        // (and a stale approval authority) impossible.
+        denyPendingApprovals("cancelled");
         running = false;
         turnAbort = null;
         render();
@@ -1761,17 +2249,23 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   // inline `/` and `@skill:` picker
   // --------------------------------------------------------------------- //
 
-  /** The catalogs the inline picker composes its rows from (once per frame). */
-  const mentionCatalogs = (): {
+  /**
+   * The catalogs the inline picker composes its rows from (once per open).
+   * The workspace file index is built only for the file picker, so `/` and
+   * `@skill:` opens stay as cheap as before.
+   */
+  const mentionCatalogs = (kind: "command" | "skill" | "file"): {
     commands: typeof TUI_COMMANDS;
     templates: SlashCommandInfo[];
     skills: SkillCatalog["skills"];
     baseCommands: BaseCommand[];
+    files: WorkspaceFileEntry[];
   } => ({
     commands: TUI_COMMANDS,
     templates: slashInfos(),
     skills: resources.skills.skills,
     baseCommands: baseCommandList(),
+    files: kind === "file" ? workspaceFilesForPicker() : [],
   });
 
   /** Insert a picked token over the trigger range; the caret lands after it. */
@@ -1800,7 +2294,12 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     }
     const triggerRange = { start: trigger.start, end: trigger.end };
     if (mention === null || mention.kind !== trigger.kind) {
-      mention = openMentionPicker(trigger.kind, trigger.query, mentionCatalogs(), triggerRange);
+      mention = openMentionPicker(
+        trigger.kind,
+        trigger.query,
+        mentionCatalogs(trigger.kind),
+        triggerRange,
+      );
     } else {
       mention = updateMentionPicker(mention, trigger.query, triggerRange);
     }
@@ -2006,6 +2505,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
               // Seed the neutral compaction markers of the restored context;
               // the rest of the TUI transcript history is not replayed.
               model = createCompactionSummaryModel(context.events);
+              // The plan belongs to the session: show this process's live
+              // snapshot when there is one, else replay the serve sidecar.
+              todos = planForSession(sessionFile);
               toolExpansion = new Set<string>();
               // A session switch resets the draft but not durable prompt
               // history or the in-memory stash slot.
@@ -2214,9 +2716,11 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   };
 
   /**
-   * `/permission`: show the approval policy and tool scopes from what the TUI
-   * actually knows. The TUI has no approval broker and no workspace, so those
-   * facts are stated as such instead of implying a policy that does not exist.
+   * `/permission`: state the approval policy, the bound workspace and the
+   * session allows from what this TUI actually knows — never implying a policy
+   * that does not exist. An unbound TUI says so plainly; a bound one names the
+   * root, the fail-closed ask-before-mutating rule and every in-memory pair the
+   * operator allowed for this process.
    */
   const openPermissionDialog = (): void => {
     const plugins = resources.plugins;
@@ -2232,9 +2736,26 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         ? 0
         : [...plugins.plugins.values()].reduce((total, plugin) => total + plugin.tools.length, 0);
     const skills = resources.skills.skills;
+    const approvalLines =
+      workspaceRoot === null
+        ? [
+            "approvals: none — this TUI run has no workspace or approval broker; workspace tools are unavailable",
+            "workspace: none — start the TUI with --workspace <dir> to bind one",
+          ]
+        : [
+            `workspace: ${workspaceRoot}`,
+            "approvals: writes, edits, deletes and shell ask before running; reads are auto-allowed; a stopped turn denies every pending request (fail closed)",
+            "approval decisions: 1 / Y allow once · 2 / A allow for this TUI session · 3 / N / Esc deny · Ctrl+E preview",
+            `session allows (memory only, this TUI process): ${
+              sessionAllows.size === 0
+                ? "none"
+                : [...sessionAllows.values()]
+                    .map((entry) => `${entry.action} ${entry.target}`.trim())
+                    .join("; ")
+            }`,
+          ];
     const lines = [
-      "approvals: none in the TUI — tool approvals are a web-run feature; TUI tool calls run inside the turn",
-      "workspace: none — TUI runs are not workspace-bound, so workspace_* tools are unavailable",
+      ...approvalLines,
       "tool scopes: built per turn from plugins + MCP (shared / senior / junior belts)",
       plugins === null
         ? "plugins: discovery failed"
@@ -2304,6 +2825,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     context = new SharedContext();
     sessionCfg = { ...sessionCfg, resume: false };
     model = createTuiModel();
+    todos = [];
     toolExpansion = new Set<string>();
     scroll = latestTranscriptScroll();
     usage = null;
@@ -2485,6 +3007,10 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   /** Safe precedence: turn cancel → composer clear → quit confirm. */
   const cancelKey = (): void => {
     if (running && turnAbort !== null) {
+      // Resolve every parked approval as deny BEFORE the abort: a stopped run
+      // must never leave a mutation waiting on an operator who already
+      // cancelled.
+      denyPendingApprovals("cancelled");
       turnAbort.abort();
       activity = "cancelling…";
       render();
@@ -2800,6 +3326,14 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       handleOverlayKey(key);
       return;
     }
+    // A parked approval owns the keyboard: its panel is the only footer and
+    // its `approval` key scope is authoritative (Esc = deny exactly once).
+    // Closing the optional preview overlay above is handled by the branch
+    // above and never answers the request.
+    if (approval !== null) {
+      handleApprovalKey(key);
+      return;
+    }
     // The inline find bar owns the keyboard while it is open: typing edits the
     // query, Enter/arrows navigate matches and Esc closes the bar (the
     // overlay-vs-find precedence above keeps modal surfaces first).
@@ -2871,6 +3405,10 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   });
 
   const abortRunningTurn = (): void => {
+    // Teardown path: deny anything parked before aborting, then abort; the
+    // broker also listens to the signal, so a pending wait resolves exactly
+    // once (denyAll removes the entries first).
+    denyPendingApprovals("cancelled");
     const controller = turnAbort;
     if (controller !== null) controller.abort();
   };
