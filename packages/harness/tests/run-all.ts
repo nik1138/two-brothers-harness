@@ -88,3 +88,4 @@ import "./cliproviderprovenance.test.ts";
 import "./toolcalling.test.ts";
 import "./tuirecall.test.ts";
 import "./tuiapprovalmodes.test.ts";
+import "./load.test.ts";

@@ -28,6 +28,11 @@
 //   hero-starters  mock provider: the welcome/empty hero renders with workspace
 //                  context + starters; a starter drafts into an empty composer
 //                  (editable, not sent) and never overwrites an existing draft
+//   composer-recall mock provider: two accepted submissions are recalled with
+//                  ArrowUp (newest first, unsent draft stashed and restored
+//                  exactly); a multiline draft only recalls at its absolute
+//                  start; recall never submits a run or opens the `/` picker,
+//                  and the versioned localStorage history survives a reload
 //   approval-reason scripted fixture: a delete approval carries the documented
 //                  reason text and the pending card renders it verbatim; its
 //                  preview toggle expands the diff as plain text (aria-expanded,
@@ -1830,6 +1835,185 @@ async function scenarioHeroStarters(runner) {
   }
 }
 
+// -- scenario: composer recall (Up/Down) ------------------------------------------------
+//
+// The composer's prompt recall (web/src/recall.ts + Composer.vue) has pure unit
+// tests; this drives the real UI. Two accepted submissions become the history
+// (newest first); ArrowUp recalls them while an unsent draft is stashed and
+// restored byte-exactly, a multiline draft only leaves the composer at its
+// absolute start (caret movement everywhere else), recall navigation never
+// submits a run or opens the `/` picker, and the versioned localStorage history
+// survives a page reload.
+
+async function scenarioComposerRecall(runner) {
+  const FIRST_TASK = 'e2e recall first task'
+  const SECOND_TASK = 'e2e recall second task'
+  const UNSENT_DRAFT = 'draft that must stay unsent'
+  const MULTILINE_DRAFT = 'line one\nline two'
+  const be = await startBackend({ kind: 'mock' })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  try {
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await createSession(page, 'E2E recall session')
+    const textarea = page.locator('textarea.composer-input')
+    // one `.bubble` per operator message (a speaker group may merge several)
+    const operatorBubbles = page.locator('.chat-group.side-operator .bubble')
+
+    /** Focus the composer with a collapsed caret at a number / 'start' / 'end'. */
+    const caretTo = (at) =>
+      textarea.evaluate((el, position) => {
+        el.focus()
+        const offset =
+          position === 'start' ? 0 : position === 'end' ? el.value.length : position
+        el.setSelectionRange(offset, offset)
+      }, at)
+
+    // -- two accepted submissions become the recall history (newest first)
+    const terminalStatuses = new Set(['completed', 'failed', 'cancelled'])
+    const waitRunsDone = async (count) => {
+      await waitFor(
+        async () => {
+          const runs = await (await fetch(`${be.base}/api/runs`)).json()
+          return runs.length === count && runs.every((run) => terminalStatuses.has(run.status))
+        },
+        { timeout: 90000, desc: `${count} accepted run(s) to reach a terminal state` },
+      )
+    }
+    for (const [index, task] of [FIRST_TASK, SECOND_TASK].entries()) {
+      await sendTask(page, task)
+      // deterministic backend truth first: both runs really finished before the
+      // next submission, so the recall history order can never depend on timing
+      await waitRunsDone(index + 1)
+      await waitForRunEnd(page)
+      // the operator block renders from the persisted envelopes after run end
+      await waitFor(async () => (await operatorBubbles.count()) === index + 1, {
+        desc: `submitted task ${index + 1} to render`,
+      })
+    }
+    const runsBefore = await (await fetch(`${be.base}/api/runs`)).json()
+    assert.equal(runsBefore.length, 2, `expected two accepted runs, got ${runsBefore.length}`)
+
+    // the persisted store itself: versioned key, versioned document, newest first
+    const recallBlob = await page.evaluate(() =>
+      window.localStorage.getItem('two-brothers.composerHistory.v1'),
+    )
+    assert.ok(recallBlob, 'accepted submissions were not persisted to the recall store')
+    const recallDoc = JSON.parse(recallBlob)
+    assert.equal(recallDoc.version, 1, 'the recall store must be versioned')
+    assert.deepEqual(
+      recallDoc.entries,
+      [SECOND_TASK, FIRST_TASK],
+      'the recall store must be newest-first and hold exactly the accepted tasks',
+    )
+
+    // -- single-line draft: Up recalls newest, Up again older; Down walks
+    //    forward again and the final Down restores the draft byte-exactly
+    await textarea.fill(UNSENT_DRAFT)
+    await caretTo('end')
+    await page.keyboard.press('ArrowUp')
+    await waitFor(async () => (await textarea.inputValue()) === SECOND_TASK, {
+      desc: 'ArrowUp to recall the newest accepted task',
+    })
+    await page.keyboard.press('ArrowUp')
+    await waitFor(async () => (await textarea.inputValue()) === FIRST_TASK, {
+      desc: 'ArrowUp to recall the older accepted task',
+    })
+    await page.keyboard.press('ArrowDown')
+    await waitFor(async () => (await textarea.inputValue()) === SECOND_TASK, {
+      desc: 'ArrowDown to walk forward to the newest task',
+    })
+    await page.keyboard.press('ArrowDown')
+    await waitFor(async () => (await textarea.inputValue()) === UNSENT_DRAFT, {
+      desc: 'ArrowDown past the newest entry to restore the unsent draft',
+    })
+
+    // -- multiline drafts: Up is caret movement everywhere except the very start
+    //    (real key path: Shift+Enter inserts the newline, not fill())
+    await textarea.fill('')
+    await textarea.focus()
+    await page.keyboard.type('line one')
+    await page.keyboard.press('Shift+Enter')
+    await page.keyboard.type('line two')
+    await waitFor(async () => (await textarea.inputValue()) === MULTILINE_DRAFT, {
+      desc: 'Shift+Enter to build a two-line draft',
+    })
+    await caretTo('end')
+    await page.keyboard.press('ArrowUp')
+    await sleep(200)
+    assert.equal(
+      await textarea.inputValue(),
+      MULTILINE_DRAFT,
+      'ArrowUp at the end of a multiline draft must move the caret, not recall',
+    )
+    await caretTo(3) // inside the first line
+    await page.keyboard.press('ArrowUp')
+    await sleep(200)
+    assert.equal(
+      await textarea.inputValue(),
+      MULTILINE_DRAFT,
+      'ArrowUp inside a multiline draft must never recall',
+    )
+    await caretTo('start')
+    await page.keyboard.press('ArrowUp')
+    await waitFor(async () => (await textarea.inputValue()) === SECOND_TASK, {
+      desc: 'ArrowUp at the absolute start of a multiline draft to recall',
+    })
+    await page.keyboard.press('ArrowDown')
+    await waitFor(async () => (await textarea.inputValue()) === MULTILINE_DRAFT, {
+      desc: 'ArrowDown to restore the multiline draft exactly',
+    })
+
+    // -- navigation is not a submission: no run, no operator block, no picker
+    const runsAfter = await (await fetch(`${be.base}/api/runs`)).json()
+    assert.equal(runsAfter.length, runsBefore.length, 'recall navigation must never submit a run')
+    assert.equal(
+      await operatorBubbles.count(),
+      2,
+      'recall navigation must not add or remove operator task messages',
+    )
+    assert.equal(
+      await textarea.getAttribute('aria-expanded'),
+      'false',
+      'recall navigation must leave the mention picker collapsed',
+    )
+    assert.equal(await page.locator('.mention-picker').count(), 0, 'the mention picker stays closed')
+    assert.equal(await textarea.isEnabled(), true, 'the composer must stay enabled during recall')
+    // the drafts that were only ever recall stashes never reached the transcript
+    const transcript = await page.locator('.chat-scroll').innerText()
+    assert.ok(transcript.includes(FIRST_TASK), 'the first submitted task is in the transcript')
+    assert.ok(transcript.includes(SECOND_TASK), 'the second submitted task is in the transcript')
+    assert.ok(
+      !transcript.includes(UNSENT_DRAFT) && !transcript.includes(MULTILINE_DRAFT),
+      'a recalled or stashed draft must never become a submitted task',
+    )
+
+    // -- the history is persisted (versioned localStorage): a reload keeps the
+    //    accepted tasks recallable
+    await page.reload()
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    const sessionItem = page.locator('.session-item', { hasText: 'E2E recall session' }).first()
+    await sessionItem.waitFor({ timeout: 10000 })
+    await sessionItem.click()
+    await waitFor(async () => (await operatorBubbles.count()) === 2, {
+      desc: 'the recalled session transcript after a reload',
+    })
+    await textarea.fill('')
+    await caretTo('end')
+    await page.keyboard.press('ArrowUp')
+    await waitFor(async () => (await textarea.inputValue()) === SECOND_TASK, {
+      desc: 'the persisted recall history to survive a reload',
+    })
+
+    consoleGuard.assertClean()
+    runner.pass('composer-recall')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(be.dir)
+  }
+}
+
 // -- scenario: approval reason + preview ------------------------------------------------
 //
 // A delete approval carries the product's documented DELETE_APPROVAL_REASON:
@@ -2214,6 +2398,13 @@ async function main() {
         ),
       },
       {
+        label: 'composer-recall',
+        run: () => (
+          (currentRunner = makeRunner('composer-recall')),
+          scenarioComposerRecall(currentRunner)
+        ),
+      },
+      {
         label: 'approval-reason',
         run: () => (
           (currentRunner = makeRunner('approval-reason')),
@@ -2247,6 +2438,7 @@ async function main() {
       'plan-dock',
       'composer-seats',
       'hero-starters',
+      'composer-recall',
       'approval-reason',
       'real',
     ].filter(scenarioSelected)) {
