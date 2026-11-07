@@ -8,49 +8,58 @@ dist/
 .env.*
 !.env.example
 
-# Smoke-test artifacts
+# Frozen Python prototype kept on disk for local reference only. The
+# repository removed it in 30b2c47 (2026-11-04); the TypeScript package
+# (packages/harness) is the sole implementation (see AGENTS.md). These paths
+# are never committed or published. The ignore rules came back because
+# checkouts that restored the prototype from history still carry the tree.
+# Keep this section in sync with the paths listed in AGENTS.md.
+/.venv/
+/venv/
+/python/
+/tools/
+/serve.sh
+/plugins/notes.py
+/docs/develop/
+/docs/product/
+__pycache__/
+*.py[cod]
+*.egg-info/
+/pip-*/
+
+# Local runs / verification artifacts.
+# Anchored to the repository root so local-only patterns cannot shadow tracked
+# files nested deeper in the tree.
+/sessions/
+/.e2e-tmp/
+/.build-tmp/
+/.tmp/
+/.zcode/
+/research/
+/tmp*/
+/tb-*/
+/--version/
+/version/
+/wheelhouse/
+/mcp-demo-config.json
 *.request.json
-
-# Local runs / verification artifacts
-sessions/
-# run/test logs
 *.log
-server.log
-wheelhouse/
-mcp-demo-config.json
-dist/
-.e2e-tmp/
-.build-tmp/
-# workspace-local TEMP for builds/tests (vite/esbuild temp cleanup is blocked
-# on the system temp dir on a confined Windows host)
-.tmp/
-.zcode/
 
-# Local research scratch: the whole research/ tree (vendored MIT clones,
-# adoption notes, design research) stays local and is never published.
-research/
-
-# Personal planning scratch and local session handoff, not project docs. Keep
-# both todo spellings explicit so the ignore also works on case-sensitive
-# filesystems.
-todo.md
-TODO.md
-HANDOFF.md
-
-# test-suite debris created at the repo root by tempdir fixtures
-tmp*/
-# review-agent probe sandboxes (tempfile.mkdtemp with a tb- prefix)
-tb-*/
-
-# husky install debris from a misdirected prepare/install invocation
-# (stub hook trees named after the stray argument); regenerable, never tracked
---version/
-version/
+# Personal planning scratch and local session handoff, not project docs.
+# Root-anchored on purpose: docs/history/handoff.md is a tracked frozen record
+# and must not be shadowed by these rules on case-insensitive filesystems.
+/todo.md
+/TODO.md
+/HANDOFF.md
 
 # Real-model E2E evidence (packages/harness)
 packages/harness/e2e/runs/
+# Package-local session output: running the package CLI with a relative
+# --sessions-dir (for example from packages/harness) leaves session files here.
+# The root-anchored `/sessions/` rule above deliberately does not cover it.
+/packages/harness/sessions/
 
-# local pack artifacts (npm pack for install testing)
+# Local pack artifacts (npm pack for install testing)
 packages/harness/*.tgz
-# built web app copied into the package for the npm tarball (scripts/sync-web.mjs)
+# Built web app copied into the package for the npm tarball (scripts/sync-web.mjs)
 packages/harness/web/
