@@ -7,11 +7,12 @@ import {
   ApiError,
   createProvider,
   deleteProvider,
+  discoverProviderModels,
   listProviders,
   resetProvider,
   updateProvider,
 } from '../../api'
-import type { ProviderCreateRequest, ProviderPatchRequest } from '../../api'
+import type { ProviderCreateRequest, ProviderDiscoverRequest, ProviderPatchRequest } from '../../api'
 import type { ProviderPreset } from '../../types'
 import {
   PROVIDER_KIND_DEFAULT,
@@ -21,7 +22,13 @@ import {
   applyProviderReset,
   applyProviderUpdate,
   cleanModelList,
+  discoveredAdditions,
+  discoveryStatusText,
+  failDiscovery,
+  isCurrentDiscovery,
   isProviderDraftDirty,
+  mergeDiscoveredModels,
+  newDiscoveryState,
   nextProviderIndex,
   normalizeProviders,
   providerBadge,
@@ -35,10 +42,14 @@ import {
   providerRowSummary,
   providerUsageBadges,
   resolveProviderSelection,
+  settleDiscovery,
+  startDiscovery,
+  supportsModelDiscovery,
+  unsupportedDiscoveryCopy,
   validateAddProviderForm,
   validateProviderBaseUrl,
 } from '../../providerSettings'
-import type { ProviderDraft, ProviderView } from '../../providerSettings'
+import type { ProviderDiscoveryState, ProviderDraft, ProviderView } from '../../providerSettings'
 import AppDialog from '../AppDialog.vue'
 
 /**
@@ -108,6 +119,21 @@ const draft = reactive<ProviderDraft>({
 })
 const draftDirty = computed(() =>
   openProvider.value ? isProviderDraftDirty(openProvider.value, draft) : false,
+)
+
+// -- model discovery ("Refresh models") --------------------------------------
+// A manual, explicit probe of the CURRENT draft: separate from Apply, never
+// auto-saves, and stale responses are dropped via the monotonic token below.
+const discovery = ref<ProviderDiscoveryState>(newDiscoveryState())
+/** Newest probe token; a settling response with an older token is stale. */
+let discoverySequence = 0
+const discovering = computed(() => discovery.value.phase === 'loading')
+const discoveryText = computed(() => discoveryStatusText(discovery.value))
+const discoveryModels = computed(() =>
+  discovery.value.phase === 'ready' ? discovery.value.models : [],
+)
+const discoveryAdditions = computed(() =>
+  discoveredAdditions(draft.models, discoveryModels.value),
 )
 
 /** Unsaved-draft guard: closing, or switching to another provider. */
@@ -207,6 +233,78 @@ function resetDraft(provider: ProviderView | null = openProvider.value): void {
   draft.kind = next.kind
 }
 
+/** Drop any probe result and invalidate an in-flight one (newer token wins). */
+function resetDiscovery(): void {
+  discoverySequence += 1
+  discovery.value = newDiscoveryState()
+}
+
+/**
+ * Probe the current draft's endpoint for its model list
+ * (`POST /api/providers/{name}/discover`). Purely informational: saved values
+ * are untouched, and a typed key is sent write-only for this one request.
+ */
+async function refreshModels(): Promise<void> {
+  const provider = openProvider.value
+  if (!provider || busy.value || addBusy.value || pendingReset.value || discovering.value) return
+  const name = provider.name
+  const token = ++discoverySequence
+  const started = startDiscovery(name, token)
+  // Honest early answer for wire kinds without an OpenAI-compatible listing:
+  // the server refuses them too (400), but this avoids a pointless round trip.
+  if (!supportsModelDiscovery(draft.kind)) {
+    const message = unsupportedDiscoveryCopy(draft.kind)
+    discovery.value = failDiscovery(started, token, name, 400, message)
+    announce(message)
+    return
+  }
+  const request: ProviderDiscoverRequest = {
+    base_url: draft.baseUrl.trim(),
+    kind: draft.kind || PROVIDER_KIND_DEFAULT,
+  }
+  // Only a key typed in this form is sent; blank means the server falls back
+  // to the stored/env-backed key. Either way the key is never persisted here.
+  const typedKey = draft.apiKey.trim()
+  if (typedKey) request.api_key = typedKey
+  discovery.value = started
+  announce(`Refreshing the model list for ${name}…`)
+  try {
+    const result = await discoverProviderModels(name, request)
+    if (!isCurrentDiscovery(discovery.value, token, name)) return
+    discovery.value = settleDiscovery(discovery.value, token, name, result.models)
+    const phase = discovery.value.phase
+    if (phase === 'ready') {
+      const count = discovery.value.models.length
+      announce(
+        `${count} model${count === 1 ? '' : 's'} reported by the endpoint. Nothing was saved.`,
+      )
+    } else if (phase === 'empty') {
+      announce(discovery.value.message)
+    }
+  } catch (e) {
+    if (!isCurrentDiscovery(discovery.value, token, name)) return
+    const status = e instanceof ApiError ? e.status : 0
+    discovery.value = failDiscovery(discovery.value, token, name, status, errText(e))
+    announce(discovery.value.message)
+  }
+}
+
+/** Explicit, draft-only merge of the reported models (still needs Save changes). */
+function useDiscoveredModels(): void {
+  if (!openProvider.value || busy.value || addBusy.value || !discoveryModels.value.length) return
+  const additions = discoveryAdditions.value
+  if (!additions.length) {
+    announce('All reported models are already in the draft.')
+    return
+  }
+  draft.models = mergeDiscoveredModels(draft.models, discoveryModels.value)
+  announce(
+    `Added ${additions.length} model${
+      additions.length === 1 ? '' : 's'
+    } to the draft. Save changes to keep them.`,
+  )
+}
+
 function roleBadges(provider: ProviderView): Array<'Senior' | 'Junior'> {
   return providerUsageBadges(provider, {
     senior: props.seniorProviderRef,
@@ -228,11 +326,19 @@ watch(
       resetError.value = null
       detailError.value = null
       resetDraft(null)
+      resetDiscovery()
     }
     if (!draftDirty.value) resetDraft(openProvider.value)
   },
   { immediate: true },
 )
+
+// A probe result describes the draft it was started for: editing the Base URL
+// or Kind makes it stale (and invalidates an in-flight probe, whose token is
+// then no longer the newest).
+watch([() => draft.baseUrl, () => draft.kind], () => {
+  if (discovery.value.phase !== 'idle') resetDiscovery()
+})
 
 watch(
   () => props.initialError,
@@ -271,6 +377,7 @@ function openDetail(name: string, focusHeading = false): void {
   resetError.value = null
   detailError.value = null
   resetDraft(provider)
+  resetDiscovery()
   if (focusHeading) void nextTick(() => detailHeading.value?.focus())
 }
 
@@ -283,6 +390,7 @@ function closeDetail(restoreRowFocus = true): void {
   resetError.value = null
   detailError.value = null
   resetDraft(null)
+  resetDiscovery()
   if (restoreRowFocus) void nextTick(() => focusRow(name))
 }
 
@@ -384,7 +492,7 @@ function onKindChange(value: string): void {
 
 async function saveSelected(): Promise<void> {
   const provider = openProvider.value
-  if (!provider || busy.value || addBusy.value || pendingReset.value) return
+  if (!provider || busy.value || addBusy.value || pendingReset.value || discovering.value) return
   const urlProblem = validateProviderBaseUrl(draft.baseUrl)
   if (urlProblem) {
     detailError.value = urlProblem
@@ -427,6 +535,7 @@ async function confirmDelete(): Promise<void> {
     pendingDelete.value = false
     openName.value = null
     resetDraft(null)
+    resetDiscovery()
     await refreshProviders(false)
     await nextTick()
     activeName.value = resolveProviderSelection(views.value, null)
@@ -490,6 +599,7 @@ async function confirmReset(): Promise<void> {
     detailError.value = null
     deleteError.value = null
     if (openName.value === name) resetDraft(restoredView)
+    resetDiscovery()
     completedResetName.value = name
     announce(`Reset ${name} to default. Role assignments remain unchanged.`)
   } catch (e) {
@@ -670,7 +780,7 @@ async function submitAdd(): Promise<void> {
             class="provider-detail"
             role="region"
             :aria-labelledby="detailTitleId(index)"
-            :aria-busy="busy"
+            :aria-busy="busy || discovering"
           >
             <header class="provider-detail-header">
               <h3
@@ -748,10 +858,61 @@ async function submitAdd(): Promise<void> {
                   </n-button>
                 </template>
               </n-dynamic-tags>
+              <div class="provider-models-actions">
+                <n-button
+                  attr-type="button"
+                  size="tiny"
+                  :loading="discovering"
+                  :disabled="busy || addBusy || discovering"
+                  @click="refreshModels"
+                >
+                  {{ discovering ? 'Refreshing models…' : 'Refresh models' }}
+                </n-button>
+                <span
+                  v-if="discoveryText"
+                  class="provider-field-note provider-discovery-status"
+                  :class="{
+                    'is-error': discovery.phase === 'error',
+                    'is-unsupported': discovery.phase === 'unsupported',
+                    'is-empty': discovery.phase === 'empty',
+                  }"
+                >
+                  {{ discoveryText }}
+                </span>
+              </div>
+              <div
+                v-if="discoveryModels.length"
+                class="provider-discovered"
+                aria-label="Models reported by the endpoint"
+              >
+                <p class="provider-discovered-text">
+                  Reported by the endpoint (not saved):
+                  <code
+                    v-for="model in discoveryModels"
+                    :key="model"
+                    class="provider-discovered-model"
+                    >{{ model }}</code
+                  >
+                </p>
+                <n-button
+                  class="provider-discovered-action"
+                  attr-type="button"
+                  size="tiny"
+                  :disabled="busy || addBusy || !discoveryAdditions.length"
+                  @click="useDiscoveredModels"
+                >
+                  {{
+                    discoveryAdditions.length
+                      ? `Add ${discoveryAdditions.length} to draft`
+                      : 'All in draft'
+                  }}
+                </n-button>
+              </div>
               <span class="provider-field-note">
                 Model IDs are suggestions for the role pickers and onboarding; set the model each
-                role actually uses in Models &amp; roles. To list what an endpoint serves, run
-                <code>two-brothers models --base-url &lt;url&gt;</code>.
+                role actually uses in Models &amp; roles. Refresh probes the current Base URL and
+                Kind (with the API key typed above, or the saved key when blank) without saving; the
+                offline path is <code>two-brothers models --base-url &lt;url&gt;</code>.
               </span>
             </div>
 
@@ -833,7 +994,7 @@ async function submitAdd(): Promise<void> {
               <n-button
                 attr-type="button"
                 type="primary"
-                :disabled="busy || addBusy || !draftDirty"
+                :disabled="busy || addBusy || discovering || !draftDirty"
                 :loading="busy"
                 @click="saveSelected"
               >
@@ -1323,6 +1484,68 @@ async function submitAdd(): Promise<void> {
   font-size: 0.72rem;
   line-height: 1.45;
   color: var(--danger);
+}
+
+/* "Refresh models": a manual probe of the current draft, separate from Apply. */
+.provider-models-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.provider-discovery-status {
+  flex: 1;
+  min-width: 11rem;
+}
+
+.provider-discovery-status.is-error {
+  color: var(--danger);
+}
+
+.provider-discovery-status.is-unsupported {
+  color: var(--warning);
+}
+
+.provider-discovery-status.is-empty {
+  color: var(--text-secondary);
+}
+
+.provider-discovered {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  background: var(--ok-soft);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.provider-discovered-text {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 5px;
+  margin: 0;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.provider-discovered-model {
+  padding: 0 6px;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  line-height: 1.5;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+  background: var(--surface-canvas);
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+}
+
+.provider-discovered-action {
+  align-self: flex-start;
 }
 
 .provider-optional {

@@ -14,6 +14,9 @@
  *     readProviders()  -> [{name, base_url, api_key, kind, models}, ...]   // key decrypted
  *     write(settings, plugins?, providers?)                  // api_key in
  *         plaintext; encrypted for disk
+ *     readSessionApprovals(session) -> [pair key, ...]       // "always allow"
+ *     addSessionApproval(session, pairKey)                   // persist one pair
+ *     clearSessionApprovals(session)                         // session delete
  *
  * The top-level `plugins` section (the active plugin list) lives in the same
  * file, unencrypted — plugin names are not secret. Entries are bare
@@ -27,6 +30,19 @@
  * `providers` section (Stage 17: named OpenAI-compatible provider presets)
  * also lives at the top level; preset `api_key` values are protected through
  * `secretbox` exactly like role API keys.
+ *
+ * The `approvals` section (top level) is the persisted "always allow for this
+ * session" approval scope:
+ * `{"<session file>": ["<pair key>", ...]}`. A pair key is
+ * `action\0normalized-target` (`runevents.ts::approvalPairKey`) — the action
+ * and its comparison target only, never prompts, keys or other request
+ * payloads. The server appends one when the operator answers a session-scope
+ * approval (persisting *before* resolving it) and reads it when a run for that
+ * session starts; `clearSessionApprovals()` runs on session delete. A
+ * missing/corrupt section reads as empty (fail closed: a damaged file never
+ * auto-allows anything), each session list is capped at
+ * `MAX_SESSION_APPROVALS` pairs (oldest dropped), and every write keeps the
+ * other sections intact.
  *
  * Env pinning: Python strips `TWO_BROTHERS_*`-pinned fields in
  * `server._persistence_snapshot` because the server owns RuntimeSettings.
@@ -78,6 +94,47 @@ export interface ProviderPreset {
 
 /** Preset `kind` default — additive field, tolerant at the boundary. */
 export const PROVIDER_KIND_DEFAULT = "openai-compatible";
+
+/** Max session-allowed pairs persisted per session (oldest dropped first). */
+export const MAX_SESSION_APPROVALS = 64;
+
+/** Bound on one persisted pair key (a shell command is the longest target). */
+export const MAX_APPROVAL_PAIR_KEY_CHARS = 4096;
+
+/** One `approvalPairKey`-shaped string, or null when not a usable pair key. */
+function normalizeApprovalPairKey(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const key = value.trim();
+  if (!key || key.length > MAX_APPROVAL_PAIR_KEY_CHARS) return null;
+  return key;
+}
+
+/**
+ * The stored `approvals` section normalized to `{session file: [pair key]}`.
+ * Tolerant at the boundary: non-object sections and non-array session values
+ * contribute nothing, only non-empty string entries survive, duplicates
+ * collapse in order, and each list keeps at most the newest
+ * `MAX_SESSION_APPROVALS` entries. A null-prototype map keeps a hostile
+ * `__proto__` key from touching the object prototype.
+ */
+function approvalSection(value: unknown): Record<string, string[]> {
+  const out: Record<string, string[]> = Object.create(null);
+  if (!isRecord(value)) return out;
+  for (const [session, raw] of Object.entries(value)) {
+    if (!session || path.basename(session) !== session) continue;
+    if (!Array.isArray(raw)) continue;
+    const seen = new Set<string>();
+    const list: string[] = [];
+    for (const item of raw) {
+      const key = normalizeApprovalPairKey(item);
+      if (key === null || seen.has(key)) continue;
+      seen.add(key);
+      list.push(key);
+    }
+    if (list.length > 0) out[session] = list.slice(-MAX_SESSION_APPROVALS);
+  }
+  return out;
+}
 
 function asStringList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
@@ -309,6 +366,61 @@ export class SettingsStore {
   }
 
   /**
+   * Persisted session-allowed `approvalPairKey` pairs for one session file
+   * (empty when the session has none, when the section is missing/corrupt, or
+   * when the file cannot be read — the fail-closed direction for approvals).
+   */
+  readSessionApprovals(session: string): string[] {
+    if (typeof session !== "string" || !session) return [];
+    const section = approvalSection(this.readRaw().approvals);
+    return Object.hasOwn(section, session) ? [...section[session]] : [];
+  }
+
+  /**
+   * Persist one session allow pair for a session file and return the stored
+   * list (newest last). `pairKey` must already be `approvalPairKey`-shaped; the
+   * server derives it from the pending approval request. Additive and
+   * idempotent; the write is atomic (temp file + rename) and keeps every other
+   * section. Throws when the file cannot be written — the server persists
+   * *before* resolving the approval, so a failed write leaves nothing
+   * auto-allowed.
+   */
+  addSessionApproval(session: string, pairKey: string): string[] {
+    const key = normalizeApprovalPairKey(pairKey);
+    if (!session || key === null) return [];
+    const raw = this.readRaw();
+    const section = approvalSection(raw.approvals);
+    const list = Object.hasOwn(section, session) ? [...section[session]] : [];
+    if (!list.includes(key)) {
+      list.push(key);
+      if (list.length > MAX_SESSION_APPROVALS) {
+        list.splice(0, list.length - MAX_SESSION_APPROVALS);
+      }
+    }
+    section[session] = list;
+    raw.approvals = section;
+    this.writeRaw(raw);
+    return [...list];
+  }
+
+  /**
+   * Drop one session's persisted allows (called when the session is deleted)
+   * and keep every other session and section. Returns `true` when a write
+   * happened; a missing session is a no-op.
+   */
+  clearSessionApprovals(session: string): boolean {
+    if (typeof session !== "string" || !session) return false;
+    const raw = this.readRaw();
+    const section = approvalSection(raw.approvals);
+    if (!Object.hasOwn(section, session)) return false;
+    delete section[session];
+    if (Object.keys(section).length > 0) raw.approvals = section;
+    else delete raw.approvals;
+    this.writeRaw(raw);
+    return true;
+  }
+
+  /**
    * Persist settings; `api_key` values arrive plaintext and are encrypted
    * before touching disk (all keys of this write in one secretbox batch).
    *
@@ -319,6 +431,8 @@ export class SettingsStore {
    * so plain role-settings saves cannot wipe it — and any legacy per-role
    * keys on disk are dropped by that save. The same preserve-when-omitted
    * rule applies to `providers` (preset list, `api_key` encrypted for disk).
+   * The `approvals` section (session allow lists) is always preserved here —
+   * this method saves role settings, plugins and providers only.
    *
    * Fields currently pinned by `TWO_BROTHERS_*` env vars are stripped from
    * the roles being written — env values must never reach the file (see
@@ -389,6 +503,9 @@ export class SettingsStore {
       payload.providers = presets;
     }
 
+    const storedApprovals = approvalSection(raw.approvals);
+    if (Object.keys(storedApprovals).length > 0) payload.approvals = storedApprovals;
+
     if (pending.length > 0) {
       const sealed = sealMany(
         this.secretBox,
@@ -399,6 +516,11 @@ export class SettingsStore {
       });
     }
 
+    this.writeRaw(payload);
+  }
+
+  /** Atomic (temp file + rename) write of one settings document. */
+  private writeRaw(payload: Record<string, unknown>): void {
     fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
     // write-then-rename so a crash mid-write cannot corrupt the file
     const tmpPath = this.filePath + ".tmp";

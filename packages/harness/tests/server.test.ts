@@ -24,6 +24,7 @@ import { resolveConfig, type Config } from "../src/config.ts";
 import type { ChatMessage } from "../src/context.ts";
 import {
   MockProvider,
+  type MockScriptStep,
   type Provider,
   type Tool,
   type ToolChatOptions,
@@ -1470,6 +1471,245 @@ test("fs/browse: dirs only, parent, truncation-free, 400s", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// Approval scope: once | session ("always allow for this session")
+// ---------------------------------------------------------------------------
+
+/** A mock junior scripted for one workspace write + its deliverable. */
+function writeDeliverableScript(): MockScriptStep[] {
+  return [
+    { tool: "workspace_write_file", args: { path: "hello.txt", content: "hello content" } },
+    {
+      text: JSON.stringify({
+        result: "the hello file is written",
+        artifacts: ["hello.txt"],
+        confidence: 0.8,
+      }),
+    },
+  ];
+}
+
+test("approval route: strict scope validation, one-shot default, unknown ids", async () => {
+  const srv = await startServer({
+    providerOverrides: { junior: new MockProvider(writeDeliverableScript()) },
+  });
+  const wsDir = tmpdir("tb-approval-scope-");
+  try {
+    const ws = await post<Record<string, any>>(srv.base, "/api/workspaces", {
+      path: wsDir.root,
+      name: "scope-validation",
+    });
+    const runId = await startApprovalRun(srv, ws.body.id, "e2e-approval-scope");
+    const { events, approval } = await awaitApproval(srv, runId);
+    const route = `/api/runs/${runId}/approvals/${approval.approval_id}`;
+
+    // -- invalid bodies never resolve the pending request
+    for (const body of [
+      { allow: true, scope: "always" },
+      { allow: true, scope: 1 },
+      { allow: true, scope: {} },
+      { allow: false, scope: "session" }, // a session deny does not exist
+      { allow: "yes" },
+    ]) {
+      const rejected = await post(srv.base, route, body);
+      assert.equal(rejected.status, 400, `expected 400 for ${JSON.stringify(body)}`);
+    }
+    const stillPending = await get<Record<string, any>>(srv.base, `/api/runs/${runId}/approvals`);
+    assert.deepEqual(
+      (stillPending.body.pending as Array<Record<string, unknown>>).map((p) => p.approval_id),
+      [approval.approval_id],
+      "rejected answers leave the approval pending",
+    );
+
+    // -- unknown run / approval ids are 404s (and persist nothing)
+    assert.equal(
+      (await post(srv.base, "/api/runs/no-such-run/approvals/x", { allow: true })).status,
+      404,
+    );
+    assert.equal(
+      (await post(srv.base, `/api/runs/${runId}/approvals/no-such-approval`, { allow: true })).status,
+      404,
+    );
+    assert.equal(
+      (
+        await post(srv.base, `/api/runs/${runId}/approvals/no-such-approval`, {
+          allow: true,
+          scope: "session",
+        })
+      ).status,
+      404,
+      "a session-scope answer for an unknown id persists nothing",
+    );
+
+    // -- a failed settings write is a 500 and leaves the approval pending:
+    //    the in-memory auto-allow must never run ahead of the persisted list.
+    const store = srv.handle.state.settingsStore;
+    const realAdd = store.addSessionApproval.bind(store);
+    store.addSessionApproval = () => {
+      throw new Error("disk full");
+    };
+    try {
+      const failed = await post<Record<string, any>>(srv.base, route, {
+        allow: true,
+        scope: "session",
+      });
+      assert.equal(failed.status, 500);
+      assert.match(String(failed.body.detail), /persist/);
+    } finally {
+      store.addSessionApproval = realAdd;
+    }
+    const afterFailedWrite = await get<Record<string, any>>(srv.base, `/api/runs/${runId}/approvals`);
+    assert.deepEqual(
+      (afterFailedWrite.body.pending as Array<Record<string, unknown>>).map((p) => p.approval_id),
+      [approval.approval_id],
+      "the failed session answer did not resolve the request",
+    );
+    assert.deepEqual(store.readSessionApprovals("e2e-approval-scope.jsonl"), []);
+
+    // -- the old body (no scope) keeps the one-shot behavior, echoed as "once"
+    const answer = await post<Record<string, any>>(srv.base, route, { allow: true });
+    assert.equal(answer.status, 200);
+    assert.deepEqual(Object.keys(answer.body).sort(), ["approval_id", "decision", "scope"]);
+    assert.equal(answer.body.decision, "allow");
+    assert.equal(answer.body.scope, "once");
+
+    // One-shot never persists anything for later runs.
+    assert.deepEqual(store.readSessionApprovals("e2e-approval-scope.jsonl"), []);
+    // and an already-answered approval stays a 404
+    assert.equal((await post(srv.base, route, { allow: true })).status, 404);
+
+    const rest = await runUntilEnd(srv.base, runId, events.length);
+    assert.equal(rest.at(-1)?.status, "completed");
+  } finally {
+    await srv.close();
+    wsDir.cleanup();
+  }
+});
+
+test("session-scope approval persists first, auto-allows repeats, isolates sessions, survives restart", async () => {
+  const sessions = tmpdir("tb-approval-session-");
+  const wsDir = tmpdir("tb-approval-session-ws-");
+  let srv: RunningServer | null = await startServer({
+    sessionsDir: sessions.root,
+    providerOverrides: {
+      junior: new MockProvider([
+        ...writeDeliverableScript(),
+        ...writeDeliverableScript(),
+        ...writeDeliverableScript(),
+      ]),
+    },
+  });
+  try {
+    const ws = await post<Record<string, any>>(srv.base, "/api/workspaces", {
+      path: wsDir.root,
+      name: "session-approval",
+    });
+    const session = "e2e-session-allow";
+    const hello = path.join(wsDir.root, "hello.txt");
+
+    // -- run 1: park, then answer "always allow this session"
+    let runId = await startApprovalRun(srv, ws.body.id, session);
+    let { events, approval } = await awaitApproval(srv, runId);
+    const answer = await post<Record<string, any>>(
+      srv.base,
+      `/api/runs/${runId}/approvals/${approval.approval_id}`,
+      { allow: true, scope: "session" },
+    );
+    assert.equal(answer.status, 200);
+    assert.equal(answer.body.decision, "allow");
+    assert.equal(answer.body.scope, "session");
+    let rest = await runUntilEnd(srv.base, runId, events.length);
+    assert.equal(rest.at(-1)?.status, "completed");
+    assert.equal(fs.readFileSync(hello, "utf-8"), "hello content");
+
+    // Persisted immediately, keyed by the session file; the value is the
+    // action + target pair only (no request payload, no secret).
+    const pair = "write\u0000hello.txt";
+    assert.deepEqual(srv.handle.state.settingsStore.readSessionApprovals(`${session}.jsonl`), [pair]);
+    const rawSettings = JSON.parse(
+      fs.readFileSync(path.join(sessions.root, "settings.json"), "utf-8"),
+    ) as Record<string, unknown>;
+    assert.deepEqual(rawSettings.approvals, { [`${session}.jsonl`]: [pair] });
+
+    // -- run 2: identical request in the same session never parks
+    fs.rmSync(hello);
+    runId = await startApprovalRun(srv, ws.body.id, session);
+    const autoEvents = await runUntilEnd(srv.base, runId);
+    assert.equal(autoEvents.at(-1)?.status, "completed");
+    assert.ok(
+      !autoEvents.some((event) => event.type === "approval_requested"),
+      "no second prompt for the allowed pair",
+    );
+    const auto = autoEvents.filter((event) => event.type === "approval_auto_allowed");
+    assert.equal(auto.length, 1);
+    assert.deepEqual(Object.keys(auto[0]).sort(), ["action", "at", "run_id", "target", "type"]);
+    assert.equal(auto[0].action, "write");
+    assert.equal(auto[0].target, "hello.txt");
+    assert.equal(fs.readFileSync(hello, "utf-8"), "hello content");
+
+    // -- cross-session: the allow is per session, a different session asks
+    runId = await startApprovalRun(srv, ws.body.id, "e2e-session-other");
+    ({ events, approval } = await awaitApproval(srv, runId));
+    assert.equal(approval.action, "write");
+    assert.equal(approval.target, "hello.txt");
+    const denied = await post(srv.base, `/api/runs/${runId}/approvals/${approval.approval_id}`, {
+      allow: false,
+    });
+    assert.equal(denied.status, 200);
+    rest = await runUntilEnd(srv.base, runId, events.length);
+    assert.equal(rest.at(-1)?.type, "run_end");
+    assert.deepEqual(
+      srv.handle.state.settingsStore.readSessionApprovals("e2e-session-other.jsonl"),
+      [],
+      "another session's answer never writes this session's allow list",
+    );
+
+    // -- survive a backend restart against the same sessions directory
+    const before = srv.handle.state.settingsStore.readSessionApprovals(`${session}.jsonl`);
+    assert.deepEqual(before, [pair]);
+    await srv.close();
+    srv = null;
+    srv = await startServer({ sessionsDir: sessions.root });
+    assert.deepEqual(
+      srv.handle.state.settingsStore.readSessionApprovals(`${session}.jsonl`),
+      before,
+    );
+  } finally {
+    if (srv !== null) await srv.close();
+    sessions.cleanup();
+    wsDir.cleanup();
+  }
+});
+
+test("deleting a session clears its persisted session allows and keeps other sections", async () => {
+  const srv = await startServer();
+  try {
+    const store = srv.handle.state.settingsStore;
+    store.write({ senior: { model: "kept-model" } }, ["notes"]);
+    store.addSessionApproval("gone.jsonl", "write\u0000hello.txt");
+    store.addSessionApproval("kept.jsonl", "shell\u0000echo hi");
+    // The delete route requires an existing session file.
+    fs.writeFileSync(path.join(srv.dir, "gone.jsonl"), "");
+
+    const deleted = await api<Record<string, unknown>>(
+      srv.base,
+      "DELETE",
+      "/api/sessions/gone.jsonl",
+    );
+    assert.equal(deleted.status, 200);
+    assert.deepEqual(store.readSessionApprovals("gone.jsonl"), []);
+    assert.deepEqual(store.readSessionApprovals("kept.jsonl"), ["shell\u0000echo hi"]);
+    // The clear is a normal settings write: every other section survives.
+    assert.deepEqual(store.readPlugins(), ["notes"]);
+    assert.equal(store.read().senior?.model, "kept-model");
+    // The settings API stays secret-free and does not expose the allow lists.
+    const view = await get<Record<string, unknown>>(srv.base, "/api/settings");
+    assert.equal("approvals" in view.body, false);
+  } finally {
+    await srv.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Provider presets
 // ---------------------------------------------------------------------------
 
@@ -2076,6 +2316,422 @@ test("provider presets: reset preserves options-carrying plugin entries in memor
     }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Provider model discovery (`POST /api/providers/{name}/discover`)
+// ---------------------------------------------------------------------------
+
+interface FakeModelsEndpoint {
+  baseUrl: string;
+  requests: Array<{ url: string; authorization: string | undefined }>;
+  close(): Promise<void>;
+}
+
+/**
+ * Hermetic OpenAI-compatible `/models` endpoint on a loopback ephemeral port.
+ * Records every request so a test can assert which endpoint was probed and
+ * which credential header arrived — no real network.
+ */
+async function startFakeModelsEndpoint(
+  handler?: (req: http.IncomingMessage, res: http.ServerResponse) => void,
+): Promise<FakeModelsEndpoint> {
+  const requests: Array<{ url: string; authorization: string | undefined }> = [];
+  const server = http.createServer((req, res) => {
+    requests.push({ url: req.url ?? "", authorization: req.headers.authorization });
+    if (handler) {
+      handler(req, res);
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ data: [{ id: "model-a" }, { id: "model-b", owned_by: "org" }] }));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+  const port = (server.address() as AddressInfo).port;
+  return {
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    requests,
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
+  };
+}
+
+test("provider model discovery: probes the stored endpoint/key and persists nothing", async () => {
+  const srv = await startServer();
+  const fake = await startFakeModelsEndpoint();
+  try {
+    const created = await post<Record<string, any>>(srv.base, "/api/providers", {
+      name: "LocalLLM",
+      base_url: fake.baseUrl,
+      api_key: "stored-secret",
+      models: ["manual-model"],
+    });
+    assert.equal(created.status, 201);
+    const settingsPath = path.join(srv.dir, "settings.json");
+    const settingsBefore = fs.readFileSync(settingsPath, "utf-8");
+
+    // No body at all: the stored base URL + stored key are the probe source.
+    const discovered = await post<Record<string, any>>(srv.base, "/api/providers/localllm/discover");
+    assert.equal(discovered.status, 200);
+    assert.deepEqual(discovered.body.models, [
+      { id: "model-a" },
+      { id: "model-b", owned_by: "org" },
+    ]);
+    assert.equal(discovered.body.base_url, fake.baseUrl);
+    assert.equal(discovered.body.kind, "openai-compatible");
+    // One `GET {base}/models` with the stored key as a Bearer token.
+    assert.equal(fake.requests.length, 1);
+    assert.equal(fake.requests[0]?.url, "/v1/models");
+    assert.equal(fake.requests[0]?.authorization, "Bearer stored-secret");
+    // A blank/whitespace typed key is "no replacement": the stored key is used.
+    const blankKey = await post<Record<string, any>>(srv.base, "/api/providers/LocalLLM/discover", {
+      api_key: "   ",
+    });
+    assert.equal(blankKey.status, 200);
+    assert.equal(fake.requests.length, 2);
+    assert.equal(fake.requests[1]?.authorization, "Bearer stored-secret");
+    // Trailing slashes do not make it a "different" endpoint: the comparison is
+    // trimmed and slash-normalized, so the stored key still applies.
+    const slashVariant = await post<Record<string, any>>(
+      srv.base,
+      "/api/providers/LocalLLM/discover",
+      { base_url: `${fake.baseUrl}///` },
+    );
+    assert.equal(slashVariant.status, 200);
+    assert.equal(fake.requests.length, 3);
+    assert.equal(fake.requests[2]?.authorization, "Bearer stored-secret");
+    // Discovery is not Apply: settings are byte-identical and no key is echoed.
+    assert.equal(fs.readFileSync(settingsPath, "utf-8"), settingsBefore);
+    assert.ok(!JSON.stringify(discovered.body).includes("stored-secret"));
+    const listed = (await get<Record<string, any>>(srv.base, "/api/providers")).body
+      .providers as Array<Record<string, any>>;
+    const provider = listed.find((entry) => entry.name === "LocalLLM");
+    assert.deepEqual(provider?.models, ["manual-model"], "the catalog is never rewritten");
+    assert.equal(provider?.base_url, fake.baseUrl);
+    assert.equal(provider?.api_key_set, true);
+  } finally {
+    await fake.close();
+    await srv.close();
+  }
+});
+
+test("provider model discovery: a saved key never goes to a different base URL", async () => {
+  const srv = await startServer();
+  const storedEndpoint = await startFakeModelsEndpoint();
+  const otherEndpoint = await startFakeModelsEndpoint();
+  try {
+    await post(srv.base, "/api/providers", {
+      name: "Mine",
+      base_url: storedEndpoint.baseUrl,
+      api_key: "stored-secret",
+      models: ["keep-me"],
+    });
+    // Different URL + no typed key: a clear 400, and neither endpoint is
+    // contacted — the saved secret cannot leak to another host.
+    const refused = await post<Record<string, any>>(srv.base, "/api/providers/Mine/discover", {
+      base_url: otherEndpoint.baseUrl,
+    });
+    assert.equal(refused.status, 400);
+    assert.equal(
+      refused.body.detail,
+      "a typed API key is required when probing a different base URL",
+    );
+    assert.equal(otherEndpoint.requests.length, 0, "the other endpoint is not contacted");
+    assert.equal(storedEndpoint.requests.length, 0);
+    assert.ok(!JSON.stringify(refused.body).includes("stored-secret"));
+    // The draft catalog is untouched by the refusal.
+    const listed = (await get<Record<string, any>>(srv.base, "/api/providers")).body
+      .providers as Array<Record<string, any>>;
+    assert.deepEqual(listed.find((entry) => entry.name === "Mine")?.models, ["keep-me"]);
+
+    // The typed one-shot key path is unchanged: an explicit key may probe a
+    // different URL, and only that endpoint is contacted.
+    const typed = await post<Record<string, any>>(srv.base, "/api/providers/Mine/discover", {
+      base_url: otherEndpoint.baseUrl,
+      api_key: "typed-secret",
+    });
+    assert.equal(typed.status, 200);
+    assert.deepEqual(typed.body.models, [
+      { id: "model-a" },
+      { id: "model-b", owned_by: "org" },
+    ]);
+    assert.equal(otherEndpoint.requests.length, 1);
+    assert.equal(otherEndpoint.requests[0]?.authorization, "Bearer typed-secret");
+    assert.equal(storedEndpoint.requests.length, 0);
+    assert.ok(!JSON.stringify(typed.body).includes("typed-secret"));
+
+    // A keyless preset has no stored/env secret to protect, so probing a
+    // different base URL stays unauthenticated instead of demanding a key.
+    await post(srv.base, "/api/providers", {
+      name: "Local",
+      base_url: storedEndpoint.baseUrl,
+      models: [],
+    });
+    const keyless = await post<Record<string, any>>(srv.base, "/api/providers/Local/discover", {
+      base_url: otherEndpoint.baseUrl,
+    });
+    assert.equal(keyless.status, 200);
+    assert.equal(otherEndpoint.requests.length, 2);
+    assert.equal(otherEndpoint.requests[1]?.authorization, undefined);
+  } finally {
+    await storedEndpoint.close();
+    await otherEndpoint.close();
+    await srv.close();
+  }
+});
+
+test("provider model discovery: draft URL and one-shot key are used, never stored or echoed", async () => {
+  const srv = await startServer();
+  const storedEndpoint = await startFakeModelsEndpoint();
+  const draftEndpoint = await startFakeModelsEndpoint((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ models: ["draft-model"] }));
+  });
+  try {
+    const created = await post<Record<string, any>>(srv.base, "/api/providers", {
+      name: "Mine",
+      base_url: storedEndpoint.baseUrl,
+      api_key: "stored-secret",
+      models: [],
+    });
+    assert.equal(created.status, 201);
+
+    const discovered = await post<Record<string, any>>(srv.base, "/api/providers/Mine/discover", {
+      base_url: draftEndpoint.baseUrl,
+      api_key: "typed-secret",
+      kind: "openai-compatible",
+    });
+    assert.equal(discovered.status, 200);
+    assert.deepEqual(discovered.body.models, [{ id: "draft-model" }]);
+    assert.equal(discovered.body.base_url, draftEndpoint.baseUrl);
+    // The draft endpoint receives the typed one-shot key; the stored endpoint
+    // is never contacted.
+    assert.equal(draftEndpoint.requests.length, 1);
+    assert.equal(draftEndpoint.requests[0]?.authorization, "Bearer typed-secret");
+    assert.equal(storedEndpoint.requests.length, 0);
+    // Neither the response nor the persisted settings file contains the key.
+    assert.ok(!JSON.stringify(discovered.body).includes("typed-secret"));
+    const settingsPath = path.join(srv.dir, "settings.json");
+    assert.ok(!fs.readFileSync(settingsPath, "utf-8").includes("typed-secret"));
+    const listed = (await get<Record<string, any>>(srv.base, "/api/providers")).body
+      .providers as Array<Record<string, any>>;
+    const provider = listed.find((entry) => entry.name === "Mine");
+    assert.equal(provider?.base_url, storedEndpoint.baseUrl, "the stored URL is unchanged");
+    assert.equal(provider?.api_key_set, true);
+    assert.deepEqual(provider?.models, []);
+  } finally {
+    await storedEndpoint.close();
+    await draftEndpoint.close();
+    await srv.close();
+  }
+});
+
+test("provider model discovery: an empty answer is valid and leaves the catalog untouched", async () => {
+  const srv = await startServer();
+  const empty = await startFakeModelsEndpoint((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ data: [] }));
+  });
+  try {
+    await post(srv.base, "/api/providers", {
+      name: "Empty",
+      base_url: empty.baseUrl,
+      models: ["keep-me"],
+    });
+    const discovered = await post<Record<string, any>>(srv.base, "/api/providers/Empty/discover");
+    assert.equal(discovered.status, 200);
+    assert.deepEqual(discovered.body.models, []);
+    assert.equal(discovered.body.base_url, empty.baseUrl);
+    // An empty result must never erase the saved catalog (the client decides).
+    const listed = (await get<Record<string, any>>(srv.base, "/api/providers")).body
+      .providers as Array<Record<string, any>>;
+    const provider = listed.find((entry) => entry.name === "Empty");
+    assert.deepEqual(provider?.models, ["keep-me"]);
+  } finally {
+    await empty.close();
+    await srv.close();
+  }
+});
+
+test("provider model discovery: unsupported wire kinds are an honest 400", async () => {
+  const srv = await startServer();
+  try {
+    // Built-in seeds with native wire families: no OpenAI-compatible /models
+    // listing exists, so probing is refused BEFORE any request is attempted.
+    for (const [name, kind] of [
+      ["anthropic", "anthropic"],
+      ["gemini", "google"],
+    ] as const) {
+      const res = await post<Record<string, any>>(srv.base, `/api/providers/${name}/discover`);
+      assert.equal(res.status, 400);
+      assert.match(String(res.body.detail), /not supported/);
+      assert.match(String(res.body.detail), new RegExp(kind));
+      assert.match(String(res.body.detail), /openai-compatible\|anthropic\|google/);
+    }
+    // A draft kind override is checked the same way, even on an OpenAI kind.
+    const viaDraft = await post<Record<string, any>>(srv.base, "/api/providers/lmstudio/discover", {
+      kind: "anthropic",
+    });
+    assert.equal(viaDraft.status, 400);
+    assert.match(String(viaDraft.body.detail), /not supported for the anthropic provider kind/);
+    // An unknown kind value is rejected with the accepted values.
+    const unknown = await post<Record<string, any>>(srv.base, "/api/providers/lmstudio/discover", {
+      kind: "wat",
+    });
+    assert.equal(unknown.status, 400);
+    assert.match(String(unknown.body.detail), /unknown provider kind: wat/);
+    assert.match(String(unknown.body.detail), /openai-compatible\|anthropic\|google/);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("provider model discovery: unknown provider 404 and invalid bodies 400", async () => {
+  const srv = await startServer();
+  try {
+    const unknown = await post<Record<string, any>>(srv.base, "/api/providers/Ghost/discover");
+    assert.equal(unknown.status, 404);
+    assert.deepEqual(unknown.body, { detail: "not found" });
+
+    const typedKey = await post<Record<string, any>>(srv.base, "/api/providers/lmstudio/discover", {
+      api_key: 42,
+    });
+    assert.equal(typedKey.status, 400);
+    assert.deepEqual(typedKey.body, { detail: "invalid request body" });
+
+    const kindType = await post<Record<string, any>>(srv.base, "/api/providers/lmstudio/discover", {
+      kind: ["anthropic"],
+    });
+    assert.equal(kindType.status, 400);
+    assert.deepEqual(kindType.body, { detail: "invalid request body" });
+
+    const emptyUrl = await post<Record<string, any>>(srv.base, "/api/providers/lmstudio/discover", {
+      base_url: "   ",
+    });
+    assert.equal(emptyUrl.status, 400);
+    assert.match(String(emptyUrl.body.detail), /base_url must not be empty/);
+
+    const scheme = await post<Record<string, any>>(srv.base, "/api/providers/lmstudio/discover", {
+      base_url: "localhost:1234/v1",
+    });
+    assert.equal(scheme.status, 400);
+    assert.match(String(scheme.body.detail), /must start with http/);
+
+    // Non-object JSON bodies are the generic 400 (readBody contract).
+    const arrayBody = await post<Record<string, any>>(srv.base, "/api/providers/lmstudio/discover", []);
+    assert.equal(arrayBody.status, 400);
+    assert.deepEqual(arrayBody.body, { detail: "invalid request body" });
+  } finally {
+    await srv.close();
+  }
+});
+
+test("provider model discovery: upstream failures are a clean 502 with no key material", async () => {
+  const srv = await startServer();
+  try {
+    const http500 = await startFakeModelsEndpoint((_req, res) => {
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("boom");
+    });
+    try {
+      await post(srv.base, "/api/providers", {
+        name: "Failing",
+        base_url: http500.baseUrl,
+        api_key: "stored-secret",
+      });
+      const failed = await post<Record<string, any>>(srv.base, "/api/providers/Failing/discover", {
+        api_key: "typed-secret",
+      });
+      assert.equal(failed.status, 502);
+      assert.match(String(failed.body.detail), /model discovery failed/);
+      assert.match(String(failed.body.detail), /HTTP 500/);
+      assert.ok(!JSON.stringify(failed.body).includes("typed-secret"));
+      assert.ok(!JSON.stringify(failed.body).includes("stored-secret"));
+    } finally {
+      await http500.close();
+    }
+
+    const notJson = await startFakeModelsEndpoint((_req, res) => {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end("definitely not json");
+    });
+    try {
+      const bad = await post<Record<string, any>>(srv.base, "/api/providers/Failing/discover", {
+        base_url: notJson.baseUrl,
+        // a different endpoint needs an explicit one-shot key (saved-key guard)
+        api_key: "typed-secret",
+      });
+      assert.equal(bad.status, 502);
+      assert.match(String(bad.body.detail), /not JSON/);
+    } finally {
+      await notJson.close();
+    }
+
+    const unexpectedShape = await startFakeModelsEndpoint((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ unexpected: true }));
+    });
+    try {
+      const bad = await post<Record<string, any>>(srv.base, "/api/providers/Failing/discover", {
+        base_url: unexpectedShape.baseUrl,
+        // a different endpoint needs an explicit one-shot key (saved-key guard)
+        api_key: "typed-secret",
+      });
+      assert.equal(bad.status, 502);
+      assert.match(String(bad.body.detail), /expected an array/);
+    } finally {
+      await unexpectedShape.close();
+    }
+
+    // A refused connection is an upstream failure too, not a 500.
+    const gone = await startFakeModelsEndpoint();
+    const goneUrl = gone.baseUrl;
+    await gone.close();
+    const unreachable = await post<Record<string, any>>(
+      srv.base,
+      "/api/providers/Failing/discover",
+      // a different endpoint needs an explicit one-shot key (saved-key guard)
+      { base_url: goneUrl, api_key: "typed-secret" },
+    );
+    assert.equal(unreachable.status, 502);
+    assert.match(String(unreachable.body.detail), /cannot reach/);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("provider model discovery: a seed's env-backed key is resolved server-side", async () => {
+  const srv = await startServer();
+  const fake = await startFakeModelsEndpoint();
+  const previous = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "env-openai-secret";
+  try {
+    // Materialize the override (the seed itself is never persisted), then probe
+    // by the case-insensitive seed name without ever sending a key.
+    const customized = await api<Record<string, any>>(srv.base, "PUT", "/api/providers/openai", {
+      base_url: fake.baseUrl,
+    });
+    assert.equal(customized.status, 200);
+    assert.equal(customized.body.provider.api_key_set, true);
+    const discovered = await post<Record<string, any>>(srv.base, "/api/providers/OpenAI/discover");
+    assert.equal(discovered.status, 200);
+    assert.equal(fake.requests.length, 1);
+    assert.equal(fake.requests[0]?.authorization, "Bearer env-openai-secret");
+    assert.ok(!JSON.stringify(discovered.body).includes("env-openai-secret"));
+    const settingsPath = path.join(srv.dir, "settings.json");
+    assert.ok(!fs.readFileSync(settingsPath, "utf-8").includes("env-openai-secret"));
+  } finally {
+    if (previous === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previous;
+    await fake.close();
+    await srv.close();
   }
 });
 

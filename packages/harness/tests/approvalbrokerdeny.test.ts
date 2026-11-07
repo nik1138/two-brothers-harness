@@ -36,6 +36,7 @@ import {
   RuntimeEventStore,
   RunApprovalBroker,
   approvalPairKey,
+  type ApprovalAutoAllowedEvent,
   type ApprovalAutoDeniedEvent,
 } from "../src/runevents.ts";
 import { RunManager, type RunJob } from "../src/runtime.ts";
@@ -466,6 +467,228 @@ test("RunManager: auto-denied attempt carries run_id/at, persists, and never re-
     assert.equal(persisted.length, 1);
     assert.equal(persisted[0].run_id, record.runId);
     assert.equal(persisted[0].count, APPROVAL_DENY_LIMIT);
+  } finally {
+    tmp.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// session allow scope ("always allow for this session")
+// ---------------------------------------------------------------------------
+
+test("a seeded session pair auto-allows without parking: one additive event per call", async () => {
+  const fixture = makeBroker();
+  const { broker } = fixture;
+  const request = writeRequest();
+  broker.seedSessionAllows([approvalPairKey(request)]);
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    assert.equal(await broker.approve(request), Decision.ALLOW);
+    assert.deepEqual(broker.pending(), [], "a session-allowed request never parks");
+  }
+  assert.deepEqual(broker.sessionAllows(), [approvalPairKey(request)]);
+  // No park cycle at all: no approval_requested, no approval_resolved.
+  assert.equal(eventsOfType(fixture, "approval_requested").length, 0);
+  assert.equal(eventsOfType(fixture, "approval_resolved").length, 0);
+  // The auto-allow is not an operator denial and never trips/counts the cap.
+  assert.deepEqual(broker.autoDenials(), {});
+
+  const allowed = eventsOfType(fixture, "approval_auto_allowed");
+  assert.equal(allowed.length, 3, "exactly one additive event per auto-allowed call");
+  for (const event of allowed) {
+    assert.deepEqual(Object.keys(event), ["type", "action", "target"]);
+    assert.equal(event.type, "approval_auto_allowed");
+    assert.equal(event.action, "write");
+    assert.equal(event.target, "a.txt");
+    assert.ok(!("approval_id" in event), "the additive event carries no approval id");
+  }
+});
+
+test("a seeded pair only matches its normalized pair; other pairs still park", async () => {
+  const fixture = makeBroker();
+  const { broker } = fixture;
+  broker.seedSessionAllows([
+    approvalPairKey(writeRequest("a.txt")),
+    approvalPairKey(shellRequest("echo hi")),
+  ]);
+
+  // Same normalized target written differently: same pair.
+  assert.equal(await broker.approve(writeRequest("./a.txt")), Decision.ALLOW);
+  // Shell requests pair on the command.
+  assert.equal(await broker.approve(shellRequest("echo hi")), Decision.ALLOW);
+  assert.equal(eventsOfType(fixture, "approval_auto_allowed").length, 2);
+
+  // A different target and a different action still reach the operator.
+  assert.equal(await parkAndAnswer(broker, writeRequest("b.txt"), Decision.ALLOW), Decision.ALLOW);
+  assert.equal(
+    await parkAndAnswer(broker, { action: Action.DELETE, target: "a.txt" }, Decision.ALLOW),
+    Decision.ALLOW,
+  );
+  assert.equal(eventsOfType(fixture, "approval_requested").length, 2);
+});
+
+test("seedSessionAllows is additive, idempotent and ignores malformed input", () => {
+  const fixture = makeBroker();
+  const { broker } = fixture;
+  const first = approvalPairKey(writeRequest("a.txt"));
+  broker.seedSessionAllows(null);
+  broker.seedSessionAllows([undefined, "", 42, null, first, first]);
+  assert.deepEqual(broker.sessionAllows(), [first]);
+  broker.seedSessionAllows([approvalPairKey(writeRequest("b.txt"))]);
+  assert.deepEqual(
+    broker.sessionAllows(),
+    [approvalPairKey(writeRequest("a.txt")), approvalPairKey(writeRequest("b.txt"))].sort(),
+  );
+  assert.deepEqual(broker.pending(), [], "seeding never parks or emits");
+  assert.equal(fixture.emitted.length, 0);
+});
+
+test("allowForSession records the pair and resolves the parked request ALLOW", async () => {
+  const fixture = makeBroker();
+  const { broker } = fixture;
+  const waiting = broker.approve(writeRequest());
+  assert.equal(broker.pending().length, 1);
+  const approvalId = String(broker.pending()[0].approval_id);
+  assert.equal(broker.allowForSession(approvalId), Decision.ALLOW);
+  assert.equal(await waiting, Decision.ALLOW);
+  assert.deepEqual(broker.pending(), []);
+  assert.deepEqual(broker.sessionAllows(), [approvalPairKey(writeRequest())]);
+
+  // The parked request kept the normal cycle; the next identical one is
+  // auto-allowed with one additive event and no further park.
+  assert.equal(eventsOfType(fixture, "approval_requested").length, 1);
+  const resolved = eventsOfType(fixture, "approval_resolved");
+  assert.equal(resolved.length, 1);
+  assert.equal(resolved[0].decision, Decision.ALLOW);
+  assert.equal(await broker.approve(writeRequest()), Decision.ALLOW);
+  assert.deepEqual(broker.pending(), []);
+  assert.equal(eventsOfType(fixture, "approval_auto_allowed").length, 1);
+  assert.deepEqual(broker.autoDenials(), {}, "an allow answers neither counts nor resets");
+});
+
+test("allowForSession and sessionPairKey on unknown/answered ids are no-ops", async () => {
+  const fixture = makeBroker();
+  const { broker } = fixture;
+  assert.equal(broker.sessionPairKey("never-seen"), null);
+  assert.equal(broker.allowForSession("never-seen"), null);
+  assert.deepEqual(broker.sessionAllows(), []);
+
+  const waiting = broker.approve(writeRequest());
+  const approvalId = String(broker.pending()[0].approval_id);
+  // The pair key is exposed only while the request is unanswered.
+  assert.equal(broker.sessionPairKey(approvalId), approvalPairKey(writeRequest()));
+  assert.equal(broker.respond(approvalId, Decision.DENY), Decision.DENY);
+  assert.equal(await waiting, Decision.DENY);
+  assert.equal(broker.sessionPairKey(approvalId), null);
+
+  const emittedBefore = fixture.emitted.length;
+  assert.equal(broker.allowForSession(approvalId), null);
+  assert.equal(broker.allowForSession("stale-id"), null);
+  assert.equal(fixture.emitted.length, emittedBefore, "no-op session answers emit nothing");
+  assert.deepEqual(broker.sessionAllows(), []);
+  assert.deepEqual(broker.autoDenials(), { [approvalPairKey(writeRequest())]: 1 });
+});
+
+test("session allow is checked before the denial cap", async () => {
+  const fixture = makeBroker();
+  const { broker } = fixture;
+  await denyTimes(broker, writeRequest());
+  assert.equal(await broker.approve(writeRequest()), Decision.DENY); // cap tripped
+  assert.equal(eventsOfType(fixture, "approval_auto_denied").length, 1);
+
+  broker.seedSessionAllows([approvalPairKey(writeRequest())]);
+  assert.equal(await broker.approve(writeRequest()), Decision.ALLOW);
+  assert.equal(eventsOfType(fixture, "approval_auto_allowed").length, 1);
+  // The cap's counters are untouched by the session allow.
+  assert.deepEqual(broker.autoDenials(), {
+    [approvalPairKey(writeRequest())]: APPROVAL_DENY_LIMIT,
+  });
+});
+
+test("a session allow does not reset an earlier operator denial count", async () => {
+  const fixture = makeBroker();
+  const { broker } = fixture;
+  await denyTimes(broker, writeRequest(), 1);
+  // The second identical request parks (below the cap) and is session-allowed.
+  const waiting = broker.approve(writeRequest());
+  const approvalId = String(broker.pending()[0].approval_id);
+  assert.equal(broker.allowForSession(approvalId), Decision.ALLOW);
+  assert.equal(await waiting, Decision.ALLOW);
+  assert.deepEqual(broker.autoDenials(), {
+    [approvalPairKey(writeRequest())]: 1,
+  });
+  // The session allow still wins over the denial cap for this run.
+  assert.equal(await broker.approve(writeRequest()), Decision.ALLOW);
+});
+
+test("an aborted run never lets a session allow bypass cancellation", async () => {
+  const emitted: Array<Record<string, unknown>> = [];
+  const controller = new AbortController();
+  const broker = new RunApprovalBroker();
+  broker.attach((event) => emitted.push(event as unknown as Record<string, unknown>), controller.signal);
+  broker.seedSessionAllows([approvalPairKey(writeRequest())]);
+  controller.abort();
+
+  assert.equal(await broker.approve(writeRequest()), Decision.DENY);
+  assert.equal(emitted.filter((event) => event.type === "approval_auto_allowed").length, 0);
+  assert.ok(
+    emitted.some(
+      (event) => event.type === "approval_resolved" && event.decision === "deny" && event.reason === "cancelled",
+    ),
+    "the stop wins: the wait resolves as a cancellation denial",
+  );
+});
+
+test("a fresh broker has no session allows (per-run isolation, never inferred)", async () => {
+  const first = makeBroker();
+  first.broker.seedSessionAllows([approvalPairKey(writeRequest())]);
+  assert.equal(await first.broker.approve(writeRequest()), Decision.ALLOW);
+
+  const second = makeBroker();
+  assert.deepEqual(second.broker.sessionAllows(), []);
+  // The operator is asked again in a new run unless the server seeds it.
+  assert.equal(await parkAndAnswer(second.broker, writeRequest(), Decision.ALLOW), Decision.ALLOW);
+});
+
+test("RunManager: auto-allowed pairs never park the run and reach the sidecar", async () => {
+  const tmp = tmpdir();
+  try {
+    const store = new RuntimeEventStore(path.join(tmp.root, "runtime"));
+    const manager = new RunManager({ persist: store.asPersist() });
+    const broker = new RunApprovalBroker();
+    broker.seedSessionAllows([approvalPairKey(writeRequest())]);
+    const decisions: string[] = [];
+    const job: RunJob = async (signal, onEnvelope) => {
+      broker.attach(onEnvelope, signal);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        decisions.push(await broker.approve(writeRequest()));
+      }
+      return { cancelled: false, decision: {}, errors: [] };
+    };
+    const record = manager.submit("repeat the allowed write", "s.jsonl", job);
+    assert.equal(await manager.wait(record.runId), true);
+    assert.equal(record.status, "completed");
+    assert.deepEqual(decisions, [Decision.ALLOW, Decision.ALLOW]);
+
+    const auto = record.events.filter(
+      (event): event is ApprovalAutoAllowedEvent => event.type === "approval_auto_allowed",
+    );
+    assert.equal(auto.length, 2);
+    for (const event of auto) {
+      assert.equal(event.run_id, record.runId);
+      assert.equal(typeof event.at, "number");
+      assert.equal(event.action, "write");
+      assert.equal(event.target, "a.txt");
+    }
+    // No park: the run never became `waiting` and never asked.
+    assert.equal(
+      record.events.filter((event) => event.type === "run_status" && event.status === "waiting").length,
+      0,
+    );
+    assert.equal(record.events.filter((event) => event.type === "approval_requested").length, 0);
+    const persisted = store.load("s.jsonl").filter((event) => event.type === "approval_auto_allowed");
+    assert.equal(persisted.length, 2);
+    assert.equal(persisted[0].run_id, record.runId);
   } finally {
     tmp.cleanup();
   }

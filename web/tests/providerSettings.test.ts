@@ -6,13 +6,21 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import {
+  DISCOVERY_UNSUPPORTED_BACKEND,
   PROVIDER_KIND_DEFAULT,
   apiKeyPlaceholder,
   apiKeyStateLabel,
   applyProviderReset,
   applyProviderUpdate,
   cleanModelList,
+  discoveredAdditions,
+  discoveredModels,
+  discoveryStatusText,
+  failDiscovery,
+  isCurrentDiscovery,
   isProviderDraftDirty,
+  mergeDiscoveredModels,
+  newDiscoveryState,
   nextProviderIndex,
   normalizeProviders,
   providerBadge,
@@ -27,7 +35,11 @@ import {
   providerUsageBadges,
   resolveProviderSelection,
   sameModelList,
+  settleDiscovery,
+  startDiscovery,
+  supportsModelDiscovery,
   toggleOpenProvider,
+  unsupportedDiscoveryCopy,
   validateAddProviderForm,
   validateProviderBaseUrl,
 } from '../src/providerSettings.ts'
@@ -389,4 +401,162 @@ test('providerRowSummary is identity-only information', () => {
     'lmstudio · OpenAI-compatible · 2 models',
   )
   assert.match(providerRowSummary(view({ models: ['a'] })), /1 model$/)
+})
+
+// -- model discovery ("Refresh models") ---------------------------------------
+
+test('supportsModelDiscovery: only OpenAI-compatible endpoints can be probed', () => {
+  assert.equal(supportsModelDiscovery('openai-compatible'), true)
+  assert.equal(supportsModelDiscovery(''), true, 'empty means the default kind')
+  assert.equal(supportsModelDiscovery(undefined), true)
+  assert.equal(supportsModelDiscovery(null), true)
+  assert.equal(supportsModelDiscovery('anthropic'), false)
+  assert.equal(supportsModelDiscovery('google'), false)
+  assert.equal(supportsModelDiscovery('future-kind'), false)
+})
+
+test('unsupportedDiscoveryCopy names the wire kind and stays honest', () => {
+  assert.match(unsupportedDiscoveryCopy('anthropic'), /not supported for Anthropic providers/)
+  assert.match(unsupportedDiscoveryCopy('anthropic'), /OpenAI-compatible/)
+  assert.match(unsupportedDiscoveryCopy('anthropic'), /two-brothers models/)
+  assert.match(unsupportedDiscoveryCopy('google'), /Google Gemini/)
+})
+
+test('discoveredModels: tolerant ids from objects, strings and wrappers', () => {
+  assert.deepEqual(discoveredModels([{ id: 'a' }, { id: 'b', owned_by: 'org' }, 'c']), [
+    'a',
+    'b',
+    'c',
+  ])
+  assert.deepEqual(discoveredModels({ models: [{ id: 'a' }, { name: 'b' }, ' a '] }), ['a', 'b'])
+  assert.deepEqual(discoveredModels({ data: ['x', 'y'] }), ['x', 'y'])
+  assert.deepEqual(discoveredModels({ models: 'nope' }), [])
+  assert.deepEqual(discoveredModels({ nope: true }), [])
+  assert.deepEqual(discoveredModels(null), [])
+  assert.deepEqual(discoveredModels([{ id: 42 }, {}, { id: ' ' }, null]), [])
+})
+
+test('discovery tokens: only the newest probe may settle', () => {
+  const first = startDiscovery(' mine ', 1)
+  assert.deepEqual(first, { token: 1, name: 'mine', phase: 'loading', models: [], message: '' })
+  assert.equal(isCurrentDiscovery(first, 1, 'mine'), true)
+  assert.equal(isCurrentDiscovery(first, 1, ' mine '), true, 'both sides are trimmed')
+  assert.equal(isCurrentDiscovery(first, 1, 'Mine'), false, 'provider ids stay case-sensitive')
+  assert.equal(isCurrentDiscovery(first, 1, 'other'), false)
+  assert.equal(isCurrentDiscovery(first, 2, 'mine'), false)
+  // starting a newer probe supersedes the older token
+  const second = startDiscovery('mine', 2)
+  assert.equal(isCurrentDiscovery(second, 1, 'mine'), false)
+  assert.equal(isCurrentDiscovery(second, 2, 'mine'), true)
+})
+
+test('settleDiscovery: ready, empty, malformed and stale answers', () => {
+  const ready = settleDiscovery(startDiscovery('mine', 7), 7, 'mine', [{ id: 'm1' }, 'm2'])
+  assert.deepEqual(ready, {
+    token: 7,
+    name: 'mine',
+    phase: 'ready',
+    models: ['m1', 'm2'],
+    message: '',
+  })
+
+  // An empty (or malformed) answer is a valid answer: honest `empty` phase and
+  // copy that says the saved catalog is untouched — never a reason to erase it.
+  for (const raw of [{ models: [] }, [], { data: [] }, null, { nope: true }]) {
+    const empty = settleDiscovery(startDiscovery('mine', 8), 8, 'mine', raw)
+    assert.equal(empty.phase, 'empty')
+    assert.deepEqual(empty.models, [])
+    assert.match(empty.message, /reported no models/)
+    assert.match(empty.message, /unchanged/)
+  }
+
+  // A stale response is dropped object-identically (no state churn).
+  const current = startDiscovery('mine', 9)
+  assert.equal(settleDiscovery(current, 8, 'mine', [{ id: 'old' }]), current)
+  assert.equal(settleDiscovery(current, 9, 'other', [{ id: 'other' }]), current)
+})
+
+test('failDiscovery: old backends/unsupported kinds vs real upstream errors', () => {
+  // 404 = the backend predates the discovery route: honest unsupported, not a
+  // scary network error. Nothing in the draft may change.
+  const legacy = failDiscovery(startDiscovery('mine', 3), 3, 'mine', 404, 'Not Found')
+  assert.equal(legacy.phase, 'unsupported')
+  assert.equal(legacy.message, DISCOVERY_UNSUPPORTED_BACKEND)
+  assert.deepEqual(legacy.models, [])
+
+  // 400 "not supported" = the server's honest wire-kind answer.
+  const kind = failDiscovery(
+    startDiscovery('mine', 4),
+    4,
+    'mine',
+    400,
+    'model discovery is not supported for the anthropic provider kind (use openai-compatible|anthropic|google)',
+  )
+  assert.equal(kind.phase, 'unsupported')
+  assert.match(kind.message, /not supported for the anthropic provider kind/)
+
+  // Other failures are errors with the detail preserved.
+  const upstream = failDiscovery(
+    startDiscovery('mine', 5),
+    5,
+    'mine',
+    502,
+    'model discovery failed: HTTP 500 from http://x/v1/models: boom',
+  )
+  assert.equal(upstream.phase, 'error')
+  assert.match(upstream.message, /^Model discovery failed: /)
+  assert.match(upstream.message, /HTTP 500/)
+
+  const unreachable = failDiscovery(
+    startDiscovery('mine', 6),
+    6,
+    'mine',
+    0,
+    'API is unreachable — is the backend running on port 8600?',
+  )
+  assert.equal(unreachable.phase, 'error')
+  assert.match(unreachable.message, /API is unreachable/)
+
+  // A stale failure never replaces a newer probe's state.
+  const current = startDiscovery('mine', 10)
+  assert.equal(failDiscovery(current, 9, 'mine', 502, 'old failure'), current)
+})
+
+test('discoveryStatusText truthfully describes every phase', () => {
+  assert.equal(discoveryStatusText(newDiscoveryState()), '')
+  assert.match(discoveryStatusText(startDiscovery('mine', 1)), /Asking the endpoint/)
+  const ready = settleDiscovery(startDiscovery('mine', 2), 2, 'mine', ['a', 'b'])
+  assert.match(discoveryStatusText(ready), /2 models reported/)
+  assert.match(discoveryStatusText(ready), /Nothing is saved/)
+  const one = settleDiscovery(startDiscovery('mine', 3), 3, 'mine', ['a'])
+  assert.match(discoveryStatusText(one), /1 model reported/)
+  const empty = settleDiscovery(startDiscovery('mine', 4), 4, 'mine', [])
+  assert.match(discoveryStatusText(empty), /no models/)
+  const error = failDiscovery(startDiscovery('mine', 5), 5, 'mine', 502, 'boom')
+  assert.match(discoveryStatusText(error), /Model discovery failed: boom/)
+})
+
+test('mergeDiscoveredModels/discoveredAdditions: union in draft order, never erase', () => {
+  assert.deepEqual(mergeDiscoveredModels(['a', 'b'], ['b', 'c']), ['a', 'b', 'c'])
+  assert.deepEqual(mergeDiscoveredModels([], ['b', 'a', 'b']), ['b', 'a'])
+  assert.deepEqual(mergeDiscoveredModels(['keep'], []), ['keep'], 'empty answer never erases')
+  assert.deepEqual(mergeDiscoveredModels('nope', ['a']), ['a'])
+  assert.deepEqual(mergeDiscoveredModels([' a '], [{ id: 'b' }]), ['a', 'b'])
+
+  assert.deepEqual(discoveredAdditions(['a', 'b'], ['b', 'c', 'd']), ['c', 'd'])
+  assert.deepEqual(discoveredAdditions(['a'], []), [])
+  assert.deepEqual(discoveredAdditions([], ['a']), ['a'])
+  assert.deepEqual(discoveredAdditions(['a'], ['a']), [])
+})
+
+test('discovery never applies by itself: only the explicit merge changes a list', () => {
+  const draftModels = ['manual-model']
+  const settled = settleDiscovery(startDiscovery('mine', 12), 12, 'mine', ['fresh-model'])
+  assert.deepEqual(draftModels, ['manual-model'], 'settling a result performs no write')
+  // Empty results must not erase the existing catalog even when merged.
+  assert.deepEqual(mergeDiscoveredModels(draftModels, []), ['manual-model'])
+  assert.deepEqual(mergeDiscoveredModels(draftModels, settled.models), [
+    'manual-model',
+    'fresh-model',
+  ])
 })

@@ -2,11 +2,22 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { NButton } from 'naive-ui'
 import type { ApprovalItem } from '../runtime'
+import type { ApprovalScope } from '../api'
 
 const props = defineProps<{
   item: ApprovalItem
-  /** Returns true when the decision was accepted by the backend. */
-  resolve: (runId: string, approvalId: string, allow: boolean) => Promise<boolean>
+  /**
+   * Returns true when the decision was accepted by the backend. The optional
+   * scope asks for "allow for this session"; the App shell resolves the
+   * applied scope and shows the honest notice when an older backend only
+   * allowed once.
+   */
+  resolve: (
+    runId: string,
+    approvalId: string,
+    allow: boolean,
+    scope?: ApprovalScope,
+  ) => Promise<boolean>
 }>()
 
 const answering = ref(false)
@@ -49,20 +60,22 @@ onUnmounted(() => {
   if (highlightTimer !== undefined) window.clearTimeout(highlightTimer)
 })
 
-async function answer(allow: boolean) {
+async function answer(allow: boolean, scope: ApprovalScope = 'once') {
   if (answering.value || !pending.value) return
   answering.value = true
   errorText.value = null
   try {
-    const accepted = await props.resolve(props.item.runId, props.item.approvalId, allow)
+    const accepted = await props.resolve(props.item.runId, props.item.approvalId, allow, scope)
     if (!accepted) errorText.value = 'The decision was not accepted — try again.'
   } finally {
     answering.value = false
   }
 }
 
-/** 'y' allows, 'n' denies — scoped to the focused card, so several pending
- * approvals never race each other. */
+/**
+ * 'y' allows once, 'a' allows for the session, 'n' denies — scoped to the
+ * focused card, so several pending approvals never race each other.
+ */
 function onKeydown(e: KeyboardEvent) {
   if (!pending.value || answering.value) return
   if (e.altKey || e.ctrlKey || e.metaKey) return
@@ -72,6 +85,9 @@ function onKeydown(e: KeyboardEvent) {
   if (key === 'y') {
     e.preventDefault()
     answer(true)
+  } else if (key === 'a') {
+    e.preventDefault()
+    answer(true, 'session')
   } else if (key === 'n') {
     e.preventDefault()
     answer(false)
@@ -91,7 +107,7 @@ function onKeydown(e: KeyboardEvent) {
     :data-approval-id="item.approvalId"
     role="group"
     :aria-label="`Approval requested: ${item.action}${item.target ? ` ${item.target}` : ''}`"
-    aria-keyshortcuts="y n"
+    aria-keyshortcuts="y n a"
     tabindex="0"
     @keydown="onKeydown"
   >
@@ -128,7 +144,7 @@ function onKeydown(e: KeyboardEvent) {
         class="approval-btn"
         :disabled="answering"
         @click="answer(true)"
-      >{{ answering ? 'Answering…' : 'Allow' }}</n-button>
+      >{{ answering ? 'Answering…' : 'Allow once' }}</n-button>
       <n-button
         type="error"
         size="large"
@@ -136,8 +152,17 @@ function onKeydown(e: KeyboardEvent) {
         :disabled="answering"
         @click="answer(false)"
       >Deny</n-button>
+      <n-button
+        size="large"
+        class="approval-btn-session"
+        :disabled="answering"
+        title="Allow identical requests for the rest of this session (saved with the session's settings, removed with the session)"
+        @click="answer(true, 'session')"
+      >Always allow this session</n-button>
       <p class="approval-shortcut muted">
-        Press <kbd>y</kbd> to allow or <kbd>n</kbd> to deny while this card is focused.
+        Press <kbd>y</kbd> to allow once or <kbd>n</kbd> to deny while this card is
+        focused. <kbd>a</kbd> allows this action for the rest of the session only — it is
+        saved with the session's settings and removed when the session is deleted.
       </p>
     </footer>
     <p v-else-if="item.reason" class="approval-note muted">{{ item.reason }}</p>
@@ -282,10 +307,21 @@ function onKeydown(e: KeyboardEvent) {
   font-weight: 600;
 }
 
-/* Keep the pair side by side on phones: the hint moves below, buttons stay. */
+/*
+ * The session-wide grant is its own full-width row, visually distinct from the
+ * primary/error pair, and deliberately not `.approval-btn`: existing browser
+ * flows select the allow/deny pair by that class.
+ */
+.approval-btn-session {
+  flex: 1 1 100%;
+  min-height: 2.5rem;
+  font-weight: 600;
+}
+
+/* Phones: the allow/deny pair stays side by side below the session-wide row. */
 @media (max-width: 480px) {
-  .approval-actions {
-    flex-wrap: nowrap;
+  .approval-btn {
+    flex: 1 1 45%;
   }
 
   .approval-shortcut {

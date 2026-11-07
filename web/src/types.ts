@@ -259,6 +259,20 @@ export interface ApprovalAutoDeniedEvent {
 }
 
 /**
+ * An identical approval request auto-allowed because the operator answered
+ * "Always allow this session" for its `(action, target)` pair (or the server
+ * seeded the pair from persisted session approvals): it never parked and no
+ * `approval_requested` was emitted for it.
+ */
+export interface ApprovalAutoAllowedEvent {
+  type: 'approval_auto_allowed'
+  action: string
+  target: string
+  run_id: string
+  at: number
+}
+
+/**
  * One live token delta from the run's named SSE `token` frame. Ephemeral:
  * never persisted to the run record/sidecar and never replayed by `?after`.
  * `thinking` deltas are observational reasoning; the reply arrives as the
@@ -292,6 +306,7 @@ export type RunEvent =
   | ApprovalRequestedEvent
   | ApprovalResolvedEvent
   | ApprovalAutoDeniedEvent
+  | ApprovalAutoAllowedEvent
   | PromptAuditEvent
 
 /** Response of GET /api/sessions/{name}/events — the runtime sidecar. */

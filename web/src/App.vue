@@ -16,6 +16,8 @@ import type { UiPrefs } from './uiPrefs'
 import {
   ApiError,
   answerRunApproval,
+  appliedApprovalScope,
+  approvalOutcomeNotice,
   compactSession,
   createSession,
   getRun,
@@ -23,12 +25,14 @@ import {
   getSessionRuntimeEvents,
   getSettings,
   listCommands,
+  listRuns,
   listSessions,
   listWorkspaces,
   reorderWorkspaces,
   startRun,
   stopRun,
 } from './api'
+import type { AppliedApprovalScope, ApprovalScope } from './api'
 import type {
   BaseCommand,
   CommandInfo,
@@ -45,6 +49,13 @@ import type {
   TokenEvent,
   Workspace,
 } from './types'
+import {
+  EMPTY_QUEUE_VIEW,
+  sessionQueueViews,
+  withQueuedRun,
+  withoutRun,
+} from './queueState'
+import type { QueuedRunRow, SessionQueueView } from './queueState'
 import { isBaseCommandAction } from './basecommands'
 import type { ComposerCommandRequest } from './basecommands'
 import { canUseStopGesture, isShortcutHelpChord, isStopGesture } from './composerKeys'
@@ -96,6 +107,7 @@ import WorkspaceRenameDialog from './components/WorkspaceRenameDialog.vue'
 import NewSessionDialog from './components/NewSessionDialog.vue'
 import DiffReview from './components/DiffReview.vue'
 import ApprovalCard from './components/ApprovalCard.vue'
+import QueueDock from './components/QueueDock.vue'
 import UsageFooter from './components/UsageFooter.vue'
 import CommandPalette from './components/CommandPalette.vue'
 import ShortcutHelpDialog from './components/ShortcutHelpDialog.vue'
@@ -117,8 +129,14 @@ interface LiveRun {
   status: RunStatus
 }
 /** Every live run known to this app, keyed by session — the backend pool may
- * run several sessions at once. */
+ * run several sessions at once. The entry is the session's current run (the
+ * FIFO head: running/waiting, else the queued head), never a queued tail. */
 const liveRuns = ref<Record<string, LiveRun>>({})
+/** Per-session active-run projection from the latest pool snapshot: the current
+ * run plus the bounded FIFO of submissions queued behind it (queue dock). */
+const queueBySession = ref<Record<string, SessionQueueView>>({})
+/** Queued-run cancel requests in flight, keyed by run id (rows stay focusable). */
+const queueStopping = ref<Record<string, boolean>>({})
 /** Live token draft of the followed run (ephemeral SSE `token` frames). */
 const streamingState = ref<StreamingState>(createStreamingState())
 /** Render-ready live draft; null sections are not shown by ChatView. */
@@ -129,6 +147,28 @@ const streamingView = computed(() => streamingBlocks(streamingState.value))
 const activeRun = computed<LiveRun | null>(() =>
   selected.value ? (liveRuns.value[selected.value] ?? null) : null,
 )
+/** Selected session's live queue: current run + rows queued behind it. */
+const queueView = computed<SessionQueueView>(() =>
+  selected.value
+    ? (queueBySession.value[selected.value] ?? EMPTY_QUEUE_VIEW)
+    : EMPTY_QUEUE_VIEW,
+)
+/** Submissions already waiting behind the selected session's current run. */
+const queuedCount = computed(() => queueView.value.queuedCount)
+/**
+ * Polite, persistent announcement for queue changes. It is always mounted, so
+ * screen readers hear a queued submission even when the dock itself is only
+ * just appearing (a freshly inserted live region is often not announced).
+ */
+const queueAnnouncement = computed(() => {
+  const count = queuedCount.value
+  if (count === 0) return ''
+  return count === 1
+    ? '1 task queued — it starts after the current run finishes.'
+    : `${count} tasks queued — they start after the current run finishes.`
+})
+/** Outcome of the last composer submission; the draft clears only on `accepted`. */
+const submitResult = ref<{ token: number; accepted: boolean } | null>(null)
 const stopping = ref(false)
 const errors = ref<string[]>([])
 /** One submitted run request, retained so a failure can be retried verbatim. */
@@ -139,11 +179,9 @@ interface RunRequestState {
   session: string | null
   workspace_id: string | null
 }
-/** Last submitted run, so a live failure can be retried with the exact request. */
-const lastRequest = ref<RunRequestState | null>(null)
-/** Task text of a start request that never became a run; the composer puts it
- * back (the token makes every failure a distinct restore trigger). */
-const draftRestore = ref<{ token: number; text: string } | null>(null)
+/** Submitted request per run id, so a failed run is retried with its own task
+ * (a queued submission must never replace the current run's retry action). */
+const requestByRun = ref<Record<string, RunRequestState>>({})
 /** Retry action per session — survives session switches and reloads. */
 const retryBySession = ref<Record<string, RunRequestState>>({})
 /** Latest failure per session, rendered as an inline error card (G-5). */
@@ -285,7 +323,7 @@ const activity = computed(() => {
   if (!live.value) return null
   if (stopping.value) return 'Stopping the run…'
   return activeRun.value?.status === 'queued'
-    ? 'Run queued — waiting for the previous run to finish…'
+    ? 'Run queued — it starts as soon as a worker is free…'
     : 'Senior and Junior are working…'
 })
 /** Failure text for the selected session's newest run, if it failed (G-5). */
@@ -723,23 +761,12 @@ function errText(e: unknown): string {
   return e instanceof ApiError ? e.message : String(e)
 }
 
-// api.ts has no listRuns yet (backend-owned); same wire format as the rest of
-// /api, tolerant of either a bare array or an object wrapping one.
-async function listRunsForSession(session: string): Promise<RunRecord[]> {
-  const res = await fetch(
-    session ? `/api/runs?session=${encodeURIComponent(session)}` : '/api/runs',
-  )
-  if (!res.ok) return []
-  const body = (await res.json()) as RunRecord[] | { runs?: RunRecord[] }
-  return Array.isArray(body) ? body : (body.runs ?? [])
-}
-
 /** Remember the usage of the session's newest completed run, if the backend
  * reports one; clears a stale entry when the newest run predates usage tracking. */
 async function refreshUsageForSession(session: string) {
   if (activeRun.value?.session === session) return
   try {
-    const runs = await listRunsForSession(session)
+    const runs = await listRuns(session)
     const completed = runs
       .filter((r) => r.status === 'completed')
       .sort((a, b) => (b.finished || b.created || 0) - (a.finished || a.created || 0))
@@ -777,7 +804,7 @@ function clearRetryAction(session: string) {
  */
 async function syncRunOutcome(session: string) {
   try {
-    const runs = await listRunsForSession(session)
+    const runs = await listRuns(session)
     const latest = [...runs].sort(
       (a, b) => (b.finished || b.created || 0) - (a.finished || a.created || 0),
     )[0]
@@ -851,12 +878,23 @@ function finalizeRun(runId: string, status: RunStatus, error: string | null) {
   delete rest[entry.session]
   liveRuns.value = rest
   forgetRunStream(runId)
+  // terminal now: the row leaves the queue, and the next queued run (if any)
+  // must be adopted/followed immediately instead of on the next 5 s pool poll
+  queueBySession.value = withoutRun(queueBySession.value, runId)
+  void refreshLiveRuns()
+  // a failed run is retried with its own submitted task, never with a newer
+  // submission queued behind it
+  const request = requestByRun.value[runId] ?? null
+  if (requestByRun.value[runId]) {
+    const nextRequests = { ...requestByRun.value }
+    delete nextRequests[runId]
+    requestByRun.value = nextRequests
+  }
   if (status === 'failed') {
     // G-5: keep the failure visible after the toast expires (and after reload,
     // via syncRunOutcome); a later successful run clears it again.
     const message = error ?? runErrorBySession.value[entry.session] ?? 'Run failed'
     setRunError(entry.session, message)
-    const request = lastRequest.value?.session === entry.session ? lastRequest.value : null
     if (request) {
       retryBySession.value = { ...retryBySession.value, [entry.session]: request }
     }
@@ -1049,24 +1087,39 @@ watch(
   },
 )
 
-/** Reconcile the live-run map with the backend pool: adopt runs that are
- * active without us following them (another session, or a reload) and drop
- * runs that reached a terminal state while unattended. */
+/**
+ * Reconcile the live-run map and the per-session queue projection with the
+ * backend pool: adopt the current run of every active session (another
+ * session, a reload, or the FIFO head that just took over after a finish) and
+ * drop runs that reached a terminal state while unattended.
+ *
+ * `GET /api/runs` returns records newest first; `sessionQueueViews` restores
+ * the per-session FIFO, so an adopted run is always the session's current run
+ * and never one queued behind it. Only active records are projected — an older
+ * backend that returns none simply yields an empty dock.
+ */
+let liveRunsRequest = 0
+
 async function refreshLiveRuns() {
+  // Last issued snapshot wins: a slow response must never overwrite a newer
+  // projection (it would resurrect a run that already left the queue).
+  const request = ++liveRunsRequest
   let runs: RunRecord[]
   try {
-    runs = await listRunsForSession('')
+    runs = await listRuns(null)
   } catch {
+    // fail-soft: keep the last known state and retry on the next poll
     return
   }
+  if (request !== liveRunsRequest) return
   // keep the per-session newest-record map current for the sidebar statuses
   for (const rec of runs) recordLastRun(rec)
-  const activeBySession = new Map(
-    runs
-      // 'waiting' = parked on an operator approval; still alive
-      .filter((r) => r.status === 'queued' || r.status === 'running' || r.status === 'waiting')
-      .map((r) => [r.session, r] as const),
-  )
+  const views = sessionQueueViews(runs)
+  queueBySession.value = views
+  const activeBySession = new Map<string, QueuedRunRow>()
+  for (const [session, view] of Object.entries(views)) {
+    if (view.current) activeBySession.set(session, view.current)
+  }
   for (const [session, run] of Object.entries(liveRuns.value)) {
     const known = activeBySession.get(session)
     if (known && known.run_id === run.run_id) {
@@ -1083,11 +1136,14 @@ async function refreshLiveRuns() {
         .catch(() => undefined)
     }
   }
-  for (const [session, rec] of activeBySession) {
-    if (!liveRuns.value[session]) {
+  for (const [session, row] of activeBySession) {
+    const current = liveRuns.value[session]
+    if (!current || current.run_id !== row.run_id) {
+      // a new head run (the one before it finished): follow it, so the next
+      // queued run's stream, transcript and Stop control take over
       liveRuns.value = {
         ...liveRuns.value,
-        [session]: { run_id: rec.run_id, session, status: rec.status },
+        [session]: { run_id: row.run_id, session, status: row.status },
       }
     }
   }
@@ -1235,20 +1291,28 @@ async function loadSession(name: string) {
 
 // -- actions ---------------------------------------------------------------
 
+/**
+ * Submit one task. A live run on the selected session is no longer a blocker:
+ * the backend keeps its per-session FIFO, so the request queues behind it. The
+ * composer shows honest "runs after the current run finishes" copy, and clears
+ * its draft only when this call reports the submission accepted.
+ */
 async function startNewRun(payload: {
   task: string
   mode: RunMode
   provider: RunProvider | null
+  /** Composer submission token; its acceptance outcome drives the draft clear. */
+  token?: number
 }) {
-  if (activeRun.value) return // the target session already has a live run
   errors.value = []
   const request: RunRequestState = {
-    ...payload,
+    task: payload.task,
+    mode: payload.mode,
+    provider: payload.provider,
     session: selected.value,
     workspace_id: workspaceFilter.value === 'all' ? null : workspaceFilter.value,
   }
-  lastRequest.value = request
-  resetStreamingDraft()
+  let accepted = false
   try {
     const res = await startRun({
       task: request.task,
@@ -1259,41 +1323,59 @@ async function startNewRun(payload: {
       // opt into the ephemeral live `token` frames for the followed run
       stream_tokens: true,
     })
-    liveRuns.value = {
-      ...liveRuns.value,
-      [res.session]: { run_id: res.run_id, session: res.session, status: res.status },
-    }
+    accepted = true
+    requestByRun.value = { ...requestByRun.value, [res.run_id]: request }
     setLastEventId(res.run_id, 0)
     setReconnectAttempts(res.run_id, 0)
+    // A session without a followed run gets this one; a submission behind a
+    // working run joins the queue and must never replace the run currently
+    // being followed and streamed.
+    if (!liveRuns.value[res.session]) {
+      resetStreamingDraft()
+      liveRuns.value = {
+        ...liveRuns.value,
+        [res.session]: { run_id: res.run_id, session: res.session, status: res.status },
+      }
+      stopping.value = false
+      runStartedAt.value = Date.now()
+      if (res.session !== selected.value) {
+        // a fresh session: the stream will replay everything from the start
+        selected.value = res.session
+        events.value = []
+        maxSeq = 0
+        setRuntimeHistory([])
+      }
+    } else if (res.status === 'queued') {
+      // Show the accepted run immediately; the pool snapshot requested below
+      // replaces this projection with the authoritative FIFO (deduped by id).
+      queueBySession.value = withQueuedRun(queueBySession.value, {
+        run_id: res.run_id,
+        session: res.session,
+        task: request.task,
+        status: res.status,
+        created: Math.floor(Date.now() / 1000),
+      })
+    }
     // a run started under a workspace is a strong recency signal
     if (request.workspace_id) noteRecentWorkspace(request.workspace_id)
-    stopping.value = false
-    runStartedAt.value = Date.now()
     // a new attempt supersedes the previous failure and its error card
     clearRunError(res.session)
     clearRetryAction(res.session)
-    if (res.session !== selected.value) {
-      // a fresh session: the stream will replay everything from the start
-      selected.value = res.session
-      events.value = []
-      maxSeq = 0
-      setRuntimeHistory([])
-    }
     if (payload.provider) {
       providerBySession.value = { ...providerBySession.value, [res.session]: payload.provider }
     }
-    // the activeRun watcher opens the event stream for the new run
+    // the activeRun watcher opens the stream for a newly followed run; the
+    // pool refresh adopts the next queued run as soon as the current one ends
+    void refreshLiveRuns()
     refreshSessions()
   } catch (e) {
-    // The request never became a run, so the submit-time clear must not be the
-    // last word: hand the exact task back to the composer (it refuses to
-    // overwrite text the operator has typed since).
-    resetStreamingDraft()
-    draftRestore.value = {
-      token: (draftRestore.value?.token ?? 0) + 1,
-      text: request.task,
-    }
+    // The request never became a run: nothing was consumed (the composer
+    // clears only an accepted submission), so the draft stays exactly as typed.
     reportError(errText(e))
+  } finally {
+    if (typeof payload.token === 'number') {
+      submitResult.value = { token: payload.token, accepted }
+    }
   }
 }
 
@@ -1308,17 +1390,27 @@ async function retryLastRun() {
 
 /** Answer a pending approval; the card flips when the approval_resolved event
  * arrives on the run stream (or is recorded locally when we are not following
- * that run — e.g. answering from a reopened session). */
+ * that run — e.g. answering from a reopened session). An optional `scope`
+ * asks the backend to remember the pair for this session; the applied scope
+ * is read back from the response, so an older backend that ignored the field
+ * is reported honestly as one-shot instead of pretending it stuck. */
 async function resolveApproval(
   runId: string,
   approvalId: string,
   allow: boolean,
+  scope: ApprovalScope = 'once',
 ): Promise<boolean> {
+  let applied: AppliedApprovalScope
   try {
-    await answerRunApproval(runId, approvalId, { allow })
+    const result = await answerRunApproval(runId, approvalId, { allow, scope })
+    applied = appliedApprovalScope(result)
   } catch (e) {
     reportError(errText(e))
     return false
+  }
+  if (scope === 'session') {
+    const notice = approvalOutcomeNotice(scope, applied)
+    if (notice) showNotice(notice)
   }
   const followed = activeRun.value
   if (!followed || followed.run_id !== runId) {
@@ -1352,6 +1444,45 @@ async function requestStop() {
   } catch (e) {
     stopping.value = false
     reportError(errText(e))
+  }
+}
+
+/**
+ * Cancel one run queued behind the current run (`POST /api/runs/{id}/stop`).
+ * The backend cancels a queued run immediately; the row leaves the projection
+ * right away and the pool refresh confirms it. The button stays focusable
+ * while the request is in flight, so cancellation never drops keyboard focus.
+ */
+async function stopQueuedRun(runId: string) {
+  if (!runId || queueStopping.value[runId]) return
+  const hadFocus = document.activeElement?.getAttribute('data-queued-run') === runId
+  queueStopping.value = { ...queueStopping.value, [runId]: true }
+  try {
+    const res = await stopRun(runId)
+    if (res.status === 'cancelled' || res.status === 'completed' || res.status === 'failed') {
+      queueBySession.value = withoutRun(queueBySession.value, runId)
+      if (requestByRun.value[runId]) {
+        const requests = { ...requestByRun.value }
+        delete requests[runId]
+        requestByRun.value = requests
+      }
+    }
+  } catch (e) {
+    // a 404 means it already left the queue; either way the refresh reconciles
+    reportError(errText(e))
+  } finally {
+    const nextStopping = { ...queueStopping.value }
+    delete nextStopping[runId]
+    queueStopping.value = nextStopping
+    void refreshLiveRuns()
+    if (hadFocus) {
+      // the row disappears with this update — never strand focus on <body>
+      void nextTick(() => {
+        if (document.activeElement === document.body) {
+          document.getElementById('composer-input')?.focus()
+        }
+      })
+    }
   }
 }
 
@@ -1632,6 +1763,20 @@ function onSessionDeleted(name: string) {
     events.value = []
     setRuntimeHistory([])
   }
+  if (queueBySession.value[name]) {
+    const queues = { ...queueBySession.value }
+    delete queues[name]
+    queueBySession.value = queues
+  }
+  // submission bookkeeping for the deleted session can never finalize
+  const staleRequests = Object.entries(requestByRun.value).filter(
+    ([, request]) => request.session === name,
+  )
+  if (staleRequests.length > 0) {
+    const requests = { ...requestByRun.value }
+    for (const [runId] of staleRequests) delete requests[runId]
+    requestByRun.value = requests
+  }
   const rest = { ...runUsageBySession.value }
   delete rest[name]
   runUsageBySession.value = rest
@@ -1891,6 +2036,9 @@ onUnmounted(() => {
           </div>
           <span v-if="activeProvider" class="provider-chip">{{ activeProvider }}</span>
           <span v-if="live && activeRun?.status === 'queued'" class="provider-chip">queued</span>
+          <span v-if="queuedCount > 0" class="provider-chip">
+            {{ queuedCount === 1 ? '1 queued' : `${queuedCount} queued` }}
+          </span>
           <span v-if="live && activeRun?.status === 'running'" class="live-badge">live</span>
           <span v-if="waiting" class="approval-badge" role="status">awaiting approval</span>
         </div>
@@ -1947,6 +2095,13 @@ onUnmounted(() => {
         </div>
       </div>
 
+      <!-- Queue changes are announced from a persistent live region: the dock
+           appears/disappears with the queue, and an inserted live region is
+           often not read until it changes. -->
+      <p class="visually-hidden" role="status" aria-live="polite">
+        {{ queueAnnouncement }}
+      </p>
+
       <DiffReview v-if="selected && changedFiles.length" :files="changedFiles" />
 
       <div v-if="pendingApproval" class="approval-dock">
@@ -1956,6 +2111,16 @@ onUnmounted(() => {
         </p>
         <ApprovalCard :item="pendingApproval" :resolve="resolveApproval" />
       </div>
+
+      <!-- Submissions accepted while a run works wait in the backend FIFO; the
+           dock shows the bounded queue behind the current run, never "steering". -->
+      <QueueDock
+        v-if="selected && queueView.queuedCount > 0"
+        :rows="queueView.waiting"
+        :hidden="queueView.hidden"
+        :stopping="queueStopping"
+        @stop="stopQueuedRun"
+      />
 
       <UsageFooter
         :live="liveHere"
@@ -1967,12 +2132,13 @@ onUnmounted(() => {
       <Composer
         :session-id="selected"
         :workspace-id="composerWorkspaceId"
-        :draft-restore="draftRestore"
         :busy="live"
+        :queued-count="queuedCount"
         :waiting="waiting"
         :compacting="compactBusy"
         :stopping="stopping"
         :settings-version="settingsVersion"
+        :submit-result="submitResult"
         @submit="startNewRun"
         @stop="requestStop"
         @open-settings="settingsOpen = true"

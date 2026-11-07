@@ -368,3 +368,190 @@ export function applyProviderReset(
     }
   })
 }
+
+// -- model discovery ("Refresh models") ---------------------------------------
+//
+// Discovery is a manual probe, deliberately separate from Apply: it never
+// writes the provider preset and never touches the draft by itself. The pure
+// state below is driven by the component, with a monotonic token so a slow
+// response can never overwrite the result of a newer probe (or a draft the
+// operator has since switched away from).
+
+/** Copy for a backend that predates the discovery route (missing route = 404). */
+export const DISCOVERY_UNSUPPORTED_BACKEND =
+  'Model discovery is not supported by this backend. Nothing was changed.'
+
+/** Phases of one "Refresh models" probe. */
+export type ProviderDiscoveryPhase =
+  | 'idle'
+  | 'loading'
+  | 'ready'
+  | 'empty'
+  | 'error'
+  | 'unsupported'
+
+/** Pure state behind the Settings → Providers "Refresh models" control. */
+export interface ProviderDiscoveryState {
+  /** Monotonic token of the newest probe (0 before the first). */
+  token: number
+  /** Provider the newest probe belongs to ('' before the first). */
+  name: string
+  phase: ProviderDiscoveryPhase
+  /** Model ids the endpoint reported (never applied automatically). */
+  models: string[]
+  /** Honest copy for the empty/error/unsupported phases ('' otherwise). */
+  message: string
+}
+
+function discoveryState(
+  token: number,
+  name: string,
+  phase: ProviderDiscoveryPhase,
+  models: string[] = [],
+  message = '',
+): ProviderDiscoveryState {
+  return { token, name, phase, models, message }
+}
+
+/** Initial idle state (nothing probed yet). */
+export function newDiscoveryState(): ProviderDiscoveryState {
+  return discoveryState(0, '', 'idle')
+}
+
+/**
+ * Begin a probe. `token` must be newer than every previous one; the caller
+ * keeps the counter (the model stays pure and deterministic in tests).
+ */
+export function startDiscovery(name: string, token: number): ProviderDiscoveryState {
+  return discoveryState(token, text(name), 'loading')
+}
+
+/** True while a settling response still belongs to the newest probe. */
+export function isCurrentDiscovery(
+  state: ProviderDiscoveryState,
+  token: number,
+  name: string,
+): boolean {
+  return state.token === token && state.name === text(name)
+}
+
+/**
+ * Tolerant model ids from a discovery response (`[{id, owned_by?}]`, bare id
+ * strings, or a `{models: [...]}` wrapper): trimmed, deduped, order preserved.
+ */
+export function discoveredModels(raw: unknown): string[] {
+  const wrapped = record(raw)
+  let entries: unknown
+  if (Array.isArray(raw)) entries = raw
+  else entries = wrapped?.models ?? wrapped?.data
+  if (!Array.isArray(entries)) return []
+  const out: string[] = []
+  for (const entry of entries) {
+    const item = record(entry)
+    const id = typeof entry === 'string' ? text(entry) : text(item?.id ?? item?.name)
+    if (!id || out.includes(id)) continue
+    out.push(id)
+  }
+  return out
+}
+
+/**
+ * Settle a successful probe. An empty list is a valid answer: it becomes the
+ * honest `empty` phase and says the saved catalog is untouched — it must never
+ * be treated as a reason to erase the draft's model list.
+ */
+export function settleDiscovery(
+  state: ProviderDiscoveryState,
+  token: number,
+  name: string,
+  raw: unknown,
+): ProviderDiscoveryState {
+  if (!isCurrentDiscovery(state, token, name)) return state
+  const models = discoveredModels(raw)
+  if (models.length === 0) {
+    return discoveryState(
+      token,
+      state.name,
+      'empty',
+      [],
+      'The endpoint reported no models. Your saved model list is unchanged.',
+    )
+  }
+  return discoveryState(token, state.name, 'ready', models)
+}
+
+/**
+ * Settle a failed probe. A 404 means the backend has no discovery route yet
+ * (old build) and an "unsupported" 400 means the wire kind has no compatible
+ * listing — both are shown honestly as unsupported, never as a scary network
+ * error, and neither can corrupt the draft.
+ */
+export function failDiscovery(
+  state: ProviderDiscoveryState,
+  token: number,
+  name: string,
+  status: number,
+  detail: string,
+): ProviderDiscoveryState {
+  if (!isCurrentDiscovery(state, token, name)) return state
+  const message = text(detail)
+  if (status === 404) {
+    return discoveryState(token, state.name, 'unsupported', [], DISCOVERY_UNSUPPORTED_BACKEND)
+  }
+  if (status === 400 && /not supported/i.test(message)) {
+    return discoveryState(token, state.name, 'unsupported', [], message)
+  }
+  return discoveryState(
+    token,
+    state.name,
+    'error',
+    [],
+    `Model discovery failed: ${message || `HTTP ${status}`}`,
+  )
+}
+
+/** Discovery is only truthful for endpoints that expose an OpenAI `/models`. */
+export function supportsModelDiscovery(kind: unknown): boolean {
+  return (text(kind) || PROVIDER_KIND_DEFAULT) === PROVIDER_KIND_DEFAULT
+}
+
+/** Honest copy for a wire kind that has no OpenAI-compatible model listing. */
+export function unsupportedDiscoveryCopy(kind: unknown): string {
+  return `Model discovery is not supported for ${providerKindLabel(
+    kind,
+  )} providers; only OpenAI-compatible endpoints expose a /models listing. List models by hand or use two-brothers models with an OpenAI-compatible endpoint.`
+}
+
+/** Visible status copy for the control ('' when there is nothing to say). */
+export function discoveryStatusText(state: ProviderDiscoveryState): string {
+  switch (state.phase) {
+    case 'loading':
+      return 'Asking the endpoint for its model list…'
+    case 'ready': {
+      const count = state.models.length
+      return `${count} model${count === 1 ? '' : 's'} reported by the endpoint. Nothing is saved until you add them to the draft and Save changes.`
+    }
+    case 'empty':
+    case 'error':
+    case 'unsupported':
+      return state.message
+    case 'idle':
+    default:
+      return ''
+  }
+}
+
+/** Union of the current model list and discovered ids (current order first). */
+export function mergeDiscoveredModels(current: unknown, discovered: unknown): string[] {
+  const merged = cleanModelList(current)
+  for (const model of discoveredModels(discovered)) {
+    if (!merged.includes(model)) merged.push(model)
+  }
+  return merged
+}
+
+/** Discovered ids not already present in the current list (for the action copy). */
+export function discoveredAdditions(current: unknown, discovered: unknown): string[] {
+  const existing = cleanModelList(current)
+  return discoveredModels(discovered).filter((model) => !existing.includes(model))
+}

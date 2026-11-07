@@ -110,6 +110,7 @@ export {
   type ApprovalRequestedEvent,
   type ApprovalResolvedEvent,
   type ApprovalAutoDeniedEvent,
+  type ApprovalAutoAllowedEvent,
   type PromptAuditEvent,
   type RunApprovalBrokerOptions,
   type RunErrorEvent,

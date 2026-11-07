@@ -403,6 +403,51 @@ export async function runSync(body: RunRequest): Promise<RunSyncResult> {
 
 // -- operator approvals -------------------------------------------------------
 
+/**
+ * Scope of one operator approval answer: `once` resolves this request only,
+ * `session` also remembers its `(action, target)` pair for the rest of the
+ * session. Older backends ignore the additive field and answer once.
+ */
+export type ApprovalScope = 'once' | 'session'
+
+/** The scope a backend actually applied (a missing/unknown field is `once`). */
+export type AppliedApprovalScope = 'once' | 'session'
+
+export interface ApprovalAnswerRequestWithScope extends ApprovalAnswerRequest {
+  scope?: ApprovalScope
+}
+
+export interface ApprovalDecisionResponse extends ApprovalDecisionView {
+  /** Additive echo of the applied scope; absent on older backends. */
+  scope?: string
+}
+
+/**
+ * The scope a backend actually applied: only an explicit `scope: "session"`
+ * echo counts, so a backend that ignored the field is honestly reported as
+ * one-shot. Never infers session scope from a successful response.
+ */
+export function appliedApprovalScope(
+  response: { scope?: unknown } | null | undefined,
+): AppliedApprovalScope {
+  return response?.scope === 'session' ? 'session' : 'once'
+}
+
+/**
+ * The honest operator-facing outcome line for one answer, or null when the
+ * plain one-shot outcome needs no extra copy. A session request the backend
+ * answered one-shot is reported as such instead of pretending it stuck.
+ */
+export function approvalOutcomeNotice(
+  requested: ApprovalScope,
+  applied: AppliedApprovalScope,
+): string | null {
+  if (requested !== 'session') return null
+  return applied === 'session'
+    ? 'Allowed for this session — identical requests will not ask again.'
+    : 'Allowed once — this backend does not support session scope.'
+}
+
 export async function getRunApprovals(runId: string): Promise<RunApprovalsView> {
   return request<RunApprovalsView>(`/api/runs/${encodeURIComponent(runId)}/approvals`)
 }
@@ -410,9 +455,9 @@ export async function getRunApprovals(runId: string): Promise<RunApprovalsView> 
 export async function answerRunApproval(
   runId: string,
   approvalId: string,
-  body: ApprovalAnswerRequest,
-): Promise<ApprovalDecisionView> {
-  return request<ApprovalDecisionView>(
+  body: ApprovalAnswerRequestWithScope,
+): Promise<ApprovalDecisionResponse> {
+  return request<ApprovalDecisionResponse>(
     `/api/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(approvalId)}`,
     json('POST', body),
   )
@@ -593,4 +638,44 @@ export async function deleteProvider(name: string): Promise<{ removed: string }>
   return request<{ removed: string }>(`/api/providers/${encodeURIComponent(name)}`, {
     method: 'DELETE',
   })
+}
+
+/**
+ * Draft values for a discovery probe. Every field is optional: omitted values
+ * fall back server-side to the stored preset (the key only when `api_key` is
+ * empty). The typed key is write-only — this app never sees it again.
+ */
+export interface ProviderDiscoverRequest {
+  base_url?: string
+  kind?: string
+  api_key?: string
+}
+
+/** Raw `POST /api/providers/{name}/discover` body; model entries are normalized by the caller. */
+export interface ProviderDiscoverResponse {
+  /** Endpoint-reported models (`{id, owned_by?}` objects or bare id strings). */
+  models: unknown[]
+  /** Additive echo of the endpoint that was actually probed. */
+  base_url?: string
+  kind?: string
+}
+
+/**
+ * Probe the CURRENT DRAFT of one provider without saving anything
+ * (`POST /api/providers/{name}/discover`). Explicit operator action only: the
+ * response is informational, and an empty `models` list is a valid answer.
+ */
+export async function discoverProviderModels(
+  name: string,
+  draft: ProviderDiscoverRequest = {},
+): Promise<ProviderDiscoverResponse> {
+  const body = await request<Partial<ProviderDiscoverResponse> | null>(
+    `/api/providers/${encodeURIComponent(name)}/discover`,
+    json('POST', draft),
+  )
+  return {
+    models: Array.isArray(body?.models) ? body.models : [],
+    ...(typeof body?.base_url === 'string' ? { base_url: body.base_url } : {}),
+    ...(typeof body?.kind === 'string' ? { kind: body.kind } : {}),
+  }
 }

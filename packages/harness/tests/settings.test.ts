@@ -22,7 +22,7 @@ import {
   PLAIN_PREFIX,
   type DpapiCipher,
 } from "../src/secretbox.ts";
-import { SettingsStore } from "../src/settings_store.ts";
+import { MAX_APPROVAL_PAIR_KEY_CHARS, MAX_SESSION_APPROVALS, SettingsStore } from "../src/settings_store.ts";
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -478,6 +478,153 @@ test("plain1: fallback write marks the file 0o600 off Windows (simulated)", () =
     const onDisk = (JSON.parse(raw) as Record<string, Record<string, string>>).senior.api_key;
     assert.ok(onDisk.startsWith(PLAIN_PREFIX), onDisk);
     assert.equal(new SettingsStore(file, box).read().senior?.api_key, "super-secret-key");
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// session approvals ("always allow for this session")
+// ---------------------------------------------------------------------------
+
+const WRITE_PAIR = "write\u0000hello.txt";
+const SHELL_PAIR = "shell\u0000echo hi";
+
+test("session approvals round-trip and keep the other sections", () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const file = path.join(root, "settings.json");
+    const store = new SettingsStore(file);
+    store.write(ROLE_SETTINGS, ["notes"], [ACME]);
+    assert.deepEqual(store.addSessionApproval("s1.jsonl", WRITE_PAIR), [WRITE_PAIR]);
+
+    const fresh = new SettingsStore(file);
+    assert.deepEqual(fresh.readSessionApprovals("s1.jsonl"), [WRITE_PAIR]);
+    assert.deepEqual(fresh.readSessionApprovals("s2.jsonl"), []);
+    // every other section survived the approvals write
+    assert.deepEqual(fresh.readPlugins(), ["notes"]);
+    assert.equal(fresh.readProviders()[0].name, "acme");
+    assert.equal(fresh.read().senior?.model, ROLE_SETTINGS.senior.model);
+
+    // and a plain role-settings save keeps the approvals section
+    fresh.write({ senior: { model: "updated" } });
+    const again = new SettingsStore(file);
+    assert.deepEqual(again.readSessionApprovals("s1.jsonl"), [WRITE_PAIR]);
+    assert.equal(again.read().senior?.model, "updated");
+  } finally {
+    cleanup();
+  }
+});
+
+test("session approvals dedupe, isolate sessions and clear on delete", () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const file = path.join(root, "settings.json");
+    const store = new SettingsStore(file);
+    store.addSessionApproval("s1.jsonl", WRITE_PAIR);
+    store.addSessionApproval("s1.jsonl", WRITE_PAIR); // idempotent
+    store.addSessionApproval("s2.jsonl", SHELL_PAIR);
+    assert.deepEqual(store.readSessionApprovals("s1.jsonl"), [WRITE_PAIR]);
+    assert.deepEqual(store.readSessionApprovals("s2.jsonl"), [SHELL_PAIR]);
+
+    assert.equal(store.clearSessionApprovals("s1.jsonl"), true);
+    assert.deepEqual(store.readSessionApprovals("s1.jsonl"), []);
+    assert.deepEqual(store.readSessionApprovals("s2.jsonl"), [SHELL_PAIR]);
+    assert.equal(store.clearSessionApprovals("s1.jsonl"), false, "a missing session is a no-op");
+    // the clearing survives a fresh instance
+    const fresh = new SettingsStore(file);
+    assert.deepEqual(fresh.readSessionApprovals("s1.jsonl"), []);
+    assert.deepEqual(fresh.readSessionApprovals("s2.jsonl"), [SHELL_PAIR]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a corrupt approvals section fails soft and never blocks the rest of the file", () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const file = path.join(root, "settings.json");
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        approvals: {
+          "s1.jsonl": "junk",
+          "s2.jsonl": [42, null, "", WRITE_PAIR, WRITE_PAIR],
+          "s3.jsonl": { nested: true },
+        },
+        senior: { model: "kept" },
+      }),
+      "utf-8",
+    );
+    const store = new SettingsStore(file);
+    assert.deepEqual(store.readSessionApprovals("s1.jsonl"), [], "corrupt entry reads empty");
+    assert.deepEqual(store.readSessionApprovals("s2.jsonl"), [WRITE_PAIR]);
+    assert.deepEqual(store.readSessionApprovals("s3.jsonl"), []);
+    assert.equal(store.read().senior?.model, "kept", "the corrupt section never breaks roles");
+
+    // A new allow rewrites the section normalized; the roles stay intact.
+    assert.deepEqual(store.addSessionApproval("s4.jsonl", SHELL_PAIR), [SHELL_PAIR]);
+    const fresh = new SettingsStore(file);
+    assert.deepEqual(fresh.readSessionApprovals("s1.jsonl"), []);
+    assert.deepEqual(fresh.readSessionApprovals("s4.jsonl"), [SHELL_PAIR]);
+    assert.equal(fresh.read().senior?.model, "kept");
+  } finally {
+    cleanup();
+  }
+});
+
+test("session approvals reject unusable pair keys and cap the stored list", () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const file = path.join(root, "settings.json");
+    const store = new SettingsStore(file);
+    for (const bad of ["", "   ", 42, null, "x".repeat(MAX_APPROVAL_PAIR_KEY_CHARS + 1)]) {
+      assert.deepEqual(
+        store.addSessionApproval("s1.jsonl", bad as unknown as string),
+        [],
+        "unusable keys persist nothing",
+      );
+    }
+    assert.equal(fs.existsSync(file), false, "a rejected key writes no file");
+
+    for (const key of Array.from(
+      { length: MAX_SESSION_APPROVALS + 5 },
+      (_, index) => `write\u0000f${index}.txt`,
+    )) {
+      store.addSessionApproval("s.jsonl", key);
+    }
+    const stored = store.readSessionApprovals("s.jsonl");
+    assert.equal(stored.length, MAX_SESSION_APPROVALS);
+    assert.equal(stored.at(-1), `write\u0000f${MAX_SESSION_APPROVALS + 4}.txt`);
+    assert.equal(stored.includes("write\u0000f0.txt"), false, "the oldest entries are dropped");
+
+    // pair keys are trimmed on the way in (the broker's keys are already clean)
+    assert.deepEqual(store.addSessionApproval("t.jsonl", `  ${WRITE_PAIR}  `), [WRITE_PAIR]);
+    assert.deepEqual(store.readSessionApprovals("t.jsonl"), [WRITE_PAIR]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("session approvals are secret-free and written atomically", () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const file = path.join(root, "settings.json");
+    const store = new SettingsStore(file);
+    store.write(ROLE_SETTINGS, ["notes"], [ACME]);
+    store.addSessionApproval("s1.jsonl", SHELL_PAIR);
+
+    const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, unknown>;
+    assert.deepEqual(raw.approvals, { "s1.jsonl": [SHELL_PAIR] });
+    const approvalsJson = JSON.stringify(raw.approvals);
+    assert.ok(!approvalsJson.includes("super-secret-key"));
+    assert.ok(!approvalsJson.includes("acme-key"));
+    assert.ok(!approvalsJson.includes("api_key"));
+    assert.ok(!fs.existsSync(file + ".tmp"), "the temp-file write leaves no artifact");
+    // the rest of the document is untouched by the approvals write
+    const senior = raw.senior as Record<string, string>;
+    assert.equal(senior.model, ROLE_SETTINGS.senior.model);
+    assert.notEqual(senior.api_key, "super-secret-key");
   } finally {
     cleanup();
   }

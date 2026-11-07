@@ -16,6 +16,19 @@
  * - Background runs execute on the `RunManager` worker pool; the per-run
  *   `RunApprovalBroker` is reachable through the run record, so the approval
  *   endpoints resolve a mutation parked mid-run.
+ * - `POST /api/runs/{run_id}/approvals/{approval_id}` accepts an additive
+ *   `scope`: `"once"` (default) or `"session"` (strict string enum; anything
+ *   else is a 400, and `scope: "session"` with `allow: false` is a 400 — a
+ *   session deny does not exist). A session-scope allow persists FIRST in the
+ *   `SettingsStore` `approvals` section (keyed by session file; a write failure
+ *   is a 500 and nothing is allowed), then records the pair on the run's
+ *   broker, so identical requests resolve ALLOW without parking the run
+ *   (additive `approval_auto_allowed` runtime event instead of
+ *   `approval_requested`). The response echoes the APPLIED `scope`; a client
+ *   that omits it keeps the one-shot behavior. Runs seed their broker from the
+ *   persisted list for their session (at submit and again at start, so queued
+ *   runs see allows granted meanwhile); deleting a session clears its stored
+ *   allows. Responses stay secret-free (pair keys are action + target only).
  * - `POST /api/runs` accepts an additive optional `stream_tokens` (strict
  *   boolean, default `false`; non-boolean is a 400). With it, provider
  *   thinking/text deltas are forwarded to the run's in-memory live-token
@@ -55,6 +68,20 @@
  *   duplicates), preserves role references, and returns the pristine public
  *   seed; unknown names are 404, custom providers are 400, and an untouched
  *   seed is 409. DELETE keeps its existing removal/ref-clearing behavior.
+ * - `POST /api/providers/{name}/discover` probes the CURRENT DRAFT endpoint
+ *   (additive `base_url`, `kind`, optional one-shot `api_key` body fields)
+ *   through `provider.listModels` and returns the model ids it reports. It
+ *   never persists or applies anything, never stores or echoes the typed key,
+ *   and resolves the preset's stored/env-backed key server-side only when the
+ *   probed base URL matches the preset's own endpoint (trimmed, trailing
+ *   slashes ignored): probing a different endpoint with a saved secret and no
+ *   typed key is a 400 ("a typed API key is required when probing a different
+ *   base URL") instead of sending that secret elsewhere. Only OpenAI-compatible
+ *   endpoints expose a `/models` listing: any other wire kind is an honest
+ *   400, an unknown provider (seeds included) a 404, an upstream failure a
+ *   502, and an empty list a valid 200 (a catalog is never erased by
+ *   discovery). Discovery is explicitly separate from `PUT` (Apply); the
+ *   offline CLI equivalent is `two-brothers models --base-url <url>`.
  * - `GET /api/plugins` lists the plugins discovered by the PluginManager
  *   (`src/plugins.ts`, the plugins.py port) plus load errors, and additively
  *   `diagnostics` (load-time notes plus the last run's binding notes) when
@@ -209,7 +236,14 @@ import {
   presetById,
   type Preset,
 } from "./presets.ts";
-import { emptyUsage, type Provider } from "./provider.ts";
+import {
+  emptyUsage,
+  isProviderKind,
+  listModels,
+  PROVIDER_KIND_HINT,
+  type Provider,
+  type RemoteModel,
+} from "./provider.ts";
 import { restoreContext, SessionStore } from "./session.ts";
 import {
   SEARCH_DEFAULT_LIMIT,
@@ -1278,6 +1312,9 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     // signal once the worker starts it.
     return async (signal, onEnvelope, onToken) => {
       const { cfg, endpoints } = buildCfg(req);
+      // A queued run may start after the operator granted a session allow to an
+      // earlier run on the same session: refresh the broker from the store.
+      broker.seedSessionAllows(state.settingsStore.readSessionApprovals(name));
       broker.attach(onEnvelope, signal);
       let workspace: Workspace | undefined;
       if (req.workspace_id) {
@@ -1962,6 +1999,15 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       while (activeFor().length > 0 && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
+      // Persisted session allows must not outlive the session they were
+      // granted for. Clear them before the file disappears: a failed write
+      // leaves the session in place rather than a deleted session whose auto-
+      // allows could apply again if the name were reused.
+      try {
+        state.settingsStore.clearSessionApprovals(safe);
+      } catch (exc) {
+        throw new HttpError(500, `could not clear the session approvals: ${errorDetail(exc)}`);
+      }
       fs.unlinkSync(store.path);
       state.metadata.delete(safe);
       state.runtimeEvents.delete(safe);
@@ -2238,6 +2284,74 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     }),
   );
 
+  routes.push(
+    compileRoute("POST", "/api/providers/{name}/discover", async (ctx) => {
+      // Manual, explicit discovery probe — deliberately separate from Apply
+      // (`PUT /api/providers/{name}`): it writes nothing (no settings.json, no
+      // run state), so a failed or unwanted probe cannot corrupt the catalog.
+      // The body is the CURRENT unsaved draft, so the operator can probe a
+      // typed base URL / kind before saving. The merge reads seeds too, so a
+      // built-in preset works without being customized first (case-insensitive,
+      // like every other provider route).
+      const body = await ctx.json();
+      const wanted = ctx.params.name.trim().toLowerCase();
+      const preset = mergedPresets().find(
+        (entry) => entry.name.trim().toLowerCase() === wanted,
+      );
+      if (preset === undefined) throw new HttpError(404, "not found");
+      const draftBaseUrl = optionalString(body, "base_url");
+      const baseUrl = (draftBaseUrl ?? preset.base_url).trim();
+      if (!baseUrl) throw new HttpError(400, "base_url must not be empty");
+      if (!/^https?:\/\//i.test(baseUrl)) {
+        throw new HttpError(400, "base_url must start with http:// or https://");
+      }
+      const draftKind = optionalString(body, "kind");
+      const kind = (draftKind ?? "").trim() || preset.kind || PROVIDER_KIND_DEFAULT;
+      if (!isProviderKind(kind)) {
+        throw new HttpError(400, `unknown provider kind: ${kind} (use ${PROVIDER_KIND_HINT})`);
+      }
+      if (kind !== PROVIDER_KIND_DEFAULT) {
+        // Honest about the wire families: only the OpenAI-compatible adapter
+        // speaks `GET {base}/models`; the native Messages / Generative
+        // Language APIs are not probed through their own listing shapes here.
+        throw new HttpError(
+          400,
+          `model discovery is not supported for the ${kind} provider kind (use ${PROVIDER_KIND_HINT}); list models by hand or use two-brothers models with an OpenAI-compatible endpoint`,
+        );
+      }
+      // Secret handling: a typed key is an explicit one-shot override that may
+      // point anywhere; the preset's stored/env-backed key is only attached when
+      // the probed endpoint IS that preset's own endpoint (trimmed, trailing
+      // slashes ignored). A different endpoint with a saved secret and no typed
+      // key is refused before any request — the secret must never be sent
+      // elsewhere. Keyless presets (local endpoints) still probe their draft
+      // URL unauthenticated. Either way the key never leaves as a value,
+      // `listModels` only puts it in a request header, and neither this response
+      // nor an error message echoes it.
+      const typedApiKey = optionalString(body, "api_key")?.trim();
+      const storedApiKey = presetApiKey(preset);
+      const sameEndpoint =
+        baseUrl.replace(/\/+$/, "") === preset.base_url.trim().replace(/\/+$/, "");
+      if (!typedApiKey && !sameEndpoint && storedApiKey) {
+        throw new HttpError(
+          400,
+          "a typed API key is required when probing a different base URL",
+        );
+      }
+      const probeKey = typedApiKey ? typedApiKey : sameEndpoint ? storedApiKey : "";
+      let models: RemoteModel[];
+      try {
+        models = await listModels(baseUrl, { apiKey: probeKey || undefined });
+      } catch (exc) {
+        throw new HttpError(502, `model discovery failed: ${errorDetail(exc)}`);
+      }
+      // Empty is a valid answer (`models: []`); the client must not erase a
+      // catalog on it. `base_url`/`kind` are additive echoes so a client can
+      // show what was actually probed.
+      return { models, base_url: baseUrl, kind };
+    }),
+  );
+
   // -- routes: folder explorer (Stage 17) ------------------------------------------
 
   function driveRoots(): Array<{ name: string; path: string }> {
@@ -2321,6 +2435,10 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       // been created for this request yet.
       assertNotCompacting(name);
       const broker = new RunApprovalBroker();
+      // Seed the persisted "always allow for this session" pairs before the run
+      // can reach a workspace tool; the job re-reads at start so a queued run
+      // also sees allows granted while it waited.
+      broker.seedSessionAllows(state.settingsStore.readSessionApprovals(name));
       const record = state.runs.submit(
         prepared.task,
         name,
@@ -2386,9 +2504,53 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         if (typeof body.allow !== "boolean") throw invalidBody();
         allow = body.allow;
       }
+      // Additive approval scope (strict string enum): "once" keeps the old
+      // behavior for clients that omit it; "session" additionally persists the
+      // pair so identical requests in this session auto-allow.
+      let scope: "once" | "session" = "once";
+      if (body.scope !== undefined && body.scope !== null) {
+        if (body.scope !== "once" && body.scope !== "session") throw invalidBody();
+        scope = body.scope;
+      }
+      if (scope === "session" && !allow) {
+        throw new HttpError(400, "scope session requires allow");
+      }
       const record = state.runs.get(ctx.params.run_id);
       if (record === null || record.approvals === null) throw new HttpError(404, "not found");
       const broker = record.approvals as RunApprovalBroker;
+      if (scope === "session") {
+        if (
+          typeof broker.sessionPairKey !== "function" ||
+          typeof broker.allowForSession !== "function"
+        ) {
+          throw new HttpError(400, "session-scope approvals are not supported for this run");
+        }
+        // The pair must belong to a real pending request: an unknown or
+        // already-answered id is a 404 and persists nothing.
+        const pairKey = broker.sessionPairKey(ctx.params.approval_id);
+        if (pairKey === null) {
+          throw new HttpError(404, "unknown or already resolved approval");
+        }
+        // Persist FIRST. A failed settings write is a 500 and leaves the
+        // request unanswered — never an in-memory auto-allow the operator
+        // cannot see in settings.json.
+        try {
+          const stored = state.settingsStore.addSessionApproval(record.session, pairKey);
+          if (!stored.includes(pairKey)) {
+            // A pair that cannot be stored (e.g. an over-long shell command)
+            // must not report a session scope the settings file does not carry;
+            // the approval stays pending and the operator can answer once.
+            throw new Error("the approval target cannot be stored for this session");
+          }
+        } catch (exc) {
+          throw new HttpError(500, `could not persist the session approval: ${errorDetail(exc)}`);
+        }
+        const decision = broker.allowForSession(ctx.params.approval_id);
+        if (decision === null) {
+          throw new HttpError(404, "unknown or already resolved approval");
+        }
+        return { approval_id: ctx.params.approval_id, decision, scope: "session" };
+      }
       const decision = broker.respond(
         ctx.params.approval_id,
         allow ? Decision.ALLOW : Decision.DENY,
@@ -2396,7 +2558,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       if (decision === null) {
         throw new HttpError(404, "unknown or already resolved approval");
       }
-      return { approval_id: ctx.params.approval_id, decision };
+      return { approval_id: ctx.params.approval_id, decision, scope: "once" };
     }),
   );
 

@@ -21,7 +21,7 @@ import {
 } from '../basecommands'
 import type { ComposerCommandRequest } from '../basecommands'
 import { canSubmitComposer, classifyComposerKey, composerLockReason } from '../composerKeys'
-import type { ComposerKeyInput } from '../composerKeys'
+import type { ComposerKeyInput, ComposerSendContext } from '../composerKeys'
 import { clearDraft, getDraft, setDraft } from '../drafts'
 import {
   MAX_FILE_ITEMS,
@@ -54,13 +54,19 @@ const props = defineProps<{
    */
   workspaceId?: string | null
   /**
-   * Recovery payload from App: a start request that failed before any run
-   * existed. `token` changes on every failure; the text is put back only when
-   * the operator has not typed anything new since the submit.
+   * Outcome of the last submission. The box clears only when the run request
+   * was accepted (`accepted: true`); a rejected request keeps the text and its
+   * saved draft, so a usage error never loses what the operator typed.
    */
-  draftRestore?: { token: number; text: string } | null
-  /** The followed run is working (queued/running) — the composer is locked. */
+  submitResult?: { token: number; accepted: boolean } | null
+  /**
+   * A run is working on the session (queued/running): the box stays usable and
+   * a submission joins the backend's FIFO queue behind it. This no longer locks
+   * sending — see `waiting` for the parked-on-approval block.
+   */
   busy: boolean
+  /** How many submissions already wait behind the working run (honest copy). */
+  queuedCount?: number
   /**
    * A manual context compaction is in flight: the draft stays editable but the
    * composer must not submit (the server rejects a run racing a compaction).
@@ -68,7 +74,7 @@ const props = defineProps<{
   compacting?: boolean
   /**
    * The followed run is parked on an operator approval. The input stays
-   * usable for drafting, but sending is blocked until the run finishes.
+   * usable for drafting, but sending is blocked until the approval resolves.
    */
   waiting?: boolean
   stopping: boolean
@@ -84,7 +90,9 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  submit: [payload: { task: string; mode: RunMode; provider: RunProvider | null }]
+  submit: [
+    payload: { task: string; mode: RunMode; provider: RunProvider | null; token: number },
+  ]
   stop: []
   openSettings: []
   /** A first-party base action chosen from the `/` menu or typed directly. */
@@ -233,40 +241,53 @@ function resizeInput() {
   el.style.overflowY = el.scrollHeight > MAX_INPUT_HEIGHT ? 'auto' : 'hidden'
 }
 
-/** Send availability: text present and no lock (working run / compaction / wait). */
-const canSend = computed(() =>
-  canSubmitComposer({
-    busy: props.busy,
-    waiting: props.waiting,
-    compacting: props.compacting,
-    text: task.value,
-  }),
-)
+/**
+ * Why sending is blocked right now. A working run is intentionally NOT a lock:
+ * its submission queues behind it. Only a run parked on an approval and an
+ * in-flight compaction keep the send control unavailable.
+ */
+const sendContext = computed<ComposerSendContext>(() => ({
+  busy: false,
+  waiting: props.waiting,
+  compacting: props.compacting,
+  text: task.value,
+}))
 
-const lockReason = computed(() =>
-  composerLockReason({
-    busy: props.busy,
-    waiting: props.waiting,
-    compacting: props.compacting,
-  }),
+/**
+ * One submission is in flight until App reports its outcome (accepted or not).
+ * Guards double-submits while the draft intentionally stays in the box.
+ */
+const pendingSubmit = ref<{ token: number; text: string; sessionId: string | null } | null>(
+  null,
 )
+const submitting = computed(() => pendingSubmit.value !== null)
+let submitToken = 0
+
+/** Send availability: text present, no lock, no submission already in flight. */
+const canSend = computed(() => !submitting.value && canSubmitComposer(sendContext.value))
+
+const lockReason = computed(() => composerLockReason(sendContext.value))
 
 const placeholder = computed(() => {
-  if (lockReason.value === 'busy') return 'The brothers are working…'
   if (lockReason.value === 'compacting') return 'Compacting context — sending unlocks when it finishes…'
   if (lockReason.value === 'waiting') return 'Draft the next task…'
+  if (props.busy) return 'Type the next task — it will queue behind the run in progress…'
   return 'Describe a task for the two brothers…'
 })
 
 const statusHint = computed(() => {
-  if (lockReason.value === 'busy') {
-    return props.stopping ? 'Stopping the run…' : 'The brothers are working — stop to interrupt.'
-  }
+  if (props.busy && props.stopping) return 'Stopping the run…'
   if (lockReason.value === 'compacting') {
     return 'Compacting context… sending unlocks when it finishes.'
   }
   if (lockReason.value === 'waiting') {
-    return 'Drafting only — sending unlocks when this run finishes.'
+    return 'Drafting only — sending unlocks when the run continues.'
+  }
+  if (submitting.value) return props.busy ? 'Queueing the task…' : 'Sending the task…'
+  if (props.busy) {
+    const queued = Math.max(0, props.queuedCount ?? 0)
+    const suffix = queued > 0 ? ` ${queued} already queued.` : ''
+    return `New tasks queue — they start after the current run finishes.${suffix}`
   }
   return 'Enter to send · Shift+Enter new line · Ctrl/⌘+Enter send now'
 })
@@ -350,27 +371,51 @@ function scheduleDraftSave() {
 function submit() {
   // submitting always closes the mention picker (the text now owns the task)
   closePicker()
+  // one request at a time: the draft stays in the box until App reports the
+  // outcome, so a second Enter must not send the same text again
+  if (submitting.value) return
   const text = task.value.trim()
-  // Locked states keep the draft intact: a working run, a run parked on an
-  // approval, and an in-flight context compaction (the server rejects a run
-  // that races a compaction, so the composer stays honest and does not send).
-  if (
-    !canSubmitComposer({
-      busy: props.busy,
-      waiting: props.waiting,
-      compacting: props.compacting,
-      text: task.value,
-    })
-  ) {
-    return
-  }
+  // Locked states keep the draft intact: a run parked on an approval and an
+  // in-flight context compaction (the server rejects a run that races one).
+  // A working run is not a lock — the submission queues behind it.
+  if (!canSubmitComposer(sendContext.value)) return
   // a typed `/action` is performed locally instead of becoming a run
   if (interceptCommandSubmit()) return
-  emit('submit', { task: text, mode: mode.value, provider: providerForRun.value })
-  // The run accepted the text — submit consumes every draft form. A blocked
-  // submit returned above, so text and drafts stay intact.
-  consumeComposerText()
+  const token = ++submitToken
+  pendingSubmit.value = { token, text, sessionId: props.sessionId ?? null }
+  emit('submit', {
+    task: text,
+    mode: mode.value,
+    provider: providerForRun.value,
+    token,
+  })
+  // The box is cleared by the acceptance handshake below, never optimistically:
+  // a rejected request (e.g. a server usage error) keeps text and draft.
 }
+
+/**
+ * App reports each submission's outcome. On acceptance the accepted text is
+ * consumed — unless the operator already typed something new, which stays.
+ * On rejection nothing is cleared: the draft is exactly where it was.
+ */
+watch(
+  () => props.submitResult,
+  (result) => {
+    const pending = pendingSubmit.value
+    if (!result || !pending || result.token !== pending.token) return
+    pendingSubmit.value = null
+    if (!result.accepted) return
+    if (props.sessionId === pending.sessionId) {
+      // same box: only clear when it still holds the submitted text
+      if (task.value.trim() === pending.text) consumeComposerText()
+      return
+    }
+    // the selection moved on while the request was in flight; the accepted
+    // task's saved draft (under its old session) must not reappear later
+    if (pending.sessionId) clearDraft(pending.sessionId)
+    else unsessionedDraft = ''
+  },
+)
 
 /** Clear the whole draft (a submit or a consumed base command). */
 function consumeComposerText() {
@@ -688,10 +733,6 @@ async function runFileSearch(
 // -- trigger tracking & keyboard ---------------------------------------------
 
 function syncPicker(): void {
-  if (props.busy) {
-    closePicker()
-    return
-  }
   const el = inputEl.value
   const value = el ? el.value : task.value
   const caret =
@@ -1039,8 +1080,9 @@ function onKeydown(e: KeyboardEvent) {
   // an open picker owns Enter/Tab/arrows/Escape: Enter/Tab accept, Shift+Enter
   // keeps the newline, Shift+Tab/Escape close, and Enter can never submit
   if (pickerOpen.value && onPickerKeydown(e)) return
-  // while waiting Enter must stay a newline — the text is a draft, not a task
-  if (props.busy || props.waiting) return
+  // a run parked on an approval owns the turn: Enter stays a newline, the
+  // text is a draft. A working run does not block — Enter queues a submission.
+  if (props.waiting) return
   switch (classifyComposerKey(keyInput(e), false)) {
     case 'submit':
     case 'submit-accelerated':
@@ -1087,14 +1129,12 @@ function closeMode(restoreFocus = false) {
 }
 
 function chooseMode(value: RunMode) {
-  if (props.busy) return
   mode.value = value
   closeMode(true)
 }
 
 /** Open the existing mode control (used by the `/mode` base action). */
 function openModePicker(): void {
-  if (props.busy) return
   modeOpen.value = true
   void nextTick(() => {
     const checked =
@@ -1159,33 +1199,13 @@ watch(
     if (pickerOpen.value && pickerKind.value === 'file') scheduleFileSearch(pickerQuery.value)
   },
 )
-// A start request that threw before creating a run: App hands the task back.
-// The successful-submit path already cleared text + saved draft, so this is
-// the only way that text survives; an operator edit since then wins.
-watch(
-  () => props.draftRestore?.token ?? 0,
-  () => {
-    const restore = props.draftRestore
-    if (!restore || restore.text.trim().length === 0) return
-    if (task.value.trim().length > 0) return
-    cancelDraftSave()
-    restoringDraft = true
-    task.value = restore.text
-    // persist again now (the submit path consumed the saved copy)
-    if (props.sessionId) setDraft(props.sessionId, restore.text)
-    else unsessionedDraft = restore.text
-    void nextTick(() => {
-      restoringDraft = false
-    })
-  },
-)
 watch(
   () => props.busy,
   (busy) => {
     if (!busy) return
     modeOpen.value = false
     modelOpen.value = false
-    // the textarea is disabled while a run works — no picker can stay open
+    // a run starting owns the conversation chrome; dismiss an open picker
     closePicker()
   },
 )
@@ -1222,7 +1242,7 @@ onBeforeUnmount(() => {
   <form
     class="composer"
     aria-label="New task"
-    :aria-busy="busy || compacting"
+    :aria-busy="compacting || submitting"
     @submit.prevent="submit"
   >
     <div
@@ -1298,7 +1318,6 @@ onBeforeUnmount(() => {
         :aria-controls="pickerOpen ? mentionListId : undefined"
         :aria-activedescendant="activeOptionId"
         :placeholder="placeholder"
-        :disabled="busy"
         @keydown="onKeydown"
         @input="onInput"
         @keyup="syncPicker"
@@ -1326,7 +1345,6 @@ onBeforeUnmount(() => {
                 aria-haspopup="true"
                 aria-controls="composer-mode-menu"
                 :aria-expanded="modeOpen"
-                :disabled="busy"
               >
                 <span class="chip-caption">Mode</span>
                 <span class="chip-value">{{ currentMode.label }}</span>
@@ -1365,7 +1383,6 @@ onBeforeUnmount(() => {
                   type="radio"
                   name="composer-mode"
                   :value="option.value"
-                  :disabled="busy"
                 />
                 <span class="mode-text">
                   <span class="mode-title">{{ option.label }}</span>
@@ -1484,14 +1501,17 @@ onBeforeUnmount(() => {
         >
           {{ stopping ? 'Stopping…' : 'Stop' }}
         </n-button>
+        <!-- Sending stays available while a run works: the submission queues
+             behind it. A parked run (`waiting`) is the only chrome state that
+             hides the send control, as before. -->
         <n-button
-          v-else
+          v-if="!waiting"
           attr-type="submit"
           type="primary"
           class="composer-send"
           :disabled="!canSend"
         >
-          Send
+          {{ submitting ? (busy ? 'Queueing…' : 'Sending…') : busy ? 'Queue' : 'Send' }}
         </n-button>
       </div>
 

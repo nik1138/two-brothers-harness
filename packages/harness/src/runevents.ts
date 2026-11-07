@@ -12,7 +12,8 @@
  * so a UI reload can recover tool/approval history without touching the
  * envelope log. Events are the typed runtime events (run_status / envelope /
  * tool_started / tool_completed / approval_requested / approval_resolved /
- * approval_auto_denied / prompt_audit / run_error / run_end) plus `run_id`
+ * approval_auto_denied / approval_auto_allowed / prompt_audit / run_error /
+ * run_end) plus `run_id`
  * and `at` (epoch seconds). Event JSON keeps the Python field names
  * (`run_id`, `approval_id`) so sidecar files stay interchangeable with the
  * Python implementation; `prompt_audit` keeps its camelCase payload
@@ -103,6 +104,21 @@ export interface ApprovalAutoDeniedEvent extends RuntimeEventMeta {
 }
 
 /**
+ * Additive event: an identical approval request was auto-allowed because the
+ * operator answered "always allow for this session" for its `(action, target)`
+ * pair (or the server seeded the pair from `sessions/settings.json`), so it
+ * never parked and never emitted an `approval_requested`. Emitted exactly once
+ * per auto-allowed call; `action` + `target` identify the pair (a shell
+ * request's target is its command). Consumers that only understand
+ * `approval_requested` / `approval_resolved` can ignore this event type safely.
+ */
+export interface ApprovalAutoAllowedEvent extends RuntimeEventMeta {
+  type: "approval_auto_allowed";
+  action: string;
+  target: string;
+}
+
+/**
  * One provider call's prompt/tool-belt audit, streamed as it happens: the
  * payload is `PromptAuditEntry` field for field (names and lengths only,
  * never prompt bodies), so `HarnessResult.promptAudits` and this event stream
@@ -136,6 +152,7 @@ export type RuntimeEvent =
   | ApprovalRequestedEvent
   | ApprovalResolvedEvent
   | ApprovalAutoDeniedEvent
+  | ApprovalAutoAllowedEvent
   | PromptAuditEvent
   | RunErrorEvent
   | RunEndEvent;
@@ -395,7 +412,11 @@ export function approvalPairKey(request: ApprovalRequest): string {
 }
 
 /** Events the broker emits into the run's event stream. */
-type ApprovalEvent = ApprovalRequestedEvent | ApprovalResolvedEvent | ApprovalAutoDeniedEvent;
+type ApprovalEvent =
+  | ApprovalRequestedEvent
+  | ApprovalResolvedEvent
+  | ApprovalAutoDeniedEvent
+  | ApprovalAutoAllowedEvent;
 
 interface PendingApproval {
   request: ApprovalRequest;
@@ -426,6 +447,17 @@ function shortId(): string {
  * cannot double-count one request because the harness auto-denies before the
  * workspace `PermissionManager` reaches this broker.
  *
+ * Session allows ("always allow for this session") are an in-memory set of
+ * `approvalPairKey` pairs for this run: an operator `allowForSession()` answer
+ * records the pending request's pair and resolves it ALLOW, and a request whose
+ * pair is set resolves ALLOW immediately — before the denial cap, without a
+ * pending entry and without an `approval_requested` — emitting exactly one
+ * additive `approval_auto_allowed` event per call. `seedSessionAllows()` loads
+ * pairs the server persisted for the session (additive, never guessed from the
+ * request); like an allow answer, a session allow neither counts nor resets a
+ * pair's operator-denial count. A stopped/aborted run still denies: the
+ * session-allow shortcut never bypasses the cancellation path below.
+ *
  * Implements the `ApprovalBroker` interface from `permissions.ts`, so it plugs
  * straight into `PermissionManager` in place of `CallbackBroker`/`StaticBroker`.
  * Python parity: `approve()` polls a threading.Event; here the same semantics
@@ -441,6 +473,11 @@ export class RunApprovalBroker implements ApprovalBroker {
   private readonly _pending = new Map<string, PendingApproval>();
   /** Operator-denial counts per `action\0target` pair (see `autoDenials()`). */
   private readonly _denials = new Map<string, number>();
+  /**
+   * `approvalPairKey` pairs the operator allowed for this session; a matching
+   * request resolves ALLOW without parking (see `seedSessionAllows`).
+   */
+  private readonly _sessionAllows = new Set<string>();
   private _emit: ((event: ApprovalEvent) => void) | null = null;
   private _signal: AbortSignal | null = null;
 
@@ -465,6 +502,27 @@ export class RunApprovalBroker implements ApprovalBroker {
     return Object.fromEntries(this._denials);
   }
 
+  /**
+   * Read-only snapshot of the session-allowed `approvalPairKey` pairs, sorted
+   * for deterministic tests/telemetry. Callers cannot mutate the set.
+   */
+  sessionAllows(): string[] {
+    return [...this._sessionAllows].sort();
+  }
+
+  /**
+   * Add `approvalPairKey`-shaped pairs the operator already allowed for this
+   * session (the server loads them from `sessions/settings.json` when a run
+   * starts). Additive and idempotent: existing pairs are kept, non-string and
+   * empty entries are ignored, and nothing here is inferred from a request.
+   */
+  seedSessionAllows(pairKeys: Iterable<unknown> | null | undefined): void {
+    if (pairKeys === null || pairKeys === undefined) return;
+    for (const key of pairKeys) {
+      if (typeof key === "string" && key.length > 0) this._sessionAllows.add(key);
+    }
+  }
+
   /** Bind the per-run emit hook and abort signal (created by the worker). */
   attach(
     emit: ((event: ApprovalEvent) => void) | null = null,
@@ -485,9 +543,24 @@ export class RunApprovalBroker implements ApprovalBroker {
    * `approval_auto_denied` event. A cancelled run keeps the cancellation path
    * below — cancellation is not an operator denial and must never trip the
    * cap.
+   *
+   * Session allow: when the pair was allowed for this session
+   * (`allowForSession()`/`seedSessionAllows()`), resolve ALLOW immediately with
+   * exactly one additive `approval_auto_allowed` event — checked before the
+   * denial cap. An aborted run skips the shortcut and takes the cancellation
+   * path, so a stop can never be turned into a mutation.
    */
   async approve(request: ApprovalRequest): Promise<Decision> {
-    const denials = this._denials.get(approvalPairKey(request)) ?? 0;
+    const key = approvalPairKey(request);
+    if (this._sessionAllows.has(key) && this._signal?.aborted !== true) {
+      this._event({
+        type: "approval_auto_allowed",
+        action: String(request.action ?? ""),
+        target: approvalMatchTarget(request),
+      });
+      return Decision.ALLOW;
+    }
+    const denials = this._denials.get(key) ?? 0;
     if (denials >= this.denyLimit && this._signal?.aborted !== true) {
       this._event({
         type: "approval_auto_denied",
@@ -598,6 +671,37 @@ export class RunApprovalBroker implements ApprovalBroker {
     entry.answered = true;
     entry.resolve(decision);
     return decision;
+  }
+
+  /**
+   * The `approvalPairKey` of one pending, unanswered request — what the server
+   * persists before resolving a session-scope answer. `null` for an unknown or
+   * already-answered id (nothing to persist, nothing to resolve).
+   */
+  sessionPairKey(requestId: string): string | null {
+    const entry = this._pending.get(requestId);
+    if (entry === undefined || entry.answered) return null;
+    return approvalPairKey(entry.request);
+  }
+
+  /**
+   * Answer one pending request as "allow for this session": record its
+   * `(action, target)` pair for the rest of the run, resolve the wait ALLOW and
+   * return ALLOW. `null` for an unknown or already-answered id — that is a
+   * no-op for the session-allow set and for every denial counter.
+   *
+   * The pair is in-memory only; the caller persists it (the server writes
+   * `sessions/settings.json` *before* calling this, so a failed write never
+   * leaves an auto-allow behind).
+   */
+  allowForSession(requestId: string): Decision | null {
+    const entry = this._pending.get(requestId);
+    if (entry === undefined || entry.answered) return null;
+    this._sessionAllows.add(approvalPairKey(entry.request));
+    entry.decision = Decision.ALLOW;
+    entry.answered = true;
+    entry.resolve(Decision.ALLOW);
+    return Decision.ALLOW;
   }
 
   /**
