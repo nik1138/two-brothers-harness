@@ -20,8 +20,16 @@ import type { Density } from '../density'
 import ModelsRolesSection from './settings/ModelsRolesSection.vue'
 import ProvidersSection from './settings/ProvidersSection.vue'
 import PluginsSection from './settings/PluginsSection.vue'
+import ApprovalPolicySection from './settings/ApprovalPolicySection.vue'
 import AppearanceSection from './settings/AppearanceSection.vue'
 import AdvancedSection from './settings/AdvancedSection.vue'
+import {
+  DEFAULT_APPROVAL_MODE,
+  approvalPolicyOf,
+  approvalPolicyPatch,
+} from '../approvalPolicy'
+import type { ApprovalPolicyState } from '../approvalPolicy'
+import type { ApprovalMode } from '../types'
 
 /** Optional controlled theme mode, density and audit preference. When
  *  supplied, the host owns live application and this panel only emits the
@@ -90,6 +98,20 @@ const providersError = ref<string | null>(null)
 /** Providers load independently after the role settings; the section shows this. */
 const providersLoading = ref(false)
 
+// Operator approval mode (Wave 4): an additive top-level `approval_policy`
+// section, fail-soft for an older backend (unsupported -> show Ask, never
+// send the field) and honest about a serve flag/env pin (pinned -> read-only).
+const approvalPolicy = ref<ApprovalPolicyState>({
+  mode: DEFAULT_APPROVAL_MODE,
+  supported: false,
+  pinned: false,
+})
+
+function onApprovalModeChange(mode: ApprovalMode) {
+  if (approvalPolicy.value.pinned || !approvalPolicy.value.supported) return
+  approvalPolicy.value = { ...approvalPolicy.value, mode }
+}
+
 const connectionOptions = computed(() => [
   { label: 'Manual', value: '' },
   ...providers.value.map((p) => ({ label: `${p.name} — ${p.base_url}`, value: p.name })),
@@ -97,7 +119,7 @@ const connectionOptions = computed(() => [
 
 // -- section navigation -------------------------------------------------------
 
-type SectionId = 'models' | 'providers' | 'plugins' | 'appearance' | 'advanced'
+type SectionId = 'models' | 'providers' | 'plugins' | 'approvals' | 'appearance' | 'advanced'
 
 const sections: {
   id: SectionId
@@ -118,6 +140,11 @@ const sections: {
     id: 'plugins',
     label: 'Plugins',
     description: 'Tools both brothers can use; the enabled list is shared.',
+  },
+  {
+    id: 'approvals',
+    label: 'Approvals',
+    description: 'What a model may do in a workspace without asking you.',
   },
   {
     id: 'appearance',
@@ -254,6 +281,7 @@ onMounted(async () => {
     fill('senior', view.senior)
     fill('junior', view.junior)
     plugins.value = normalizePluginSelection(view.plugins)
+    approvalPolicy.value = approvalPolicyOf(view)
     pluginOptions.value = discovered.plugins.map((p) => ({
       label: p.description ? `${p.name} — ${p.description}` : p.name,
       value: p.name,
@@ -295,14 +323,18 @@ async function save() {
     patch[role] = entry
   }
   try {
-    // role settings and the shared plugin selection travel in one PUT
+    // role settings, the shared plugin selection and the approval mode travel
+    // in one PUT; an unsupported (older) backend and a server-pinned mode get
+    // no approval field at all (a pin is never persisted by a normal save)
     const view = await updateSettingsWithPlugins({
       ...patch,
       plugins: plugins.value,
+      ...approvalPolicyPatch(approvalPolicy.value),
     })
     fill('senior', view.senior)
     fill('junior', view.junior)
     plugins.value = normalizePluginSelection(view.plugins)
+    approvalPolicy.value = approvalPolicyOf(view)
     senior.api_key = ''
     junior.api_key = ''
     emit('saved')
@@ -397,6 +429,23 @@ async function save() {
               <rect x="9" y="2.5" width="4.5" height="4.5" rx="1" />
               <rect x="2.5" y="9" width="4.5" height="4.5" rx="1" />
               <rect x="9" y="9" width="4.5" height="4.5" rx="1" />
+            </svg>
+            <svg
+              v-else-if="section.id === 'approvals'"
+              class="settings-nav-icon"
+              viewBox="0 0 16 16"
+              width="16"
+              height="16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.3"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path d="M8 2 3.5 3.6v4.2c0 2.6 1.9 4.9 4.5 5.7 2.6-.8 4.5-3.1 4.5-5.7V3.6L8 2Z" />
+              <path d="m6 8 1.4 1.4L10.5 6.3" />
             </svg>
             <svg
               v-else-if="section.id === 'appearance'"
@@ -519,6 +568,20 @@ async function save() {
             </div>
 
             <div
+              v-show="activeId === 'approvals'"
+              class="settings-pane"
+              role="region"
+              aria-label="Approvals"
+            >
+              <ApprovalPolicySection
+                :mode="approvalPolicy.mode"
+                :supported="approvalPolicy.supported"
+                :pinned="approvalPolicy.pinned"
+                @update:mode="onApprovalModeChange"
+              />
+            </div>
+
+            <div
               v-show="activeId === 'appearance'"
               class="settings-pane"
               role="region"
@@ -549,7 +612,8 @@ async function save() {
         <footer class="settings-footer">
           <p v-if="error" class="settings-footer-error" role="alert">{{ error }}</p>
           <p v-else class="settings-footer-hint">
-            Role and plugin changes save together. Provider and theme changes apply immediately.
+            Role, plugin and approval changes save together. Provider and theme changes apply
+            immediately.
           </p>
           <div class="settings-footer-actions">
             <n-button attr-type="button" @click="emit('close')">Cancel</n-button>

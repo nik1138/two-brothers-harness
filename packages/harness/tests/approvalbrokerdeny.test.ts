@@ -27,8 +27,10 @@ import { test } from "node:test";
 
 import {
   Action,
+  ApprovalMode,
   Decision,
   PermissionManager,
+  PermissionPolicy,
   type ApprovalRequest,
 } from "../src/permissions.ts";
 import {
@@ -754,6 +756,53 @@ test("RunManager: auto-allowed pairs never park the run and reach the sidecar", 
     const persisted = store.load("s.jsonl").filter((event) => event.type === "approval_auto_allowed");
     assert.equal(persisted.length, 2);
     assert.equal(persisted[0].run_id, record.runId);
+  } finally {
+    tmp.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Approval modes: the mode can only reduce what reaches the broker
+// ---------------------------------------------------------------------------
+
+test("edits mode auto-allows writes, so the broker cap is never consumed", async () => {
+  const tmp = tmpdir();
+  try {
+    const fixture = makeBroker();
+    const workspace = new Workspace(
+      tmp.root,
+      new PermissionManager(new PermissionPolicy(ApprovalMode.EDITS), fixture.broker),
+    );
+    // Repeated identical writes never park and never count as denials.
+    for (let index = 0; index < APPROVAL_DENY_LIMIT + 2; index++) {
+      const result = await workspace.write_file(`f${index}.txt`, "x\n");
+      assert.equal(result.status, "ok");
+    }
+    assert.deepEqual(fixture.broker.autoDenials(), {});
+    assert.deepEqual(fixture.broker.pending(), []);
+    assert.equal(eventsOfType(fixture, "approval_requested").length, 0);
+    assert.equal(eventsOfType(fixture, "approval_auto_denied").length, 0);
+  } finally {
+    tmp.cleanup();
+  }
+});
+
+test("readonly denials are policy denials: no pending request, no operator counts, no events", async () => {
+  const tmp = tmpdir();
+  try {
+    const fixture = makeBroker();
+    const workspace = new Workspace(
+      tmp.root,
+      new PermissionManager(new PermissionPolicy(ApprovalMode.READONLY), fixture.broker),
+    );
+    for (let index = 0; index < APPROVAL_DENY_LIMIT + 1; index++) {
+      const result = await workspace.write_file(`f${index}.txt`, "x\n");
+      assert.equal(result.status, "denied");
+    }
+    assert.deepEqual(fixture.emitted, [], "a mode denial emits no approval/broker event");
+    assert.deepEqual(fixture.broker.pending(), []);
+    assert.deepEqual(fixture.broker.autoDenials(), {});
+    assert.deepEqual(fixture.broker.sessionAllows(), []);
   } finally {
     tmp.cleanup();
   }

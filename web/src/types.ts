@@ -152,6 +152,23 @@ export interface RoleSettingsView {
 
 export type SettingsView = Record<'senior' | 'junior', RoleSettingsView>
 
+/**
+ * Operator approval mode for workspace mutations and shell commands
+ * (`approval_policy` section of `GET/PUT /api/settings`). Mirrors the backend
+ * `ApprovalMode` enum in `packages/harness/src/permissions.ts`.
+ */
+export type ApprovalMode = 'ask' | 'readonly' | 'edits' | 'allow-all'
+
+/**
+ * Additive `approval_policy` section. Older backends omit it (the web app
+ * then shows the fail-closed `ask` and never sends an approval patch).
+ */
+export interface ApprovalPolicyView {
+  mode: ApprovalMode
+  /** True when a serve flag/env pin overrides the persisted mode. */
+  pinned?: boolean
+}
+
 /** Compact diff summary inside a workspace tool result. */
 export interface ToolDiffSummary {
   added_lines: number

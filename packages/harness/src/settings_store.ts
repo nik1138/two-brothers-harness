@@ -12,8 +12,10 @@
  *     read()           -> {senior: {provider, model, base_url, api_key, ...}, ...}
  *     readPlugins()    -> [name, ...]                        // one shared list
  *     readProviders()  -> [{name, base_url, api_key, kind, models}, ...]   // key decrypted
+ *     readApprovalPolicy() -> "ask" | "readonly" | "edits" | "allow-all"
  *     write(settings, plugins?, providers?)                  // api_key in
  *         plaintext; encrypted for disk
+ *     writeApprovalPolicy(mode)                              // strict enum, atomic
  *     readSessionApprovals(session) -> [pair key, ...]       // "always allow"
  *     addSessionApproval(session, pairKey)                   // persist one pair
  *     clearSessionApprovals(session)                         // session delete
@@ -44,6 +46,15 @@
  * `MAX_SESSION_APPROVALS` pairs (oldest dropped), and every write keeps the
  * other sections intact.
  *
+ * The `approval_policy` section (top level) is the persisted operator approval
+ * mode for workspace runs: `{"mode": "ask"}`. It is fail-closed on read — a
+ * missing or corrupt section, or an unknown mode, reads as `ask` (never a more
+ * permissive mode) — and every role-settings save preserves the section,
+ * normalizing a corrupt one to the fail-closed shape. The mode gates nothing
+ * secret, so the section is unencrypted. `writeApprovalPolicy()` is the only
+ * write path; a per-run CLI/env choice is a server option and never reaches
+ * this file.
+ *
  * Env pinning: Python strips `TWO_BROTHERS_*`-pinned fields in
  * `server._persistence_snapshot` because the server owns RuntimeSettings.
  * This port has no server module, so `write()` strips the pinned
@@ -55,6 +66,11 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+import {
+  DEFAULT_APPROVAL_MODE,
+  normalizeApprovalMode,
+  type ApprovalMode,
+} from "./permissions.ts";
 import { defaultSecretBox, type SecretBox } from "./secretbox.ts";
 
 const ROLES = ["senior", "junior"] as const;
@@ -98,8 +114,21 @@ export const PROVIDER_KIND_DEFAULT = "openai-compatible";
 /** Max session-allowed pairs persisted per session (oldest dropped first). */
 export const MAX_SESSION_APPROVALS = 64;
 
+/** Top-level settings section carrying the operator approval mode. */
+export const APPROVAL_POLICY_SECTION = "approval_policy";
+
 /** Bound on one persisted pair key (a shell command is the longest target). */
 export const MAX_APPROVAL_PAIR_KEY_CHARS = 4096;
+
+/**
+ * The stored `approval_policy` mode, fail-closed: a missing/non-object section
+ * or an unknown mode value reads as `ask`. Tolerant only in shape — the mode
+ * itself must be one of the exact `ApprovalMode` names.
+ */
+function approvalPolicyOf(value: unknown): ApprovalMode {
+  if (!isRecord(value)) return DEFAULT_APPROVAL_MODE;
+  return normalizeApprovalMode(value.mode) ?? DEFAULT_APPROVAL_MODE;
+}
 
 /** One `approvalPairKey`-shaped string, or null when not a usable pair key. */
 function normalizeApprovalPairKey(value: unknown): string | null {
@@ -366,6 +395,33 @@ export class SettingsStore {
   }
 
   /**
+   * The persisted operator approval mode, fail-closed: a missing/corrupt
+   * section or an unknown mode reads as `ask`. Never returns a mode the
+   * operator did not explicitly persist.
+   */
+  readApprovalPolicy(): ApprovalMode {
+    return approvalPolicyOf(this.readRaw()[APPROVAL_POLICY_SECTION]);
+  }
+
+  /**
+   * Persist one operator approval mode (the only write path for the section).
+   * Rejects a value outside the strict `ApprovalMode` enum before touching
+   * disk — a mode can never arrive from a model or tool call, only from the
+   * validated server/CLI surface. Atomic (temp file + rename); every other
+   * section is preserved, and a corrupt `approval_policy` reads back as the
+   * fail-closed default.
+   */
+  writeApprovalPolicy(mode: ApprovalMode): void {
+    const normalized = normalizeApprovalMode(mode);
+    if (normalized === null) {
+      throw new TypeError(`invalid approval mode: ${String(mode)}`);
+    }
+    const raw = this.readRaw();
+    raw[APPROVAL_POLICY_SECTION] = { mode: normalized };
+    this.writeRaw(raw);
+  }
+
+  /**
    * Persisted session-allowed `approvalPairKey` pairs for one session file
    * (empty when the session has none, when the section is missing/corrupt, or
    * when the file cannot be read — the fail-closed direction for approvals).
@@ -432,7 +488,9 @@ export class SettingsStore {
    * keys on disk are dropped by that save. The same preserve-when-omitted
    * rule applies to `providers` (preset list, `api_key` encrypted for disk).
    * The `approvals` section (session allow lists) is always preserved here —
-   * this method saves role settings, plugins and providers only.
+   * this method saves role settings, plugins and providers only. The
+   * `approval_policy` section is preserved the same way when it exists on
+   * disk (a corrupt one is rewritten as the fail-closed `ask`).
    *
    * Fields currently pinned by `TWO_BROTHERS_*` env vars are stripped from
    * the roles being written — env values must never reach the file (see
@@ -505,6 +563,11 @@ export class SettingsStore {
 
     const storedApprovals = approvalSection(raw.approvals);
     if (Object.keys(storedApprovals).length > 0) payload.approvals = storedApprovals;
+    // Preserve the operator approval mode on every role-settings save; a
+    // corrupt section is normalized to the fail-closed shape here.
+    if (Object.hasOwn(raw, APPROVAL_POLICY_SECTION)) {
+      payload[APPROVAL_POLICY_SECTION] = { mode: approvalPolicyOf(raw[APPROVAL_POLICY_SECTION]) };
+    }
 
     if (pending.length > 0) {
       const sealed = sealMany(

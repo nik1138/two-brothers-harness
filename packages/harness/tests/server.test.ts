@@ -2859,3 +2859,221 @@ test("run list: ?session= filters, empty means all", async () => {
     await srv.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Approval policy (Wave 4, lane C): settings API + run seeding
+// ---------------------------------------------------------------------------
+
+test("settings: approval_policy defaults to ask and roundtrips across a restart", async () => {
+  const tmp = tmpdir("tb-approval-policy-");
+  try {
+    const srv = await startServer({ sessionsDir: tmp.root });
+    const initial = await get<Record<string, any>>(srv.base, "/api/settings");
+    assert.equal(initial.status, 200);
+    assert.deepEqual(initial.body.approval_policy, { mode: "ask", pinned: false });
+    // reading never writes a settings file
+    assert.equal(fs.existsSync(path.join(tmp.root, "settings.json")), false);
+
+    const put = await api<Record<string, any>>(srv.base, "PUT", "/api/settings", {
+      approval_policy: { mode: "readonly" },
+    });
+    assert.equal(put.status, 200);
+    assert.deepEqual(put.body.approval_policy, { mode: "readonly", pinned: false });
+    // the additive section rides the same PUT as the role settings
+    assert.equal(put.body.senior.provider, null);
+    const onDisk = JSON.parse(
+      fs.readFileSync(path.join(tmp.root, "settings.json"), "utf-8"),
+    ) as Record<string, unknown>;
+    assert.deepEqual(onDisk.approval_policy, { mode: "readonly" });
+    assert.ok(!JSON.stringify(onDisk).includes("secret"), "the policy section is secret-free");
+    await srv.close();
+
+    const restarted = await startServer({ sessionsDir: tmp.root });
+    try {
+      const after = await get<Record<string, any>>(restarted.base, "/api/settings");
+      assert.deepEqual(after.body.approval_policy, { mode: "readonly", pinned: false });
+    } finally {
+      await restarted.close();
+    }
+  } finally {
+    tmp.cleanup();
+  }
+});
+
+test("settings: invalid approval_policy bodies are 400s and change nothing", async () => {
+  const srv = await startServer();
+  try {
+    assert.equal(
+      (await api(srv.base, "PUT", "/api/settings", { approval_policy: { mode: "edits" } })).status,
+      200,
+    );
+    for (const bad of [
+      { approval_policy: { mode: "auto" } },
+      { approval_policy: { mode: "ASK" } },
+      { approval_policy: { mode: 42 } },
+      { approval_policy: { mode: "" } },
+      { approval_policy: { mode: null } },
+      { approval_policy: {} },
+      { approval_policy: "readonly" },
+      { approval_policy: null },
+      { approval_policy: ["edits"] },
+    ]) {
+      const res = await api(srv.base, "PUT", "/api/settings", bad);
+      assert.equal(res.status, 400, `expected 400 for ${JSON.stringify(bad)}`);
+    }
+    // neither a bad body nor a body without the section changes the stored mode
+    assert.equal(
+      (await api(srv.base, "PUT", "/api/settings", { senior: { model: "m-model" } })).status,
+      200,
+    );
+    const after = await get<Record<string, any>>(srv.base, "/api/settings");
+    assert.deepEqual(after.body.approval_policy, { mode: "edits", pinned: false });
+  } finally {
+    await srv.close();
+  }
+});
+
+test("readonly serve run: the workspace write is denied with no parked approval", async () => {
+  const srv = await startServer({
+    providerOverrides: { junior: new MockProvider(writeDeliverableScript()) },
+  });
+  const wsDir = tmpdir("tb-mode-readonly-");
+  try {
+    assert.equal(
+      (await api(srv.base, "PUT", "/api/settings", { approval_policy: { mode: "readonly" } }))
+        .status,
+      200,
+    );
+    const ws = await post<Record<string, any>>(srv.base, "/api/workspaces", {
+      path: wsDir.root,
+      name: "mode-readonly",
+    });
+    const runId = await startApprovalRun(srv, ws.body.id, "mode-readonly-run");
+    const events = await runUntilEnd(srv.base, runId);
+    assert.equal(events.at(-1)?.type, "run_end");
+    assert.equal(events.at(-1)?.status, "completed", "the run finishes, it never parks");
+    assert.equal(
+      events.filter((event) => event.type === "approval_requested").length,
+      0,
+      "readonly never asks the operator",
+    );
+    assert.equal(
+      events.filter((event) => event.type === "run_status" && event.status === "waiting").length,
+      0,
+    );
+    const completed = events
+      .filter((event) => event.type === "tool_completed")
+      .map((event) => [event.tool, event.status]);
+    assert.ok(
+      completed.some(([tool, status]) => tool === "workspace_write_file" && status === "denied"),
+      `expected a denied write, got ${JSON.stringify(completed)}`,
+    );
+    assert.equal(fs.existsSync(path.join(wsDir.root, "hello.txt")), false);
+  } finally {
+    await srv.close();
+    wsDir.cleanup();
+  }
+});
+
+test("allow-all serve run: the workspace write proceeds without any approval", async () => {
+  const srv = await startServer({
+    providerOverrides: { junior: new MockProvider(writeDeliverableScript()) },
+  });
+  const wsDir = tmpdir("tb-mode-allow-all-");
+  try {
+    assert.equal(
+      (await api(srv.base, "PUT", "/api/settings", { approval_policy: { mode: "allow-all" } }))
+        .status,
+      200,
+    );
+    const ws = await post<Record<string, any>>(srv.base, "/api/workspaces", {
+      path: wsDir.root,
+      name: "mode-allow-all",
+    });
+    const runId = await startApprovalRun(srv, ws.body.id, "mode-allow-all-run");
+    const events = await runUntilEnd(srv.base, runId);
+    assert.equal(events.at(-1)?.status, "completed");
+    assert.equal(events.filter((event) => event.type === "approval_requested").length, 0);
+    const completed = events
+      .filter((event) => event.type === "tool_completed")
+      .map((event) => [event.tool, event.status]);
+    assert.ok(
+      completed.some(([tool, status]) => tool === "workspace_write_file" && status === "ok"),
+      `expected an ok write, got ${JSON.stringify(completed)}`,
+    );
+    assert.equal(fs.readFileSync(path.join(wsDir.root, "hello.txt"), "utf-8"), "hello content");
+  } finally {
+    await srv.close();
+    wsDir.cleanup();
+  }
+});
+
+test("default ask serve run still parks: an explicit ask policy keeps the operator in the loop", async () => {
+  const srv = await startServer({
+    providerOverrides: { junior: new MockProvider(writeDeliverableScript()) },
+  });
+  const wsDir = tmpdir("tb-mode-ask-");
+  try {
+    assert.equal(
+      (await api(srv.base, "PUT", "/api/settings", { approval_policy: { mode: "ask" } })).status,
+      200,
+    );
+    const ws = await post<Record<string, any>>(srv.base, "/api/workspaces", {
+      path: wsDir.root,
+      name: "mode-ask",
+    });
+    const runId = await startApprovalRun(srv, ws.body.id, "mode-ask-run");
+    const { events, approval } = await awaitApproval(srv, runId);
+    assert.equal(approval.action, "write");
+    assert.equal(approval.target, "hello.txt");
+    const answer = await api<Record<string, unknown>>(
+      srv.base,
+      "POST",
+      `/api/runs/${runId}/approvals/${approval.approval_id}`,
+      { allow: true },
+    );
+    assert.equal(answer.status, 200);
+    const rest = await runUntilEnd(srv.base, runId, events.length);
+    assert.equal(rest.at(-1)?.status, "completed");
+    assert.equal(fs.readFileSync(path.join(wsDir.root, "hello.txt"), "utf-8"), "hello content");
+  } finally {
+    await srv.close();
+    wsDir.cleanup();
+  }
+});
+
+test("a pinned server approval mode wins over the persisted setting and is never persisted", async () => {
+  // No flag/env reaches settings.json: the pin lives only in ServerOptions.
+  const srv = await startServer({
+    approvalPolicy: "readonly",
+    providerOverrides: { junior: new MockProvider(writeDeliverableScript()) },
+  });
+  const wsDir = tmpdir("tb-mode-pinned-");
+  try {
+    const view = await get<Record<string, any>>(srv.base, "/api/settings");
+    assert.deepEqual(view.body.approval_policy, { mode: "readonly", pinned: true });
+    // An operator save is stored but cannot unpin the running server.
+    const put = await api<Record<string, any>>(srv.base, "PUT", "/api/settings", {
+      approval_policy: { mode: "allow-all" },
+    });
+    assert.equal(put.status, 200);
+    assert.deepEqual(put.body.approval_policy, { mode: "readonly", pinned: true });
+    const onDisk = JSON.parse(
+      fs.readFileSync(path.join(srv.dir, "settings.json"), "utf-8"),
+    ) as Record<string, unknown>;
+    assert.deepEqual(onDisk.approval_policy, { mode: "allow-all" }, "the save is persisted");
+    // ... and the pinned readonly still denies the write.
+    const ws = await post<Record<string, any>>(srv.base, "/api/workspaces", {
+      path: wsDir.root,
+      name: "mode-pinned",
+    });
+    const runId = await startApprovalRun(srv, ws.body.id, "mode-pinned-run");
+    const events = await runUntilEnd(srv.base, runId);
+    assert.equal(events.at(-1)?.status, "completed");
+    assert.equal(events.filter((event) => event.type === "approval_requested").length, 0);
+    assert.equal(fs.existsSync(path.join(wsDir.root, "hello.txt")), false);
+  } finally {
+    await srv.close();
+    wsDir.cleanup();
+  }
+});

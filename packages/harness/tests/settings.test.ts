@@ -22,6 +22,11 @@ import {
   PLAIN_PREFIX,
   type DpapiCipher,
 } from "../src/secretbox.ts";
+import {
+  DEFAULT_APPROVAL_MODE,
+  normalizeApprovalMode,
+  ApprovalMode,
+} from "../src/permissions.ts";
 import { MAX_APPROVAL_PAIR_KEY_CHARS, MAX_SESSION_APPROVALS, SettingsStore } from "../src/settings_store.ts";
 
 // ---------------------------------------------------------------------------
@@ -625,6 +630,135 @@ test("session approvals are secret-free and written atomically", () => {
     const senior = raw.senior as Record<string, string>;
     assert.equal(senior.model, ROLE_SETTINGS.senior.model);
     assert.notEqual(senior.api_key, "super-secret-key");
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Approval policy (`approval_policy` section)
+// ---------------------------------------------------------------------------
+
+test("approval policy: missing/corrupt/unknown reads fail closed to ask", () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const file = path.join(root, "settings.json");
+    assert.equal(new SettingsStore(file).readApprovalPolicy(), DEFAULT_APPROVAL_MODE);
+    assert.equal(fs.existsSync(file), false, "a read-only probe writes nothing");
+
+    for (const section of [
+      "readonly", // bare string (old/wrong shape)
+      { mode: "auto" }, // unknown mode
+      { mode: "READONLY" }, // wrong case
+      { mode: 42 },
+      { mode: null },
+      { mode: "" },
+      {},
+      ["edits"],
+      null,
+    ]) {
+      fs.writeFileSync(file, JSON.stringify({ approval_policy: section }), "utf-8");
+      assert.equal(
+        new SettingsStore(file).readApprovalPolicy(),
+        DEFAULT_APPROVAL_MODE,
+        `fail closed for ${JSON.stringify(section)}`,
+      );
+    }
+
+    // corrupt JSON fails closed too (and never throws)
+    fs.writeFileSync(file, "{not json", "utf-8");
+    assert.equal(new SettingsStore(file).readApprovalPolicy(), DEFAULT_APPROVAL_MODE);
+  } finally {
+    cleanup();
+  }
+});
+
+test("approval policy roundtrip, strict write validation and atomic secret-free storage", () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const file = path.join(root, "settings.json");
+    const store = new SettingsStore(file);
+
+    const modes = ["readonly", "edits", "allow-all", "ask"] as const;
+    for (const mode of modes) {
+      store.writeApprovalPolicy(mode);
+      assert.equal(store.readApprovalPolicy(), mode);
+      assert.equal(new SettingsStore(file).readApprovalPolicy(), mode);
+      const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, unknown>;
+      assert.deepEqual(raw.approval_policy, { mode });
+      // exactly the documented section: no extra fields, no key material
+      assert.deepEqual(Object.keys(raw), ["approval_policy"]);
+      assert.ok(!fs.existsSync(file + ".tmp"), "atomic temp-file write leaves no artifact");
+    }
+
+    // invalid values are rejected before touching the file (strict enum)
+    store.writeApprovalPolicy(ApprovalMode.EDITS);
+    const before = fs.readFileSync(file, "utf-8");
+    for (const bad of ["auto", "READONLY", "", "allow_all", 42, null, undefined]) {
+      assert.throws(
+        () => store.writeApprovalPolicy(bad as unknown as ApprovalMode),
+        /invalid approval mode/,
+        `expected a rejection for ${JSON.stringify(bad)}`,
+      );
+    }
+    assert.equal(fs.readFileSync(file, "utf-8"), before, "a rejected write changes nothing");
+    assert.equal(normalizeApprovalMode("edits"), "edits");
+  } finally {
+    cleanup();
+  }
+});
+
+test("approval policy write preserves every other section", () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const file = path.join(root, "settings.json");
+    const store = new SettingsStore(file);
+    store.write(ROLE_SETTINGS, ["notes"], [ACME]);
+    store.addSessionApproval("s1.jsonl", WRITE_PAIR);
+    store.writeApprovalPolicy(ApprovalMode.READONLY);
+
+    const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, any>;
+    assert.deepEqual(raw.approval_policy, { mode: "readonly" });
+    assert.equal(raw.senior.model, ROLE_SETTINGS.senior.model);
+    assert.notEqual(raw.senior.api_key, "super-secret-key", "keys stay encrypted");
+    assert.deepEqual(raw.plugins, ["notes"]);
+    assert.equal(raw.providers[0].name, "acme");
+    assert.deepEqual(raw.approvals, { "s1.jsonl": [WRITE_PAIR] });
+
+    // A role/plugin save after the policy write must not wipe the section.
+    store.write(ROLE_SETTINGS, ["notes"], [ACME]);
+    assert.equal(new SettingsStore(file).readApprovalPolicy(), "readonly");
+    // ... and a policy save must not wipe the roles.
+    store.writeApprovalPolicy(ApprovalMode.ALLOW_ALL);
+    assert.equal(new SettingsStore(file).read().senior?.model, ROLE_SETTINGS.senior.model);
+    assert.deepEqual(new SettingsStore(file).readPlugins(), ["notes"]);
+    assert.deepEqual(new SettingsStore(file).readSessionApprovals("s1.jsonl"), [WRITE_PAIR]);
+    assert.equal(new SettingsStore(file).readApprovalPolicy(), "allow-all");
+  } finally {
+    cleanup();
+  }
+});
+
+test("a role-settings save normalizes a corrupt approval policy to the fail-closed ask", () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const file = path.join(root, "settings.json");
+    fs.writeFileSync(
+      file,
+      JSON.stringify({ approval_policy: { mode: "auto" }, senior: { model: "kept" } }),
+      "utf-8",
+    );
+    const store = new SettingsStore(file);
+    assert.equal(store.readApprovalPolicy(), "ask");
+    store.write({ senior: { model: "kept", base_url: "http://127.0.0.1:1234/v1" } });
+    const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, unknown>;
+    assert.deepEqual(raw.approval_policy, { mode: "ask" });
+    assert.equal((raw.senior as Record<string, string>).model, "kept");
+    // a file without the section stays without it after a role save
+    fs.writeFileSync(file, JSON.stringify({ senior: { model: "only" } }), "utf-8");
+    store.write({ senior: { model: "only" } });
+    const raw2 = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, unknown>;
+    assert.equal(Object.hasOwn(raw2, "approval_policy"), false);
   } finally {
     cleanup();
   }

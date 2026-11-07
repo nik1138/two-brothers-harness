@@ -184,6 +184,12 @@ export const FLAGS: Record<string, FlagHelp> = {
     value: "<consult|work|auto>",
     description: "cooperation mode (default consult)",
   },
+  "approval-mode": {
+    name: "approval-mode",
+    value: "<mode>",
+    description:
+      "workspace approval mode: ask|readonly|edits|allow-all (default ask; env TWO_BROTHERS_APPROVAL_MODE)",
+  },
   verbose: {
     name: "verbose",
     description: "extra diagnostics: payloads, prompt audits, plugin load notes",
@@ -464,14 +470,26 @@ defineCommand({
     "mcp-config",
     "plugins-dir",
     "skills-dir",
+    "approval-mode",
     "help",
   ],
-  acceptedFlags: [...SHARED_FLAGS, "live", "no-live", "dry-run", "task-file"],
+  acceptedFlags: [
+    ...SHARED_FLAGS,
+    "live",
+    "no-live",
+    "dry-run",
+    "task-file",
+    "approval-mode",
+  ],
   flagNotes: {
     mode: "cooperation mode consult|work|auto; run also accepts the output modes print|json",
     "dry-run":
       "print the resolved plan (roles with sources, tools, session, compaction) " +
       "and exit 0; invalid with --stream (usage error)",
+    "approval-mode":
+      "workspace approval mode ask|readonly|edits|allow-all; no workspace is bound " +
+      "on this surface, so the mode changes nothing here; `serve` pins it for its " +
+      "web runs (never persisted)",
   },
   examples: [
     'two-brothers run "Plan a migration from Redis to Valkey" --provider mock',
@@ -533,13 +551,24 @@ defineCommand({
     "plugins-dir",
     "skills-dir",
     "commands-dir",
+    "approval-mode",
     "help",
   ],
-  acceptedFlags: [...SHARED_FLAGS, "live", "no-live", "dry-run"],
+  acceptedFlags: [
+    ...SHARED_FLAGS,
+    "live",
+    "no-live",
+    "dry-run",
+    "approval-mode",
+  ],
   flagNotes: {
     mode: "cooperation mode consult|work|auto (the run output modes are not accepted here)",
     "compact-keep-recent":
       "recent chars kept verbatim by auto-compaction and by the REPL /compact action",
+    "approval-mode":
+      "workspace approval mode ask|readonly|edits|allow-all; no workspace is bound " +
+      "on this surface, so the mode changes nothing here; `serve` pins it for its " +
+      "web runs (never persisted)",
   },
   details: [
     "REPL commands:",
@@ -579,7 +608,9 @@ defineCommand({
     "belt, the senior the read-only verify slice, writes/edits/deletes/shell park " +
     "the run on an approval panel (1/Y allow once, 2/A allow for this TUI session, " +
     "3/N/Esc deny, Ctrl+E preview), and composer @path mentions attach workspace " +
-    "files read read-only. The key guide printed below is " +
+    "files read read-only. The workspace approval policy is the saved " +
+    "approval_policy setting (see /permission; ask|readonly|edits|allow-all) " +
+    "unless --approval-mode/env pins it for this process. The key guide printed below is " +
     "generated from the same registry that powers the in-app Ctrl+P palette and " +
     "the ? help overlay.",
   flags: [
@@ -617,13 +648,17 @@ defineCommand({
     "commands-dir",
     "workspace",
     "stream-tokens",
+    "approval-mode",
     "help",
   ],
-  acceptedFlags: [...SHARED_FLAGS, "workspace"],
+  acceptedFlags: [...SHARED_FLAGS, "workspace", "approval-mode"],
   flagNotes: {
     mode: "cooperation mode consult|work|auto (print/json are run output modes)",
     workspace:
       "confined workspace root for this TUI run (workspace tools + operator approvals)",
+    "approval-mode":
+      "pin the approval mode for this TUI process (never persisted); without it " +
+      "the saved approval_policy setting (or ask) applies and /permission writes it",
   },
   examples: [
     "two-brothers tui --provider mock",
@@ -663,18 +698,23 @@ defineCommand({
     "skills-dir",
     "commands-dir",
     "mcp-config",
+    "approval-mode",
     "verbose",
     "help",
   ],
-  acceptedFlags: [...SHARED_FLAGS, "host", "port", "sessions-dir", "workers"],
+  acceptedFlags: [...SHARED_FLAGS, "host", "port", "sessions-dir", "workers", "approval-mode"],
   flagNotes: {
     timeout:
       "per-provider-attempt timeout in seconds (default 120; env TWO_BROTHERS_TIMEOUT); " +
       "raise this for slow local models",
+    "approval-mode":
+      "pin the approval mode for every web run of this server (never persisted); " +
+      "without the flag/env the saved approval_policy setting (or ask) applies",
   },
   examples: [
     "two-brothers serve",
     "two-brothers serve --host 127.0.0.1 --port 8600 --sessions-dir sessions",
+    "two-brothers serve --approval-mode readonly",
   ],
 });
 
@@ -1374,6 +1414,20 @@ export function renderMainHelp(
       style,
     ),
     "",
+    style.paint("strong", "Workspace safety:"),
+    paintHelpLine(
+      "  --approval-mode <ask|readonly|edits|allow-all>   policy for workspace",
+      style,
+    ),
+    paintHelpLine(
+      "                                 mutations and shell commands (default ask);",
+      style,
+    ),
+    paintHelpLine(
+      "                                 serve pins it for its web runs, never persisted",
+      style,
+    ),
+    "",
     style.paint("strong", "Extensions:"),
     paintHelpLine(
       "  --mcp-config <file>  --plugins-dir <dir>  --skills-dir <path>",
@@ -1437,7 +1491,11 @@ export function renderMainHelp(
       style,
     ),
     paintHelpLine(
-      "  TWO_BROTHERS_SKILLS_DIR, TWO_BROTHERS_COMMANDS_DIR, TWO_BROTHERS_STREAM_TOKENS.",
+      "  TWO_BROTHERS_SKILLS_DIR, TWO_BROTHERS_COMMANDS_DIR, TWO_BROTHERS_STREAM_TOKENS,",
+      style,
+    ),
+    paintHelpLine(
+      "  TWO_BROTHERS_APPROVAL_MODE.",
       style,
     ),
     "",
@@ -1529,6 +1587,7 @@ export const ENVIRONMENT: readonly EnvironmentHelp[] = [
   { variable: "TWO_BROTHERS_SKILLS_DIR", flag: "--skills-dir" },
   { variable: "TWO_BROTHERS_COMMANDS_DIR", flag: "--commands-dir" },
   { variable: "TWO_BROTHERS_STREAM_TOKENS", flag: "--stream-tokens", note: "boolean" },
+  { variable: "TWO_BROTHERS_APPROVAL_MODE", flag: "--approval-mode" },
   { variable: "TWO_BROTHERS_WORKERS", flag: "--workers", note: "serve" },
 ];
 

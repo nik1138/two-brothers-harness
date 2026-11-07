@@ -222,7 +222,15 @@ import {
   renderFileBlock,
   renderSkillLoadedBlock,
 } from "./mentions.ts";
-import { Decision, PermissionManager } from "./permissions.ts";
+import {
+  APPROVAL_MODES,
+  normalizeApprovalMode,
+  PermissionManager,
+  PermissionPolicy,
+  resolveApprovalMode,
+  Decision,
+  type ApprovalMode,
+} from "./permissions.ts";
 import {
   PluginManager,
   type HookRegistry,
@@ -724,6 +732,14 @@ export interface ServerOptions {
   /** Test hook: provider overrides wired into every run (like Python's
    *  `mock.patch` on `build_responder`). */
   providerOverrides?: { senior?: Provider; junior?: Provider };
+  /**
+   * Pinned approval mode for every run this server starts (the `serve`
+   * `--approval-mode` flag / `TWO_BROTHERS_APPROVAL_MODE` env). Takes
+   * precedence over the persisted `approval_policy` setting and is never
+   * written to settings.json. Absent = the persisted mode (fail-closed
+   * `ask`). Operators change the persisted mode through `PUT /api/settings`.
+   */
+  approvalPolicy?: ApprovalMode;
 }
 
 export interface ServerState {
@@ -759,6 +775,12 @@ export interface ServerState {
    * only — never persisted.
    */
   compactions: Set<string>;
+  /**
+   * Pinned approval mode from `ServerOptions` (a serve CLI flag/env choice),
+   * or null when runs follow the persisted `approval_policy` setting. The pin
+   * is never persisted; `GET /api/settings` reports it as `pinned`.
+   */
+  approvalPolicyOverride: ApprovalMode | null;
 }
 
 export interface ServerHandle {
@@ -857,6 +879,19 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   // fields, so this overlay never reaches settings.json.)
   applyEnvOverrides(settings);
 
+  // Operator approval mode: a serve CLI flag/env pin (never persisted) beats
+  // the persisted `approval_policy` setting, which fails closed to `ask` when
+  // missing or corrupt. Read per run so a settings save applies to the next
+  // run without a restart.
+  const approvalPolicyOverride: ApprovalMode | null =
+    options.approvalPolicy === undefined ? null : resolveApprovalMode(options.approvalPolicy);
+  const effectiveApprovalPolicy = (): ApprovalMode =>
+    approvalPolicyOverride ?? settingsStore.readApprovalPolicy();
+  const approvalPolicyView = (): { mode: ApprovalMode; pinned: boolean } => ({
+    mode: effectiveApprovalPolicy(),
+    pinned: approvalPolicyOverride !== null,
+  });
+
   const runtimeEvents = new RuntimeEventStore(path.join(sessionsDir, "runtime"));
   const runs = new RunManager({ persist: runtimeEvents.asPersist(), workers: options.workers });
   const providerOverrides = options.providerOverrides ?? null;
@@ -903,6 +938,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     pluginDiagnostics: [],
     mcpConfig: options.mcpConfig,
     compactions: new Set<string>(),
+    approvalPolicyOverride,
   };
 
   // -- helpers ---------------------------------------------------------------
@@ -1322,7 +1358,10 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         if (registered === null) {
           throw new WorkspaceError(`unknown workspace_id: ${req.workspace_id}`);
         }
-        workspace = new Workspace(registered.path, new PermissionManager(null, broker));
+        workspace = new Workspace(
+          registered.path,
+          new PermissionManager(new PermissionPolicy(effectiveApprovalPolicy()), broker),
+        );
       }
       const result = await executeRun(
         task,
@@ -2019,8 +2058,14 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
 
   routes.push(
     compileRoute("GET", "/api/settings", () => {
-      // plugin names only — nothing secret leaves the backend
-      return { ...state.settings.public(), plugins: [...state.pluginSelection] };
+      // plugin names only — nothing secret leaves the backend. The additive
+      // `approval_policy` section reports the effective mode and whether a
+      // serve flag/env pin overrides the persisted one.
+      return {
+        ...state.settings.public(),
+        plugins: [...state.pluginSelection],
+        approval_policy: approvalPolicyView(),
+      };
     }),
   );
 
@@ -2044,6 +2089,24 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       if (body.plugins !== undefined && body.plugins !== null) {
         // shared list (current) or legacy per-role object (merged); may 400
         pluginsPatch = cleanPluginSelection(body.plugins);
+      }
+      // Additive approval policy section: strict enum, validated before any
+      // mutation. Absent leaves the persisted mode untouched. Both fields are
+      // required: an unknown mode is a 400, never a silently weaker mode.
+      let approvalPatch: ApprovalMode | null = null;
+      if (body.approval_policy !== undefined) {
+        if (!isRecord(body.approval_policy)) {
+          throw new HttpError(400, "approval_policy must be an object with a mode");
+        }
+        const mode = normalizeApprovalMode(body.approval_policy.mode);
+        if (mode === null) {
+          throw new HttpError(
+            400,
+            `invalid approval mode: ${String(body.approval_policy.mode)} ` +
+              `(use ${APPROVAL_MODES.join("|")})`,
+          );
+        }
+        approvalPatch = mode;
       }
       let updated: PublicRuntimeSettings;
       try {
@@ -2070,7 +2133,22 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       // RuntimeSettings.update (env-pinned fields stripped by the store).
       // Writing the list shape also drops any legacy per-role keys on disk.
       state.settingsStore.write(state.settings.snapshot(), savedPluginSelection);
-      return { ...updated, plugins: [...state.pluginSelection] };
+      if (approvalPatch !== null) {
+        // Persist AFTER the role/plugin save: that write preserves an existing
+        // `approval_policy` section, and the policy write then reads it back
+        // so every other section survives. A failed write is a 500 (the
+        // response never claims a mode settings.json does not carry).
+        try {
+          state.settingsStore.writeApprovalPolicy(approvalPatch);
+        } catch (exc) {
+          throw new HttpError(500, `could not persist the approval policy: ${errorDetail(exc)}`);
+        }
+      }
+      return {
+        ...updated,
+        plugins: [...state.pluginSelection],
+        approval_policy: approvalPolicyView(),
+      };
     }),
   );
 

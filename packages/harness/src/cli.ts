@@ -27,6 +27,12 @@ import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
 
 import { resolveConfig, maxTokensForRole, validateRunConfig, type Config } from "./config.ts";
 import {
+  APPROVAL_MODES,
+  approvalModeWarning,
+  normalizeApprovalMode,
+  type ApprovalMode,
+} from "./permissions.ts";
+import {
   buildConfigView,
   renderConfigView,
   sourceLabel,
@@ -185,6 +191,18 @@ const TASK_FILE_OPTIONS = {
 } satisfies ParseArgsOptionsConfig;
 
 /**
+ * `--approval-mode` is parsed by `run`, `chat`, `serve` and `tui`. `run`/`chat`
+ * bind no workspace so the flag is inert there (the help says so honestly);
+ * `serve` pins it for every web run and `tui` pins it for the TUI process
+ * (both never persisted — the saved `approval_policy` setting otherwise
+ * applies, and the TUI's `/permission` selector writes that setting).
+ * `resolveConfig` validates the value (exit 2 on an unknown mode).
+ */
+const APPROVAL_MODE_OPTIONS = {
+  "approval-mode": { type: "string" as const },
+} satisfies ParseArgsOptionsConfig;
+
+/**
  * `tui`-only flags. Like `--dry-run` they stay out of the shared `OPTIONS`
  * table, so `run`/`chat`/`serve` reject them instead of silently ignoring
  * them. `--workspace <dir>` binds every TUI turn to one confined workspace
@@ -224,6 +242,34 @@ function liveFlag(values: Record<string, any>): boolean | undefined {
   return undefined;
 }
 
+/**
+ * Validate an explicit `--approval-mode` (or its `TWO_BROTHERS_APPROVAL_MODE`
+ * env counterpart) before `resolveConfig` runs: an unknown mode is a usage
+ * error the caller reports as exit 2, not a rejected run. `null` = valid or
+ * absent (the default applies).
+ */
+function approvalModeProblem(values: Record<string, any>): string | null {
+  const raw =
+    typeof values["approval-mode"] === "string" && values["approval-mode"].trim()
+      ? values["approval-mode"]
+      : (process.env.TWO_BROTHERS_APPROVAL_MODE ?? "").trim();
+  if (!raw) return null;
+  if (normalizeApprovalMode(raw) !== null) return null;
+  return `invalid approval mode: ${String(raw)} (use ${APPROVAL_MODES.join("|")})`;
+}
+
+/** One usage-error block for a bad `--approval-mode`; returns exit code 2. */
+function reportApprovalModeProblem(
+  command: string,
+  problem: string,
+  io: CliIO,
+): number {
+  io.error(`[error] ${problem}`);
+  io.error(`Usage: ${commandUsage(command)}`);
+  io.error(`Run 'two-brothers ${command} --help'.`);
+  return 2;
+}
+
 const FLAG_TO_CONFIG: Record<string, string> = {
   provider: "provider",
   "provider-kind": "kind",
@@ -254,6 +300,7 @@ const FLAG_TO_CONFIG: Record<string, string> = {
   "compact-threshold-tokens": "compactThresholdTokens",
   "compact-keep-recent": "compactKeepRecent",
   "context-window": "contextWindow",
+  "approval-mode": "approvalMode",
 };
 
 /**
@@ -903,6 +950,13 @@ async function runOnce(
   // A command's `mode` applies to this turn only — the shared config object
   // stays untouched for the next REPL turn.
   if (options.mode !== undefined) cfg = { ...cfg, mode: options.mode };
+  // One visible stderr warning per run when the operator chose a mode that
+  // widens what runs without asking. `ask`/`readonly`/`edits` keep the
+  // operator in the loop (or close it) and print nothing.
+  const approvalWarning = approvalModeWarning(cfg.approvalMode);
+  if (approvalWarning !== null) {
+    io.error(paintWarningPrefix(textStyle, `[warn] ${approvalWarning}`));
+  }
   // validate before connecting to MCP servers so a misconfigured run fails
   // fast instead of opening stdio connections first
   const endpoints = cliEndpoints(cfg);
@@ -1468,7 +1522,7 @@ async function doRun(
 ): Promise<number> {
   const parsed = parseCommandArgs(
     argv,
-    { ...OPTIONS, ...HELP_OPTIONS, ...RUN_INPUT_OPTIONS, ...LIVE_OPTIONS },
+    { ...OPTIONS, ...HELP_OPTIONS, ...RUN_INPUT_OPTIONS, ...LIVE_OPTIONS, ...APPROVAL_MODE_OPTIONS },
     "run",
     io,
     true,
@@ -1479,6 +1533,8 @@ async function doRun(
     io.log(renderCommandHelp("run", style));
     return 0;
   }
+  const approvalProblem = approvalModeProblem(values);
+  if (approvalProblem !== null) return reportApprovalModeProblem("run", approvalProblem, io);
   const cfg = resolveConfig(argsToConfigArgs(values));
   if (
     values.stream === true &&
@@ -1626,7 +1682,7 @@ async function doChat(
 ): Promise<number> {
   const parsed = parseCommandArgs(
     argv,
-    { ...OPTIONS, ...HELP_OPTIONS, ...DRY_RUN_OPTIONS, ...LIVE_OPTIONS },
+    { ...OPTIONS, ...HELP_OPTIONS, ...DRY_RUN_OPTIONS, ...LIVE_OPTIONS, ...APPROVAL_MODE_OPTIONS },
     "chat",
     io,
   );
@@ -1636,6 +1692,8 @@ async function doChat(
     io.log(renderCommandHelp("chat", style));
     return 0;
   }
+  const approvalProblem = approvalModeProblem(values);
+  if (approvalProblem !== null) return reportApprovalModeProblem("chat", approvalProblem, io);
   const cfg = resolveConfig(argsToConfigArgs(values));
   // `--stream-tokens` is a `run --stream` option; a REPL turn prints the
   // human transcript, so there is no stream sink to carry token records.
@@ -2004,7 +2062,7 @@ async function doTui(
 ): Promise<number> {
   const parsed = parseCommandArgs(
     argv,
-    { ...OPTIONS, ...TUI_OPTIONS, ...HELP_OPTIONS },
+    { ...OPTIONS, ...TUI_OPTIONS, ...APPROVAL_MODE_OPTIONS, ...HELP_OPTIONS },
     "tui",
     io,
     true,
@@ -2015,6 +2073,8 @@ async function doTui(
     printTuiHelp(io, style);
     return 0;
   }
+  const approvalProblem = approvalModeProblem(values);
+  if (approvalProblem !== null) return reportApprovalModeProblem("tui", approvalProblem, io);
   if (isOutputMode(values.mode)) {
     io.error(
       "Error: tui is interactive; --mode takes consult|work|auto (print/json are run output modes).",
@@ -2030,6 +2090,21 @@ async function doTui(
   }
   const initialTask = positionals.join(" ").trim();
   const workspace = typeof values.workspace === "string" ? values.workspace.trim() : "";
+  // A `--approval-mode`/env value pins the policy for THIS TUI process only
+  // (never persisted): without one the saved `approval_policy` setting is read
+  // per turn and `/permission` writes it. The pin is reported honestly in the
+  // `/permission` dialog, and `allow-all` gets the same visible warning the CLI
+  // run path prints.
+  const rawApprovalMode =
+    (typeof values["approval-mode"] === "string" && values["approval-mode"].trim()) ||
+    (process.env.TWO_BROTHERS_APPROVAL_MODE ?? "").trim();
+  const pinnedApprovalMode = rawApprovalMode
+    ? (normalizeApprovalMode(rawApprovalMode) ?? undefined)
+    : undefined;
+  if (pinnedApprovalMode !== undefined) {
+    const warning = approvalModeWarning(pinnedApprovalMode);
+    if (warning !== null) io.error(paintWarningPrefix(style, `[warn] ${warning}`));
+  }
   return runTuiApp({
     cfg,
     io,
@@ -2037,6 +2112,7 @@ async function doTui(
     skillsRoots: skillsRootsForCli(values),
     commandsRoots: commandsRootsForCli(values),
     ...(workspace !== "" ? { workspaceRoot: workspace } : {}),
+    ...(pinnedApprovalMode !== undefined ? { approvalMode: pinnedApprovalMode } : {}),
     ...(typeof values["mcp-config"] === "string" && values["mcp-config"].trim()
       ? { mcpConfig: values["mcp-config"] }
       : {}),
@@ -2807,6 +2883,7 @@ async function doServe(
       port: { type: "string" as const },
       "sessions-dir": { type: "string" as const },
       workers: { type: "string" as const },
+      ...APPROVAL_MODE_OPTIONS,
       ...HELP_OPTIONS,
     },
     "serve",
@@ -2825,6 +2902,26 @@ async function doServe(
     return 2;
   }
   const workers = values.workers !== undefined ? Number.parseInt(values.workers, 10) : undefined;
+  // Pinned approval mode: an explicit --approval-mode (or its env counterpart)
+  // pins every run this server starts. The pin is in-memory only and never
+  // reaches sessions/settings.json; without either, the persisted
+  // approval_policy setting (or the fail-closed `ask`) applies.
+  const rawApprovalMode =
+    (typeof values["approval-mode"] === "string" && values["approval-mode"].trim()) ||
+    (process.env.TWO_BROTHERS_APPROVAL_MODE ?? "").trim();
+  let approvalPolicy: ApprovalMode | undefined;
+  if (rawApprovalMode) {
+    const normalized = normalizeApprovalMode(rawApprovalMode);
+    if (normalized === null) {
+      io.error(
+        `[error] invalid approval mode: ${rawApprovalMode} (use ${APPROVAL_MODES.join("|")})`,
+      );
+      return 2;
+    }
+    approvalPolicy = normalized;
+    const warning = approvalModeWarning(normalized);
+    if (warning !== null) io.error(`[warn] ${warning}`);
+  }
   // Explicit --plugins-dir (or TWO_BROTHERS_PLUGINS_DIR) wins; otherwise the
   // server keeps its module-relative default (`<repo>/plugins`), which is what
   // existing checkouts and tests rely on. Skill roots follow the same
@@ -2843,6 +2940,7 @@ async function doServe(
     ...(typeof values["mcp-config"] === "string" && values["mcp-config"].trim()
       ? { mcpConfig: values["mcp-config"] }
       : {}),
+    ...(approvalPolicy !== undefined ? { approvalPolicy } : {}),
   });
   const server = await app.listen(host, port);
   io.log(

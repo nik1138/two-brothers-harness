@@ -12,9 +12,24 @@ import {
   isProviderKind,
   PROVIDER_KIND_HINT,
 } from "./provider.ts";
+import {
+  APPROVAL_MODES,
+  DEFAULT_APPROVAL_MODE,
+  isApprovalMode,
+  type ApprovalMode,
+} from "./permissions.ts";
 
 export interface Config {
   provider: string;
+  /**
+   * True when `provider` came from an explicit source — the `--provider` flag
+   * or the `TWO_BROTHERS_PROVIDER` env var — instead of the built-in default.
+   * `resolveConfig` records it; the TUI's provider resolution uses it so an
+   * explicitly requested default-valued provider (e.g. `--provider openai`)
+   * beats a persisted non-default one. A hand-built `Config` may omit it: an
+   * absent flag then keeps the documented non-default heuristic.
+   */
+  providerExplicit?: boolean;
   /**
    * Wire family for `openai` roles (`--provider-kind`): openai-compatible,
    * anthropic or google. Role kinds win over this run-level default.
@@ -76,6 +91,14 @@ export interface Config {
    */
   seniorMaxTokens: number;
   juniorMaxTokens: number;
+  /**
+   * Operator approval mode for workspace actions (`--approval-mode`, env
+   * `TWO_BROTHERS_APPROVAL_MODE`). Only a surface that binds a
+   * `PermissionManager` (the web `serve` runs, the TUI workspace) acts on it;
+   * `ask` is the fail-closed default. Flags/env pin it — never persisted, and
+   * `resolveConfig` rejects an unknown value before any run starts.
+   */
+  approvalMode: ApprovalMode;
 }
 
 export const DEFAULTS: Omit<Config, "seniorSystem" | "juniorSystem"> = {
@@ -108,6 +131,7 @@ export const DEFAULTS: Omit<Config, "seniorSystem" | "juniorSystem"> = {
   maxTokens: undefined,
   seniorMaxTokens: 0,
   juniorMaxTokens: 0,
+  approvalMode: DEFAULT_APPROVAL_MODE,
 };
 
 const ENV_KEYS: Record<string, string> = {
@@ -142,6 +166,7 @@ const ENV_KEYS: Record<string, string> = {
   maxTokens: "TWO_BROTHERS_MAX_TOKENS",
   seniorMaxTokens: "TWO_BROTHERS_SENIOR_MAX_TOKENS",
   juniorMaxTokens: "TWO_BROTHERS_JUNIOR_MAX_TOKENS",
+  approvalMode: "TWO_BROTHERS_APPROVAL_MODE",
 };
 
 const BOOL_FIELDS = ["verbose", "jsonOut", "resume", "compact"] as const;
@@ -326,6 +351,13 @@ export function validateRunConfig(
 
 export function resolveConfig(args: Args = {}): Config {
   const values: Record<string, unknown> = { ...DEFAULTS };
+  // Provenance of the run-level provider: both the flag and the env var are
+  // explicit operator requests, even when they repeat the built-in default.
+  // The TUI needs this to distinguish `--provider openai` from no flag at all.
+  const providerExplicit =
+    ("provider" in args && args.provider !== undefined && args.provider !== null) ||
+    (process.env.TWO_BROTHERS_PROVIDER !== undefined &&
+      process.env.TWO_BROTHERS_PROVIDER !== "");
 
   for (const [field, envName] of Object.entries(ENV_KEYS)) {
     const raw = process.env[envName];
@@ -342,11 +374,19 @@ export function resolveConfig(args: Args = {}): Config {
   if ("juniorSystem" in args && args.juniorSystem) values.juniorSystem = args.juniorSystem;
 
   const cfg = values as unknown as Config;
+  cfg.providerExplicit = providerExplicit;
   if (!["consult", "work", "auto"].includes(cfg.mode)) {
     throw new Error(`invalid mode: ${cfg.mode} (use consult|work|auto)`);
   }
   if (!["openai", "mock"].includes(cfg.provider)) {
     throw new Error(`invalid provider: ${cfg.provider} (use openai|mock)`);
+  }
+  // A strict enum: an unknown mode would otherwise silently act like `ask` on
+  // some surfaces and be ignored on others. Fail before any run starts.
+  if (!isApprovalMode(cfg.approvalMode)) {
+    throw new Error(
+      `invalid approval mode: ${String(cfg.approvalMode)} (use ${APPROVAL_MODES.join("|")})`,
+    );
   }
   // An empty per-role kind inherits the run-level kind; a non-empty one must
   // name a family we can actually speak — a typo fails here, before any run.

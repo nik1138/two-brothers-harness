@@ -1,6 +1,8 @@
 import type {
   ApprovalAnswerRequest,
   ApprovalDecisionView,
+  ApprovalMode,
+  ApprovalPolicyView,
   CommandInfo,
   CommandListResponse,
   Envelope,
@@ -312,10 +314,22 @@ export interface SettingsPatch {
   junior?: RoleSettingsPatch
   /** Omit to leave the persisted plugin selection untouched. */
   plugins?: PluginSelection
+  /**
+   * Additive operator approval mode (`approval_policy` section). Omit on an
+   * older backend: an unknown key is ignored at best, and the section is
+   * brand new, so the app only sends it when GET reported support.
+   */
+  approval_policy?: { mode: ApprovalMode }
 }
 
-/** `GET/PUT /api/settings` response: role views plus the plugin selection. */
-export type SettingsResponse = SettingsView & { plugins?: PluginSelectionPayload }
+/**
+ * `GET/PUT /api/settings` response: role views, the plugin selection and the
+ * additive `approval_policy` section (older backends omit the latter).
+ */
+export type SettingsResponse = SettingsView & {
+  plugins?: PluginSelectionPayload
+  approval_policy?: ApprovalPolicyView
+}
 
 export async function getSettings(): Promise<SettingsResponse> {
   return request<SettingsResponse>('/api/settings')
