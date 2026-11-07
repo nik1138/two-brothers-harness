@@ -352,7 +352,7 @@ onUnmounted(removeMenuListeners)
   text-align: left;
   background: transparent;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
 }
 
@@ -405,7 +405,7 @@ onUnmounted(removeMenuListeners)
   text-align: center;
   color: var(--text-secondary);
   background: var(--surface-hover);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
 }
 
 /* Header actions trigger: hidden until the group is hovered/focused, like the
@@ -423,7 +423,7 @@ onUnmounted(removeMenuListeners)
   color: var(--text-secondary);
   background: transparent;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   opacity: 0;
   pointer-events: none;
@@ -467,7 +467,7 @@ onUnmounted(removeMenuListeners)
   text-align: left;
   background: transparent;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
 }
 

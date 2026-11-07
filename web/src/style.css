@@ -1,232 +1,14 @@
 /* ============================================================
-   Design tokens
+   App chrome
    ------------------------------------------------------------
-   Two token layers:
-   - raw measurements / type / motion (scheme independent)
-   - semantic colour tokens (light here, dark in the blocks below)
+   Design tokens (colour tiers, spacing, radii, motion, elevation,
+   layout contract) live in tokens.css, imported first by main.ts.
+   This sheet only consumes them; colour literals stay out of it.
 
-   A pinned theme writes `data-theme` on <html>; the pre-paint script in
-   index.html does the same before the first frame. `system` writes no
-   attribute, so the prefers-color-scheme block stays authoritative.
-   Keep theme.ts in sync with the colour values.
+   Sections: base, layout, sidebar, chat header/stream, composer,
+   toasts, dialogs, provider presets, activity/streaming, responsive,
+   density, reduced motion.
    ============================================================ */
-
-:root {
-  color-scheme: light;
-
-  /* --- surfaces --------------------------------------------------------- */
-  --surface-canvas: #f6f7f9;
-  --surface-panel: #ffffff;
-  --surface-raised: #ffffff;
-  --surface-sunken: #eef1f5;
-  --surface-bubble: #ffffff;
-  --surface-bubble-operator: #3568d4;
-  --surface-hover: #f1f3f7;
-  --surface-active: #e7ebf1;
-  --surface-highlight: #eaf0fc;
-
-  /* --- borders ---------------------------------------------------------- */
-  --border-subtle: #e4e7ec;
-  --border-strong: #cbd1db;
-  --border-focus: #3568d4;
-
-  /* --- text ------------------------------------------------------------- */
-  --text-primary: #171a21;
-  --text-secondary: #5c6370;
-  --text-tertiary: #858c98;
-  --text-on-accent: #ffffff;
-  --text-on-danger: #ffffff;
-
-  /* --- intent ----------------------------------------------------------- */
-  --accent: #3568d4;
-  --accent-hover: #2a56b4;
-  --accent-pressed: #234a9e;
-  --accent-soft: #e8eefb;
-  --senior: #3568d4;
-  --junior: #0d7f69;
-  --operator: #6f7684;
-  --danger: #c8433b;
-  --danger-soft: #fbecea;
-  --warning: #946200;
-  --warning-soft: #fbf1dc;
-  --ok: #1c7f3f;
-  --ok-soft: #e7f5eb;
-  --focus-ring: #3568d4;
-
-  /* find-in-transcript highlights (CSS Custom Highlight names, see ChatView) */
-  --find-hit-bg: #fbe7a8;
-  --find-hit-text: #171a21;
-  --find-active-bg: #9a5b00;
-  --find-active-text: #ffffff;
-
-  /* live streaming draft (ephemeral SSE token blocks, see ChatView) */
-  --thinking-bg: #f2f3f6;
-  --thinking-border: #d8dce4;
-  --thinking-text: #5c6370;
-
-  /* --- elevation -------------------------------------------------------- */
-  --shadow-raised:
-    0 1px 2px rgb(16 24 40 / 6%),
-    0 8px 24px -12px rgb(16 24 40 / 18%);
-  --shadow-dialog:
-    0 1px 2px rgb(16 24 40 / 8%),
-    0 24px 64px -18px rgb(16 24 40 / 32%);
-  --overlay: rgb(20 23 31 / 38%);
-
-  /* --- radii ------------------------------------------------------------ */
-  --radius-xs: 4px;
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 14px;
-  --radius-xl: 18px;
-  --radius-pill: 999px;
-
-  /* --- typography ------------------------------------------------------- */
-  --font-sans:
-    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue',
-    Arial, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
-  --text-xs: 11px;
-  --text-sm: 12px;
-  --text-md: 13px;
-  --text-base: 14px;
-  --text-lg: 16px;
-  --text-xl: 20px;
-  --leading-tight: 1.3;
-  --leading-normal: 1.5;
-
-  /* --- motion ----------------------------------------------------------- */
-  --motion-fast: 120ms;
-  --motion-base: 180ms;
-  --motion-slow: 240ms;
-  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
-  --ease-emphasized: cubic-bezier(0.2, 0.8, 0.2, 1);
-
-  /* --- layout contract -------------------------------------------------- */
-  --sidebar-width: 280px;
-  --sidebar-rail-width: 56px;
-  --session-row-height: 32px;
-  --sidebar-footer-height: 48px;
-  --chat-header-height: 48px;
-  --composer-max-width: 880px;
-  --finder-width: 680px;
-  --finder-height: 500px;
-  --settings-width: 800px;
-  --settings-height: 800px;
-  --settings-nav-width: 188px;
-  --dialog-inset: 16px;
-  --sidebar-padding: 8px;
-  --sidebar-row-padding: 12px;
-  --control-height-sm: 28px;
-  --control-height-md: 32px;
-  --control-height-lg: 36px;
-}
-
-/* Dark palette — duplicated for OS preference and a pinned `data-theme`.
-   Keep the two declarations byte-identical. */
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme='light']) {
-    color-scheme: dark;
-    --surface-canvas: #101115;
-    --surface-panel: #17181d;
-    --surface-raised: #1d1f25;
-    --surface-sunken: #0b0c0f;
-    --surface-bubble: #1d1f25;
-    --surface-bubble-operator: #2f6fed;
-    --surface-hover: #23252c;
-    --surface-active: #2b2e37;
-    --surface-highlight: #1b2a44;
-    --border-subtle: #2a2c34;
-    --border-strong: #3d404a;
-    --border-focus: #6c9bff;
-    --text-primary: #e7e9ef;
-    --text-secondary: #a1a7b3;
-    --text-tertiary: #7d8492;
-    --text-on-accent: #ffffff;
-    --text-on-danger: #ffffff;
-    --accent: #2f6fed;
-    --accent-hover: #4f7fe8;
-    --accent-pressed: #2753c9;
-    --accent-soft: #1e2a44;
-    --senior: #2f6fed;
-    --junior: #0d7f69;
-    --operator: #7a8194;
-    --danger: #d54941;
-    --danger-soft: #3a2224;
-    --warning: #b07d10;
-    --warning-soft: #38300f;
-    --ok: #1f883d;
-    --ok-soft: #16301d;
-    --focus-ring: #6c9bff;
-    --find-hit-bg: #4a3c12;
-    --find-hit-text: #f2ead2;
-    --find-active-bg: #e0a92a;
-    --find-active-text: #171a21;
-    --thinking-bg: #141519;
-    --thinking-border: #2a2d35;
-    --thinking-text: #8a909c;
-    --shadow-raised:
-      0 1px 2px rgb(0 0 0 / 45%),
-      0 8px 24px -12px rgb(0 0 0 / 55%);
-    --shadow-dialog:
-      0 1px 2px rgb(0 0 0 / 50%),
-      0 24px 64px -18px rgb(0 0 0 / 70%);
-    --overlay: rgb(0 0 0 / 56%);
-  }
-}
-
-:root[data-theme='dark'] {
-  color-scheme: dark;
-  --surface-canvas: #101115;
-  --surface-panel: #17181d;
-  --surface-raised: #1d1f25;
-  --surface-sunken: #0b0c0f;
-  --surface-bubble: #1d1f25;
-  --surface-bubble-operator: #2f6fed;
-  --surface-hover: #23252c;
-  --surface-active: #2b2e37;
-  --surface-highlight: #1b2a44;
-  --border-subtle: #2a2c34;
-  --border-strong: #3d404a;
-  --border-focus: #6c9bff;
-  --text-primary: #e7e9ef;
-  --text-secondary: #a1a7b3;
-  --text-tertiary: #7d8492;
-  --text-on-accent: #ffffff;
-  --text-on-danger: #ffffff;
-  --accent: #2f6fed;
-  --accent-hover: #4f7fe8;
-  --accent-pressed: #2753c9;
-  --accent-soft: #1e2a44;
-  --senior: #2f6fed;
-  --junior: #0d7f69;
-  --operator: #7a8194;
-  --danger: #d54941;
-  --danger-soft: #3a2224;
-  --warning: #b07d10;
-  --warning-soft: #38300f;
-  --ok: #1f883d;
-  --ok-soft: #16301d;
-  --focus-ring: #6c9bff;
-  --find-hit-bg: #4a3c12;
-  --find-hit-text: #f2ead2;
-  --find-active-bg: #e0a92a;
-  --find-active-text: #171a21;
-  --thinking-bg: #141519;
-  --thinking-border: #2a2d35;
-  --thinking-text: #8a909c;
-  --shadow-raised:
-    0 1px 2px rgb(0 0 0 / 45%),
-    0 8px 24px -12px rgb(0 0 0 / 55%);
-  --shadow-dialog:
-    0 1px 2px rgb(0 0 0 / 50%),
-    0 24px 64px -18px rgb(0 0 0 / 70%);
-  --overlay: rgb(0 0 0 / 56%);
-}
-
-:root[data-theme='light'] {
-  color-scheme: light;
-}
 
 * {
   box-sizing: border-box;
@@ -282,16 +64,16 @@ samp {
 }
 
 :focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
 }
 
 /* naive-ui draws its own focus state and resets `outline: none` on buttons, so
    its focus ring is easy to lose. Give every naive button (composer Send/Stop,
    dialog primary actions) the app's single keyboard ring. */
 .n-button:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
 }
 
 /* The page scrollbar is part of the surface, not a black slab. */
@@ -365,7 +147,7 @@ samp {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--space-2);
   min-height: var(--control-height-lg);
   padding: 0 4px 6px;
 }
@@ -534,7 +316,7 @@ samp {
 }
 
 .empty-hint {
-  padding: 1rem;
+  padding: var(--space-4);
   text-align: center;
   color: var(--text-secondary);
 }
@@ -545,9 +327,9 @@ samp {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 1rem;
+  gap: var(--space-4);
   min-height: var(--chat-header-height);
-  padding: 6px 1.25rem;
+  padding: 6px var(--space-5);
   border-bottom: 1px solid var(--border-subtle);
   background: var(--surface-panel);
 }
@@ -616,7 +398,7 @@ samp {
 .provider-chip {
   font-size: 0.75rem;
   padding: 0.15rem 0.55rem;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   border: 1px solid var(--border-strong);
   color: var(--text-secondary);
 }
@@ -627,7 +409,7 @@ samp {
   letter-spacing: 0.06em;
   color: var(--text-on-accent);
   background: var(--ok);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 0.15rem 0.6rem;
 }
 
@@ -642,7 +424,7 @@ samp {
   overflow-y: auto;
   /* manual scroll pinning (see ChatView) — browser scroll-anchoring fights it */
   overflow-anchor: none;
-  padding: 1.4rem 1.25rem 1rem;
+  padding: 1.4rem var(--space-5) var(--space-4);
   display: flex;
   flex-direction: column;
   gap: 1.1rem;
@@ -709,7 +491,7 @@ samp {
 .group-header {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--space-2);
   font-size: 0.8rem;
 }
 
@@ -774,15 +556,15 @@ samp {
   letter-spacing: 0.05em;
   color: var(--text-secondary);
   border: 1px solid var(--border-subtle);
-  border-radius: 999px;
-  padding: 0.05rem 0.5rem;
+  border-radius: var(--radius-pill);
+  padding: 0.05rem var(--space-2);
   background: var(--surface-panel);
 }
 
 .verdict-chip {
   font-size: 0.7rem;
   font-weight: 600;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 0.1rem 0.55rem;
   color: var(--text-on-accent);
 }
@@ -810,12 +592,12 @@ samp {
   margin: 0.4rem 0 0;
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: var(--space-1);
 }
 
 .detail-row {
   display: flex;
-  gap: 0.5rem;
+  gap: var(--space-2);
   font-size: 0.86rem;
 }
 
@@ -860,8 +642,8 @@ samp {
 .confidence {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  margin-top: 0.5rem;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
 }
 
 .confidence-bar {
@@ -896,7 +678,7 @@ samp {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   border: 1px solid var(--border-strong);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 0.15rem 0.7rem;
   background: var(--surface-panel);
 }
@@ -916,7 +698,7 @@ samp {
   width: 100%;
   max-width: var(--composer-max-width);
   margin: 0 auto;
-  padding: 0 1.25rem 0.5rem;
+  padding: 0 var(--space-5) var(--space-2);
   display: flex;
   justify-content: flex-end;
 }
@@ -926,10 +708,10 @@ samp {
   width: 100%;
   max-width: var(--composer-max-width);
   margin: 0 auto;
-  padding: 0 1.25rem 1rem;
+  padding: 0 var(--space-5) var(--space-4);
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: var(--space-2);
 }
 
 .composer-input {
@@ -975,7 +757,7 @@ samp {
 }
 
 select {
-  padding: 0.35rem 0.5rem;
+  padding: 0.35rem var(--space-2);
   font-size: 0.85rem;
   color: var(--text-primary);
   background: var(--surface-panel);
@@ -987,20 +769,20 @@ select {
 
 .toast-stack {
   position: fixed;
-  left: 1rem;
-  bottom: 1rem;
+  left: var(--space-4);
+  bottom: var(--space-4);
   z-index: 3000;
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
-  max-width: min(26rem, calc(100vw - 2rem));
+  gap: var(--space-2);
+  max-width: min(26rem, calc(100vw - var(--space-7)));
 }
 
 .toast {
   display: flex;
   align-items: flex-start;
   gap: 0.6rem;
-  padding: 0.55rem 0.5rem 0.55rem 0.8rem;
+  padding: 0.55rem var(--space-2) 0.55rem 0.8rem;
   background: var(--danger-soft);
   border: 1px solid var(--danger);
   border-radius: var(--radius-md);
@@ -1033,9 +815,9 @@ select {
   z-index: 3100;
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  max-width: min(34rem, calc(100vw - 2rem));
-  padding: 0.5rem 0.55rem 0.5rem 0.85rem;
+  gap: var(--space-2);
+  max-width: min(34rem, calc(100vw - var(--space-7)));
+  padding: var(--space-2) 0.55rem var(--space-2) 0.85rem;
   font-size: 0.82rem;
   line-height: 1.4;
   color: var(--text-primary);
@@ -1074,7 +856,7 @@ select {
 }
 
 .command-notice-close:focus-visible {
-  outline: 2px solid var(--focus-ring);
+  outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: 1px;
 }
 
@@ -1087,8 +869,8 @@ select {
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-dialog);
   width: 100%;
-  max-width: min(30rem, calc(100vw - 2rem));
-  max-height: calc(100dvh - 2rem);
+  max-width: min(30rem, calc(100vw - var(--space-7)));
+  max-height: calc(100dvh - var(--space-7));
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1097,29 +879,29 @@ select {
 
 /* Optional width presets for legacy `.modal` markup. */
 .modal--sm {
-  max-width: min(420px, calc(100vw - 2rem));
+  max-width: min(420px, calc(100vw - var(--space-7)));
 }
 
 .modal--md {
-  max-width: min(560px, calc(100vw - 2rem));
+  max-width: min(560px, calc(100vw - var(--space-7)));
 }
 
 .modal--lg {
-  max-width: min(var(--finder-width), calc(100vw - 2rem));
+  max-width: min(var(--finder-width), calc(100vw - var(--space-7)));
 }
 
 .modal--xl {
-  max-width: min(var(--settings-width), calc(100vw - 2rem));
+  max-width: min(var(--settings-width), calc(100vw - var(--space-7)));
 }
 
 .modal--finder {
-  width: min(var(--finder-width), calc(100vw - 2rem));
-  height: min(var(--finder-height), calc(100dvh - 2rem));
+  width: min(var(--finder-width), calc(100vw - var(--space-7)));
+  height: min(var(--finder-height), calc(100dvh - var(--space-7)));
 }
 
 .modal--settings {
-  width: min(var(--settings-width), calc(100vw - 2rem));
-  max-height: min(var(--settings-height), calc(100dvh - 2rem));
+  width: min(var(--settings-width), calc(100vw - var(--space-7)));
+  max-height: min(var(--settings-height), calc(100dvh - var(--space-7)));
 }
 
 /* scrollable body of tall dialogs (e.g. model settings); header and the
@@ -1130,7 +912,7 @@ select {
 }
 
 .modal h2 {
-  margin: 0 0 1rem;
+  margin: 0 0 var(--space-4);
   font-size: var(--text-lg);
   line-height: var(--leading-tight);
   flex: none;
@@ -1144,8 +926,8 @@ select {
 .role-fieldset {
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  margin: 0 0 1rem;
-  padding: 0.8rem 1rem 0.4rem;
+  margin: 0 0 var(--space-4);
+  padding: 0.8rem var(--space-4) 0.4rem;
 }
 
 .role-fieldset legend {
@@ -1314,7 +1096,7 @@ select {
 /* path input + Browse row (workspace dialog) and the folder picker path row */
 .folder-picker-path {
   display: flex;
-  gap: 0.5rem;
+  gap: var(--space-2);
   width: 100%;
   align-items: flex-start;
 }
@@ -1367,7 +1149,7 @@ select {
 .provider-list {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: var(--space-2);
   margin: 0.6rem 0;
 }
 
@@ -1378,7 +1160,7 @@ select {
   gap: 0.4rem 0.6rem;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  padding: 0.5rem 0.7rem;
+  padding: var(--space-2) 0.7rem;
 }
 
 .provider-row > .n-input {
@@ -1410,7 +1192,7 @@ select {
 }
 
 .workspace-filter {
-  padding: 0 0.25rem 0.6rem;
+  padding: 0 var(--space-1) 0.6rem;
 }
 
 .workspace-filter select {
@@ -1419,7 +1201,7 @@ select {
 }
 
 .session-group-label {
-  margin: 0.7rem 0.25rem 0.25rem;
+  margin: 0.7rem var(--space-1) var(--space-1);
   font-size: 0.72rem;
   font-weight: 600;
   text-transform: uppercase;
@@ -1432,7 +1214,7 @@ select {
 .activity-line {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--space-2);
   margin: 0;
   color: var(--text-secondary);
   font-size: 0.85rem;
@@ -1499,7 +1281,7 @@ select {
 }
 
 .stream-thinking-head:focus-visible {
-  outline: 2px solid var(--focus-ring);
+  outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: 1px;
 }
 
@@ -1619,7 +1401,7 @@ select {
   color: var(--warning);
   background: var(--warning-soft);
   border: 1px solid var(--warning);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 0.15rem 0.6rem;
   white-space: nowrap;
 }
@@ -1629,17 +1411,17 @@ select {
    requests remain in the transcript as history. */
 .approval-dock {
   flex: 0 0 auto;
-  width: calc(100% - 2.5rem);
+  width: calc(100% - var(--space-8));
   max-width: var(--composer-max-width);
   margin: 0.4rem auto 0;
-  padding-top: 0.5rem;
+  padding-top: var(--space-2);
   border-top: 1px solid var(--border-subtle);
 }
 
 .approval-dock-label {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--space-2);
   margin: 0 0 0.4rem;
   font-size: 0.8rem;
   font-weight: 600;
@@ -1687,7 +1469,7 @@ html[data-density='compact'] .sidebar-list {
 }
 
 html[data-density='compact'] .status-legend {
-  padding-block: 0.2rem 0.25rem;
+  padding-block: 0.2rem var(--space-1);
 }
 
 html[data-density='compact'] .sidebar .session-item {
@@ -1722,7 +1504,7 @@ html[data-density='compact'] .sidebar .theme-option {
 
 /* transcript + composer */
 html[data-density='compact'] .chat-scroll {
-  padding-block: 1rem 0.8rem;
+  padding-block: var(--space-4) 0.8rem;
   gap: 0.85rem;
 }
 
@@ -1749,16 +1531,16 @@ html[data-density='compact'] .app-dialog__footer {
 }
 
 html[data-density='compact'] .modal {
-  padding: 1rem 1.1rem 1.1rem;
+  padding: var(--space-4) 1.1rem 1.1rem;
 }
 
 /* command palette */
 html[data-density='compact'] .palette-search {
-  padding-block: 0.5rem;
+  padding-block: var(--space-2);
 }
 
 html[data-density='compact'] .palette-group-label {
-  padding-block: 0.25rem 0.15rem;
+  padding-block: var(--space-1) 0.15rem;
 }
 
 html[data-density='compact'] .palette-option {

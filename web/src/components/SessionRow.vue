@@ -454,7 +454,7 @@ onUnmounted(() => {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--space-2);
   height: 32px;
   padding: 0 30px 0 8px;
   font: inherit;
@@ -506,7 +506,7 @@ onUnmounted(() => {
   flex: none;
   display: inline-flex;
   align-items: center;
-  gap: 0.25rem;
+  gap: var(--space-1);
   font-size: 0.6875rem;
   font-weight: 600;
   line-height: 1;
@@ -561,7 +561,7 @@ onUnmounted(() => {
   color: var(--text-secondary);
   background: transparent;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   opacity: 0;
   pointer-events: none;
@@ -685,7 +685,7 @@ onUnmounted(() => {
   color: var(--text-primary);
   background: var(--surface-panel);
   border: 1px solid var(--accent);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 
 .session-rename-input:focus {
@@ -705,7 +705,7 @@ onUnmounted(() => {
   color: var(--text-secondary);
   background: transparent;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
 }
 

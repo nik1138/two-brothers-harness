@@ -523,7 +523,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 0.3rem;
-  padding: 0.5rem var(--sidebar-inline) 0.45rem;
+  padding: var(--space-2) var(--sidebar-inline) 0.45rem;
   border-bottom: 1px solid var(--border-subtle);
 }
 
@@ -545,7 +545,7 @@ onUnmounted(() => {
   letter-spacing: 0.02em;
   color: var(--text-on-accent);
   background: var(--accent);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 
 .brand-name {
@@ -571,7 +571,7 @@ onUnmounted(() => {
   color: var(--text-secondary);
   background: transparent;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
 }
 
@@ -618,7 +618,7 @@ onUnmounted(() => {
   overflow: hidden;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   appearance: none;
   -webkit-appearance: none;
   cursor: pointer;
@@ -657,7 +657,7 @@ onUnmounted(() => {
   justify-content: center;
   gap: 0.35rem;
   height: 30px;
-  padding: 0 0.5rem;
+  padding: 0 var(--space-2);
   font: inherit;
   font-size: 0.8rem;
   font-weight: 600;
@@ -684,7 +684,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 0.3rem;
   height: 30px;
-  padding: 0 0.5rem;
+  padding: 0 var(--space-2);
   font: inherit;
   font-size: 0.8rem;
   color: var(--text-secondary);
@@ -781,7 +781,7 @@ onUnmounted(() => {
 
 /* Empty list: a real call to action instead of inert text. */
 .empty-state {
-  padding: 1rem 0.4rem 0.6rem;
+  padding: var(--space-4) 0.4rem 0.6rem;
   text-align: center;
 }
 
@@ -818,7 +818,7 @@ onUnmounted(() => {
   padding: 0 0.6rem;
   font: inherit;
   font-size: 0.78rem;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
 }
 
@@ -865,7 +865,7 @@ onUnmounted(() => {
 .status-legend-item {
   display: inline-flex;
   align-items: center;
-  gap: 0.25rem;
+  gap: var(--space-1);
   white-space: nowrap;
 }
 

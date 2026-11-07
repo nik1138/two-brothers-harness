@@ -1,0 +1,283 @@
+/* ============================================================
+   Design tokens
+   ------------------------------------------------------------
+   The single definition layer for the app chrome. Rules in style.css and the
+   components read these custom properties; colour literals do not belong
+   outside this file.
+
+   Two tiers:
+   - scheme independent: type, spacing, radii, motion, elevation geometry,
+     focus-ring geometry and the layout contract;
+   - semantic colour: light values in `:root`, dark values in the
+     prefers-color-scheme block and the pinned `data-theme='dark'` block. The
+     two dark declarations are kept byte-identical (tokens.test.ts checks it)
+     so the OS preference and a pinned scheme resolve the same palette.
+
+   A pinned theme writes `data-theme` on <html>; the pre-paint script in
+   index.html does the same before the first frame. `system` writes no
+   attribute, so the prefers-color-scheme block stays authoritative. Keep
+   theme.ts (the naive-ui overrides) in sync with the colour tokens.
+
+   Vocabulary: the naming follows kimi-code's token layer (vendored MIT
+   reference in research/vendor/kimi-code — `apps/vis/web/src/theme.css`
+   surface/foreground tiers and the web bundle's semantic `--color-*` set:
+   surfaces by role, three text tiers, intent colours with soft companions,
+   dedicated diff add/remove and search-hit roles, duration/ease/radius/space
+   scales). The vocabulary is translated, not copied: values here are Two
+   Brothers', and only the roles that this app actually renders are kept.
+
+   Values that do not map to a shared role (3px/5px/7px chrome radii,
+   fractional rem paddings, one-off widths) stay literal in the sheets that
+   use them; the layer only carries values with cross-component meaning.
+
+   The density preference (`data-density`) and the reduced-motion policy retune
+   a few motion/layout tokens from style.css, next to the behavior they
+   describe; they are not part of the base layer.
+   ============================================================ */
+
+:root {
+  color-scheme: light;
+
+  /* --- surfaces --------------------------------------------------------- */
+  --surface-canvas: #f6f7f9;
+  --surface-panel: #ffffff;
+  --surface-raised: #ffffff;
+  --surface-sunken: #eef1f5;
+  --surface-bubble: #ffffff;
+  --surface-bubble-operator: #3568d4;
+  --surface-hover: #f1f3f7;
+  --surface-active: #e7ebf1;
+  --surface-highlight: #eaf0fc;
+
+  /* --- borders ---------------------------------------------------------- */
+  --border-subtle: #e4e7ec;
+  --border-strong: #cbd1db;
+  --border-focus: #3568d4;
+
+  /* --- text ------------------------------------------------------------- */
+  --text-primary: #171a21;
+  --text-secondary: #5c6370;
+  --text-tertiary: #858c98;
+  --text-on-accent: #ffffff;
+  --text-on-danger: #ffffff;
+
+  /* --- intent ----------------------------------------------------------- */
+  --accent: #3568d4;
+  --accent-hover: #2a56b4;
+  --accent-pressed: #234a9e;
+  --accent-soft: #e8eefb;
+  --senior: #3568d4;
+  --junior: #0d7f69;
+  --operator: #6f7684;
+  --danger: #c8433b;
+  --danger-soft: #fbecea;
+  --warning: #946200;
+  --warning-soft: #fbf1dc;
+  --ok: #1c7f3f;
+  --ok-soft: #e7f5eb;
+  --focus-ring: #3568d4;
+
+  /* --- diff add/remove -------------------------------------------------- */
+  --diff-add-fg: #1c7f3f;
+  --diff-add-bg: #e7f5eb;
+  --diff-del-fg: #c8433b;
+  --diff-del-bg: #fbecea;
+
+  /* find-in-transcript highlights (CSS Custom Highlight names, see ChatView) */
+  --find-hit-bg: #fbe7a8;
+  --find-hit-text: #171a21;
+  --find-active-bg: #9a5b00;
+  --find-active-text: #ffffff;
+
+  /* live streaming draft (ephemeral SSE token blocks, see ChatView) */
+  --thinking-bg: #f2f3f6;
+  --thinking-border: #d8dce4;
+  --thinking-text: #5c6370;
+
+  /* --- elevation -------------------------------------------------------- */
+  --shadow-raised:
+    0 1px 2px rgb(16 24 40 / 6%),
+    0 8px 24px -12px rgb(16 24 40 / 18%);
+  --shadow-dialog:
+    0 1px 2px rgb(16 24 40 / 8%),
+    0 24px 64px -18px rgb(16 24 40 / 32%);
+  --overlay: rgb(20 23 31 / 38%);
+
+  /* --- radii ------------------------------------------------------------ */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-pill: 999px;
+
+  /* --- spacing scale ---------------------------------------------------- */
+  /* rem keeps the scale relative to the user's root font size, matching the
+     fractional rem spacing still used by component-specific rules. */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-7: 2rem;
+  --space-8: 2.5rem;
+
+  /* --- typography ------------------------------------------------------- */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue',
+    Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-md: 13px;
+  --text-base: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --leading-tight: 1.3;
+  --leading-normal: 1.5;
+
+  /* --- motion ----------------------------------------------------------- */
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --motion-slow: 240ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-emphasized: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  /* --- focus ring geometry ---------------------------------------------- */
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
+
+  /* --- layout contract -------------------------------------------------- */
+  --sidebar-width: 280px;
+  --sidebar-rail-width: 56px;
+  --session-row-height: 32px;
+  --sidebar-footer-height: 48px;
+  --chat-header-height: 48px;
+  --composer-max-width: 880px;
+  --finder-width: 680px;
+  --finder-height: 500px;
+  --settings-width: 800px;
+  --settings-height: 800px;
+  --settings-nav-width: 188px;
+  --dialog-inset: 16px;
+  --sidebar-padding: 8px;
+  --sidebar-row-padding: 12px;
+  --control-height-sm: 28px;
+  --control-height-md: 32px;
+  --control-height-lg: 36px;
+}
+
+/* Dark palette — duplicated for OS preference and a pinned `data-theme`.
+   Keep the two declarations byte-identical. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --surface-canvas: #101115;
+    --surface-panel: #17181d;
+    --surface-raised: #1d1f25;
+    --surface-sunken: #0b0c0f;
+    --surface-bubble: #1d1f25;
+    --surface-bubble-operator: #2f6fed;
+    --surface-hover: #23252c;
+    --surface-active: #2b2e37;
+    --surface-highlight: #1b2a44;
+    --border-subtle: #2a2c34;
+    --border-strong: #3d404a;
+    --border-focus: #6c9bff;
+    --text-primary: #e7e9ef;
+    --text-secondary: #a1a7b3;
+    --text-tertiary: #7d8492;
+    --text-on-accent: #ffffff;
+    --text-on-danger: #ffffff;
+    --accent: #2f6fed;
+    --accent-hover: #4f7fe8;
+    --accent-pressed: #2753c9;
+    --accent-soft: #1e2a44;
+    --senior: #2f6fed;
+    --junior: #0d7f69;
+    --operator: #7a8194;
+    --danger: #d54941;
+    --danger-soft: #3a2224;
+    --warning: #b07d10;
+    --warning-soft: #38300f;
+    --ok: #1f883d;
+    --ok-soft: #16301d;
+    --focus-ring: #6c9bff;
+    --diff-add-fg: #3fb950;
+    --diff-add-bg: #16301d;
+    --diff-del-fg: #e5736c;
+    --diff-del-bg: #3a2224;
+    --find-hit-bg: #4a3c12;
+    --find-hit-text: #f2ead2;
+    --find-active-bg: #e0a92a;
+    --find-active-text: #171a21;
+    --thinking-bg: #141519;
+    --thinking-border: #2a2d35;
+    --thinking-text: #8a909c;
+    --shadow-raised:
+      0 1px 2px rgb(0 0 0 / 45%),
+      0 8px 24px -12px rgb(0 0 0 / 55%);
+    --shadow-dialog:
+      0 1px 2px rgb(0 0 0 / 50%),
+      0 24px 64px -18px rgb(0 0 0 / 70%);
+    --overlay: rgb(0 0 0 / 56%);
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --surface-canvas: #101115;
+  --surface-panel: #17181d;
+  --surface-raised: #1d1f25;
+  --surface-sunken: #0b0c0f;
+  --surface-bubble: #1d1f25;
+  --surface-bubble-operator: #2f6fed;
+  --surface-hover: #23252c;
+  --surface-active: #2b2e37;
+  --surface-highlight: #1b2a44;
+  --border-subtle: #2a2c34;
+  --border-strong: #3d404a;
+  --border-focus: #6c9bff;
+  --text-primary: #e7e9ef;
+  --text-secondary: #a1a7b3;
+  --text-tertiary: #7d8492;
+  --text-on-accent: #ffffff;
+  --text-on-danger: #ffffff;
+  --accent: #2f6fed;
+  --accent-hover: #4f7fe8;
+  --accent-pressed: #2753c9;
+  --accent-soft: #1e2a44;
+  --senior: #2f6fed;
+  --junior: #0d7f69;
+  --operator: #7a8194;
+  --danger: #d54941;
+  --danger-soft: #3a2224;
+  --warning: #b07d10;
+  --warning-soft: #38300f;
+  --ok: #1f883d;
+  --ok-soft: #16301d;
+  --focus-ring: #6c9bff;
+  --diff-add-fg: #3fb950;
+  --diff-add-bg: #16301d;
+  --diff-del-fg: #e5736c;
+  --diff-del-bg: #3a2224;
+  --find-hit-bg: #4a3c12;
+  --find-hit-text: #f2ead2;
+  --find-active-bg: #e0a92a;
+  --find-active-text: #171a21;
+  --thinking-bg: #141519;
+  --thinking-border: #2a2d35;
+  --thinking-text: #8a909c;
+  --shadow-raised:
+    0 1px 2px rgb(0 0 0 / 45%),
+    0 8px 24px -12px rgb(0 0 0 / 55%);
+  --shadow-dialog:
+    0 1px 2px rgb(0 0 0 / 50%),
+    0 24px 64px -18px rgb(0 0 0 / 70%);
+  --overlay: rgb(0 0 0 / 56%);
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+}

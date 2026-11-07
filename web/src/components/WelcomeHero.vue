@@ -141,7 +141,7 @@ const contextLabel = computed(() => {
   margin: auto;
   width: 100%;
   max-width: 34rem;
-  padding: 1.4rem 1.5rem;
+  padding: 1.4rem var(--space-6);
   text-align: center;
   background: var(--surface-panel);
   border: 1px solid var(--border-subtle);
@@ -191,7 +191,7 @@ const contextLabel = computed(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   border: 1px solid var(--border-strong);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
 }
 
 .welcome-hero-meta {
@@ -264,7 +264,7 @@ const contextLabel = computed(() => {
 .welcome-hero-button:focus-visible,
 .welcome-hero-link:focus-visible,
 .welcome-hero-starter:focus-visible {
-  outline: 2px solid var(--focus-ring);
+  outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: 1px;
 }
 
@@ -327,7 +327,7 @@ const contextLabel = computed(() => {
 
 @media (max-width: 640px) {
   .welcome-hero {
-    padding: 1.1rem 1rem;
+    padding: 1.1rem var(--space-4);
     border-radius: var(--radius-md);
   }
 
