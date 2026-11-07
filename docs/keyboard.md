@@ -63,6 +63,7 @@ From a checkout, replace `two-brothers` with `node dist/cli.js` after
 | Composer | `Enter` | send the task |
 | Composer | `Ctrl+Enter` / `Cmd+Enter` | send without waiting (accelerated submit) |
 | Composer | `Shift+Enter` | insert a newline |
+| Composer | `↑` / `↓` | recall the previous/next accepted task at the draft edges (single-line draft: anywhere; multiline: only at the very start/end); stepping past the newest entry restores the draft you were writing exactly |
 | Composer `@` / line-start `/` | open the mention or command picker; `↑`/`↓` move, `Enter`/`Tab` insert, `Shift+Tab`/`Esc` dismiss (the draft is kept) |
 | Conversation (composer focused) | `Esc` `Esc` (within 500 ms) | stop the followed run; a single `Esc` keeps its normal layering |
 | Anywhere outside a text field | `?` | open the commands & shortcuts overlay |
@@ -154,6 +155,18 @@ session.
   observational: it is never persisted, never part of the reply, and never
   searched by Ctrl+F.
 
+- **Prompt recall.** `↑`/`↓` walk the tasks you have actually submitted
+  (accepted runs, including queued ones) newest first, and the draft you were
+  writing is preserved and restored exactly when you step past the newest
+  entry. A recalled entry is not counted as a draft edit, so switching
+  sessions never turns it into a saved draft. Recall only applies while the
+  mention/command picker is closed; IME composition, auto-repeat, a held
+  modifier (`Shift`+arrow selects, `Ctrl`/`Alt`/`⌘`+arrow jumps) and a
+  non-collapsed selection keep their normal editing behavior. The history is a
+  bounded local store (`two-brothers.composerHistory.v1`: newest first, 100
+  entries, consecutive duplicates dropped) and survives a reload; an unsent
+  draft is never recallable.
+
 - **Stop and approvals.** Stop is the composer's Stop button (Tab to it, press
   `Enter`/`Space`); it is cooperative and denies pending approvals. Pressing
   `Esc` twice within 500 ms in the conversation also stops the followed run
@@ -227,7 +240,7 @@ from the registry at runtime. The TUI is Ctrl-based: terminals do not deliver
 | `Enter` | Send the composer text as the next task. |
 | `Shift+Enter` or `Ctrl+J` | Insert a newline instead of sending. |
 | `Tab` | Complete a partially typed slash name when exactly one built-in or discovered template matches; inside an open picker it accepts the highlighted row. |
-| `Up` / `Down` | Recall earlier submitted tasks; on a multi-line draft they move within the draft until the cursor reaches the first or last line. The live draft is preserved and restored when you come back to it. |
+| `Up` / `Down` | Recall earlier submitted tasks: a single-line draft recalls immediately; on a multi-line draft the arrows only leave the composer at its very start (Up) or very end (Down) and otherwise move the caret inside the draft. The live draft is preserved and restored exactly when you come back to it, and recall never adds to the persisted history. |
 | `Ctrl+R` | Incremental prompt-history search, newest first; accepting puts the entry back in the composer. |
 | `Ctrl+O` | Stash the draft, or restore the stashed draft. |
 | `/` (line start) | Inline command picker. It groups the TUI's own commands first, then built-in prompts and built-in actions (each row badged `builtin`/`action`), then discovered `<name>.md` templates with a `usage — description` footer for the highlighted row. `↑`/`↓` move, `Enter`/`Tab` insert or run, `Shift+Tab`/`Esc` closes and keeps the draft. |
@@ -249,7 +262,13 @@ from the registry at runtime. The TUI is Ctrl-based: terminals do not deliver
 ### Approvals (workspace-bound runs)
 
 A run started with `tui --workspace <dir>` pauses on a workspace mutation or
-shell command and replaces the composer with the approval panel. These keys
+shell command and replaces the composer with the approval panel. The effective
+approval mode decides whether the panel appears at all: `readonly` denies
+mutations and shell commands before a card can park, `edits` lets writes and
+edits run, and `allow-all` runs everything without asking (with a warning
+toast each turn). The mode is set from `/permission` or
+`--approval-mode`/`TWO_BROTHERS_APPROVAL_MODE`; see
+[Approval modes](cli-reference.md#approval-modes). These keys
 belong to the panel while it is open (the checked `approval` key scope — they
 cannot collide with the composer, pickers or quit chord):
 
@@ -318,9 +337,14 @@ template shadows a same-named built-in):
   configured senior endpoint and rewrites the session file; the visible
   transcript is unchanged), `/export [path]` (Markdown export; in-memory
   sessions need an explicit path), `/status` (session/context/panel details),
-  `/permission` (the real fail-closed policy facts — the bound workspace root,
-  the ask-before-mutating rule and this process's in-memory session allows, or
-  an honest "no workspace, no approval broker" when unbound), and `/new` (a
+  `/permission` (the effective approval mode with its honest description and
+  the `allow-all` warning, the bound workspace root, the decision keys and
+  this process's in-memory session allows; without a `--approval-mode` pin
+  its buttons persist one of the four modes — `ask`, `readonly`, `edits`,
+  `allow-all` — to `sessions/settings.json`, with a pin it says so and offers
+  only Close, and `/permission <mode>` applies one directly — a pinned
+  process refuses that change with the pin reason; an unbound TUI
+  still states the mode and that it has no approval broker), and `/new` (a
   fresh in-memory session; on-disk sessions are refused honestly). Actions never
   become tasks; a refusal says why.
 

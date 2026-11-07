@@ -78,7 +78,11 @@ connects or changes a provider from inside the terminal workspace (see
 [Connecting a provider from the TUI](#connecting-a-provider-from-the-tui)).
 Environment variables win over saved settings while they are set
 and are never written to the settings file (see the
-[CLI reference](cli-reference.md#environment-variables)).
+[CLI reference](cli-reference.md#environment-variables)). An explicit
+`--provider` (even one that repeats the default value) or
+`TWO_BROTHERS_PROVIDER` also overrides a persisted non-default provider; with
+neither set, the persisted role providers stay in effect (see
+[Provider connection](cli-reference.md#provider-connection-provider)).
 
 > **Local models (LM Studio, CPU):** small models on CPU can take 2–7+
 > minutes per provider call. The default `--timeout` (120 s) bounds *each
@@ -233,6 +237,12 @@ the same hero appears inside a selected session that has no transcript yet.
    commands run locally — `/compact` summarizes older context through the
    configured models, `/export` downloads the session as Markdown, `/help`
    (also `?` or `Ctrl+/`) opens the commands-and-shortcuts overlay.
+   **Up/Down recall:** `Up` on a single-line draft (or at the very start of a
+   multiline one) brings back your previous submitted task, `Down` steps
+   forward, and the final `Down` restores the draft you were writing exactly.
+   Only accepted submissions are remembered (a bounded local history, newest
+   first); recall is skipped while a mention/command picker is open, and
+   modified arrow presses or a selection keep their normal editing behavior.
    Per-model-call prompt annotations are developer information and stay out
    of the conversation by default; Settings → **Advanced** has the
    `Show prompt audits in the conversation` toggle when you need them.
@@ -246,13 +256,16 @@ the same hero appears inside a selected session that has no transcript yet.
    tool, a **Plan** dock appears above the composer (✓ completed, ▸ in
    progress, ○ pending — at most four rows plus a `+N more` tail, a real
    expand button and a live announcement). The composer's status-seat row
-   states what the next run will use: the Senior and Junior models, the real
-   permission expectation ("Ask in app" when a workspace is linked), and the
+   states what the next run will use: the Senior and Junior models, the
+   effective workspace approval mode (`Ask in app` in the default `ask` mode;
+   `Read only`, `Edits auto` or `Allow all` mirror Settings → Approvals, and
+   an older backend with no saved-policy field reads as the fail-closed `ask`
+   it applies), and the
    latest prompt audit's exact system/context character counts plus the
    offered-tool count. A seat whose data is unknown is simply absent — no
    token counts or other numbers are invented.
-5. **Approve mutations.** Reads inside the workspace are free, but every
-   write/edit/delete/shell command docks an approval card in the chat —
+5. **Approve mutations.** Reads inside the workspace are free, but by default
+   every write/edit/delete/shell command docks an approval card in the chat —
    **Allow once** or **Deny** there to resume the run. A third decision,
    **Always allow this session**, resolves the request now and remembers the
    identical `(action, target)` pair for the rest of that session, so repeats
@@ -264,6 +277,19 @@ the same hero appears inside a selected session that has no transcript yet.
    sidecar already records. The fail-closed default is unchanged, and an older
    backend without session scope answers honestly: "Allowed once — this
    backend does not support session scope."
+
+   **Approval modes.** How much runs without asking is an explicit operator
+   choice, set in Settings → **Approvals** (or with `--approval-mode` on the
+   server / TUI process, never persisted): **Ask** (the default — reads free,
+   everything mutating asks), **Read only** (only reads run; every mutation
+   and shell command is denied without asking), **Edits** (writes/edits run
+   freely; deletes and shell still ask) and **Allow all** (everything runs
+   without asking — explicit opt-in, shown with a destructive warning
+   inline). The mode is stored in `sessions/settings.json` and applies to new
+   workspace runs; it never bypasses workspace confinement or the
+   sensitive-path refusal, and an older backend that does not report the
+   setting shows Ask without sending it. See
+   [Approval modes](cli-reference.md#approval-modes) for the decision table.
 
    The card explains what is being approved. Shell and delete requests carry a
    fixed honest reason (shell: effects cannot be previewed and may change any
@@ -305,7 +331,10 @@ node dist/cli.js tui --workspace ./repo --provider mock   # workspace-bound: too
 Block transcript with textual role labels, Markdown bodies (headings, lists,
 fences, diffs, inline bold/italic/code emphasis with theme styling that
 disappears cleanly under `NO_COLOR`), a grapheme-aware multiline
-composer with history and bracketed paste, `Ctrl+R` incremental prompt-history
+composer with history and bracketed paste, `Up`/`Down` recall of submitted
+tasks at the draft edges (the live draft is preserved and restored exactly;
+single-line drafts recall immediately, multiline drafts only at their very
+start/end), `Ctrl+R` incremental prompt-history
 search, `Ctrl+F` find-in-transcript (with `/find`), `Ctrl+O` to stash or
 restore a draft, Ctrl+P command palette and `?` help overlays, session/model
 pickers, live **THINKING** and response blocks from token streaming, live
@@ -318,7 +347,12 @@ token opens the workspace-file picker and attaches that file to the shared
 context before the turn starts (without `--workspace`, `@path` stays literal
 text). A built-in action like `/compact`, `/export [path]`, `/status` or
 `/permission` is performed by the TUI and never submitted as a task;
-`/plan <objective>` expands and runs that turn. A plan written through the
+`/plan <objective>` expands and runs that turn. `/permission` states the
+effective approval mode; without a `--approval-mode` pin its buttons save one
+of the four modes to `sessions/settings.json`, and with a pin it says so and
+offers only Close (a typed `/permission <mode>` change is refused with the
+pin reason; without a pin it applies the mode directly). A plan
+written through the
 model's `todo_write` tool docks above the composer as a compact display-only
 panel (✓/▸/○ markers, four rows plus an honest `+N more` tail; no key answers
 it). With `--session-file` that plan is durable: each plan snapshot is written
@@ -354,7 +388,9 @@ senior and junior can actually read, search, edit and run commands inside it:
 
 - The junior gets the `workspace_*` tool belt and the senior gets the
   read-only verify slice (plus approval-brokered `run_shell`). Reads
-  auto-allow; every write, edit, delete and shell command pauses the run.
+  auto-allow; every write, edit, delete and shell command pauses the run —
+  unless the effective [approval mode](cli-reference.md#approval-modes) allows it (`edits`,
+  `allow-all`) or denies it before a card can appear (`readonly`).
 - A parked request replaces the composer with an approval panel showing the
   action, target, shell command, reason and a bounded diff summary. Answer with
   `1`/`y` **Allow once**, `2`/`a` **Always allow this session** (memory only,
@@ -371,8 +407,12 @@ senior and junior can actually read, search, edit and run commands inside it:
   sensitive paths refuse the whole task with an honest notice).
 - An invalid root (`workspace root does not exist:` /
   `workspace root is not a directory:`) exits 2 before the screen opens.
-  `/permission` states the bound root, the real ask-before-mutating policy, the
-  decision keys and any in-memory session allows.
+  `/permission` states the effective approval mode and its description (plus
+  the `allow-all` warning), the bound root, the decision keys and any
+  in-memory session allows; without a pin its buttons persist a mode, and
+  `/permission <mode>` applies one directly. Pass
+  `--approval-mode <ask|readonly|edits|allow-all>` to pin the mode for this
+  TUI process only (never persisted).
 
 Try it with the mock provider (the mock cannot mutate, but the workspace binds
 and the policy is real):

@@ -653,14 +653,122 @@ Design anchors that already exist:
   suite stays fully hermetic (temp dirs, free ports, system Edge headless, no
   network). Tests only.
 
+## Shipped 2026-11-08 (wave 4: tools for both brothers, composer recall, approval modes, web tokens, follow-ups)
+
+- **Tool calling for both brothers** — in consult mode the senior's opening,
+  the junior's proposal/revision and the senior's review may now call the
+  role's **read-only** tool belt before emitting the structured reply, reusing
+  the bounded `toolLoop` (`MAX_CONSULT_TOOL_ITERATIONS` = 4). The consult belt
+  is the role's belt minus `WORKSPACE_MUTATION_TOOL_NAMES`
+  (`workspace_write_file`/`workspace_edit_file`/`workspace_delete_file`/
+  `workspace_run_shell`) and the display-only plan tool, so a consult node can
+  never mutate; `senior_decide` deliberately stays a plain call (the review
+  immediately before it already ran the checks). A node only loops when its
+  belt is non-empty AND the provider implements `chatWithTools` — tool-less
+  configurations keep the exact pre-tools request path (no tools on the wire,
+  no extra calls, same prompt-audit sections). Work mode is unchanged
+  (delegation, junior mutating deliverable loop, senior approval-brokered
+  verify slice and its `run_shell` carve-out). Files: `src/harness.ts`;
+  tests `tests/toolcalling.test.ts` (10).
+- **Up/Down previous-message recall in the TUI and web composers** — both
+  composers walk accepted submissions newest first and preserve/restore the
+  live draft byte-exactly; only submitted tasks are recallable and navigation
+  never appends. TUI (persisted prompt history): single-line drafts recall
+  immediately, multiline drafts only at their very edges, so interior caret
+  movement never replaces text mid-draft. Web: new pure `web/src/recall.ts`
+  (versioned bounded `localStorage` blob
+  `two-brothers.composerHistory.v1`, newest first, 100 entries, consecutive
+  dedupe, fail-soft) wired through `Composer.vue`/`composerKeys.ts`; recall is
+  suppressed while a picker is open and a recalled entry never becomes a saved
+  draft. Also: `/provider` is a native registry command now, so a discovered
+  `provider.md` template cannot shadow the connect surface (native wins the
+  name; the template is dropped from the catalog with a diagnostic). Files:
+  `src/tui/editor.ts`, `src/tui/app.ts`, `src/tui/keymap.ts`,
+  `web/src/recall.ts` (new), `web/src/components/Composer.vue`,
+  `web/src/composerKeys.ts`; tests `tests/tuirecall.test.ts` (3),
+  `web/tests/recall.test.ts` (7), extended `tuieditor`/`tuiintegration`.
+- **Approval modes and guardrails** — four honest operator modes for workspace
+  actions: `ask` (default: reads free, mutations/shell ask), `readonly` (only
+  reads run; mutations and shell denied without asking), `edits` (reads/writes/
+  edits free; deletes and shell ask) and `allow-all` (everything runs without
+  asking; explicit opt-in with a visible warning). The policy is a fixed
+  decision table in `PermissionPolicy`; persisted top-level in
+  `sessions/settings.json` as `approval_policy` through the atomic, validated
+  `SettingsStore.writeApprovalPolicy` (missing/corrupt/unknown reads as `ask`;
+  other sections preserved); exposed additively on `GET/PUT /api/settings`
+  (`{mode, pinned}`; strict enum → 400, failed write → 500) and applied to
+  every new run. CLI: `--approval-mode` + `TWO_BROTHERS_APPROVAL_MODE` on
+  `run`/`chat`/`serve`/`tui` (invalid = exit 2; `serve` pins its web runs,
+  `tui` pins the process, both never persisted; `run`/`chat` inert without a
+  workspace; `allow-all` warns visibly). The TUI's `/permission` dialog states
+  the mode, its description and the allow-all warning, persists a chosen mode,
+  states a flag/env pin honestly (only Close then) and accepts a typed
+  `/permission <mode>`; every workspace turn reads the mode fresh. The web
+  Settings gains **Approvals** with honest copy, inline danger warning and
+  pinned/old-backend read-only states (an old backend omits the field; the
+  client shows Ask and never sends a patch). Guardrails: a mode never bypasses
+  workspace confinement/sensitive-path refusal (they run before permissions),
+  `readonly` denies even with a broker, broker answers can only choose
+  allow/ask/deny, broker-null stays fail-closed, session-allow pairs/denial
+  cap/overlay-close semantics unchanged, and the model/tools can never set the
+  mode. Files: `src/permissions.ts`, `src/config.ts`, `src/settings_store.ts`,
+  `src/server.ts`, `src/cli.ts`, `src/clihelp.ts`, `src/index.ts`,
+  `src/tui/app.ts`; web `src/approvalPolicy.ts`,
+  `components/settings/ApprovalPolicySection.vue`, `SettingsDialog.vue`,
+  `api.ts`, `types.ts`; tests `tests/approvalmodes.test.ts` (19),
+  `tests/tuiapprovalmodes.test.ts` (6), extended
+  `settings`/`server`/`approvalbrokerdeny`, `web/tests/approvalPolicy.test.ts`
+  (12).
+- **Wave-3 follow-ups** — (a) explicit `--provider` provenance: `Config`
+  records whether the run-level provider came from the flag/env, so an
+  explicit default-valued `--provider openai` now overrides a persisted
+  non-default provider while an absent flag keeps persisted settings (flags >
+  env; env pins never persisted); (b) the TUI provider connect view clips its
+  box title to the real budget, so 20/25/29-column frames stay width-safe;
+  (c) the browser E2E runner guards the packaged `packages/harness/web` copy
+  against `web/dist` by path set + content and auto-resyncs a stale copy
+  (`e2e/web-freshness.mjs`, 12 pure tests), failing actionably when the build
+  is missing or the sync cannot converge; (d) `/provider` native shadowing
+  fixed; (e) the `approval-reason` browser scenario now clicks the pending
+  card's preview toggle through expand/collapse, asserting plain-text content
+  (literal HTML stays escaped text, no handler runs), `aria-expanded`, and the
+  resolved card dropping the pending-only preview. Tests:
+  `tests/cliproviderprovenance.test.ts` (10), extended
+  `tests/tuiproviders.test.ts` (26) and `tests/tuieditor`/`tuiintegration`,
+  `e2e/web-freshness.test.mjs` (12), browser suite unchanged at 13 offline
+  scenarios (+1 opt-in skip).
+- **Web design-token layer** — the web chrome now reads one semantic
+  custom-property layer, `web/src/tokens.css` (imported first by `main.ts`):
+  93 tokens — 45 semantic colour tokens with full light/dark parity (surfaces,
+  three text tiers, borders, intent accents with the role colours
+  operator/senior/junior, diff add/remove, find hits, thinking, elevation) and
+  48 scheme-independent tokens (radii, a rem spacing scale, type,
+  duration/easing, focus-ring geometry, layout contract). The dark palette
+  still ships twice (prefers-color-scheme + pinned `data-theme='dark'`) and a
+  deterministic test pins the two declarations identical. `style.css` and the
+  owned chrome components (Sidebar, SessionGroup, SessionRow, WelcomeHero)
+  were migrated value-for-value (literal colours/radii/spacing/focus-ring →
+  `var(--token)`), with zero visual difference; naming was translated from
+  kimi-code's token layer (MIT reference — attribution row added). Files:
+  `web/src/tokens.css` (new), `web/src/style.css`, `web/src/main.ts`, the four
+  owned components; tests `web/tests/tokens.test.ts` (7).
+- **Approval-mode-aware composer seat** (wave 4 follow-up) — the web composer's
+  permission status seat now names the effective workspace approval mode
+  (`Ask in app` / `Read only` / `Edits auto` / `Allow all`) from the additive
+  `approval_policy` settings field, with a truthful tooltip per mode, and
+  keeps the fail-closed `ask` copy for an older backend that omits the
+  section. Files: `web/src/composerStatus.ts`,
+  `web/src/components/Composer.vue`; tests
+  `web/tests/composerStatus.test.ts`.
+
 ## Open items (deferred)
 
-- **Web design-token / empty-state pass** — kimi-code's role-named CSS
-  token layer (~870 custom properties, diff colors, composer radius, easing)
-  could still tighten the web chrome. The empty state shipped (2026-11-07):
-  the welcome hero covers both the no-session landing state and an empty
-  session, with workspace context, actions and editable starter suggestions;
-  the token layer remains open.
+- **Web design-token follow-through** — the semantic layer and the migrated
+  chrome shipped 2026-11-08 (see the wave-4 section). Two optional follow-ups:
+  `DiffView.vue` still derives its add/remove fills from `--ok`/`--danger`
+  instead of the new `--diff-add-*`/`--diff-del-*` tokens, and the remaining
+  component sheets (App, ChatView, ApprovalCard, settings sections) still
+  carry literal one-off radii/`999px` values the layer could absorb.
 
 - **Reasoning persistence and passback** — thinking/reasoning deltas are
   currently observational and live-only: they are not persisted, not

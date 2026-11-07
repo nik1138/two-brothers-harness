@@ -138,7 +138,8 @@ with a clean message and no escape bytes (use `chat` for scripts).
 The screen is a block transcript with textual role labels (`YOU`, `SENIOR`,
 `JUNIOR`, `TOOL`, `ERR`/`WARN`/`INFO`), a contained multiline composer
 (grapheme-aware cursor, prompt history, bracketed paste — a pasted newline
-never submits), and a two-line status bar with mode, models, session, cwd,
+never submits; `Up`/`Down` recall submitted tasks at the draft edges and
+restore the pre-recall draft exactly), and a two-line status bar with mode, models, session, cwd,
 context/tokens/cache/cost and rotating key hints (see
 [Status hints and transient copy](#status-hints-and-transient-copy)).
 Markdown bodies render headings,
@@ -188,9 +189,10 @@ never submitted as tasks). The built-in prompts `/plan <objective>`,
 built-in actions `/compact` (between turns — compacts through the configured
 senior endpoint and rewrites the session file, the visible transcript is
 unchanged), `/export [path]` (Markdown; in-memory sessions need a path),
-`/status`, `/permission` (real policy facts — the bound workspace, the
-ask-before-mutating rule and this process's session allows; an unbound run says
-so plainly) and `/new` (in-memory session; on-disk sessions are refused
+`/status`, `/permission` (the effective approval mode with its description, the
+bound workspace, the decision keys and this process's session allows — see
+[Approvals in the TUI](#approvals-in-the-tui); an unbound run says so plainly)
+and `/new` (in-memory session; on-disk sessions are refused
 honestly) are
 performed locally and never submitted as tasks — see
 [Built-in commands](#built-in-commands). A native command always wins its own
@@ -204,8 +206,14 @@ runs.
 ```powershell
 node dist/cli.js tui --provider mock
 node dist/cli.js tui --workspace ./repo --provider mock
+node dist/cli.js tui --workspace ./repo --approval-mode readonly --provider mock
 node dist/cli.js tui "Plan a migration from Redis to Valkey" --provider mock
 ```
+
+`tui --approval-mode <mode>` (or `TWO_BROTHERS_APPROVAL_MODE`) pins the
+[approval mode](#approval-modes) for this TUI process only — never persisted;
+without a pin the saved `approval_policy` setting (or the fail-closed `ask`)
+applies, and `/permission` writes that setting.
 
 #### Workspace-bound TUI runs (`--workspace`)
 
@@ -218,7 +226,11 @@ workspace root:
   `workspace_run_shell`) and the senior gets the read-only verify slice (plus
   approval-brokered `run_shell`); plugin bindings see the same workspace.
 - Reads auto-allow. Writes, edits, deletes and shell commands park the run on
-  the [approval panel](#approvals-in-the-tui) instead of the composer.
+  the [approval panel](#approvals-in-the-tui) instead of the composer — unless
+  the effective [approval mode](#approval-modes) lets them run without asking
+  (`edits`, `allow-all`) or denies them before an approval can park
+  (`readonly`). The mode is read fresh for every workspace turn (the saved
+  setting, or a `--approval-mode`/env pin for this process).
 - Composer `@<relative/path>` / `@./<path>` mentions attach a workspace file as
   a `<file path="…">` context block before the turn starts, under the same
   caps and refusals as the server path: at most `MENTION_MAX_FILES` (5) files,
@@ -232,14 +244,24 @@ workspace root:
 - An invalid root is a startup error: exit `2` before the alternate screen
   opens, with an `[error]` line naming the problem — `workspace root does not
   exist: <dir>` or `workspace root is not a directory: <dir>`.
-- `/permission` states the bound root, the fail-closed ask-before-mutating
-  policy, the decision keys and the in-memory session allows (or says the run
-  has no workspace and no approval broker).
+- `/permission` states the effective [approval mode](#approval-modes) and its
+  description (with the `allow-all` danger warning), the bound root, the
+  decision keys and the in-memory session allows — or says the run has no
+  workspace and no approval broker. Without a `--approval-mode` pin its
+  buttons persist one of the four modes to `sessions/settings.json` (it
+  applies from the next workspace turn); with a pin it states that the mode is
+  pinned for this process, offers only Close, and a typed change is refused
+  with that same honest reason. `/permission <mode>` applies one directly
+  (unknown values are refused with the allowed list).
 
 #### Approvals in the TUI
 
 Workspace-bound runs request operator approval through the same
-`RunApprovalBroker` the server uses. While one is pending, a docked panel
+`RunApprovalBroker` the server uses. The effective
+[approval mode](#approval-modes) decides whether a mutation parks at all
+(`readonly` denies without a card, `edits`/`allow-all` let their actions run);
+every workspace turn shows a warning toast while the mode is `allow-all`.
+While a request is pending, a docked panel
 replaces the composer and shows the action, target, shell command, reason and a
 bounded diff summary (the full diff/command is one `Ctrl+E` away). Shell and
 delete requests carry the fixed reasons listed in the
@@ -319,9 +341,9 @@ Precedence, the operator's most explicit request first:
 1. **CLI flags / `TWO_BROTHERS_*` env pairs** — the role pair
    (`--senior-base-url`/`--senior-api-key` or `TWO_BROTHERS_SENIOR_*`) beats the
    shared pair, all-or-nothing; an explicit connection pair clears the role's
-   named `provider_ref`, and an explicit non-default `--provider` (or
-   `TWO_BROTHERS_PROVIDER`) overrides the persisted role providers. Env-pinned
-   fields are never persisted.
+   named `provider_ref`, and an explicit `--provider` (any value — including
+   one that repeats the default — or `TWO_BROTHERS_PROVIDER`) overrides the
+   persisted role providers. Env-pinned fields are never persisted.
 2. **Persisted role settings** — manual fields, else a named `provider_ref`
    resolved through the merged seed+stored preset table.
 3. **Built-in seed presets** (`presets.ts`), then the harness's per-field
@@ -604,6 +626,7 @@ the npm tarball).
 ```powershell
 # from packages/harness/ after npm run build
 node dist/cli.js serve [--host 127.0.0.1] [--port 8600] [--sessions-dir sessions]
+node dist/cli.js serve --approval-mode readonly           # pin the mode for these web runs
 ```
 
 | Flag | Default | Description |
@@ -612,6 +635,7 @@ node dist/cli.js serve [--host 127.0.0.1] [--port 8600] [--sessions-dir sessions
 | `--port` | `8600` | port |
 | `--sessions-dir` | `sessions` | directory of JSONL session files to expose |
 | `--workers` | (runtime default) | background run workers (env `TWO_BROTHERS_WORKERS`) |
+| `--approval-mode` | `ask`, `readonly`, `edits`, `allow-all` | `ask` | pin the [approval mode](#approval-modes) for every run this server starts (env `TWO_BROTHERS_APPROVAL_MODE`); the pin is in-memory only and never persisted — without it the saved `approval_policy` setting applies |
 
 The backend is a **local single-user workspace server**. API overview:
 
@@ -630,7 +654,7 @@ The backend is a **local single-user workspace server**. API overview:
 | `GET /api/sessions/{name}` | all protocol envelopes of one session |
 | `GET /api/sessions/{name}/events` | runtime sidecar events (tool calls, approvals) for browser reload |
 | `POST /api/sessions/{name}/compact` | compact the session in place on demand: the older context is summarized by the configured summarizer role (senior by default) and the session JSONL is rewritten with dense `seq`, so a reload shows the summary. `200 {"compacted": true, "before_events": N, "after_events": M}`; `200 {"compacted": false, "reason": "nothing to compact"}` when there is nothing to cut; 404 unknown session, 400 invalid session name, 409 while a run for that session is active or another compaction is already running, 422 when the session file is unreadable/corrupt, and 502 with the provider message (nothing written) when summarization fails. A run submitted for a session while it is being compacted is a 409 (`a compaction is in progress for this session; retry in a moment`) — the two operations are mutually exclusive so a run's envelopes can never be lost to the rewrite. The summarizer budgets follow the resolved run config (`--compact-*`/`TWO_BROTHERS_COMPACT*`), an explicit `ServerOptions.compaction` still wins, and a client disconnect aborts the provider call and releases the session |
-| `GET /PUT /api/settings` | per-role Senior/Junior provider/model/base URL/API key (keys are write-only; responses show `api_key_set` only) |
+| `GET /PUT /api/settings` | per-role Senior/Junior provider/model/base URL/API key (keys are write-only; responses show `api_key_set` only). Both carry the additive top-level `approval_policy` section for the [approval mode](#approval-modes): `GET` returns `{mode, pinned}` (the effective mode, and whether a `serve` flag/env pin overrides the persisted one), `PUT` accepts `{"approval_policy": {"mode": "ask\|readonly\|edits\|allow-all"}}` — a strict enum (400 for an unknown mode, 500 if the atomic settings write fails, absent leaves the persisted mode untouched) and returns the same view. The mode is stored in `sessions/settings.json`; a per-run flag/env pin is never written there |
 | `POST /api/runs` | start a background run (`{"task", "mode"?, "session"?, "provider"?, "workspace_id"?, "stream_tokens"?}` → `202 {"run_id", "session", "status"}`); a leading `/name` command is expanded and `@skill:`/`@file` mentions are attached before the run (see [Composer mentions and slash commands](#composer-mentions-and-slash-commands)); `stream_tokens: true` additionally streams live `token` frames on the run SSE endpoint (strict boolean, default off); runs are FIFO — one active, the rest `queued`, so a submission for a session that already has a live run is still accepted (`202` with `status: "queued"`) and starts after the earlier one finishes |
 | `GET /api/runs`, `GET /api/runs/{run_id}` | list runs / run status (`queued`/`running`/`waiting`/`completed`/`failed`/`cancelled`); records carry a per-run `usage` object (`model_calls`, `input_tokens`, `output_tokens`, `cached_tokens`; zeros while running) |
 | `POST /api/runs/{run_id}/stop` | cooperative stop (pending approvals are denied); a `queued` run is marked cancelled immediately, without waiting for a worker |
@@ -716,9 +740,14 @@ workspace tools (`workspace_read_file`, `workspace_list_dir`,
 `workspace_delete_file`, `workspace_run_shell`) rooted at the registered
 directory. Reads auto-allow; mutations and shell commands pause the run on an
 `approval_requested` event until the operator answers — once, or for the rest of
-the session (see the session-scope paragraph above). The
+the session (see the session-scope paragraph above) — unless the effective
+[approval mode](#approval-modes) allows them without asking (or denies them
+outright, as `readonly` does). The
 senior gets read-only workspace checks (plus approval-brokered `run_shell`) to
-verify the junior's deliverable before reviewing it.
+verify the junior's deliverable before reviewing it. In consult mode neither
+role is offered a workspace mutation tool: both may call the read-only
+workspace belt (operator-installed MCP/plugin tools keep their own scopes;
+see [tool use for both brothers](#features-beyond-the-original-prototype)).
 
 Shell and delete approvals carry a fixed, honest `reason`; write and edit
 approvals carry none because their unified diff is the explanation:
@@ -823,6 +852,7 @@ per-role connection without leaving the terminal.
 | `--task-file` | path | — | (TS package, `run` only) read the task from a file — missing/unreadable/blank exits 2; mutually exclusive with a positional task. `run -` reads the task from stdin instead (bounded to 1 MiB, blank exits 2) |
 | `--commands-dir` | path | — (repeatable) | (TS package) extra slash-command root for the chat REPL and `tui`; defaults are `TWO_BROTHERS_COMMANDS_DIR` (OS path list), then `<cwd>/commands` and `~/.two-brothers/commands` |
 | `--workspace` | dir | — | (TS package, `tui` only) bind every turn to one confined workspace root: `workspace_*` tools for the junior, the read-only verify slice for the senior, the operator approval panel for mutations/shell, and `@path` file mentions. An invalid root exits 2 before the screen opens |
+| `--approval-mode` | `ask`, `readonly`, `edits`, `allow-all` | `ask` | (TS package) operator [approval mode](#approval-modes) for workspace actions (env `TWO_BROTHERS_APPROVAL_MODE`). `serve` pins it for its web runs and `tui` for the TUI process (in-memory only, never persisted; the saved `approval_policy` setting applies without a pin); `run`/`chat` accept it but bind no workspace. An unknown value is a usage error (exit 2); `allow-all` prints one visible warning |
 
 ## Environment variables
 
@@ -863,6 +893,7 @@ per-role connection without leaving the terminal.
 | `TWO_BROTHERS_SKILLS_DIR` | `--skills-dir` (OS path list; TS package) |
 | `TWO_BROTHERS_STREAM_TOKENS` | `--stream-tokens` (`true`/`1`; requires `--stream`, which a run without it reports as a usage error) |
 | `TWO_BROTHERS_COMMANDS_DIR` | `--commands-dir` (one or more roots separated by the OS path-list separator; TS package) |
+| `TWO_BROTHERS_APPROVAL_MODE` | `--approval-mode` (pins the mode for `serve`'s web runs / the TUI process; never persisted; TS package) |
 | `TWO_BROTHERS_WORKERS` | `--workers` (serve) |
 | `TWO_BROTHERS_PLUGINS_SENIOR` / `TWO_BROTHERS_PLUGINS_JUNIOR` | — (comma-separated plugin names; see `docs/plugins.md`) |
 | `TWO_BROTHERS_SHELL_PATH_EXTRA` | — (path-separated dirs prepended to the confined workspace-shell `PATH`, e.g. the directory holding the binaries your tool proofs call) |
@@ -991,6 +1022,54 @@ metadata only at `GET /api/skills`.
 | `consult` | senior asks for advice → junior `proposal` → `review` → `decision` |
 | `work` | senior delegates (`delegation`) → junior `deliverable` → `review` → `decision` |
 | `auto` | senior chooses; in v0.1 this reduces to `consult` |
+
+## Approval modes
+
+A workspace-bound run applies one operator-selected **approval mode** to
+decide which workspace actions may run without asking. The mode is a fixed,
+honest decision table — the model and any tool call can never set or widen it:
+
+| Mode | Reads | Writes / edits | Deletes | Shell commands |
+|---|---|---|---|---|
+| `ask` (default) | run freely | ask | ask | ask |
+| `readonly` | run freely | **denied** without asking | **denied** without asking | **denied** without asking |
+| `edits` | run freely | run freely | ask | ask |
+| `allow-all` | run freely | run freely | run freely | run freely |
+
+- **Sources.** Persisted top-level in `sessions/settings.json` as
+  `{"approval_policy": {"mode": "ask"}}`; the web Settings → **Approvals**
+  section and the TUI `/permission` dialog write it through the validated
+  store. `--approval-mode <mode>` / `TWO_BROTHERS_APPROVAL_MODE` **pin** a mode
+  for `serve`'s web runs or the TUI process (in-memory only, never persisted:
+  the saved setting applies again after a restart without the pin). `run` and
+  `chat` accept the flag for symmetry but bind no workspace, so it changes
+  nothing there.
+- **Reads are always free.** A mode only decides the mutating actions; the
+  deny rows in `readonly` are deterministic denials, not parked approvals —
+  a broker cannot re-open what the mode closed.
+- **Fail closed.** A missing, corrupt or unknown stored policy reads as `ask`;
+  no mode is ever inferred; the default and an invalid `--approval-mode` are a
+  usage error (exit 2). An unknown mode in `PUT /api/settings` is a 400.
+- **Guardrails are outside the mode.** Workspace confinement, the
+  sensitive-path refusal and the `..`/absolute-path checks run in the
+  workspace layer *before* permissions, so no mode can read or write outside
+  the registered root. Broker-null stays fail closed, the per-session
+  "always allow this session" pairs and the denial-repeat cap are unchanged,
+  closing an approval overlay never answers it, and stopping a run still
+  denies every pending request.
+- **Shell is approved as its own action.** A denied mutation tool does not
+  restrict shell: if the model retries the same change as a
+  `workspace_run_shell` command, that command is a separate request that still
+  parks in `ask`/`edits` (read it in the card before allowing it; `Ctrl+E` /
+  Preview shows the full command). `readonly` denies shell along with the
+  mutation tools, which is the mode to use when shell writes must be
+  impossible rather than merely visible.
+- **Visible when permissive.** `allow-all` prints one `[warn]` line per
+  `run`/server start, the TUI shows a warning toast each workspace turn in
+  that mode, the web section renders its destructive warning inline whenever
+  `allow-all` is the selected mode, and a
+  pinned mode is stated as pinned in the TUI dialog (which then offers only
+  Close) and in the web section (read-only with the restart instruction).
 
 ## Human text output (TS package)
 
@@ -1146,13 +1225,40 @@ them):
 - **TUI workspace runs and approvals** — `tui --workspace <dir>` gives the TUI
   the confined workspace tools, the senior's read-only verify slice, a docked
   approval panel for mutations/shell (numbered decisions, `Ctrl+E` preview,
-  in-memory session allows) and `@path` file mentions (see
-  [`tui`](#tui-initial-task)).
+  in-memory session allows) and `@path` file mentions. The effective
+  [approval mode](#approval-modes) decides whether a mutation parks;
+  `/permission` states it, persists a choice and accepts
+  `/permission <mode>`, while `--approval-mode`/env pins it for the process
+  (see [`tui`](#tui-initial-task)).
 - **TUI provider connection** — the TUI reads the same persisted provider
   settings as the server path (web Settings, `serve`, `onboard`) and resolves
   the same effective endpoints; `/provider` (also `/settings` →
   **Connect provider…**) shows a key-free per-role summary and connects a
   preset or manual endpoint through one atomic, encrypted settings write (see
+  [Provider connection](#provider-connection-provider)).
+- **Tool calling for both brothers** — in consult mode the senior's opening,
+  the junior's proposal/revision and the senior's review may call the role's
+  **read-only** tool belt (workspace reads/searches, MCP tools, plugin tools —
+  never the workspace mutations) before emitting the structured reply; a
+  tool-less configuration or a provider without `chatWithTools` keeps the
+  exact pre-tools request path. Work mode is unchanged (junior mutating
+  deliverable loop, senior read-only verify slice).
+- **Approval modes** — `ask` (default), `readonly`, `edits` and `allow-all`,
+  persisted in `sessions/settings.json`, pinned per process with
+  `--approval-mode`/env, edited from the web Settings → Approvals section and
+  the TUI `/permission` dialog; workspace confinement and the
+  sensitive-path refusal apply in every mode and a mode can never be set by
+  the model (see [Approval modes](#approval-modes)).
+- **Prompt recall** — `Up`/`Down` walk earlier accepted tasks in both
+  composers, preserving and restoring the live draft exactly. The TUI uses
+  its persisted prompt history (single-line drafts recall immediately;
+  multiline drafts only at their very edges); the web composer keeps a
+  bounded `localStorage` history (`two-brothers.composerHistory.v1`, newest
+  first, 100 entries) and recall only applies while no picker is open.
+- **Explicit provider provenance** — `--provider` (even a value that repeats
+  the default) or `TWO_BROTHERS_PROVIDER` is an explicit operator request and
+  overrides a persisted non-default provider; without either, persisted
+  providers survive (see
   [Provider connection](#provider-connection-provider)).
 - **Plan and todo function** — the built-in `todo_write` tool records the whole
   plan, emits one additive `todo_updated` runtime event (sidecar-persisted) and

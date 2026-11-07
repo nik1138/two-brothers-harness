@@ -97,8 +97,15 @@ panel docks above the composer (snapshots persist to the session's runtime
 sidecar when the session has a `--session-file`, so a restart replays the
 plan), `/provider` connects a provider from the same persisted settings the
 web workspace and `onboard` write (preset or manual endpoint; the typed key is
-masked and encrypted at rest), and `/permission` reports the real bound-root
-policy. An invalid root exits 2 before the screen opens.
+masked and encrypted at rest), and `Up`/`Down` recall earlier submitted tasks
+at the draft edges (single-line drafts immediately; multiline only at their
+very start/end, with the live draft restored exactly). `/permission` states
+the effective approval mode and its honest description (with the `allow-all`
+warning), the bound-root policy and this process's session allows; without a
+`--approval-mode`/env pin its buttons persist one of the four modes — `ask`,
+`readonly`, `edits`, `allow-all` — to `sessions/settings.json`, with a pin it
+says so and offers only Close, and `/permission <mode>` applies one directly.
+An invalid root exits 2 before the screen opens.
 
 The human `run`/`chat` text mode renders each envelope as a separated block,
 model prose as width-safe Markdown (sanitized first), the decision behind a
@@ -139,7 +146,14 @@ OpenAI-compatible endpoint (`POST /api/providers/{name}/discover`; an empty
 answer is valid and a typed key is one-shot). An approval card can
 **Always allow this session**, remembering an `(action, target)` pair in the
 session settings while one-shot allow/deny, the denial cap and the fail-closed
-default are unchanged. Runs use the configured models — the UI has no separate
+default are unchanged. Settings → **Approvals** selects the workspace
+approval mode (Ask / Read only / Edits / Allow all) with honest copy and an
+inline destructive warning for `allow-all`; the mode is stored in
+`sessions/settings.json`, a flag/env pin is reported read-only, an older
+backend without the field shows Ask and never receives a patch, and the mode
+never bypasses workspace confinement. `Up`/`Down` in the composer recall
+earlier accepted tasks at the draft edges and restore the live draft exactly.
+Runs use the configured models — the UI has no separate
 "mock" switch.
 
 ## Features
@@ -147,6 +161,25 @@ default are unchanged. Runs use the configured models — the UI has no separate
 - **Cooperation loop**: consult → proposal → review → (revise)* → decision,
   with delegation → deliverable in `work` mode; the junior's objections are
   recorded explicitly (`decision.dissent`).
+- **Tools for both brothers**: in consult mode the senior's opening, the
+  junior's proposal/revision and the senior's review may call a read-only
+  workspace belt before emitting the structured reply (bounded; the four
+  workspace mutation built-ins are always excluded, while operator-installed
+  MCP/plugin tools stay as their role scopes grant them); tool-less
+  configurations keep the exact pre-tools
+  request path, and work mode keeps its mutating junior deliverable loop and
+  the senior's read-only verify slice unchanged.
+- **Approval modes and guardrails**: Ask (default) / Read only / Edits /
+  Allow all as a persisted, operator-selected policy
+  (`sessions/settings.json` `approval_policy`, `--approval-mode`/env pins never
+  persisted); visible warnings for the permissive mode, a fail-closed default
+  for corrupt/missing policy, workspace confinement and sensitive-path
+  refusals unaffected by the mode, and the policy cannot be set by a model or
+  a tool.
+- **Composer prompt recall**: Up/Down walk accepted submissions in the TUI and
+  the web composer, newest first, preserving and restoring the live draft
+  exactly (multiline drafts only leave at their edges; only submitted tasks
+  are recallable).
 - **Structured prompt sections**: per-call `## Available tools` and tool-use
   directives assembled in code, plus a per-call prompt audit trail
   (observable as an SSE runtime event).

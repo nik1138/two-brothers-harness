@@ -25,7 +25,8 @@ The script runs:
 8. the `web/` unit tests (`npm test` — chat, timeline, drafts, palette,
    session-status, recents, density, find, content-search, mentions, provider
    settings and model discovery, queue visibility, session-scope approvals,
-   step folding, composer status seats, plan docks and streaming)
+   step folding, composer status seats, plan docks, streaming, composer prompt
+   recall, the approval-policy model and the design-token layer)
 9. the `web/` build
 
 Expected final line: `SMOKE TEST: PASS`. It is an offline pre-flight, not the
@@ -74,7 +75,7 @@ npm run test:spawn      # node --test tests/ (child processes allowed)
 ```
 
 On the canonical integrated run for this round the in-process suite is
-**1 389 tests: 1 387 pass, 0 fail, 2 skipped** (exit 0); the two skips are
+**1 454 tests: 1 452 pass, 0 fail, 2 skipped** (exit 0); the two skips are
 environment-gated and never failures — the workspace symlink-parity test and
 the MCP stdio spawn are unavailable in this environment. `npm run typecheck`
 and `npm run build` pass, the hermetic CLI E2E is 17/17 on sources and 17/17
@@ -105,12 +106,12 @@ local fake endpoint, no real network): the stored/env-backed key used only for
 the preset's own URL, the different-URL-with-saved-key 400, a one-shot typed key
 that is never stored or echoed, an empty answer that leaves the catalog intact,
 the unsupported-wire-kind 400, unknown-provider 404/invalid-body 400 and the
-clean upstream 502 (suite now 59 tests). The `allow_session` approval scope is
-covered across layers: `tests/approvalbrokerdeny.test.ts` (26 tests — a
+clean upstream 502 (suite now 65 tests). The `allow_session` approval scope is
+covered across layers: `tests/approvalbrokerdeny.test.ts` (28 tests — a
 seeded pair auto-allows without parking with one event per call, the check
 precedes the denial cap, one-shot counters are untouched, an aborted run still
 denies), `tests/settings.test.ts` (round-trip, dedupe/isolation, cap, atomic
-write, corrupt-section fail-soft, secret-free), and `tests/server.test.ts`
+write, corrupt-section fail-soft, secret-free; 31 tests), and `tests/server.test.ts`
 (strict scope validation, persist-before-resolve, restart survival, session
 delete clears, auto-allow on a repeated identical request). The CLI text layout
 is covered by `tests/clistyle.test.ts` (now 27 tests) and `tests/cli.test.ts`
@@ -156,7 +157,7 @@ and the compact sanitized event shape). TUI workspace-bound runs are covered by
 workspace-file picker rows/trigger, the approval panel's exact-width rendering
 and key handling, `Ctrl+E` preview, the panel replacing the composer, and the
 real broker allow/deny/allow-session/abort paths with a bounded diff detail).
-TUI provider connection is covered by `tests/tuiproviders.test.ts` (23 tests,
+TUI provider connection is covered by `tests/tuiproviders.test.ts` (26 tests,
 registered in `tests/run-all.ts`): flags/env vs persisted-settings precedence
 per pair, `provider_ref` resolution through the stored preset, a dangling ref
 warning with manual fallback, corrupt settings failing soft, a session
@@ -195,7 +196,7 @@ slot, the rotating footer tips (one registry-derived tip per accepted turn, full
 cycle coverage, fold action leading without repeating, the stopped-turn and
 approval-parked transient copy; `tests/tuiviewlane.test.ts` 32 tests,
 `tests/tuistyle.test.ts` 18 tests, also pinning byte-identical NO_COLOR
-output, and the assembled `tests/tuiintegration.test.ts` 18 tests), the
+output, and the assembled `tests/tuiintegration.test.ts` 19 tests), the
 docked plan panel with its durable sidecar writes (`tests/tuitodo.test.ts`,
 18 tests) and workspace-bound runs with the approval
 panel and `@file` mentions (`tests/tuiworkspace.test.ts`, 20 tests). Other TUI
@@ -204,6 +205,44 @@ in size: `tests/tui.test.ts` 37, `tests/tuikeymap.test.ts` 18,
 `tests/tuibasecommands.test.ts` 19. The TUI lanes and the doctor,
 completions, reliability, search/export, workspace-order and broker-cap suites
 are registered in `tests/run-all.ts` (including the new `tuiproviders` suite).
+
+Wave 4 adds five suites and extends six existing ones (all registered in
+`tests/run-all.ts`): `tests/toolcalling.test.ts` (10 tests: the senior's
+consult opening, the junior's consult proposal and the senior's consult
+review each call a read tool before emitting their structured reply; consult
+belts never contain the workspace mutations; a tool-less configuration
+produces byte-identical requests with no extra calls; the loop is bounded and
+still repairs once after exhaustion; cancel mid-round, unknown-tool
+recovery); `tests/approvalmodes.test.ts` (19 tests: the per-mode decision
+matrix for read/write/delete/shell with and without a broker, `readonly`
+denying with no parked approval, `edits` auto-allowing writes while deletes
+still park, `ask` parking a write, `allow-all` skipping the broker, workspace
+confinement and sensitive-path refusal still running first, and the CLI
+flag/env/help/warning/invalid-exit-2 cases; the persisted section's
+fail-closed/corrupt round-trip and other-section preservation live in
+`tests/settings.test.ts`, while the `GET`/`PUT /api/settings` round-trip with
+an invalid mode as 400 and the run path honoring the mode live in
+`tests/server.test.ts`); `tests/tuiapprovalmodes.test.ts` (6 tests: the default
+dialog states `ask` and offers the four persisted modes, a chosen mode is
+written through the settings store, Enter on a freshly opened dialog only
+closes it without persisting, a persisted `allow-all` shows its danger
+warning, a pinned mode offers only Close, and typed `/permission <mode>`
+applies valid modes while refusing unknown ones); `tests/tuirecall.test.ts` (3 tests through
+the assembled fake-TTY app: loaded history recall, byte-exact draft
+stash/restore, history file never appended by navigation, only accepted
+submissions recorded, and the multiline only-at-the-edges rule);
+`tests/cliproviderprovenance.test.ts` (10 tests: flag/env/absent provenance,
+explicit default-valued `--provider` beating a persisted non-default provider,
+absent flag keeping persisted settings, flag > env, the hand-built-Config
+heuristic, and the persisted-store load/save paths). The extended suites are
+`tests/settings.test.ts` (31), `tests/server.test.ts` (65),
+`tests/approvalbrokerdeny.test.ts` (28), `tests/tuiproviders.test.ts` (26,
+including the 20/25/29-column frame checks for the provider connect view),
+`tests/tuieditor.test.ts` (17) and `tests/tuiintegration.test.ts` (19).
+`e2e/web-freshness.test.mjs` covers the browser suite's packaged-web
+freshness guard (12 pure tests: fresh, missing, changed, extra and
+non-converging trees, the `sync: false` refusal, and the actionable error
+copy).
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
@@ -247,7 +286,8 @@ The suite (`tests/chat.test.ts`, `tests/timeline.test.ts`,
 `tests/providerSettings.test.ts`, `tests/uiPrefs.test.ts`,
 `tests/queueState.test.ts`, `tests/approvalSession.test.ts`,
 `tests/folding.test.ts`, `tests/composerStatus.test.ts`,
-`tests/todo.test.ts`) covers the
+`tests/todo.test.ts`, `tests/recall.test.ts`,
+`tests/approvalPolicy.test.ts`, `tests/tokens.test.ts`) covers the
 envelope→group-chat projection, the runtime-event timeline merge, per-session
 unsent drafts, palette building/scoring/filtering, sidebar row status, the MRU
 workspace list, the persisted UI density preference, find-in-transcript
@@ -280,15 +320,32 @@ folding
 tool/audit only, never conversation or the followed run), single-row and
 `minRows` behavior, hidden-audit/docked-approval handling, expansion order and
 offset-aware keys, honest pluralized summaries), composer status seats
-(`tests/composerStatus.test.ts`, 9 tests: no-data means no seat, models gated on
-loaded settings, the real permission model per workspace context, exact audit
+(`tests/composerStatus.test.ts`, 10 tests: no-data means no seat, models gated on
+loaded settings, the permission seat naming the effective approval mode per
+workspace context (and the fail-closed `ask` fallback), exact audit
 char/tool counts, defensive formatting, ordering and `formatCharCount`
 bounds), the plan projection (`tests/todo.test.ts`, 11 tests: last
 `todo_updated` wins, empty list is a real clear, malformed/oversized snapshots
 are tolerated, bounded selection with truthful hidden counts, summary counts,
 and no plan leaking across sessions), the speaker labels (the
-operator reads "You"), and the persisted conversation preferences + transcript
-visibility filter (prompt audits are opt-in); 286/286 web tests. The modules are
+operator reads "You"), the persisted conversation preferences + transcript
+visibility filter (prompt audits are opt-in), the composer prompt-history
+recall (`tests/recall.test.ts`, 7 tests: the versioned bounded store with
+consecutive dedupe, the fail-soft read of corrupt/wrong-version/blocked
+storage, record-only-on-acceptance, the newest-first browsing state machine
+with byte-exact draft stash/restore, and the caret/IME/repeat/modifier-safe
+key classifier), the Settings → Approvals model
+(`tests/approvalPolicy.test.ts`, 12 tests: the honest copy per mode, the
+`allow-all` danger warning, strict mode normalization, the fail-soft
+`GET /api/settings` section (old backend = unsupported + Ask), the save
+patch omitted for an unsupported backend and for a server-pinned mode (a
+pin is never persisted by a normal save), and the pinned/unsupported
+read-only reasons), and the design-token layer (`tests/tokens.test.ts`, 7
+tests: every `var(--x)` reference in `style.css` and the migrated components
+is defined, every core colour token exists in the light block and both dark
+blocks — which must stay identical —, the spacing scale is complete and
+ordered, no colour literal is left in the migrated sheets, and `theme.ts`
+stays mapped to the colour tokens); 313/313 web tests. The modules are
 dependency-free at runtime, so plain `node --test` runs them
 via the `tests/register-ts.mjs` bootstrap (a tiny resolve hook for the
 extensionless imports); `npm test` wires that up. The full `web/` gate also
@@ -332,9 +389,21 @@ node e2e/run.mjs
 ```
 
 The backend serves the packaged `packages/harness/web` copy before the repo's
-`web/dist`, so after a `web/` rebuild run `npm run sync-web` (from
-`packages/harness`) before browser runs — otherwise a stale packaged copy can
-shadow the fresh build.
+`web/dist`, so a stale packaged copy could shadow a fresh build. The runner
+now guards this itself: before any scenario it compares the two trees by
+relative-path set and file content and, when they differ, re-runs the
+publisher's copy from `web/dist` (the same `cpSync` as `npm run sync-web`,
+building nothing) and logs `packaged web: resynced … (N files; reasons)`;
+a missing `web/dist` fails with the exact build command. The comparison is
+the pure `compareWebTrees` in `e2e/web-freshness.mjs`, covered by
+`e2e/web-freshness.test.mjs` (12 tests) — offline and deterministic.
+`scripts/e2e-test.ps1` runs those freshness tests before the browser
+scenarios, so a guard regression fails the E2E gate too (the browser run is
+the last step).
+The guard mirrors an existing build; it never rebuilds `web/`, so rebuild
+after a web change before a browser run.
+`npm run sync-web` (from `packages/harness`) remains the command for
+refreshing the copy that ships in the npm tarball.
 
 Scenarios, in suite order: `chat` (group-chat run with the mock provider —
 distinct role bubbles, no raw-protocol leakage), `resume` (reload/continue),
@@ -351,10 +420,13 @@ place, per-session reset), `plan-dock` (Plan dock counts/markers/bounded
 `composer-seats` (role models plus the prompt-audit context seat, with no token
 wording), `hero-starters` (landing and empty-session hero; starters prefill only
 an empty composer, a preserved draft wins with a notice) and `approval-reason`
-(a delete approval shows the documented reason on the pending card, Allow
-removes the file, the resolved history card keeps the same reason verbatim, no
-raw markers). On the canonical run that is **13 PASS, 0 FAIL, 1 SKIP** (the
-opt-in `real` scenario). The queue dock and the session-scope approval decisions
+(a delete approval shows the documented reason on the pending card; its
+collapsed-by-default preview toggle exposes the bounded diff as plain text —
+`aria-expanded`/`aria-controls`, `+N -M` counts, literal HTML in the removed
+line stays escaped text and runs no handler — collapses again, the resolved
+history card keeps the same reason verbatim and drops the pending-only
+preview, Allow removes the file, no raw markers). On the canonical run that is
+**13 PASS, 0 FAIL, 1 SKIP** (the opt-in `real` scenario). The queue dock and the session-scope approval decisions
 remain covered by the web unit suites, not by separate browser scenarios. The
 default suite is fully offline; the
 opt-in `real` scenario (below) reports `SKIP` unless an endpoint is configured.

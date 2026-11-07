@@ -82,6 +82,14 @@ server then serves (the npm tarball ships its own copy of that build).
   (`consult`, `proposal`, `delegation`, `deliverable`, `review`, `decision`,
   `message`) appended to one shared, append-only context; dissent is recorded
   explicitly in the decision.
+- **Tool calling for both brothers.** In consult mode the senior's opening,
+  the junior's proposal/revision and the senior's review may call a role
+  **read-only workspace belt** (workspace reads/searches, plus
+  operator-installed MCP/plugin tools scoped to that role — the four workspace
+  mutation built-ins are always excluded) before emitting the structured
+  reply, with a bounded loop; a tool-less configuration keeps the exact
+  pre-tools request path. Work mode keeps its mutating junior deliverable loop
+  and the senior's read-only verify slice unchanged.
 - **Payload repair + few-shot exemplars.** Model output goes through a
   tolerant parse, a strict schema check, exactly one repair re-ask with a
   byte-stable `[[REPAIR_REQUEST]]` turn, and finally a sanitize-plus-defaults
@@ -146,12 +154,24 @@ server then serves (the npm tarball ships its own copy of that build).
   without touching the Senior/Junior role assignments.
 - **Approval broker.** Workspace tools are confined to an operator-registered
   directory: reads auto-allow, while writes, edits, deletes, and shell commands
-  park the run on an operator approval. With no broker configured the policy
+  park the run on an operator approval (the approval mode below decides which
+  of them park at all). With no broker configured the policy
   fails closed; stopping a run auto-denies everything still pending. A third
   decision, **Always allow this session**, remembers an identical
   `(action, target)` pair for that session (persisted in the session settings,
   removed with the session) while the fail-closed default and denial cap stay
   unchanged.
+- **Approval modes and guardrails.** An operator-selected policy — **Ask**
+  (the default), **Read only**, **Edits** or **Allow all** — selects a fixed,
+  honest decision table for workspace actions. It is persisted in
+  `sessions/settings.json`, can be pinned per server/TUI process with
+  `--approval-mode` (never persisted), and is editable from Settings →
+  Approvals in the web workspace and the TUI `/permission` dialog; `allow-all`
+  is explicit opt-in and always shows a destructive warning. A mode never
+  bypasses workspace confinement or the sensitive-path refusal, `readonly`
+  denies without asking, and neither a model reply nor a tool call can change
+  it. The TUI `/permission` dialog also states the effective mode and accepts
+  `/permission <mode>`.
 - **Sessions and resume.** Every envelope is appended to a JSONL session file
   (flushed immediately, dense `seq`); `--resume` rebuilds the shared context,
   and `sessions` lists files with readable titles.
@@ -172,7 +192,11 @@ server then serves (the npm tarball ships its own copy of that build).
   dock mirrors the model's todo list. The composer has a `@` mention picker and
   a `/` command menu (built-ins first, then your templates), the built-in
   actions run locally (`/compact`, `/export`, `/help`, `/status`, `/permission`,
-  …), and `?`/`Ctrl+/` opens the commands-and-shortcuts overlay.
+  …), and `?`/`Ctrl+/` opens the commands-and-shortcuts overlay. `Up`/`Down` in
+  the composer recall earlier accepted tasks (multiline drafts only at their
+  edges, the live draft restored exactly), and Settings → **Approvals** picks
+  the workspace approval mode with honest copy and an inline warning for
+  `allow-all`.
 - **TUI.** A bare interactive `two-brothers` (or `tui [task]`) is a
   zero-dependency full-screen chat in the terminal's alternate screen, over
   the same harness and the same flags: block transcript with textual role
@@ -189,7 +213,11 @@ server then serves (the npm tarball ships its own copy of that build).
   docks above the composer (durable across restarts when the session has a
   `--session-file`). `/provider` connects a provider from the same persisted
   settings the web workspace and `onboard` write (preset or manual endpoint,
-  key masked and encrypted at rest). The `/` picker lists the built-in commands
+  key masked and encrypted at rest). `Up`/`Down` recall earlier submitted tasks
+  at the draft edges (the live draft is restored exactly), `/permission` states
+  the effective approval mode and persists a new one (a `--approval-mode`/env
+  pin states itself and offers only Close), and `/permission <mode>` applies
+  one directly. The `/` picker lists the built-in commands
   (badged) plus discovered templates, Tab/Shift+Tab accept/dismiss, and actions
   like `/compact`/`/export` are performed in the TUI rather than submitted.
   Overlay lists follow the theme, the composer leaves mode/models to the status
@@ -257,6 +285,10 @@ changes one without leaving it (preset or manual endpoint, key masked while
 typing and encrypted at rest).
 
 Precedence: CLI flags > environment variables > persisted settings > defaults.
+An explicit `--provider` (even one that repeats the default) or
+`TWO_BROTHERS_PROVIDER` counts as an explicit request and overrides a
+persisted non-default provider; with neither set, the persisted provider stays
+in effect.
 Environment variables also *pin* their fields: an env value wins over any
 Settings edit and is never written to `settings.json`, so a change to a
 pinned field in the web UI (or `onboard`) does not stick while the env var
@@ -404,14 +436,19 @@ What the workspace gives you:
 - **Workspace tools with docked operator approvals** — in `work` mode with a
   linked workspace the junior gets confined tools (`read_file`, `list_dir`,
   `search_text`, `write_file`, `edit_file`, `delete_file`, `run_shell`) that
-  can only touch files inside the workspace. Reads auto-allow; every write,
-  edit, delete, or shell command docks an approval card in the chat — allow
-  or deny there to resume the run (or stop it — pending approvals are then
-  denied). Shell/delete requests state their honest reason (write/edit show
-  their diff) and the card can expand a bounded diff/command preview. The
-  senior additionally gets read-only workspace checks
-  (including approval-brokered `run_shell`) to verify the junior's work
-  before reviewing it. Below the drawer breakpoint the sidebar turns into a
+  can only touch files inside the workspace; in `consult` mode both brothers
+  may use their read-only belts before replying. Reads auto-allow; by default
+  every write, edit, delete, or shell command docks an approval card in the
+  chat — allow or deny there to resume the run (or stop it — pending
+  approvals are then denied). Settings → **Approvals** selects the workspace
+  approval mode (Ask / Read only / Edits / Allow all, with an inline warning
+  for the permissive one), so an operator can also deny all mutations without
+  asking or, explicitly, let edits run unattended. Shell/delete requests state
+  their honest reason (write/edit show their diff) and the card can expand a
+  bounded diff/command preview. The senior additionally gets read-only
+  workspace checks (including approval-brokered `run_shell`) to verify the
+  junior's work before reviewing it. `Up`/`Down` in the composer recall
+  earlier accepted tasks. Below the drawer breakpoint the sidebar turns into a
   drawer over the chat (backdrop, Escape, focus handling).
 - **Sessions and presets** — session files listed with readable titles and
   workspace grouping, plus named provider presets (seeded: openai, deepseek,

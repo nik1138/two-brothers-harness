@@ -9,6 +9,137 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Consult-mode tool loops for both brothers** (wave 4, lane A): the
+  senior's consult opening and the consult-mode junior proposal/revision now
+  ground themselves with a read-only workspace belt before emitting the
+  structured reply — they run the same bounded `toolLoop` the work-mode
+  deliverable uses (`MAX_CONSULT_TOOL_ITERATIONS` = 4 rounds). The read-only
+  belt is the role's normal belt minus `WORKSPACE_MUTATION_TOOL_NAMES`
+  (`workspace_write_file` / `workspace_edit_file` /
+  `workspace_delete_file` / `workspace_run_shell`) and minus the
+  display-only plan tool, so a consult node is never offered a workspace
+  mutation tool (operator-installed MCP/plugin tools scoped to the role stay
+  as that scope grants them — their own side effects are outside the
+  workspace permission layer, unchanged);
+  the senior's review also grounds itself in consult mode and appends the
+  clipped tool lines to its points/notes like the work-mode verify evidence.
+  A node only loops when the belt is non-empty AND the role's provider
+  implements `chatWithTools` — a tool-less configuration keeps the exact
+  pre-tools request path (no tools on the wire, no extra provider calls, the
+  same prompt-audit section names). `senior_decide` deliberately stays a
+  plain call (the review immediately before it already ran the read-only
+  checks); work mode is unchanged (delegation, the junior's mutating
+  deliverable loop, the senior's approval-brokered verify slice and the
+  work-mode review/decision calls keep their behavior). Files:
+  `src/harness.ts` (`WORKSPACE_MUTATION_TOOL_NAMES`,
+  `MAX_CONSULT_TOOL_ITERATIONS`, `consultToolSet`, `consultNode`,
+  `consultWithTools`, `toolLoop`'s `wireKind`). Tests:
+  `tests/toolcalling.test.ts` (10: read-before-reply for senior consult,
+  junior proposal and senior review, mutation-free belts, tool-less
+  byte-identical requests, the non-`chatWithTools` gate, bounded loop +
+  repair-after-loop, cancel mid-round, unknown-tool recovery, no mutating
+  belt in any node).
+- **Workspace approval modes and guardrails** (wave 4, lane C): a new honest
+  operator policy selects a fixed decision table for workspace actions —
+  `ask` (default: reads free, writes/edits/deletes/shell ask), `readonly`
+  (only reads run; every mutation and shell command is denied without
+  asking), `edits` (reads/writes/edits free; deletes and shell ask) and
+  `allow-all` (everything runs without asking; explicit opt-in only, with a
+  visible danger warning). `PermissionPolicy` applies the mode; a mode never
+  bypasses workspace confinement or the sensitive-path refusal (those run
+  before permissions), `readonly` denies deterministically even with a broker
+  present, a broker answer can only choose allow/ask/deny (never widen the
+  policy), and the per-session allow pairs, denial cap and broker-null
+  fail-closed behavior are unchanged. The mode persists top-level in
+  `sessions/settings.json` as `{"approval_policy": {"mode": "ask"}}` through
+  the atomic `SettingsStore.writeApprovalPolicy` (read is fail-closed:
+  missing/corrupt/unknown → `ask`; every other section is preserved).
+  `GET /api/settings` additively returns `approval_policy: {mode, pinned}`
+  (a serve flag/env pin overrides the persisted mode and reports
+  `pinned: true`); `PUT /api/settings` accepts the additive
+  `{"approval_policy": {"mode": "…"}}` (strict enum, 400 invalid, 500 when
+  the write fails; absent leaves the persisted mode untouched) and every run
+  seeds its `PermissionManager` from the effective mode. CLI:
+  `--approval-mode <ask|readonly|edits|allow-all>` (+ pinned env
+  `TWO_BROTHERS_APPROVAL_MODE`) on `run`, `chat`, `serve` and `tui`; an
+  unknown value is a usage error (exit 2), `serve` pins the mode for every
+  web run and `tui` for the TUI process (both never persisted), `run`/`chat`
+  bind no workspace so the flag is inert there, and `allow-all` prints one
+  visible `[warn]` line per run/startup. The TUI's `/permission` dialog now
+  states the effective mode with its description and the allow-all warning,
+  offers the four modes as persistent buttons (or only Close when a
+  flag/env pin owns the mode and says so honestly), and `/permission <mode>`
+  applies one directly (unknown values are refused with the allowed list);
+  every workspace turn reads the mode fresh and shows one warning toast in
+  `allow-all`. The web Settings gains an **Approvals** section (honest copy
+  per mode, a destructive-warning banner for `allow-all`, pinned and
+  old-backend states read-only with the reason; a backend without the field
+  shows `ask` and never receives an approval patch). Files:
+  `src/permissions.ts`, `src/config.ts`, `src/settings_store.ts`,
+  `src/server.ts`, `src/cli.ts`, `src/clihelp.ts`, `src/index.ts`,
+  `src/tui/app.ts`; web `src/approvalPolicy.ts`,
+  `src/components/settings/ApprovalPolicySection.vue`,
+  `src/components/SettingsDialog.vue`, `src/api.ts`, `src/types.ts`. Tests:
+  `tests/approvalmodes.test.ts` (19: the per-mode decision matrix with and
+  without a broker, readonly/edits/ask/allow-all workspace behavior,
+  confinement-before-permissions even under allow-all, and the CLI
+  flag/env/help/warning/invalid-exit-2 cases; the persisted-section
+  fail-closed round-trip lives in `tests/settings.test.ts`, the
+  `GET`/`PUT` route and run-path mode matrix in `tests/server.test.ts`),
+  `tests/tuiapprovalmodes.test.ts` (6), `tests/settings.test.ts` (now 31),
+  `tests/server.test.ts` (now 65) and
+  `tests/approvalbrokerdeny.test.ts` (now 28) extensions,
+  `web/tests/approvalPolicy.test.ts` (12).
+- **Up/Down previous-message recall in the TUI and the web composer**
+  (wave 4, lane B): Up/Down now walks the operator's earlier accepted tasks
+  in both composers, with the live draft preserved byte-exactly and restored
+  when stepping past the newest entry. TUI: a single-line draft recalls
+  immediately; a multiline draft only leaves the composer at its very edges
+  (Up at the start, Down at the end) — interior caret movement keeps the
+  draft and never recalls; only accepted task submissions (typed,
+  slash-template or `tui "<task>"`) are recallable, the pre-recall draft is
+  restored exactly, persisted prompt history loaded at startup is available,
+  and recall navigation never appends to the history file. Web: a new pure
+  `web/src/recall.ts` (versioned bounded `localStorage` blob
+  `two-brothers.composerHistory.v1`, newest first, 100 entries, 16 384 chars
+  each, consecutive dedupe, fail-soft on corrupt/blocked storage; draft
+  stashing/restoring as a pure state machine and an IME/repeat/modifier-safe
+  key classifier) wired into `Composer.vue`/`composerKeys.ts`: recall only
+  applies while no picker is open, a recalled entry is never treated as a
+  draft edit (the drafts store keeps the stashed live draft, including across
+  session switches), only accepted submissions join the history, and the
+  final Down restores the preserved draft. Also: `/provider` is now a native
+  registry command, so a discovered `provider.md` template can no longer
+  shadow the provider connect surface (it is dropped from the TUI command
+  catalog with a diagnostic, and the native command wins its name, like
+  `/help`). Files: `src/tui/editor.ts`, `src/tui/app.ts`,
+  `src/tui/keymap.ts`, `src/tui/basecommands.ts` (existing token helper),
+  `web/src/recall.ts` (new), `web/src/components/Composer.vue`,
+  `web/src/composerKeys.ts`. Tests: `tests/tuirecall.test.ts` (3, through
+  the assembled fake-TTY app), `web/tests/recall.test.ts` (7), plus the
+  extended `tests/tuieditor.test.ts` and `tests/tuiintegration.test.ts`.
+- **Browser E2E packaged-web freshness guard** (wave 4, lane D): the browser
+  suite serves the packaged `packages/harness/web` copy first (that is what
+  the server prefers in a checkout and what the npm tarball ships), so a
+  stale copy could silently test old UI after a `web/` rebuild. The runner
+  now compares the packaged copy against `web/dist` by relative-path set and
+  file content before any scenario and re-runs the publisher's copy (the
+  `scripts/sync-web.mjs` `cpSync`, building nothing) when the trees differ,
+  logging `packaged web: fresh (N files)` or
+  `packaged web: resynced … (N files; reasons)`. Missing `web/dist` fails
+  with the exact build command; `sync: false` and a non-converging sync fail
+  with the publisher command and the remaining differences. Offline,
+  synchronous, dependency-free (`e2e/web-freshness.mjs`, pure
+  `compareWebTrees`); tests: `e2e/web-freshness.test.mjs` (12). The
+  `approval-reason` scenario also gained the click-through of the pending
+  card's preview toggle: collapsed by default (`aria-expanded="false"`,
+  stable `aria-controls`, `+N -M` counts), expands the unified diff as
+  plain text (literal HTML in the removed line stays text, becomes an
+  escaped `&lt;` node and runs no handler), labels the toggle
+  "Hide preview", collapses again, and the resolved card drops the
+  pending-only preview. No new browser scenario (the suite stays 13 offline
+  scenarios + the opt-in `real` skip).
+
 - **TUI provider connection (owner bug fix)**: the TUI used to build role
   providers from CLI flags/env only, silently ignoring the provider
   configuration saved by the web Settings, `serve` or `onboard`
@@ -481,6 +612,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Approval-mode-aware web composer seat** (wave 4 follow-up): the composer's
+  permission status seat now names the effective workspace approval mode from
+  `GET /api/settings` — `ask` shows "Ask in app", `readonly` "Read only",
+  `edits` "Edits auto" and `allow-all` "Allow all" — each with a truthful
+  tooltip instead of always claiming the generic ask behaviour. A backend that
+  omits the additive `approval_policy` section still reads as the fail-closed
+  `ask` it applies. Files: `web/src/composerStatus.ts`,
+  `web/src/components/Composer.vue`; tests:
+  `web/tests/composerStatus.test.ts`.
+- **Explicit `--provider` provenance** (wave 4, lane D): `resolveConfig`
+  now records whether the run-level provider came from an explicit source —
+  the `--provider` flag or `TWO_BROTHERS_PROVIDER` — in
+  `Config.providerExplicit`. The TUI's provider resolution uses it, so an
+  explicitly requested default-valued provider (`--provider openai`) now
+  overrides a persisted non-default provider, while an absent flag keeps
+  today's behavior (persisted providers survive) and a hand-built `Config`
+  without the field keeps the older non-default heuristic. Flags still beat
+  env; env-pinned fields are still never persisted. Files:
+  `src/config.ts`, `src/tui/providers.ts`. Tests:
+  `tests/cliproviderprovenance.test.ts` (10: provenance for flag/env/absent,
+  TUI resolution for explicit-default/absent/env/flag>env/hand-built,
+  persisted-store load, env-pinned save).
+- **Web design-token layer** (wave 4, lane E): the web chrome now reads one
+  semantic custom-property layer, `web/src/tokens.css` (imported first by
+  `main.ts`): 93 tokens — 45 semantic colour tokens with full light/dark
+  parity (surfaces, three text tiers, borders, intent accents incl. the
+  senior/junior/operator role colours, diff add/remove, find hits, thinking,
+  elevation) and 48 scheme-independent tokens (radii, a rem spacing scale,
+  type, duration/easing, focus-ring geometry, layout contract). The dark
+  palette still ships twice (prefers-color-scheme and the pinned
+  `data-theme='dark'`) and a new deterministic test pins the two blocks
+  identical. `style.css` and the owned chrome components (Sidebar,
+  SessionGroup, SessionRow, WelcomeHero) were migrated to the tokens
+  (literal radii/spacing/focus-ring values → `var(--token)`); no colour
+  literal remains in those sheets and the change is value-for-value — zero
+  visual difference (verified by expanding every migrated token back to its
+  literal, and the token-copy check in the new test). Naming was translated
+  from kimi-code's token layer (MIT reference, see `docs/attribution.md`).
+  Files: `web/src/tokens.css` (new), `web/src/style.css`,
+  `web/src/main.ts`, the four owned components. Tests:
+  `web/tests/tokens.test.ts` (7: reference closure, light + both dark blocks,
+  identical dark blocks, colour-literal ban, ordered spacing scale,
+  `theme.ts` ↔ token mapping).
 - **Human CLI text layout**: `run` (and every `chat` turn) renders the
   transcript as blank-line-separated envelope blocks, rules off the final
   decision with a width-capped `── decision ──` label, renders model prose as
@@ -549,6 +723,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **TUI provider connect view at narrow widths** (wave 4, lane D): the
+  dialog's box title could widen the top border by one column at very narrow
+  terminals because `renderBox` decorates and clips it only to the inner
+  width. The title is now clipped to the real budget (with an ellipsis) and
+  omitted when there is no room, so frames at 20/25/29 columns keep every
+  row within the terminal width; tests extend `tests/tuiproviders.test.ts`.
 - **Settings → Appearance cards collapsed under Compact density**: the
   global compact-density rule targeting the sidebar footer's `.theme-option`
   switch also matched the Appearance dialog's cards (same class name), so with

@@ -291,11 +291,18 @@ Settings entries may carry per-plugin settings:
 
 - Plugin tools operate inside the same `Workspace` confinement as the coding
   tools: any file access must go through the workspace root, and writes /
-  shell-like side effects pass through the `PermissionManager` approval
-  broker exactly like built-in tools (operator approval required, deny on
-  stop, sensitive paths refused).
-- A plugin that needs capabilities beyond the workspace (network, arbitrary
-  paths) is out of scope — plugins are workspace tools, not agents.
+  shell-like side effects that go through the workspace bridge
+  (`ctx.workspace_*`) pass through the `PermissionManager` approval broker
+  exactly like built-in tools (operator approval required by default, deny on
+  stop, sensitive paths refused). The effective
+  [approval mode](cli-reference.md#approval-modes) applies to those bridged
+  plugin actions too — `readonly` denies their mutations without asking,
+  `edits` auto-allows writes/edits, and `allow-all` runs everything (with its
+  visible warning); a mode never bypasses workspace confinement or the
+  sensitive-path refusal, and a plugin can neither read nor change the policy.
+  A plugin that performs side effects outside the workspace bridge (its own
+  network calls, arbitrary paths) is out of scope — plugins are workspace
+  tools, not agents.
 
 ## Example
 
