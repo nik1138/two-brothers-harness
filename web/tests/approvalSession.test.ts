@@ -12,6 +12,16 @@ import {
   appliedApprovalScope,
   approvalOutcomeNotice,
 } from '../src/api.ts'
+import {
+  APPROVAL_PREVIEW_MAX_CHARS,
+  approvalDetailOf,
+  approvalPreviewCounts,
+  approvalPreviewOf,
+  projectRuntimeEvents,
+  resetRuntimeProjection,
+} from '../src/runtime.ts'
+import type { ApprovalItem } from '../src/runtime.ts'
+import type { RunEvent } from '../src/types.ts'
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -153,4 +163,212 @@ test('an HTTP failure still rejects as an ApiError (no false success)', async ()
   } finally {
     globalThis.fetch = original
   }
+})
+
+// ---------------------------------------------------------------------------
+// additive approval detail: tolerant projection + plain-text preview
+// ---------------------------------------------------------------------------
+
+/** One `approval_requested` runtime event; `detail` omitted when undefined. */
+function requested(detail?: unknown, overrides: Record<string, unknown> = {}): RunEvent {
+  const event: Record<string, unknown> = {
+    type: 'approval_requested',
+    approval_id: 'ap-detail-1',
+    action: 'write',
+    target: 'src/app.ts',
+    run_id: 'run-1',
+    at: 10,
+    ...overrides,
+  }
+  if (detail !== undefined) event.detail = detail
+  return event as unknown as RunEvent
+}
+
+/** One `approval_resolved` runtime event; `reason` omitted when undefined. */
+function resolved(overrides: Record<string, unknown> = {}): RunEvent {
+  return {
+    type: 'approval_resolved',
+    approval_id: 'ap-detail-1',
+    decision: 'allow',
+    run_id: 'run-1',
+    at: 11,
+    ...overrides,
+  } as unknown as RunEvent
+}
+
+/** Project a fresh event list and return the approval items. */
+function approvalsOf(events: RunEvent[]): ApprovalItem[] {
+  resetRuntimeProjection([])
+  return projectRuntimeEvents(events).filter(
+    (item): item is ApprovalItem => item.type === 'approval',
+  )
+}
+
+const WRITE_DETAIL = {
+  kind: 'write',
+  diff: '--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-old line\n+new line',
+  addedLines: 3,
+  removedLines: 1,
+}
+
+test('approvalDetailOf keeps the additive preview and drops unknown fields', () => {
+  assert.deepEqual(approvalDetailOf({ ...WRITE_DETAIL, extra: 'nope' }), WRITE_DETAIL)
+  assert.deepEqual(approvalDetailOf({ kind: 'shell', command: 'git status --short' }), {
+    kind: 'shell',
+    command: 'git status --short',
+  })
+  assert.deepEqual(approvalDetailOf({ ...WRITE_DETAIL, truncated: true }), {
+    ...WRITE_DETAIL,
+    truncated: true,
+  })
+})
+
+test('approvalDetailOf is tolerant: absent and malformed details become undefined', () => {
+  for (const missing of [undefined, null, [], 'detail', 42, {}, { kind: '' }, { kind: 7 }]) {
+    assert.equal(approvalDetailOf(missing), undefined, JSON.stringify(missing))
+  }
+  // Valid fields survive; invalid ones are dropped instead of failing the card.
+  assert.deepEqual(
+    approvalDetailOf({
+      kind: ' write ',
+      diff: 42,
+      command: null,
+      addedLines: '3',
+      removedLines: -2,
+      truncated: 'yes',
+    }),
+    { kind: 'write' },
+  )
+  // An out-of-range count is dropped, a valid zero is kept.
+  assert.deepEqual(approvalDetailOf({ kind: 'edit', addedLines: 0, removedLines: 1.9 }), {
+    kind: 'edit',
+    addedLines: 0,
+    removedLines: 1,
+  })
+})
+
+test('approvalDetailOf bounds a huge diff/command so the DOM stays bounded', () => {
+  const huge = approvalDetailOf({
+    kind: 'write',
+    diff: 'a'.repeat(APPROVAL_PREVIEW_MAX_CHARS + 50),
+    command: 'b'.repeat(APPROVAL_PREVIEW_MAX_CHARS + 50),
+  })
+  assert.ok(huge !== undefined)
+  assert.equal(huge.diff?.length, APPROVAL_PREVIEW_MAX_CHARS)
+  assert.equal(huge.command?.length, APPROVAL_PREVIEW_MAX_CHARS)
+  assert.equal(huge.truncated, true)
+})
+
+test('approvalPreviewOf renders a command for shell and a diff/counts for changes', () => {
+  assert.deepEqual(approvalPreviewOf({ kind: 'shell', command: 'rm -rf build' }), {
+    kind: 'shell',
+    text: 'rm -rf build',
+    truncated: false,
+    noun: 'command',
+  })
+  assert.equal(approvalPreviewCounts(approvalPreviewOf({ kind: 'shell', command: 'x' })!), '')
+
+  const change = approvalPreviewOf(WRITE_DETAIL)
+  assert.ok(change !== null)
+  assert.equal(change.noun, 'change')
+  assert.equal(change.text, WRITE_DETAIL.diff)
+  assert.equal(change.added, 3)
+  assert.equal(change.removed, 1)
+  assert.equal(change.truncated, false)
+  assert.equal(approvalPreviewCounts(change), '+3 -1')
+
+  // Nothing renderable: no detail, unknown shape, or a detail without text.
+  for (const empty of [undefined, null, {}, { kind: 'write' }, { kind: 'write', diff: '   ' }]) {
+    assert.equal(approvalPreviewOf(empty), null, JSON.stringify(empty))
+  }
+})
+
+test('the runtime projection carries the detail (and old backends keep no field)', () => {
+  const [withDetail] = approvalsOf([requested(WRITE_DETAIL)])
+  assert.equal(withDetail.approvalId, 'ap-detail-1')
+  assert.deepEqual(withDetail.detail, WRITE_DETAIL)
+
+  const [withoutDetail] = approvalsOf([requested()])
+  assert.equal(withoutDetail.detail, undefined, 'no detail field when the backend omits it')
+
+  const [malformed] = approvalsOf([requested({ kind: 7, diff: 'x' })])
+  assert.equal(malformed.detail, undefined, 'an invalid detail never breaks the card')
+})
+
+test('last-writer semantics are unchanged: resolution keeps the pending detail', () => {
+  const resolved: RunEvent = {
+    type: 'approval_resolved',
+    approval_id: 'ap-detail-1',
+    decision: 'allow',
+    run_id: 'run-1',
+    at: 11,
+  } as unknown as RunEvent
+  const approvals = approvalsOf([requested(WRITE_DETAIL), resolved])
+  assert.equal(approvals.length, 1)
+  assert.equal(approvals[0].decision, 'allow')
+  assert.deepEqual(approvals[0].detail, WRITE_DETAIL)
+})
+
+test('preview text is plain data: HTML-looking content round-trips verbatim (no HTML built)', () => {
+  const hostile = '<img src=x onerror="alert(1)">\n<script>alert(2)</script>'
+  const [item] = approvalsOf([
+    requested({ kind: 'write', diff: hostile, addedLines: 2, removedLines: 0 }),
+  ])
+  // The projection never escapes or wraps the text: it stays the exact string
+  // the backend sent, so rendering it via Vue's text interpolation (never
+  // v-html) is the only consumer and no HTML sink receives it.
+  assert.equal(item.detail?.diff, hostile)
+  assert.ok(!item.detail?.diff?.includes('&lt;'))
+
+  const preview = approvalPreviewOf(item.detail)
+  assert.ok(preview !== null)
+  assert.equal(preview.text, hostile)
+  assert.ok(!preview.text.includes('&lt;'))
+  assert.ok(!preview.text.includes('<pre'))
+  assert.equal(approvalPreviewCounts(preview), '+2 -0')
+})
+
+// ---------------------------------------------------------------------------
+// resolution keeps the request reason (the resolved card's honest note)
+// ---------------------------------------------------------------------------
+
+const REQUEST_REASON = 'matches sensitive file pattern .env'
+
+test('Allow/Deny keeps the request reason on the resolved card', () => {
+  for (const decision of ['allow', 'deny']) {
+    const approvals = approvalsOf([
+      requested(undefined, { reason: REQUEST_REASON }),
+      resolved({ decision }),
+    ])
+    assert.equal(approvals.length, 1)
+    assert.equal(approvals[0].decision, decision)
+    assert.equal(
+      approvals[0].reason,
+      REQUEST_REASON,
+      `${decision} resolution carries no reason and must keep the request's`,
+    )
+  }
+})
+
+test('a resolution reason wins when present (cancellation keeps "cancelled")', () => {
+  const approvals = approvalsOf([
+    requested(undefined, { reason: REQUEST_REASON }),
+    resolved({ decision: 'deny', reason: 'cancelled' }),
+  ])
+  assert.equal(approvals[0].decision, 'deny')
+  assert.equal(approvals[0].reason, 'cancelled')
+})
+
+test('no reason on either event stays undefined (nothing is invented)', () => {
+  const approvals = approvalsOf([requested(), resolved({ decision: 'allow' })])
+  assert.equal(approvals[0].reason, undefined)
+})
+
+test('the no-entry fallback only shows a reason the resolution actually carried', () => {
+  // A resolved event without a prior request (partial/replayed sidecar) has no
+  // request reason to preserve, so only the event's own reason can appear.
+  const [withReason] = approvalsOf([resolved({ decision: 'deny', reason: 'cancelled' })])
+  assert.equal(withReason.reason, 'cancelled')
+  const [withoutReason] = approvalsOf([resolved({ decision: 'allow' })])
+  assert.equal(withoutReason.reason, undefined)
 })

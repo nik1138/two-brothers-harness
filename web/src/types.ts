@@ -198,6 +198,26 @@ export interface ToolCompletedEvent {
   at: number
 }
 
+/**
+ * Additive bounded preview of a pending mutation, mirroring the harness's
+ * `ApprovalDetail` (`packages/harness/src/permissions.ts`). Every field except
+ * `kind` is optional; the backend clips `diff` to its own cap before sending
+ * it. Old backends and broker-only requests simply omit the whole object.
+ */
+export interface ApprovalDetail {
+  /** `write` / `edit` / `delete` / `shell` (the requested action). */
+  kind: string
+  /** Unified diff of the change for write/edit/delete (bounded by the backend). */
+  diff?: string
+  /** Diff line counts, when the backend knows them. */
+  addedLines?: number
+  removedLines?: number
+  /** Shell command to run (shell detail). */
+  command?: string
+  /** True when the backend clipped the diff to its size cap. */
+  truncated?: boolean
+}
+
 export interface ApprovalRequestedEvent {
   type: 'approval_requested'
   approval_id: string
@@ -205,6 +225,8 @@ export interface ApprovalRequestedEvent {
   target: string
   command?: string | null
   reason?: string | null
+  /** Additive bounded preview; omitted by old backends and broker-only events. */
+  detail?: ApprovalDetail
   run_id: string
   at: number
 }

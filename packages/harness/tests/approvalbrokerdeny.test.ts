@@ -40,6 +40,11 @@ import {
   type ApprovalAutoDeniedEvent,
 } from "../src/runevents.ts";
 import { RunManager, type RunJob } from "../src/runtime.ts";
+import {
+  DELETE_APPROVAL_REASON,
+  SHELL_APPROVAL_REASON,
+  Workspace,
+} from "../src/workspace.ts";
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -648,6 +653,66 @@ test("a fresh broker has no session allows (per-run isolation, never inferred)",
   assert.deepEqual(second.broker.sessionAllows(), []);
   // The operator is asked again in a new run unless the server seeds it.
   assert.equal(await parkAndAnswer(second.broker, writeRequest(), Decision.ALLOW), Decision.ALLOW);
+});
+
+test("approval_requested carries the shell and delete reasons; write stays reason-free", async () => {
+  const tmp = tmpdir();
+  try {
+    const fixture = makeBroker();
+    const workspace = new Workspace(tmp.root, new PermissionManager(null, fixture.broker));
+
+    // Shell: parks with the "effects not previewable" reason.
+    const shellRun = workspace.run_shell("echo hi");
+    await waitFor(() => fixture.broker.pending().length === 1, "the shell approval to park");
+    assert.equal(
+      fixture.broker.respond(String(fixture.broker.pending()[0].approval_id), Decision.DENY),
+      Decision.DENY,
+    );
+    assert.equal((await shellRun).status, "denied");
+
+    // Delete: parks with the "permanent removal" reason.
+    fs.writeFileSync(path.join(tmp.root, "doomed.txt"), "bye\n");
+    const deleteRun = workspace.delete_file("doomed.txt");
+    await waitFor(() => fixture.broker.pending().length === 1, "the delete approval to park");
+    assert.equal(
+      fixture.broker.respond(String(fixture.broker.pending()[0].approval_id), Decision.ALLOW),
+      Decision.ALLOW,
+    );
+    assert.equal((await deleteRun).status, "ok");
+    assert.equal(fs.existsSync(path.join(tmp.root, "doomed.txt")), false);
+
+    // Write: keeps the previous event shape — no `reason` field at all.
+    const writeRun = workspace.write_file("notes.txt", "x\n");
+    await waitFor(() => fixture.broker.pending().length === 1, "the write approval to park");
+    assert.equal(
+      fixture.broker.respond(String(fixture.broker.pending()[0].approval_id), Decision.ALLOW),
+      Decision.ALLOW,
+    );
+    assert.equal((await writeRun).status, "ok");
+
+    const requested = eventsOfType(fixture, "approval_requested");
+    assert.equal(requested.length, 3);
+    assert.equal(requested[0]?.reason, SHELL_APPROVAL_REASON);
+    assert.equal(requested[1]?.reason, DELETE_APPROVAL_REASON);
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(requested[2], "reason"),
+      false,
+      "a write request keeps its previous event shape",
+    );
+
+    // The additive reason never participates in the pair key / denial-cap
+    // identity: adding it changes nothing.
+    assert.equal(
+      approvalPairKey({ action: Action.SHELL, command: "echo hi" }),
+      approvalPairKey({
+        action: Action.SHELL,
+        command: "echo hi",
+        reason: SHELL_APPROVAL_REASON,
+      }),
+    );
+  } finally {
+    tmp.cleanup();
+  }
 });
 
 test("RunManager: auto-allowed pairs never park the run and reach the sidecar", async () => {

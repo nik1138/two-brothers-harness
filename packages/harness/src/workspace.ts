@@ -54,6 +54,19 @@ export const MAX_SHELL_TIMEOUT_S = 600;
 /** run_shell timeout floor: a non-positive value means "run without a timer". */
 export const MIN_SHELL_TIMEOUT_S = 1;
 
+/**
+ * Operator-facing reasons for the approvals where the operator genuinely lacks
+ * a preview. Stable, path- and secret-free English (the request already names
+ * its target/path); the web approval card and the TUI approval panel render
+ * them as-is. Write/edit approvals stay reason-free: their unified-diff
+ * preview is the explanation, so a reason would only add noise.
+ */
+export const SHELL_APPROVAL_REASON =
+  "runs arbitrary shell code inside the workspace — its effects cannot be previewed and may change any file the process can reach";
+/** See {@link SHELL_APPROVAL_REASON}; deletion has no undo and no diff read. */
+export const DELETE_APPROVAL_REASON =
+  "permanently removes the file from the workspace — deletion cannot be undone";
+
 // Refused everywhere, reads included. Patterns are matched against each path
 // component (case-insensitively on case-insensitive filesystems).
 const SENSITIVE_COMPONENTS = new Set([
@@ -1166,7 +1179,7 @@ export class Workspace {
         } catch {
           // unreadable stat/read: the approval still names the target
         }
-        await this.authorize(Action.DELETE, target, "", "", detail);
+        await this.authorize(Action.DELETE, target, "", DELETE_APPROVAL_REASON, detail);
         fs.unlinkSync(target);
         return this.result(tool, target, "ok", { deleted: true });
       });
@@ -1181,7 +1194,10 @@ export class Workspace {
   /** Run a bounded shell command inside the workspace (approval required). */
   async run_shell(command: string, timeout?: number, signal?: AbortSignal): Promise<WorkspaceResult> {
     try {
-      await this.authorize(Action.SHELL, null, command, "", { kind: "shell", command });
+      await this.authorize(Action.SHELL, null, command, SHELL_APPROVAL_REASON, {
+        kind: "shell",
+        command,
+      });
     } catch (exc) {
       if (exc instanceof PermissionDenied) {
         return { tool: "run_shell", status: "denied", command, error: (exc as Error).message };

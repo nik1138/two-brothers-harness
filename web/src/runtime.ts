@@ -1,6 +1,6 @@
 import { chatProjectionGeneration } from './chat'
 import type { ChatItem } from './chat'
-import type { RunEvent, TodoItem, TodoStatus, ToolResultCompact } from './types'
+import type { ApprovalDetail, RunEvent, TodoItem, TodoStatus, ToolResultCompact } from './types'
 
 // Projection of typed runtime events (tool calls, approvals, prompt audits)
 // into group-chat items. Components consume RuntimeItem / TimelineEntry and
@@ -33,6 +33,11 @@ export interface ApprovalItem {
   /** 'allow' | 'deny' once the matching approval_resolved arrives. */
   decision?: string
   reason?: string
+  /**
+   * Additive bounded preview of the pending mutation (diff/command), when the
+   * backend sent one. Plain strings only — the card renders them as text.
+   */
+  detail?: ApprovalDetail
 }
 
 /**
@@ -172,6 +177,7 @@ function appendToRuntimeProjection(state: RuntimeProjectionState, ev: RunEvent) 
       break
     }
     case 'approval_requested': {
+      const detail = approvalDetailOf(ev.detail)
       const item: ApprovalItem = {
         type: 'approval',
         approvalId: ev.approval_id,
@@ -181,6 +187,7 @@ function appendToRuntimeProjection(state: RuntimeProjectionState, ev: RunEvent) 
         reason: ev.reason ?? undefined,
         at: ev.at,
         runId: ev.run_id,
+        ...(detail !== undefined ? { detail } : {}),
       }
       state.approvals.set(ev.approval_id, state.items.length)
       state.items.push(item)
@@ -193,7 +200,9 @@ function appendToRuntimeProjection(state: RuntimeProjectionState, ev: RunEvent) 
         state.items[index] = {
           ...open,
           decision: ev.decision,
-          reason: ev.reason ?? undefined,
+          // Keep the request's honest reason when the resolution carries none
+          // (normal allow/deny); a cancellation reason wins when present.
+          reason: ev.reason ?? open.reason,
         }
       } else {
         state.items.push({
@@ -457,6 +466,122 @@ export function changedFilesOf(runtime: RuntimeItem[]): ChangedFile[] {
     })
   }
   return files
+}
+
+// -- approval detail preview (pure, additive) --------------------------------
+
+/**
+ * Bound on one preview text kept in the DOM, in characters. Mirrors the
+ * package's `APPROVAL_DETAIL_MAX_CHARS`; a value from an old/hostile backend is
+ * clipped here so the browser never holds an unbounded diff.
+ */
+export const APPROVAL_PREVIEW_MAX_CHARS = 20_000
+
+/** One plain-text preview group for the approval card. */
+export interface ApprovalPreview {
+  /** Action kind the detail described (`write`/`edit`/`delete`/`shell`). */
+  kind: string
+  /** Plain text for a `<pre>` — a unified diff or a shell command, never markup. */
+  text: string
+  /** Diff line counts, when the backend reported them. */
+  added?: number
+  removed?: number
+  /** True when the backend clipped the detail or this projection clipped it. */
+  truncated: boolean
+  /** What the preview shows, for the honest toggle label. */
+  noun: 'change' | 'command'
+}
+
+/** Bound one preview text; returns the clipped text and whether it clipped. */
+function previewText(text: string): { text: string; clipped: boolean } {
+  if (text.length <= APPROVAL_PREVIEW_MAX_CHARS) return { text, clipped: false }
+  return { text: `${text.slice(0, APPROVAL_PREVIEW_MAX_CHARS - 1)}…`, clipped: true }
+}
+
+function nonNegativeInt(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : undefined
+}
+
+/**
+ * Tolerant copy of one additive approval detail. A value that does not match
+ * the typed shape becomes `undefined`; invalid individual fields are dropped
+ * while the valid ones survive; diff/command text is bounded. Never throws, so
+ * an old backend (no `detail`) or a malformed payload never breaks a card.
+ */
+export function approvalDetailOf(value: unknown): ApprovalDetail | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const kind = typeof record.kind === 'string' ? record.kind.trim() : ''
+  if (kind === '') return undefined
+  const detail: ApprovalDetail = { kind }
+  let truncated = record.truncated === true
+  if (typeof record.diff === 'string' && record.diff !== '') {
+    const clipped = previewText(record.diff)
+    detail.diff = clipped.text
+    if (clipped.clipped) truncated = true
+  }
+  if (typeof record.command === 'string' && record.command !== '') {
+    const clipped = previewText(record.command)
+    detail.command = clipped.text
+    if (clipped.clipped) truncated = true
+  }
+  const added = nonNegativeInt(record.addedLines)
+  if (added !== undefined) detail.addedLines = added
+  const removed = nonNegativeInt(record.removedLines)
+  if (removed !== undefined) detail.removedLines = removed
+  if (truncated) detail.truncated = true
+  return detail
+}
+
+/**
+ * The render-ready preview of one approval detail, or null when there is
+ * nothing to show (no detail, unknown shape, or a detail without diff/command
+ * text). Shell details preview the command; diff-bearing actions preview the
+ * change. Pure: the returned text is data, never markup.
+ */
+export function approvalPreviewOf(value: unknown): ApprovalPreview | null {
+  const detail = approvalDetailOf(value)
+  if (detail === undefined) return null
+  const diff = detail.diff !== undefined && detail.diff.trim() !== '' ? detail.diff : undefined
+  const command =
+    detail.command !== undefined && detail.command.trim() !== '' ? detail.command : undefined
+  const commandPreview: ApprovalPreview | null =
+    command === undefined
+      ? null
+      : {
+          kind: detail.kind,
+          text: command,
+          truncated: detail.truncated === true,
+          noun: 'command',
+        }
+  const diffPreview: ApprovalPreview | null =
+    diff === undefined
+      ? null
+      : {
+          kind: detail.kind,
+          text: diff,
+          ...(detail.addedLines !== undefined ? { added: detail.addedLines } : {}),
+          ...(detail.removedLines !== undefined ? { removed: detail.removedLines } : {}),
+          truncated: detail.truncated === true,
+          noun: 'change',
+        }
+  return detail.kind === 'shell'
+    ? commandPreview ?? diffPreview
+    : diffPreview ?? commandPreview
+}
+
+/**
+ * `+N -M` for a diff preview with known line counts, or "" when there is
+ * nothing truthful to print (a command preview, or unknown counts).
+ */
+export function approvalPreviewCounts(preview: ApprovalPreview): string {
+  if (preview.noun !== 'change') return ''
+  const parts: string[] = []
+  if (preview.added !== undefined) parts.push(`+${preview.added}`)
+  if (preview.removed !== undefined) parts.push(`-${preview.removed}`)
+  return parts.join(' ')
 }
 
 // -- live "who is acting" tail state (additive) ------------------------------

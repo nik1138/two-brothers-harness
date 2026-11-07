@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { NButton } from 'naive-ui'
 import type { ApprovalItem } from '../runtime'
+import { approvalPreviewCounts, approvalPreviewOf } from '../runtime'
 import type { ApprovalScope } from '../api'
 
 const props = defineProps<{
@@ -32,6 +33,26 @@ const pending = computed(() => props.item.decision === undefined)
 const allowed = computed(() => props.item.decision === 'allow')
 
 /**
+ * The additive bounded preview (shell command or unified diff), or null when
+ * the backend sent no detail (old backends) or the detail carries no renderable
+ * text. The preview is collapsed by default; the toggle is a real button.
+ */
+const preview = computed(() => approvalPreviewOf(props.item.detail))
+
+/** Diff line counts (`+N -M`) shown beside the toggle; "" when unknown. */
+const previewCounts = computed(() => {
+  const value = preview.value
+  return value === null ? '' : approvalPreviewCounts(value)
+})
+
+/** Stable id for the `<pre>` the toggle controls (approval ids are backend ids). */
+const previewId = computed(
+  () => `approval-preview-${props.item.approvalId.replace(/[^A-Za-z0-9_-]/g, '')}`,
+)
+
+const previewOpen = ref(false)
+
+/**
  * Pull the card into view when it starts waiting (G-1): the operator may have
  * scrolled up to read history, and nothing else would reveal the new request.
  */
@@ -49,7 +70,17 @@ async function reveal() {
 
 watch(pending, (isPending, wasPending) => {
   if (isPending && !wasPending) reveal()
+  // A resolved card no longer needs the (collapsible) preview surface.
+  if (!isPending) previewOpen.value = false
 })
+
+// A different approval on the same card instance starts collapsed.
+watch(
+  () => props.item.approvalId,
+  () => {
+    previewOpen.value = false
+  },
+)
 
 onMounted(() => {
   // a reload can land on a run that is already parked on this request
@@ -136,6 +167,32 @@ function onKeydown(e: KeyboardEvent) {
 
     <p v-if="item.reason && pending" class="approval-reason muted">{{ item.reason }}</p>
     <p v-if="errorText" class="approval-error" role="alert">{{ errorText }}</p>
+
+    <!-- Additive bounded preview (old backends send no detail → nothing here).
+         The diff/command is untrusted text: it is interpolated into a <pre>
+         (Vue escapes text nodes) and never goes through v-html. -->
+    <div v-if="pending && preview" class="approval-preview">
+      <button
+        type="button"
+        class="approval-preview-toggle"
+        :aria-expanded="previewOpen ? 'true' : 'false'"
+        :aria-controls="previewId"
+        @click="previewOpen = !previewOpen"
+      >
+        <span class="approval-preview-caret" aria-hidden="true">{{ previewOpen ? '▾' : '▸' }}</span>
+        <span class="approval-preview-label">{{
+          previewOpen ? 'Hide preview' : `Preview the ${preview.noun}`
+        }}</span>
+        <span v-if="previewCounts" class="approval-preview-counts">{{ previewCounts }}</span>
+        <span v-if="preview.truncated" class="approval-preview-clipped">clipped</span>
+      </button>
+      <pre
+        v-show="previewOpen"
+        :id="previewId"
+        class="approval-preview-body"
+        tabindex="0"
+      >{{ preview.text }}</pre>
+    </div>
 
     <footer v-if="pending" class="approval-actions">
       <n-button
@@ -280,6 +337,102 @@ function onKeydown(e: KeyboardEvent) {
 
 .approval-command {
   white-space: pre-wrap;
+}
+
+/* Additive bounded preview: a real toggle plus a plain-text <pre>. Collapsed
+   by default; the expanded body scrolls inside the card (no horizontal page
+   shift on phones). */
+.approval-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.approval-preview-toggle {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 0.15rem 0.1rem;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-align: left;
+  color: var(--accent);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.approval-preview-toggle:hover .approval-preview-label {
+  text-decoration: underline;
+}
+
+.approval-preview-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.approval-preview-caret {
+  flex: none;
+  font-size: 0.72rem;
+}
+
+.approval-preview-label,
+.approval-preview-counts,
+.approval-preview-clipped {
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+.approval-preview-counts {
+  flex: none;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
+.approval-preview-clipped {
+  flex: none;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--warning, var(--text-secondary));
+}
+
+.approval-preview-body {
+  margin: 0;
+  max-width: 100%;
+  max-height: 14rem;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-panel);
+  color: var(--text-primary);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  white-space: pre;
+  tab-size: 2;
+}
+
+.approval-preview-body:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+@media (max-width: 480px) {
+  .approval-preview-toggle {
+    align-self: stretch;
+  }
+
+  .approval-preview-body {
+    max-height: 10rem;
+  }
 }
 
 .approval-reason,

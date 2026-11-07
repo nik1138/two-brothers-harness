@@ -27,11 +27,14 @@ import {
 } from "../src/permissions.ts";
 import { ShellRunner } from "../src/shell.ts";
 import {
+  DELETE_APPROVAL_REASON,
+  SHELL_APPROVAL_REASON,
   Workspace,
   WorkspaceError,
   isSensitivePath,
   makeDiff,
 } from "../src/workspace.ts";
+import { approvalPairKey } from "../src/runevents.ts";
 import { resolveConfig } from "../src/config.ts";
 import { SENIOR_VERIFY_TOOL_NAMES, TwoBrothersHarness } from "../src/harness.ts";
 import { MockProvider } from "../src/provider.ts";
@@ -659,6 +662,75 @@ test("senior shell still goes through the approval broker", async () => {
   } finally {
     cleanup();
   }
+});
+
+// ---------------------------------------------------------------------------
+// Approval reasons: honest, stable, additive (shell + delete only)
+// ---------------------------------------------------------------------------
+
+test("shell and delete approvals carry honest reasons; write and edit carry none", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const requests: ApprovalRequest[] = [];
+    const broker = new CallbackBroker((request) => {
+      requests.push(request);
+      return Decision.ALLOW;
+    });
+    const ws = new Workspace(root, new PermissionManager(null, broker));
+    await ws.write_file("notes.txt", "one\n");
+    await ws.edit_file("notes.txt", "one", "two");
+    await ws.run_shell("echo hi");
+    await ws.write_file("doomed.txt", "bye\n");
+    await ws.delete_file("doomed.txt");
+
+    assert.deepEqual(
+      requests.map((request) => request.action),
+      [Action.WRITE, Action.EDIT, Action.SHELL, Action.WRITE, Action.DELETE],
+    );
+    const requestsFor = (action: Action): ApprovalRequest[] =>
+      requests.filter((request) => request.action === action);
+
+    // Shell: the operator genuinely cannot preview the effects of arbitrary
+    // code, so the request carries one stable, path- and command-free reason.
+    const shell = requestsFor(Action.SHELL);
+    assert.equal(shell.length, 1);
+    assert.equal(shell[0]?.reason, SHELL_APPROVAL_REASON);
+    assert.ok(SHELL_APPROVAL_REASON.length > 0 && SHELL_APPROVAL_REASON.length <= 200);
+    assert.doesNotMatch(SHELL_APPROVAL_REASON, /[\r\n]/);
+    assert.equal(SHELL_APPROVAL_REASON.includes(root), false, "no workspace path leaks");
+    assert.equal(SHELL_APPROVAL_REASON.includes("echo hi"), false, "no command echo");
+
+    // Delete: permanent and undoable, so it states that.
+    const removed = requestsFor(Action.DELETE);
+    assert.equal(removed.length, 1);
+    assert.equal(removed[0]?.reason, DELETE_APPROVAL_REASON);
+    assert.ok(DELETE_APPROVAL_REASON.length > 0 && DELETE_APPROVAL_REASON.length <= 200);
+    assert.doesNotMatch(DELETE_APPROVAL_REASON, /[\r\n]/);
+    assert.equal(DELETE_APPROVAL_REASON.includes(root), false, "no workspace path leaks");
+
+    // Write/edit stay reason-free: their diff preview is the explanation.
+    for (const request of [...requestsFor(Action.WRITE), ...requestsFor(Action.EDIT)]) {
+      assert.equal(request.reason, "", `${request.action} must not invent a reason`);
+    }
+    const reasons = new Set([SHELL_APPROVAL_REASON, DELETE_APPROVAL_REASON]);
+    assert.equal(reasons.size, 2, "the two reasons are distinct, stable strings");
+  } finally {
+    cleanup();
+  }
+});
+
+test("approvalPairKey is unaffected by the reason field", () => {
+  const writeWithout: ApprovalRequest = { action: Action.WRITE, target: "notes.txt" };
+  const writeWith: ApprovalRequest = { ...writeWithout, reason: "anything" };
+  assert.equal(approvalPairKey(writeWith), approvalPairKey(writeWithout));
+
+  const shellWithout: ApprovalRequest = { action: Action.SHELL, command: "echo hi" };
+  const shellWith: ApprovalRequest = { ...shellWithout, reason: SHELL_APPROVAL_REASON };
+  assert.equal(approvalPairKey(shellWith), approvalPairKey(shellWithout));
+
+  const deleteWithout: ApprovalRequest = { action: Action.DELETE, target: "doomed.txt" };
+  const deleteWith: ApprovalRequest = { ...deleteWithout, reason: DELETE_APPROVAL_REASON };
+  assert.equal(approvalPairKey(deleteWith), approvalPairKey(deleteWithout));
 });
 
 // ---------------------------------------------------------------------------

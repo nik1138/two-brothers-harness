@@ -323,6 +323,8 @@ export {
   WorkspaceError,
   isSensitivePath,
   makeDiff,
+  SHELL_APPROVAL_REASON,
+  DELETE_APPROVAL_REASON,
   WorkspaceRegistry,
   WORKSPACE_NAME_MAX_CHARS,
   type RegisteredWorkspace,
