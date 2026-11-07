@@ -76,13 +76,16 @@ try {
 		check("node dist/selftest.js", false, `missing ${selftestEntry}`);
 	}
 
-	// 5. Mock CLI run from the installed copy (offline; expects the tokens footer).
+	// 5. Mock CLI run from the installed copy (offline; expects the decision
+	//    envelope and the compact human footer from terminal UX slice 2).
 	const cliEntry = join(installedRoot, "dist", "cli.js");
 	if (existsSync(cliEntry)) {
 		const cli = run("node", [cliEntry, "run", "smoke", "--provider", "mock"], tempDir, { timeoutMs: 180_000 });
+		const footer = /\btokens \d+ in \/ \d+ out\b/.test(cli.stdout);
+		const decision = cli.stdout.includes("[senior -> user] decision");
 		check(
 			"node dist/cli.js run --provider mock",
-			!cli.failed && cli.status === 0 && cli.stdout.includes("tokens:"),
+			!cli.failed && cli.status === 0 && decision && footer,
 			`exit ${cli.status}; ${cli.stdout.trim().split("\n").slice(-1)[0] ?? cli.stderr.trim()}`,
 		);
 	} else {

@@ -31,6 +31,7 @@ import {
   createTheme,
   detectThemeMode,
   plainTheme,
+  type EmphasisStyle,
   type ThemeMode,
   type ThemeToken,
 } from "./tui/theme.ts";
@@ -46,6 +47,13 @@ export interface CliStyle {
   readonly color: boolean;
   /** Paint `text` with one semantic token (identity when `color` is false). */
   paint(token: ThemeToken, text: string): string;
+  /**
+   * Paint `text` with a token plus one Markdown emphasis (`bold`, `italic`,
+   * `code`, `link`, `marker`); the transcript's Markdown bodies use it so the
+   * span vocabulary and its SGR stay in `tui/theme.ts`. Identity when
+   * `color` is false, and `emphasis: undefined` is exactly {@link paint}.
+   */
+  paintEmphasis(token: ThemeToken, emphasis: EmphasisStyle | undefined, text: string): string;
   /** Bold `text` (identity when `color` is false). */
   bold(text: string): string;
   /** Dim `text` (identity when `color` is false). */

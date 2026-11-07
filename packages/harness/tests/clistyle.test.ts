@@ -22,14 +22,22 @@ import {
   type CliStyle,
 } from "../src/clistyle.ts";
 import {
+  helpColumns,
   renderBriefUsage,
   renderCommandHelp,
   renderFullHelp,
   renderMainHelp,
 } from "../src/clihelp.ts";
+import {
+  RULE_MAX_WIDTH,
+  humanFooter,
+  renderLabeledRule,
+  ruleWidth,
+} from "../src/clilayout.ts";
 import { costLine, renderMessages, usageLine } from "../src/cli.ts";
 import { formatDoctorReport } from "../src/doctor.ts";
 import { resolveConfig } from "../src/config.ts";
+import { displayWidth } from "../src/tui/text.ts";
 import { createTheme, RESET, type ThemeToken } from "../src/tui/theme.ts";
 
 // ---------------------------------------------------------------------------
@@ -363,4 +371,225 @@ test("clistyle.ts spells no escape sequence: the TUI theme owns the ANSI vocabul
   assert.ok(!/\\x1b|\\u001b|\\u001B/.test(source), "clistyle.ts must not spell ANSI");
   assert.match(source, /tui\/theme\.ts/, "clistyle.ts reuses the theme layer");
   assert.ok(!/from "zod"|from "@earendil/.test(source), "clistyle.ts adds no dependency");
+});
+
+// ---------------------------------------------------------------------------
+// human text layout: block separation, decision rule, Markdown bodies, footer
+// ---------------------------------------------------------------------------
+
+/** A transcript whose prose bodies carry Markdown, inline markers and a fence. */
+const markdownTranscript: Array<Record<string, any>> = [
+  { from: "user", to: "senior", kind: "message", payload: { text: "do the thing" } },
+  {
+    from: "junior",
+    to: "senior",
+    kind: "proposal",
+    payload: {
+      title: "Plan",
+      answer:
+        "## Sub head\n\n**bold** and `code` and *italic*\n\n- item one\n- item two",
+      confidence: 0.5,
+    },
+  },
+  {
+    from: "senior",
+    to: "junior",
+    kind: "review",
+    payload: { verdict: "accept", notes: "All **good**.\n\n```ts\nconst x = 1;\n```" },
+  },
+  {
+    from: "senior",
+    to: "user",
+    kind: "decision",
+    payload: { decision: "go **now**", rationale: "because `why`", confidence: 0.9, dissent: null },
+  },
+];
+
+test("cli layout: envelopes are blank-line separated and the decision is ruled off", () => {
+  const plain = renderMessages(transcript, false, plainCliStyle, FALLBACK_TERMINAL_WIDTH);
+  const lines = plain.split("\n");
+  assert.equal(lines[0], "[user]      hello");
+  // exactly one blank line between consecutive envelope blocks
+  assert.match(plain, /\n\n\[senior -> junior\] consult\n/);
+  assert.match(plain, /\n\n\[junior -> senior\] proposal\n/);
+  assert.ok(!plain.includes(ESC));
+
+  const ruleIndex = lines.findIndex((line) => line.startsWith("── decision ─"));
+  assert.ok(ruleIndex >= 0, "the decision rule is missing");
+  assert.equal(lines[ruleIndex + 1], "[senior -> user] decision");
+  assert.equal(displayWidth(lines[ruleIndex] as string), RULE_MAX_WIDTH);
+  assert.equal(lines.filter((line) => line.startsWith("── decision")).length, 1);
+
+  // the rule is width-capped to the calling width as well
+  const narrow = renderMessages(transcript, false, plainCliStyle, 40);
+  const narrowRule = narrow
+    .split("\n")
+    .find((line) => line.startsWith("── decision")) as string;
+  assert.equal(displayWidth(narrowRule), 40);
+});
+
+test("cli layout: model Markdown bodies render width-safe and strip back", () => {
+  const width = 60;
+  const plain = renderMessages(markdownTranscript, false, plainCliStyle, width);
+  const colored = renderMessages(markdownTranscript, false, ansi16Style(), width);
+  assert.equal(stripAnsi(colored), plain);
+  assert.ok(!plain.includes(ESC));
+  for (const line of plain.split("\n")) {
+    assert.ok(displayWidth(line) <= width, `line over ${width}: ${JSON.stringify(line)}`);
+  }
+  // block structure and inline markers render (markers are structure, not text)
+  assert.match(plain, /^    answer: ## Sub head$/m);
+  assert.ok(plain.includes("bold and code and italic"), plain);
+  assert.ok(plain.includes("- item one"), plain);
+  assert.ok(plain.includes("┌─ ts"), plain);
+  assert.ok(plain.includes("const x = 1;"), plain);
+  assert.ok(plain.includes("└─"), plain);
+  // continuation rows hang under the body column (4 indent + key + space)
+  assert.match(plain, /\n {12}bold and code and italic/);
+
+  // the inline emphasis is painted through the theme's emphasis vocabulary
+  const theme = createTheme("ansi16");
+  assert.ok(colored.includes(theme.paintEmphasis("junior", "bold", "bold")));
+  assert.ok(colored.includes(theme.paintEmphasis("junior", "code", "code")));
+  assert.ok(colored.includes(theme.paintEmphasis("strong", undefined, "Sub head")));
+  assert.ok(colored.includes(theme.paintEmphasis("success", undefined, "accept")));
+});
+
+test("cli layout: model control bytes and ANSI never reach the output", () => {
+  const hostile: Array<Record<string, any>> = [
+    { from: "user", to: "senior", kind: "message", payload: { text: "task\u0007" } },
+    {
+      from: "junior",
+      to: "senior",
+      kind: "proposal",
+      payload: {
+        title: "\u001b[31mred\u001b[0m\u0007 title",
+        answer: "\u001b[2Jcleared\u0000zero",
+        risks: ["\u001b[31mrisk\u001b[0m"],
+      },
+    },
+  ];
+  const plain = renderMessages(hostile, false, plainCliStyle, FALLBACK_TERMINAL_WIDTH);
+  const colored = renderMessages(hostile, false, ansi16Style(), FALLBACK_TERMINAL_WIDTH);
+  assert.equal(stripAnsi(colored), plain);
+  assert.ok(!plain.includes(ESC), "a model ANSI sequence leaked into the transcript");
+  assert.ok(
+    !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(plain),
+    "a model control byte leaked into the transcript",
+  );
+  assert.ok(plain.includes("red title"), plain);
+  assert.ok(plain.includes("clearedzero"), plain);
+  assert.ok(plain.includes("- risk"), plain);
+});
+
+test("cli layout: the compact human footer appears only when usage data exists", () => {
+  const usage = { input_tokens: 4000, output_tokens: 2000, cached_tokens: 1000, model_calls: 4 };
+  assert.equal(
+    humanFooter(usage, 0.03, plainCliStyle, FALLBACK_TERMINAL_WIDTH),
+    "tokens 4000 in / 2000 out · cache 25% · 4 calls · cost $0.0300",
+  );
+  assert.equal(
+    humanFooter(
+      { input_tokens: 40, output_tokens: 20, model_calls: 4 },
+      null,
+      plainCliStyle,
+      FALLBACK_TERMINAL_WIDTH,
+    ),
+    "tokens 40 in / 20 out · 4 calls",
+  );
+  assert.equal(
+    humanFooter({ model_calls: 1 }, null, plainCliStyle, FALLBACK_TERMINAL_WIDTH),
+    "tokens 0 in / 0 out · 1 call",
+  );
+  assert.equal(humanFooter({}, null, plainCliStyle, FALLBACK_TERMINAL_WIDTH), null);
+
+  const style = ansi16Style();
+  const colored = humanFooter(usage, 0.03, style, FALLBACK_TERMINAL_WIDTH) as string;
+  assert.equal(stripAnsi(colored), humanFooter(usage, 0.03, plainCliStyle, FALLBACK_TERMINAL_WIDTH));
+  assert.ok(colored.includes(expectedAnsi16("muted", "tokens")));
+  assert.ok(colored.includes(expectedAnsi16("strong", "$0.0300")));
+
+  // width-capped: a narrow terminal shortens instead of overflowing
+  const narrow = humanFooter(usage, 3.5, plainCliStyle, 30) as string;
+  assert.ok(displayWidth(narrow) <= 30, narrow);
+  assert.ok(narrow.endsWith("…"), narrow);
+});
+
+test("cli layout: ruleWidth caps at both the width and the maximum rule", () => {
+  assert.equal(ruleWidth(FALLBACK_TERMINAL_WIDTH), RULE_MAX_WIDTH);
+  assert.equal(ruleWidth(200), RULE_MAX_WIDTH);
+  assert.equal(ruleWidth(40), 40);
+  assert.equal(ruleWidth(Number.NaN), 1);
+  const plain = renderLabeledRule("decision", FALLBACK_TERMINAL_WIDTH);
+  assert.equal(displayWidth(plain), RULE_MAX_WIDTH);
+  assert.ok(plain.startsWith("── decision ─"));
+});
+
+test("clilayout.ts spells no escape sequence and reuses the pure renderers", () => {
+  const source = readFileSync(new URL("../src/clilayout.ts", import.meta.url), "utf8");
+  assert.ok(!/\\x1b|\\u001b|\\u001B/.test(source), "clilayout.ts must not spell ANSI");
+  assert.match(source, /tui\/markdownstyle\.ts/, "Markdown comes from the one pure renderer");
+  assert.match(source, /tui\/text\.ts/, "sanitizing/width comes from the shared text helpers");
+  assert.match(source, /paintEmphasis/, "spans are painted through CliStyle");
+  assert.ok(!/from "zod"|from "@earendil/.test(source), "clilayout.ts adds no dependency");
+});
+
+// ---------------------------------------------------------------------------
+// responsive help columns
+// ---------------------------------------------------------------------------
+
+/** The plain help lines belonging to one command's `Flags:` block. */
+function flagBlockLines(command: string, width: number): string[] {
+  const text = renderCommandHelp(command, plainCliStyle, width);
+  const start = text.indexOf("Flags:");
+  const end = text.indexOf("Examples:");
+  assert.ok(start >= 0 && end > start, "help block missing Flags/Examples");
+  return text.slice(start, end).split("\n");
+}
+
+test("clihelp: generated help columns scale with the terminal width", () => {
+  const legacy = helpColumns(FALLBACK_TERMINAL_WIDTH);
+  assert.deepEqual(legacy, { command: 40, flag: 40, variable: 48 });
+  assert.deepEqual(helpColumns(Number.NaN), legacy);
+  const wide = helpColumns(160);
+  assert.ok(wide.command > legacy.command, `wide command column ${wide.command}`);
+  const narrow = helpColumns(60);
+  assert.ok(narrow.command < legacy.command, `narrow command column ${narrow.command}`);
+  assert.ok(narrow.flag < legacy.flag, `narrow flag column ${narrow.flag}`);
+
+  // a wide TTY puts a long command and its summary on one aligned row...
+  const sessionsWide = renderMainHelp(plainCliStyle, 160)
+    .split("\n")
+    .find((line) => line.includes("two-brothers sessions")) as string;
+  assert.ok(
+    sessionsWide.includes("list, read, search and export stored sessions"),
+    sessionsWide,
+  );
+  // ...while the 96-column fallback keeps the historical two-line layout
+  const sessionsFallback = renderMainHelp(plainCliStyle, FALLBACK_TERMINAL_WIDTH)
+    .split("\n")
+    .find((line) => line.includes("two-brothers sessions")) as string;
+  assert.ok(
+    !sessionsFallback.includes("list, read, search and export stored sessions"),
+    sessionsFallback,
+  );
+
+  // painted renderers still strip back to the plain bytes at every width
+  for (const width of [60, FALLBACK_TERMINAL_WIDTH, 160]) {
+    assert.equal(
+      stripAnsi(renderMainHelp(ansi16Style(), width)),
+      renderMainHelp(plainCliStyle, width),
+      `main help width ${width}`,
+    );
+    assert.equal(
+      stripAnsi(renderCommandHelp("run", ansi16Style(), width)),
+      renderCommandHelp("run", plainCliStyle, width),
+      `run help width ${width}`,
+    );
+  }
+
+  // a narrow flag column keeps every flag row inside the terminal
+  for (const line of flagBlockLines("run", 60)) {
+    assert.ok(displayWidth(line) <= 60, `flag line over 60: ${JSON.stringify(line)}`);
+  }
 });

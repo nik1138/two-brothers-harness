@@ -68,7 +68,17 @@ import {
   type CommandCatalog,
 } from "./commands.ts";
 import { estimateCost, type CostEstimate } from "./cost.ts";
-import { plainCliStyle, resolveCliStyle, type CliStyle } from "./clistyle.ts";
+import { plainCliStyle, resolveCliStyle, terminalWidth, type CliStyle } from "./clistyle.ts";
+import {
+  USER_INDENT,
+  humanFooter,
+  renderBullets,
+  renderKeyedBody,
+  renderKeyedLine,
+  renderLabeledRule,
+  renderPlainBlock,
+  sanitizeOneLine,
+} from "./clilayout.ts";
 import { formatDoctorReport, runDoctor } from "./doctor.ts";
 import { TwoBrothersHarness, type PromptAuditEntry, type ToolScopes } from "./harness.ts";
 import {
@@ -353,93 +363,136 @@ function renderPromptAudits(
   return lines.join("\n");
 }
 
+/** A payload list field (the protocol sanitizer guarantees arrays; bail soft). */
+function payloadItems(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+/** Theme tone for a review verdict: `accept` reads as success, rework warns. */
+function verdictTone(value: unknown): ThemeToken | null {
+  const verdict = sanitizeOneLine(value).toLowerCase();
+  if (verdict === "accept") return "success";
+  if (verdict === "revise" || verdict === "reject") return "warning";
+  return null;
+}
+
+/**
+ * One envelope block: the `[from -> to] kind` header plus one row per rendered
+ * payload field. Model-provided text is sanitized before layout; prose fields
+ * render as width-safe Markdown bodies (the TUI's parser), while titles,
+ * numbers and verdicts stay single-line values.
+ */
+function renderEnvelopeBlock(
+  msg: Record<string, any>,
+  verbose: boolean,
+  style: CliStyle,
+  width: number,
+): string[] {
+  const from = sanitizeOneLine(msg.from);
+  const to = sanitizeOneLine(msg.to);
+  const kind = sanitizeOneLine(msg.kind);
+  const payload: Record<string, unknown> =
+    msg.payload !== null && typeof msg.payload === "object"
+      ? (msg.payload as Record<string, unknown>)
+      : {};
+
+  if (kind === "message" && from === "user") {
+    // Keep text on the historical `[user]      <task>` line: scripts and the
+    // E2E anchors read the task from that line; only long text wraps.
+    const prefix = `[${paintRole(style, "user")}]${" ".repeat(USER_INDENT - "[user]".length)}`;
+    const rows = renderPlainBlock(payload.text, width - USER_INDENT);
+    return rows.map((row, index) =>
+      index === 0 ? `${prefix}${row}` : `${" ".repeat(USER_INDENT)}${row}`,
+    );
+  }
+
+  const block: string[] = [];
+  // The final verdict is the run's product: rule it off so it reads as the
+  // conclusion rather than one more envelope in the pile.
+  if (kind === "decision") block.push(renderLabeledRule("decision", width, style));
+  block.push(`[${paintRole(style, from)} -> ${paintRole(style, to)}] ${style.dim(kind)}`);
+  if (verbose) block.push("    " + JSON.stringify(payload));
+
+  const roleTone: ThemeToken = from === "junior" ? "junior" : "senior";
+
+  if (kind === "consult") {
+    block.push(...renderKeyedBody("ask", payload.ask, width, style, roleTone));
+    block.push(...renderKeyedLine("expect", payload.expect ?? "proposal", width, style));
+  } else if (kind === "proposal") {
+    block.push(...renderKeyedLine("title", payload.title, width, style));
+    block.push(...renderKeyedBody("answer", payload.answer, width, style, roleTone));
+    if (payload.rationale) {
+      block.push(...renderKeyedBody("rationale", payload.rationale, width, style, "muted"));
+    }
+    if (payload.risks) {
+      block.push(...renderBullets("risks", payloadItems(payload.risks), width, style, "warning"));
+    }
+    block.push(...renderKeyedLine("confidence", payload.confidence, width, style));
+    if (payload.asks) {
+      block.push(...renderBullets("asks", payloadItems(payload.asks), width, style));
+    }
+  } else if (kind === "delegation") {
+    block.push(...renderKeyedBody("work", payload.work, width, style, roleTone));
+    block.push(...renderBullets("acceptance", payloadItems(payload.acceptance), width, style));
+  } else if (kind === "deliverable") {
+    block.push(...renderKeyedBody("result", payload.result, width, style, roleTone));
+    if (payload.artifacts) {
+      block.push(...renderBullets("artifacts", payloadItems(payload.artifacts), width, style));
+    }
+    block.push(...renderKeyedLine("confidence", payload.confidence, width, style));
+  } else if (kind === "review") {
+    block.push(
+      ...renderKeyedLine("verdict", payload.verdict, width, style, verdictTone(payload.verdict)),
+    );
+    block.push(...renderKeyedBody("notes", payload.notes, width, style, roleTone));
+  } else if (kind === "decision") {
+    block.push(...renderKeyedBody("decision", payload.decision, width, style, "decision"));
+    block.push(...renderKeyedBody("rationale", payload.rationale, width, style, "muted"));
+    block.push(...renderKeyedLine("confidence", payload.confidence, width, style));
+    block.push(
+      ...renderKeyedLine(
+        "dissent",
+        payload.dissent ?? "(none)",
+        width,
+        style,
+        payload.dissent === undefined || payload.dissent === null ? null : "dissent",
+      ),
+    );
+    if (payload.accepted_proposals) {
+      block.push(
+        ...renderBullets(
+          "accepted_proposals",
+          payloadItems(payload.accepted_proposals),
+          width,
+          style,
+        ),
+      );
+    }
+  }
+  return block;
+}
+
 /**
  * The human transcript for a `run` (and every chat REPL turn).
  *
- * `[role -> role]` headers are painted by role token, the envelope kind is
- * `dim`, the labelled payload keys are `dim`, a decision value uses the bold
- * `decision` token and a dissent value the `dissent`/error token; the plain
- * default keeps the historical bytes unchanged.
+ * Envelopes render as separate blocks (one blank line between them) with a
+ * stable `[from -> to] kind` header, a width-capped rule in front of the
+ * decision block, and model prose as width-safe Markdown. `[role -> role]`
+ * headers are painted by role token, the envelope kind is `dim`, the labelled
+ * payload keys are `dim`, a decision value uses the bold `decision` token and
+ * a dissent value the `dissent` token. `width` defaults to
+ * {@link terminalWidth}, so piped output keeps the 96-column plain layout and
+ * a TTY wraps to its own size; the plain default keeps machine-safe text.
  */
 export function renderMessages(
   messages: Array<Record<string, any>>,
   verbose: boolean,
   style: CliStyle = plainCliStyle,
+  width: number = terminalWidth(),
 ): string {
-  const out: string[] = [];
-  for (const msg of messages) {
-    const frm = msg.from;
-    const to = msg.to;
-    const kind = msg.kind;
-    const payload = msg.payload ?? {};
-
-    if (kind === "message" && frm === "user") {
-      out.push(`[${paintRole(style, "user")}]      ${payload.text ?? ""}`);
-      continue;
-    }
-
-    out.push(
-      `[${paintRole(style, frm)} -> ${paintRole(style, to)}] ${style.dim(kind)}`,
-    );
-    if (verbose) out.push("    " + JSON.stringify(payload));
-
-    if (kind === "consult") {
-      out.push(`    ${style.dim("ask:")} ${payload.ask ?? ""}`);
-      out.push(`    ${style.dim("expect:")} ${payload.expect ?? "proposal"}`);
-    } else if (kind === "proposal") {
-      out.push(`    ${style.dim("title:")} ${payload.title ?? ""}`);
-      out.push(`    ${style.dim("answer:")} ${payload.answer ?? ""}`);
-      if (payload.rationale) {
-        out.push(`    ${style.dim("rationale:")} ${payload.rationale}`);
-      }
-      if (payload.risks) {
-        out.push(`    ${style.dim("risks:")}`);
-        for (const risk of payload.risks) {
-          out.push(`      - ${style.paint("warning", String(risk))}`);
-        }
-      }
-      out.push(`    ${style.dim("confidence:")} ${payload.confidence ?? ""}`);
-      if (payload.asks) {
-        out.push(`    ${style.dim("asks:")}`);
-        for (const ask of payload.asks) out.push(`      - ${ask}`);
-      }
-    } else if (kind === "delegation") {
-      out.push(`    ${style.dim("work:")} ${payload.work ?? ""}`);
-      out.push(`    ${style.dim("acceptance:")}`);
-      for (const acceptance of payload.acceptance ?? []) {
-        out.push(`      - ${acceptance}`);
-      }
-    } else if (kind === "deliverable") {
-      out.push(`    ${style.dim("result:")} ${payload.result ?? ""}`);
-      if (payload.artifacts) {
-        out.push(`    ${style.dim("artifacts:")}`);
-        for (const artifact of payload.artifacts) out.push(`      - ${artifact}`);
-      }
-      out.push(`    ${style.dim("confidence:")} ${payload.confidence ?? ""}`);
-    } else if (kind === "review") {
-      out.push(`    ${style.dim("verdict:")} ${payload.verdict ?? ""}`);
-      out.push(`    ${style.dim("notes:")} ${payload.notes ?? ""}`);
-    } else if (kind === "decision") {
-      out.push(
-        `    ${style.dim("decision:")} ${style.paint("decision", String(payload.decision ?? ""))}`,
-      );
-      out.push(`    ${style.dim("rationale:")} ${payload.rationale ?? ""}`);
-      out.push(`    ${style.dim("confidence:")} ${payload.confidence ?? ""}`);
-      const dissentText = payload.dissent ?? "(none)";
-      const paintedDissent =
-        payload.dissent === undefined || payload.dissent === null
-          ? dissentText
-          : style.paint("dissent", String(dissentText));
-      out.push(`    ${style.dim("dissent:")} ${paintedDissent}`);
-      if (payload.accepted_proposals) {
-        out.push(`    ${style.dim("accepted_proposals:")}`);
-        for (const proposal of payload.accepted_proposals) {
-          out.push(`      - ${proposal}`);
-        }
-      }
-    }
-  }
-  return out.join("\n");
+  return messages
+    .map((msg) => renderEnvelopeBlock(msg, verbose, style, width).join("\n"))
+    .join("\n\n");
 }
 
 function argsToConfigArgs(values: Record<string, any>): Record<string, unknown> {
@@ -1028,9 +1081,19 @@ async function runOnce(
       io.error(paintWarningPrefix(textStyle, `[warn] ${err}`));
     }
     if (!cfg.jsonOut) {
-      io.log(usageLine(result.usage ?? {}, textStyle));
-      const cost = costLine(cfg, result.usage ?? {}, textStyle);
-      if (cost) io.log(cost);
+      // The compact human footer replaces the print-mode `tokens:`/`cost:`
+      // diagnostics lines here; machine modes keep those exact formats.
+      const cost = estimateRunCost(cfg, result.usage ?? {});
+      const footer = humanFooter(
+        result.usage ?? {},
+        cost === null ? null : cost.totalCost,
+        textStyle,
+        terminalWidth(),
+      );
+      if (footer !== null) {
+        io.log("");
+        io.log(footer);
+      }
     }
     if (cfg.jsonOut) io.log(JSON.stringify(result.decision));
     return failed ? 1 : 0;

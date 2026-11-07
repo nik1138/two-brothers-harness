@@ -11,6 +11,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { deriveTitle, isCliEntry, main, type CliIO } from "../src/cli.ts";
+import { resolveCliStyle } from "../src/clistyle.ts";
 
 function makeIO(): CliIO & { out: string[]; err: string[] } {
   const out: string[] = [];
@@ -312,4 +313,79 @@ test("CLI runs through a symlinked entry (npm .bin parity)", async (t) => {
     assert.equal(selftest.status, 0, selftest.stderr);
     assert.match(selftest.stdout, /SELFTEST: PASS/, "symlinked selftest runs");
   });
+});
+
+// ---------------------------------------------------------------------------
+// human text layout + machine-mode purity (slice 2)
+// ---------------------------------------------------------------------------
+
+/** Strip every SGR sequence (the CLI theme is the only escape source). */
+function stripAnsi(text: string): string {
+  return text.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+/** The 16-color style the CLI resolves on a depth-4 TTY. */
+function ansi16Style(): ReturnType<typeof resolveCliStyle> {
+  return resolveCliStyle({ depth: 4, env: {} });
+}
+
+const MOCK_RUN_ARGS = ["run", "pick an approach", "--provider", "mock"] as const;
+
+test("run: text mode renders separated blocks, a ruled decision and the compact footer", async () => {
+  const io = makeIO();
+  const code = await main([...MOCK_RUN_ARGS], io);
+  assert.equal(code, 0, io.err.join("\n"));
+  const text = io.out.join("\n");
+  assert.ok(!text.includes("\x1b"), "a custom io must stay plain");
+  assert.match(text, /^\[user\]\s+pick an approach$/m);
+  // a blank line separates every pair of envelope blocks
+  assert.match(text, /\n\n\[senior -> junior\] consult\n/);
+  assert.match(text, /\n\n\[junior -> senior\] proposal\n/);
+  assert.match(text, /\n\n\[senior -> junior\] review\n/);
+  // the decision block is ruled off with a width-capped label
+  assert.match(text, /\n\n── decision ─+$/m);
+  assert.match(text, /^\[senior -> user\] decision$/m);
+  // the compact human footer replaces the machine `tokens:` line in text mode
+  assert.match(text, /^tokens \d+ in \/ \d+ out · \d+ calls?$/m);
+  assert.match(text, /\n\ntokens \d+ in \/ \d+ out · \d+ calls?$/);
+  assert.doesNotMatch(text, /^tokens:/m, "text mode must not print the print-mode footer");
+});
+
+test("run: an explicit colored style paints the text transcript and strips back", async () => {
+  const plainIO = makeIO();
+  assert.equal(await main([...MOCK_RUN_ARGS], plainIO), 0, plainIO.err.join("\n"));
+  const coloredIO = makeIO();
+  assert.equal(await main([...MOCK_RUN_ARGS], coloredIO, ansi16Style()), 0);
+  const colored = coloredIO.out.join("\n");
+  assert.ok(colored.includes("\x1b"), "an explicit style must paint the text transcript");
+  assert.equal(stripAnsi(colored), plainIO.out.join("\n"));
+  assert.equal(stripAnsi(coloredIO.err.join("\n")), plainIO.err.join("\n"));
+});
+
+test("run: machine output modes stay escape-free under an explicit colored style", async () => {
+  const cases: Array<{ label: string; args: string[] }> = [
+    { label: "--json", args: [...MOCK_RUN_ARGS, "--json"] },
+    { label: "--json-events", args: [...MOCK_RUN_ARGS, "--json-events"] },
+    { label: "--mode print", args: [...MOCK_RUN_ARGS, "--mode", "print"] },
+    { label: "--stream", args: [...MOCK_RUN_ARGS, "--stream"] },
+    { label: "--dry-run", args: [...MOCK_RUN_ARGS, "--dry-run"] },
+  ];
+  for (const { label, args } of cases) {
+    const io = makeIO();
+    assert.equal(await main(args, io, ansi16Style()), 0, `${label}: ${io.err.join("\n")}`);
+    const output = [...io.out, ...io.err].join("\n");
+    assert.ok(!output.includes("\x1b"), `${label} leaked an escape sequence`);
+  }
+
+  // one parseable JSON object on stdout, nothing else
+  const json = makeIO();
+  assert.equal(await main([...MOCK_RUN_ARGS, "--json"], json, ansi16Style()), 0);
+  assert.equal(json.out.length, 1);
+  JSON.parse(json.out[0]);
+
+  // print mode keeps its documented split: decision on stdout, usage on stderr
+  const print = makeIO();
+  assert.equal(await main([...MOCK_RUN_ARGS, "--mode", "print"], print, ansi16Style()), 0);
+  assert.equal(print.out.length, 1);
+  assert.ok(print.err.some((line) => line.startsWith("tokens: ")), print.err.join("\n"));
 });

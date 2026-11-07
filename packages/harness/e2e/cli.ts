@@ -199,8 +199,21 @@ async function scenarioConsult(): Promise<string> {
       kinds.join(",") === "message,consult,proposal,review,decision",
       `unexpected kind sequence: ${kinds.join(",")}`,
     );
-    assert.match(result.stdout, /^tokens: \d+\/\d+ \(cache \d+%, \d+ model calls\)$/m, "usage footer missing");
-    return `${kinds.length} envelopes (${kinds.join(" -> ")}), usage footer present`;
+    // human text layout: blank-line-separated blocks, a ruled decision and the
+    // compact usage footer (never the print-mode `tokens:` line)
+    check(
+      /\n\n\[senior -> junior\] consult\n/.test(result.stdout),
+      "envelope blocks are not separated by a blank line",
+    );
+    check(/^── decision ─+$/m.test(result.stdout), "decision rule missing");
+    check(/^\[senior -> user\] decision$/m.test(result.stdout), "decision header changed");
+    check(
+      /^tokens \d+ in \/ \d+ out · \d+ calls?$/m.test(result.stdout),
+      "compact usage footer missing",
+    );
+    check(!/^tokens:/m.test(result.stdout), "text mode printed the machine usage footer");
+    check(!result.stdout.includes("\x1b"), "piped text output emitted an escape sequence");
+    return `${kinds.length} envelopes (${kinds.join(" -> ")}), ruled decision, compact footer`;
   } finally {
     rmDir(dir);
   }

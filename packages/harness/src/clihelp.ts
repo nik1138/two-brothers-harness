@@ -20,7 +20,12 @@
  * command and flag in this file — `cli.ts` must not hard-code help text of
  * its own.
  */
-import { plainCliStyle, terminalWidth, type CliStyle } from "./clistyle.ts";
+import {
+  FALLBACK_TERMINAL_WIDTH,
+  plainCliStyle,
+  terminalWidth,
+  type CliStyle,
+} from "./clistyle.ts";
 
 const DESCRIPTION_INDENT = 2;
 
@@ -395,8 +400,10 @@ defineCommand({
   description:
     "Run one task through the two-brother loop: the senior either consults the " +
     "junior for a proposal or delegates work and receives a deliverable, reviews " +
-    "it and makes the final decision. Prints the human transcript, a token-usage " +
-    "footer and, when both roles resolve to the same priced model, a cost line. " +
+    "it and makes the final decision. Prints the human transcript as separated, " +
+    "Markdown-rendered envelope blocks with a compact token-usage footer; when " +
+    "both roles resolve to the same priced model the footer also carries the " +
+    "estimated cost. " +
     "The task comes from the positional argument; a task of `-` reads it from " +
     "stdin (bounded to 1 MiB) and --task-file reads it from a file. --dry-run " +
     "resolves the whole run and prints the plan without calling a model or " +
@@ -956,20 +963,88 @@ export function commandUsage(name: string): string {
 // rendering
 // --------------------------------------------------------------------------- //
 
-/** Word-wrap `text` to `width` columns, returning bare lines. */
+/** The 96-column column widths the piped CLI has always rendered (the anchor). */
+const LEGACY_HELP_WIDTH = FALLBACK_TERMINAL_WIDTH;
+const LEGACY_COMMAND_COLUMN = 40;
+const LEGACY_FLAG_COLUMN = 40;
+const LEGACY_VARIABLE_COLUMN = 48;
+
+/** Nothing wider than these makes a generated help table more readable. */
+const MAX_COMMAND_COLUMN = 70;
+const MAX_FLAG_COLUMN = 40;
+const MAX_VARIABLE_COLUMN = 48;
+
+/** Generated help table widths for one terminal width. */
+export interface HelpColumns {
+  /** Column where a command's summary starts in the grouped help. */
+  command: number;
+  /** Widest flag-label column before a description wraps to the next row. */
+  flag: number;
+  /** Widest environment-variable column in the full reference. */
+  variable: number;
+}
+
+/** Scale one legacy column with the terminal width, clamped to its bounds. */
+function scaledColumn(legacy: number, width: number, floor: number, cap: number): number {
+  const scaled = Math.round((legacy * width) / LEGACY_HELP_WIDTH);
+  return Math.max(floor, Math.min(cap, scaled));
+}
+
+/**
+ * The generated help table columns for `width`. The 96-column piped fallback
+ * (and therefore every non-TTY caller) gets the historical columns exactly;
+ * a wider TTY widens the command/label columns so summaries align beside
+ * their commands, and a narrow TTY shrinks them so flag descriptions keep
+ * room to wrap.
+ */
+export function helpColumns(width: number = terminalWidth()): HelpColumns {
+  const columns =
+    Number.isFinite(width) && width >= 1 ? Math.floor(width) : LEGACY_HELP_WIDTH;
+  const longestCommand = Math.max(
+    2,
+    ...COMMAND_ORDER.map((name) => COMMAND_TABLE[name]?.commandLine.length ?? 0),
+  );
+  return {
+    command: scaledColumn(
+      LEGACY_COMMAND_COLUMN,
+      columns,
+      20,
+      Math.min(MAX_COMMAND_COLUMN, longestCommand + 2),
+    ),
+    flag: scaledColumn(LEGACY_FLAG_COLUMN, columns, 16, MAX_FLAG_COLUMN),
+    variable: scaledColumn(LEGACY_VARIABLE_COLUMN, columns, 20, MAX_VARIABLE_COLUMN),
+  };
+}
+
+/**
+ * Word-wrap `text` to `width` columns, returning bare lines. Words wider than
+ * the column (an env-var name, a long metavar) are hard-split at code-point
+ * boundaries, so a narrow terminal never overflows on one long token.
+ */
 function wrapText(text: string, width: number): string[] {
+  const columns = Math.max(1, Math.floor(width));
   const words = text.split(/\s+/).filter((word) => word.length > 0);
   const lines: string[] = [];
   let current = "";
-  for (const word of words) {
-    if (current === "") {
-      current = word;
-    } else if (current.length + 1 + word.length <= width) {
-      current += ` ${word}`;
-    } else {
-      lines.push(current);
-      current = word;
+  const placeOverlong = (word: string): void => {
+    let rest = Array.from(word);
+    while (rest.length > columns) {
+      lines.push(rest.slice(0, columns).join(""));
+      rest = rest.slice(columns);
     }
+    current = rest.join("");
+  };
+  for (const word of words) {
+    if (current !== "" && current.length + 1 + word.length <= columns) {
+      current += ` ${word}`;
+      continue;
+    }
+    if (current !== "") {
+      lines.push(current);
+      current = "";
+    }
+    if (Array.from(word).length <= columns) current = word;
+    else placeOverlong(word);
   }
   if (current) lines.push(current);
   return lines;
@@ -1061,12 +1136,25 @@ function renderFlags(spec: CommandHelp, style: CliStyle, width: number): string[
       const description = spec.flagNotes?.[name] ?? flag.description;
       return { label: flagLabel(flag), description };
     });
+  const naturalLabelWidth = Math.max(2, ...entries.map((entry) => entry.label.length));
+  // Responsive label column: keep at least 20 columns for the description on
+  // this width, and never widen past the scaled/capped column.
   const labelWidth = Math.min(
-    40,
-    Math.max(2, ...entries.map((entry) => entry.label.length)),
+    helpColumns(width).flag,
+    Math.max(2, width - 24),
+    naturalLabelWidth,
   );
   const lines: string[] = [style.paint("strong", "Flags:")];
   for (const entry of entries) {
+    // A label too long for the width to leave a usable description column
+    // gets its own row and the description wraps below it.
+    if (2 + entry.label.length + 2 + 20 > width) {
+      lines.push(`  ${paintFlagLabel(entry.label, style)}`);
+      for (const row of wrapText(entry.description, Math.max(20, width - 4))) {
+        lines.push(`    ${style.paint("muted", row)}`);
+      }
+      continue;
+    }
     const prefix = `  ${entry.label.padEnd(labelWidth)}  `;
     const paintedPrefix =
       `  ${paintFlagLabel(entry.label, style)}` +
@@ -1140,19 +1228,28 @@ export function renderMainHelp(
     "",
     style.paint("strong", "Commands:"),
   ];
-  const commandColumn = 40;
+  const commandColumn = helpColumns(width).command;
   for (const name of COMMAND_ORDER) {
     const spec = COMMAND_TABLE[name];
     if (spec === undefined) continue;
     const commandLine = spec.commandLine;
-    if (2 + commandLine.length + 2 + spec.summary.length <= width) {
+    // A command wider than the column keeps a two-space separator instead of
+    // butting its summary against the invocation.
+    const fitsColumn = commandLine.length < commandColumn;
+    const cell = fitsColumn ? commandLine.padEnd(commandColumn) : `${commandLine}  `;
+    if (2 + cell.length + spec.summary.length <= width) {
       lines.push(
-        `  ${style.paint("accent", commandLine.padEnd(commandColumn))}` +
-          style.paint("muted", spec.summary),
+        `  ${style.paint("accent", cell)}` + style.paint("muted", spec.summary),
       );
     } else {
+      // A summary that cannot share the row wraps under the command at the
+      // description indent — never parked at a column that does not fit.
       lines.push(`  ${style.paint("accent", commandLine)}`);
-      lines.push(`  ${" ".repeat(commandColumn)}${style.paint("muted", spec.summary)}`);
+      for (const row of wrapText(spec.summary, Math.max(20, width - 2 - DESCRIPTION_INDENT))) {
+        lines.push(
+          `${" ".repeat(2 + DESCRIPTION_INDENT)}${style.paint("muted", row)}`,
+        );
+      }
     }
   }
   lines.push(
@@ -1441,7 +1538,7 @@ export function renderFullHelp(
     style.paint("strong", "Environment variables (CLI flags win; env vars pin the value):"),
   );
   const variableWidth = Math.min(
-    48,
+    helpColumns(width).variable,
     Math.max(2, ...ENVIRONMENT.map((entry) => entry.variable.length)),
   );
   for (const entry of ENVIRONMENT) {
