@@ -140,11 +140,11 @@ const summary = computed(
 }
 
 .diff-added {
-  color: var(--ok);
+  color: var(--diff-add-fg);
 }
 
 .diff-removed {
-  color: var(--danger);
+  color: var(--diff-del-fg);
 }
 
 /* Long diffs scroll inside the card instead of stretching the page. */
@@ -176,20 +176,22 @@ const summary = computed(
   color: var(--text-secondary);
 }
 
+/* The add/remove chrome uses the dedicated diff tokens: the fill is the intent
+   colour's 12% tint, so a line keeps exactly the previous color-mix look. */
 .diff-add {
-  background: color-mix(in srgb, var(--ok) 12%, transparent);
+  background: var(--diff-add-bg);
 }
 
 .diff-add .diff-sign {
-  color: var(--ok);
+  color: var(--diff-add-fg);
 }
 
 .diff-del {
-  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  background: var(--diff-del-bg);
 }
 
 .diff-del .diff-sign {
-  color: var(--danger);
+  color: var(--diff-del-fg);
 }
 
 .diff-hunk {

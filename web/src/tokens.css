@@ -78,10 +78,15 @@
   --focus-ring: #3568d4;
 
   /* --- diff add/remove -------------------------------------------------- */
+  /* The foreground is the intent colour the diff views rendered before the
+     tokens existed (same values as --ok / --danger per scheme); the background
+     is that colour's 12% tint — the old color-mix(… 12%, transparent) fill,
+     expressed as a token so the views composite it over the card surface
+     exactly as before. */
   --diff-add-fg: #1c7f3f;
-  --diff-add-bg: #e7f5eb;
+  --diff-add-bg: rgb(28 127 63 / 12%);
   --diff-del-fg: #c8433b;
-  --diff-del-bg: #fbecea;
+  --diff-del-bg: rgb(200 67 59 / 12%);
 
   /* find-in-transcript highlights (CSS Custom Highlight names, see ChatView) */
   --find-hit-bg: #fbe7a8;
@@ -204,10 +209,10 @@
     --ok: #1f883d;
     --ok-soft: #16301d;
     --focus-ring: #6c9bff;
-    --diff-add-fg: #3fb950;
-    --diff-add-bg: #16301d;
-    --diff-del-fg: #e5736c;
-    --diff-del-bg: #3a2224;
+    --diff-add-fg: #1f883d;
+    --diff-add-bg: rgb(31 136 61 / 12%);
+    --diff-del-fg: #d54941;
+    --diff-del-bg: rgb(213 73 65 / 12%);
     --find-hit-bg: #4a3c12;
     --find-hit-text: #f2ead2;
     --find-active-bg: #e0a92a;
@@ -258,10 +263,10 @@
   --ok: #1f883d;
   --ok-soft: #16301d;
   --focus-ring: #6c9bff;
-  --diff-add-fg: #3fb950;
-  --diff-add-bg: #16301d;
-  --diff-del-fg: #e5736c;
-  --diff-del-bg: #3a2224;
+  --diff-add-fg: #1f883d;
+  --diff-add-bg: rgb(31 136 61 / 12%);
+  --diff-del-fg: #d54941;
+  --diff-del-bg: rgb(213 73 65 / 12%);
   --find-hit-bg: #4a3c12;
   --find-hit-text: #f2ead2;
   --find-active-bg: #e0a92a;

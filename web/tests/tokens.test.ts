@@ -368,3 +368,43 @@ test('token layer: naive theme overrides stay mapped to the colour tokens', () =
   const lightCommon = themeOverrides.common as unknown as Record<string, string>
   assert.equal(lightCommon.popoverColor?.toLowerCase(), LIGHT.get('--surface-panel'))
 })
+
+test('token layer: diff chrome tokens freeze the intent colours they replaced', () => {
+  const hexRgb = (value: string | undefined): [number, number, number] => {
+    const match = /^#([0-9a-f]{6})$/i.exec((value ?? '').trim())
+    assert.ok(match, `expected a 6-digit hex colour, got ${String(value)}`)
+    const n = Number.parseInt(match[1]!, 16)
+    return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff]
+  }
+  const assertDiff = (label: string, palette: Map<string, string>): void => {
+    const ok = hexRgb(palette.get('--ok'))
+    const danger = hexRgb(palette.get('--danger'))
+    // The diff views consume these tokens instead of --ok/--danger; freezing
+    // the mapping keeps a future token edit from silently recolouring them.
+    assert.deepEqual(
+      hexRgb(palette.get('--diff-add-fg')),
+      ok,
+      `${label}: --diff-add-fg must stay the --ok colour`,
+    )
+    assert.deepEqual(
+      hexRgb(palette.get('--diff-del-fg')),
+      danger,
+      `${label}: --diff-del-fg must stay the --danger colour`,
+    )
+    // The views previously built the fills with color-mix(… 12%, transparent),
+    // which resolves to exactly this rgb() overlay.
+    assert.equal(
+      palette.get('--diff-add-bg'),
+      `rgb(${ok.join(' ')} / 12%)`,
+      `${label}: --diff-add-bg must be the 12% --ok overlay`,
+    )
+    assert.equal(
+      palette.get('--diff-del-bg'),
+      `rgb(${danger.join(' ')} / 12%)`,
+      `${label}: --diff-del-bg must be the 12% --danger overlay`,
+    )
+  }
+  assertDiff('light', LIGHT)
+  assertDiff('dark (media)', DARK_MEDIA)
+  assertDiff('dark (pinned)', DARK_PINNED)
+})

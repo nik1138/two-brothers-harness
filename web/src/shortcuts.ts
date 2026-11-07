@@ -77,6 +77,14 @@ export const SHORTCUTS: readonly ShortcutEntry[] = [
     description: 'At the start of a line; built-in actions run locally',
   },
   {
+    id: 'recall',
+    group: 'Composer',
+    keys: ['↑', '↓'],
+    label: 'Recall previous tasks',
+    description:
+      'At the draft edges; the unsent draft is preserved and restored exactly',
+  },
+  {
     id: 'picker-navigate',
     group: 'Pickers',
     keys: ['↑', '↓'],

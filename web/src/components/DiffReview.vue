@@ -204,8 +204,8 @@ onUnmounted(() => {
   font-weight: 600;
   border-radius: 999px;
   padding: 0.05rem 0.45rem;
-  background: color-mix(in srgb, var(--ok) 16%, transparent);
-  color: var(--ok);
+  background: color-mix(in srgb, var(--diff-add-fg) 16%, transparent);
+  color: var(--diff-add-fg);
 }
 
 .diff-review-preview {
@@ -314,11 +314,11 @@ onUnmounted(() => {
 }
 
 .diff-added {
-  color: var(--ok);
+  color: var(--diff-add-fg);
 }
 
 .diff-removed {
-  color: var(--danger);
+  color: var(--diff-del-fg);
 }
 
 .diff-review-empty {
