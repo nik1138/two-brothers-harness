@@ -156,9 +156,11 @@ export function renderBox(content: readonly string[], options: BoxOptions): stri
   const contentWidth = Math.max(1, inner - padding * 2);
   const out: string[] = [];
 
+  // The decorated title is "─ " + title + " " (three extra columns), so the
+  // title itself must fit inner - 3 or the top border grows past `width`.
   const title = options.title === undefined
     ? ""
-    : clipDisplay(options.title.trim(), Math.max(0, inner - 2));
+    : clipDisplay(options.title.trim(), Math.max(0, inner - 3));
   if (title === "") {
     out.push(border("╭" + "─".repeat(inner) + "╮"));
   } else {

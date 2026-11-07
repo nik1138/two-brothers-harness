@@ -47,9 +47,11 @@ import {
   openProviderPresets,
   providerConnectKey,
   providerConnectView,
+  setProviderConnectError,
 } from "../src/tui/view/provider.ts";
 import type { KeyLike } from "../src/tui/keymap.ts";
 import { stripAnsi } from "../src/tui/render.ts";
+import { styledWidth } from "../src/tui/screen.ts";
 
 // --------------------------------------------------------------------------- //
 // helpers
@@ -275,24 +277,38 @@ test("provider resolution: explicit CLI flags beat persisted settings per role",
   assert.equal(state.endpoints.junior.model, "stored-junior-model");
 });
 
-test("provider resolution: an explicit --provider beats persisted role providers; the default does not", () => {
-  const snapshot = fullSnapshot({ provider: "mock" }, { provider: "mock" });
-  const explicit = resolveTuiProviderState({
-    snapshot,
-    storedPresets: [],
-    cfg: resolveConfig({ provider: "openai" }),
-    env: NO_ENV,
+test("provider resolution: an explicit default-valued --provider beats persisted role providers", async () => {
+  await withCleanProviderEnv(async () => {
+    const persistedMock = fullSnapshot({ provider: "mock" }, { provider: "mock" });
+    // `--provider openai` repeats the built-in default, but provenance makes it
+    // an explicit request (wave-3 follow-up) so the persisted mock must not win.
+    const explicitDefault = resolveTuiProviderState({
+      snapshot: persistedMock,
+      storedPresets: [],
+      cfg: resolveConfig({ provider: "openai" }),
+      env: NO_ENV,
+    });
+    assert.equal(explicitDefault.endpoints.senior.provider, "openai");
+    assert.equal(explicitDefault.endpoints.junior.provider, "openai");
+    // An absent flag keeps today's behavior: the persisted provider survives.
+    const absent = resolveTuiProviderState({
+      snapshot: persistedMock,
+      storedPresets: [],
+      cfg: resolveConfig({}),
+      env: NO_ENV,
+    });
+    assert.equal(absent.endpoints.senior.provider, "mock");
+    assert.equal(absent.endpoints.junior.provider, "mock");
+    // A non-default provider is still an explicit-looking request.
+    const forced = resolveTuiProviderState({
+      snapshot: fullSnapshot({ provider: "openai" }, { provider: "openai" }),
+      storedPresets: [],
+      cfg: resolveConfig({ provider: "mock" }),
+      env: NO_ENV,
+    });
+    assert.equal(forced.endpoints.senior.provider, "mock");
+    assert.equal(forced.endpoints.junior.provider, "mock");
   });
-  // "openai" is the run default, not an explicit request: persisted mock stays.
-  assert.equal(explicit.endpoints.senior.provider, "mock");
-  const forced = resolveTuiProviderState({
-    snapshot: fullSnapshot({ provider: "openai" }, { provider: "openai" }),
-    storedPresets: [],
-    cfg: resolveConfig({ provider: "mock" }),
-    env: NO_ENV,
-  });
-  assert.equal(forced.endpoints.senior.provider, "mock");
-  assert.equal(forced.endpoints.junior.provider, "mock");
 });
 
 test("provider resolution: a session /models choice beats the persisted model (never persisted)", () => {
@@ -655,6 +671,110 @@ test("provider view: rows are width-safe and plain at narrow widths", () => {
     for (const line of lines) assert.equal(stripAnsi(line).length, width, `${width}: ${line}`);
   }
 });
+
+test("provider view: 20/25/29-column frames are exactly width-safe for every stage", () => {
+  const data = connectData();
+  const presetModel = press(
+    openProviderPresets(createProviderConnectState(), "senior"),
+    data,
+    KEY.enter,
+  );
+  const editing = press(openManualProviderForm(createProviderConnectState(), data), data, KEY.enter);
+  const stages: Array<[string, ReturnType<typeof createProviderConnectState>]> = [
+    ["roles", createProviderConnectState()],
+    ["presets", openProviderPresets(createProviderConnectState(), "junior")],
+    ["presetModel", presetModel],
+    ["manual", openManualProviderForm(createProviderConnectState(), data)],
+    ["manualEditing", editing],
+    [
+      "withError",
+      setProviderConnectError(
+        openManualProviderForm(createProviderConnectState(), data),
+        "Base URL must start with http:// or https://.",
+      ),
+    ],
+  ];
+  for (const [name, state] of stages) {
+    for (const width of [20, 25, 29]) {
+      for (const height of [20, 10]) {
+        const view = providerConnectView(state, data, { width, height });
+        const label = `${name} ${width}x${height}`;
+        assert.equal(view.lines.length, height, `${label}: row count`);
+        assert.ok(
+          view.selectedRow >= -1 && view.selectedRow < view.lines.length,
+          `${label}: selectedRow out of range (${view.selectedRow})`,
+        );
+        for (const [index, line] of view.lines.entries()) {
+          assert.equal(styledWidth(line), width, `${label} row ${index}: ${JSON.stringify(line)}`);
+          assert.ok(
+            !line.includes("\u001b"),
+            `${label} row ${index}: plain theme must not leak escapes`,
+          );
+        }
+      }
+    }
+  }
+});
+
+test("provider view: narrow titles truncate honestly instead of widening the border", () => {
+  const data = connectData();
+  const cases: Array<[string, number, string, boolean]> = [
+    // [stage, width, expected title prefix, must be truncated]
+    ["roles", 20, "PROVIDER", true],
+    ["roles", 25, "PROVIDER SETTINGS", false],
+    ["roles", 29, "PROVIDER SETTINGS", false],
+    ["manual", 20, "SENIOR", true],
+    ["manual", 25, "SENIOR MANUAL", true],
+  ];
+  for (const [stage, width, prefix, truncated] of cases) {
+    const state = stage === "roles"
+      ? createProviderConnectState()
+      : openManualProviderForm(createProviderConnectState(), data);
+    const lines = providerConnectView(state, data, { width, height: 20 }).lines;
+    const top = stripAnsi(lines[0] ?? "");
+    assert.equal(styledWidth(lines[0] ?? ""), width, `${stage} ${width}: title row width`);
+    assert.ok(top.startsWith("╭─ "), `${stage} ${width}: ${JSON.stringify(top)}`);
+    assert.ok(top.includes(prefix), `${stage} ${width}: ${JSON.stringify(top)}`);
+    if (truncated) {
+      assert.ok(top.includes("…"), `${stage} ${width}: truncated title needs an ellipsis`);
+    } else {
+      assert.ok(!top.includes("…"), `${stage} ${width}: full title fits without an ellipsis`);
+    }
+    for (const line of lines) assert.ok(styledWidth(line) <= width);
+  }
+  // Long field values clip with an ellipsis instead of overflowing silently.
+  const narrow = providerConnectView(
+    openManualProviderForm(createProviderConnectState(), data),
+    data,
+    { width: 20, height: 20 },
+  ).lines;
+  assert.ok(narrow.some((line) => line.includes("…")), "long values must be visibly truncated");
+});
+
+test("provider view: zero/tiny widths never throw or overflow", () => {
+  const data = connectData();
+  const state = openManualProviderForm(createProviderConnectState(), data);
+  assert.deepEqual(providerConnectView(state, data, { width: 0 }), { lines: [], selectedRow: -1 });
+  for (const width of [1, 2, 3]) {
+    for (const height of [undefined, 0, 1, 3, 8]) {
+      const view = height === undefined
+        ? providerConnectView(state, data, { width })
+        : providerConnectView(state, data, { width, height });
+      if (height !== undefined) assert.equal(view.lines.length, height, `${width}x${height}`);
+      assert.ok(view.selectedRow >= -1 && view.selectedRow < Math.max(1, view.lines.length));
+      for (const line of view.lines) {
+        assert.ok(styledWidth(line) <= width, `${width}x${height}: ${JSON.stringify(line)}`);
+        assert.ok(!line.includes("\u001b"), `${width}x${height}: escape leaked`);
+      }
+    }
+  }
+  for (const width of [4, 5]) {
+    const view = providerConnectView(state, data, { width, height: 6 });
+    assert.equal(view.lines.length, 6);
+    for (const line of view.lines) assert.equal(styledWidth(line), width);
+  }
+});
+
 
 // --------------------------------------------------------------------------- //
 // assembled TUI: persisted endpoint drives a real turn (root cause)

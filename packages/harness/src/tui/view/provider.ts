@@ -684,7 +684,16 @@ export function providerConnectView(
   const footer = themed(theme, "dim", clipDisplay(footerHints(state), contentWidth));
   const content = [...header, ...body, ...errorRows, footer];
   while (height !== undefined && content.length < Math.max(0, height - 2)) content.push("");
-  const lines = renderBox(content, { width, title: stageTitle(state), theme });
+  // `renderBox` decorates the title as `─ <title> ` — three columns inside the
+  // border — and clips it only to the inner width, so an unclipped title could
+  // widen the top border by one column at very narrow widths. Clip it to the
+  // real title budget first; the ellipsis keeps the truncation honest.
+  const title = width >= 4 ? clipDisplay(stageTitle(state), width - 5) : "";
+  const lines = renderBox(content, {
+    width,
+    ...(title !== "" ? { title } : {}),
+    theme,
+  });
   if (height !== undefined) {
     lines.splice(height);
     while (lines.length < height) lines.push(fitStyled("", width));

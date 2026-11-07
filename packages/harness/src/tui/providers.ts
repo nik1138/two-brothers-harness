@@ -15,13 +15,16 @@
  *   1. `TWO_BROTHERS_*` env pairs (`TWO_BROTHERS_SENIOR_BASE_URL`/`_API_KEY`,
  *      then the shared `TWO_BROTHERS_BASE_URL`/`_API_KEY`) — all-or-nothing,
  *      exactly like `serve`; env-pinned fields are never persisted by the
- *      store.
+ *      store. `TWO_BROTHERS_PROVIDER` is applied at this tier too and is
+ *      explicit by provenance (even its default value wins over settings).
  *   2. Explicit CLI flags (`--base-url`/`--api-key`, the per-role
  *      `--senior-*`/`--junior-*` flags, `--provider`, `--senior-model`/
  *      `--junior-model`) — also all-or-nothing per pair. The resolved `Config`
  *      already merged flags > env, so a non-empty connection field is an
- *      explicit request; the only ambiguity left is when a flag repeats a
- *      default value (e.g. `--provider openai`), which is a no-op anyway.
+ *      explicit request. `--provider` rides `Config.providerExplicit`, so a
+ *      flag repeating the default (e.g. `--provider openai`) still overrides a
+ *      persisted non-default provider; without flag or env, stored providers
+ *      survive unchanged.
  *   3. Persisted role settings (manual fields, or a named `provider_ref` that
  *      resolves through the merged seed+stored preset table).
  *   4. Built-in seed presets (`presets.ts`) through the resolver's preset
@@ -224,10 +227,12 @@ function applyExplicitConfigOverlay(
     out.junior.api_key = cfg.juniorApiKey;
     out.junior.provider_ref = "";
   }
-  // An explicit run-level provider (`--provider mock`, `TWO_BROTHERS_PROVIDER`)
-  // is a direct operator request and beats persisted role providers. The
-  // default provider is not an explicit request, so persisted values survive.
-  if (cfg.provider !== DEFAULTS.provider) {
+  // An explicit run-level provider (`--provider`, even when it repeats the
+  // default, or `TWO_BROTHERS_PROVIDER`) is a direct operator request and beats
+  // persisted role providers. `resolveConfig` records that provenance; a
+  // hand-built Config without it falls back to the older heuristic (a
+  // non-default provider looks explicit, the default does not).
+  if (cfg.providerExplicit === true || cfg.provider !== DEFAULTS.provider) {
     out.senior.provider = cfg.provider;
     out.junior.provider = cfg.provider;
   }

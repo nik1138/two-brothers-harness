@@ -27,7 +27,17 @@ if (-not (Test-Path (Join-Path $root 'e2e\node_modules'))) {
   }
 }
 
-# 3. run the suite
+# 3. pure packaged-web freshness helper tests (hermetic, no browser)
+Push-Location (Join-Path $root 'e2e')
+try {
+  node web-freshness.test.mjs
+  $freshCode = $LASTEXITCODE
+} finally {
+  Pop-Location
+}
+if ($freshCode -ne 0) { exit $freshCode }
+
+# 4. run the browser suite
 Push-Location (Join-Path $root 'e2e')
 try {
   node run.mjs

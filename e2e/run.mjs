@@ -29,13 +29,20 @@
 //                  context + starters; a starter drafts into an empty composer
 //                  (editable, not sent) and never overwrites an existing draft
 //   approval-reason scripted fixture: a delete approval carries the documented
-//                  reason text and the pending card renders it verbatim; the
-//                  allow path still removes the file
+//                  reason text and the pending card renders it verbatim; its
+//                  preview toggle expands the diff as plain text (aria-expanded,
+//                  no HTML injection) and collapses again; the allow path still
+//                  removes the file
 //   real           opt-in (TWO_BROTHERS_REAL_E2E=1): real models via LM Studio
 //
 // Backend: every scenario runs against the TypeScript server
 // (node packages/harness/dist/cli.js serve) with TWO_BROTHERS_PROVIDER=mock or
 // a scripted model server, depending on the scenario.
+//
+// Web build: before any scenario, the runner refreshes the packaged
+// `packages/harness/web` copy from `web/dist` when it is stale. The server
+// serves the packaged copy first, so a stale copy would silently test old UI
+// (see web-freshness.mjs; offline copy, nothing built here).
 //
 // Fixture-based scenarios drive fixtures/scripted-server.mjs (a scripted
 // OpenAI-compatible model server the TS server talks to via
@@ -54,11 +61,16 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { chromium } from 'playwright'
 
+import { ensurePackagedWebFresh } from './web-freshness.mjs'
+
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.dirname(HERE)
 const TS_CLI = path.join(ROOT, 'packages', 'harness', 'dist', 'cli.js')
 const NODE_SCRIPTED = path.join(HERE, 'fixtures', 'scripted-server.mjs')
 const WEB_DIST_INDEX = path.join(ROOT, 'web', 'dist', 'index.html')
+const WEB_DIST_DIR = path.join(ROOT, 'web', 'dist')
+/** The copy the TS server serves first in a checkout (see server.ts). */
+const PACKAGED_WEB_DIR = path.join(ROOT, 'packages', 'harness', 'web')
 const TASK_TEXT = 'Plan a migration from Redis to Valkey'
 const HELLO_FILE = 'e2e-hello.txt'
 
@@ -189,6 +201,30 @@ async function ensureWebBuild() {
     })
   })
   if (!fs.existsSync(WEB_DIST_INDEX)) throw new Error('web build produced no dist/index.html')
+}
+
+/**
+ * The backend serves the packaged `packages/harness/web` copy before the repo's
+ * `web/dist` (see `packages/harness/src/server.ts`), so a stale packaged copy
+ * silently shadows a fresh web build and the suite would test old UI. Compare
+ * the trees by path set + file content and re-run the publisher's copy (the same
+ * `cpSync` as `scripts/sync-web.mjs`, building nothing) when they differ. This
+ * is a local file copy — still offline, hermetic and deterministic — and fresh
+ * trees are a no-op; a missing build fails with the exact command to run.
+ */
+function ensureFreshPackagedWeb() {
+  const freshness = ensurePackagedWebFresh({
+    sourceDir: WEB_DIST_DIR,
+    targetDir: PACKAGED_WEB_DIR,
+  })
+  if (freshness.synced) {
+    log(
+      `packaged web: resynced packages/harness/web from web/dist ` +
+        `(${freshness.files} files; ${freshness.reasons.join('; ')})`,
+    )
+  } else {
+    log(`packaged web: fresh (${freshness.files} files)`)
+  }
 }
 
 // -- free ports ----------------------------------------------------------------
@@ -1794,16 +1830,25 @@ async function scenarioHeroStarters(runner) {
   }
 }
 
-// -- scenario: approval reason ---------------------------------------------------------
+// -- scenario: approval reason + preview ------------------------------------------------
 //
 // A delete approval carries the product's documented DELETE_APPROVAL_REASON:
 // the pending card renders it verbatim (the backend emits the additive `reason`
 // field on `approval_requested`), the resolved history card keeps the same text
 // (the request reason survives Allow/Deny), the allow path removes the file, and
 // no raw protocol marker leaks into the transcript.
+//
+// The same pending card carries the additive bounded preview (`detail`): its
+// toggle is a real button (aria-expanded / aria-controls) that expands the
+// unified diff as a plain-text <pre> and collapses it again. The deleted file's
+// content contains literal HTML, which must survive as TEXT (no injection).
 
 async function scenarioApprovalReason(runner) {
   const DELETE_FILE = 'e2e-approval-reason.txt'
+  // Literal markup proves the preview is text-only: if it were parsed as HTML
+  // an <img>/handler would appear in the DOM and the console guard would see it.
+  const DELETE_CONTENT =
+    'created by the E2E approval-reason scenario <img src=x onerror="window.__e2e_pwned=1">\n'
   const DELETE_REASON =
     'permanently removes the file from the workspace \u2014 deletion cannot be undone'
   const be = await startBackend({ kind: 'fixture', scenario: 'delete' })
@@ -1813,7 +1858,7 @@ async function scenarioApprovalReason(runner) {
   const { context, page, consoleGuard } = await newScenarioPage()
   try {
     // the target exists before the run, so the delete has something to remove
-    fs.writeFileSync(deletePath, 'created by the E2E approval-reason scenario\n')
+    fs.writeFileSync(deletePath, DELETE_CONTENT)
     await page.goto(be.base)
     await page.locator('nav[aria-label="Sessions"]').waitFor()
     await ensureWorkspace(page, wsDir, wsName)
@@ -1840,6 +1885,67 @@ async function scenarioApprovalReason(runner) {
     // the pending timeline duplicate stays suppressed in favour of the dock
     assert.equal(await page.locator('article.approval', { hasText: 'awaiting you' }).count(), 1)
 
+    // -- additive approval preview: a real toggle + a plain-text <pre> ----------
+    // Collapsed by default; the toggle owns aria-expanded and points at the
+    // <pre> it controls; expanding shows the diff as text, collapsing hides it.
+    const previewToggle = card.locator('button.approval-preview-toggle')
+    await previewToggle.waitFor({ state: 'visible' })
+    const previewLabel = previewToggle.locator('.approval-preview-label')
+    assert.equal(
+      await previewToggle.getAttribute('aria-expanded'),
+      'false',
+      'the preview starts collapsed',
+    )
+    assert.equal((await previewLabel.innerText()).trim(), 'Preview the change')
+    assert.equal(
+      (await previewToggle.locator('.approval-preview-counts').innerText()).trim(),
+      '+0 -1',
+      'a removed-only diff reports +0 -1',
+    )
+    const previewId = await previewToggle.getAttribute('aria-controls')
+    assert.ok(
+      previewId !== null && /^approval-preview-[A-Za-z0-9_-]+$/.test(previewId),
+      `the toggle must control a stable preview id (got ${previewId})`,
+    )
+    const preview = card.locator(`#${previewId}`)
+    assert.equal(await preview.count(), 1, 'the controlled preview body must exist')
+    assert.equal(await preview.isVisible(), false, 'a collapsed preview body is hidden')
+    assert.ok(
+      ((await preview.textContent()) ?? '').includes(
+        '-created by the E2E approval-reason scenario <img src=x',
+      ),
+      'the collapsed body already carries the diff text',
+    )
+
+    await previewToggle.click()
+    assert.equal(await previewToggle.getAttribute('aria-expanded'), 'true')
+    assert.equal((await previewLabel.innerText()).trim(), 'Hide preview')
+    await preview.waitFor({ state: 'visible' })
+    const previewText = await preview.innerText()
+    assert.ok(previewText.includes('--- a/e2e-approval-reason.txt'), `missing diff header: ${previewText}`)
+    assert.ok(previewText.includes('+++ b/e2e-approval-reason.txt'), 'missing diff header')
+    assert.ok(
+      previewText.includes(
+        '-created by the E2E approval-reason scenario <img src=x onerror="window.__e2e_pwned=1">',
+      ),
+      'the removed line must render as text',
+    )
+    // The diff is interpolated into the <pre> as text (Vue escapes text nodes):
+    // the markup stays literal, no node is created and no handler can run.
+    const previewHtml = await preview.evaluate((el) => el.innerHTML)
+    assert.ok(previewHtml.includes('&lt;img src=x'), 'the diff must be escaped text, not markup')
+    assert.equal(await preview.locator('img').count(), 0, 'diff markup must never become a DOM node')
+    assert.equal(
+      await page.evaluate(() => window.__e2e_pwned ?? null),
+      null,
+      'no injected handler may run',
+    )
+
+    await previewToggle.click()
+    assert.equal(await previewToggle.getAttribute('aria-expanded'), 'false')
+    assert.equal((await previewLabel.innerText()).trim(), 'Preview the change')
+    await preview.waitFor({ state: 'hidden' })
+
     await dock.locator('button.approval-btn', { hasText: 'Allow once' }).click()
     await waitForRunEnd(page)
     assert.equal(fs.existsSync(deletePath), false, 'the approved delete did not remove the file')
@@ -1854,6 +1960,12 @@ async function scenarioApprovalReason(runner) {
     const note = page.locator('article.approval .approval-note')
     await note.first().waitFor({ state: 'visible', timeout: 10000 })
     assert.equal((await note.first().innerText()).trim(), DELETE_REASON)
+    // A resolved card no longer needs the pending-only preview surface.
+    assert.equal(
+      await page.locator('article.approval .approval-preview').count(),
+      0,
+      'the resolved history card drops the pending-only preview',
+    )
 
     // no raw protocol marker or JSON leaks into the visible transcript
     const transcript = await page.locator('.chat-scroll').innerText()
@@ -2010,6 +2122,7 @@ function pendingSecs() {
 async function main() {
   const t0 = Date.now()
   await ensureWebBuild()
+  ensureFreshPackagedWeb()
   await launchBrowser()
   log(`browser: ${browserLabel}`)
   log('backend: TypeScript server (packages/harness/dist/cli.js serve)')

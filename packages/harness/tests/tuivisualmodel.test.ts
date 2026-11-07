@@ -252,6 +252,14 @@ test("screen: boxes and composed frames obey exact dimensions", () => {
   const content = wrapDisplay("你好 😀 abcdef", boxContentWidth(width));
   const box = renderBox(content, { width, title: "TEST", theme });
   assert.ok(box.every((row) => styledWidth(row) === width));
+  // A title longer than the inner-3 decoration budget must be clipped, not
+  // widen the top border (the shared budget the provider view used to work
+  // around caller-side).
+  const longTitle = renderBox(["x"], { width: 20, title: "APPROVAL REQUIRED · WRITE", theme });
+  assert.ok(
+    longTitle.every((row) => styledWidth(row) === 20),
+    `long title widened a row: ${JSON.stringify(longTitle.map((row) => styledWidth(row)))}`,
+  );
   const frame = composeScreen({ width: 20, height: 8, header: ["head"], body, footer: ["foot"], overlay: ["overlay"] });
   assert.equal(frame.length, 8);
   assert.ok(frame.every((row) => styledWidth(row) === 20));
