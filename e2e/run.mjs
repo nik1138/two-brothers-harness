@@ -13,6 +13,24 @@
 //   provider-reset mock provider: a built-in seed customized through the API is
 //                  reset in Settings -> Providers; pristine flags and both role
 //                  assignments survive (offline, no model run)
+//   folding        scripted fixture: two work-mode runs whose junior writes two
+//                  plan snapshots each; the older run's tool cards fold into a
+//                  summary disclosure row (aria-expanded, expand/collapse in
+//                  place) while the followed run stays open
+//   plan-dock      scripted fixture: three work-mode runs write a 3-item plan,
+//                  a 6-item plan (bounded list + "+N more" expand) and an empty
+//                  list; the composer-adjacent Plan dock and its polite live
+//                  region are asserted ("Plan updated", "Plan cleared.")
+//   composer-seats mock provider: the composer status seats show the role model
+//                  names from settings and a prompt-audit context breakdown
+//                  (chars, no invented token counts); the context seat is
+//                  absent until an audit exists
+//   hero-starters  mock provider: the welcome/empty hero renders with workspace
+//                  context + starters; a starter drafts into an empty composer
+//                  (editable, not sent) and never overwrites an existing draft
+//   approval-reason scripted fixture: a delete approval carries the documented
+//                  reason text and the pending card renders it verbatim; the
+//                  allow path still removes the file
 //   real           opt-in (TWO_BROTHERS_REAL_E2E=1): real models via LM Studio
 //
 // Backend: every scenario runs against the TypeScript server
@@ -132,6 +150,25 @@ function attachConsoleGuard(page) {
       )
     },
   }
+}
+
+/**
+ * One browser context + page + console guard for a scenario. The caller closes
+ * the context (and kills the backend) in its `finally`.
+ */
+async function newScenarioPage() {
+  const context = await browser.newContext()
+  const page = await context.newPage()
+  const consoleGuard = attachConsoleGuard(page)
+  return { context, page, consoleGuard }
+}
+
+/** Resolve a session file name from its readable title (API-side event checks). */
+async function sessionNameByTitle(base, title) {
+  const sessions = await (await fetch(`${base}/api/sessions`)).json()
+  const match = sessions.find((session) => session.title === title)
+  assert.ok(match, `session titled "${title}" missing from /api/sessions`)
+  return match.name
 }
 
 // -- web build ----------------------------------------------------------------
@@ -273,11 +310,13 @@ function tsEnv(overrides = {}) {
  *                          fixtures/scripted-server.mjs is an
  *                          OpenAI-compatible model server the backend talks to
  *                          (provider=openai)
- *   scenario fixture scenario name (approval | slow)
+ *   scenario fixture scenario name (approval | slow | plan | folding)
+ *   lingerMs optional --linger-ms forwarded to the fixture (slow's first
+ *            answer delay; folding's second-run deliverable delay)
  * The returned handle may carry a `modelServer` (fixture runs) that
  * killBackend() tears down with the backend itself.
  */
-async function startBackend({ kind, scenario }) {
+async function startBackend({ kind, scenario, lingerMs }) {
   const port = await freePort()
   const dir = tmpDir('tb-e2e-ts')
   let modelServer = null
@@ -286,10 +325,9 @@ async function startBackend({ kind, scenario }) {
     env = tsEnv({ TWO_BROTHERS_PROVIDER: 'mock' })
   } else {
     const modelPort = await freePort()
-    modelServer = spawnServer(
-      [NODE_SCRIPTED, '--port', String(modelPort), '--scenario', scenario],
-      'ts-model',
-    )
+    const modelArgs = [NODE_SCRIPTED, '--port', String(modelPort), '--scenario', scenario]
+    if (Number.isFinite(lingerMs)) modelArgs.push('--linger-ms', String(lingerMs))
+    modelServer = spawnServer(modelArgs, 'ts-model')
     await waitForModelServer(modelPort)
     env = tsEnv({
       TWO_BROTHERS_PROVIDER: 'openai',
@@ -1329,6 +1367,513 @@ async function scenarioProviderReset(runner) {
   }
 }
 
+// -- scenario: step folding -----------------------------------------------------------
+//
+// Two work-mode runs whose junior writes two `todo_write` plans each: every run
+// leaves two tool cards in the transcript. Once a run finishes it folds into one
+// muted summary disclosure row; the run the page currently follows keeps its
+// rows open (the fixture lingers before the second run's deliverable, so that
+// window is deterministic). The summary is a real button with aria-expanded:
+// expanding restores the rows in place, collapsing removes them from the DOM,
+// and a session switch resets the expansion state.
+
+async function scenarioFolding(runner) {
+  const FIRST = 'E2E folding first task'
+  const SECOND = 'E2E folding second task'
+  const OTHER = 'E2E folding other session'
+  const be = await startBackend({ kind: 'fixture', scenario: 'folding', lingerMs: 2500 })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  try {
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    // no workspace: the work-mode run only has the plan tool, so no approval
+    // prompt interrupts the scripted run
+    await createSession(page, 'E2E folding session')
+
+    // -- run 1: two tool cards; once completed they collapse into one summary
+    await sendTask(page, FIRST, { mode: 'work' })
+    await waitForRunEnd(page)
+    const folds = page.locator('.fold-toggle')
+    await waitFor(async () => (await folds.count()) === 1, {
+      desc: 'the first completed run to fold its tool rows',
+    })
+    const firstFold = folds.first()
+    assert.equal(await firstFold.getAttribute('aria-expanded'), 'false')
+    assert.equal(
+      await page.locator('.tool-activity').count(),
+      0,
+      'a collapsed fold must remove its tool rows from the DOM',
+    )
+    const label = (await firstFold.locator('.fold-label').innerText()).trim()
+    assert.equal(label, '2 tool calls', `fold summary label (got "${label}")`)
+    assert.equal((await firstFold.locator('.fold-hint').innerText()).trim(), 'expand')
+    assert.ok(
+      (await page.locator('.chat-group.side-senior .bubble.bubble-highlight').count()) >= 1,
+      'the decision bubble must stay visible next to a fold summary',
+    )
+
+    // -- run 2: the followed run's tool rows stay open while it works
+    await sendTask(page, SECOND, { mode: 'work' })
+    await waitFor(async () => (await page.locator('.tool-activity').count()) === 2, {
+      desc: 'the followed run tool rows to stay open',
+    })
+    assert.equal(
+      await folds.count(),
+      1,
+      'the earlier completed run must stay folded while the next run is followed',
+    )
+    const openTools = (await page.locator('.tool-activity .tool-name').allInnerTexts()).map((t) =>
+      t.trim(),
+    )
+    assert.deepEqual(openTools, ['todo_write', 'todo_write'])
+    const foldBox = await firstFold.boundingBox()
+    const openBox = await page.locator('.tool-activity').first().boundingBox()
+    assert.ok(
+      foldBox && openBox && foldBox.y < openBox.y,
+      'the fold summary must sit before the followed run rows',
+    )
+    await waitForRunEnd(page)
+    // Every completed-run tool card must leave the DOM again. Depending on how
+    // the runs' whole-second envelope timestamps line up this can form one fold
+    // group per run (two rows) or one merged group (four tool calls), so account
+    // for both shapes honestly instead of pinning a fragile count.
+    await waitFor(async () => (await page.locator('.tool-activity').count()) === 0, {
+      desc: 'all completed-run tool cards to fold',
+    })
+    const labels = (await folds.locator('.fold-label').allInnerTexts()).map((t) => t.trim())
+    assert.ok(labels.length >= 1 && labels.length <= 2, `unexpected fold count: ${labels.join(' | ')}`)
+    const foldCalls = labels.reduce((sum, label) => sum + (Number.parseInt(label, 10) || 0), 0)
+    assert.equal(
+      foldCalls,
+      4,
+      `the fold summaries must account for all four completed tool cards (${labels.join(' | ')})`,
+    )
+
+    // -- expanding restores the older rows in place; collapsing removes them
+    const firstCount = Number.parseInt(labels[0], 10)
+    await firstFold.click()
+    assert.equal(await firstFold.getAttribute('aria-expanded'), 'true')
+    assert.equal((await firstFold.locator('.fold-hint').innerText()).trim(), 'collapse')
+    await waitFor(async () => (await page.locator('.tool-activity').count()) === firstCount, {
+      desc: 'the expanded run rows to render',
+    })
+    const expandedTools = (await page.locator('.tool-activity .tool-name').allInnerTexts()).map((t) =>
+      t.trim(),
+    )
+    assert.equal(expandedTools.length, firstCount)
+    assert.ok(
+      expandedTools.every((name) => name === 'todo_write'),
+      `unexpected expanded tool names: ${expandedTools.join(', ')}`,
+    )
+    await firstFold.click()
+    assert.equal(await firstFold.getAttribute('aria-expanded'), 'false')
+    await waitFor(async () => (await page.locator('.tool-activity').count()) === 0, {
+      desc: 'collapsing to remove the rows from the DOM again',
+    })
+    assert.equal(await folds.count(), labels.length)
+
+    // -- fold state is per session: switching away and back starts collapsed
+    await createSession(page, OTHER)
+    await page.locator('.chat-scroll').waitFor({ state: 'visible' })
+    assert.equal(await page.locator('.fold-toggle').count(), 0, 'another session has no folds')
+    await page.locator('.session-item', { hasText: 'E2E folding session' }).first().click()
+    await waitFor(async () => (await page.locator('.fold-toggle').count()) >= 1, {
+      desc: 'the original session folds to come back',
+    })
+    await waitFor(async () => (await page.locator('.tool-activity').count()) === 0, {
+      desc: 'the restored session rows to start collapsed',
+    })
+    const states = await page
+      .locator('.fold-toggle')
+      .evaluateAll((els) => els.map((el) => el.getAttribute('aria-expanded')))
+    assert.ok(states.length >= 1)
+    assert.ok(
+      states.every((state) => state === 'false'),
+      `a session switch must reset expansion state (got ${states.join(', ')})`,
+    )
+
+    consoleGuard.assertClean()
+    runner.pass('folding')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(be.dir)
+  }
+}
+
+// -- scenario: plan dock --------------------------------------------------------------
+//
+// Three work-mode runs (no workspace needed: the plan tool never needs one):
+// run 1 writes a three-item plan (one ✓, one ▸, one ○), run 2 replaces it with a
+// six-item plan that exceeds the bounded list (the "+N more" expand control
+// reveals the rest), run 3 clears it. The dock's counts, markers, item texts and
+// polite live-region announcements are asserted after each run.
+
+const PLAN_TICK = '\u2713'
+const PLAN_ACTIVE = '\u25b8'
+const PLAN_PENDING = '\u25cb'
+const MIDDLE_DOT = '\u00b7'
+
+async function scenarioPlanDock(runner) {
+  const be = await startBackend({ kind: 'fixture', scenario: 'plan' })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  try {
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await createSession(page, 'E2E plan session')
+    const panel = page.locator('section.todo-panel')
+    const counts = panel.locator('.todo-panel-counts')
+    const rows = panel.locator('.todo-panel-row')
+    const expand = panel.locator('.todo-panel-expand')
+
+    // -- run 1: a three-item plan, shown whole (under the collapsed bound)
+    await sendTask(page, 'E2E plan first task', { mode: 'work' })
+    await waitForRunEnd(page)
+    await panel.waitFor({ state: 'visible', timeout: 10000 })
+    assert.equal(await panel.getAttribute('aria-label'), 'Plan')
+    // textContent, not innerText: the title is CSS `text-transform: uppercase`,
+    // and Chromium's innerText returns the transformed "PLAN".
+    const planTitle = (
+      await panel.locator('.todo-panel-title').evaluate((el) => el.textContent ?? '')
+    ).trim()
+    assert.equal(planTitle, 'Plan')
+    assert.equal((await counts.innerText()).trim(), `1/3 done ${MIDDLE_DOT} 1 in progress`)
+    assert.equal(await rows.count(), 3)
+    assert.equal(await panel.locator('.todo-panel-row-completed').count(), 1)
+    assert.equal(await panel.locator('.todo-panel-row-in_progress').count(), 1)
+    assert.equal(await panel.locator('.todo-panel-row-pending').count(), 1)
+    assert.deepEqual(
+      (await panel.locator('.todo-panel-marker').allInnerTexts()).map((t) => t.trim()),
+      [PLAN_TICK, PLAN_ACTIVE, PLAN_PENDING],
+    )
+    assert.deepEqual(
+      (await panel.locator('.todo-panel-content').allInnerTexts()).map((t) => t.trim()),
+      ['Inspect the workspace', 'Draft the migration plan', 'Verify the plan'],
+    )
+    assert.equal(await expand.count(), 0, 'a plan that fits needs no expand control')
+
+    // -- run 2: a six-item plan -> bounded list + honest "+N more" expand
+    await sendTask(page, 'E2E plan second task', { mode: 'work' })
+    await waitForRunEnd(page)
+    await waitFor(
+      async () =>
+        (await counts.innerText()).trim() === `2/6 done ${MIDDLE_DOT} 1 in progress`,
+      { desc: 'the six-item plan snapshot header' },
+    )
+    assert.equal(await rows.count(), 4, 'the collapsed plan shows the bounded four rows')
+    assert.equal(await expand.getAttribute('aria-expanded'), 'false')
+    assert.match((await expand.innerText()).trim(), /^\+2 more/)
+    await expand.click()
+    assert.equal(await expand.getAttribute('aria-expanded'), 'true')
+    await waitFor(async () => (await rows.count()) === 6, {
+      desc: 'expanding to reveal the complete plan',
+    })
+    assert.equal(await panel.locator('.todo-panel-row-completed').count(), 2)
+    assert.equal((await expand.innerText()).trim(), 'Show less')
+    await expand.click()
+    assert.equal(await expand.getAttribute('aria-expanded'), 'false')
+    await waitFor(async () => (await rows.count()) === 4, {
+      desc: 'collapsing back to the bounded plan rows',
+    })
+    // a plan change is announced politely (the dock's persistent live region)
+    const updated = page.locator('p[role="status"]', { hasText: 'Plan updated: 2 of 6 done' })
+    await updated.first().waitFor({ timeout: 10000 })
+
+    // -- run 3: the model clears the plan -> dock gone + "Plan cleared."
+    await sendTask(page, 'E2E plan third task', { mode: 'work' })
+    await waitForRunEnd(page)
+    await waitFor(async () => (await panel.count()) === 0, {
+      desc: 'the plan dock to disappear when the model clears the plan',
+    })
+    const cleared = page.locator('p[role="status"]', { hasText: 'Plan cleared.' })
+    await cleared.first().waitFor({ timeout: 10000 })
+
+    consoleGuard.assertClean()
+    runner.pass('plan-dock')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(be.dir)
+  }
+}
+
+// -- scenario: composer status seats ---------------------------------------------------
+//
+// Role models are written through the settings API before the page loads, so the
+// composer seats can show real names; a mock-provider run then supplies the
+// latest prompt audit the context seat reports (character counts and offered
+// tools only — no tokenizer, no invented token counts).
+
+async function scenarioComposerSeats(runner) {
+  const SEAT_SENIOR = 'seat-senior-model'
+  const SEAT_JUNIOR = 'seat-junior-model'
+  const be = await startBackend({ kind: 'mock' })
+  const wsDir = tmpDir('tb-e2e-ws-seats')
+  const wsName = path.basename(wsDir)
+  const { context, page, consoleGuard } = await newScenarioPage()
+  try {
+    const put = await apiCall(be.base, 'PUT', '/api/settings', {
+      senior: { model: SEAT_SENIOR, base_url: 'http://127.0.0.1:9/v1' },
+      junior: { model: SEAT_JUNIOR, base_url: 'http://127.0.0.1:9/v1' },
+    })
+    assert.equal(put.status, 200, `PUT /api/settings -> HTTP ${put.status}`)
+
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await ensureWorkspace(page, wsDir, wsName)
+    await selectWorkspaceFilter(page, wsName)
+    await createSession(page, 'E2E seats session')
+
+    const seats = page.locator('.composer-seats')
+    await seats.waitFor({ state: 'visible', timeout: 10000 })
+    assert.equal(await seats.getAttribute('aria-label'), 'Run status')
+    const models = seats.locator('.composer-seat.is-models')
+    const permission = seats.locator('.composer-seat.is-permissions')
+    const contextSeat = seats.locator('.composer-seat.is-context')
+    const modelsText = (await models.innerText()).replace(/\s+/g, ' ').trim()
+    assert.ok(modelsText.includes(`S ${SEAT_SENIOR}`), `senior model missing from seats: ${modelsText}`)
+    assert.ok(modelsText.includes(`J ${SEAT_JUNIOR}`), `junior model missing from seats: ${modelsText}`)
+    assert.equal(
+      (await permission.innerText()).replace(/\s+/g, ' ').trim(),
+      'Permissions Ask in app',
+    )
+    // no audited provider call yet: the context seat has no data and must hide
+    assert.equal(await contextSeat.count(), 0, 'the context seat must hide without an audit')
+
+    // -- one mock-provider run (every provider call is audited)
+    await sendTask(page, 'Explain a reversible migration')
+    await waitForRunEnd(page)
+    await waitFor(async () => (await contextSeat.count()) === 1, {
+      desc: 'the context seat after an audited run',
+    })
+    const seatText = (await contextSeat.innerText()).replace(/\s+/g, ' ').trim()
+    assert.match(
+      seatText,
+      /^Context [\d.]+k? system [\u00b7] [\d.]+k? context [\u00b7] \d+ tools$/,
+      `unexpected context seat text: ${seatText}`,
+    )
+    // truth: the seat's title must match the latest audit the backend recorded
+    const sessionName = await sessionNameByTitle(be.base, 'E2E seats session')
+    const runtime = await (await fetch(
+      `${be.base}/api/sessions/${encodeURIComponent(sessionName)}/events`,
+    )).json()
+    const audits = (runtime.events ?? []).filter((event) => event.type === 'prompt_audit')
+    assert.ok(audits.length > 0, 'the mock run emitted no prompt audit')
+    const latest = audits[audits.length - 1]
+    const title = await contextSeat.getAttribute('title')
+    assert.ok(
+      title.includes(`${latest.systemChars.toLocaleString('en-US')} system-prompt characters`),
+      `context seat title does not carry the audit's system chars: ${title}`,
+    )
+    assert.ok(
+      title.includes(`${latest.userChars.toLocaleString('en-US')} context characters`),
+      `context seat title does not carry the audit's context chars: ${title}`,
+    )
+    assert.ok(
+      title.includes(`${latest.tools.length} tools offered`),
+      `context seat title does not carry the audit's tool count: ${title}`,
+    )
+    // no fabricated token accounting anywhere in the seats
+    const seatTitles = (
+      await seats
+        .locator('.composer-seat')
+        .evaluateAll((els) => els.map((el) => el.getAttribute('title') ?? ''))
+    ).join(' ')
+    assert.ok(
+      !/\btokens?\b/i.test(`${await seats.innerText()} ${seatTitles}`),
+      'the seats must not invent token counts',
+    )
+
+    // -- a fresh session without any audit: the data seat disappears again
+    await createSession(page, 'E2E seats empty session')
+    await waitFor(async () => (await contextSeat.count()) === 0, {
+      desc: 'the context seat to hide again for a session without audit data',
+    })
+    await seats.waitFor({ state: 'visible' })
+
+    consoleGuard.assertClean()
+    runner.pass('composer-seats')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(wsDir)
+    rmTree(be.dir)
+  }
+}
+
+// -- scenario: welcome hero + starters -------------------------------------------------
+//
+// No session selected: the landing hero. An empty selected session: the
+// empty-transcript hero (inside the transcript area, replacing the bare hint).
+// Starters only *draft* text into the composer; an occupied composer keeps its
+// draft and shows an honest notice instead.
+
+async function scenarioHeroStarters(runner) {
+  const be = await startBackend({ kind: 'mock' })
+  const wsDir = tmpDir('tb-e2e-ws-hero')
+  const wsName = path.basename(wsDir)
+  const { context, page, consoleGuard } = await newScenarioPage()
+  try {
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    const hero = page.locator('.welcome-hero')
+    const title = hero.locator('#welcome-hero-title')
+    const chip = hero.locator('.welcome-hero-chip')
+    const textarea = page.locator('textarea.composer-input')
+
+    // -- landing state: the start hero replaces the old static card
+    await hero.waitFor({ state: 'visible', timeout: 10000 })
+    assert.equal((await title.innerText()).trim(), 'Two Brothers workspace')
+    assert.equal(await hero.locator('.welcome-hero-starter').count(), 3)
+    assert.match((await chip.innerText()).trim(), /No workspace linked yet/)
+    assert.equal(
+      await page.locator('.chat-scroll .empty-hint').count(),
+      0,
+      'the hero must replace the bare empty placeholder',
+    )
+    assert.equal(await hero.getByRole('button', { name: 'New session', exact: true }).count(), 1)
+    assert.equal(await hero.getByRole('button', { name: 'Add a workspace', exact: true }).count(), 1)
+
+    // -- workspace context: adding + filtering a workspace names it in the chip
+    await ensureWorkspace(page, wsDir, wsName)
+    await selectWorkspaceFilter(page, wsName)
+    await waitFor(async () => (await chip.innerText()).includes(wsName), {
+      desc: 'the hero workspace chip to name the selected workspace',
+    })
+
+    // -- empty selected session: the empty-transcript hero variant
+    await createSession(page, 'E2E hero session')
+    await hero.waitFor({ state: 'visible' })
+    assert.equal((await title.innerText()).trim(), 'This session is empty')
+    assert.ok((await chip.innerText()).includes(wsName))
+    assert.equal((await hero.locator('.welcome-hero-meta').innerText()).trim(), 'E2E hero session')
+    assert.equal(await page.locator('.chat-scroll .empty-hint').count(), 0)
+    assert.equal(await textarea.inputValue(), '')
+
+    // -- a starter drafts into an EMPTY composer (editable, nothing sent)
+    const starters = hero.locator('.welcome-hero-starter')
+    assert.equal((await starters.first().locator('.starter-label').innerText()).trim(), 'Plan a change')
+    await starters.first().click()
+    await waitFor(async () => (await textarea.inputValue()) === '/plan ', {
+      desc: 'the starter to prefill the composer',
+    })
+    await waitFor(async () => (await page.evaluate(() => document.activeElement?.id ?? '')) === 'composer-input', {
+      desc: 'the starter to focus the task box so the draft is editable',
+    })
+    assert.equal(
+      (await (await fetch(`${be.base}/api/runs`)).json()).length,
+      0,
+      'a starter must not start a run',
+    )
+
+    // -- an existing draft is never overwritten; the honest notice explains
+    await textarea.fill('my own draft')
+    await starters.nth(1).click()
+    assert.equal(await textarea.inputValue(), 'my own draft')
+    const notice = page.locator('.command-notice')
+    await notice.waitFor({ state: 'visible', timeout: 10000 })
+    assert.match(
+      (await notice.locator('.command-notice-text').innerText()).trim(),
+      /already has a draft/,
+    )
+    assert.equal(await notice.getAttribute('role'), 'status')
+    assert.equal(await notice.getAttribute('aria-live'), 'polite')
+    assert.equal(
+      (await (await fetch(`${be.base}/api/runs`)).json()).length,
+      0,
+      'the blocked starter must not start a run',
+    )
+
+    consoleGuard.assertClean()
+    runner.pass('hero-starters')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(wsDir)
+    rmTree(be.dir)
+  }
+}
+
+// -- scenario: approval reason ---------------------------------------------------------
+//
+// A delete approval carries the product's documented DELETE_APPROVAL_REASON:
+// the pending card renders it verbatim (the backend emits the additive `reason`
+// field on `approval_requested`), the resolved history card keeps the same text
+// (the request reason survives Allow/Deny), the allow path removes the file, and
+// no raw protocol marker leaks into the transcript.
+
+async function scenarioApprovalReason(runner) {
+  const DELETE_FILE = 'e2e-approval-reason.txt'
+  const DELETE_REASON =
+    'permanently removes the file from the workspace \u2014 deletion cannot be undone'
+  const be = await startBackend({ kind: 'fixture', scenario: 'delete' })
+  const wsDir = tmpDir('tb-e2e-ws-reason')
+  const wsName = path.basename(wsDir)
+  const deletePath = path.join(wsDir, DELETE_FILE)
+  const { context, page, consoleGuard } = await newScenarioPage()
+  try {
+    // the target exists before the run, so the delete has something to remove
+    fs.writeFileSync(deletePath, 'created by the E2E approval-reason scenario\n')
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await ensureWorkspace(page, wsDir, wsName)
+    await selectWorkspaceFilter(page, wsName)
+    await createSession(page, 'E2E approval reason session')
+
+    await sendTask(page, `Delete ${DELETE_FILE} from the workspace`, { mode: 'work' })
+    const dock = page.locator('.approval-dock')
+    await dock.waitFor({ state: 'visible', timeout: 30000 })
+    const card = dock.locator('article.approval')
+    await card.waitFor({ state: 'visible' })
+    // the documented reason text, rendered verbatim on the pending card
+    const reason = card.locator('.approval-reason')
+    await reason.waitFor({ state: 'visible' })
+    assert.equal((await reason.innerText()).trim(), DELETE_REASON)
+    // The card renders the normalized action label ("delete"), not the tool name,
+    // plus the workspace-relative target.
+    const bodyText = (await card.locator('.approval-body').innerText()).replace(/\s+/g, ' ').trim()
+    assert.match(
+      bodyText,
+      /^action delete target e2e-approval-reason\.txt$/i,
+      `unexpected approval card body: ${bodyText}`,
+    )
+    // the pending timeline duplicate stays suppressed in favour of the dock
+    assert.equal(await page.locator('article.approval', { hasText: 'awaiting you' }).count(), 1)
+
+    await dock.locator('button.approval-btn', { hasText: 'Allow once' }).click()
+    await waitForRunEnd(page)
+    assert.equal(fs.existsSync(deletePath), false, 'the approved delete did not remove the file')
+    // The resolved history card keeps the allowed state AND the same verbatim
+    // reason text the operator approved (the request reason survives Allow/Deny;
+    // a cancellation reason wins when one is present).
+    await waitFor(
+      async () =>
+        (await page.locator('article.approval .approval-status.approval-allowed').count()) >= 1,
+      { desc: 'the resolved (allowed) approval card in history' },
+    )
+    const note = page.locator('article.approval .approval-note')
+    await note.first().waitFor({ state: 'visible', timeout: 10000 })
+    assert.equal((await note.first().innerText()).trim(), DELETE_REASON)
+
+    // no raw protocol marker or JSON leaks into the visible transcript
+    const transcript = await page.locator('.chat-scroll').innerText()
+    assert.ok(!transcript.includes('{"v":1'), 'raw protocol JSON visible in chat')
+    assert.ok(!transcript.includes('[[TASK]]'), 'raw [[TASK]] marker visible in chat')
+    assert.ok(
+      !transcript.includes('[[REPAIR_REQUEST]]'),
+      'raw [[REPAIR_REQUEST]] marker visible in chat',
+    )
+
+    consoleGuard.assertClean()
+    runner.pass('approval-reason')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(wsDir)
+    rmTree(be.dir)
+  }
+}
+
 // -- scenario: real models (opt-in) ---------------------------------------------------
 
 async function scenarioReal(runner) {
@@ -1527,6 +2072,41 @@ async function main() {
           scenarioProviderReset(currentRunner)
         ),
       },
+      {
+        label: 'folding',
+        run: () => (
+          (currentRunner = makeRunner('folding')),
+          scenarioFolding(currentRunner)
+        ),
+      },
+      {
+        label: 'plan-dock',
+        run: () => (
+          (currentRunner = makeRunner('plan-dock')),
+          scenarioPlanDock(currentRunner)
+        ),
+      },
+      {
+        label: 'composer-seats',
+        run: () => (
+          (currentRunner = makeRunner('composer-seats')),
+          scenarioComposerSeats(currentRunner)
+        ),
+      },
+      {
+        label: 'hero-starters',
+        run: () => (
+          (currentRunner = makeRunner('hero-starters')),
+          scenarioHeroStarters(currentRunner)
+        ),
+      },
+      {
+        label: 'approval-reason',
+        run: () => (
+          (currentRunner = makeRunner('approval-reason')),
+          scenarioApprovalReason(currentRunner)
+        ),
+      },
     ]
     blocks.push(...hermetic.filter((block) => scenarioSelected(block.label)))
     if (realEnabled && scenarioSelected('real')) {
@@ -1550,6 +2130,11 @@ async function main() {
       'mobile',
       'appearance-density',
       'provider-reset',
+      'folding',
+      'plan-dock',
+      'composer-seats',
+      'hero-starters',
+      'approval-reason',
       'real',
     ].filter(scenarioSelected)) {
       results.push({
