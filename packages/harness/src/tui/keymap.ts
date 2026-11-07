@@ -472,6 +472,19 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
     when: "always",
     idleOnly: true,
   },
+  {
+    id: "provider",
+    title: "Connect a provider",
+    description: "Connect or change the provider endpoint used by this session.",
+    group: "Settings",
+    slash: "provider",
+    // Native app surface rather than a task: `/provider` always opens the
+    // connect form, and a discovered `provider.md` template can never shadow
+    // it (native commands win their own name, like `/help` and `/mode`).
+    keys: [],
+    when: "always",
+    idleOnly: true,
+  },
 ];
 
 // --------------------------------------------------------------------------- //

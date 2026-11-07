@@ -7,6 +7,8 @@
  * contract is documented in one place and unit-tested without a DOM.
  */
 
+import { classifyRecallKey, type RecallCaret } from './recall'
+
 /** Two Escape presses within this window request a run stop. */
 export const STOP_GESTURE_WINDOW_MS = 500
 
@@ -92,6 +94,27 @@ export function isShortcutHelpChord(input: ComposerKeyInput | null | undefined):
   if (input.key === '/') return input.ctrlKey === true || input.metaKey === true
   if (input.key === '?') return input.ctrlKey !== true && input.metaKey !== true
   return false
+}
+
+/** What an Up/Down press means for composer recall, or null for "leave it". */
+export type ComposerRecallAction = 'recall-previous' | 'recall-next' | null
+
+/**
+ * Recall bridge: an open picker owns Up/Down (list navigation), so recall only
+ * applies while it is closed. The boundary rule itself lives in `recall.ts`
+ * (single-line anywhere, multiline only at the draft's very edges) and the
+ * returned action is applied by `Composer.vue` with `stepRecall`.
+ */
+export function classifyComposerRecall(
+  input: ComposerKeyInput | null | undefined,
+  caret: RecallCaret | null | undefined,
+  pickerOpen: boolean,
+): ComposerRecallAction {
+  if (pickerOpen) return null
+  const intent = classifyRecallKey(input, caret)
+  if (intent === 'previous') return 'recall-previous'
+  if (intent === 'next') return 'recall-next'
+  return null
 }
 
 /** True when `now` is a second Escape press inside the stop window. */

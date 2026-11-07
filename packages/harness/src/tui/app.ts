@@ -53,7 +53,17 @@ import {
   type McpToolSet,
 } from "../mcp.ts";
 import { PluginManager, type PluginBindings } from "../plugins.ts";
-import { Decision, PermissionManager } from "../permissions.ts";
+import {
+  APPROVAL_MODE_INFO,
+  APPROVAL_MODES,
+  DEFAULT_APPROVAL_MODE,
+  Decision,
+  PermissionManager,
+  PermissionPolicy,
+  approvalModeWarning,
+  normalizeApprovalMode,
+  type ApprovalMode,
+} from "../permissions.ts";
 import type { Message } from "../protocol.ts";
 import { RunApprovalBroker, RuntimeEventStore } from "../runevents.ts";
 import type { RuntimeEvent } from "../runevents.ts";
@@ -124,6 +134,7 @@ import {
   planBaseCommandSubmission,
   tuiBaseCommands,
   tuiBasePaletteEntries,
+  tuiNativeCommandTokens,
 } from "./basecommands.ts";
 import {
   guardComposerSubmit,
@@ -289,6 +300,15 @@ export interface TuiAppOptions {
   mcpConfig?: string;
   /** `--stream-tokens`: append provider text deltas in place while a turn runs. */
   streamTokens?: boolean;
+  /**
+   * `tui --approval-mode` / `TWO_BROTHERS_APPROVAL_MODE`: pin the workspace
+   * approval policy for this TUI process. Never persisted; without a pin the
+   * saved `approval_policy` setting is read per turn and `/permission` writes
+   * that setting. The dialog states the pinned mode and offers no save buttons
+   * (the pin would keep winning until restart, so pretending to change it
+   * would be dishonest).
+   */
+  approvalMode?: ApprovalMode;
   /** `tui "<task>"`: run this task as soon as the screen opens. */
   initialTask?: string;
   /**
@@ -824,6 +844,26 @@ export async function loadTuiResources(options: {
 }): Promise<TuiResources> {
   const skills = discoverSkills(options.skillsRoots ?? []);
   const commands = discoverCommands(options.commandsRoots ?? []);
+  // A native registry command always wins its own name (see `keymap.ts`): a
+  // discovered `<name>.md` template reusing a native slash name (`provider.md`,
+  // `help.md`, …) would either shadow the native surface in the palette/help/
+  // `/` picker or silently turn it into a task, so it is dropped from the TUI
+  // catalog before any surface reads it. `/provider` stays the native connect
+  // surface even when such a template exists.
+  const nativeSlashTokens = tuiNativeCommandTokens();
+  const shadowed = commands.commands.filter((command) =>
+    nativeSlashTokens.has(command.name.toLowerCase()),
+  );
+  for (const command of shadowed) {
+    commands.diagnostics.push(
+      `ignored command "${command.name}": it shadows a native TUI command and native commands win`,
+    );
+  }
+  if (shadowed.length > 0) {
+    commands.commands = commands.commands.filter(
+      (command) => !nativeSlashTokens.has(command.name.toLowerCase()),
+    );
+  }
   let plugins: PluginManager | null = null;
   try {
     plugins =
@@ -1284,6 +1324,39 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       modelOverrides: sessionModelOverrides,
     });
     return providerState;
+  };
+
+  /**
+   * The persisted operator approval mode, read fresh for every turn/compaction
+   * and for `/permission`, so a change made in another surface (web Settings,
+   * a previous TUI run) applies without a restart. `SettingsStore` reads the
+   * section fail-closed (missing/corrupt/unknown => `ask`); a read error is
+   * treated the same way, never as a more permissive mode.
+   */
+  const currentApprovalMode = (): ApprovalMode => {
+    if (options.approvalMode !== undefined) return options.approvalMode;
+    try {
+      return providerStore.readApprovalPolicy();
+    } catch {
+      return DEFAULT_APPROVAL_MODE;
+    }
+  };
+
+  /** Process-pinned mode (flag/env); absent means the saved setting applies. */
+  const pinnedApprovalMode = options.approvalMode;
+
+  /**
+   * Persist one operator approval mode (the only TUI write path; it can never
+   * arrive from a model reply or a tool call). Returns an error message when
+   * the save failed, or null on success — the caller decides how to report it.
+   */
+  const saveApprovalMode = (mode: ApprovalMode): string | null => {
+    try {
+      providerStore.writeApprovalPolicy(mode);
+      return null;
+    } catch (exc) {
+      return messageOf(exc);
+    }
   };
 
   /**
@@ -2125,6 +2198,12 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       let turnWorkspace: Workspace | undefined;
       try {
         if (workspaceRoot !== null) {
+          // The approval mode is a persisted operator policy, read fresh per
+          // turn. It only widens/narrows what the workspace permission layer
+          // decides; the workspace confinement and sensitive-path refusals run
+          // before it and are untouched. `allow-all` gets one visible warning
+          // per turn because it is the only mode that weakens a guardrail.
+          const approvalMode = currentApprovalMode();
           // One broker per turn: it emits the approval events the panel renders
           // and is bound to this turn's abort signal, so stopping the turn
           // resolves every parked approval as DENY. Session allows granted in
@@ -2182,7 +2261,15 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
             }
           }, controller.signal);
           activeBroker = broker;
-          turnWorkspace = new Workspace(workspaceRoot, new PermissionManager(null, broker));
+          // The persisted mode shapes every workspace permission decision this
+          // turn; `ask` is the historical default. The warning is visible, not
+          // buried: a silent widening is exactly what this mode must never be.
+          const modeWarning = approvalModeWarning(approvalMode);
+          if (modeWarning !== null) pushToast("warn", modeWarning);
+          turnWorkspace = new Workspace(
+            workspaceRoot,
+            new PermissionManager(new PermissionPolicy(approvalMode), broker),
+          );
         }
         // Re-resolve the provider settings for THIS turn: a provider connected
         // in the web workspace / `onboard` / a previous TUI run is picked up
@@ -2991,13 +3078,53 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   };
 
   /**
-   * `/permission`: state the approval policy, the bound workspace and the
-   * session allows from what this TUI actually knows — never implying a policy
-   * that does not exist. An unbound TUI says so plainly; a bound one names the
-   * root, the fail-closed ask-before-mutating rule and every in-memory pair the
-   * operator allowed for this process.
+   * Apply one operator approval mode to the persisted settings and report the
+   * outcome honestly: a success toast, plus the mode's destructive warning
+   * when it weakens a guardrail; a failed save keeps the previous mode. Shared
+   * by the `/permission` dialog buttons and the `/permission <mode>` form.
    */
-  const openPermissionDialog = (): void => {
+  const applyApprovalMode = (next: ApprovalMode): boolean => {
+    if (pinnedApprovalMode !== undefined) {
+      pushToast(
+        "warn",
+        `approval mode is pinned to ${pinnedApprovalMode} for this TUI process — restart without --approval-mode / TWO_BROTHERS_APPROVAL_MODE to change the saved policy`,
+      );
+      return false;
+    }
+    const error = saveApprovalMode(next);
+    if (error !== null) {
+      pushToast("warn", `approval mode not saved: ${error}`);
+      return false;
+    }
+    pushToast("info", `approval mode: ${next} — the next workspace turn uses it`);
+    const warning = approvalModeWarning(next);
+    if (warning !== null) pushToast("warn", warning);
+    return true;
+  };
+
+  /**
+   * `/permission`: state the persisted approval mode, the bound workspace and
+   * the session allows from what this TUI actually knows — never implying a
+   * policy that does not exist. The dialog buttons change the persisted mode
+   * (`allow-all` is tone-warned; a write failure keeps the old mode);
+   * `/permission <mode>` applies one directly. A change applies from the next
+   * workspace turn, and the mode never relaxes workspace confinement or the
+   * sensitive-path refusal, which run before permission checks.
+   */
+  const openPermissionDialog = (args = ""): void => {
+    const requested = args.trim();
+    if (requested !== "") {
+      const next = normalizeApprovalMode(requested);
+      if (next === null) {
+        baseNotice(
+          "warn",
+          `unknown approval mode "${requested}" — use ${APPROVAL_MODES.join(" | ")}`,
+        );
+        return;
+      }
+      applyApprovalMode(next);
+      return;
+    }
     const plugins = resources.plugins;
     const pluginServers =
       plugins === null
@@ -3011,15 +3138,29 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         ? 0
         : [...plugins.plugins.values()].reduce((total, plugin) => total + plugin.tools.length, 0);
     const skills = resources.skills.skills;
+    const mode = currentApprovalMode();
+    const modeInfo = APPROVAL_MODE_INFO[mode];
+    const modeLines = [
+      `approval mode: ${mode} — ${modeInfo.description}`,
+      ...(modeInfo.danger !== undefined ? [`warning: ${modeInfo.danger}`] : []),
+      ...(pinnedApprovalMode !== undefined
+        ? [
+            "pinned by --approval-mode / TWO_BROTHERS_APPROVAL_MODE for this TUI process (never persisted); the saved approval_policy applies again after a restart without the pin",
+          ]
+        : [
+            "the buttons below persist the mode (sessions/settings.json); it applies from the next workspace turn",
+          ]),
+    ];
     const approvalLines =
       workspaceRoot === null
         ? [
+            ...modeLines,
             "approvals: none — this TUI run has no workspace or approval broker; workspace tools are unavailable",
             "workspace: none — start the TUI with --workspace <dir> to bind one",
           ]
         : [
+            ...modeLines,
             `workspace: ${workspaceRoot}`,
-            "approvals: writes, edits, deletes and shell ask before running; reads are auto-allowed; a stopped turn denies every pending request (fail closed)",
             "approval decisions: 1 / Y allow once · 2 / A allow for this TUI session · 3 / N / Esc deny · Ctrl+E preview",
             `session allows (memory only, this TUI process): ${
               sessionAllows.size === 0
@@ -3043,15 +3184,37 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         `junior ${skills.filter((skill) => skill.scope === "junior").length} ` +
         "(only shared skills are operator-attachable)",
     ];
+    // Close is listed last and is the default selection: opening /permission
+    // and pressing Enter must never persist a mode change (a no-op close is the
+    // safe default; the operator moves the selection to choose a mode).
+    const modeActions =
+      pinnedApprovalMode !== undefined
+        ? [{ id: "close", label: "Close" }]
+        : [
+            ...APPROVAL_MODES.map((candidate) => ({
+              id: candidate,
+              label:
+                candidate === mode
+                  ? `${APPROVAL_MODE_INFO[candidate].label} (current)`
+                  : APPROVAL_MODE_INFO[candidate].label,
+            })),
+            { id: "close", label: "Close" },
+          ];
     overlay = {
       kind: "dialog",
       state: createDialog({
         title: "PERMISSIONS",
         message: "Approval policy and configured tool scopes",
         details: lines.join("\n"),
-        actions: [{ id: "close", label: "Close" }],
+        ...(mode === "allow-all" ? { tone: "warning" as const } : {}),
+        actions: modeActions,
+        selected: modeActions.length - 1,
       }),
-      onAction: () => {},
+      onAction: (id) => {
+        const next = normalizeApprovalMode(id);
+        if (next !== null) applyApprovalMode(next);
+        render();
+      },
     };
     render();
   };
@@ -3122,7 +3285,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         exportSessionAction(args);
         return;
       case "permission":
-        openPermissionDialog();
+        openPermissionDialog(args);
         return;
       case "status":
         openStatusDialog();
@@ -3260,6 +3423,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       case "settings":
         openSettingsDialog();
         break;
+      case "provider":
+        openProviderSurface();
+        break;
       case "retry":
         doRetry();
         break;
@@ -3309,8 +3475,6 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       ...TUI_COMMANDS.map((c) => c.slash).filter((s): s is string => s !== undefined),
       ...resources.commands.commands.map((c) => c.name),
       ...baseCommandList().flatMap((command) => [command.name, ...command.aliases]),
-      // First-party alias for the provider connect surface (see submitEditor).
-      "provider",
     ];
     const unique = [...new Set(names.filter((name) => name.toLowerCase().startsWith(prefix)))];
     if (unique.length === 1 && unique[0] !== undefined && unique[0] !== prefix) {
@@ -3390,6 +3554,10 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         if (!gateIdleCommand(command)) return true;
         openSettingsDialog();
         return true;
+      case "provider":
+        if (!gateIdleCommand(command)) return true;
+        openProviderSurface();
+        return true;
       case "retry":
         doRetry();
         return true;
@@ -3440,15 +3608,13 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     if (text.trim() === "") return;
     const matched = matchCommand(text);
     if (matched !== null) {
-      // `/provider` is the TUI's provider connect surface (the same one behind
-      // `/settings`); it is an app action, never a task or a discovered template.
-      if (matched.name === "provider") {
-        openProviderSurface();
-        return;
-      }
+      // A native registry command always wins its own name (the same rule the
+      // catalog filter in `loadTuiResources` applies to the surfaces): a
+      // discovered template can never shadow a native app surface such as
+      // `/provider`. Native commands this dispatcher does not own fall through
+      // to the template/base resolution below unchanged.
       const builtin = findSlashCommand(TUI_COMMANDS, matched.name);
-      const shadowsTemplate = resources.commands.commands.some((c) => c.name === matched.name);
-      if (builtin !== null && !shadowsTemplate && dispatchSlash(builtin, matched.args)) return;
+      if (builtin !== null && dispatchSlash(builtin, matched.args)) return;
       // A discovered template shadows a same-named base command; when no
       // template claims the name, a first-party base command handles it
       // (prompt → expanded turn, action → performed locally, never a task).

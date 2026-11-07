@@ -8,6 +8,7 @@ import {
   listSkills,
   listWorkspaceFiles,
 } from '../api'
+import type { SettingsResponse } from '../api'
 import {
   MODE_COMMAND_USAGE,
   commandSectionCount,
@@ -20,10 +21,12 @@ import {
   typedCommandNotice,
 } from '../basecommands'
 import type { ComposerCommandRequest } from '../basecommands'
-import { canSubmitComposer, classifyComposerKey, composerLockReason } from '../composerKeys'
+import { canSubmitComposer, classifyComposerKey, classifyComposerRecall, composerLockReason } from '../composerKeys'
 import type { ComposerKeyInput, ComposerSendContext } from '../composerKeys'
 import { composerSeats } from '../composerStatus'
 import { clearDraft, getDraft, setDraft } from '../drafts'
+import { createRecallState, loadRecall, recordRecall, saveRecall, stepRecall } from '../recall'
+import type { RecallState } from '../recall'
 import {
   MAX_FILE_ITEMS,
   MENTION_DEBOUNCE_MS,
@@ -42,7 +45,6 @@ import type {
   CommandInfo,
   RunMode,
   RunProvider,
-  SettingsView,
   SkillInfo,
   WorkspaceFileEntry,
 } from '../types'
@@ -167,7 +169,7 @@ interface RoleRoute {
   baseUrl: string | null
 }
 
-const settings = ref<SettingsView | null>(null)
+const settings = ref<SettingsResponse | null>(null)
 /** Loading until the first settings response; unknown when the request failed. */
 const settingsState = ref<'loading' | 'ready' | 'unknown'>('loading')
 let settingsRequest = 0
@@ -311,9 +313,11 @@ const settingsHint = computed(
 )
 
 /**
- * Truthful status seats (models · permission expectation · latest audit-derived
- * context breakdown). Each seat hides itself when its data is unknown, so the
- * row never shows placeholders or fabricated token counts.
+ * Truthful status seats (models · effective permission mode · latest
+ * audit-derived context breakdown). Each seat hides itself when its data is
+ * unknown, so the row never shows placeholders or fabricated token counts.
+ * The permission seat names the saved approval mode (`ask` when the backend
+ * omits the additive section, which is the mode such a backend applies).
  */
 const statusSeats = computed(() =>
   composerSeats({
@@ -321,6 +325,7 @@ const statusSeats = computed(() =>
     seniorLabel: settings.value ? modelLabel(seniorRoute.value) : null,
     juniorLabel: settings.value ? modelLabel(juniorRoute.value) : null,
     workspaceLinked: Boolean(props.workspaceId),
+    approvalMode: settings.value?.approval_policy?.mode ?? null,
     latestAudit: props.latestAudit ?? null,
   }),
 )
@@ -340,6 +345,18 @@ let restoringDraft = false
 /** Welcome-screen draft (no active session), kept in memory until submit. */
 let unsessionedDraft = ''
 
+// -- prompt-history recall ----------------------------------------------------
+// Up/Down at the draft edges recall accepted submissions, newest first (the
+// same contract as the TUI composer). Browsing is in memory: the live draft is
+// stashed in `recallState.draft` and restored exactly, and the drafts blob is
+// deliberately left alone while a recalled entry is on screen. Entries are
+// recorded only when App reports an accepted submission (`submitResult`), so an
+// unsent draft is never recallable and navigation never appends.
+const recallEntries = ref<string[]>([])
+let recallState: RecallState = createRecallState()
+/** True while a recall step writes `task`; that change is not a draft edit. */
+let applyingRecall = false
+
 function cancelDraftSave() {
   if (draftSaveTimer === null) return
   clearTimeout(draftSaveTimer)
@@ -349,17 +366,23 @@ function cancelDraftSave() {
 /** Write the current text for `sessionId` now (session switch / unmount). */
 function flushDraft(sessionId: string | null | undefined = props.sessionId) {
   cancelDraftSave()
+  // While a recalled entry is on screen the operator's live draft is the
+  // stashed one: the recalled text must never overwrite the saved draft.
+  const text = recallState.active ? recallState.draft : task.value
   if (!sessionId) {
     // no storage key for the welcome screen — remember the text in memory
-    unsessionedDraft = task.value
+    unsessionedDraft = text
     return
   }
-  setDraft(sessionId, task.value)
+  setDraft(sessionId, text)
 }
 
 /** Show `sessionId`'s saved draft, or the remembered welcome-screen text. */
 function restoreDraft(sessionId: string | null | undefined) {
   cancelDraftSave()
+  // A restored draft replaces the box, so any recall browsing is over.
+  recallState = createRecallState()
+  applyingRecall = false
   restoringDraft = true
   task.value = sessionId ? getDraft(sessionId) : unsessionedDraft
   void nextTick(() => {
@@ -381,7 +404,7 @@ function adoptOrRestore(sessionId: string) {
 }
 
 function scheduleDraftSave() {
-  if (restoringDraft) return
+  if (restoringDraft || applyingRecall || recallState.active) return
   if (!props.sessionId) {
     // nothing to key the welcome-screen draft to; the in-memory copy is enough
     unsessionedDraft = task.value
@@ -434,6 +457,9 @@ watch(
     if (!result || !pending || result.token !== pending.token) return
     pendingSubmit.value = null
     if (!result.accepted) return
+    // Only accepted submissions (a run the backend queued included) join the
+    // recall history; a rejected request must never become recallable.
+    rememberRecall(pending.text)
     if (props.sessionId === pending.sessionId) {
       // same box: only clear when it still holds the submitted text
       if (task.value.trim() === pending.text) consumeComposerText()
@@ -449,9 +475,74 @@ watch(
 /** Clear the whole draft (a submit or a consumed base command). */
 function consumeComposerText() {
   cancelDraftSave()
+  recallState = createRecallState()
+  applyingRecall = false
   clearDraft(props.sessionId)
   unsessionedDraft = ''
   task.value = ''
+}
+
+// -- prompt-history recall (keyboard) ----------------------------------------
+// Up on a single-line draft (or the very start of a multiline one) recalls the
+// newest accepted submission; Down steps forward again, restoring the stashed
+// draft past the newest entry. Any other arrow usage keeps the textarea's own
+// caret movement. A recalled entry is programmatic text: it never saves to the
+// drafts blob, and typing over it ends browsing (the pre-recall draft is
+// dropped, exactly like editing a recalled task in the TUI).
+
+/** The caret/textarea facts the recall boundary rule reads. */
+function recallCaret(): { text: string; selectionStart: number; selectionEnd: number } {
+  const el = inputEl.value
+  const text = composerValue()
+  const start = el && typeof el.selectionStart === 'number' ? el.selectionStart : text.length
+  const end = el && typeof el.selectionEnd === 'number' ? el.selectionEnd : text.length
+  return { text, selectionStart: start, selectionEnd: end }
+}
+
+/** Place recalled text in the box without treating it as an operator edit. */
+function showRecalledText(text: string): void {
+  cancelDraftSave()
+  applyingRecall = true
+  task.value = text
+  void nextTick(() => {
+    applyingRecall = false
+    const el = inputEl.value
+    if (!el) return
+    const end = text.length
+    el.focus()
+    try {
+      el.setSelectionRange(end, end)
+    } catch {
+      // a detached/disabled textarea must never throw while restoring the caret
+    }
+    resizeInput()
+  })
+}
+
+/** One Up/Down recall step (the keystroke was already consumed). */
+function applyRecallStep(action: 'recall-previous' | 'recall-next'): void {
+  const liveText = composerValue()
+  if (!recallState.active) {
+    // Capture the unsent draft synchronously before the box is replaced, so
+    // stepping back to it — or switching sessions — restores exactly this text
+    // while drafts.ts keeps its copy.
+    flushDraft()
+  }
+  const step = stepRecall(
+    recallState,
+    action === 'recall-previous' ? 'previous' : 'next',
+    recallEntries.value,
+    liveText,
+  )
+  if (step.text === null) return
+  recallState = step.state
+  showRecalledText(step.text)
+}
+
+/** Record one accepted submission and persist the bounded history. */
+function rememberRecall(text: string): void {
+  recallEntries.value = recordRecall(recallEntries.value, text)
+  saveRecall(recallEntries.value)
 }
 
 // -- @ mention and / command pickers -----------------------------------------
@@ -799,6 +890,10 @@ function syncPicker(): void {
 
 /** The input event owns text changes; typing re-arms a dismissed picker. */
 function onInput(): void {
+  // Editing a recalled entry turns it into the live draft: history browsing
+  // ends and the operator's new text is the draft from here on (the same rule
+  // as editing a recalled task in the TUI composer).
+  if (recallState.active) recallState = createRecallState()
   pickerDismissed = null
   syncPicker()
 }
@@ -1109,6 +1204,16 @@ function onKeydown(e: KeyboardEvent) {
   // an open picker owns Enter/Tab/arrows/Escape: Enter/Tab accept, Shift+Enter
   // keeps the newline, Shift+Tab/Escape close, and Enter can never submit
   if (pickerOpen.value && onPickerKeydown(e)) return
+  // Up/Down at the draft edges recall accepted submissions (never an unsent
+  // draft, never a submit); the open picker above keeps its own arrow handling.
+  if (recallEntries.value.length > 0) {
+    const recallAction = classifyComposerRecall(keyInput(e), recallCaret(), pickerOpen.value)
+    if (recallAction !== null) {
+      e.preventDefault()
+      applyRecallStep(recallAction)
+      return
+    }
+  }
   // a run parked on an approval owns the turn: Enter stays a newline, the
   // text is a draft. A working run does not block — Enter queues a submission.
   if (props.waiting) return
@@ -1213,8 +1318,21 @@ watch(
     pickerDismissed = null
     resetFileState()
     // `task` still holds the previous state's text here: save it under the old
-    // id (or remember it when there was no session), then swap the box.
+    // id (or remember it when there was no session), then swap the box. While
+    // browsing history, `flushDraft` writes the stashed live draft instead of
+    // the recalled text, and the box is put back on that draft before the new
+    // session adopts it — a recalled task must never leak into a draft.
+    const stashedRecall = recallState.active ? recallState.draft : null
     flushDraft(prev)
+    recallState = createRecallState()
+    applyingRecall = false
+    if (stashedRecall !== null) {
+      applyingRecall = true
+      task.value = stashedRecall
+      void nextTick(() => {
+        applyingRecall = false
+      })
+    }
     if (!prev && next) adoptOrRestore(next)
     else restoreDraft(next)
   },
@@ -1236,6 +1354,8 @@ watch(
     }
     cancelDraftSave()
     restoringDraft = false
+    recallState = createRecallState()
+    applyingRecall = false
     task.value = prefill.text
     if (props.sessionId) setDraft(props.sessionId, prefill.text)
     else unsessionedDraft = prefill.text
@@ -1277,6 +1397,7 @@ watch(() => props.settingsVersion, () => {
 onMounted(() => {
   // a mounted composer may already have a session (restored selection on load)
   restoreDraft(props.sessionId)
+  recallEntries.value = loadRecall()
   resizeInput()
   window.addEventListener('resize', resizeInput)
   void checkSettings()

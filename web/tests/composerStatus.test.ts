@@ -62,6 +62,35 @@ test('the permission seat states the real approval model per workspace context',
   assert.deepEqual(composerSeats({ workspaceLinked: null }), [])
 })
 
+test('the permission seat names the effective approval mode', () => {
+  const seatOf = (mode: 'ask' | 'readonly' | 'edits' | 'allow-all') =>
+    composerSeats({ workspaceLinked: true, approvalMode: mode })[0]
+
+  const ask = seatOf('ask')
+  assert.equal(ask.value, 'Ask in app')
+  assert.match(ask.title, /ask here before running/)
+
+  const readonly = seatOf('readonly')
+  assert.equal(readonly.value, 'Read only')
+  assert.match(readonly.title, /denied without asking/)
+  assert.match(readonly.title, /Settings → Approvals/)
+
+  const edits = seatOf('edits')
+  assert.equal(edits.value, 'Edits auto')
+  assert.match(edits.title, /writes and edits run without asking/)
+  assert.match(edits.title, /deletes and shell commands pause the run/)
+
+  const allowAll = seatOf('allow-all')
+  assert.equal(allowAll.value, 'Allow all')
+  assert.match(allowAll.title, /every action runs without asking/)
+  assert.match(allowAll.title, /including deletes and shell commands/)
+
+  // A mode is only meaningful for a linked workspace: the unlinked seat keeps
+  // saying there are no privileged tools, whatever the saved mode is.
+  const unlinked = composerSeats({ workspaceLinked: false, approvalMode: 'readonly' })[0]
+  assert.equal(unlinked.value, 'No workspace')
+})
+
 test('the context seat reports the latest prompt audit exactly', () => {
   const seats = composerSeats({ latestAudit: audit() })
   assert.equal(seats.length, 1)

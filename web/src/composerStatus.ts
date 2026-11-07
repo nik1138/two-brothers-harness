@@ -9,12 +9,16 @@
  *   offered-tool count exactly as recorded. No tokenizer is invented from char
  *   counts, and no context-window number is shown: the web client does not
  *   receive one, so a token seat would be fabricated;
- * - the permission seat describes the product's real approval model: workspace
- *   tools that need permission pause the run and ask in the web UI, and a run
- *   without a linked workspace has no privileged workspace tools to approve.
+ * - the permission seat describes the product's real approval model for the
+ *   linked workspace: the effective approval mode (`ask`/`readonly`/`edits`/
+ *   `allow-all`) from settings, or the fail-closed `ask` default when an older
+ *   backend omits the additive `approval_policy` section; a run without a
+ *   linked workspace has no privileged workspace tools to approve.
  *
  * No DOM or Vue dependency: the derivation is unit-tested directly.
  */
+
+import type { ApprovalMode } from './types'
 
 /** The fields of `PromptAuditItem` the seats read (no prompt bodies exist). */
 export interface AuditSeatInput {
@@ -36,8 +40,16 @@ export interface ComposerStatusInput {
    * `null`/`undefined` = unknown (seat hidden).
    */
   workspaceLinked?: boolean | null
-  /** Latest prompt audit of the selected session / followed run, when any. */
+  /**
+   * Latest prompt audit of the selected session / followed run, when any.
+   */
   latestAudit?: AuditSeatInput | null
+  /**
+   * Effective workspace approval mode from settings (`approval_policy`), when
+   * known. `null`/`undefined` on an older backend that omits the section: the
+   * seat keeps the fail-closed default copy, which is what that backend applies.
+   */
+  approvalMode?: ApprovalMode | null
 }
 
 export type ComposerSeatId = 'models' | 'permissions' | 'context'
@@ -100,6 +112,35 @@ function modelsSeat(input: ComposerStatusInput): ComposerSeat | null {
 
 function permissionsSeat(input: ComposerStatusInput): ComposerSeat | null {
   if (input.workspaceLinked === true) {
+    // The seat names the effective mode honestly; `ask` is also the fail-closed
+    // fallback an older backend (no additive approval_policy section) applies.
+    if (input.approvalMode === 'readonly') {
+      return {
+        id: 'permissions',
+        label: 'Permissions',
+        value: 'Read only',
+        title:
+          'Approval mode is read only: writes, edits, deletes and shell commands are denied without asking. Change it in Settings → Approvals.',
+      }
+    }
+    if (input.approvalMode === 'edits') {
+      return {
+        id: 'permissions',
+        label: 'Permissions',
+        value: 'Edits auto',
+        title:
+          'Approval mode is edits: writes and edits run without asking; deletes and shell commands pause the run and ask here. Change it in Settings → Approvals.',
+      }
+    }
+    if (input.approvalMode === 'allow-all') {
+      return {
+        id: 'permissions',
+        label: 'Permissions',
+        value: 'Allow all',
+        title:
+          'Approval mode is allow all: every action runs without asking, including deletes and shell commands. Change it in Settings → Approvals.',
+      }
+    }
     return {
       id: 'permissions',
       label: 'Permissions',

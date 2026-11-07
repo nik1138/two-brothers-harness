@@ -689,7 +689,13 @@ export function handleEditorKey(
     return { state: moveCursor(state, key.ctrl === true ? "docEnd" : "lineEnd"), action: "none" };
   }
   if (name === "up") {
-    if (cursorPosition(state).line > 0) {
+    // A single-line draft has nowhere to move up, so Up recalls the previous
+    // submission immediately (the composer is empty right after a turn, which
+    // is the normal recall case). A multiline draft only leaves the composer
+    // at the very start (first line, column 0): everywhere else Up is ordinary
+    // vertical movement, so browsing history can never replace text the
+    // operator is in the middle of editing.
+    if (state.text.includes("\n") && state.cursor > 0) {
       return { state: moveCursor(state, "lineUp"), action: "none" };
     }
     return { state: historyPrevious(state), action: "history-prev" };
@@ -697,6 +703,12 @@ export function handleEditorKey(
   if (name === "down") {
     const units = graphemes(state.text);
     if (cursorPosition(state).line < lineBounds(units).length - 1) {
+      return { state: moveCursor(state, "lineDown"), action: "none" };
+    }
+    // The same boundary rule downwards: only the very end of a multiline draft
+    // steps through history; writing history at an interior last-line caret is
+    // movement first, so Down never surprises an editor mid-draft.
+    if (state.text.includes("\n") && state.cursor < units.length) {
       return { state: moveCursor(state, "lineDown"), action: "none" };
     }
     return { state: historyNext(state), action: "history-next" };

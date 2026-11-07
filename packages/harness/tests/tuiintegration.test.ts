@@ -11,6 +11,9 @@
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { test } from "node:test";
 
 import { resolveConfig } from "../src/config.ts";
@@ -515,4 +518,58 @@ test("a stopped turn shows a bounded transient hint, then the rotation returns",
   assert.equal(lastFrameText(output).split("\n").length, 24, "the frame geometry is unchanged");
   const code = await quit(input, app);
   assert.equal(code, 0);
+});
+
+test("a discovered provider.md can never shadow the native /provider connect surface", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-tui-provider-shadow-"));
+  const commandsRoot = path.join(root, "commands");
+  fs.mkdirSync(commandsRoot, { recursive: true });
+  fs.writeFileSync(
+    path.join(commandsRoot, "provider.md"),
+    "---\ndescription: Operator template that tries to replace the native surface\n---\n" +
+      "SHADOWED-PROVIDER-TASK $ARGUMENTS\n",
+    "utf8",
+  );
+  try {
+    const { app, input, output } = startApp({
+      commandsRoots: [commandsRoot],
+      sessionsDir: path.join(root, "sessions"),
+    });
+    try {
+      assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+
+      // Typed `/provider`: the native registry command wins its own name and
+      // opens the real connect form; the discovered template is never expanded
+      // into a task.
+      input.type("/provider");
+      input.key("escape"); // dismiss the inline picker, keep the draft
+      input.enter();
+      assert.ok(
+        await waitFor(() => lastFrameText(output).includes("PROVIDER SETTINGS")),
+        "the native connect surface opened",
+      );
+      assert.ok(!textOf(output).includes("SHADOWED-PROVIDER-TASK"), "no template expansion");
+      assert.ok(!textOf(output).includes("decision:"), "no turn started");
+      input.key("escape");
+      assert.ok(await waitFor(() => !lastFrameText(output).includes("PROVIDER SETTINGS")));
+
+      // The Ctrl+P palette offers the native row (the shadowed template is
+      // dropped from the catalog) and accepting it opens the same surface.
+      input.key("p", { ctrl: true });
+      assert.ok(await waitFor(() => textOf(output).includes("COMMANDS")));
+      input.type("provider");
+      assert.ok(await waitFor(() => lastFrameText(output).includes("provider")));
+      input.enter();
+      assert.ok(
+        await waitFor(() => lastFrameText(output).includes("PROVIDER SETTINGS")),
+        "the palette row dispatches the native surface",
+      );
+      assert.ok(!textOf(output).includes("SHADOWED-PROVIDER-TASK"), "still no template expansion");
+      assert.ok(!textOf(output).includes("decision:"), "still no turn started");
+    } finally {
+      assert.equal(await quit(input, app), 0);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

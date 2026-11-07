@@ -248,3 +248,45 @@ test("Up/Down move within multiline drafts and use history only at the edges", (
   assert.equal(restored.action, "history-next");
   assert.equal(restored.state.text, "one\ntwo");
 });
+
+test("recall boundary rule: single-line anywhere, multiline only at the very edges", () => {
+  // A single-line draft has no vertical movement, so Up recalls from any caret
+  // column and Down steps forward/restores exactly.
+  let single = recordHistory(editor("live draft"), "older");
+  single = recordHistory(single, "newest task");
+  const recalledFromMiddle = handleEditorKey(at(single, 4), key("up", "\u001b[A"));
+  assert.equal(recalledFromMiddle.action, "history-prev");
+  assert.equal(recalledFromMiddle.state.text, "newest task");
+  assert.equal(recalledFromMiddle.state.draft, "live draft");
+  const forward = handleEditorKey(recalledFromMiddle.state, key("down", "\u001b[B"));
+  assert.equal(forward.action, "history-next");
+  assert.equal(forward.state.text, "live draft");
+  assert.equal(forward.state.historyIndex, null);
+
+  // Multiline: Up at an interior first-line caret is ordinary movement (a
+  // no-op at the top), never a recall that replaces the draft being edited.
+  const multi = at(recordHistory(editor("first\nsecond"), "old"), 3);
+  const interiorUp = handleEditorKey(multi, key("up", "\u001b[A"));
+  assert.equal(interiorUp.action, "none");
+  assert.deepEqual(interiorUp.state, multi);
+
+  // At the very start of the first line it recalls and stashes the draft bytes.
+  const recalled = handleEditorKey(at(multi, 0), key("up", "\u001b[A"));
+  assert.equal(recalled.action, "history-prev");
+  assert.equal(recalled.state.text, "old");
+  assert.equal(recalled.state.draft, "first\nsecond");
+
+  // A recalled multiline entry keeps its interior cursor: Down on the last
+  // line before its end is movement (a no-op at the bottom), and only the very
+  // end of the draft restores the stashed live draft.
+  const multilineHistory = recordHistory(editor("live"), "recalled\nentry");
+  const entry = handleEditorKey(at(multilineHistory, 0), key("up", "\u001b[A"));
+  assert.equal(entry.state.text, "recalled\nentry");
+  const interiorDown = handleEditorKey(at(entry.state, 11), key("down", "\u001b[B"));
+  assert.equal(interiorDown.action, "none");
+  assert.deepEqual(interiorDown.state, at(entry.state, 11));
+  const restored = handleEditorKey(entry.state, key("down", "\u001b[B"));
+  assert.equal(restored.action, "history-next");
+  assert.equal(restored.state.text, "live");
+  assert.equal(restored.state.draft, "");
+});
