@@ -165,8 +165,13 @@ Then open `http://127.0.0.1:8600`:
    configured models; there is no separate "mock" switch in the UI. Settings →
    **Providers** lists the provider presets by name and opens the selected
    provider's settings right below it (base URL, masked API key, model ids,
-   advanced wire kind, add/delete); Settings → **Appearance** sets the theme
-   and the Comfortable/Compact density for this device.
+   advanced wire kind, add/delete). A customized built-in seed also shows
+   **Reset to default**: the confirmation warns that the customized values and
+   the stored override API key are discarded while the Senior/Junior role
+   assignments stay unchanged, and the provider itself is not deleted. Against
+   a backend without the reset route, the client shows an unsupported message
+   and changes nothing. Settings → **Appearance** sets the theme and the
+   Comfortable/Compact density for this device.
 3. **Send a task** in `work` mode. The run proceeds in the background; the
    chat updates live over SSE — a folded **Thinking** row (reasoning) and the
    **Response** block stream in as the models generate, then resolve into the
@@ -232,6 +237,14 @@ mentions are web-only because terminal runs have no workspace). A built-in
 action like `/compact`, `/export [path]`, `/status` or `/permission` is
 performed by the TUI and never submitted as a task; `/plan <objective>`
 expands and runs that turn.
+
+Collapsed tool-result rows fold to a preview bounded by visual rows after
+width-aware wrapping (six by default), with a `… +N more lines` marker that
+counts the hidden visual rows; `Ctrl+T` toggles the most recent result between
+the preview and its complete text, expansion is per tool row, and the model
+always keeps the full result. The visual-row truncation follows pi's
+visual-truncate approach (MIT — see
+[Attribution](attribution.md)).
 
 Full keymap and web palette keys: [Keyboard and shortcuts](keyboard.md).
 

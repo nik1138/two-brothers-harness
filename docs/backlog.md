@@ -403,16 +403,36 @@ Design anchors that already exist:
   `/status`, `/permission`, `/mode`, `/help`/`/commands` locally; `/new` is
   refused with guidance; `help chat` documents the surface.
 
+## Shipped 2026-11-07 (provider reset, folded tool previews)
+
+- **Provider preset reset-to-default** — `POST /api/providers/{name}/reset`
+  removes only a customized built-in seed's stored override (legacy
+  case-variant duplicates included), keeps both roles' `provider_ref`,
+  unrelated settings/plugins and other providers, and returns the canonical
+  seed (`seed: true`, `customized: false`). Errors: unknown name 404, custom
+  (non-seed) provider 400, pristine seed/no stored override 409
+  (`provider is not customized: <name>`). `DELETE` keeps its existing
+  remove-and-clear-refs behavior. The web Settings → Providers master–detail
+  card shows **Reset to default** only for a customized built-in seed, with a
+  confirmation that the stored override (including its API key) is discarded
+  while Senior/Junior assignments stay; against an older backend without the
+  route, the client shows an unsupported message and changes nothing. Tests:
+  `tests/server.test.ts`, `web/tests/providerSettings.test.ts`. See
+  `docs/cli-reference.md` and `docs/quickstart.md`.
+- **TUI folded tool-result previews by visual rows** — a collapsed tool row
+  now keeps the first `maxToolRows` (default six) visual rows after
+  width-aware wrapping instead of raw logical lines, so one long line cannot
+  fill the screen; the `… +N more lines` marker counts hidden visual rows.
+  `Ctrl+T` still toggles the most recent result between the preview and its
+  complete text; expansion remains per tool row, and the model keeps the full
+  result. The visual-row truncation follows pi's visual-truncate approach
+  (MIT); reimplemented locally with no substantial block copied (NOTICE
+  unchanged).
+  Tests: `tests/tuivisualmodel.test.ts`. See `docs/cli-reference.md` and
+  `docs/quickstart.md`.
+
 ## Open items (deferred)
 
-- **Provider preset reset-to-default** — a seed edited in Settings →
-  Providers materializes a stored override, and today the only way to drop it
-  is `DELETE /api/providers/{name}`, which also clears every role
-  `provider_ref` pointing at that name (roles silently fall back to Manual).
-  Add a dedicated `POST /api/providers/{name}/reset` that removes the stored
-  override, keeps role references, and returns the pristine seed; the web
-  detail card then gets a "Reset to default" action (deliberately not shipped
-  in the master–detail round because the DELETE side effect is surprising).
 - **Provider model discovery** — `preset.models` is a manual/suggested list;
   there is no discovery endpoint (`provider.listModels()` exists in the
   package and drives the CLI `models` command). Add

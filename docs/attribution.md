@@ -62,5 +62,13 @@ width handling of pi's TUI Markdown component
 Zechner). It is implemented locally without `marked` and emits the same
 grapheme/width-safe plain rows as the rest of the TUI.
 
+`packages/harness/src/tui/transcript.ts` follows the wrap-then-slice visual-row
+truncation approach of pi's `visual-truncate.ts` (coding-agent
+`modes/interactive/components/`, MIT, Copyright (c) 2025 Mario Zechner) for
+collapsed tool-result previews: text is wrapped to the render width first, the
+preview budget counts visual rows rather than logical lines, and the hidden
+count is exact. The implementation is local (no pi-tui dependency, no copied
+block); a point-of-use provenance comment names the upstream file.
+
 `@earendil-works/pi-mcp` 1.5.0 is a runtime dependency (MIT, Copyright (c) 2025
 Mario Zechner). It is installed from npm, not vendored.

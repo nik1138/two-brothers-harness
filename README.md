@@ -121,7 +121,10 @@ server then serves (the npm tarball ships its own copy of that build).
   a hand-maintained price table for `cost: $…` estimates, and per-role
   `--max-tokens` output caps. In the web workspace, Settings → Providers is a
   master–detail list: provider names first, the selected provider's settings
-  (base URL, masked write-only key, model ids, wire kind) directly below.
+  (base URL, masked write-only key, model ids, wire kind) directly below. A
+  customized built-in seed has a **Reset to default** action that discards the
+  stored override and its key without touching the Senior/Junior role
+  assignments.
 - **Approval broker.** Workspace tools are confined to an operator-registered
   directory: reads auto-allow, while writes, edits, deletes, and shell commands
   park the run on an operator approval. With no broker configured the policy
@@ -141,12 +144,13 @@ server then serves (the npm tarball ships its own copy of that build).
   the same harness and the same flags: block transcript with textual role
   labels, grapheme-aware multiline composer with history and bracketed paste,
   Ctrl+P command palette and `?` help from one keymap registry, session and
-  model pickers, token streaming in place, live resize repaint, and
-  non-blocking turns with Escape/Ctrl+C cancellation. The `/` picker lists
-  the built-in commands (badged) plus discovered templates, Tab/Shift+Tab
-  accept/dismiss, and actions like `/compact`/`/export` are performed in the
-  TUI rather than submitted. Piped no-arg invocations print the usage screen
-  instead.
+  model pickers, token streaming in place, width-aware folded tool-result
+  previews (six visual rows by default; `Ctrl+T` toggles preview/full text),
+  live resize repaint, and non-blocking turns with Escape/Ctrl+C
+  cancellation. The `/` picker lists the built-in commands (badged) plus
+  discovered templates, Tab/Shift+Tab accept/dismiss, and actions like
+  `/compact`/`/export` are performed in the TUI rather than submitted. Piped
+  no-arg invocations print the usage screen instead.
 - **Protocol reference.** [`typescript/`](typescript/) is a zero-dependency
   implementation of `PROTOCOL.md` (no npm packages, no build step) that
   documents the contract.
@@ -357,7 +361,9 @@ What the workspace gives you:
 - **Sessions and presets** — session files listed with readable titles and
   workspace grouping, plus named provider presets (seeded: openai, deepseek,
   anthropic, gemini, openrouter, lmstudio, custom) that a role can reference;
-  API keys are write-only and sealed at rest.
+  API keys are write-only and sealed at rest. A customized built-in seed has
+  **Reset to default**, which removes the stored override and its key while the
+  role references stay.
 - **Runtime sidecars** — tool calls, diffs, approvals, run status, and prompt
   audits are persisted per session in `sessions/runtime/<name>.events.jsonl`,
   so a browser reload recovers the full activity history; the protocol JSONL

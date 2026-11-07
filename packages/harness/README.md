@@ -78,9 +78,10 @@ console.log(result.decision);
 A bare interactive `two-brothers` (or `tui [task]`) opens a zero-dependency
 full-screen TUI over the same harness: block transcript, grapheme-aware
 multiline composer, Ctrl+P palette / `?` help, session and model pickers,
-token streaming in place, resize repaint, and cancellable non-blocking turns.
-Piped no-arg invocations print the usage screen instead; `chat` stays the
-plain REPL for scripts.
+token streaming in place, width-aware folded tool-result previews (six visual
+rows by default; `Ctrl+T` toggles preview/full text), resize repaint, and
+cancellable non-blocking turns. Piped no-arg invocations print the usage
+screen instead; `chat` stays the plain REPL for scripts.
 
 ## Web workspace
 
@@ -96,8 +97,10 @@ workspaces picked through a single finder, workspace-grouped sessions,
 confined junior tools with docked per-mutation approval cards (a mobile
 drawer below the breakpoint), async runs with live SSE progress,
 changed-file diff review, and a bottom-left Settings dialog for the per-role
-provider presets with sealed API keys. Runs use the configured models — the
-UI has no separate "mock" switch.
+provider presets with sealed API keys. A customized built-in seed has
+**Reset to default**, which clears the stored override without touching the
+Senior/Junior role references. Runs use the configured models — the UI has no
+separate "mock" switch.
 
 ## Features
 
@@ -110,7 +113,9 @@ UI has no separate "mock" switch.
 - **Providers**: OpenAI-compatible, Anthropic Messages, and Google Gemini
   adapters behind one interface; per-role endpoints; deterministic offline
   `mock`; provider error classification (fail-fast 4xx, `Retry-After`
-  honoring, context-overflow detection) ported from pi-ai.
+  honoring, context-overflow detection) ported from pi-ai. Built-in presets
+  can be customized, and `POST /api/providers/{name}/reset` restores a
+  customized built-in seed without touching role references.
 - **MCP tool loading** (stdio + streamable HTTP) with role scoping,
   `mcp__server__tool` namespacing, result caps, and per-call timeouts.
 - **Session persistence** as JSONL transcripts (dense `seq`, `--resume`),

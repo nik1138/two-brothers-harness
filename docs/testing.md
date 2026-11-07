@@ -23,8 +23,8 @@ The script runs:
 6. the hermetic CLI E2E (`node e2e/cli.ts`)
 7. the `typescript/` reference selftest
 8. the `web/` unit tests (`npm test` — chat, timeline, drafts, palette,
-   session-status, recents, density, find, content-search, mentions and
-   streaming)
+   session-status, recents, density, find, content-search, mentions, provider
+   settings and streaming)
 9. the `web/` build
 
 Expected final line: `SMOKE TEST: PASS`. It is an offline pre-flight, not the
@@ -78,8 +78,12 @@ transcript markers, session persistence (`--session-file` / `--resume`,
 dense `seq`), context compaction, MCP loading and role scoping, the plugin
 loader, the HTTP/SSE server and its run-status contract, the
 provider error-classification registry, and the workspace tools
-(confinement, approvals, diffs). The CLI-ergonomics suites cover the help
-catalog, `sessions --json` / `sessions show`, `models` and `onboard`;
+(confinement, approvals, diffs). Provider presets are covered by
+`tests/server.test.ts`: the additive `seed`/`customized` flags, the
+non-destructive `POST /api/providers/{name}/reset` (stored override removed;
+role refs, settings and plugins intact; 404/400/409 paths), and the unchanged
+`DELETE` remove-and-clear-refs behavior. The CLI-ergonomics suites cover the
+help catalog, `sessions --json` / `sessions show`, `models` and `onboard`;
 `tests/doctor.test.ts` covers the `doctor` diagnostics (injected transport and
 clock, API keys never rendered), `tests/completions.test.ts` the deterministic
 bash/zsh/fish/PowerShell completion generator, and
@@ -162,15 +166,14 @@ compact request shape, old-backend fallback), the pure composer key
 contract (IME/repeat-safe submit, `Ctrl/⌘+Enter`, picker accept/dismiss,
 double-`Esc` window), the Settings → Providers preset model (tolerant
 `seed`/`customized` normalization, inline detail open/selection, draft dirty
-tracking, role usage badges, delete eligibility/impact copy, add-form
-validation, keyboard arithmetic), the speaker labels (the operator reads
-"You"), and the persisted conversation preferences + transcript visibility
-filter (prompt audits are opt-in); 201/201 web tests. The modules are
-dependency-free at
-runtime, so plain `node --test` runs them via the `tests/register-ts.mjs`
-bootstrap (a tiny resolve hook for the extensionless imports); `npm test`
-wires that up. The full `web/` gate also includes `npm run build` (see the
-smoke test above).
+tracking, role usage badges, delete/reset eligibility and impact copy, reset
+response merge, add-form validation, keyboard arithmetic), the speaker labels
+(the operator reads "You"), and the persisted conversation preferences +
+transcript visibility filter (prompt audits are opt-in); 203/203 web tests.
+The modules are dependency-free at runtime, so plain `node --test` runs them
+via the `tests/register-ts.mjs` bootstrap (a tiny resolve hook for the
+extensionless imports); `npm test` wires that up. The full `web/` gate also
+includes `npm run build` (see the smoke test above).
 
 ## TypeScript reference (`typescript/`)
 
@@ -211,10 +214,14 @@ Scenarios: group-chat run with the mock provider (distinct role bubbles, no
 raw-protocol leakage), reload/resume, approval card → file on disk →
 changed-file diff (allow and deny paths), stop, the 390 px mobile drawer
 (starts closed, chat inert while open, Escape/backdrop close it, focus returns
-to the trigger), and the Appearance-density regression (Settings → Appearance
+to the trigger), the Appearance-density regression (Settings → Appearance
 cards keep their natural height and unclipped copy under compact density while
 the sidebar footer theme switch shrinks, and the density choice survives a
-reload). Every scenario runs against the TypeScript backend
+reload), and the provider reset flow. The default suite is fully offline; the
+opt-in `real` scenario (below) reports `SKIP` unless an endpoint is configured.
+For iteration, `TWO_BROTHERS_E2E_ONLY=<substring>` runs only scenario blocks
+whose label contains the substring.
+Every scenario runs against the TypeScript backend
 (`packages/harness/dist/cli.js serve`, built from this checkout). Fixture-backed
 scenarios drive a scripted OpenAI-compatible model server
 (`e2e/fixtures/scripted-server.mjs`) through the real approval broker, and skip

@@ -153,8 +153,14 @@ held key cannot repeat a submit.
 When a provider streams reasoning, a bounded dim `THINKING` block appears
 above the streaming response for that call and disappears when the completed
 reply arrives — reasoning is observational and never persisted or treated as
-part of the reply. File mentions are web-only (terminal runs have no
-workspace). Slash input: `/mode consult|work`, `/models`,
+part of the reply. Collapsed tool-result rows fold to a bounded preview: the
+newest result shows at most six visual rows after width-aware wrapping, and a
+`… +N more lines` marker counts the hidden visual rows; `Ctrl+T` toggles the
+most recent result between the preview and its complete text, expansion is
+tracked per tool row, and the model always keeps the full result. The
+visual-row truncation follows pi's visual-truncate approach (MIT — see
+[Attribution](attribution.md)). File mentions are web-only
+(terminal runs have no workspace). Slash input: `/mode consult|work`, `/models`,
 `/sessions`, `/theme dark|light|system`, `/settings`, `/retry`, `/help`,
 `/commands`, `/exit`, plus discovered `<name>.md` templates (unknown names are
 never submitted as tasks). The built-in prompts `/plan <objective>`,
@@ -466,13 +472,32 @@ The backend is a **local single-user workspace server**. API overview:
 | `POST /api/runs/{run_id}/stop` | cooperative stop (pending approvals are denied) |
 | `GET /api/runs/{run_id}/events?after=N` | SSE of typed runtime events (`run_status`, `envelope`, `tool_started`, `tool_completed`, `approval_requested`, `approval_resolved`, `run_error`, `run_end`); reconnectable via `after`. When the run was started with `stream_tokens`, the same stream additionally carries ephemeral named `token` frames (`event: token`, data `{type, run_id, role, kind: "text"\\|"thinking", delta, at}`) with no SSE id — they are live-only, never persisted and never replayed |
 | `GET /api/runs/{run_id}/approvals`, `POST /api/runs/{run_id}/approvals/{id}` | list/answer pending operator approvals (`{"allow": bool}`) |
-| `GET /api/providers`, `POST /api/providers`, `PUT /api/providers/{seed}`, `DELETE /api/providers/{name}` | provider presets (seeded: openai, deepseek, anthropic, gemini, openrouter, lmstudio, custom). `GET` returns `{name, base_url, api_key_set, kind, models}` plus additive `seed` (the name comes from the built-in seed table) and `customized` (a stored override of that name exists), so a client can tell a pristine seed from an edited/custom entry. `POST` creates a custom provider (409 on a duplicate name, including a seed name); `PUT` updates it, and on a seed name materializes a stored override (blank `base_url` is a 400); `DELETE` removes a stored preset/override and clears any role `provider_ref` that pointed at it (a pristine seed is a 404). Keys are never returned — responses carry `api_key_set` only. The Settings → Providers tab is the operator UI for this pair of routes |
+| `GET /api/providers`, `POST /api/providers`, `PUT /api/providers/{seed}`, `POST /api/providers/{name}/reset`, `DELETE /api/providers/{name}` | provider presets (seeded: openai, deepseek, anthropic, gemini, openrouter, lmstudio, custom). `GET` returns `{name, base_url, api_key_set, kind, models}` plus additive `seed` (the name comes from the built-in seed table) and `customized` (a stored override of that name exists), so a client can tell a pristine seed from an edited/custom entry. `POST` creates a custom provider (409 on a duplicate name, including a seed name); `PUT` updates it, and on a seed name materializes a stored override (blank `base_url` is a 400); `DELETE` removes a stored preset/override and clears any role `provider_ref` that pointed at it (a pristine seed is a 404); `POST /api/providers/{name}/reset` restores a customized built-in seed without clearing role references (see below). Keys are never returned — responses carry `api_key_set` only. The Settings → Providers tab is the operator UI for these routes |
 | `GET /api/plugins` | discovered plugins (`name`, `description`, `roles`, load `errors`, `diagnostics`) |
 | `GET /api/skills` | discovered skills metadata (`name`, `description`, `scope`, `tools`, `file`) — never bodies |
 | `GET /api/commands` | discovered slash-command metadata (`name`, `description`, `argumentHint`, `mode?`, `file`) plus the additive first-party `baseCommands` list (`name`, `aliases`, `description`, `argumentHint`, `kind: "prompt"\|"action"`, `action?`, `requiresArguments`, `priority`) — never bodies |
 | `GET /api/fs/browse` | browse the filesystem for workspace registration (UI helper) |
 | `POST /api/run` | legacy synchronous run (body `{"task", "mode"?, "session"?, "provider"?}` → `{"session", "events", "decision"}`); slash commands and mentions are expanded the same way, but there is no token streaming |
 | `GET /api/stream?session=<name>` | legacy SSE tail of a session file |
+
+**Provider reset vs. delete.** `POST /api/providers/{name}/reset` restores a
+customized built-in seed: it deletes only that name's stored override
+(including legacy case-variant duplicates), keeps both roles' `provider_ref`,
+unrelated settings, plugins and other stored providers, and returns
+`200 {provider: {name, base_url, api_key_set, kind, models, seed: true, customized: false}}`
+— the canonical seed, with keys still reported only as `api_key_set`. The
+name resolves case-insensitively against the seed table. Errors: unknown name
+`404 {"detail": "not found"}`; an existing custom (non-seed) provider is a
+`400` (`only built-in provider presets can be reset: <name>`); a pristine
+seed with no stored override is a
+`409 {"detail": "provider is not customized: <name>"}`.
+`DELETE /api/providers/{name}` is unchanged: it removes a stored
+provider/override and clears matching role `provider_ref` values. In the web
+workspace, Settings → Providers shows **Reset to default** only for a
+customized built-in seed; the confirmation warns that customized values and
+the stored override API key are discarded while Senior/Junior role
+assignments stay unchanged. Against an older backend without the route, the
+client shows an unsupported message and changes nothing.
 
 In `work` mode, a run with a `workspace_id` gives the junior confined
 workspace tools (`workspace_read_file`, `workspace_list_dir`,
@@ -774,7 +799,9 @@ them):
   anthropic, gemini, openrouter, lmstudio, custom) keyed by env-var names,
   `onboard` to write per-role settings, `models` to list an endpoint's
   models, a `cost:` line (and `cost` in `--mode json`) from a hand-maintained
-  price table, and per-role `--max-tokens` output caps.
+  price table, and per-role `--max-tokens` output caps. A customized built-in
+  seed can be reset to its canonical default from Settings → Providers
+  without touching the Senior/Junior role assignments.
 - **Diagnostics and shell completions** — `doctor` reports the local
   environment and provider setup (human report or `--json`, exit 1 on a
   failing check), `config` prints the resolved configuration with per-field
@@ -796,8 +823,9 @@ them):
   the same harness and flags: block transcript with textual role labels, a
   multiline grapheme-aware composer with bracketed paste, a two-line status
   bar, Ctrl+P palette / `?` help from one keymap registry, session and model
-  pickers, Ctrl+F find-in-transcript, and non-blocking turns with
-  Escape/Ctrl+C cancellation.
+  pickers, Ctrl+F find-in-transcript, width-aware folded tool-result previews
+  (six visual rows by default; `Ctrl+T` toggles preview/full text), and
+  non-blocking turns with Escape/Ctrl+C cancellation.
 
 ## Examples
 

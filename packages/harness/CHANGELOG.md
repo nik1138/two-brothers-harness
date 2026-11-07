@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Provider reset to default**: `POST /api/providers/{name}/reset` restores a
+  customized built-in seed by deleting only its stored override (legacy
+  case-variant duplicates included) — both roles' `provider_ref`, unrelated
+  settings/plugins and other providers stay intact. Returns
+  `200 {provider: {name, base_url, api_key_set, kind, models, seed: true, customized: false}}`;
+  unknown name 404 `{"detail": "not found"}`, custom (non-seed) provider 400
+  (`only built-in provider presets can be reset: <name>`), pristine seed/no
+  stored override 409 `{"detail": "provider is not customized: <name>"}`.
+  `DELETE /api/providers/{name}` keeps its existing remove-and-clear-refs
+  behavior. Settings → Providers shows **Reset to default** only for a
+  customized built-in seed; the confirmation warns that customized values and
+  the stored override API key are discarded while Senior/Junior role
+  assignments stay unchanged; against an older backend without the route, the
+  client shows an unsupported message and changes nothing. Tests:
+  `tests/server.test.ts`, `web/tests/providerSettings.test.ts` (web 203/203).
 - **Provider presets master–detail in Settings → Providers**: the preset list
   is now identity-only (name, Senior/Junior role badges, key-state dot,
   `Customized`/`custom` tags), and the selected provider's settings appear
@@ -186,6 +201,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **TUI folded tool-result previews by visual rows**: a collapsed tool row
+  now keeps the first `maxToolRows` (default 6) visual rows after width-aware
+  wrapping instead of raw logical lines, so one long line cannot fill the
+  screen; the `… +N more lines` marker counts hidden visual rows. `Ctrl+T`
+  still toggles the most recent result between the preview and its complete
+  text; expansion remains per tool row, and the model keeps the full result.
+  The visual-row truncation follows pi's `visual-truncate.ts` (coding-agent
+  `modes/interactive/components/`, MIT, Copyright (c) 2025 Mario Zechner);
+  reimplemented locally with no substantial block copied, so the NOTICE files
+  are unchanged. Tests: `tests/tuivisualmodel.test.ts`.
 - **Quieter, simpler conversation view**: per-model-call prompt-audit
   annotations are developer information and are hidden from the transcript by
   default — a new persisted device preference (`showPromptAudits`, versioned
