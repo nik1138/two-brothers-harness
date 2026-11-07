@@ -567,7 +567,7 @@ test("transcript: collapsed tool rows show six lines plus a marker, expanded row
   assert.ok(joined.includes("line 5"));
   assert.ok(!joined.includes("line 6"));
 
-  // The preview cap follows maxToolRows and never wraps the hidden tail.
+  // The preview cap follows maxToolRows.
   const narrow = renderBlock(block, { width: 80, theme: plainTheme, maxToolRows: 2 });
   assert.ok(narrow.join("\n").includes("… +10 more lines"));
 
@@ -581,6 +581,57 @@ test("transcript: collapsed tool rows show six lines plus a marker, expanded row
   assert.ok(all.includes("call: c1"));
   assert.ok(all.includes("line 11"));
   assert.ok(!all.includes("more lines"));
+});
+
+test("transcript: collapsed tool preview bounds wrapped visual rows and counts the hidden rows", () => {
+  const result = "x".repeat(60);
+  let model = addToolCall(createTuiModel(), { role: "junior", tool: "read", callId: "wrapped" });
+  model = addToolResult(model, {
+    role: "junior",
+    tool: "read",
+    callId: "wrapped",
+    status: "ok",
+    result,
+  });
+  const block = model.blocks[0]!;
+
+  // At width 28 the content column is 20 cells. The 68-cell result row wraps
+  // to four visual rows, so a two-row preview hides exactly two rows.
+  assert.deepEqual(renderBlock(block, { width: 28, theme: plainTheme, maxToolRows: 2 }), [
+    "TOOL    junior · read — ok",
+    "        result:",
+    `        ${"x".repeat(20)}`,
+    "        … +2 more lines",
+  ]);
+  assert.equal((model.blocks[0] as ToolBlock).result, result, "the model retains the full result");
+
+  // Per-call expansion still bypasses the preview cap and shows the full tail.
+  const keys = toggleNewestToolExpansion(model, new Set()).keys;
+  const expanded = withToolExpansion(model, keys).blocks[0]!;
+  assert.deepEqual(renderBlock(expanded, { width: 28, theme: plainTheme, maxToolRows: 2 }), [
+    "TOOL    junior · read — ok",
+    "        call: wrapped",
+    "        result:",
+    `        ${"x".repeat(20)}`,
+    `        ${"x".repeat(20)}`,
+    `        ${"x".repeat(20)}`,
+  ]);
+});
+
+test("transcript: collapsed tool preview counts narrow CJK and emoji visual rows", () => {
+  const result = `終👨‍👩‍👧‍👦${ESC}[31m${"終".repeat(6)}${ESC}[0m${"😀".repeat(4)}`;
+  let model = addToolCall(createTuiModel(), { role: "junior", tool: "read" });
+  model = addToolResult(model, { role: "junior", tool: "read", status: "ok", result });
+  const rows = renderBlock(model.blocks[0]!, { width: 16, theme: plainTheme, maxToolRows: 2 });
+
+  assert.deepEqual(rows.slice(-3), [
+    "result:",
+    `終👨‍👩‍👧‍👦${"終".repeat(6)}`,
+    "… +1 more lines",
+  ]);
+  assert.ok(rows.every((row) => styledWidth(row) <= 16), rows.join("\n"));
+  assert.ok(rows.every((row) => !row.includes(ESC)), "plain output strips model-provided ANSI");
+  assert.equal((model.blocks[0] as ToolBlock).result, result);
 });
 
 test("transcript: tool expansion is per call id, isolated and survives unrelated updates", () => {

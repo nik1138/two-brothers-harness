@@ -16,8 +16,9 @@
  * identity, so every row is exactly the plain label + Markdown text.
  *
  * Tool detail is progressive: a collapsed row shows the newest result's first
- * `maxToolRows` lines (default 6) plus a `… +N more lines` marker, and a row
- * expanded by the app shows every line. Expansion state is per tool row,
+ * `maxToolRows` visual rows after wrapping (default 6), plus a
+ * `… +N more lines` marker; an expanded row shows every line. Expansion state
+ * is per tool row,
  * keyed by the call id when present ({@link toolExpansionKey}), so it is
  * independent of row position and survives streaming updates of other rows.
  * The model keeps every line either way.
@@ -47,7 +48,7 @@ import { plainTheme, type Theme, type ThemeToken } from "./theme.ts";
 /** Minimum label column for the inline transcript layout. */
 export const TRANSCRIPT_LABEL_WIDTH = 8;
 
-/** Default number of collapsed tool-result lines (and of bounded detail rows). */
+/** Default number of collapsed tool-result visual rows (and of bounded detail rows). */
 export const DEFAULT_MAX_TOOL_ROWS = 6;
 
 /** Label of the live reasoning block (exactly the 8-cell label gutter). */
@@ -120,7 +121,7 @@ export interface TranscriptOptions {
   theme?: Theme;
   /** Show tool args/result detail (default false: collapsed result preview). */
   expandedTools?: boolean;
-  /** Maximum visual rows of expanded tool detail / preview source lines (default 6). */
+  /** Maximum visual rows of expanded tool detail / collapsed result preview (default 6). */
   maxToolRows?: number;
   /** Maximum visual rows of a compaction-summary preview (default 3). */
   maxSummaryRows?: number;
@@ -236,22 +237,24 @@ function toolTone(block: ToolBlock): ThemeToken {
 }
 
 /**
- * Tool row detail mode: `preview` (collapsed, bounded source lines),
+ * Tool row detail mode: `preview` (collapsed, bounded visual rows),
  * `detail` (legacy `expandedTools` view, bounded visual rows) and `full`
  * (a per-row expansion: every line).
  */
 type ToolRowMode = "preview" | "detail" | "full";
 
-function previewToolRows(block: ToolBlock, maxLines: number): ContentRow[] {
+function previewToolRows(block: ToolBlock, maxRows: number, width: number): ContentRow[] {
   const tone = toolTone(block);
   const rows: ContentRow[] = [{ text: toolSummary(block), tone }];
   const result = block.result ?? "";
   if (result === "") return rows;
-  const lines = result.split("\n");
-  const shown = lines.slice(0, maxLines);
+  // As in pi's visual-truncate component, wrap first so one long logical line
+  // cannot consume the whole screen and the marker counts actual hidden rows.
+  const visual = wrapDisplay(`result: ${result}`, width);
+  const shown = visual.slice(0, maxRows);
   const resultTone = tone === "error" ? "error" : "muted";
-  rows.push({ text: `result: ${shown.join("\n")}`, tone: resultTone });
-  const hidden = lines.length - shown.length;
+  for (const text of shown) rows.push({ text, tone: resultTone });
+  const hidden = visual.length - shown.length;
   if (hidden > 0) rows.push({ text: `… +${hidden} more lines`, tone: "dim" });
   return rows;
 }
@@ -375,8 +378,8 @@ function summaryRowLimit(options: TranscriptOptions): number {
   return Math.max(1, Math.floor(options.maxSummaryRows ?? DEFAULT_SUMMARY_MAX_ROWS));
 }
 
-/** Collapsed tool rows keep this many source lines before the marker. */
-function toolPreviewLines(options: TranscriptOptions): number {
+/** Collapsed tool results keep this many visual rows before the marker. */
+function toolPreviewRows(options: TranscriptOptions): number {
   return Math.max(1, Math.floor(options.maxToolRows ?? DEFAULT_MAX_TOOL_ROWS));
 }
 
@@ -395,7 +398,7 @@ function contentRows(
       return decisionRows(block);
     case "tool":
       return toolMode === "preview"
-        ? previewToolRows(block, toolPreviewLines(options))
+        ? previewToolRows(block, toolPreviewRows(options), width)
         : detailedToolRows(block);
     case "notice":
       return noticeRows(block);
