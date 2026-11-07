@@ -75,7 +75,7 @@ npm run test:spawn      # node --test tests/ (child processes allowed)
 ```
 
 On the canonical integrated run for this round the in-process suite is
-**1 454 tests: 1 452 pass, 0 fail, 2 skipped** (exit 0); the two skips are
+**1 459 tests: 1 457 pass, 0 fail, 2 skipped** (exit 0); the two skips are
 environment-gated and never failures — the workspace symlink-parity test and
 the MCP stdio spawn are unavailable in this environment. `npm run typecheck`
 and `npm run build` pass, the hermetic CLI E2E is 17/17 on sources and 17/17
@@ -243,6 +243,17 @@ including the 20/25/29-column frame checks for the provider connect view),
 freshness guard (12 pure tests: fresh, missing, changed, extra and
 non-converging trees, the `sync: false` refusal, and the actionable error
 copy).
+
+Wave 5 adds the hermetic scale coverage: `tests/load.test.ts` (5 tests, about
+1 s total) drives the real seams at scale — 1,500-envelope session
+resume/restore with dense seq and no re-append, a 400-block TUI transcript
+projection bounded to the exact height/width with in-range paging, a
+200-session listing through the in-process `sessions` path with stable
+repeats and no filesystem-handle growth, 8 concurrent `RunManager` runs
+behind a barrier proving genuine concurrency with no cross-session mixing,
+and five repeated compaction rounds that keep exactly one summary while the
+rendered transcript stays bounded and non-growing. It asserts bounded
+behavior, never wall-clock correctness.
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
@@ -425,8 +436,12 @@ collapsed-by-default preview toggle exposes the bounded diff as plain text —
 `aria-expanded`/`aria-controls`, `+N -M` counts, literal HTML in the removed
 line stays escaped text and runs no handler — collapses again, the resolved
 history card keeps the same reason verbatim and drops the pending-only
-preview, Allow removes the file, no raw markers). On the canonical run that is
-**13 PASS, 0 FAIL, 1 SKIP** (the opt-in `real` scenario). The queue dock and the session-scope approval decisions
+preview, Allow removes the file, no raw markers), plus `composer-recall`
+(after two accepted submissions, Up/Down recall walks them newest-first in the
+real textarea, the pre-recall draft is restored byte-exactly, multiline recall
+fires only at the absolute edges, nothing submits during navigation, and the
+history survives a page reload). On the canonical run that is
+**14 PASS, 0 FAIL, 1 SKIP** (the opt-in `real` scenario). The queue dock and the session-scope approval decisions
 remain covered by the web unit suites, not by separate browser scenarios. The
 default suite is fully offline; the
 opt-in `real` scenario (below) reports `SKIP` unless an endpoint is configured.

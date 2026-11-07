@@ -761,14 +761,40 @@ Design anchors that already exist:
   `web/src/components/Composer.vue`; tests
   `web/tests/composerStatus.test.ts`.
 
+## Shipped 2026-11-08 (wave 5: browser recall coverage, diff tokens, load suite)
+
+- **Browser coverage for web composer recall** — new hermetic `composer-recall`
+  scenario (two accepted submissions, newest-first Up/Down recall in the real
+  textarea, byte-exact draft restore, multiline edge rule, no accidental
+  submit, reload persistence); the browser suite is now 14 offline scenarios
+  plus the opt-in `real` skip. The web `/help` shortcut table also lists the
+  Up/Down recall gesture (a discoverability gap the lane reported).
+- **Diff views consume the design tokens** — `DiffView.vue`/`DiffReview.vue`
+  switched from `--ok`/`--danger`/`color-mix` to the dedicated
+  `--diff-add-*`/`--diff-del-*` tokens; the wave-4 diff token values were
+  reconciled to the colours the views actually rendered (they had never been
+  consumed), so the visual result is identical. The provider connect view's
+  redundant caller-side title pre-clip was removed now that `renderBox` owns
+  the title budget.
+- **Hermetic load/scale suite** — new `tests/load.test.ts` (5 tests, about
+  1 s): 1,500-envelope session resume, bounded 400-block transcript
+  projection, 200-session listing, 8 concurrent `RunManager` runs behind a
+  barrier, and repeated compaction keeping exactly one summary with a
+  bounded, non-growing transcript. Deterministic and wall-clock-free
+  (closes the hermetic part of the "no load tests" gap; real-network
+  load/fault injection remains open).
+
 ## Open items (deferred)
 
 - **Web design-token follow-through** — the semantic layer and the migrated
-  chrome shipped 2026-11-08 (see the wave-4 section). Two optional follow-ups:
-  `DiffView.vue` still derives its add/remove fills from `--ok`/`--danger`
-  instead of the new `--diff-add-*`/`--diff-del-*` tokens, and the remaining
-  component sheets (App, ChatView, ApprovalCard, settings sections) still
-  carry literal one-off radii/`999px` values the layer could absorb.
+  chrome shipped 2026-11-08 (see the wave-4/wave-5 sections). Remaining
+  optional work: the other component sheets (App, ChatView, ApprovalCard,
+  settings sections) still carry literal one-off radii/`999px` values the
+  layer could absorb.
+- **Web composer recall polish (small)** — with a non-empty single-line draft,
+  ArrowDown is consumed even when recall is inactive, suppressing the textarea's
+  native caret-to-end movement (harmless no-op); recall history is global while
+  saved drafts are per-session (matches the TUI; worth one docs line).
 
 - **Reasoning persistence and passback** — thinking/reasoning deltas are
   currently observational and live-only: they are not persisted, not

@@ -612,6 +612,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Web diff views now consume the semantic diff tokens** (wave 5): the
+  admin/changed-file diff chrome in `web/src/components/DiffView.vue` and
+  `DiffReview.vue` switched from `--ok`/`--danger` (plus `color-mix` for the
+  line fills) to the dedicated `--diff-add-fg`/`--diff-add-bg` and
+  `--diff-del-fg`/`--diff-del-bg` tokens. The wave-4 token values had never
+  been rendered and were reconciled to the colours the views actually showed
+  (`color-mix(in srgb, C 12%, transparent)` ≡ `rgb(C / 12%)`, fg tokens equal
+  to the previous intent colours per scheme), so the visual result is
+  identical. The provider connect view's redundant caller-side title
+  pre-clip was removed now that `renderBox` owns the title budget
+  (`inner - 3`). Files: the two components, `web/src/tokens.css`,
+  `packages/harness/src/tui/view/provider.ts`. The web `/help` shortcut
+  table also gained the composer Up/Down recall gesture
+  (`web/src/shortcuts.ts`), closing a discoverability gap in the wave-4
+  feature.
+- **Hermetic scale/load test suite** (wave 5): new
+  `packages/harness/tests/load.test.ts` (5 tests, about 1 s total) covers
+  1,500-envelope session resume/restore with dense seq and no re-append, a
+  400-block TUI transcript projection bounded to exact height/width with
+  in-range paging, a 200-session listing through the in-process `sessions`
+  path with stable repeats and no filesystem-handle growth, 8 concurrent
+  `RunManager` runs behind a barrier proving genuine concurrency with no
+  cross-session mixing, and five repeated compaction rounds keeping exactly
+  one summary while the rendered transcript stays bounded and non-growing.
+  It asserts bounded behavior, never wall-clock correctness; real-network
+  load/fault injection remains a separate open item. The browser E2E suite
+  gained the hermetic `composer-recall` scenario (two accepted submissions,
+  newest-first Up/Down recall in the real textarea, byte-exact draft
+  restore, multiline edge rule, no accidental submit, reload persistence) —
+  the suite is now 14 offline scenarios plus the opt-in `real` skip.
 - **Approval-mode-aware web composer seat** (wave 4 follow-up): the composer's
   permission status seat now names the effective workspace approval mode from
   `GET /api/settings` — `ask` shows "Ask in app", `readonly` "Read only",

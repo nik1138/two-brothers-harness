@@ -119,7 +119,12 @@ production — env vars / a secret store only.
 
 ### 9. Tests
 
-No integration tests with a real network, no load tests, no timeout checks.
+No integration tests with a real network; no wall-clock/throughput load tests
+(the hermetic scale suite covers large sessions and transcripts, 200-session
+listings, concurrent runs and repeated compaction). Timeout and shutdown
+behavior is covered hermetically (provider retry/timeout registry, `run_shell`
+timeout clamp, `serve` shutdown grace); real-network fault injection remains
+open.
 
 ### 10. The web workspace is single-user, single-process
 
