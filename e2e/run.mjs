@@ -10,6 +10,9 @@
 //   appearance-density mock provider: Settings -> Appearance cards stay readable
 //                  under compact density; the footer theme switch shrinks and the
 //                  preference survives a reload
+//   provider-reset mock provider: a built-in seed customized through the API is
+//                  reset in Settings -> Providers; pristine flags and both role
+//                  assignments survive (offline, no model run)
 //   real           opt-in (TWO_BROTHERS_REAL_E2E=1): real models via LM Studio
 //
 // Backend: every scenario runs against the TypeScript server
@@ -22,6 +25,8 @@
 // (not failed) while the built CLI is missing.
 // The real scenario is SKIPPED (not failed) unless TWO_BROTHERS_REAL_E2E=1
 // and both LM Studio models are listed by /v1/models.
+// Iteration aid (mirrors packages/harness/e2e): TWO_BROTHERS_E2E_ONLY=<substr>
+// runs only scenario blocks whose label contains the substring.
 
 import assert from 'node:assert/strict'
 import { spawn, execFile } from 'node:child_process'
@@ -54,6 +59,10 @@ const JUNIOR_MODEL = process.env.TWO_BROTHERS_E2E_JUNIOR_MODEL || 'lfm3-1.7b'
 const REAL_TASK = 'In one sentence: what is a reversible migration?'
 const REAL_DEADLINE_MS = Number(process.env.TWO_BROTHERS_E2E_DEADLINE_MS) || 10 * 60 * 1000
 const LM_PROBE_MS = 5000
+
+// Optional iteration filter for scenario blocks (empty = the full suite).
+const ONLY_SCENARIO = (process.env.TWO_BROTHERS_E2E_ONLY ?? '').trim().toLowerCase()
+const scenarioSelected = (label) => !ONLY_SCENARIO || label.toLowerCase().includes(ONLY_SCENARIO)
 
 /** In-scenario skip: reported as SKIP (never FAIL), like a missing fixture. */
 class SkipError extends Error {}
@@ -972,6 +981,354 @@ async function scenarioAppearanceDensity(runner) {
   }
 }
 
+// -- scenario: Settings -> Providers -> Reset to default ----------------------------
+// A seeded preset is customized through the public API (the UI edit form would be
+// a second, heavier flow), then reset through the visible Settings -> Providers
+// control and its confirmation dialog. Reset must discard only the stored
+// override: both roles keep their provider_ref/model, an unrelated custom
+// provider survives, and no key material reaches the DOM or an API response.
+// The backend is the deterministic mock, so this scenario opens no model server
+// and never makes a model call.
+
+const RESET_SEED = 'lmstudio'
+const RESET_OVERRIDE_BASE = 'https://e2e-provider-reset.invalid/v1'
+const RESET_OVERRIDE_KIND = 'anthropic'
+const RESET_OVERRIDE_MODEL = 'e2e-reset-override-model'
+const RESET_OVERRIDE_SECRET = 'sk-e2e-reset-override-6b1f4c'
+const RESET_UNRELATED_NAME = 'e2e-unrelated'
+const RESET_UNRELATED_BASE = 'http://127.0.0.1:5999/v1'
+const RESET_UNRELATED_SECRET = 'sk-e2e-reset-unrelated-9d2e7a'
+const RESET_SENIOR_MODEL = 'e2e-senior-before-reset'
+const RESET_JUNIOR_MODEL = 'e2e-junior-before-reset'
+const RESET_PRISTINE = {
+  name: RESET_SEED,
+  base_url: 'http://localhost:1234/v1',
+  api_key_set: false,
+  kind: 'openai-compatible',
+  models: ['spark-x2.6-4b@q4_k_m', 'lfm3-1.7b'],
+  seed: true,
+  customized: false,
+}
+
+/** Minimal JSON request helper for the API-backed setup/assertions. */
+async function apiCall(base, method, pathname, body) {
+  const res = await fetch(`${base}${pathname}`, {
+    method,
+    headers: body === undefined ? undefined : { 'content-type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  const text = await res.text()
+  let json = null
+  try {
+    json = JSON.parse(text)
+  } catch {}
+  return { status: res.status, text, json }
+}
+
+async function scenarioProviderReset(runner) {
+  const be = await startBackend({ kind: 'mock' })
+  const context = await browser.newContext()
+  const page = await context.newPage()
+  const consoleGuard = attachConsoleGuard(page)
+  try {
+    // -- setup through the API: customize the seed, keep both roles on it, add
+    //    an unrelated provider that reset must not touch
+    const customized = await apiCall(be.base, 'PUT', `/api/providers/${RESET_SEED}`, {
+      base_url: RESET_OVERRIDE_BASE,
+      api_key: RESET_OVERRIDE_SECRET,
+      kind: RESET_OVERRIDE_KIND,
+      models: [RESET_OVERRIDE_MODEL],
+    })
+    assert.equal(customized.status, 200, `PUT provider -> HTTP ${customized.status}: ${customized.text}`)
+    assert.equal(customized.json.provider.base_url, RESET_OVERRIDE_BASE)
+    assert.equal(customized.json.provider.api_key_set, true)
+    assert.equal(customized.json.provider.kind, RESET_OVERRIDE_KIND)
+    assert.deepEqual(customized.json.provider.models, [RESET_OVERRIDE_MODEL])
+    assert.ok(
+      !customized.text.includes(RESET_OVERRIDE_SECRET),
+      'PUT /api/providers echoed the API key',
+    )
+    // The additive seed/customized flags live on GET, not on the PUT response.
+    const customizedList = (await (await fetch(`${be.base}/api/providers`)).json()).providers
+    assert.deepEqual(customizedList.find((provider) => provider.name === RESET_SEED), {
+      name: RESET_SEED,
+      base_url: RESET_OVERRIDE_BASE,
+      api_key_set: true,
+      kind: RESET_OVERRIDE_KIND,
+      models: [RESET_OVERRIDE_MODEL],
+      seed: true,
+      customized: true,
+    })
+
+    const unrelated = await apiCall(be.base, 'POST', '/api/providers', {
+      name: RESET_UNRELATED_NAME,
+      base_url: RESET_UNRELATED_BASE,
+      api_key: RESET_UNRELATED_SECRET,
+      models: ['unrelated-model'],
+    })
+    assert.equal(
+      unrelated.status,
+      201,
+      `POST unrelated provider -> HTTP ${unrelated.status}: ${unrelated.text}`,
+    )
+
+    const configured = await apiCall(be.base, 'PUT', '/api/settings', {
+      senior: { provider_ref: RESET_SEED, model: RESET_SENIOR_MODEL },
+      junior: { provider_ref: RESET_SEED, model: RESET_JUNIOR_MODEL },
+    })
+    assert.equal(configured.status, 200, `PUT settings -> HTTP ${configured.status}: ${configured.text}`)
+    assert.equal(configured.json.senior.provider_ref, RESET_SEED)
+    assert.equal(configured.json.junior.provider_ref, RESET_SEED)
+    assert.equal(configured.json.senior.model, RESET_SENIOR_MODEL)
+    assert.equal(configured.json.junior.model, RESET_JUNIOR_MODEL)
+
+    // -- the visible flow
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+
+    await page.locator('.sidebar-footer .footer-action').click()
+    const settings = page.locator('[role="dialog"][aria-labelledby="settings-dialog-title"]')
+    await settings.waitFor({ state: 'visible' })
+    await settings.getByRole('button', { name: 'Providers', exact: true }).click()
+    const pane = settings.locator('[role="region"][aria-label="Providers"]')
+    await pane.waitFor({ state: 'visible' })
+
+    const row = pane.locator('.provider-row').filter({
+      has: page.locator('.provider-row-name', { hasText: /^lmstudio$/ }),
+    })
+    await row.waitFor({ state: 'visible' })
+    assert.equal(
+      (await row.locator('.provider-row-tag').innerText()).trim(),
+      'Customized',
+      'customized seed must be tagged in the list',
+    )
+    assert.deepEqual(
+      await row.locator('.provider-role').allInnerTexts(),
+      ['Senior', 'Junior'],
+      'both roles must be badged on the seed row before reset',
+    )
+    assert.equal(await row.locator('.provider-key-dot').getAttribute('aria-label'), 'API key set')
+
+    await row.click()
+    const detail = pane.locator('.provider-detail')
+    await detail.waitFor({ state: 'visible' })
+    assert.equal((await detail.locator('.provider-detail-title').innerText()).trim(), RESET_SEED)
+    const badges = (await detail.locator('.provider-badge').allInnerTexts()).map((text) =>
+      text.trim(),
+    )
+    assert.ok(badges.includes('Built-in'), `missing Built-in badge (got: ${badges.join(', ')})`)
+    assert.ok(badges.includes('Customized'), `missing Customized badge (got: ${badges.join(', ')})`)
+    assert.deepEqual(
+      await detail.locator('.provider-badge.is-role').allInnerTexts(),
+      ['Used by Senior', 'Used by Junior'],
+      'both role assignments must show in the detail before reset',
+    )
+    assert.equal(
+      (await detail.locator('.provider-kind-chip').innerText()).trim(),
+      'Anthropic',
+      'the override kind must render before reset',
+    )
+
+    const baseField = detail.locator('label.provider-field').filter({ hasText: 'Base URL' })
+    const keyField = detail.locator('label.provider-field').filter({ hasText: 'API key' })
+    assert.equal(await baseField.locator('input').inputValue(), RESET_OVERRIDE_BASE)
+    assert.equal(await keyField.locator('input').inputValue(), '')
+    assert.equal(
+      await keyField.locator('input').getAttribute('placeholder'),
+      'Set — type a new value to replace',
+      'the override key must be shown as stored, never as a value',
+    )
+    assert.ok(
+      (await detail.innerText()).includes(RESET_OVERRIDE_MODEL),
+      'the override model must render before reset',
+    )
+    assert.ok(
+      !(await page.content()).includes(RESET_OVERRIDE_SECRET),
+      'the override API key leaked into the page',
+    )
+
+    const resetButton = detail.getByRole('button', { name: 'Reset to default', exact: true })
+    await resetButton.waitFor({ state: 'visible' })
+    const resetResponse = page.waitForResponse(
+      (res) =>
+        res.request().method() === 'POST' &&
+        res.url() === `${be.base}/api/providers/${RESET_SEED}/reset`,
+    )
+    await resetButton.click()
+
+    const resetDialog = page.locator('.app-dialog').filter({
+      has: page.locator('.provider-reset-confirm'),
+    })
+    await resetDialog.waitFor({ state: 'visible' })
+    assert.equal(
+      (await resetDialog.locator('.app-dialog__title').innerText()).trim(),
+      `Reset ${RESET_SEED} to default?`,
+    )
+    assert.ok(
+      (await resetDialog.locator('.app-dialog__description').innerText()).includes(
+        'role assignments remain unchanged',
+      ),
+      'the confirmation must state that role assignments survive',
+    )
+    await resetDialog
+      .locator('.app-dialog__footer')
+      .getByRole('button', { name: 'Reset to default', exact: true })
+      .click()
+
+    const response = await resetResponse
+    const resetBody = await response.json()
+    assert.equal(response.status(), 200, `POST reset -> HTTP ${response.status()}`)
+    assert.deepEqual(resetBody, { provider: RESET_PRISTINE })
+    assert.ok(
+      !JSON.stringify(resetBody).includes(RESET_OVERRIDE_SECRET),
+      'the reset response echoed the old API key',
+    )
+    await resetDialog.waitFor({ state: 'hidden' })
+
+    // -- pristine values/flags render, and the role assignments survive
+    await waitFor(
+      async () => (await detail.locator('.provider-kind-chip').innerText()).trim() === 'OpenAI-compatible',
+      { desc: 'detail to show the pristine provider kind' },
+    )
+    assert.equal(await baseField.locator('input').inputValue(), RESET_PRISTINE.base_url)
+    assert.equal(await keyField.locator('input').inputValue(), '')
+    assert.equal(
+      await keyField.locator('input').getAttribute('placeholder'),
+      'Not set — paste a key to store one',
+      'the pristine key state must replace the stored override state',
+    )
+    assert.equal(await row.locator('.provider-key-dot').getAttribute('aria-label'), 'API key missing')
+    const pristineText = await detail.innerText()
+    for (const model of RESET_PRISTINE.models) {
+      assert.ok(pristineText.includes(model), `pristine model "${model}" missing after reset`)
+    }
+    assert.ok(
+      !pristineText.includes(RESET_OVERRIDE_MODEL),
+      'the customized model is still rendered after reset',
+    )
+    assert.equal(await detail.locator('.provider-badge.is-muted').count(), 0)
+    assert.ok(
+      !(await detail.locator('.provider-badge').allInnerTexts()).map((text) => text.trim()).includes('Customized'),
+      'Customized badge must disappear after reset',
+    )
+    assert.deepEqual(
+      await detail.locator('.provider-badge.is-role').allInnerTexts(),
+      ['Used by Senior', 'Used by Junior'],
+      'role assignments must survive the reset',
+    )
+    assert.deepEqual(
+      await row.locator('.provider-role').allInnerTexts(),
+      ['Senior', 'Junior'],
+      'role badges must survive on the list row',
+    )
+    assert.equal(
+      await detail.getByRole('button', { name: 'Reset to default', exact: true }).count(),
+      0,
+      'a pristine seed must not offer Reset to default',
+    )
+    await waitFor(async () => (await row.locator('.provider-row-tag').count()) === 0, {
+      desc: 'Customized row tag to disappear',
+    })
+    await waitFor(
+      async () => {
+        const live = pane.locator('p[role="status"]')
+        return (
+          (await live.count()) > 0 &&
+          (await live.first().innerText()).includes(`Reset ${RESET_SEED} to default`)
+        )
+      },
+      { desc: 'reset announcement' },
+    )
+
+    // -- role cards keep the preset + model that pointed at the reset seed
+    await settings.getByRole('button', { name: 'Models & roles', exact: true }).click()
+    const rolesPane = settings.locator('[role="region"][aria-label="Models & roles"]')
+    await rolesPane.waitFor({ state: 'visible' })
+    for (const [role, model] of [
+      ['senior', RESET_SENIOR_MODEL],
+      ['junior', RESET_JUNIOR_MODEL],
+    ]) {
+      const card = rolesPane.locator(`.role-card--${role}`)
+      assert.equal((await card.locator('.role-chip').innerText()).trim(), 'preset')
+      const modelInput = card.locator('.n-form-item').filter({ hasText: 'Model' }).locator('input')
+      assert.equal(await modelInput.inputValue(), model, `${role} model changed after reset`)
+      const connectionText = (await card.locator('.n-base-selection').innerText()).trim()
+      assert.ok(
+        connectionText.includes(RESET_SEED),
+        `${role} role no longer selects ${RESET_SEED} (got: ${connectionText})`,
+      )
+      assert.ok(
+        connectionText.includes(RESET_PRISTINE.base_url),
+        `${role} role did not pick up the pristine base URL (got: ${connectionText})`,
+      )
+    }
+
+    // -- backend state + no secret exposure anywhere
+    const providersNow = (await (await fetch(`${be.base}/api/providers`)).json()).providers
+    assert.deepEqual(
+      providersNow.find((provider) => provider.name === RESET_SEED),
+      RESET_PRISTINE,
+    )
+    assert.deepEqual(
+      providersNow.find((provider) => provider.name === RESET_UNRELATED_NAME),
+      {
+        name: RESET_UNRELATED_NAME,
+        base_url: RESET_UNRELATED_BASE,
+        api_key_set: true,
+        kind: 'openai-compatible',
+        models: ['unrelated-model'],
+        seed: false,
+        customized: true,
+      },
+      'reset must leave an unrelated custom provider untouched',
+    )
+    const settingsNow = await (await fetch(`${be.base}/api/settings`)).json()
+    assert.equal(settingsNow.senior.provider_ref, RESET_SEED)
+    assert.equal(settingsNow.junior.provider_ref, RESET_SEED)
+    assert.equal(settingsNow.senior.model, RESET_SENIOR_MODEL)
+    assert.equal(settingsNow.junior.model, RESET_JUNIOR_MODEL)
+    for (const payload of [providersNow, settingsNow]) {
+      const serialized = JSON.stringify(payload)
+      for (const secret of [RESET_OVERRIDE_SECRET, RESET_UNRELATED_SECRET]) {
+        assert.ok(!serialized.includes(secret), 'an API response exposed key material')
+      }
+    }
+    assert.ok(!(await page.content()).includes(RESET_OVERRIDE_SECRET))
+    assert.ok(!(await page.content()).includes(RESET_UNRELATED_SECRET))
+
+    const onDisk = fs.readFileSync(path.join(be.dir, 'settings.json'), 'utf-8')
+    for (const secret of [RESET_OVERRIDE_SECRET, RESET_UNRELATED_SECRET]) {
+      assert.ok(!onDisk.includes(secret), 'settings.json contains plaintext key material')
+    }
+    const rawSettings = JSON.parse(onDisk)
+    assert.equal(rawSettings.senior.provider_ref, RESET_SEED)
+    assert.equal(rawSettings.junior.provider_ref, RESET_SEED)
+    assert.ok(
+      !rawSettings.providers.some(
+        (provider) => provider.name.toLowerCase() === RESET_SEED.toLowerCase(),
+      ),
+      'reset must not persist the canonical seed as a stored override',
+    )
+
+    // a second reset is a stable 409: the seed is pristine server-side too
+    const secondReset = await apiCall(be.base, 'POST', `/api/providers/${RESET_SEED}/reset`)
+    assert.equal(secondReset.status, 409, `second reset -> HTTP ${secondReset.status}`)
+    assert.deepEqual(secondReset.json, {
+      detail: `provider is not customized: ${RESET_SEED}`,
+    })
+
+    await settings.getByRole('button', { name: 'Close settings' }).click()
+    await settings.waitFor({ state: 'hidden' })
+
+    consoleGuard.assertClean()
+    runner.pass('provider-reset')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(be.dir)
+  }
+}
+
 // -- scenario: real models (opt-in) ---------------------------------------------------
 
 async function scenarioReal(runner) {
@@ -1111,6 +1468,7 @@ async function main() {
   await launchBrowser()
   log(`browser: ${browserLabel}`)
   log('backend: TypeScript server (packages/harness/dist/cli.js serve)')
+  if (ONLY_SCENARIO) log(`scenario filter: ${ONLY_SCENARIO}`)
 
   const realEnabled = process.env.TWO_BROTHERS_REAL_E2E === '1'
 
@@ -1119,7 +1477,7 @@ async function main() {
   // server (fixtures/scripted-server.mjs, always present).
   const blocks = []
   if (tsAvailable) {
-    blocks.push(
+    const hermetic = [
       {
         label: 'chat/resume',
         run: () => (
@@ -1162,8 +1520,16 @@ async function main() {
           scenarioAppearanceDensity(currentRunner)
         ),
       },
-    )
-    if (realEnabled) {
+      {
+        label: 'provider-reset',
+        run: () => (
+          (currentRunner = makeRunner('provider-reset')),
+          scenarioProviderReset(currentRunner)
+        ),
+      },
+    ]
+    blocks.push(...hermetic.filter((block) => scenarioSelected(block.label)))
+    if (realEnabled && scenarioSelected('real')) {
       blocks.push({
         label: 'real',
         run: () => (
@@ -1183,8 +1549,9 @@ async function main() {
       'stop',
       'mobile',
       'appearance-density',
+      'provider-reset',
       'real',
-    ]) {
+    ].filter(scenarioSelected)) {
       results.push({
         name,
         status: 'SKIP',
@@ -1211,7 +1578,7 @@ async function main() {
     }
   }
 
-  if (!realEnabled && tsAvailable) {
+  if (!realEnabled && tsAvailable && scenarioSelected('real')) {
     results.push({
       name: 'real',
       status: 'SKIP',
