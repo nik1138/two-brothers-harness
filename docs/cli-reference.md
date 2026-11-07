@@ -1061,9 +1061,12 @@ honest decision table — the model and any tool call can never set or widen it:
   restrict shell: if the model retries the same change as a
   `workspace_run_shell` command, that command is a separate request that still
   parks in `ask`/`edits` (read it in the card before allowing it; `Ctrl+E` /
-  Preview shows the full command). `readonly` denies shell along with the
-  mutation tools, which is the mode to use when shell writes must be
-  impossible rather than merely visible.
+  Preview shows the full command). When the operator has already denied a
+  write/edit/delete earlier in the same run, the parked shell request's reason
+  additively carries a caution sentence ("a file change was denied earlier in
+  this run — review this command closely"); it changes no decision, and
+  `readonly` denies shell along with the mutation tools, which is the mode to
+  use when shell writes must be impossible rather than merely visible.
 - **Visible when permissive.** `allow-all` prints one `[warn]` line per
   `run`/server start, the TUI shows a warning toast each workspace turn in
   that mode, the web section renders its destructive warning inline whenever

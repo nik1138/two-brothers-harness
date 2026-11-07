@@ -75,7 +75,7 @@ npm run test:spawn      # node --test tests/ (child processes allowed)
 ```
 
 On the canonical integrated run for this round the in-process suite is
-**1 459 tests: 1 457 pass, 0 fail, 2 skipped** (exit 0); the two skips are
+**1 474 tests: 1 472 pass, 0 fail, 2 skipped** (exit 0); the two skips are
 environment-gated and never failures — the workspace symlink-parity test and
 the MCP stdio spawn are unavailable in this environment. `npm run typecheck`
 and `npm run build` pass, the hermetic CLI E2E is 17/17 on sources and 17/17
@@ -255,6 +255,16 @@ and five repeated compaction rounds that keep exactly one summary while the
 rendered transcript stays bounded and non-growing. It asserts bounded
 behavior, never wall-clock correctness.
 
+Wave 6 adds `tests/approvalshellcaution.test.ts` (15 tests: the shell-approval
+caution fires only after an operator-denied write/edit/delete in the same run,
+allow/cancel/session-allow paths never arm it, the base reason stays
+byte-identical when nothing was denied, and the pair key, denial cap and
+event shape are unchanged) and extends the web composer-key suite by four
+tests for the recall key pass-through (inactive arrows fall through to native
+caret movement, Up is history-gated, browsing Down still steps/restores).
+The package suite is now 1 474 tests (1 472 pass, 2 environment skips) and the
+web suite 318.
+
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
 subprocess against the mock provider — **17 scenarios**: consult, chat-repl,
@@ -351,12 +361,12 @@ key classifier), the Settings → Approvals model
 `GET /api/settings` section (old backend = unsupported + Ask), the save
 patch omitted for an unsupported backend and for a server-pinned mode (a
 pin is never persisted by a normal save), and the pinned/unsupported
-read-only reasons), and the design-token layer (`tests/tokens.test.ts`, 7
+read-only reasons), and the design-token layer (`tests/tokens.test.ts`, 8
 tests: every `var(--x)` reference in `style.css` and the migrated components
 is defined, every core colour token exists in the light block and both dark
 blocks — which must stay identical —, the spacing scale is complete and
 ordered, no colour literal is left in the migrated sheets, and `theme.ts`
-stays mapped to the colour tokens); 313/313 web tests. The modules are
+stays mapped to the colour tokens); 318/318 web tests. The modules are
 dependency-free at runtime, so plain `node --test` runs them
 via the `tests/register-ts.mjs` bootstrap (a tiny resolve hook for the
 extensionless imports); `npm test` wires that up. The full `web/` gate also
@@ -439,7 +449,8 @@ history card keeps the same reason verbatim and drops the pending-only
 preview, Allow removes the file, no raw markers), plus `composer-recall`
 (after two accepted submissions, Up/Down recall walks them newest-first in the
 real textarea, the pre-recall draft is restored byte-exactly, multiline recall
-fires only at the absolute edges, nothing submits during navigation, and the
+fires only at the absolute edges, an inactive ArrowDown falls through to the
+native caret-to-end movement, nothing submits during navigation, and the
 history survives a page reload). On the canonical run that is
 **14 PASS, 0 FAIL, 1 SKIP** (the opt-in `real` scenario). The queue dock and the session-scope approval decisions
 remain covered by the web unit suites, not by separate browser scenarios. The

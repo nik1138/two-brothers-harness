@@ -165,7 +165,12 @@ session.
   non-collapsed selection keep their normal editing behavior. The history is a
   bounded local store (`two-brothers.composerHistory.v1`: newest first, 100
   entries, consecutive duplicates dropped) and survives a reload; an unsent
-  draft is never recallable.
+  draft is never recallable. The history is **global** — it remembers tasks
+  from every session on this device — while an unsent draft belongs to its
+  session, so stepping past the newest recalled task restores that session's
+  draft exactly. When there is nothing to recall (no history, or the caret is
+  not at a recall edge) the arrow keys fall through to the textarea's normal
+  caret movement.
 
 - **Stop and approvals.** Stop is the composer's Stop button (Tab to it, press
   `Enter`/`Space`); it is cooperative and denies pending approvals. Pressing

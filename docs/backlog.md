@@ -784,6 +784,27 @@ Design anchors that already exist:
   (closes the hermetic part of the "no load tests" gap; real-network
   load/fault injection remains open).
 
+## Shipped 2026-11-08 (wave 6: shell-approval caution, recall key fall-through)
+
+- **Shell-approval caution after a denied mutation** — the `RunApprovalBroker`
+  tracks whether the operator already denied a write/edit/delete in the run;
+  a subsequently parked `workspace_run_shell` request's existing additive
+  `reason` gains one bounded caution sentence ("a file change was denied
+  earlier in this run — review this command closely") so the web card, TUI
+  panel, approvals API and plugin/MCP consumers all show it. Display-only: no
+  decision, pair key, denial-cap, session-allow or event-shape change; base
+  reasons stay byte-identical when nothing was denied, and `readonly`
+  (which denies shell) never parks. Tests: `tests/approvalshellcaution.test.ts`
+  (15).
+- **Web composer recall key fall-through** — when recall is inactive (nothing
+  to recall at the caret), `↑`/`↓` are no longer consumed: the textarea keeps
+  its native caret movement instead of a swallowed no-op. Active recall
+  semantics are unchanged (newest-first Up, Down stepping and byte-exact draft
+  restore, multiline absolute edges, IME/repeat/modifier/selection/picker
+  guards), and the hermetic `composer-recall` browser scenario now asserts the
+  native fall-through in the real UI. Docs state that recall history is global
+  while unsaved drafts are per-session.
+
 ## Open items (deferred)
 
 - **Web design-token follow-through** — the semantic layer and the migrated
@@ -791,10 +812,6 @@ Design anchors that already exist:
   optional work: the other component sheets (App, ChatView, ApprovalCard,
   settings sections) still carry literal one-off radii/`999px` values the
   layer could absorb.
-- **Web composer recall polish (small)** — with a non-empty single-line draft,
-  ArrowDown is consumed even when recall is inactive, suppressing the textarea's
-  native caret-to-end movement (harmless no-op); recall history is global while
-  saved drafts are per-session (matches the TUI; worth one docs line).
 
 - **Reasoning persistence and passback** — thinking/reasoning deltas are
   currently observational and live-only: they are not persisted, not

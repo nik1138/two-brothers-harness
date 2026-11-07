@@ -612,6 +612,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Shell approvals warn after a denied file change** (wave 6): the
+  `RunApprovalBroker` now tracks whether the operator denied a
+  write/edit/delete earlier in the same run; a subsequently parked
+  `workspace_run_shell` approval appends one bounded caution sentence to its
+  existing additive `reason` — "a file change was denied earlier in this run
+  — review this command closely" — so the web card, TUI panel, approvals API
+  and plugin/MCP consumers all surface it. Display-only: no decision table,
+  pair key, denial-cap, session-allow or event-shape change; base reasons
+  (including the fixed shell reason) stay byte-identical when no mutation was
+  denied, cancellations never arm it, and `readonly`/`allow-all` never park.
+  Files: `src/runevents.ts` (`SHELL_DENIED_MUTATION_CAUTION`); tests
+  `tests/approvalshellcaution.test.ts` (15).
+- **Web composer recall keys fall through when idle** (wave 6): with the
+  recall wiring inactive (nothing to recall at the caret), Up/Down are no
+  longer `preventDefault`ed — a non-empty single-line draft's ArrowDown now
+  performs the textarea's native caret-to-end movement instead of a swallowed
+  no-op. Active recall is unchanged (newest-first Up, Down stepping and
+  byte-exact draft restore, multiline absolute edges, IME/repeat/modifier/
+  selection/picker guards); `classifyComposerRecall` takes an explicit
+  `ComposerRecallContext {pickerOpen, recallActive, historyCount}` and returns
+  `null` for a pass-through. The hermetic `composer-recall` browser scenario
+  additionally asserts the native fall-through in the real UI. Files:
+  `web/src/composerKeys.ts`, `web/src/components/Composer.vue`; tests
+  `web/tests/composerKeys.test.ts` (+4) and the updated
+  `web/tests/recall.test.ts`.
 - **Web diff views now consume the semantic diff tokens** (wave 5): the
   admin/changed-file diff chrome in `web/src/components/DiffView.vue` and
   `DiffReview.vue` switched from `--ok`/`--danger` (plus `color-mix` for the
