@@ -184,6 +184,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/thinkingstream.test.ts`, `tests/servertokens.test.ts`,
   `tests/tuithinking.test.ts`, `web/tests/streaming.test.ts`.
 
+### Changed
+
+- **Quieter, simpler conversation view**: per-model-call prompt-audit
+  annotations are developer information and are hidden from the transcript by
+  default — a new persisted device preference (`showPromptAudits`, versioned
+  key `two-brothers.ui-prefs.v1`) is exposed as Settings → Advanced →
+  `Show prompt audits in the conversation`, and when off the rows are absent
+  from the DOM (no gaps, not reachable by find/scroll). The live **Thinking**
+  row now starts folded and never auto-opens when the reply begins — the
+  reader expands it. The operator's messages read **You** everywhere visible
+  (bubble header and avatar, search/palette role hints, approval
+  "awaiting you", status dialog, welcome copy), while the internal speaker id
+  stays `operator`. Pure modules `web/src/uiPrefs.ts` and the new
+  `chat.ts` speaker-label helpers; tests `web/tests/uiPrefs.test.ts` +
+  `web/tests/chat.test.ts` (web 201/201), and the browser E2E role
+  expectations follow the new label.
+
 ### Security
 
 - **Server local-request guards**: while every binding is loopback,

@@ -140,7 +140,7 @@ Completion scripts are generated from the same catalog; for an installed
 ## The web workspace
 
 The browser app is a **local, single-user coding workspace**. The only
-conversation view is a three-party group chat — you (the Operator), the
+conversation view is a three-party group chat — you (labelled **You**), the
 Senior, and the Junior:
 
 ```powershell
@@ -168,9 +168,11 @@ Then open `http://127.0.0.1:8600`:
    advanced wire kind, add/delete); Settings → **Appearance** sets the theme
    and the Comfortable/Compact density for this device.
 3. **Send a task** in `work` mode. The run proceeds in the background; the
-   chat updates live over SSE — live **Thinking** (reasoning) and **Response**
-   blocks stream in as the models generate, then resolve into the normal
-   conversation bubbles. You can send follow-up messages, stop the run, or
+   chat updates live over SSE — a folded **Thinking** row (reasoning) and the
+   **Response** block stream in as the models generate, then resolve into the
+   normal conversation bubbles. The Thinking row starts folded — click it to
+   read the reasoning; the reply never pops it open. You can send follow-up
+   messages, stop the run, or
    just reload the page (progress is recovered from the runtime sidecar).
    In the composer, `@` opens a picker over shared skills and workspace files
    and `/` at the start of a line opens the command menu — built-in commands
@@ -183,6 +185,9 @@ Then open `http://127.0.0.1:8600`:
    commands run locally — `/compact` summarizes older context through the
    configured models, `/export` downloads the session as Markdown, `/help`
    (also `?` or `Ctrl+/`) opens the commands-and-shortcuts overlay.
+   Per-model-call prompt annotations are developer information and stay out
+   of the conversation by default; Settings → **Advanced** has the
+   `Show prompt audits in the conversation` toggle when you need them.
 4. **Approve mutations.** Reads inside the workspace are free, but every
    write/edit/delete/shell command docks an approval card in the chat —
    allow or deny there to resume the run. On narrow screens the sidebar

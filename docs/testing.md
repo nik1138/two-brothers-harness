@@ -150,7 +150,7 @@ The suite (`tests/chat.test.ts`, `tests/timeline.test.ts`,
 `tests/search.test.ts`, `tests/workspaceOrder.test.ts`,
 `tests/mentions.test.ts`, `tests/streaming.test.ts`,
 `tests/basecommands.test.ts`, `tests/composerKeys.test.ts`,
-`tests/providerSettings.test.ts`) covers the
+`tests/providerSettings.test.ts`, `tests/uiPrefs.test.ts`) covers the
 envelope→group-chat projection, the runtime-event timeline merge, per-session
 unsent drafts, palette building/scoring/filtering, sidebar row status, the MRU
 workspace list, the persisted UI density preference, find-in-transcript
@@ -160,10 +160,12 @@ bounded live-token streaming accumulator, the base-command catalogue merge
 (sorting, discovered-shadowing, alias search, typed-command resolution,
 compact request shape, old-backend fallback), the pure composer key
 contract (IME/repeat-safe submit, `Ctrl/⌘+Enter`, picker accept/dismiss,
-double-`Esc` window), and the Settings → Providers preset model (tolerant
+double-`Esc` window), the Settings → Providers preset model (tolerant
 `seed`/`customized` normalization, inline detail open/selection, draft dirty
 tracking, role usage badges, delete eligibility/impact copy, add-form
-validation, keyboard arithmetic; 195/195 web tests). The modules are
+validation, keyboard arithmetic), the speaker labels (the operator reads
+"You"), and the persisted conversation preferences + transcript visibility
+filter (prompt audits are opt-in); 201/201 web tests. The modules are
 dependency-free at
 runtime, so plain `node --test` runs them via the `tests/register-ts.mjs`
 bootstrap (a tiny resolve hook for the extensionless imports); `npm test`
