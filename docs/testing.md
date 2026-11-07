@@ -74,9 +74,11 @@ npm run test:spawn      # node --test tests/ (child processes allowed)
 ```
 
 On the canonical integrated run for this round the in-process suite is
-**1 351 tests: 1 349 pass, 0 fail, 2 skipped** (exit 0); the two skips are
-environment-gated and never failures — the symlink parity test and the MCP
-stdio spawn are unavailable in this environment.
+**1 389 tests: 1 387 pass, 0 fail, 2 skipped** (exit 0); the two skips are
+environment-gated and never failures — the workspace symlink-parity test and
+the MCP stdio spawn are unavailable in this environment. `npm run typecheck`
+and `npm run build` pass, the hermetic CLI E2E is 17/17 on sources and 17/17
+against `--dist`, the tarball smoke is 7/7 and `pack:check` passes.
 
 Environment note (Windows): the shell-execution tests spawn the `bash` found on
 `PATH`; the documented/verified environment is Git Bash
@@ -91,7 +93,9 @@ transcript markers, session persistence (`--session-file` / `--resume`,
 dense `seq`), context compaction, MCP loading and role scoping, the plugin
 loader, the HTTP/SSE server and its run-status contract, the
 provider error-classification registry, and the workspace tools
-(confinement, approvals, diffs). Provider presets are covered by
+(`tests/workspace.test.ts`, 46 tests — 45 pass + 1 environment skip — covering
+confinement, robust edits, mutations, diffs, and the shell/delete approval
+reasons). Provider presets are covered by
 `tests/server.test.ts`: the additive `seed`/`customized` flags, the
 non-destructive `POST /api/providers/{name}/reset` (stored override removed;
 role refs, settings and plugins intact; 404/400/409 paths), and the unchanged
@@ -102,7 +106,7 @@ the preset's own URL, the different-URL-with-saved-key 400, a one-shot typed key
 that is never stored or echoed, an empty answer that leaves the catalog intact,
 the unsupported-wire-kind 400, unknown-provider 404/invalid-body 400 and the
 clean upstream 502 (suite now 59 tests). The `allow_session` approval scope is
-covered across layers: `tests/approvalbrokerdeny.test.ts` (now 25 tests — a
+covered across layers: `tests/approvalbrokerdeny.test.ts` (26 tests — a
 seeded pair auto-allows without parking with one event per call, the check
 precedes the denial cap, one-shot counters are untouched, an aborted run still
 denies), `tests/settings.test.ts` (round-trip, dedupe/isolation, cap, atomic
@@ -138,16 +142,30 @@ pickers + skill-attachment validation). The plan/todo function is covered by
 grammar, the model-facing schema, valid/invalid/empty calls, exactly one
 `todo_updated` per write with last-write-wins, the tool joining the junior and
 senior belts without enabling a tool-less verify pass, no approval/workspace
-side effect, and sidecar replay) and `tests/tuitodo.test.ts` (12 tests: the
+side effect, and sidecar replay) and `tests/tuitodo.test.ts` (18 tests: the
 docked panel's markers/title, bounded selection and honest `+N more`, empty-plan
 omission, width safety at 40/60/80/120 incl. CJK/emoji, NO_COLOR/theme
 byte-stability, sidecar replay keyed by the session file name (`x.jsonl` ->
-`sessions/runtime/x.jsonl.events.jsonl`), and the frame keeping its size). TUI
-workspace-bound runs are covered by `tests/tuiworkspace.test.ts` (20 tests:
+`sessions/runtime/x.jsonl.events.jsonl`), and the frame keeping its size; plus
+TUI plan durability — a snapshot round-trip through a real runtime store,
+restart/last-wins/clear semantics, exactly one sidecar line per plan write and
+nothing else persisted, torn-line tolerance, a fail-soft uncreatable store path,
+and the compact sanitized event shape). TUI workspace-bound runs are covered by
+`tests/tuiworkspace.test.ts` (20 tests:
 `--workspace` startup errors, `@file` mention resolution and refusals, the
 workspace-file picker rows/trigger, the approval panel's exact-width rendering
 and key handling, `Ctrl+E` preview, the panel replacing the composer, and the
 real broker allow/deny/allow-session/abort paths with a bounded diff detail).
+TUI provider connection is covered by `tests/tuiproviders.test.ts` (23 tests,
+registered in `tests/run-all.ts`): flags/env vs persisted-settings precedence
+per pair, `provider_ref` resolution through the stored preset, a dangling ref
+warning with manual fallback, corrupt settings failing soft, a session
+`/models` choice never being persisted, the `/provider` views carrying only
+`api_key_set` (never the key), manual/preset saves writing through the encrypted
+store (env-pinned fields stripped, validation/write failures changing nothing),
+a real TUI turn using the endpoints persisted by the web Settings/`onboard`
+(the root-cause regression), and the failure guidance naming `/provider` while
+keeping the provider error visible.
 Thinking/response streaming is covered
 by `tests/thinkingstream.test.ts` (provider splits for all three wire families
 and harness token kinds), `tests/servertokens.test.ts` (named live token SSE
@@ -172,13 +190,20 @@ reload, permutation validation) and `tests/serverworkspaces.test.ts` (the
 the editor, the keymap registry, the terminal, the views, prompt history, the
 find-in-transcript overlay, span-level Markdown styling, the theme-painted
 palette/help overlay rows, the composer's meta-row removal, the mid-block `⋯`
-transcript slice marker, the status-bar hint priority, the docked plan panel
-(`tests/tuitodo.test.ts`, 12 tests) and workspace-bound runs with the approval
-panel and `@file` mentions (`tests/tuiworkspace.test.ts`, 20 tests;
-`tests/tuistyle.test.ts` also pins byte-identical NO_COLOR output), with the
-assembled app in `tests/tuiintegration.test.ts`. The TUI lanes and the doctor,
+transcript slice marker, the status-bar hint priority and its clipped transient
+slot, the rotating footer tips (one registry-derived tip per accepted turn, full
+cycle coverage, fold action leading without repeating, the stopped-turn and
+approval-parked transient copy; `tests/tuiviewlane.test.ts` 32 tests,
+`tests/tuistyle.test.ts` 18 tests, also pinning byte-identical NO_COLOR
+output, and the assembled `tests/tuiintegration.test.ts` 18 tests), the
+docked plan panel with its durable sidecar writes (`tests/tuitodo.test.ts`,
+18 tests) and workspace-bound runs with the approval
+panel and `@file` mentions (`tests/tuiworkspace.test.ts`, 20 tests). Other TUI
+lanes are unchanged
+in size: `tests/tui.test.ts` 37, `tests/tuikeymap.test.ts` 18,
+`tests/tuibasecommands.test.ts` 19. The TUI lanes and the doctor,
 completions, reliability, search/export, workspace-order and broker-cap suites
-are registered in `tests/run-all.ts` (the two new suites included).
+are registered in `tests/run-all.ts` (including the new `tuiproviders` suite).
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
@@ -243,9 +268,14 @@ queue-visibility projection (`tests/queueState.test.ts`, 19 tests: FIFO order
 and 1-based positions from the newest-first backend list, per-session grouping,
 bounded rows and the honest hidden count, single-line task previews, optimistic
 insert/remove, and no dock for an old backend without active records), the
-session-scope approval helpers (`tests/approvalSession.test.ts`, 8 tests: the
-applied-scope echo, the honest one-shot fallback notice for an older backend,
-and scope resolution never inferring session scope), step folding
+approval answer/scope helpers and the additive approval preview
+(`tests/approvalSession.test.ts`, 19 tests: the applied-scope echo, the honest
+one-shot fallback notice for an older backend, scope resolution never inferring
+session scope, `approvalDetailOf`/`approvalPreviewOf` keeping and bounding the
+additive detail, the runtime projection carrying it (old backends keep no
+field), plain-text-only preview content (HTML-looking text round-trips verbatim,
+no HTML built), and the request reason retained on the resolved card), step
+folding
 (`tests/folding.test.ts`, 16 tests: stable ids, which rows fold (completed-run
 tool/audit only, never conversation or the followed run), single-row and
 `minRows` behavior, hidden-audit/docked-approval handling, expansion order and
@@ -258,7 +288,7 @@ bounds), the plan projection (`tests/todo.test.ts`, 11 tests: last
 are tolerated, bounded selection with truthful hidden counts, summary counts,
 and no plan leaking across sessions), the speaker labels (the
 operator reads "You"), and the persisted conversation preferences + transcript
-visibility filter (prompt audits are opt-in); 275/275 web tests. The modules are
+visibility filter (prompt audits are opt-in); 286/286 web tests. The modules are
 dependency-free at runtime, so plain `node --test` runs them
 via the `tests/register-ts.mjs` bootstrap (a tiny resolve hook for the
 extensionless imports); `npm test` wires that up. The full `web/` gate also
@@ -276,7 +306,9 @@ node tests/run-all.ts
 ```
 
 `node --test tests/` also works where spawning child processes is allowed
-(in sandboxes it can fail with `EPERM` — use `run-all.ts` there).
+(in sandboxes it can fail with `EPERM` — use `run-all.ts` there). On the
+canonical run the reference selftest passes and `node tests/run-all.ts` is
+**33/33**.
 
 Coverage: envelope and payload validation, model output parsing, `sanitize_payload`,
 the consult/work/revise loop, configuration precedence, and session persistence
@@ -299,18 +331,32 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/e2e-test.ps1
 node e2e/run.mjs
 ```
 
-Scenarios: group-chat run with the mock provider (distinct role bubbles, no
-raw-protocol leakage), reload/resume, approval card → file on disk →
-changed-file diff (allow and deny paths), stop, the 390 px mobile drawer
-(starts closed, chat inert while open, Escape/backdrop close it, focus returns
-to the trigger), the Appearance-density regression (Settings → Appearance
-cards keep their natural height and unclipped copy under compact density while
-the sidebar footer theme switch shrinks, and the density choice survives a
-reload), and the provider reset flow. On the canonical run that is **8 PASS,
-0 FAIL, 1 SKIP** (the opt-in `real` scenario). The queue dock, session-scope
-approval decisions, step folding, composer status seats, the welcome hero and
-the plan dock are covered by the web unit suites, not by separate browser
-scenarios. The default suite is fully offline; the
+The backend serves the packaged `packages/harness/web` copy before the repo's
+`web/dist`, so after a `web/` rebuild run `npm run sync-web` (from
+`packages/harness`) before browser runs — otherwise a stale packaged copy can
+shadow the fresh build.
+
+Scenarios, in suite order: `chat` (group-chat run with the mock provider —
+distinct role bubbles, no raw-protocol leakage), `resume` (reload/continue),
+`approval-allow` and `approval-deny` (approval card → file on disk →
+changed-file diff, allow and deny paths), `stop`, `mobile` (the 390 px drawer
+starts closed, chat inert while open, Escape/backdrop close it, focus returns to
+the trigger), `appearance-density` (Settings → Appearance cards keep their
+natural height and unclipped copy under compact density while the sidebar footer
+theme switch shrinks, and the density choice survives a reload),
+`provider-reset`, `folding` (completed-run tool rows fold into an
+`aria-expanded` disclosure, the followed run stays open, expand/collapse in
+place, per-session reset), `plan-dock` (Plan dock counts/markers/bounded
+`+N more` expand and the polite announcements, including "Plan cleared."),
+`composer-seats` (role models plus the prompt-audit context seat, with no token
+wording), `hero-starters` (landing and empty-session hero; starters prefill only
+an empty composer, a preserved draft wins with a notice) and `approval-reason`
+(a delete approval shows the documented reason on the pending card, Allow
+removes the file, the resolved history card keeps the same reason verbatim, no
+raw markers). On the canonical run that is **13 PASS, 0 FAIL, 1 SKIP** (the
+opt-in `real` scenario). The queue dock and the session-scope approval decisions
+remain covered by the web unit suites, not by separate browser scenarios. The
+default suite is fully offline; the
 opt-in `real` scenario (below) reports `SKIP` unless an endpoint is configured.
 For iteration, `TWO_BROTHERS_E2E_ONLY=<substring>` runs only scenario blocks
 whose label contains the substring.

@@ -81,7 +81,9 @@ multiline composer, Ctrl+P palette / `?` help, session and model pickers,
 token streaming in place, width-aware folded tool-result previews (six visual
 rows by default; `Ctrl+T` toggles preview/full text), theme-painted overlay
 lists, a dim `⋯` marker when a transcript window starts mid-block, a status bar
-whose hints stay visible at ordinary widths, resize repaint, and cancellable
+that rotates a registry-derived tip per accepted turn (with brief transient
+hints, including the quit path while an approval is parked), resize repaint,
+and cancellable
 non-blocking turns. Piped no-arg invocations print the usage screen instead;
 `chat` stays the plain REPL for scripts.
 
@@ -91,7 +93,11 @@ edits/deletes/shell park the run on a docked approval panel (`1`/`y` allow
 once, `2`/`a` allow for this TUI process only, `3`/`n`/`Esc` deny,
 `Ctrl+E` full-screen diff/command preview; stopping denies everything
 pending), composer `@path` mentions attach workspace files read-only, a plan
-panel docks above the composer, and `/permission` reports the real bound-root
+panel docks above the composer (snapshots persist to the session's runtime
+sidecar when the session has a `--session-file`, so a restart replays the
+plan), `/provider` connects a provider from the same persisted settings the
+web workspace and `onboard` write (preset or manual endpoint; the typed key is
+masked and encrypted at rest), and `/permission` reports the real bound-root
 policy. An invalid root exits 2 before the screen opens.
 
 The human `run`/`chat` text mode renders each envelope as a separated block,
@@ -115,7 +121,9 @@ npm tarball ships the built app, so no separate frontend build is needed):
 three-party Operator/Senior/Junior group chat, operator-registered
 workspaces picked through a single finder, workspace-grouped sessions,
 confined junior tools with docked per-mutation approval cards (a mobile
-drawer below the breakpoint), async runs with live SSE progress, a bounded
+drawer below the breakpoint) that state the honest reason for shell/delete
+requests and expand a bounded diff/command preview (write/edit rely on their
+diff), async runs with live SSE progress, a bounded
 queue dock for submissions made while a run works (Send reads **Queue**;
 per-row Stop cancels a queued run immediately and the next queued run is
 followed automatically), changed-file diff review, and a bottom-left Settings

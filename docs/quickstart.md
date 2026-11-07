@@ -73,7 +73,10 @@ Any OpenAI-compatible endpoint works: DeepSeek, OpenAI, OpenRouter, vLLM,
 Ollama, OpenCode Zen — and Anthropic / Google Gemini through their adapters
 (`--provider-kind anthropic|google`). `node dist/cli.js onboard` writes the
 per-role settings interactively if you prefer not to set environment
-variables. Environment variables win over saved settings while they are set
+variables. The TUI reads those same persisted settings, and `/provider`
+connects or changes a provider from inside the terminal workspace (see
+[Connecting a provider from the TUI](#connecting-a-provider-from-the-tui)).
+Environment variables win over saved settings while they are set
 and are never written to the settings file (see the
 [CLI reference](cli-reference.md#environment-variables)).
 
@@ -260,7 +263,18 @@ the same hero appears inside a selected session that has no transcript yet.
    shell grant stores the approved command line — the same detail the runtime
    sidecar already records. The fail-closed default is unchanged, and an older
    backend without session scope answers honestly: "Allowed once — this
-   backend does not support session scope." On narrow screens the sidebar
+   backend does not support session scope."
+
+   The card explains what is being approved. Shell and delete requests carry a
+   fixed honest reason (shell: effects cannot be previewed and may change any
+   file the process can reach; delete: cannot be undone) — write/edit
+   approvals carry none because their diff is the explanation — and the reason
+   stays on the card after Allow/Deny (`cancelled` wins for a cancelled run).
+   A collapsed-by-default **Preview the change** / **Preview the command**
+   toggle expands the bounded unified diff or shell command as plain text,
+   with `+N -M` counts and a `clipped` badge when the backend hit the 20 000
+   char cap; nothing renders when there is no preview, so an older backend
+   degrades to the previous card. On narrow screens the sidebar
    becomes a drawer over the chat.
 6. **Review the changes** — files touched by tools are collected with their
    unified diffs.
@@ -307,7 +321,10 @@ text). A built-in action like `/compact`, `/export [path]`, `/status` or
 `/plan <objective>` expands and runs that turn. A plan written through the
 model's `todo_write` tool docks above the composer as a compact display-only
 panel (✓/▸/○ markers, four rows plus an honest `+N more` tail; no key answers
-it).
+it). With `--session-file` that plan is durable: each plan snapshot is written
+to the session's runtime sidecar, so restarting the TUI on the same session
+file brings it back (a cleared plan stays cleared); an in-memory session keeps
+its plan only for the current process.
 
 Collapsed tool-result rows fold to a preview bounded by visual rows after
 width-aware wrapping (six by default), with a `… +N more lines` marker that
@@ -322,8 +339,13 @@ chords, descriptions and selected row — while `NO_COLOR` output keeps the same
 text; the composer no longer repeats the mode/models line because the status bar
 is the single source for both; a transcript window that starts in the middle of
 a block marks the hidden label with a dim `⋯` in the gutter; and the status bar
-keeps its hints (including `Ctrl+T expand tool`) visible at ordinary terminal
-widths instead of hiding them behind the metrics.
+uses its hint slot well at ordinary widths: one registry-derived tip per
+accepted turn (`Ctrl+T fold tool output`, `Ctrl+F find in transcript`,
+`Ctrl+P commands`, …), with the tool-fold action leading while a tool row is on
+screen, and a brief transient hint after events such as a stopped turn
+(`turn stopped — Ctrl+C ×2 exits`). While a workspace approval is parked the
+slot instead explains the quit path (`deny to continue — Ctrl+C stops the turn
+after it resolves`).
 
 ### Workspace-bound runs and approvals
 
@@ -340,7 +362,10 @@ senior and junior can actually read, search, edit and run commands inside it:
   `Up`/`Down` + `Enter` pick the highlighted row, and `Ctrl+E` opens the full
   diff or command full-screen (closing the preview never answers the request).
   Stopping or cancelling the turn denies everything still pending, so a stop
-  can never leave a mutation parked or apply one later.
+  can never leave a mutation parked or apply one later. While the panel is open
+  it owns the decision keys: `Ctrl+C` is inert until you answer (the status bar
+  says `deny to continue — Ctrl+C stops the turn after it resolves`), so deny
+  or allow first, then stop the turn as usual.
 - `@relative/path` mentions attach workspace files (at most five, 20 000 chars
   each, 100 000 total, text files only; unknown, absolute, `..`-escaping and
   sensitive paths refuse the whole task with an honest notice).
@@ -355,6 +380,34 @@ and the policy is real):
 ```powershell
 node dist/cli.js tui --workspace . --provider mock
 ```
+
+### Connecting a provider from the TUI
+
+The TUI resolves provider connections the same way `serve` does: it reads the
+persisted settings store (`<sessions-dir>/settings.json` — the file the web
+Settings and `onboard` write; keys encrypted at rest) at startup and again
+before every turn and compaction. A provider you configured in the web UI or
+with `onboard` is therefore already in effect when you open the TUI; CLI flags
+and `TWO_BROTHERS_*` env pairs stay the most explicit override (role pair beats
+shared pair, all-or-nothing; env-pinned fields are never persisted).
+
+To connect or change a provider without leaving the terminal, run `/provider`
+(also reachable through `/settings` → **Connect provider…**; `/settings` is in
+the Ctrl+P palette):
+
+1. It shows a per-role summary — provider · model · wire kind · base URL ·
+   `API key: set` or `not set` (never the key value).
+2. Pick a role, then either a named preset (seed or stored) with one of its
+   model ids, or a manual connection (Base URL / model / optional API key; the
+   key is masked while you type).
+3. Saving is one atomic settings write with the key encrypted at rest; a failed
+   save keeps the dialog open with the real error and changes nothing.
+   Changing providers is refused while a turn or compaction is running.
+
+If a turn cannot connect, the provider's own error stays visible and the TUI
+points you at `/provider` (or the `--base-url`/`--api-key` flags). Keys never
+appear in frames, transcripts, prompt history or sidecars, and a dangling saved
+provider reference warns at startup and falls back to the role's manual fields.
 
 Full keymap and web palette keys: [Keyboard and shortcuts](keyboard.md).
 

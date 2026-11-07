@@ -24,8 +24,8 @@ assets) and `plugins` (Plugins directory).
 
 | Symptom | `doctor` check | Fix |
 |---|---|---|
-| `run` exits 1: `no base_url configured for the senior role ...` | `roles` fails: `no senior base URL ...` | Set `--base-url` (or the per-role `--senior-base-url` / `--junior-base-url`), the matching `TWO_BROTHERS_*` variables, or write settings with `onboard`. In the web UI, open Settings in the sidebar footer. |
-| `run` exits 1: `no model configured for the senior role ...` | `roles` warns: `no senior model ...`; `endpoint` warns: `... no senior/junior model configured yet` | Set `--senior-model` / `--junior-model`, the env vars, or the Settings dialog / `onboard`. List what the endpoint actually serves with `node dist/cli.js models --base-url <url>` (add `--api-key` or `--api-key-env` if the endpoint needs one). |
+| `run` exits 1: `no base_url configured for the senior role ...` | `roles` fails: `no senior base URL ...` | Set `--base-url` (or the per-role `--senior-base-url` / `--junior-base-url`), the matching `TWO_BROTHERS_*` variables, or write settings with `onboard`. In the web UI, open Settings in the sidebar footer; in the TUI, run `/provider`. |
+| `run` exits 1: `no model configured for the senior role ...` | `roles` warns: `no senior model ...`; `endpoint` warns: `... no senior/junior model configured yet` | Set `--senior-model` / `--junior-model`, the env vars, or the Settings dialog / `onboard` (or `/provider` in the TUI). List what the endpoint actually serves with `node dist/cli.js models --base-url <url>` (add `--api-key` or `--api-key-env` if the endpoint needs one). |
 
 A missing model is only a warning in `doctor`; a real run still fails. The
 `mock` provider needs neither an endpoint nor models — run
@@ -139,6 +139,28 @@ node dist/cli.js serve --port 8600 --sessions-dir sessions
 | "Always allow this session" asks again in a new `tui` process | That decision is in-memory for the current TUI process by design — it is never written to `settings.json` | Re-allow in the new process, or use the web approval card whose session grant persists in the session settings. |
 | Stopping a run makes a pending approval disappear | A stop/cancel denies every pending request (fail closed) — a stopped run must never leave a mutation parked | Expected. Re-run the task if you meant to finish it. |
 | `Ctrl+E` says "nothing to preview for this approval" | The request carries no diff or command — e.g. a delete of a large/unreadable file, which is approved by path alone | Answer from the panel; the preview is optional detail, not an answer path. |
+| `Ctrl+C` does not stop the running turn while an approval panel is open | The panel owns the decision keys — the turn cannot be stopped while a mutation waits, so `Ctrl+C` is deliberately inert until the request is answered | Answer the request first (`1`/`y` allow once, `2`/`a` allow for the process, `3`/`n`/`Esc` deny), then `Ctrl+C`/`Esc` stops the turn. The status bar states this: `deny to continue — Ctrl+C stops the turn after it resolves`. |
+
+## TUI plan durability and status hints
+
+| Symptom | Why | Fix |
+|---|---|---|
+| The plan panel is empty after restarting the TUI although it showed a plan before | Plans are only durable for a session with a file: each TUI turn writes one plan snapshot to `sessions/runtime/<session-file>.events.jsonl`. An in-memory session (no `--session-file`) keeps its plan only for the current process. | Start/keep the TUI on the same `--session-file`; a restart then replays the last snapshot. A cleared plan is durable too (the latest snapshot wins). |
+| Only plan events appear in a TUI-written sidecar | By design: a TUI turn persists only `todo_updated` plan snapshots; tool, approval and envelope events still are not persisted by the TUI | Nothing to fix — that sidecar is display state for the plan panel, not a full run log. |
+| The sidecar file name does not match what I expected | The sidecar key is the session file's basename unchanged (extension included), and the runtime store appends `.events.jsonl` — so `2026-11-07-1-abc.jsonl` becomes `sessions/runtime/2026-11-07-1-abc.jsonl.events.jsonl` | Use that exact path when inspecting; a `serve` backend writes the same convention for the same session. |
+| The status-bar hint changes every turn | The second status row rotates one registry-derived discoverability tip per accepted turn (fold tool output, find, commands, keys/help, prompt-history search, status panel, and stop while a turn runs) | Expected. Every tip names a real binding from the same registry as `?`/`Ctrl+P`; nothing new is bound. |
+| A hint like `turn stopped — Ctrl+C ×2 exits` disappears after a moment | It is a one-shot transient hint shown for a bounded number of renders, then the rotating tip returns | Expected; the binding it names is unchanged. |
+
+## TUI provider connection
+
+| Symptom | Why | Fix |
+|---|---|---|
+| The TUI still uses the default/wrong endpoint after configuring the provider in the web Settings, `serve` or `onboard` | Current builds read the same persisted store the rest of the product uses: `<sessions-dir>/settings.json` is loaded at startup and re-resolved before every turn and compaction (persisted presets, manual fields, decrypted stored keys). If it still differs, the stores or the overrides differ. | Make sure the TUI runs with the same `--sessions-dir` as the settings writer; check the precedence: explicit `--base-url`/`--api-key`/`--senior-*`/`--junior-*` flags and `TWO_BROTHERS_*` env pairs beat persisted settings (env-pinned fields are never persisted), then a named `provider_ref`, then seed presets. `/provider` shows the effective per-role summary. |
+| A saved `provider_ref` no longer exists (preset deleted/renamed) | A dangling reference is resolved honestly: the TUI warns at startup and falls back to that role's manual fields instead of crashing | Reconnect with `/provider`, or fix the reference in the web Settings. |
+| A turn fails to connect | The provider's own error is shown and the TUI adds the actionable path rather than leaving a generic failure | Run `/provider` to connect a provider, or pass `--base-url`/`--api-key` (and the per-role variants) for this run. |
+| `/provider` save fails | The write is one atomic settings-store save (key encrypted at rest); on failure the dialog stays open with the real error and nothing changed | Fix the reported error (usually the sessions directory/settings file not writable) and save again; no partial state is left behind. |
+| The provider summary says `API key: not set` although I saved one | The TUI is reading a different settings directory, the key belongs to another preset than the effective one, or an env-pinned/model field replaced that role's connection | Check `--sessions-dir`, confirm the role's preset/manual connection in `/provider`, and remember env pins win; re-run `/provider` after changing settings elsewhere. |
+| `/provider` refuses to change anything while a turn runs | Provider changes are refused while a turn or compaction is in progress so an in-flight run cannot switch endpoints mid-call | Stop or wait for the turn (then `/provider`), or change it before starting the next task. |
 
 ## Live CLI output and machine modes
 
@@ -171,6 +193,15 @@ node dist/cli.js serve --port 8600 --sessions-dir sessions
 | A folded row's text is not found by Ctrl+F | Collapsed rows are removed from the DOM, exactly like hidden prompt-audit rows — find searches what the transcript renders | Expand the fold row, then search again. |
 | Composer status seats are missing | Every seat hides when its data is unknown: models need loaded role settings, the permission seat needs a known workspace context, and the context seat needs at least one prompt audit | Send a run so a provider call is audited; the seats appear as their data becomes known (a linked workspace shows "Ask in app"). No numbers are guessed by design. |
 | A welcome-hero starter did not send the task | Starters only prefill the editable composer — they never submit for you | Edit the prefilled text and press `Enter` (or the Send/Queue control). |
+
+## Web approval card (reasons and preview)
+
+| Symptom | Why | Fix |
+|---|---|---|
+| A delete/shell approval card shows a reason, but a write/edit one does not | By design: shell and delete have no honest diff to show, so they carry a fixed reason (shell effects cannot be previewed; deletion cannot be undone). Write/edit approvals carry none because their unified diff is the explanation. | Read the reason (or expand the preview) before answering; nothing is missing for write/edit. |
+| No **Preview the change** / **Preview the command** toggle on a card | The backend sent no additive `detail` (an older backend), or the request has no renderable diff/command (e.g. a delete of a large/unreadable file is approved by path alone) | Expected; old backends degrade to the previous card. Rebuild the backend from this checkout for diffs/commands that are actually previewable. |
+| The preview shows a `clipped` badge | The backend bounded the detail at 20 000 characters (head-preserving) — the same cap the approval event carries | The complete diff is still available after the run in the changed-file review; the badge is honest about the preview, not a failure. |
+| The reason disappeared after Allow/Deny | A card from an older backend that does not keep the request reason on the resolution — current backends retain it (`cancelled` wins when a run is cancelled) | Rebuild the backend; the resolved history card keeps the reason verbatim on current builds. |
 
 ## Usage errors and exit codes
 

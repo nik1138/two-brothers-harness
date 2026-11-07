@@ -157,8 +157,10 @@ server then serves (the npm tarball ships its own copy of that build).
   and `sessions` lists files with readable titles.
 - **Web workspace.** A Vue 3 + Vite group chat (Operator / Senior / Junior)
   with registered workspaces, workspace-grouped sessions, background runs
-  over SSE, docked approval cards (a mobile drawer below the breakpoint),
-  runtime sidecars, and changed-file diffs. A submission made while a run works
+  over SSE, docked approval cards (a mobile drawer below the breakpoint) that
+  state their honest reason for shell/delete requests and offer a collapsible
+  diff/command preview (write/edit rely on their diff), runtime sidecars, and
+  changed-file diffs. A submission made while a run works
   joins the server's FIFO instead of blocking the composer (Send reads
   **Queue**), a bounded queue dock shows waiting tasks with per-row Stop, and
   the next queued run is followed automatically. Older completed-run tool rows
@@ -184,12 +186,17 @@ server then serves (the npm tarball ships its own copy of that build).
   write/edit/delete/shell parks on a docked approval panel (`1`/`y` allow once,
   `2`/`a` allow for this TUI session — memory only, `3`/`n`/`Esc` deny,
   `Ctrl+E` preview), `@path` mentions attach workspace files, and a plan panel
-  docks above the composer. The `/` picker lists the built-in commands
+  docks above the composer (durable across restarts when the session has a
+  `--session-file`). `/provider` connects a provider from the same persisted
+  settings the web workspace and `onboard` write (preset or manual endpoint,
+  key masked and encrypted at rest). The `/` picker lists the built-in commands
   (badged) plus discovered templates, Tab/Shift+Tab accept/dismiss, and actions
   like `/compact`/`/export` are performed in the TUI rather than submitted.
   Overlay lists follow the theme, the composer leaves mode/models to the status
   bar, a dim `⋯` marks a transcript window that starts mid-block, and the
-  status bar keeps its hints visible at ordinary widths. Piped no-arg
+  status bar rotates one registry-derived tip per turn with brief transient
+  hints (a stopped turn's exit copy, the quit path while an approval is
+  parked). Piped no-arg
   invocations print the usage screen instead.
 - **Protocol reference.** [`typescript/`](typescript/) is a zero-dependency
   implementation of `PROTOCOL.md` (no npm packages, no build step) that
@@ -243,7 +250,11 @@ For different endpoints per role, use the per-role flags instead:
 `--junior-base-url/--junior-api-key/--junior-model` (env
 `TWO_BROTHERS_SENIOR_BASE_URL` etc.); `--senior-kind`/`--junior-kind` pick the
 wire adapter per role, and `onboard` writes the same settings to
-`sessions/settings.json`.
+`sessions/settings.json`. The TUI reads those persisted settings too, so a
+provider configured for the web workspace or by `onboard` already works when
+you open the terminal workspace — and `/provider` inside the TUI connects or
+changes one without leaving it (preset or manual endpoint, key masked while
+typing and encrypted at rest).
 
 Precedence: CLI flags > environment variables > persisted settings > defaults.
 Environment variables also *pin* their fields: an env value wins over any
@@ -396,7 +407,9 @@ What the workspace gives you:
   can only touch files inside the workspace. Reads auto-allow; every write,
   edit, delete, or shell command docks an approval card in the chat — allow
   or deny there to resume the run (or stop it — pending approvals are then
-  denied). The senior additionally gets read-only workspace checks
+  denied). Shell/delete requests state their honest reason (write/edit show
+  their diff) and the card can expand a bounded diff/command preview. The
+  senior additionally gets read-only workspace checks
   (including approval-brokered `run_shell`) to verify the junior's work
   before reviewing it. Below the drawer breakpoint the sidebar turns into a
   drawer over the chat (backdrop, Escape, focus handling).

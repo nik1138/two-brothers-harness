@@ -572,6 +572,87 @@ Design anchors that already exist:
   `tests/tuitodo.test.ts` (12), `web/tests/todo.test.ts` (11). See
   `docs/cli-reference.md` → "Plan and todo function".
 
+## Shipped 2026-11-07 (wave 3: TUI provider connect, footer tips, plan durability, browser E2E)
+
+- **TUI provider connection (owner bug fix)** — the TUI used to build role
+  providers from CLI flags/env only and silently ignored the provider
+  configuration saved by the web Settings, `serve` or `onboard`
+  (`<sessions-dir>/settings.json`). It now loads that store at startup and
+  re-resolves before every turn/compaction through the same
+  `SettingsStore`/`RuntimeSettings`/`resolveRoleEndpoints` stack `serve` uses,
+  so persisted presets, manual fields and decrypted stored keys drive the turn
+  harness, the `/compact` provider, model pickers, status bar and welcome.
+  Precedence: explicit CLI flags/env pairs (role pair > shared pair,
+  all-or-nothing; an explicit connection pair clears a named ref, and an
+  explicit non-default `--provider` overrides the persisted role providers) >
+  persisted role
+  settings (manual fields, else a named `provider_ref` through the merged
+  seed+stored preset table) > built-in seed presets > harness per-field
+  fallback; env-pinned fields are never persisted and a dangling ref warns and
+  falls back instead of crashing. New in-TUI `/provider` (also `/settings` →
+  **Connect provider…**; `/settings` is in Ctrl+P) shows a key-free per-role
+  summary then a preset-or-manual connect; saving is one atomic encrypted
+  settings write, failures keep the dialog with the real error and change
+  nothing, and a failed turn points at `/provider`/the endpoint flags while
+  keeping the provider error. Keys are masked while typing and never appear in
+  frames, transcripts, history or sidecars. Files: `src/tui/providers.ts`
+  (new), `src/tui/view/provider.ts` (new), `src/tui/app.ts`,
+  `src/tui/keymap.ts`; tests `tests/tuiproviders.test.ts` (23, registered in
+  `tests/run-all.ts`).
+- **TUI status-bar tip rotation + transient hint channel** — the status bar's
+  hint slot now rotates one registry-derived, high-value tip per accepted turn
+  (`Ctrl+T fold tool output`, `Ctrl+F find in transcript`, `Ctrl+P commands`,
+  `? keys and help`, `Ctrl+R search prompt history`, `Ctrl+B status panel`, and
+  `Esc stop the turn` while running), deterministic from an app turn counter
+  (no clock/randomness), with unavailable commands skipped and the tool-fold
+  action leading (and excluded from the rotation) whenever a tool row is on
+  screen. A new transient slot outranks the rotation for a bounded render
+  budget (6 renders): `turn stopped — Ctrl+C ×2 exits` after a stopped turn,
+  and always `deny to continue — Ctrl+C stops the turn after it resolves` while
+  a workspace approval is parked (the panel owns the decision keys, so Ctrl+C
+  is inert until answered). The transient hint is clipped into the remaining
+  cells instead of dropped and never displaces the activity segment; no
+  binding changed. Files: `src/tui/keymap.ts` (`FOOTER_TIPS`, `footerTips`,
+  `rotatingFooterTip`, `composeStatusHints`), `src/tui/view/statusbar.ts`
+  (`transientHint`, `APPROVAL_PARKED_HINT`, clipped fitting),
+  `src/tui/app.ts`; tests `tests/tuiviewlane.test.ts`,
+  `tests/tuistyle.test.ts`, `tests/tuiintegration.test.ts`.
+- **TUI plan durability** — a TUI turn now persists each plan change as one
+  `todo_updated` event in the session's runtime sidecar
+  `sessions/runtime/<session-file>.events.jsonl` (same store/directory/key
+  convention as `serve`: session file name unchanged, extension included), via
+  the new fail-soft `src/tui/todoPersist.ts`; restarting the TUI with the same
+  `--session-file` replays the last snapshot (last write wins, a cleared plan
+  stays cleared). Only plan snapshots are written — tool/approval/envelope
+  events still are not — and an in-memory session has nothing durable to write
+  to. Tests: `tests/tuitodo.test.ts` (round-trip through a real store,
+  restart/last-wins/clear, one line per write and nothing else, torn-line
+  tolerance, fail-soft store path, compact event shape).
+- **Approval reasons and a web approval-detail preview** — shell and delete
+  approvals carry fixed honest reasons (`SHELL_APPROVAL_REASON`,
+  `DELETE_APPROVAL_REASON`); write/edit stay reason-free because their diff is
+  the explanation. The web card shows the reason while pending and keeps it
+  after Allow/Deny (a resolution reason such as `cancelled` wins), the TUI
+  panel shows its reason row, and the pending card gained a
+  collapsed-by-default **Preview the change** / **Preview the command** toggle
+  (real button with `aria-expanded`/`aria-controls`, `+N -M` counts, a
+  `clipped` badge at the 20 000-char cap, plain-text `<pre>` diff/command, no
+  HTML); older backends degrade to the previous card. Additive `reason`/
+  `detail` on the wire only — no protocol envelope change. Files:
+  `src/workspace.ts`, `web/src/components/ApprovalCard.vue`,
+  `web/src/runtime.ts`, `web/src/types.ts`; tests
+  `web/tests/approvalSession.test.ts` (19), `tests/workspace.test.ts`,
+  `tests/approvalbrokerdeny.test.ts`.
+- **Browser E2E coverage for the new web UX** — the hermetic Playwright suite
+  is now 13 offline scenarios plus the opt-in `real` skip (**13 PASS, 0 FAIL,
+  1 SKIP**): `chat`, `resume`, `approval-allow`, `approval-deny`, `stop`,
+  `mobile`, `appearance-density`, `provider-reset`, plus this round's
+  `folding`, `plan-dock`, `composer-seats`, `hero-starters` and
+  `approval-reason`. The scripted fixture server/README were extended so the
+  new scenarios exercise real projection/annotation/approval-detail paths; the
+  suite stays fully hermetic (temp dirs, free ports, system Edge headless, no
+  network). Tests only.
+
 ## Open items (deferred)
 
 - **Web design-token / empty-state pass** — kimi-code's role-named CSS
@@ -580,13 +661,6 @@ Design anchors that already exist:
   the welcome hero covers both the no-session landing state and an empty
   session, with workspace context, actions and editable starter suggestions;
   the token layer remains open.
-- **TUI footer tips + transient hints** — kimi-code's footer slot system
-  (mode/goal/model/tasks/environment/cwd/git/tips, skipped when empty) with
-  a weighted tip rotation and a separate transient-hint line; our
-  `StatusBarState.hints` already exists. The 2026-11-07 TUI polish round raised
-  the hint segment's priority (activity → hints → metrics → settings warning),
-  so the existing hints are visible at ordinary widths; the weighted tip
-  rotation and the separate transient-hint line remain open.
 
 - **Reasoning persistence and passback** — thinking/reasoning deltas are
   currently observational and live-only: they are not persisted, not

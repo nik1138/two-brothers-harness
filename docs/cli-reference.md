@@ -139,7 +139,9 @@ The screen is a block transcript with textual role labels (`YOU`, `SENIOR`,
 `JUNIOR`, `TOOL`, `ERR`/`WARN`/`INFO`), a contained multiline composer
 (grapheme-aware cursor, prompt history, bracketed paste — a pasted newline
 never submits), and a two-line status bar with mode, models, session, cwd,
-context/tokens/cache/cost and key hints. Markdown bodies render headings,
+context/tokens/cache/cost and rotating key hints (see
+[Status hints and transient copy](#status-hints-and-transient-copy)).
+Markdown bodies render headings,
 lists, quotes, fenced code, diffs, and inline bold/italic/code/link emphasis
 with theme colors and attributes; under `NO_COLOR` (or a color-free theme)
 the layout and text are byte-identical and only the styling disappears. The
@@ -177,7 +179,9 @@ as a compact display-only panel (✓/▸/○ markers, at most four rows plus an
 honest `+N more` tail — see
 [Plan and todo function](#plan-and-todo-function-ts-package));
 it takes no keys. Slash input: `/mode consult|work`, `/models`,
-`/sessions`, `/theme dark|light|system`, `/settings`, `/retry`, `/help`,
+`/sessions`, `/theme dark|light|system`, `/settings`, `/provider` (the provider
+connect surface — see [Provider connection](#provider-connection-provider)),
+`/retry`, `/help`,
 `/commands`, `/exit`, plus discovered `<name>.md` templates (unknown names are
 never submitted as tasks). The built-in prompts `/plan <objective>`,
 `/goal <objective>` and `/feedback [notes]` expand and run that turn; the
@@ -192,7 +196,9 @@ performed locally and never submitted as tasks — see
 [Built-in commands](#built-in-commands). A native command always wins its own
 name and a discovered template shadows a same-named built-in. `/models` and
 `/sessions` refuse to change things while a turn runs, and model changes are
-session-local. `--stream-tokens` renders token deltas in place while a turn
+session-local. Provider connections resolve from the same persisted settings
+store as `serve` (see [Provider connection](#provider-connection-provider)).
+`--stream-tokens` renders token deltas in place while a turn
 runs.
 
 ```powershell
@@ -235,7 +241,11 @@ workspace root:
 Workspace-bound runs request operator approval through the same
 `RunApprovalBroker` the server uses. While one is pending, a docked panel
 replaces the composer and shows the action, target, shell command, reason and a
-bounded diff summary (the full diff/command is one `Ctrl+E` away):
+bounded diff summary (the full diff/command is one `Ctrl+E` away). Shell and
+delete requests carry the fixed reasons listed in the
+[approval-reason table](#serve) — shell explains that its effects cannot be
+previewed, delete that it cannot be undone — while write/edit approvals carry
+none because the diff is the explanation:
 
 | Key | Decision |
 |---|---|
@@ -248,19 +258,90 @@ bounded diff summary (the full diff/command is one `Ctrl+E` away):
 Stopping or cancelling the turn denies every pending request (fail closed), and
 the broker's per-pair denial cap still applies. The panel is the only approval
 authority in the TUI: closing an overlay never answers it, and a stopped turn
-never leaves a mutation parked.
+never leaves a mutation parked. While the panel is open it owns the decision
+keys, so `Ctrl+C` is inert until the request is answered — the status bar says
+`deny to continue — Ctrl+C stops the turn after it resolves`; deny (or allow)
+first, then `Ctrl+C`/`Esc` can stop the turn as usual.
 
 #### Plan panel
 
 A plan written by the model through the built-in `todo_write` tool docks above
 the composer: at most four item rows (`✓` completed, `▸` in progress, `○`
 pending) plus an honest `+N more (…)` tail and a `TODO · n/m done` title. It is
-display-only — no key answers it and the composer keeps its normal keys — and
-the latest snapshot is replayed from the session's runtime sidecar when a
-session that has one is resumed or switched. The TUI itself does not write the
-runtime sidecar: a plan its own turns wrote is kept in memory for the rest of
-that TUI process (so session switches keep it) but is not durable across a TUI
-restart; a sidecar written by `serve` for the same session replays.
+display-only — no key answers it and the composer keeps its normal keys.
+
+The plan is durable for a run whose session has a file: a TUI turn writes each
+plan snapshot as one `todo_updated` event to the session's runtime sidecar,
+`sessions/runtime/<session-file>.events.jsonl` (same store, directory and key
+convention as `serve` — the session file name unchanged, extension included).
+Restarting the TUI with the same `--session-file` replays the last snapshot and
+a cleared plan stays cleared; only plan snapshots are persisted (tool, approval
+and envelope events are still not), and an in-memory session — no
+`--session-file` — has nothing durable to write to. A serve-written sidecar for
+the same session replays the same way, and the in-process cache keeps session
+switching instant.
+
+#### Status hints and transient copy
+
+The status bar's second row carries a rotating tip derived from the same keymap
+registry as `?`/`Ctrl+P`: one tip per accepted turn, deterministic, highest
+value first — `Ctrl+T fold tool output`, `Ctrl+F find in transcript`,
+`Ctrl+P commands`, `? keys and help`, `Ctrl+R search prompt history`,
+`Ctrl+B status panel`, plus `Esc stop the turn` while a turn runs. A full cycle
+covers each available action once; while a tool row is on screen its fold
+action leads and is removed from the rotation, so the same chord never appears
+twice. Tips are skipped when their command is unknown, has no chord, or is
+disabled in that state (the running-only stop tip hides while idle), so the
+footer never advertises an action the operator cannot take.
+
+A one-shot transient hint can take the hint slot for a few renders, clipped
+into the remaining cells rather than dropped while at least eight cells are
+left (with less room the slot is omitted whole rather than showing a fragment):
+after a stopped turn it reads
+`turn stopped — Ctrl+C ×2 exits`, and while a workspace approval is parked it
+reads `deny to continue — Ctrl+C stops the turn after it resolves` (the
+approval panel owns the decision keys, so Ctrl+C is inert until the request is
+answered). The transient hint never displaces the activity segment; the
+rotating tip returns when the transient budget runs out.
+
+#### Provider connection (`/provider`)
+
+The TUI resolves provider connections exactly like `serve`: it reads the
+persisted settings store in the TUI's sessions directory
+(`<cwd>/sessions/settings.json` by default — the same file the web Settings,
+`serve` and `onboard` write; API keys encrypted at rest) at startup
+and re-resolves before every turn and compaction. Persisted presets, manual
+fields and stored keys therefore drive the turn harness, the `/compact`
+provider, the model pickers, the status bar and the welcome screen.
+
+Precedence, the operator's most explicit request first:
+
+1. **CLI flags / `TWO_BROTHERS_*` env pairs** — the role pair
+   (`--senior-base-url`/`--senior-api-key` or `TWO_BROTHERS_SENIOR_*`) beats the
+   shared pair, all-or-nothing; an explicit connection pair clears the role's
+   named `provider_ref`, and an explicit non-default `--provider` (or
+   `TWO_BROTHERS_PROVIDER`) overrides the persisted role providers. Env-pinned
+   fields are never persisted.
+2. **Persisted role settings** — manual fields, else a named `provider_ref`
+   resolved through the merged seed+stored preset table.
+3. **Built-in seed presets** (`presets.ts`), then the harness's per-field
+   fallback.
+
+A dangling `provider_ref` warns at startup and falls back to the role's manual
+fields instead of crashing.
+
+`/provider` is the in-TUI connect surface (also reached through `/settings` →
+**Connect provider…**; `/settings` is in the Ctrl+P palette). It opens a
+per-role summary — provider · model · kind · base URL ·
+`API key: set`/`not set`, never the key value — and then a preset-or-manual
+connect: pick a role, choose a named preset with one of its model ids, or enter
+a manual Base URL / model / optional API key (typed keys are masked while
+typing). Saving goes through one atomic `SettingsStore.write` with the key
+encrypted at rest; a save failure keeps the dialog open with the real error and
+changes nothing. A turn that fails to connect keeps the provider's error visible
+and points at `/provider` (or the `--base-url`/`--api-key` flags). Keys never
+appear in frames, transcripts, prompt history or sidecars. Changing providers
+is refused while a turn or compaction is running.
 
 ### Composer mentions and slash commands
 
@@ -479,8 +560,10 @@ key value is never printed.**
 
 The flag/env layers resolve exactly like `run`; the preset/settings layers are
 read from `<sessions-dir>/settings.json` (the store `serve`/`onboard` use), so
-the table also explains what the web path would use. `run`/`chat`/`tui`
-themselves resolve flags and `TWO_BROTHERS_*` env only. Exit codes: `0`
+the table also explains what the web path would use. `run`/`chat` themselves
+resolve flags and `TWO_BROTHERS_*` env only; `serve` and the TUI additionally
+read this store — the TUI re-resolves it before every turn and its `/provider`
+writes it. Exit codes: `0`
 success, `2` usage/config error (unknown option, invalid flag value, unknown
 `--mode`).
 
@@ -635,7 +718,27 @@ directory. Reads auto-allow; mutations and shell commands pause the run on an
 `approval_requested` event until the operator answers — once, or for the rest of
 the session (see the session-scope paragraph above). The
 senior gets read-only workspace checks (plus approval-brokered `run_shell`) to
-verify the junior's deliverable before reviewing it. See the
+verify the junior's deliverable before reviewing it.
+
+Shell and delete approvals carry a fixed, honest `reason`; write and edit
+approvals carry none because their unified diff is the explanation:
+
+| Action | Reason |
+|---|---|
+| `run_shell` | `runs arbitrary shell code inside the workspace — its effects cannot be previewed and may change any file the process can reach` |
+| delete | `permanently removes the file from the workspace — deletion cannot be undone` |
+
+The reason reaches clients on `approval_requested` (and keeps through the
+resolved card when the resolution itself carries none; a resolution reason such
+as `cancelled` wins). The web approval card shows it while pending and after
+Allow/Deny; the TUI approval panel shows it in its reason row — see
+[Approvals in the TUI](#approvals-in-the-tui). The same additive detail field
+(`{kind, diff?, addedLines?, removedLines?, command?, truncated?}`) feeds the
+web card's collapsed **Preview the change** / **Preview the command** toggle:
+a real button with `aria-expanded`/`aria-controls`, `+N -M` counts, a `clipped`
+badge when the detail hit the 20 000-char cap, and a plain-text `<pre>` for the
+bounded unified diff or shell command (never HTML); a backend that sends no
+detail simply renders no preview. See the
 [Quickstart](quickstart.md) for the operator-facing walkthrough.
 
 ### `models`
@@ -668,6 +771,11 @@ node dist/cli.js onboard --base-url https://api.deepseek.com/v1 `
 gemini, openrouter, lmstudio, custom); its API key resolves from the env-var
 name the preset declares. Manual fields: `--base-url`, `--api-key` (or
 `--api-key-env <VAR>`), `--senior-model`, `--junior-model`.
+
+The same store is what `serve` and the TUI read (the TUI also re-resolves it
+before every turn), so an `onboard` run configures both surfaces. Inside the
+TUI, `/provider` (or `/settings` → **Connect provider…**) performs the same
+per-role connection without leaving the terminal.
 
 ## Flags
 
@@ -759,11 +867,15 @@ name the preset declares. Manual fields: `--base-url`, `--api-key` (or
 | `TWO_BROTHERS_PLUGINS_SENIOR` / `TWO_BROTHERS_PLUGINS_JUNIOR` | — (comma-separated plugin names; see `docs/plugins.md`) |
 | `TWO_BROTHERS_SHELL_PATH_EXTRA` | — (path-separated dirs prepended to the confined workspace-shell `PATH`, e.g. the directory holding the binaries your tool proofs call) |
 
-**Precedence:** CLI flags > environment variables > defaults. (Persisted
-settings from `onboard` / the web Settings sit between env vars and defaults
-on the server path: per-run flags > `TWO_BROTHERS_*` env vars > named preset
-(`provider_ref`) > role manual settings > defaults. `two-brothers config` prints
-this chain per field with the winning source.)
+**Precedence:** CLI flags > environment variables > defaults. Persisted
+settings from `onboard` / the web Settings sit between env vars and defaults,
+and the TUI now resolves through the same chain as the server path: per-run
+flags > `TWO_BROTHERS_*` env vars (all-or-nothing pairs; env-pinned fields are
+never persisted) > named preset (`provider_ref`) > role manual settings >
+built-in seed presets > harness defaults. `two-brothers config` prints this
+chain per field with the winning source, and the TUI's `/provider` shows the
+effective per-role connection (see
+[Provider connection](#provider-connection-provider)).
 
 **Env-pinned fields.** An environment variable does not just override a
 settings field — it *pins* it. A field pinned by a `TWO_BROTHERS_*` env var
@@ -961,7 +1073,9 @@ enables the senior verify pass:
 - **Surfaces:** the TUI docks a compact plan panel above the composer and the
   web renders a Plan dock near the composer (see
   [TUI](#plan-panel) and [Quickstart](quickstart.md)) — both use the same
-  status markers and bounded selection, and neither takes a key.
+  status markers and bounded selection, and neither takes a key. A TUI turn
+  also writes each plan snapshot to the same sidecar (`todo_updated` only), so
+  a restart with the same `--session-file` replays the plan.
 
 ## Automation output (TS package)
 
@@ -1034,6 +1148,12 @@ them):
   approval panel for mutations/shell (numbered decisions, `Ctrl+E` preview,
   in-memory session allows) and `@path` file mentions (see
   [`tui`](#tui-initial-task)).
+- **TUI provider connection** — the TUI reads the same persisted provider
+  settings as the server path (web Settings, `serve`, `onboard`) and resolves
+  the same effective endpoints; `/provider` (also `/settings` →
+  **Connect provider…**) shows a key-free per-role summary and connects a
+  preset or manual endpoint through one atomic, encrypted settings write (see
+  [Provider connection](#provider-connection-provider)).
 - **Plan and todo function** — the built-in `todo_write` tool records the whole
   plan, emits one additive `todo_updated` runtime event (sidecar-persisted) and
   feeds the TUI plan panel and the web Plan dock (see

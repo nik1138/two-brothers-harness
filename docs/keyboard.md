@@ -68,6 +68,7 @@ From a checkout, replace `two-brothers` with `node dist/cli.js` after
 | Anywhere outside a text field | `?` | open the commands & shortcuts overlay |
 | Anywhere | `Ctrl+/` / `Cmd+/` | open the commands & shortcuts overlay |
 | Approval card | `y` / `n` / `a` | allow once / deny / always allow this session while the card has focus |
+| Approval card preview | `Tab`, then `Enter` / `Space` | expand or collapse the bounded diff/command preview (native button; collapsed by default) |
 | Folded activity summary | `Tab`, then `Enter` / `Space` | expand or collapse that completed run's folded tool/activity rows (native button) |
 | Welcome hero starter | `Tab`, then `Enter` / `Space` | put the suggestion in the composer (editable, never sent) |
 | Mobile drawer | `Esc` | close the drawer when it is the topmost layer |
@@ -164,6 +165,9 @@ session.
   this session** buttons always work. A session grant saves the
   `(action, target)` pair in `sessions/settings.json` and is removed with the
   session; against an older backend the card says it allowed once instead.
+  The card shows a fixed honest reason for shell/delete requests (write/edit
+  rely on their diff) and offers a collapsed-by-default diff/command preview
+  toggle — both are plain buttons, no new chords.
 
 - **Folded activity, plan and status seats.** Completed runs' tool/prompt-audit
   rows fold into one disclosure button (`… N tool calls · expand`, with
@@ -240,6 +244,7 @@ from the registry at runtime. The TUI is Ctrl-based: terminals do not deliver
 | `Ctrl+T` | Expand or collapse the most recent tool result: collapsed shows the first six result rows after width-aware wrapping plus a `… +N more lines` marker (N counts hidden visual rows), expanded shows the whole result. The model always keeps the full text. |
 | `Ctrl+B` | Toggle the status side panel on wide terminals (it needs at least 100 columns and 20 rows; below that the transcript simply uses the full width). `/panel` does the same. |
 | (plan dock) | A model-written plan shows above the composer (`✓` completed / `▸` in progress / `○` pending, at most four rows plus a `+N more` tail). Display-only: no key answers it and the composer keeps its normal keys. |
+| (status bar) | The second status row rotates one registry-derived discoverability tip per accepted turn (`Ctrl+T fold tool output`, `Ctrl+F find in transcript`, `Ctrl+P commands`, …) and can briefly show a transient hint instead. Tips and hints only describe existing bindings — they add none. |
 
 ### Approvals (workspace-bound runs)
 
@@ -259,7 +264,12 @@ cannot collide with the composer, pickers or quit chord):
 
 The composer is paused while an approval is pending; stopping/cancelling the
 turn denies every pending request (fail closed), and a preview overlay closes
-before `Esc` can deny.
+before `Esc` can deny. The panel owns the decision keys while it is open, so
+`Ctrl+C` does nothing until the request is answered — the status bar shows
+`deny to continue — Ctrl+C stops the turn after it resolves`. Deny (or allow)
+first; `Ctrl+C`/`Esc` then stop the turn normally. After a stopped turn the
+status bar briefly shows `turn stopped — Ctrl+C ×2 exits` (no key changes; the
+hint clears on its own).
 
 ### Cancel, clear, quit
 
@@ -287,7 +297,9 @@ Every registry command also has a typed slash form — even when it has no
 chord — and all are searchable in `Ctrl+P`: `/palette`, `/help` (`/h`),
 `/commands`, `/find [query]`, `/retry`, `/stash`, `/exit` (`/quit`, `/q`),
 `/mode consult|work`, `/models`, `/sessions`, `/theme dark|light|system`,
-`/settings`, plus discovered `<name>.md` templates. `/models` and `/sessions`
+`/settings`, `/provider` (the provider connect surface; `/settings` also has a
+**Connect provider…** action in its dialog), plus discovered `<name>.md`
+templates. `/models` and `/sessions`
 refuse while a turn runs. The find bar is an inline input, not a modal: while
 it is open it owns printable keys and the app chords (`Ctrl+P`, `?`, slash
 commands) are inert, exactly like the palette and help overlays; `Esc` closes

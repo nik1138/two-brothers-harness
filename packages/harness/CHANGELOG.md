@@ -9,6 +9,116 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **TUI provider connection (owner bug fix)**: the TUI used to build role
+  providers from CLI flags/env only, silently ignoring the provider
+  configuration saved by the web Settings, `serve` or `onboard`
+  (`<sessions-dir>/settings.json`, keys encrypted at rest). It now loads that
+  store through the same `SettingsStore`/`RuntimeSettings`/
+  `resolveRoleEndpoints` stack `serve` uses — at startup and re-resolved before
+  every turn and compaction — so persisted presets, manual fields and decrypted
+  stored keys drive the turn harness, the `/compact` provider, the model
+  pickers, the status bar and the welcome screen. Precedence is explicit
+  CLI flags/env pairs (role pair > shared pair, all-or-nothing; an explicit
+  `--provider` clears a named ref) > persisted role settings (manual fields,
+  else a named `provider_ref` resolved through the merged seed+stored preset
+  table) > built-in seed presets > the harness's per-field fallback;
+  env-pinned fields are never persisted, and a dangling `provider_ref` warns at
+  startup and falls back to the manual fields instead of crashing. New in-TUI
+  connect surface `/provider` (also reached through `/settings` →
+  **Connect provider…**; `/settings` is in the Ctrl+P palette) shows the
+  effective per-role summary — provider · model · kind · base URL ·
+  `API key: set|not set`, never the value — then a preset-or-manual connect
+  (preset + model, or Base URL / model / optional key). Saving goes through one
+  atomic `SettingsStore.write` with the key encrypted at rest; a failed save
+  keeps the dialog with the real error and changes nothing. A turn that fails
+  to connect points the operator at `/provider` and the
+  `--base-url`/`--api-key` flags while keeping the provider's own error
+  visible; typed keys are masked while typing and never appear in frames,
+  transcripts, prompt history or sidecars. Files: `src/tui/providers.ts` (new),
+  `src/tui/view/provider.ts` (new), `src/tui/app.ts`, `src/tui/keymap.ts`.
+  Tests: `tests/tuiproviders.test.ts` (23, registered in `tests/run-all.ts`).
+- **Approval reasons and a web approval-detail preview**: shell and delete
+  approvals now carry fixed, honest operator reasons — shell: "runs arbitrary
+  shell code inside the workspace — its effects cannot be previewed and may
+  change any file the process can reach"
+  (`SHELL_APPROVAL_REASON`); delete: "permanently removes the file from the
+  workspace — deletion cannot be undone" (`DELETE_APPROVAL_REASON`). Write/edit
+  approvals stay reason-free because their unified diff is the explanation. The
+  web approval card shows the reason while pending (`.approval-reason`) and
+  keeps it after Allow/Deny (`.approval-note`; a resolution reason such as
+  `cancelled` wins when present), and the TUI approval panel shows its reason
+  row. The pending web card also gained a collapsed-by-default **Preview the
+  change** / **Preview the command** toggle — a real button with
+  `aria-expanded`/`aria-controls`, `+N -M` diff counts and a `clipped` badge
+  when the backend clipped the detail at 20 000 chars — rendering the bounded
+  unified diff or shell command as plain text in a `<pre>` (no HTML,
+  horizontal/vertical scroll, nothing rendered when the backend sends no
+  detail); an older backend degrades to the previous card. The additive
+  `reason`/`detail` fields are unchanged on the wire and no protocol envelope
+  changed. Files: `src/workspace.ts`,
+  `web/src/components/ApprovalCard.vue`, `web/src/runtime.ts`,
+  `web/src/types.ts`. Tests: `web/tests/approvalSession.test.ts` (19 tests),
+  `tests/workspace.test.ts`, `tests/approvalbrokerdeny.test.ts`, and the
+  browser `approval-reason` scenario.
+- **Browser E2E coverage for the new web UX**: the hermetic Playwright suite
+  now has 13 offline scenarios plus the opt-in `real` one — **13 PASS, 0 FAIL,
+  1 SKIP** on the canonical run: `chat`, `resume`, `approval-allow`,
+  `approval-deny`, `stop`, `mobile`, `appearance-density`, `provider-reset`,
+  and new this round `folding` (folded completed-run tool rows:
+  `aria-expanded` disclosure, followed run stays open, expand/collapse in
+  place, per-session reset), `plan-dock` (counts/markers/bounded `+N more`
+  expand and the polite announcements, including "Plan cleared."),
+  `composer-seats` (role models + prompt-audit context seat, no token wording),
+  `hero-starters` (landing/empty-session hero; starters prefill only an empty
+  composer and a preserved draft wins with a notice) and `approval-reason`
+  (delete approval shows the documented reason; Allow removes the file; the
+  resolved history card keeps the reason verbatim, no raw markers). The
+  scripted OpenAI-compatible fixture server and its README were extended so
+  the new scenarios exercise real projection/annotation/approval-detail paths
+  through the backend; the suite stays fully hermetic (temp dirs, free ports,
+  system Edge headless, no network). Tests only — no product behavior change
+  in this entry.
+- **TUI status-bar footer tips and a transient hint channel**: the status bar's
+  hint slot now rotates through high-value tips derived from the single keymap
+  registry — one tip per accepted turn, deterministic (a turn counter, never a
+  clock or randomness), highest value first: `Ctrl+T fold tool output`,
+  `Ctrl+F find in transcript`, `Ctrl+P commands`, `? keys and help`,
+  `Ctrl+R search prompt history`, `Ctrl+B status panel`, plus
+  `Esc stop the turn` while a turn runs. A tip is skipped when its command is
+  unknown, unbound or disabled, so the footer never advertises an action the
+  operator cannot take, and one cycle shows each available action once; while
+  a tool row is on screen the tool-fold action leads and is excluded from the
+  rotation (the same chord never appears twice). A new transient slot outranks
+  the rotating tip for a bounded number of renders: after a stopped turn it
+  says `turn stopped — Ctrl+C ×2 exits`, and while a workspace approval is
+  parked it always says `deny to continue — Ctrl+C stops the turn after it
+  resolves` — the approval panel owns the decision keys, so Ctrl+C is inert
+  until the request is answered (copy only; no binding changes). The transient
+  hint is clipped into the remaining cells (real ellipsis, never mid-grapheme)
+  instead of being dropped whole, and it never displaces the activity segment;
+  `plainTheme` output changes only in the new tips/transient copy. Files:
+  `src/tui/keymap.ts` (`FOOTER_TIPS`, `footerTips`, `rotatingFooterTip`,
+  `composeStatusHints`), `src/tui/view/statusbar.ts` (`transientHint`,
+  `APPROVAL_PARKED_HINT`, clipped fitting), `src/tui/app.ts` (one tip per
+  accepted turn, `TRANSIENT_HINT_RENDERS` = 6 one-shot budget). Tests:
+  `tests/tuiviewlane.test.ts`, `tests/tuistyle.test.ts`,
+  `tests/tuiintegration.test.ts`.
+- **TUI plan durability**: a TUI turn now persists its plan — one
+  `todo_updated` event per plan change — to the session's runtime sidecar
+  `sessions/runtime/<session-file>.events.jsonl`, using the same store,
+  directory and key convention `serve` uses (the session file name unchanged,
+  extension included). Restarting the TUI with the same `--session-file`
+  replays the last snapshot; last write wins, so a later snapshot — including a
+  cleared list — replaces the earlier plan, exactly like a serve-written
+  sidecar. Only plan snapshots are written: a TUI turn still does not persist
+  tool, approval or envelope events, and an in-memory session (no
+  `--session-file`) has nothing durable to write to. Fail-soft through the new
+  `src/tui/todoPersist.ts` (a failed write warns only under `--verbose` and
+  never breaks a turn); the in-process cache still makes session switching
+  instant. Tests: `tests/tuitodo.test.ts` (round-trip through a real runtime
+  store, restart/last-wins/clear semantics, exactly one line per plan write and
+  nothing else, torn-line tolerance, an uncreatable store path failing soft,
+  the compact sanitized event shape).
 - **TUI workspace binding, approval panel and `@file` mentions**
   (`tui --workspace <dir>`): every turn binds one confined root — the junior
   gets the `workspace_*` tool belt, the senior the read-only verify slice,
@@ -88,10 +198,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the final snapshot; no protocol envelope or session-JSONL change. The TUI
   docks a compact plan panel above the composer (✓ completed / ▸ in progress /
   ○ pending, ≤4 rows plus an honest `+N more (…)` tail, `TODO · n/m done`
-  title; display-only, no new key), and replays the latest sidecar snapshot on
-  session resume/switch when that session has one. TUI turns do not write the
-  sidecar: a plan they produce is kept in memory for that TUI process (so it
-  survives session switches there) but not across a TUI restart. The web
+  title; display-only, no new key), and replays the session's latest sidecar
+  snapshot on session resume/switch. The web
   renders a Plan dock
   with the same selection
   rules, a real expand button and a polite live announcement. Files:
