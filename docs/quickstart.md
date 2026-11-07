@@ -36,9 +36,17 @@ block separated by a blank line, model prose renders as width-safe Markdown, and
 the final decision is ruled off with `── decision ──…`. When the run reports
 usage, the transcript ends with a compact footer —
 `tokens 40 in / 20 out · cache 25% · 4 calls · cost $0.0300` — whose segments
-appear only when they are known. Piped output stays plain; `--json`,
-`--json-events`, `--stream` and `--mode print` are machine modes with unchanged
-bytes (see [Human text output](cli-reference.md#human-text-output-ts-package)).
+appear only when they are known.
+
+On a real terminal the transcript streams live: each block appears as the run
+produces it, with dim `· …` activity rows between blocks (`· senior consulting…`,
+`· junior tool workspace_read_file…`) while the models and tools work. The
+decision rule and the footer still print exactly once, at the end. In a pipe —
+or with `--no-live` — you get the same transcript printed once when the run
+finishes; `--live` cannot force a pipe to stream. Piped output stays plain and
+`--json`, `--json-events`, `--stream` and `--mode print` are machine modes with
+unchanged bytes (see
+[Human text output](cli-reference.md#human-text-output-ts-package)).
 
 ## 3. Delegation mode
 
@@ -165,6 +173,12 @@ node dist/cli.js serve --port 8600 --sessions-dir sessions
 
 Then open `http://127.0.0.1:8600`:
 
+With no session selected you land on a welcome hero: the workspace context
+chip, the actions (New session, Add a workspace, Set up models when the roles
+are not usable yet, Keyboard shortcuts) and three starter suggestions. A
+starter only prefills the editable task box — it is never sent for you — and
+the same hero appears inside a selected session that has no transcript yet.
+
 1. **Register a workspace** with the workspace finder (a directory you pick —
    it is never scanned) and create a session linked to it. Sessions are
    grouped by workspace in the sidebar; each workspace group's `⋯` menu
@@ -219,7 +233,22 @@ Then open `http://127.0.0.1:8600`:
    Per-model-call prompt annotations are developer information and stay out
    of the conversation by default; Settings → **Advanced** has the
    `Show prompt audits in the conversation` toggle when you need them.
-4. **Approve mutations.** Reads inside the workspace are free, but every
+4. **Read the run at a glance.** Older tool/activity rows of completed runs
+   fold into one muted disclosure row — `… N tool calls · expand` (the label
+   adds `in M runs` when the folded group spans several runs) —
+   a real button (`aria-expanded`; `Tab` to it and press `Enter`/`Space`):
+   expanding restores those rows in place, a single row stays open,
+   conversation content never folds, and the run you are following always
+   stays open. When the model writes a plan through the built-in `todo_write`
+   tool, a **Plan** dock appears above the composer (✓ completed, ▸ in
+   progress, ○ pending — at most four rows plus a `+N more` tail, a real
+   expand button and a live announcement). The composer's status-seat row
+   states what the next run will use: the Senior and Junior models, the real
+   permission expectation ("Ask in app" when a workspace is linked), and the
+   latest prompt audit's exact system/context character counts plus the
+   offered-tool count. A seat whose data is unknown is simply absent — no
+   token counts or other numbers are invented.
+5. **Approve mutations.** Reads inside the workspace are free, but every
    write/edit/delete/shell command docks an approval card in the chat —
    **Allow once** or **Deny** there to resume the run. A third decision,
    **Always allow this session**, resolves the request now and remembers the
@@ -233,9 +262,9 @@ Then open `http://127.0.0.1:8600`:
    backend without session scope answers honestly: "Allowed once — this
    backend does not support session scope." On narrow screens the sidebar
    becomes a drawer over the chat.
-5. **Review the changes** — files touched by tools are collected with their
+6. **Review the changes** — files touched by tools are collected with their
    unified diffs.
-6. **Jump around with `Ctrl+K`** (`Cmd+K` on macOS) — the command palette
+7. **Jump around with `Ctrl+K`** (`Cmd+K` on macOS) — the command palette
    searches sessions, workspaces, and actions; from two typed characters it
    also searches message content across all sessions and lists the hits in a
    `Messages` group. The sidebar footer's Light/Dark/System selector sets the
@@ -244,7 +273,8 @@ Then open `http://127.0.0.1:8600`:
 
 Sessions are plain JSONL files under `--sessions-dir`; each has a
 `<name>.meta.json` sidecar (title, workspace link) and a runtime sidecar in
-`sessions/runtime/<name>.events.jsonl` (tool calls, approvals, diffs).
+`sessions/runtime/<name>.events.jsonl` (tool calls, approvals, diffs, plan
+snapshots).
 
 ## The terminal workspace
 
@@ -255,6 +285,7 @@ instead. Use `chat` for scripts.
 
 ```powershell
 node dist/cli.js tui --provider mock
+node dist/cli.js tui --workspace ./repo --provider mock   # workspace-bound: tools + approvals
 ```
 
 Block transcript with textual role labels, Markdown bodies (headings, lists,
@@ -267,12 +298,16 @@ pickers, live **THINKING** and response blocks from token streaming, live
 resize repaint, and non-blocking turns — Escape/Ctrl+C cancel a running turn
 before anything else. Typing `/` at the start of the composer opens the
 command menu (the TUI's own commands, then built-in prompts/actions, then
-discovered templates) and `@` opens the skill picker; `@skill:name` mentions
-are validated and attached to the shared context before the turn runs (file
-mentions are web-only because terminal runs have no workspace). A built-in
-action like `/compact`, `/export [path]`, `/status` or `/permission` is
-performed by the TUI and never submitted as a task; `/plan <objective>`
-expands and runs that turn.
+discovered templates) and `@` opens the mention picker: shared skills are
+selectable (`@skill:name`), and in a workspace-bound run a path-like `@dir/file`
+token opens the workspace-file picker and attaches that file to the shared
+context before the turn starts (without `--workspace`, `@path` stays literal
+text). A built-in action like `/compact`, `/export [path]`, `/status` or
+`/permission` is performed by the TUI and never submitted as a task;
+`/plan <objective>` expands and runs that turn. A plan written through the
+model's `todo_write` tool docks above the composer as a compact display-only
+panel (✓/▸/○ markers, four rows plus an honest `+N more` tail; no key answers
+it).
 
 Collapsed tool-result rows fold to a preview bounded by visual rows after
 width-aware wrapping (six by default), with a `… +N more lines` marker that
@@ -289,6 +324,37 @@ is the single source for both; a transcript window that starts in the middle of
 a block marks the hidden label with a dim `⋯` in the gutter; and the status bar
 keeps its hints (including `Ctrl+T expand tool`) visible at ordinary terminal
 widths instead of hiding them behind the metrics.
+
+### Workspace-bound runs and approvals
+
+`tui --workspace <dir>` binds every turn to one confined directory, so the
+senior and junior can actually read, search, edit and run commands inside it:
+
+- The junior gets the `workspace_*` tool belt and the senior gets the
+  read-only verify slice (plus approval-brokered `run_shell`). Reads
+  auto-allow; every write, edit, delete and shell command pauses the run.
+- A parked request replaces the composer with an approval panel showing the
+  action, target, shell command, reason and a bounded diff summary. Answer with
+  `1`/`y` **Allow once**, `2`/`a` **Always allow this session** (memory only,
+  for this TUI process — never saved to settings), or `3`/`n`/`Esc` **Deny**;
+  `Up`/`Down` + `Enter` pick the highlighted row, and `Ctrl+E` opens the full
+  diff or command full-screen (closing the preview never answers the request).
+  Stopping or cancelling the turn denies everything still pending, so a stop
+  can never leave a mutation parked or apply one later.
+- `@relative/path` mentions attach workspace files (at most five, 20 000 chars
+  each, 100 000 total, text files only; unknown, absolute, `..`-escaping and
+  sensitive paths refuse the whole task with an honest notice).
+- An invalid root (`workspace root does not exist:` /
+  `workspace root is not a directory:`) exits 2 before the screen opens.
+  `/permission` states the bound root, the real ask-before-mutating policy, the
+  decision keys and any in-memory session allows.
+
+Try it with the mock provider (the mock cannot mutate, but the workspace binds
+and the policy is real):
+
+```powershell
+node dist/cli.js tui --workspace . --provider mock
+```
 
 Full keymap and web palette keys: [Keyboard and shortcuts](keyboard.md).
 

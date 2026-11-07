@@ -54,6 +54,7 @@ node dist/cli.js serve --port 8600 --sessions-dir sessions
 
 # 3. the terminal workspace (a bare interactive `two-brothers` opens this TUI)
 node dist/cli.js tui --provider mock
+node dist/cli.js tui --workspace . --provider mock   # confined tools + operator approvals
 ```
 
 The `run` output is the full conversation: `[user]`,
@@ -61,6 +62,9 @@ The `run` output is the full conversation: `[user]`,
 `[senior -> junior] review`, `[senior -> user] decision`. Each envelope is a
 separated block, model prose renders as width-safe Markdown, the decision is
 ruled off, and a compact usage footer closes the transcript when usage exists.
+On an interactive terminal the transcript also streams live block by block,
+with dim activity rows while the models and tools work (`--no-live` prints the
+finished transcript once; piped output always does).
 
 With no arguments at all, an interactive terminal opens the TUI directly;
 piped/CI invocations print the usage screen instead.
@@ -112,6 +116,17 @@ server then serves (the npm tarball ships its own copy of that build).
   (status, envelopes, repairs, tool calls, terminal result);
   `run --stream --stream-tokens` adds a `token` record per provider text delta,
   and the TUI renders those deltas in place.
+- **Live terminal transcript.** On an interactive stdout `run`/`chat` stream
+  each envelope block as it is produced, with dim `· …` activity rows between
+  blocks; the ruled decision and compact footer still print exactly once.
+  `--live`/`--no-live` control it (live is the TTY default), and piped output
+  plus every machine mode stays byte-identical.
+- **Plan and todo function.** The built-in `todo_write` tool keeps a whole-list
+  plan (`{content, status}` entries, tolerant sanitize, last write wins) for
+  both brothers without touching the workspace or asking for approval; each
+  write emits one additive `todo_updated` runtime event (sidecar-persisted,
+  replayed on reload) that drives a display-only TUI plan panel and a web
+  **Plan** dock.
 - **Provider adapters.** OpenAI-compatible, Anthropic, and Google Gemini wire
   adapters behind one `Provider` interface, driven by an ordered
   error-classification registry: 408/409/429/5xx and transport errors retry
@@ -146,10 +161,16 @@ server then serves (the npm tarball ships its own copy of that build).
   runtime sidecars, and changed-file diffs. A submission made while a run works
   joins the server's FIFO instead of blocking the composer (Send reads
   **Queue**), a bounded queue dock shows waiting tasks with per-row Stop, and
-  the next queued run is followed automatically. The composer has a `@` mention
-  picker and a `/` command menu (built-ins first, then your templates), the
-  built-in actions run locally (`/compact`, `/export`, `/help`, `/status`,
-  `/permission`, …), and `?`/`Ctrl+/` opens the commands-and-shortcuts overlay.
+  the next queued run is followed automatically. Older completed-run tool rows
+  fold into one disclosure summary (`… N tool calls`, plus `in M runs` when a
+  group spans several runs), the composer has a truthful status-seat row
+  (models, permission expectation, latest prompt-audit context sizes), and with
+  no session open — or an empty one — a welcome hero offers workspace context,
+  actions and starter suggestions that only prefill the composer. A **Plan**
+  dock mirrors the model's todo list. The composer has a `@` mention picker and
+  a `/` command menu (built-ins first, then your templates), the built-in
+  actions run locally (`/compact`, `/export`, `/help`, `/status`, `/permission`,
+  …), and `?`/`Ctrl+/` opens the commands-and-shortcuts overlay.
 - **TUI.** A bare interactive `two-brothers` (or `tui [task]`) is a
   zero-dependency full-screen chat in the terminal's alternate screen, over
   the same harness and the same flags: block transcript with textual role
@@ -158,13 +179,18 @@ server then serves (the npm tarball ships its own copy of that build).
   model pickers, token streaming in place, width-aware folded tool-result
   previews (six visual rows by default; `Ctrl+T` toggles preview/full text),
   live resize repaint, and non-blocking turns with Escape/Ctrl+C
-  cancellation. The `/` picker lists the built-in commands (badged) plus
-  discovered templates, Tab/Shift+Tab accept/dismiss, and actions like
-  `/compact`/`/export` are performed in the TUI rather than submitted. Overlay
-  lists follow the theme, the composer leaves mode/models to the status bar, a
-  dim `⋯` marks a transcript window that starts mid-block, and the status bar
-  keeps its hints visible at ordinary widths. Piped no-arg invocations print the
-  usage screen instead.
+  cancellation. `tui --workspace <dir>` binds a confined workspace: the junior
+  gets the `workspace_*` tools, the senior the read-only verify slice, every
+  write/edit/delete/shell parks on a docked approval panel (`1`/`y` allow once,
+  `2`/`a` allow for this TUI session — memory only, `3`/`n`/`Esc` deny,
+  `Ctrl+E` preview), `@path` mentions attach workspace files, and a plan panel
+  docks above the composer. The `/` picker lists the built-in commands
+  (badged) plus discovered templates, Tab/Shift+Tab accept/dismiss, and actions
+  like `/compact`/`/export` are performed in the TUI rather than submitted.
+  Overlay lists follow the theme, the composer leaves mode/models to the status
+  bar, a dim `⋯` marks a transcript window that starts mid-block, and the
+  status bar keeps its hints visible at ordinary widths. Piped no-arg
+  invocations print the usage screen instead.
 - **Protocol reference.** [`typescript/`](typescript/) is a zero-dependency
   implementation of `PROTOCOL.md` (no npm packages, no build step) that
   documents the contract.
@@ -247,6 +273,7 @@ two-brothers run "Pick a testing scheme" --provider mock --stream
 # REPL, terminal workspace, sessions, web backend
 two-brothers chat --provider mock
 two-brothers tui --provider mock
+two-brothers tui --workspace . --provider mock      # confined tools + approvals
 two-brothers sessions --sessions-dir sessions
 two-brothers serve --port 8600 --sessions-dir sessions
 
@@ -259,9 +286,9 @@ From a checkout, replace `two-brothers` with `node dist/cli.js`.
 
 | Command | Purpose |
 |---|---|
-| `run "<task>"` | one call: task → cooperation → decision |
-| `chat` | REPL: many tasks in one session, with slash commands |
-| `tui [task]` | full-screen terminal workspace |
+| `run "<task>"` | one call: task → cooperation → decision (live on a TTY; `--no-live` for one render) |
+| `chat` | REPL: many tasks in one session, with slash commands (live per turn on a TTY) |
+| `tui [task]` | full-screen terminal workspace (`--workspace <dir>` binds confined tools and approvals) |
 | `sessions` | list session files with readable titles |
 | `selftest` | offline check of the protocol and providers (mock) |
 | `serve` | web workspace backend (HTTP + SSE; serves the built UI) |
@@ -275,7 +302,8 @@ invocations print the usage screen instead.
 Common flags: `--provider`, `--base-url`, `--api-key`, `--senior-model`,
 `--junior-model`, `--senior-system`, `--junior-system`, `--max-rounds`,
 `--temperature`, `--timeout`, `--retries`, `--mode {consult,work,auto}`,
-`--verbose`, `--json`, `--stream`, `--stream-tokens`, `--session-file <path>`,
+`--verbose`, `--json`, `--stream`, `--stream-tokens`, `--live`/`--no-live`
+(`run`/`chat`), `--session-file <path>`,
 `--resume`, `--mcp-config <path>`, `--compact`, `--max-tokens`.
 `--mode print|json` / `--json-events` give pipe-clean automation output
 (decision-only stdout; one JSON object with

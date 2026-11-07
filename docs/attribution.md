@@ -41,14 +41,19 @@ verbatim copies of pi's prompts, as recorded in `NOTICE`.
 ## Conventions adopted from kimi-code, opencode and deepseek-harness
 
 No source code is copied from these three — only wire shapes and design
-conventions, each with an attribution comment at the point of use (see
-`NOTICE`).
+conventions, recorded in this index (most adapted modules also name their
+upstream in a header comment). `NOTICE` changes only for a substantial block
+(`NOTICE` is unchanged by the 2026-11-07 surface adaptations below).
 
 | Project | Here | What was adopted |
 |---|---|---|
 | kimi-code | `packages/harness/src/commands.ts`, `src/skills.ts`, `src/harness.ts` | The plugin command model (markdown templates), skills-root precedence (earlier root wins a name collision), and the `<skill-loaded>` body delivery as a `message` envelope from `"user"`. |
 | opencode | `packages/harness/src/commands.ts`, `src/plugins.ts` | Markdown command files with a template body, `{path, options}` plugin entries, free-form plugin config, and the `execute.before` hook vocabulary. Our command catalogue stays flat; upstream also scans nested `command/` trees. |
 | deepseek-harness | `packages/harness/src/runstream.ts`, `src/plugins.ts` | The NDJSON run-stream projection shape (commit-point records, bounded fields, terminal `result`) and the pre-execute tool hook in the shared hook set. |
+| kimi-code | `packages/harness/src/tui/view/approval.ts`, `web/src/components/ApprovalCard.vue`, the additive `ApprovalDetail` in `src/permissions.ts` | The workspace approval-panel shape: typed detail blocks (diff / file content / shell invocation), numbered decisions, `Esc` reject, a full-screen preview, and honest copy around the scope of a session-wide grant. Reimplemented locally on our own `RunApprovalBroker`; no block copied. |
+| kimi-code | `web/src/folding.ts`, `web/src/components/ChatView.vue` | The step-summary shape: collapsing older completed-run tool/step rows into one muted summary line (our `… N tool calls · expand`, plus `in M runs` when a group spans several runs) while the active run and all conversation content stay open. Implemented locally; no code copied. |
+| kimi-code | `web/src/components/WelcomeHero.vue` | The empty/welcome-state shape: workspace context, primary actions and starter suggestions for a session with no transcript (our starters only prefill the composer, never auto-send). Implemented locally. |
+| deepseek-harness | `packages/harness/src/todos.ts`, `src/tui/view/todo.ts`, `web/src/runtime.ts`, `web/src/components/TodoPanel.vue` | The model-facing tool-todo idea: a whole-list snapshot of minimal `{content, status}` entries, last-write-wins, plus a bounded display panel with status markers and a hidden-count tail. Our tool, schema, events and panels are implemented locally (tolerant sanitize, no approval, no workspace access); no code copied. |
 
 ## Other MIT references
 

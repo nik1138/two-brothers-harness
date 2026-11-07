@@ -22,6 +22,8 @@ The CLI is command-driven; these are its help and discovery paths.
 | Search stored sessions | `two-brothers sessions search <query> [--json] [--limit N]` |
 | Export a session | `two-brothers sessions export <name> [--format markdown\|json] [--output <path>]` |
 | Completion script | `two-brothers completions <bash\|zsh\|fish\|powershell>` |
+| Live CLI transcript | `two-brothers run … --live` / `--no-live` (live is the default on a TTY; piped output always prints once) |
+| Workspace-bound TUI | `two-brothers tui --workspace <dir>` (tools, approval panel, `@path` mentions) |
 
 `help <command>` and `<command> --help` print the same page; a near-miss
 command or option gets a did-you-mean line, and usage errors exit `2`. `config`
@@ -66,6 +68,8 @@ From a checkout, replace `two-brothers` with `node dist/cli.js` after
 | Anywhere outside a text field | `?` | open the commands & shortcuts overlay |
 | Anywhere | `Ctrl+/` / `Cmd+/` | open the commands & shortcuts overlay |
 | Approval card | `y` / `n` / `a` | allow once / deny / always allow this session while the card has focus |
+| Folded activity summary | `Tab`, then `Enter` / `Space` | expand or collapse that completed run's folded tool/activity rows (native button) |
+| Welcome hero starter | `Tab`, then `Enter` / `Space` | put the suggestion in the composer (editable, never sent) |
 | Mobile drawer | `Esc` | close the drawer when it is the topmost layer |
 | Dialog | `Esc` | close the topmost dialog |
 | Session actions trigger | `↓` | open the row menu; `↑`/`↓`/`Home`/`End` move, `Esc`/`Tab` close |
@@ -161,6 +165,23 @@ session.
   `(action, target)` pair in `sessions/settings.json` and is removed with the
   session; against an older backend the card says it allowed once instead.
 
+- **Folded activity, plan and status seats.** Completed runs' tool/prompt-audit
+  rows fold into one disclosure button (`… N tool calls · expand`, with
+  `in M runs` when the group spans several runs; `Tab` + `Enter`/`Space` toggles
+  it; the followed run and every conversation row stay open, and a collapsed
+  row is absent from find). A **Plan** dock above
+  the composer mirrors the model's `todo_write` plan (`✓`/`▸`/`○`, up to four
+  rows, a real expand button, a polite live announcement; display-only — no
+  keys). The composer's status seats state the models, the real permission
+  expectation and the latest prompt audit's exact char/tool counts; unknown
+  data hides its seat, and no numbers are fabricated.
+
+- **Welcome hero.** With no session selected — or a selected empty session —
+  the landing state shows the workspace context, actions (New session, Add a
+  workspace, Set up models, Keyboard shortcuts) and starter suggestions that
+  only prefill the composer (never sent). All are ordinary buttons: `Tab` to
+  one and press `Enter` / `Space`.
+
 - **Theme.** The sidebar footer's Light/Dark/System radio group sets the theme
   — Settings → Appearance and the palette's `Theme: …` actions do the same. The
   choice persists in localStorage; System follows the OS and updates live.
@@ -206,7 +227,7 @@ from the registry at runtime. The TUI is Ctrl-based: terminals do not deliver
 | `Ctrl+R` | Incremental prompt-history search, newest first; accepting puts the entry back in the composer. |
 | `Ctrl+O` | Stash the draft, or restore the stashed draft. |
 | `/` (line start) | Inline command picker. It groups the TUI's own commands first, then built-in prompts and built-in actions (each row badged `builtin`/`action`), then discovered `<name>.md` templates with a `usage — description` footer for the highlighted row. `↑`/`↓` move, `Enter`/`Tab` insert or run, `Shift+Tab`/`Esc` closes and keeps the draft. |
-| `@` (token start) | Inline skill picker. Shared skills insert `@skill:name `; role-scoped rows are visible but disabled. File mentions are not available in the TUI (terminal runs have no workspace). |
+| `@` (token start) | Inline mention picker. Shared skills insert `@skill:name ` and role-scoped rows are visible but disabled; in a `--workspace` run, a path-like `@dir/file` token opens the workspace-file picker and inserts the canonical `@path ` token (the file is attached read-only before the turn). File mentions stay literal text only when no workspace is bound. |
 | (held key) | A held-down `Enter`/`Tab` cannot repeat a submit: explicit key-repeat events and identical presses on unchanged text within 400 ms are ignored, while a deliberate press after typing is accepted. |
 
 ### Read the transcript
@@ -218,6 +239,27 @@ from the registry at runtime. The TUI is Ctrl-based: terminals do not deliver
 | `Ctrl+F` | Find in the transcript: an inline bar above the status rows. Typing filters live (case-insensitive literal text), `Enter`/`Down` jumps to the next match and `Shift+Enter`/`Up` to the previous one (both wrap); the bar shows `current/total`, marks the active match and scrolls its block into view. `Esc` closes it and restores the composer draft and scroll position exactly. `/find [query]` opens it with a query already typed. |
 | `Ctrl+T` | Expand or collapse the most recent tool result: collapsed shows the first six result rows after width-aware wrapping plus a `… +N more lines` marker (N counts hidden visual rows), expanded shows the whole result. The model always keeps the full text. |
 | `Ctrl+B` | Toggle the status side panel on wide terminals (it needs at least 100 columns and 20 rows; below that the transcript simply uses the full width). `/panel` does the same. |
+| (plan dock) | A model-written plan shows above the composer (`✓` completed / `▸` in progress / `○` pending, at most four rows plus a `+N more` tail). Display-only: no key answers it and the composer keeps its normal keys. |
+
+### Approvals (workspace-bound runs)
+
+A run started with `tui --workspace <dir>` pauses on a workspace mutation or
+shell command and replaces the composer with the approval panel. These keys
+belong to the panel while it is open (the checked `approval` key scope — they
+cannot collide with the composer, pickers or quit chord):
+
+| Keys | Action |
+|---|---|
+| `1` / `y` | **Allow once** — approve this call only. |
+| `2` / `a` | **Always allow this session** — approve this call and identical `(action, target)` requests for the rest of this TUI process. Memory only: never written to `settings.json`. |
+| `3` / `n` / `Esc` | **Deny** — refuse the call. `Esc` denies exactly once and never answers a later request. |
+| `Up` / `Down` | Move the highlight between the three numbered decisions (wraps). |
+| `Enter` | Answer with the highlighted decision. |
+| `Ctrl+E` | Open the full-screen preview of the pending diff or shell command. Closing the preview never answers the request — the panel stays parked. |
+
+The composer is paused while an approval is pending; stopping/cancelling the
+turn denies every pending request (fail closed), and a preview overlay closes
+before `Esc` can deny.
 
 ### Cancel, clear, quit
 
@@ -233,7 +275,7 @@ from the registry at runtime. The TUI is Ctrl-based: terminals do not deliver
 | `Up` / `Down` | Move the highlighted row. |
 | `Enter` | Open or run the highlighted item; a disabled row refuses and says why. |
 | `Esc` | Close the overlay and restore the previous focus. |
-| `Tab` / `Shift+Tab` | In the `/` and `@skill:` pickers: accept / dismiss (the text input keeps focus; Left/Right keep editing the draft). |
+| `Tab` / `Shift+Tab` | In the `/`, `@skill:` and workspace-file pickers: accept / dismiss (the text input keeps focus; Left/Right keep editing the draft). |
 
 Overlays receive keys before the composer: while one is open, `Up`/`Down` move
 the selection and never recall composer history, and `Esc` closes the overlay
@@ -264,9 +306,11 @@ template shadows a same-named built-in):
   configured senior endpoint and rewrites the session file; the visible
   transcript is unchanged), `/export [path]` (Markdown export; in-memory
   sessions need an explicit path), `/status` (session/context/panel details),
-  `/permission` (the real fail-closed policy facts — the TUI has no approval
-  broker), and `/new` (a fresh in-memory session; on-disk sessions are refused
-  honestly). Actions never become tasks; a refusal says why.
+  `/permission` (the real fail-closed policy facts — the bound workspace root,
+  the ask-before-mutating rule and this process's in-memory session allows, or
+  an honest "no workspace, no approval broker" when unbound), and `/new` (a
+  fresh in-memory session; on-disk sessions are refused honestly). Actions never
+  become tasks; a refusal says why.
 
 ## See also
 

@@ -282,10 +282,10 @@ Settings entries may carry per-plugin settings:
     accepts the shared list (with `{path, options}` entries) and a legacy
     per-role object (merged); a save carrying `plugins` updates the
     manager settings and reloads it.
-- **CLI parity.** `run`, `chat` and `serve` load plugins too. Hooks apply
-  to every run; plugin **tools** are only offered to workspace-bound runs,
-  so `serve` runs over a workspace get them and a bare CLI run (no
-  workspace concept) gets hooks/skills only.
+- **CLI parity.** `run`, `chat`, `tui` and `serve` load plugins too. Hooks
+  apply to every run; plugin **tools** are only offered to workspace-bound
+  runs, so `serve` runs over a workspace and a `tui --workspace <dir>` run get
+  them, while a plain CLI run (no workspace concept) gets hooks/skills only.
 
 ## Confinement and permissions
 

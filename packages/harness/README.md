@@ -85,12 +85,23 @@ whose hints stay visible at ordinary widths, resize repaint, and cancellable
 non-blocking turns. Piped no-arg invocations print the usage screen instead;
 `chat` stays the plain REPL for scripts.
 
+`tui --workspace <dir>` binds every turn to one confined root: the junior gets
+the `workspace_*` tool belt and the senior the read-only verify slice, writes/
+edits/deletes/shell park the run on a docked approval panel (`1`/`y` allow
+once, `2`/`a` allow for this TUI process only, `3`/`n`/`Esc` deny,
+`Ctrl+E` full-screen diff/command preview; stopping denies everything
+pending), composer `@path` mentions attach workspace files read-only, a plan
+panel docks above the composer, and `/permission` reports the real bound-root
+policy. An invalid root exits 2 before the screen opens.
+
 The human `run`/`chat` text mode renders each envelope as a separated block,
 model prose as width-safe Markdown (sanitized first), the decision behind a
 ruled `── decision ──` line, and, when usage exists, a compact footer such as
-`tokens 40 in / 20 out · cache 25% · 4 calls · cost $0.0300`;
-`--json`, `--json-events`, `--stream` and `--mode print` stay byte-identical
-machine modes.
+`tokens 40 in / 20 out · cache 25% · 4 calls · cost $0.0300`. On an interactive
+terminal it streams live block by block with dim activity rows
+(`--live`/`--no-live`; piped output prints once); `--json`,
+`--json-events`, `--stream` and `--mode print` stay byte-identical machine
+modes.
 
 ## Web workspace
 
@@ -108,7 +119,11 @@ drawer below the breakpoint), async runs with live SSE progress, a bounded
 queue dock for submissions made while a run works (Send reads **Queue**;
 per-row Stop cancels a queued run immediately and the next queued run is
 followed automatically), changed-file diff review, and a bottom-left Settings
-dialog for the per-role provider presets with sealed API keys. A customized
+dialog for the per-role provider presets with sealed API keys. Completed runs'
+tool rows fold into a disclosure summary, the composer carries truthful status
+seats (models, permission expectation, latest prompt-audit context sizes), a
+welcome hero greets an empty session (context, actions and editable starter
+suggestions), and a **Plan** dock mirrors the model's todo list. A customized
 built-in seed has **Reset to default**, which clears the stored override
 without touching the Senior/Junior role references, and the provider detail has
 **Refresh models** — an explicit, non-saving probe of the current draft's
@@ -148,6 +163,12 @@ default are unchanged. Runs use the configured models — the UI has no separate
   the body on demand.
 - **Slash commands**: markdown prompt templates expanded literally in the
   chat REPL and the TUI (`/name args`, `$ARGUMENTS`, `$1`..`$9`).
+- **Plan/todo function**: the built-in `todo_write` tool replaces the model's
+  whole plan in one call (tolerant `{content, status}` snapshot, no approval,
+  never touches the workspace) and emits one additive `todo_updated` runtime
+  event — sidecar-persisted, SSE-streamed and replayed — that feeds the TUI
+  plan panel and the web Plan dock; `HarnessResult.todos` carries the final
+  snapshot.
 - **Server**: HTTP + SSE on plain `node:http`; worker pool, approval broker
   (one-shot or session-scope allows persisted in the settings store),
   settings/secret stores (DPAPI/`plain1:`).

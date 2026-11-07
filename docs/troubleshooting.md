@@ -119,13 +119,35 @@ node dist/cli.js serve --port 8600 --sessions-dir sessions
 |---|---|---|
 | A plugin's tools or hooks never appear | `plugins` passes or warns | The check only verifies that `<cwd>/plugins` exists — it does not load plugin code. Pass `--plugins-dir` if your modules live elsewhere; a plugin that throws on import or registration is skipped with a warning (`plugin "name" skipped: ...`) and the run continues. Add `--verbose` for the per-plugin diagnostic line. |
 | `plugins` warns: `... not found — plugins are optional` | `plugins` | Optional. Create the directory or pass `--plugins-dir`. |
-| Plugin tools are missing in `run` or `chat`, but hooks fire | `plugins` | Plugin tools need a workspace; only workspace-bound `serve` runs bind them. The CLI has no workspace, so only hooks apply there. |
+| Plugin tools are missing in `run`/`chat`, but hooks fire | `plugins` | Plugin tools need a workspace: workspace-bound `serve` runs and a `tui --workspace <dir>` run bind them; plain `run`/`chat` have no workspace, so only hooks apply there. |
 
 ## TUI refuses to start
 
 | Symptom | `doctor` check | Fix |
 |---|---|---|
 | `tui needs an interactive terminal — stdin/stdout are not TTYs` (exit 2) | none — `doctor` cannot test a TTY | Run `tui`, or a bare `two-brothers`, from a real terminal. For piped, redirected or CI sessions use `chat` instead. |
+
+## TUI workspace, approvals and file mentions
+
+| Symptom | Why | Fix |
+|---|---|---|
+| `tui --workspace <dir>` exits 2 with `[error] workspace root does not exist: <dir>` | The path does not exist (relative paths resolve against the shell's cwd, not the sessions dir) | Fix the path or create the directory; the TUI never opens the alternate screen on a bad root. |
+| `tui --workspace <dir>` exits 2 with `[error] workspace root is not a directory: <dir>` | The path is a file | Point `--workspace` at the folder you want confined. |
+| `@path` in the TUI stays literal text instead of attaching a file | The TUI is not workspace-bound — file mentions need `--workspace` (the picker and the submit validator both require it) | Start the TUI with `tui --workspace <dir>`, or use the web composer where the session's linked workspace supplies the root. |
+| A TUI `@path` mention is refused: `cannot attach file "@…"`, `not a text file`, `too many file mentions`, or the total-size error | Mentions are validated before the turn starts with the same rules as the server: workspace-relative text files only, no absolute/`..`/sensitive paths, at most 5 files, 20 000 chars each and 100 000 chars in total | Fix the path (pick it from the `@` picker) or send fewer/smaller files; nothing was recorded or sent. |
+| The approval panel never appears, or `y`/`n`/`1`/`2`/`3` type into the composer instead | The run is not workspace-bound (no mutations to approve), or an overlay is open above the panel (it owns the keys until closed) | Bind the root with `tui --workspace <dir>`; close any overlay (`Esc`) — the panel then owns the decision keys. |
+| "Always allow this session" asks again in a new `tui` process | That decision is in-memory for the current TUI process by design — it is never written to `settings.json` | Re-allow in the new process, or use the web approval card whose session grant persists in the session settings. |
+| Stopping a run makes a pending approval disappear | A stop/cancel denies every pending request (fail closed) — a stopped run must never leave a mutation parked | Expected. Re-run the task if you meant to finish it. |
+| `Ctrl+E` says "nothing to preview for this approval" | The request carries no diff or command — e.g. a delete of a large/unreadable file, which is approved by path alone | Answer from the panel; the preview is optional detail, not an answer path. |
+
+## Live CLI output and machine modes
+
+| Symptom | Why | Fix |
+|---|---|---|
+| Piped/CI output shows no activity rows and no block-by-block streaming | Live output is TTY-only; a pipe always prints the finished transcript once, and `--live` cannot force a pipe to stream | Expected for scripts. Run interactively to see the live transcript. |
+| The TTY transcript is too noisy / you want the old single render | `prompt_audit` and tool progress rows are dim `· …` activity lines printed as work happens | Use `--no-live` (or pipe the output) to print the finished transcript once; machine modes never stream. |
+| `--json`/`--json-events`/`--stream`/`--mode print` output changed shape or gained escape bytes | It should not — live output never applies to those modes, and the hermetic E2E pins their bytes | Re-run with `--verbose` and report the exact command; `--live`/`--no-live` are only accepted by `run`/`chat`. |
+| `--live`/`--no-live` is rejected by `serve` or `tui` | Both flags are `run`/`chat`-only (like `--dry-run`); unknown-option usage errors exit 2 | Drop the flag, or move it to the `run`/`chat` command that prints a human transcript. |
 
 ## Streaming and composer mentions
 
@@ -140,6 +162,16 @@ node dist/cli.js serve --port 8600 --sessions-dir sessions
 | The web `/compact` action reports "a run is active" or a summarizer failure | Manual compaction is refused while a run for that session is queued/running/waiting (409), and a provider failure is a 502 with the message; nothing is written on failure | Wait for or stop the run, then retry; if it fails again, check the configured Senior endpoint with `doctor` and re-run with `--verbose` on the server. |
 | A built-in command (e.g. `/plan`) behaves differently after adding a `plan.md` | A discovered `<name>.md` template shadows a built-in of the same name (exact-name priority, deepseek-harness rule) | Rename or remove the template file, or use the built-in under its other spellings (aliases) where the template does not shadow them. |
 
+## Web plan, folding and status seats
+
+| Symptom | Why | Fix |
+|---|---|---|
+| The web **Plan** dock never appears although the model planned something | `todo_write` is a tool the model chooses to call, and the dock is projected from `todo_updated` runtime events — an older backend never emits them | Rebuild and restart the backend from this checkout; a run whose model never calls `todo_write` legitimately has no plan. The dock is per session and restores on reload from the runtime sidecar. |
+| Older tool rows did not fold / a fold row disappeared on reload | Folding only groups tool/prompt-audit rows attributable to a run that is not the one being followed (single rows stay open; the followed run stays open); expanded/collapsed state is per mount, so a reload or session switch resets it to collapsed. An older backend whose tool events carry no run id cannot attribute rows, so they stay open. | Expected. Click the `… N tool calls · expand` row again to expand it in place; rebuild/restart the backend to get run ids on tool events. |
+| A folded row's text is not found by Ctrl+F | Collapsed rows are removed from the DOM, exactly like hidden prompt-audit rows — find searches what the transcript renders | Expand the fold row, then search again. |
+| Composer status seats are missing | Every seat hides when its data is unknown: models need loaded role settings, the permission seat needs a known workspace context, and the context seat needs at least one prompt audit | Send a run so a provider call is audited; the seats appear as their data becomes known (a linked workspace shows "Ask in app"). No numbers are guessed by design. |
+| A welcome-hero starter did not send the task | Starters only prefill the editable composer — they never submit for you | Edit the prefilled text and press `Enter` (or the Send/Queue control). |
+
 ## Usage errors and exit codes
 
 Usage errors are rejected before `doctor` runs, so they have no check id.
@@ -151,7 +183,7 @@ Near-miss command and option names get a suggestion on stderr, for example
 |---|---|---|
 | `0` | Success; `doctor` when no check failed | — |
 | `1` | Run error (including a provider call failure), or `doctor` with a failed check | Follow the failing `doctor` check above. If `doctor` passes but `run` exits 1, the provider call itself failed (for example `fetch failed`); re-run with `--verbose` and check the endpoint's log. `doctor` only probes `GET /models`. |
-| `2` | Usage error: unknown command or option, a missing command argument (task, shell, session), or the TUI without a TTY; `doctor` also returns 2 for an invalid provider flag | Read the usage line on stderr, then run `help <command>` or the command's `--help`. |
+| `2` | Usage error: unknown command or option, a missing command argument (task, shell, session), the TUI without a TTY, or an invalid `tui --workspace` root; `doctor` also returns 2 for an invalid provider flag | Read the usage line on stderr, then run `help <command>` or the command's `--help`. |
 
 See the [CLI reference](cli-reference.md#return-codes) for the full command and
 flag surface, and [Quickstart](quickstart.md) for a working configuration.

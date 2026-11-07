@@ -25,8 +25,11 @@ If the task contains spaces, pass it as a single string (quote it in PowerShell)
 
 The human transcript renders as separated, Markdown-rendered envelope blocks
 with a ruled decision and a compact usage footer — see
-[Human text output](#human-text-output-ts-package). The automation modes
-(`--json`, `--json-events`, `--stream`, `--mode print`) keep their exact bytes.
+[Human text output](#human-text-output-ts-package). On an interactive stdout
+the transcript streams live (each block as produced, with dim activity rows
+between blocks); `--no-live` prints the finished transcript once instead. The
+automation modes (`--json`, `--json-events`, `--stream`, `--mode print`) keep
+their exact bytes and never stream live.
 
 The task can also come from stdin or a file:
 
@@ -58,7 +61,10 @@ node dist/cli.js run - --provider mock --dry-run --json < task.txt
 
 REPL: several tasks in one session. Empty line, `exit`, `quit`, `q`, `/exit`,
 `/quit` — exit. Before the first prompt the REPL prints the resolved
-provider/model/base URL per role.
+provider/model/base URL per role. Each turn's human transcript renders through
+the same layout as `run`; on an interactive stdout every turn streams live
+(dim activity rows included) and `--no-live` prints each turn once when it
+finishes — a piped REPL always prints it once.
 
 ```powershell
 node dist/cli.js chat --provider mock
@@ -151,8 +157,10 @@ position. Typing `/` at the start of the composer (or a line start) opens an
 inline command picker: the TUI's own commands first, then built-in prompts and
 built-in actions (rows badged `builtin`/`action`, highlighted-row
 `usage — description` footer), then discovered templates with a `template`
-badge; typing `@` at a token boundary opens a skill picker (shared skills are
-selectable, role-scoped rows are shown disabled). `Enter`/`Tab` insert or run
+badge; typing `@` at a token boundary opens the mention picker — skills (shared
+skills are selectable, role-scoped rows are shown disabled) and, in a
+workspace-bound TUI, a path-like `@dir/file` token opens the workspace-file
+picker instead. `Enter`/`Tab` insert or run
 the highlighted row, `Shift+Tab`/`Esc` close without touching the draft, and a
 held key cannot repeat a submit.
 When a provider streams reasoning, a bounded dim `THINKING` block appears
@@ -164,8 +172,11 @@ newest result shows at most six visual rows after width-aware wrapping, and a
 most recent result between the preview and its complete text, expansion is
 tracked per tool row, and the model always keeps the full result. The
 visual-row truncation follows pi's visual-truncate approach (MIT — see
-[Attribution](attribution.md)). File mentions are web-only
-(terminal runs have no workspace). Slash input: `/mode consult|work`, `/models`,
+[Attribution](attribution.md)). A model-written plan docks above the composer
+as a compact display-only panel (✓/▸/○ markers, at most four rows plus an
+honest `+N more` tail — see
+[Plan and todo function](#plan-and-todo-function-ts-package));
+it takes no keys. Slash input: `/mode consult|work`, `/models`,
 `/sessions`, `/theme dark|light|system`, `/settings`, `/retry`, `/help`,
 `/commands`, `/exit`, plus discovered `<name>.md` templates (unknown names are
 never submitted as tasks). The built-in prompts `/plan <objective>`,
@@ -173,8 +184,10 @@ never submitted as tasks). The built-in prompts `/plan <objective>`,
 built-in actions `/compact` (between turns — compacts through the configured
 senior endpoint and rewrites the session file, the visible transcript is
 unchanged), `/export [path]` (Markdown; in-memory sessions need a path),
-`/status`, `/permission` (real policy facts; the TUI has no approval broker)
-and `/new` (in-memory session; on-disk sessions are refused honestly) are
+`/status`, `/permission` (real policy facts — the bound workspace, the
+ask-before-mutating rule and this process's session allows; an unbound run says
+so plainly) and `/new` (in-memory session; on-disk sessions are refused
+honestly) are
 performed locally and never submitted as tasks — see
 [Built-in commands](#built-in-commands). A native command always wins its own
 name and a discovered template shadows a same-named built-in. `/models` and
@@ -184,8 +197,70 @@ runs.
 
 ```powershell
 node dist/cli.js tui --provider mock
+node dist/cli.js tui --workspace ./repo --provider mock
 node dist/cli.js tui "Plan a migration from Redis to Valkey" --provider mock
 ```
+
+#### Workspace-bound TUI runs (`--workspace`)
+
+`tui --workspace <dir>` binds every turn of the TUI session to one confined
+workspace root:
+
+- The junior's belt gains the confined `workspace_*` tools
+  (`workspace_read_file`, `workspace_list_dir`, `workspace_search_text`,
+  `workspace_write_file`, `workspace_edit_file`, `workspace_delete_file`,
+  `workspace_run_shell`) and the senior gets the read-only verify slice (plus
+  approval-brokered `run_shell`); plugin bindings see the same workspace.
+- Reads auto-allow. Writes, edits, deletes and shell commands park the run on
+  the [approval panel](#approvals-in-the-tui) instead of the composer.
+- Composer `@<relative/path>` / `@./<path>` mentions attach a workspace file as
+  a `<file path="…">` context block before the turn starts, under the same
+  caps and refusals as the server path: at most `MENTION_MAX_FILES` (5) files,
+  `MENTION_MAX_FILE_CHARS` (20 000) per file with the standard truncation
+  marker, `MENTION_MAX_TOTAL_CHARS` (100 000) in total, text files only;
+  unknown, absolute, `..`-escaping, sensitive and oversized files refuse the
+  whole task with an honest notice. Typing `@` and a path-like token opens the
+  workspace-file picker (rows show the canonical `@path` token and the file
+  size). Without `--workspace`, `@path` stays literal task text exactly as
+  before.
+- An invalid root is a startup error: exit `2` before the alternate screen
+  opens, with an `[error]` line naming the problem — `workspace root does not
+  exist: <dir>` or `workspace root is not a directory: <dir>`.
+- `/permission` states the bound root, the fail-closed ask-before-mutating
+  policy, the decision keys and the in-memory session allows (or says the run
+  has no workspace and no approval broker).
+
+#### Approvals in the TUI
+
+Workspace-bound runs request operator approval through the same
+`RunApprovalBroker` the server uses. While one is pending, a docked panel
+replaces the composer and shows the action, target, shell command, reason and a
+bounded diff summary (the full diff/command is one `Ctrl+E` away):
+
+| Key | Decision |
+|---|---|
+| `1` / `y` | **Allow once** — approve this call only |
+| `2` / `a` | **Always allow this session** — approve this call and identical `(action, target)` requests for the rest of this TUI process (memory only, never saved to settings) |
+| `3` / `n` / `Esc` | **Deny** — refuse this call (`Esc` denies exactly once and never answers a later request) |
+| `Up` / `Down`, `Enter` | Move the highlight between the three decisions, answer with the highlighted one |
+| `Ctrl+E` | Full-screen preview of the pending diff or shell command; closing it never answers the request |
+
+Stopping or cancelling the turn denies every pending request (fail closed), and
+the broker's per-pair denial cap still applies. The panel is the only approval
+authority in the TUI: closing an overlay never answers it, and a stopped turn
+never leaves a mutation parked.
+
+#### Plan panel
+
+A plan written by the model through the built-in `todo_write` tool docks above
+the composer: at most four item rows (`✓` completed, `▸` in progress, `○`
+pending) plus an honest `+N more (…)` tail and a `TODO · n/m done` title. It is
+display-only — no key answers it and the composer keeps its normal keys — and
+the latest snapshot is replayed from the session's runtime sidecar when a
+session that has one is resumed or switched. The TUI itself does not write the
+runtime sidecar: a plan its own turns wrote is kept in memory for the rest of
+that TUI process (so session switches keep it) but is not durable across a TUI
+restart; a sidecar written by `serve` for the same session replays.
 
 ### Composer mentions and slash commands
 
@@ -214,8 +289,9 @@ context, and the server applies the same rules to `POST /api/runs` /
 
 Mention tokens stay in the task text (traceability); the attached blocks are
 separate `message` envelopes persisted in the session JSONL before the task.
-The TUI supports `/` and `@skill:` (no workspace, so file mentions stay
-literal text). Discovered metadata is served at `GET /api/skills`,
+The TUI supports `/` and `@skill:` on every run, and `@<path>` file mentions
+when it is bound to a workspace (`tui --workspace <dir>`; without a workspace
+they stay literal text). Discovered metadata is served at `GET /api/skills`,
 `GET /api/commands` and `GET /api/workspaces/{id}/files` (never bodies).
 
 #### Built-in commands
@@ -475,7 +551,7 @@ The backend is a **local single-user workspace server**. API overview:
 | `POST /api/runs` | start a background run (`{"task", "mode"?, "session"?, "provider"?, "workspace_id"?, "stream_tokens"?}` → `202 {"run_id", "session", "status"}`); a leading `/name` command is expanded and `@skill:`/`@file` mentions are attached before the run (see [Composer mentions and slash commands](#composer-mentions-and-slash-commands)); `stream_tokens: true` additionally streams live `token` frames on the run SSE endpoint (strict boolean, default off); runs are FIFO — one active, the rest `queued`, so a submission for a session that already has a live run is still accepted (`202` with `status: "queued"`) and starts after the earlier one finishes |
 | `GET /api/runs`, `GET /api/runs/{run_id}` | list runs / run status (`queued`/`running`/`waiting`/`completed`/`failed`/`cancelled`); records carry a per-run `usage` object (`model_calls`, `input_tokens`, `output_tokens`, `cached_tokens`; zeros while running) |
 | `POST /api/runs/{run_id}/stop` | cooperative stop (pending approvals are denied); a `queued` run is marked cancelled immediately, without waiting for a worker |
-| `GET /api/runs/{run_id}/events?after=N` | SSE of typed runtime events (`run_status`, `envelope`, `tool_started`, `tool_completed`, `approval_requested`, `approval_resolved`, `approval_auto_allowed`, `approval_auto_denied`, `run_error`, `run_end`); reconnectable via `after`. When the run was started with `stream_tokens`, the same stream additionally carries ephemeral named `token` frames (`event: token`, data `{type, run_id, role, kind: "text"\\|"thinking", delta, at}`) with no SSE id — they are live-only, never persisted and never replayed |
+| `GET /api/runs/{run_id}/events?after=N` | SSE of typed runtime events (`run_status`, `envelope`, `tool_started`, `tool_completed`, `approval_requested`, `approval_resolved`, `approval_auto_allowed`, `approval_auto_denied`, `todo_updated`, `prompt_audit`, `run_error`, `run_end`); reconnectable via `after`. `approval_requested` additively carries `reason` and a bounded `detail` (`{kind, diff?, addedLines?, removedLines?, command?, truncated?}` preview) when the request has one; `todo_updated` carries the model's complete sanitized plan snapshot. When the run was started with `stream_tokens`, the same stream additionally carries ephemeral named `token` frames (`event: token`, data `{type, run_id, role, kind: "text"\\|"thinking", delta, at}`) with no SSE id — they are live-only, never persisted and never replayed |
 | `GET /api/runs/{run_id}/approvals`, `POST /api/runs/{run_id}/approvals/{id}` | list/answer pending operator approvals (`{"allow": bool, "scope"?: "once" \| "session"}` → `{approval_id, decision, scope}`; `scope` defaults to `once`, an invalid value or `session` with a deny is a 400, an unknown/already-resolved approval id is a 404). See the session-scope paragraph below |
 | `GET /api/providers`, `POST /api/providers`, `PUT /api/providers/{seed}`, `POST /api/providers/{name}/reset`, `POST /api/providers/{name}/discover`, `DELETE /api/providers/{name}` | provider presets (seeded: openai, deepseek, anthropic, gemini, openrouter, lmstudio, custom). `GET` returns `{name, base_url, api_key_set, kind, models}` plus additive `seed` (the name comes from the built-in seed table) and `customized` (a stored override of that name exists), so a client can tell a pristine seed from an edited/custom entry. `POST` creates a custom provider (409 on a duplicate name, including a seed name); `PUT` updates it, and on a seed name materializes a stored override (blank `base_url` is a 400); `DELETE` removes a stored preset/override and clears any role `provider_ref` that pointed at it (a pristine seed is a 404); `POST /api/providers/{name}/reset` restores a customized built-in seed without clearing role references (see below); `POST /api/providers/{name}/discover` probes a draft endpoint for its model list without saving (see the discovery paragraph below). Keys are never returned — responses carry `api_key_set` only. The Settings → Providers tab is the operator UI for these routes |
 | `GET /api/plugins` | discovered plugins (`name`, `description`, `roles`, load `errors`, `diagnostics`) |
@@ -622,6 +698,8 @@ name the preset declares. Manual fields: `--base-url`, `--api-key` (or
 | `--mode` | `print`, `json` | — | (TS package, `run` only) non-interactive automation output — see [Automation output](#automation-output-ts-package); `--mode work --json-events` stays possible because `print`/`json` are output modes, not cooperation modes |
 | `--json-events` | flag | off | (TS package, `run` only) alias for `--mode json` |
 | `--stream` | flag | off | (TS package, `run` only) NDJSON run events on stdout as they happen: one JSON object per line from `run_status`, `envelope`, `repair`, `tool_call`, `tool_result`, `result`. Its own output mode — cannot combine with `--json`/`--json-events`/`--mode print|json` (usage error, exit 2); the human summary and cost line are suppressed |
+| `--live` | flag | off (on for a TTY) | (TS package, `run`/`chat` only) stream the human transcript live on an interactive stdout: one envelope block as produced, dim `· …` activity rows between blocks, the decision rule and compact footer still once at the end. Never applies to a pipe, a machine output mode, or a sink without a TTY signal |
+| `--no-live` | flag | off | (TS package, `run`/`chat` only) disable live streaming and print the finished transcript once (the piped behavior); wins when both `--live` and `--no-live` are given |
 | `--verbose` | flag | off | print the full payload of every message |
 | `--json` | flag | off | with no explicit `--mode`: select `--mode json` (one machine-readable object). With an explicit `--mode print`: print the `decision` as JSON on the last line |
 | `--session-file` | path | — | JSONL file to persist every protocol envelope to |
@@ -636,6 +714,7 @@ name the preset declares. Manual fields: `--base-url`, `--api-key` (or
 | `--dry-run` | flag | off | (TS package, `run`/`chat`) resolve the run (config with sources, tools, session, compaction, limits) and print the plan; exits 0 with no model calls and no session write. `run --dry-run --json` prints one JSON object. Invalid with `--stream` (usage error, exit 2) |
 | `--task-file` | path | — | (TS package, `run` only) read the task from a file — missing/unreadable/blank exits 2; mutually exclusive with a positional task. `run -` reads the task from stdin instead (bounded to 1 MiB, blank exits 2) |
 | `--commands-dir` | path | — (repeatable) | (TS package) extra slash-command root for the chat REPL and `tui`; defaults are `TWO_BROTHERS_COMMANDS_DIR` (OS path list), then `<cwd>/commands` and `~/.two-brothers/commands` |
+| `--workspace` | dir | — | (TS package, `tui` only) bind every turn to one confined workspace root: `workspace_*` tools for the junior, the read-only verify slice for the senior, the operator approval panel for mutations/shell, and `@path` file mentions. An invalid root exits 2 before the screen opens |
 
 ## Environment variables
 
@@ -828,6 +907,16 @@ stable, width-safe layout:
   print-mode format and stay on stderr there (see
   [Automation output](#automation-output-ts-package)); the human transcript does
   not print them.
+- **Live on a TTY.** On an interactive stdout `run`/`chat` write each envelope
+  block as the harness produces it, with dim `· …` activity rows between blocks
+  (`· senior consulting…` before a call, `· junior tool workspace_read_file…`
+  while a tool runs, an explicit row for a non-ok tool result). The ruled
+  decision and the compact footer still print exactly once, at the end.
+  `--no-live` — or a pipe/non-TTY stdout, or a machine output mode — prints the
+  finished transcript once instead; `--live` cannot force a pipe to stream.
+  Dropping the `· ` activity rows from live output leaves the finished
+  transcript's bytes plus the footer block, and `--verbose` keeps the same
+  payload rows in both projections.
 - **Widths.** A TTY wraps to its own width; piped/non-TTY output keeps the
   historical 96-column layout. The text stays plain when color is off
   (`NO_COLOR`, a pipe, `TERM=dumb`), and `stripAnsi(colored)` reproduces the
@@ -841,7 +930,38 @@ stable, width-safe layout:
 
 Machine output is unaffected: `--json`, `--json-events`, `--stream`,
 `--mode print` and `--dry-run` are byte-identical to their previous formats
-(zero escape bytes, same field shapes and stderr routing).
+(zero escape bytes, same field shapes and stderr routing), and live streaming
+never applies to them (nor to a non-TTY stdout).
+
+## Plan and todo function (TS package)
+
+The built-in `todo_write` tool lets the model keep a plan for multi-step work.
+Both brothers receive it (the junior belt and the senior verify slice); it is
+display state only — no workspace access, no approval, and on its own it never
+enables the senior verify pass:
+
+- **Arguments:** `{"todos": [{"content": "short imperative line",
+  "status": "pending" | "in_progress" | "completed"}, ...]}` — the complete
+  list, replacing any previous one (last write wins; no ids).
+- **Tolerant boundary:** non-object entries and empty content are dropped, an
+  unknown/missing status becomes `pending`, content is collapsed to one line
+  and bounded, and at most 50 entries survive. A call whose `todos` is not an
+  array — or that yields no usable entry — returns a JSON error result and
+  leaves the previous plan untouched; one bad entry never loses the plan.
+- **Result and event:** a valid call returns a compact text result
+  (`todo list updated: N items (M in progress)`) and emits exactly one additive
+  `todo_updated` runtime event
+  `{"type": "todo_updated", "todos": [...], "run_id", "at"}`. The event is
+  persisted in the run sidecar (`sessions/runtime/<session-file>.events.jsonl`,
+  where the session file name already ends in `.jsonl`: `x.jsonl` ->
+  `x.jsonl.events.jsonl`), streamed over the run SSE endpoint and replayed on a
+  reload — the latest snapshot is the current plan. Protocol envelopes and the
+  session JSONL are untouched, and `HarnessResult.todos` carries the final
+  snapshot for API callers.
+- **Surfaces:** the TUI docks a compact plan panel above the composer and the
+  web renders a Plan dock near the composer (see
+  [TUI](#plan-panel) and [Quickstart](quickstart.md)) — both use the same
+  status markers and bounded selection, and neither takes a key.
 
 ## Automation output (TS package)
 
@@ -905,9 +1025,19 @@ them):
   `sessions/settings.json` and cleared with the session); one-shot allows and
   denials, the fail-closed default and the denial cap are unchanged.
 - **Human terminal output** — separated, Markdown-rendered envelope blocks, a
-  ruled decision, a compact usage footer and width-aware help tables (see
-  [Human text output](#human-text-output-ts-package)); machine modes are
-  byte-identical.
+  ruled decision, a compact usage footer, width-aware help tables and — on an
+  interactive terminal — live block-by-block streaming with dim activity rows
+  (`--live`/`--no-live`; see [Human text output](#human-text-output-ts-package)).
+  Machine modes stay byte-identical.
+- **TUI workspace runs and approvals** — `tui --workspace <dir>` gives the TUI
+  the confined workspace tools, the senior's read-only verify slice, a docked
+  approval panel for mutations/shell (numbered decisions, `Ctrl+E` preview,
+  in-memory session allows) and `@path` file mentions (see
+  [`tui`](#tui-initial-task)).
+- **Plan and todo function** — the built-in `todo_write` tool records the whole
+  plan, emits one additive `todo_updated` runtime event (sidecar-persisted) and
+  feeds the TUI plan panel and the web Plan dock (see
+  [Plan and todo function](#plan-and-todo-function-ts-package)).
 - **Diagnostics and shell completions** — `doctor` reports the local
   environment and provider setup (human report or `--json`, exit 1 on a
   failing check), `config` prints the resolved configuration with per-field

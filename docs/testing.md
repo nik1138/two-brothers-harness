@@ -24,8 +24,8 @@ The script runs:
 7. the `typescript/` reference selftest
 8. the `web/` unit tests (`npm test` — chat, timeline, drafts, palette,
    session-status, recents, density, find, content-search, mentions, provider
-   settings and model discovery, queue visibility, session-scope approvals and
-   streaming)
+   settings and model discovery, queue visibility, session-scope approvals,
+   step folding, composer status seats, plan docks and streaming)
 9. the `web/` build
 
 Expected final line: `SMOKE TEST: PASS`. It is an offline pre-flight, not the
@@ -74,8 +74,16 @@ npm run test:spawn      # node --test tests/ (child processes allowed)
 ```
 
 On the canonical integrated run for this round the in-process suite is
-**1 291 tests: 1 289 pass, 2 environment skips, 0 fail** (exit 0); the two skips
-are the known environment-gated cases, not failures.
+**1 351 tests: 1 349 pass, 0 fail, 2 skipped** (exit 0); the two skips are
+environment-gated and never failures — the symlink parity test and the MCP
+stdio spawn are unavailable in this environment.
+
+Environment note (Windows): the shell-execution tests spawn the `bash` found on
+`PATH`; the documented/verified environment is Git Bash
+(`C:\Program Files\Git\bin`). A WSL `bash.exe` earlier on `PATH` can hold the
+temp directory handle and make cleanup-only assertions fail — the unchanged
+baseline fails the same way, so that is an environment quirk, not a product
+failure.
 
 Coverage: envelope and payload validation (zod), model output parsing,
 `sanitize_payload`, the consult/work/revise state machine, byte-stable
@@ -101,11 +109,15 @@ denies), `tests/settings.test.ts` (round-trip, dedupe/isolation, cap, atomic
 write, corrupt-section fail-soft, secret-free), and `tests/server.test.ts`
 (strict scope validation, persist-before-resolve, restart survival, session
 delete clears, auto-allow on a repeated identical request). The CLI text layout
-is covered by `tests/clistyle.test.ts` (now 22 tests) and `tests/cli.test.ts`
-(now 20) — block separation, the ruled decision, Markdown bodies and their
+is covered by `tests/clistyle.test.ts` (now 27 tests) and `tests/cli.test.ts`
+(now 26) — block separation, the ruled decision, Markdown bodies and their
 sanitization, the compact footer's presence rules,
-`stripAnsi(colored) === plain`, machine modes escape-free, and responsive help
-columns. The CLI-ergonomics suites cover the help catalog,
+`stripAnsi(colored) === plain`, machine modes escape-free, responsive help
+columns, and live TTY streaming: a TTY sink streams each block and prints the
+footer once, `--no-live`/a non-TTY sink/machine modes keep the finished render,
+colored live output strips back to the plain one, and the layout tests pin that
+dropping the `· ` activity rows leaves the finished transcript bytes. The
+CLI-ergonomics suites cover the help catalog,
 `sessions --json` / `sessions show`, `models` and `onboard`;
 `tests/doctor.test.ts` covers the `doctor` diagnostics (injected transport and
 clock, API keys never rendered), `tests/completions.test.ts` the deterministic
@@ -121,7 +133,22 @@ their exit codes). Composer mentions/slash commands are covered by
 `tests/workspacefiles.test.ts` (bounded file index + picker ranking),
 `tests/mentionswiring.test.ts` (the files endpoint and run-submission
 expansion/injection over loopback) and `tests/tuipicker.test.ts` (the TUI
-pickers + skill-attachment validation). Thinking/response streaming is covered
+pickers + skill-attachment validation). The plan/todo function is covered by
+`tests/todos.test.ts` (17 tests: tolerant `sanitizeTodos`, summary/result
+grammar, the model-facing schema, valid/invalid/empty calls, exactly one
+`todo_updated` per write with last-write-wins, the tool joining the junior and
+senior belts without enabling a tool-less verify pass, no approval/workspace
+side effect, and sidecar replay) and `tests/tuitodo.test.ts` (12 tests: the
+docked panel's markers/title, bounded selection and honest `+N more`, empty-plan
+omission, width safety at 40/60/80/120 incl. CJK/emoji, NO_COLOR/theme
+byte-stability, sidecar replay keyed by the session file name (`x.jsonl` ->
+`sessions/runtime/x.jsonl.events.jsonl`), and the frame keeping its size). TUI
+workspace-bound runs are covered by `tests/tuiworkspace.test.ts` (20 tests:
+`--workspace` startup errors, `@file` mention resolution and refusals, the
+workspace-file picker rows/trigger, the approval panel's exact-width rendering
+and key handling, `Ctrl+E` preview, the panel replacing the composer, and the
+real broker allow/deny/allow-session/abort paths with a bounded diff detail).
+Thinking/response streaming is covered
 by `tests/thinkingstream.test.ts` (provider splits for all three wire families
 and harness token kinds), `tests/servertokens.test.ts` (named live token SSE
 frames, no persistence/replay) and `tests/tuithinking.test.ts` (the TUI live
@@ -145,11 +172,13 @@ reload, permutation validation) and `tests/serverworkspaces.test.ts` (the
 the editor, the keymap registry, the terminal, the views, prompt history, the
 find-in-transcript overlay, span-level Markdown styling, the theme-painted
 palette/help overlay rows, the composer's meta-row removal, the mid-block `⋯`
-transcript slice marker, and the status-bar hint priority (`tests/tuistyle.test.ts`
-also pins byte-identical NO_COLOR output; TUI suites total 301 tests), with the
+transcript slice marker, the status-bar hint priority, the docked plan panel
+(`tests/tuitodo.test.ts`, 12 tests) and workspace-bound runs with the approval
+panel and `@file` mentions (`tests/tuiworkspace.test.ts`, 20 tests;
+`tests/tuistyle.test.ts` also pins byte-identical NO_COLOR output), with the
 assembled app in `tests/tuiintegration.test.ts`. The TUI lanes and the doctor,
 completions, reliability, search/export, workspace-order and broker-cap suites
-are registered in `tests/run-all.ts`.
+are registered in `tests/run-all.ts` (the two new suites included).
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
@@ -160,11 +189,17 @@ file), stdin (`run -`), sessions-json, sessions-show, sessions-search
 (human and `--json`, short-query exit 2), sessions-export (Markdown
 stdout, `--output` file, missing session exit 1) and style (FORCE_COLOR/
 NO_COLOR paint matrix, `stripAnsi` byte-identity, machine modes escape-free,
-palette pinning). The human consult scenario's anchors follow the new text
+palette pinning). Both runners pass all 17 scenarios (`node e2e/cli.ts` and
+`--dist`). The human consult scenario's anchors follow the text
 layout — separated envelope blocks, the `── decision ──` rule, the compact
-`tokens … in / … out · … calls` footer and no `tokens:` line on stdout — while
-the machine-mode scenarios stay byte-identical. CI runs both (see
-[CI coverage](#ci-coverage)).
+`tokens … in / … out · … calls` footer and no `tokens:` line on stdout — and
+piped output is compared under `--live` and `--no-live` (both must be
+byte-identical to the un-flagged run on stdout and stderr, with no activity
+rows and zero escape bytes), while the machine-mode scenarios stay
+byte-identical. The canonical gate also diffed the piped human output against a
+pristine `957d11b` worktree (identical for consult and work), with
+`--mode print`/`--dry-run` byte-identical and `--json` identical apart from
+random envelope ids. CI runs both (see [CI coverage](#ci-coverage)).
 
 The CLI-ergonomics suite also covers `config`'s provenance precedence
 (flag > role env > shared env > preset > settings > default) and key masking,
@@ -185,7 +220,9 @@ The suite (`tests/chat.test.ts`, `tests/timeline.test.ts`,
 `tests/mentions.test.ts`, `tests/streaming.test.ts`,
 `tests/basecommands.test.ts`, `tests/composerKeys.test.ts`,
 `tests/providerSettings.test.ts`, `tests/uiPrefs.test.ts`,
-`tests/queueState.test.ts`, `tests/approvalSession.test.ts`) covers the
+`tests/queueState.test.ts`, `tests/approvalSession.test.ts`,
+`tests/folding.test.ts`, `tests/composerStatus.test.ts`,
+`tests/todo.test.ts`) covers the
 envelope→group-chat projection, the runtime-event timeline merge, per-session
 unsent drafts, palette building/scoring/filtering, sidebar row status, the MRU
 workspace list, the persisted UI density preference, find-in-transcript
@@ -208,9 +245,20 @@ bounded rows and the honest hidden count, single-line task previews, optimistic
 insert/remove, and no dock for an old backend without active records), the
 session-scope approval helpers (`tests/approvalSession.test.ts`, 8 tests: the
 applied-scope echo, the honest one-shot fallback notice for an older backend,
-and scope resolution never inferring session scope), the speaker labels (the
+and scope resolution never inferring session scope), step folding
+(`tests/folding.test.ts`, 16 tests: stable ids, which rows fold (completed-run
+tool/audit only, never conversation or the followed run), single-row and
+`minRows` behavior, hidden-audit/docked-approval handling, expansion order and
+offset-aware keys, honest pluralized summaries), composer status seats
+(`tests/composerStatus.test.ts`, 9 tests: no-data means no seat, models gated on
+loaded settings, the real permission model per workspace context, exact audit
+char/tool counts, defensive formatting, ordering and `formatCharCount`
+bounds), the plan projection (`tests/todo.test.ts`, 11 tests: last
+`todo_updated` wins, empty list is a real clear, malformed/oversized snapshots
+are tolerated, bounded selection with truthful hidden counts, summary counts,
+and no plan leaking across sessions), the speaker labels (the
 operator reads "You"), and the persisted conversation preferences + transcript
-visibility filter (prompt audits are opt-in); 239/239 web tests. The modules are
+visibility filter (prompt audits are opt-in); 275/275 web tests. The modules are
 dependency-free at runtime, so plain `node --test` runs them
 via the `tests/register-ts.mjs` bootstrap (a tiny resolve hook for the
 extensionless imports); `npm test` wires that up. The full `web/` gate also
@@ -258,8 +306,10 @@ changed-file diff (allow and deny paths), stop, the 390 px mobile drawer
 to the trigger), the Appearance-density regression (Settings → Appearance
 cards keep their natural height and unclipped copy under compact density while
 the sidebar footer theme switch shrinks, and the density choice survives a
-reload), and the provider reset flow. The queue dock and the session-scope
-approval decisions are covered by the web unit suites, not by separate browser
+reload), and the provider reset flow. On the canonical run that is **8 PASS,
+0 FAIL, 1 SKIP** (the opt-in `real` scenario). The queue dock, session-scope
+approval decisions, step folding, composer status seats, the welcome hero and
+the plan dock are covered by the web unit suites, not by separate browser
 scenarios. The default suite is fully offline; the
 opt-in `real` scenario (below) reports `SKIP` unless an endpoint is configured.
 For iteration, `TWO_BROTHERS_E2E_ONLY=<substring>` runs only scenario blocks

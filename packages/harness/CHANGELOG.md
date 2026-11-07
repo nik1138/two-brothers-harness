@@ -9,6 +9,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **TUI workspace binding, approval panel and `@file` mentions**
+  (`tui --workspace <dir>`): every turn binds one confined root — the junior
+  gets the `workspace_*` tool belt, the senior the read-only verify slice,
+  plugins bind workspace-bound, and the composer `@path` picker/attachments
+  read from it. When a write/edit/delete/shell parks the run, a docked approval
+  panel replaces the composer with the action/target/command/reason and a
+  bounded diff summary; decisions are numbered `1 Allow once`,
+  `2 Always allow this session`, `3 Deny` (mnemonics `y`/`a`/`n`), with
+  Up/Down + Enter and `Esc` = deny exactly once, and `Ctrl+E` opens the
+  full-screen diff/command preview (closing a preview never answers the
+  request). "Always allow this session" is in-memory for that TUI process only
+  — never persisted to settings; stopping/cancelling the turn denies every
+  pending request (fail closed) and the broker's denial cap is unchanged.
+  `ApprovalRequestedEvent` additively carries optional `reason` and a bounded
+  `detail` (`ApprovalDetail`: diff for write/edit/delete, command for shell,
+  line counts, `truncated`), so a UI can show what will change before
+  approving. Composer `@path` mentions attach workspace files as
+  `<file path="…">` context blocks under the server's caps (≤5 files, 20 000
+  chars each, 100 000 total, text files only, no absolute/`..`/sensitive
+  paths), resolved before the turn starts; an invalid workspace root is a
+  startup error (exit 2) before the alternate screen opens, and `/permission`
+  now states the bound root, the real ask-before-mutating policy and the
+  in-memory session allows. Files: `src/tui/app.ts`,
+  `src/tui/view/approval.ts` (new), `src/tui/view/screen.ts`,
+  `src/tui/keymap.ts` (the `approval` key scope),
+  `src/tui/view/mentionpicker.ts`, `src/permissions.ts`, `src/runevents.ts`,
+  `src/workspace.ts`, `src/cli.ts`, `src/clihelp.ts`. Tests:
+  `tests/tuiworkspace.test.ts` (20).
+- **Live TTY transcript for `run`/`chat`** (`--live` / `--no-live`): on an
+  interactive stdout each envelope block streams as the harness produces it,
+  with dim `· <role> <verb>…` activity rows between blocks (`prompt_audit`
+  fires before each provider call, `tool_started` and failed/blocked
+  `tool_completed` mirror tool work); the final decision rule and the compact
+  footer still print exactly once. The flags are `run`/`chat` only:
+  `--no-live` prints the finished transcript once (the piped behavior) and
+  wins when both are given; `--live` cannot force a pipe to stream. Piped human
+  output and every machine mode (`--json`, `--json-events`, `--stream`,
+  `--mode print`, `--dry-run`) stay byte-identical — the hermetic CLI E2E
+  compares piped bytes under `--live`/`--no-live`. The per-envelope renderer
+  moved into `src/clilayout.ts` (finished and live projections share it;
+  dropping the `· ` activity rows from live output leaves the finished
+  transcript bytes plus the footer) and `CliIO` gained an optional `isTTY`
+  signal. Files: `src/cli.ts`, `src/clilayout.ts`, `src/clihelp.ts`,
+  `e2e/cli.ts`. Tests: `tests/cli.test.ts` (26), `tests/clistyle.test.ts` (27).
+- **Web UX: step folding, composer status seats, welcome hero**: transcript
+  tool/prompt-audit rows of completed runs (any run that is not the followed
+  one) fold into one muted disclosure row — `… N tool calls · expand` (the
+  label gains `in M runs` when a folded group spans several runs), a real
+  button with `aria-expanded`; a single row stays open,
+  conversation rows never fold, and collapsed rows leave the DOM so find/copy
+  see exactly what the transcript renders (the find cache is invalidated on
+  toggle). The composer gained a compact status-seat row built only from data
+  the app holds: models (hidden until role settings load), the real permission
+  expectation ("Ask in app" with a linked workspace, "No workspace" without),
+  and the latest prompt audit's exact system/context character counts plus the
+  offered tool count — never a fabricated token count; a seat with unknown data
+  is absent instead of showing a placeholder. Empty sessions and the no-session
+  landing state show a welcome hero with workspace context, New session /
+  Add workspace / Set up models / Keyboard shortcuts actions and three starter
+  suggestions that only prefill the editable composer (never auto-send).
+  Files: `web/src/components/ChatView.vue`, `App.vue`, `Composer.vue`,
+  `folding.ts` (new), `composerStatus.ts` (new),
+  `components/WelcomeHero.vue` (new), `style.css`. Tests:
+  `web/tests/folding.test.ts` (16), `web/tests/composerStatus.test.ts` (9);
+  web 275/275.
+- **Plan/todo function (`todo_write`)**: a built-in tool both brothers receive
+  (junior belt and senior verify slice, no approval, never touches the
+  workspace) that records or replaces the plan in one call —
+  `{todos: [{content, status: "pending" | "in_progress" | "completed"}]}`,
+  tolerant at the model boundary (non-object entries and empty content dropped,
+  unknown status → `pending`, content collapsed to one bounded line, ≤50
+  entries; a call with no usable entries is a JSON error result and never loses
+  the previous plan). A valid call replaces the run's snapshot (last write
+  wins), returns a compact text result and emits exactly one additive
+  `todo_updated` runtime event `{todos}` — persisted by the run sidecar,
+  streamed over SSE and replayed on reload, with `HarnessResult.todos` carrying
+  the final snapshot; no protocol envelope or session-JSONL change. The TUI
+  docks a compact plan panel above the composer (✓ completed / ▸ in progress /
+  ○ pending, ≤4 rows plus an honest `+N more (…)` tail, `TODO · n/m done`
+  title; display-only, no new key), and replays the latest sidecar snapshot on
+  session resume/switch when that session has one. TUI turns do not write the
+  sidecar: a plan they produce is kept in memory for that TUI process (so it
+  survives session switches there) but not across a TUI restart. The web
+  renders a Plan dock
+  with the same selection
+  rules, a real expand button and a polite live announcement. Files:
+  `src/todos.ts` (new), `src/harness.ts`, `src/runevents.ts`, `src/index.ts`,
+  `src/tui/view/todo.ts` (new), `src/tui/app.ts`,
+  `web/src/components/TodoPanel.vue` (new), `web/src/runtime.ts`,
+  `web/src/types.ts`, `web/src/App.vue`. Tests: `tests/todos.test.ts` (17),
+  `tests/tuitodo.test.ts` (12), `web/tests/todo.test.ts` (11).
 - **Provider model discovery**: `POST /api/providers/{name}/discover` probes an
   explicit draft — `{base_url?, kind?, api_key?}` — through
   `provider.ts::listModels` and returns `200 {models, base_url, kind}` with the

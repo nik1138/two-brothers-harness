@@ -505,32 +505,81 @@ Design anchors that already exist:
   301 tests. Files under `src/tui/`; see `docs/cli-reference.md` and
   `docs/quickstart.md`.
 
+## Shipped 2026-11-07 (TUI workspace + approvals, CLI live, web folding/seats/hero, plan function)
+
+- **TUI workspace-bound runs, approval panel and `@file` mentions** —
+  `tui --workspace <dir>` binds every turn to one confined root: the junior
+  gets the `workspace_*` belt, the senior the read-only verify slice, plugins
+  bind workspace-bound and the composer `@path` picker/attachments read from
+  it. A parked write/edit/delete/shell replaces the composer with a docked
+  approval panel (action/target/command/reason, bounded diff summary; numbered
+  `1 Allow once` / `2 Always allow this session` / `3 Deny`, mnemonics
+  `y`/`a`/`n`, Up/Down + Enter, `Esc` = deny once, `Ctrl+E` full-screen
+  diff/command preview). The session allow is in-memory for that TUI process
+  only — never persisted to settings; stopping/cancelling denies all pending
+  requests (fail closed); the broker denial cap is unchanged. The additive
+  `ApprovalRequestedEvent` carries optional `reason`/`detail`
+  (`ApprovalDetail` diff/command preview). `@path` mentions attach workspace
+  files under the server caps (5 files / 20 000 chars each / 100 000 total,
+  text only); invalid roots exit 2 before the screen opens; `/permission` now
+  states the real bound-workspace policy. Files: `src/tui/app.ts`,
+  `src/tui/view/approval.ts` (new), `src/tui/view/screen.ts`,
+  `src/tui/keymap.ts`, `src/tui/view/mentionpicker.ts`, `src/permissions.ts`,
+  `src/runevents.ts`, `src/workspace.ts`, `src/cli.ts`, `src/clihelp.ts`;
+  tests `tests/tuiworkspace.test.ts` (20). See `docs/keyboard.md` and
+  `docs/cli-reference.md`.
+- **Live TTY transcript for `run`/`chat`** — on an interactive stdout each
+  envelope block streams as produced, with dim `· …` activity rows from
+  `prompt_audit` and tool events; the decision rule and compact footer still
+  print once. New `--live`/`--no-live` flags (`run`/`chat` only; `--no-live`
+  wins, `--live` cannot force a pipe); piped human output and every machine
+  mode stay byte-identical (asserted in the hermetic CLI E2E, including piped
+  bytes under both flags). The per-envelope renderer moved to
+  `src/clilayout.ts` so the finished and live projections cannot drift;
+  `CliIO` gained an optional `isTTY`. Tests: `tests/cli.test.ts` (26),
+  `tests/clistyle.test.ts` (27).
+- **Web step folding, composer status seats and welcome hero** — completed-run
+  tool/prompt-audit rows fold into one muted disclosure row
+  (`… N tool calls · expand`, plus `in M runs` when a group spans several runs;
+  a real button with `aria-expanded`; single rows stay open, conversation rows
+  never fold, the followed run stays open, collapsed rows leave the DOM so
+  find/copy match the render). The
+  composer gained truthful status seats: models (hidden until settings load),
+  the real permission expectation, and the latest prompt audit's exact
+  system/context char counts + offered-tool count (never fabricated tokens;
+  unknown seats are absent). Empty sessions and the no-session landing state
+  show a welcome hero with workspace context, actions and starter suggestions
+  that only prefill the editable composer. Files:
+  `web/src/components/ChatView.vue`, `App.vue`, `Composer.vue`,
+  `folding.ts` (new), `composerStatus.ts` (new),
+  `components/WelcomeHero.vue` (new), `style.css`; tests
+  `web/tests/folding.test.ts` (16), `web/tests/composerStatus.test.ts` (9).
+- **Plan/todo function (`todo_write`)** — a built-in tool both brothers
+  receive (no approval, never touches the workspace) that replaces the whole
+  plan in one call (`{todos: [{content, status}]}`, tolerant sanitize, ≤50
+  entries, last write wins), returns compact text and emits one additive
+  `todo_updated` runtime event `{todos}` (persisted in the run sidecar,
+  SSE + replay; no protocol envelope change), with `HarnessResult.todos`
+  carrying the final snapshot. The TUI docks a compact plan panel above the
+  composer (✓/▸/○, ≤4 rows + honest `+N more`, display-only, replayed from the
+  sidecar on resume/switch when the session has one) and the web renders a
+  Plan dock with the same bounded selection, an expand button and an aria-live
+  announcement. Files: `src/todos.ts` (new),
+  `src/harness.ts`, `src/runevents.ts`, `src/index.ts`,
+  `src/tui/view/todo.ts` (new), `src/tui/app.ts`,
+  `web/src/components/TodoPanel.vue` (new), `web/src/runtime.ts`,
+  `web/src/types.ts`, `web/src/App.vue`; tests `tests/todos.test.ts` (17),
+  `tests/tuitodo.test.ts` (12), `web/tests/todo.test.ts` (11). See
+  `docs/cli-reference.md` → "Plan and todo function".
+
 ## Open items (deferred)
 
-- **TUI approval surface (kimi-code parity)** — the TUI has no approval panel
-  although `src/permissions.ts` brokers requests and fails closed (`web/`
-  renders the cards). Port kimi-code's approval panel shape: typed detail blocks
-  (diff / file content / shell / invocation), numbered decisions, `Esc` reject,
-  a full-screen preview (`Ctrl+E`, reusing `workspace.ts::makeDiff`), and an
-  inline feedback field when the request requires one. The broker now also
-  supports session-scope allows (shipped 2026-11-07), so a workspace-bound TUI
-  run path would inherit them; the TUI still has no approval broker of its own.
-- **Todo / plan panel** — neither surface shows the cooperation plan as a
-  live artifact; kimi-code's todo card (status markers + "+N more" tail) and
-  DSH's plan-mode review are the references. Needs a session-visible plan
-  source before the panel is worth building.
-- **Step folding** — collapse older thinking/tool steps into a one-line
-  summary ("thinking N times, called M tools, K messages") on both surfaces;
-  kimi-code's `step-summary.ts` is the reference. Pure function shared by
-  `tui/transcript.ts` and `web/src/runtime.ts`.
 - **Web design-token / empty-state pass** — kimi-code's role-named CSS
   token layer (~870 custom properties, diff colors, composer radius, easing)
-  and its single `.ui-empty` pattern could tighten the web chrome; the empty
-  hero (headline + workspace chip + preset picker) is missing on the web.
-- **Composer status seats** — DSH's second composer row (context ring with a
-  system/tools/messages breakdown, model and permission seats) against our
-  `ContextMeter` + `PromptAuditEntry` data; the breakdown is derivable from
-  the existing prompt audits without a protocol change.
+  could still tighten the web chrome. The empty state shipped (2026-11-07):
+  the welcome hero covers both the no-session landing state and an empty
+  session, with workspace context, actions and editable starter suggestions;
+  the token layer remains open.
 - **TUI footer tips + transient hints** — kimi-code's footer slot system
   (mode/goal/model/tasks/environment/cwd/git/tips, skipped when empty) with
   a weighted tip rotation and a separate transient-hint line; our
@@ -548,9 +597,6 @@ Design anchors that already exist:
   thinking with tool use expects signed thinking blocks passed back on
   assistant turns — capture and replay them in the Anthropic adapter if
   thinking-enabled tool loops are offered as a supported configuration.
-- **TUI file mentions** — `@file` mentions need a workspace-bound TUI run
-  path; today terminal runs have no workspace, so `@relative/path` stays
-  literal task text.
 - **`TWO_BROTHERS_JSON` vs bare `--json`** — the flag is now an output
   mode (the `--mode json` object), while the env var keeps its
   `PROTOCOL.md` contract (decision as JSON on the last line, after the
