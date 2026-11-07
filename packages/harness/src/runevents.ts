@@ -440,6 +440,37 @@ export function approvalPairKey(request: ApprovalRequest): string {
   return `${String(request.action ?? "")}\u0000${normalized}`;
 }
 
+/**
+ * One bounded caution appended to a parked shell approval's existing additive
+ * `reason` when the operator already denied a file mutation (write/edit/delete)
+ * earlier in the same run. `workspace_run_shell` is a separate approval: the
+ * denied mutation does not restrict it, and a model can retry the same effect
+ * through a command with no diff preview. Display-only: it never changes a
+ * decision, the pair key, the denial cap or the event shape.
+ */
+export const SHELL_DENIED_MUTATION_CAUTION =
+  "a file change was denied earlier in this run — review this command closely";
+
+/** Actions whose operator denial arms {@link SHELL_DENIED_MUTATION_CAUTION}. */
+function isMutationAction(action: string): boolean {
+  return action === Action.WRITE || action === Action.EDIT || action === Action.DELETE;
+}
+
+/**
+ * The reason one parked approval is presented with: the request's own reason,
+ * plus the shell caution when a mutation was already denied. The base reason
+ * (including "no reason at all") is returned byte-identically when nothing was
+ * denied, and the caution is appended at most once even for a reused request.
+ */
+function approvalReasonFor(request: ApprovalRequest, mutationDenied: boolean): string | undefined {
+  const base =
+    request.reason !== undefined && request.reason !== "" ? request.reason : undefined;
+  if (!mutationDenied || String(request.action ?? "") !== Action.SHELL) return base;
+  if (base === undefined) return SHELL_DENIED_MUTATION_CAUTION;
+  if (base.includes(SHELL_DENIED_MUTATION_CAUTION)) return base;
+  return `${base}; ${SHELL_DENIED_MUTATION_CAUTION}`;
+}
+
 /** Events the broker emits into the run's event stream. */
 type ApprovalEvent =
   | ApprovalRequestedEvent
@@ -487,6 +518,14 @@ function shortId(): string {
  * pair's operator-denial count. A stopped/aborted run still denies: the
  * session-allow shortcut never bypasses the cancellation path below.
  *
+ * Shell caution: a parked shell approval whose run already denied a file
+ * mutation (write/edit/delete) by the operator carries one bounded caution
+ * sentence appended to its existing additive `reason`
+ * ({@link SHELL_DENIED_MUTATION_CAUTION}). Shell is a separate approval, so the
+ * denied mutation does not restrict it; the sentence is display-only and
+ * changes no decision, pair key, denial count or event field. A cancellation
+ * (`denyAll()`/abort) is not an operator denial and never arms it.
+ *
  * Implements the `ApprovalBroker` interface from `permissions.ts`, so it plugs
  * straight into `PermissionManager` in place of `CallbackBroker`/`StaticBroker`.
  * Python parity: `approve()` polls a threading.Event; here the same semantics
@@ -502,6 +541,12 @@ export class RunApprovalBroker implements ApprovalBroker {
   private readonly _pending = new Map<string, PendingApproval>();
   /** Operator-denial counts per `action\0target` pair (see `autoDenials()`). */
   private readonly _denials = new Map<string, number>();
+  /**
+   * True once the operator denied a file mutation (write/edit/delete) in this
+   * run: a following parked shell approval carries the bounded caution. Never
+   * consulted by a decision or the pair key; a cancellation never arms it.
+   */
+  private _mutationDenied = false;
   /**
    * `approvalPairKey` pairs the operator allowed for this session; a matching
    * request resolves ALLOW without parking (see `seedSessionAllows`).
@@ -591,6 +636,10 @@ export class RunApprovalBroker implements ApprovalBroker {
     }
     const denials = this._denials.get(key) ?? 0;
     if (denials >= this.denyLimit && this._signal?.aborted !== true) {
+      // An auto-denied mutation is still an operator-driven denial (the cap is
+      // built from operator answers): arm the shell caution if it is a file
+      // mutation. The prior `respond()` denials have usually armed it already.
+      if (isMutationAction(String(request.action ?? ""))) this._mutationDenied = true;
       this._event({
         type: "approval_auto_denied",
         action: String(request.action ?? ""),
@@ -601,8 +650,16 @@ export class RunApprovalBroker implements ApprovalBroker {
       return Decision.DENY;
     }
     const approvalId = shortId();
+    // Display-only shell caution: a separate shell approval parked after an
+    // operator-denied file mutation names that earlier denial. The caller's
+    // request object is never mutated (idempotent re-parks cannot duplicate it).
+    const cautious =
+      this._mutationDenied && String(request.action ?? "") === Action.SHELL;
+    const effectiveRequest: ApprovalRequest = cautious
+      ? { ...request, reason: approvalReasonFor(request, true) }
+      : request;
     const entry: PendingApproval = {
-      request,
+      request: effectiveRequest,
       decision: null,
       answered: false,
       resolve: () => undefined,
@@ -614,13 +671,13 @@ export class RunApprovalBroker implements ApprovalBroker {
     this._event({
       type: "approval_requested",
       approval_id: approvalId,
-      action: request.action,
-      target: request.target,
-      command: request.command,
-      ...(request.reason !== undefined && request.reason !== ""
-        ? { reason: request.reason }
+      action: effectiveRequest.action,
+      target: effectiveRequest.target,
+      command: effectiveRequest.command,
+      ...(effectiveRequest.reason !== undefined && effectiveRequest.reason !== ""
+        ? { reason: effectiveRequest.reason }
         : {}),
-      ...(request.detail !== undefined ? { detail: request.detail } : {}),
+      ...(effectiveRequest.detail !== undefined ? { detail: effectiveRequest.detail } : {}),
     });
 
     let onAbort: (() => void) | null = null;
@@ -692,7 +749,9 @@ export class RunApprovalBroker implements ApprovalBroker {
    *
    * Only an operator *deny* counts toward the repeat cap (per identical
    * `(action, target)` pair). Allows neither count nor reset a pair; an
-   * already-answered/unknown id is a no-op and never changes any count.
+   * already-answered/unknown id is a no-op and never changes any count. An
+   * operator deny of a file mutation additionally arms the display-only shell
+   * caution for later parked shell approvals in this run.
    */
   respond(requestId: string, decision: Decision): Decision | null {
     const entry = this._pending.get(requestId);
@@ -700,6 +759,10 @@ export class RunApprovalBroker implements ApprovalBroker {
     if (decision === Decision.DENY) {
       const key = approvalPairKey(entry.request);
       this._denials.set(key, (this._denials.get(key) ?? 0) + 1);
+      // An operator denial of a file mutation arms the display-only shell
+      // caution; a shell denial never does (it cannot be replayed as a file
+      // mutation the operator already refused).
+      if (isMutationAction(String(entry.request.action ?? ""))) this._mutationDenied = true;
     }
     entry.decision = decision;
     entry.answered = true;
@@ -746,7 +809,7 @@ export class RunApprovalBroker implements ApprovalBroker {
    *
    * These are cancellation denials, not operator answers: they never
    * increment the repeat-cap counters (a stop must not consume the operator's
-   * deny budget for a pair).
+   * deny budget for a pair) and never arm the shell caution.
    */
   denyAll(reason = "cancelled"): number {
     const entries = [...this._pending.entries()];

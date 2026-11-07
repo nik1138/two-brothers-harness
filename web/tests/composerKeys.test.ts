@@ -11,6 +11,7 @@ import {
   canSubmitComposer,
   canUseStopGesture,
   classifyComposerKey,
+  classifyComposerRecall,
   composerLockReason,
   isImeComposing,
   isShortcutHelpChord,
@@ -87,6 +88,119 @@ test('open picker: Enter can never submit and repeats are ignored', () => {
   assert.equal(classifyComposerKey(key({ repeat: true }), true), 'ignore')
   assert.equal(classifyComposerKey(key({ key: 'Tab', repeat: true }), true), 'picker-accept')
   assert.equal(classifyComposerKey(key({ isComposing: true }), true), 'ignore')
+})
+
+// -- composer recall bridge ---------------------------------------------------
+
+const SINGLE_END = { text: 'draft', selectionStart: 5, selectionEnd: 5 }
+const SINGLE_START = { text: 'draft', selectionStart: 0, selectionEnd: 0 }
+const MULTILINE_EDGES = {
+  start: { text: 'one\ntwo', selectionStart: 0, selectionEnd: 0 },
+  end: { text: 'one\ntwo', selectionStart: 7, selectionEnd: 7 },
+  interior: { text: 'one\ntwo', selectionStart: 3, selectionEnd: 3 },
+}
+const IDLE_RECALL = { pickerOpen: false, recallActive: false, historyCount: 2 }
+
+test('composer recall bridge: inactive recall leaves Up/Down unconsumed', () => {
+  // The polish fix: with accepted history but no browsing, ArrowDown must fall
+  // through (null = the caller must not preventDefault) so the textarea moves
+  // the caret natively instead of eating a no-op.
+  assert.equal(classifyComposerRecall(key({ key: 'ArrowDown' }), SINGLE_END, IDLE_RECALL), null)
+  assert.equal(
+    classifyComposerRecall(
+      key({ key: 'ArrowDown' }),
+      SINGLE_END,
+      { ...IDLE_RECALL, historyCount: 0 },
+    ),
+    null,
+  )
+  // Up still starts a recall when there is history...
+  assert.equal(
+    classifyComposerRecall(key({ key: 'ArrowUp' }), SINGLE_END, IDLE_RECALL),
+    'recall-previous',
+  )
+  // ...and falls through when there is nothing to recall.
+  assert.equal(
+    classifyComposerRecall(
+      key({ key: 'ArrowUp' }),
+      SINGLE_START,
+      { ...IDLE_RECALL, historyCount: 0 },
+    ),
+    null,
+  )
+})
+
+test('composer recall bridge: browsing keeps Up/Down, including boundary no-ops', () => {
+  const browsing = { ...IDLE_RECALL, recallActive: true }
+  assert.equal(
+    classifyComposerRecall(key({ key: 'ArrowUp' }), SINGLE_END, browsing),
+    'recall-previous',
+  )
+  assert.equal(
+    classifyComposerRecall(key({ key: 'ArrowDown' }), SINGLE_END, browsing),
+    'recall-next',
+  )
+  // Active browsing claims its boundary no-ops exactly as before (the caller
+  // consumes the key; the pure step function is the one that does nothing).
+  assert.equal(
+    classifyComposerRecall(key({ key: 'ArrowUp' }), SINGLE_START, browsing),
+    'recall-previous',
+  )
+})
+
+test('composer recall bridge: picker, IME, modifiers and selection still defer', () => {
+  assert.equal(
+    classifyComposerRecall(
+      key({ key: 'ArrowUp' }),
+      SINGLE_END,
+      { ...IDLE_RECALL, pickerOpen: true },
+    ),
+    null,
+  )
+  for (const blocked of [
+    { isComposing: true },
+    { keyCode: 229 },
+    { repeat: true },
+    { shiftKey: true },
+    { ctrlKey: true },
+    { metaKey: true },
+    { altKey: true },
+  ]) {
+    assert.equal(
+      classifyComposerRecall(key({ key: 'ArrowUp', ...blocked }), SINGLE_END, IDLE_RECALL),
+      null,
+      JSON.stringify(blocked),
+    )
+  }
+  assert.equal(classifyComposerRecall(key({ key: 'Enter' }), SINGLE_END, IDLE_RECALL), null)
+  const selection = { text: 'draft', selectionStart: 0, selectionEnd: 2 }
+  assert.equal(classifyComposerRecall(key({ key: 'ArrowUp' }), selection, IDLE_RECALL), null)
+  assert.equal(classifyComposerRecall(null, SINGLE_END, IDLE_RECALL), null)
+})
+
+test('composer recall bridge: the multiline absolute-edge rule is unchanged', () => {
+  assert.equal(
+    classifyComposerRecall(key({ key: 'ArrowUp' }), MULTILINE_EDGES.interior, IDLE_RECALL),
+    null,
+  )
+  assert.equal(
+    classifyComposerRecall(key({ key: 'ArrowUp' }), MULTILINE_EDGES.start, IDLE_RECALL),
+    'recall-previous',
+  )
+  const browsing = { ...IDLE_RECALL, recallActive: true }
+  assert.equal(
+    classifyComposerRecall(key({ key: 'ArrowDown' }), MULTILINE_EDGES.interior, browsing),
+    null,
+  )
+  assert.equal(
+    classifyComposerRecall(key({ key: 'ArrowDown' }), MULTILINE_EDGES.end, browsing),
+    'recall-next',
+  )
+  // single-line drafts recall/step from any caret column
+  assert.equal(
+    classifyComposerRecall(key({ key: 'ArrowUp' }), SINGLE_START, IDLE_RECALL),
+    'recall-previous',
+  )
 })
 
 // -- shortcut help chord ------------------------------------------------------

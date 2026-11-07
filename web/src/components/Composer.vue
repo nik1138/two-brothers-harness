@@ -1205,14 +1205,20 @@ function onKeydown(e: KeyboardEvent) {
   // keeps the newline, Shift+Tab/Escape close, and Enter can never submit
   if (pickerOpen.value && onPickerKeydown(e)) return
   // Up/Down at the draft edges recall accepted submissions (never an unsent
-  // draft, never a submit); the open picker above keeps its own arrow handling.
-  if (recallEntries.value.length > 0) {
-    const recallAction = classifyComposerRecall(keyInput(e), recallCaret(), pickerOpen.value)
-    if (recallAction !== null) {
-      e.preventDefault()
-      applyRecallStep(recallAction)
-      return
-    }
+  // draft, never a submit); an open picker above keeps its own arrow handling.
+  // The bridge returns null for any keystroke that is not an actual recall
+  // step (nothing to recall, an inactive Down, the wrong caret edge,
+  // IME/modifier/repeat, a selection), so those keep the textarea's native
+  // behavior and this handler never consumes them as a no-op.
+  const recallAction = classifyComposerRecall(keyInput(e), recallCaret(), {
+    pickerOpen: pickerOpen.value,
+    recallActive: recallState.active,
+    historyCount: recallEntries.value.length,
+  })
+  if (recallAction !== null) {
+    e.preventDefault()
+    applyRecallStep(recallAction)
+    return
   }
   // a run parked on an approval owns the turn: Enter stays a newline, the
   // text is a draft. A working run does not block — Enter queues a submission.

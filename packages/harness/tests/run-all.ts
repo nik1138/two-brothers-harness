@@ -89,3 +89,4 @@ import "./toolcalling.test.ts";
 import "./tuirecall.test.ts";
 import "./tuiapprovalmodes.test.ts";
 import "./load.test.ts";
+import "./approvalshellcaution.test.ts";

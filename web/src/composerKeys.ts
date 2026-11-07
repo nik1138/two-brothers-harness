@@ -1,7 +1,8 @@
 /**
  * Composer key contract (pure): IME-safe submit, accelerated submit, picker
- * accept/dismiss keys, the `?`/`Ctrl+/` shortcut-reference chord and the
- * double-Escape stop gesture.
+ * accept/dismiss keys, Up/Down prompt-history recall (including when it must
+ * fall through to the textarea), the `?`/`Ctrl+/` shortcut-reference chord and
+ * the double-Escape stop gesture.
  *
  * `Composer.vue`/`App.vue` only act on what this module classifies, so the
  * contract is documented in one place and unit-tested without a DOM.
@@ -99,21 +100,45 @@ export function isShortcutHelpChord(input: ComposerKeyInput | null | undefined):
 /** What an Up/Down press means for composer recall, or null for "leave it". */
 export type ComposerRecallAction = 'recall-previous' | 'recall-next' | null
 
+/** What the composer knows when an Up/Down press reaches the recall bridge. */
+export interface ComposerRecallContext {
+  /** An open `/`/`@` picker owns Up/Down (list navigation). */
+  pickerOpen: boolean
+  /** Recall browsing is active: the box currently shows a recalled entry. */
+  recallActive: boolean
+  /** Accepted submissions available to recall (`0` = nothing to recall). */
+  historyCount: number
+}
+
 /**
  * Recall bridge: an open picker owns Up/Down (list navigation), so recall only
  * applies while it is closed. The boundary rule itself lives in `recall.ts`
  * (single-line anywhere, multiline only at the draft's very edges) and the
  * returned action is applied by `Composer.vue` with `stepRecall`.
+ *
+ * `null` means "not a recall keystroke": the caller must leave the event alone
+ * (no `preventDefault`, no state change) so the textarea keeps its native caret
+ * movement. A key is only claimed when it actually does something: Up starts a
+ * recall only when history exists, and Down only steps while browsing — an
+ * inactive Down has nothing to navigate to and falls through.
  */
 export function classifyComposerRecall(
   input: ComposerKeyInput | null | undefined,
   caret: RecallCaret | null | undefined,
-  pickerOpen: boolean,
+  context: ComposerRecallContext,
 ): ComposerRecallAction {
-  if (pickerOpen) return null
+  if (context.pickerOpen) return null
   const intent = classifyRecallKey(input, caret)
-  if (intent === 'previous') return 'recall-previous'
-  if (intent === 'next') return 'recall-next'
+  if (intent === 'previous') {
+    // Browsing keeps its exact semantics (including the honest no-op at the
+    // oldest entry); starting a recall needs at least one accepted submission.
+    return context.recallActive || context.historyCount > 0 ? 'recall-previous' : null
+  }
+  if (intent === 'next') {
+    // Inactive recall has no entry to step forward to: pass the key through so
+    // the textarea moves its caret instead of eating a no-op.
+    return context.recallActive ? 'recall-next' : null
+  }
   return null
 }
 

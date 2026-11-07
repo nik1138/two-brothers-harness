@@ -1928,6 +1928,27 @@ async function scenarioComposerRecall(runner) {
       desc: 'ArrowDown past the newest entry to restore the unsent draft',
     })
 
+    // -- fall-through fix: with a non-empty single-line draft and recall
+    //    inactive, ArrowDown must not be consumed by the recall wiring; the
+    //    textarea keeps its native caret movement and nothing is recalled
+    await caretTo('start')
+    await page.keyboard.press('ArrowDown')
+    const afterInactiveDown = await textarea.evaluate((el) => ({
+      start: el.selectionStart,
+      end: el.selectionEnd,
+      length: el.value.length,
+    }))
+    assert.equal(
+      await textarea.inputValue(),
+      UNSENT_DRAFT,
+      'an inactive ArrowDown must not recall or rewrite the draft',
+    )
+    assert.deepEqual(
+      [afterInactiveDown.start, afterInactiveDown.end],
+      [afterInactiveDown.length, afterInactiveDown.length],
+      'an inactive ArrowDown must fall through to the native caret-to-end movement',
+    )
+
     // -- multiline drafts: Up is caret movement everywhere except the very start
     //    (real key path: Shift+Enter inserts the newline, not fill())
     await textarea.fill('')

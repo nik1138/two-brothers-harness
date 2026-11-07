@@ -255,14 +255,38 @@ test('classifyRecallKey is IME/modifier/repeat/selection safe and never a submit
 
 test('the composer bridge defers to an open picker and maps both directions', () => {
   const up = { key: 'ArrowUp' }
-  assert.equal(classifyComposerRecall(up, single('draft', 2), false), 'recall-previous')
-  assert.equal(classifyComposerRecall({ key: 'ArrowDown' }, single('draft', 2), false), 'recall-next')
-  assert.equal(classifyComposerRecall(up, multi('a\nb', 2), false), null)
-  assert.equal(classifyComposerRecall(up, single('draft', 2), true), null, 'the picker owns the arrows')
-  assert.equal(classifyComposerRecall({ key: 'ArrowUp', isComposing: true }, single('', 0), false), null)
+  const down = { key: 'ArrowDown' }
+  const idle = { pickerOpen: false, recallActive: false, historyCount: 2 }
+  const browsing = { ...idle, recallActive: true }
+
+  assert.equal(classifyComposerRecall(up, single('draft', 2), idle), 'recall-previous')
+  // The inactive-Down fix: no recall step to take -> pass the key through to
+  // the textarea instead of consuming it as a no-op.
+  assert.equal(classifyComposerRecall(down, single('draft', 2), idle), null)
+  assert.equal(
+    classifyComposerRecall(down, single('draft', 2), browsing),
+    'recall-next',
+    'browsing keeps stepping toward the stashed draft',
+  )
+  assert.equal(classifyComposerRecall(up, multi('a\nb', 2), idle), null)
+  assert.equal(
+    classifyComposerRecall(up, single('draft', 2), { ...idle, pickerOpen: true }),
+    null,
+    'the picker owns the arrows',
+  )
+  assert.equal(
+    classifyComposerRecall(up, single('', 0), { ...idle, historyCount: 0 }),
+    null,
+    'nothing to recall: Up is native caret movement',
+  )
+  assert.equal(classifyComposerRecall({ key: 'ArrowUp', isComposing: true }, single('', 0), idle), null)
   // The composer key shape is structurally compatible with the recall reader.
   assert.equal(
-    classifyComposerRecall({ key: 'ArrowUp', shiftKey: false, ctrlKey: false, metaKey: false, altKey: false }, single('', 0), false),
+    classifyComposerRecall(
+      { key: 'ArrowUp', shiftKey: false, ctrlKey: false, metaKey: false, altKey: false },
+      single('', 0),
+      idle,
+    ),
     'recall-previous',
   )
 })
