@@ -58,6 +58,7 @@ import {
   toolExpansionKey,
   withToolExpansion,
 } from "../src/tui/transcript.ts";
+import { statusBarSegments } from "../src/tui/view/statusbar.ts";
 
 const AT = "2026-11-04T00:00:00Z";
 const ESC = "\u001b";
@@ -790,4 +791,50 @@ test("keymap: Ctrl+B toggles the status panel and conflicts with no other bindin
     ),
     "Ctrl+S / Ctrl+Q (XON/XOFF) stay unbound",
   );
+});
+
+test("status bar: the row-two priority order is activity, hints, metrics, settings warning", () => {
+  // Hints outrank optional metrics and the duplicated settings warning so the
+  // tool-fold hint can appear at ordinary widths; activity stays first because
+  // it is live turn state.
+  const [, populated] = statusBarSegments({
+    mode: "consult",
+    activity: "working",
+    seniorModel: "s",
+    juniorModel: "j",
+    contextTokens: 1_000,
+    contextWindow: 2_000,
+    inputTokens: 3,
+    outputTokens: 4,
+    cachedTokens: 5,
+    cost: 0.006,
+    elapsedMs: 7_000,
+    hints: "Ctrl+T expand tool",
+  });
+  assert.deepEqual(
+    populated.map((segment) => segment.text),
+    [
+      "working",
+      "Ctrl+T expand tool",
+      "context 1.0k/2.0k",
+      "tokens 3 in · 4 out",
+      "cache 5",
+      "cost $0.0060",
+      "7s",
+    ],
+  );
+
+  // Without hints in the state the registry default takes the same early seat;
+  // the settings warning is always last.
+  const [, bare] = statusBarSegments({ mode: "consult" });
+  assert.deepEqual(
+    bare.map((segment) => segment.text),
+    ["Ctrl+P commands · ? / F1 help", "/settings configures models"],
+  );
+
+  // The running marker stays on row one (live state), the hint stays first on
+  // row two: the priority change never moves identity segments between rows.
+  const [firstRow, secondRow] = statusBarSegments({ mode: "work", running: true, hints: "h" });
+  assert.deepEqual(firstRow.slice(0, 2).map((segment) => segment.text), ["work", "RUNNING"]);
+  assert.equal(secondRow[0]?.text, "h");
 });

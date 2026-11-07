@@ -17,6 +17,11 @@ import { plainTheme, type Theme } from "../theme.ts";
 export interface ComposerOptions {
   width: number;
   editor: EditorState;
+  /**
+   * Accepted for embedding compatibility; deliberately not rendered. The
+   * two-line status bar already carries mode and both role models, and a second
+   * copy inside the composer only cost two message rows at every width.
+   */
   mode?: string;
   seniorModel?: string;
   juniorModel?: string;
@@ -38,10 +43,6 @@ export interface ComposerView {
   inputRows: number;
   hiddenBefore: number;
   hiddenAfter: number;
-}
-
-function modelName(value: string | undefined): string {
-  return value?.trim() || "(unset)";
 }
 
 function paintInputRow(row: string, column: number | null, theme: Theme): string {
@@ -90,8 +91,6 @@ export function composerView(options: ComposerOptions): ComposerView {
     return paintInputRow(row, cursorVisible && index === visibleCursor ? cursorColumn : null, theme);
   });
 
-  const meta = `MODE ${options.mode?.trim() || "consult"} · SENIOR ${modelName(options.seniorModel)} · JUNIOR ${modelName(options.juniorModel)}`;
-  const metaRows = wrapDisplay(meta, contentWidth).map((row) => theme.paint("muted", row));
   const hint = options.running === true
     ? `Turn running · ${hintSegments(TUI_COMMANDS, [{ id: "cancel", label: "cancel" }])}`
     : options.disabled === true
@@ -101,7 +100,9 @@ export function composerView(options: ComposerOptions): ComposerView {
           { id: "newline", label: "newline" },
         ]);
   const hintRows = wrapDisplay(hint, contentWidth).map((row) => theme.paint("dim", row));
-  const body = [...metaRows, "", ...inputRows, "", ...hintRows];
+  // The message box is input plus the turn-state hint; mode/models live in the
+  // status bar only, so no row here repeats them.
+  const body = [...inputRows, "", ...hintRows];
   const title = `MESSAGE${options.running === true ? " · RUNNING" : ""}`;
 
   return {

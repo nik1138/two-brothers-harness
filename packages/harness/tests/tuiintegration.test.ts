@@ -18,6 +18,7 @@ import { toNdjsonLine, type ToolCallStreamEvent } from "../src/runstream.ts";
 import { runTuiApp, type TuiIO } from "../src/tui/app.ts";
 import { stripAnsi } from "../src/tui/render.ts";
 import { ANSI } from "../src/tui/render.ts";
+import { resolveTheme } from "../src/tui/theme.ts";
 
 const ESC = "\x1b";
 
@@ -282,6 +283,77 @@ test("resize repaints immediately at the new width", async () => {
   assert.ok(repainted, "a frame at the new width was rendered");
   const code = await quit(input, app);
   assert.equal(code, 0);
+});
+
+test("welcome frame: status hints fit at 80 columns and the composer has no mode/models meta row", async () => {
+  const { app, input, output } = startApp();
+  assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+  const text = textOf(output);
+  // The hint segment now outranks optional metrics and the duplicated
+  // "/settings configures models" warning, so at the ordinary 80-column default
+  // it appears on row two instead of being squeezed out.
+  assert.ok(
+    text.includes("ready — type a task and press Enter · Ctrl+P commands · ? / F1 help"),
+    "the default palette/help hint is visible on the second status row",
+  );
+  const frame = stripAnsi(output.data.split(ANSI.cursorHome).at(-1) ?? "");
+  const lines = frame.split("\n");
+  const composerTop = lines.findIndex((line) => line.includes("MESSAGE"));
+  assert.ok(composerTop >= 0, "the composer box is rendered");
+  const composerBottom = lines.findIndex(
+    (line, index) => index > composerTop && line.includes("╰"),
+  );
+  assert.ok(composerBottom > composerTop, "the composer box is closed");
+  const composer = lines.slice(composerTop, composerBottom + 1).join("\n");
+  assert.ok(composer.includes("Type a task"), "the composer placeholder is rendered");
+  assert.ok(!composer.includes("MODE"), "the composer does not repeat the status bar's mode");
+  assert.ok(!composer.includes("SENIOR"), "the composer does not repeat the status bar's models");
+  const code = await quit(input, app);
+  assert.equal(code, 0);
+});
+
+test("overlay frames paint their inner rows through the app theme", async () => {
+  // Force a color theme deterministically: the host environment of the test
+  // runner may set NO_COLOR (as this agent's shell does), and the app resolves
+  // its theme from the environment at startup.
+  const previousNoColor = process.env.NO_COLOR;
+  const previousTerm = process.env.TERM;
+  delete process.env.NO_COLOR;
+  if (previousTerm === "dumb") delete process.env.TERM;
+  try {
+    const { app, input, output } = startApp();
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+    const theme = resolveTheme({ mode: null });
+    assert.equal(theme.color, true, "color is forced for this test");
+
+    input.key("p", { ctrl: true });
+    assert.ok(await waitFor(() => textOf(output).includes("COMMANDS")));
+    const paletteFrame = output.data.split(ANSI.cursorHome).at(-1) ?? "";
+    assert.ok(stripAnsi(paletteFrame).includes("Command palette"), "the palette list is intact");
+    assert.ok(
+      paletteFrame.includes(theme.tokens.strong),
+      "the palette header is painted through the app theme",
+    );
+    assert.ok(paletteFrame.includes(theme.tokens.inverse), "the selected row is inverse-painted");
+    input.key("escape");
+    await waitFor(() => !textOf(output).slice(-2000).includes("COMMANDS"));
+
+    input.key("?", { shift: true });
+    assert.ok(await waitFor(() => textOf(output).includes("HELP")));
+    const helpFrame = output.data.split(ANSI.cursorHome).at(-1) ?? "";
+    assert.ok(stripAnsi(helpFrame).includes("[General]"), "the grouped help list is intact");
+    assert.ok(
+      helpFrame.includes(theme.tokens.accent),
+      "help group headers are painted through the app theme",
+    );
+    const code = await quit(input, app);
+    assert.equal(code, 0);
+  } finally {
+    if (previousNoColor === undefined) delete process.env.NO_COLOR;
+    else process.env.NO_COLOR = previousNoColor;
+    if (previousTerm === undefined) delete process.env.TERM;
+    else process.env.TERM = previousTerm;
+  }
 });
 
 test("tool stream events carry additive callId/args/result and stay NDJSON-compatible", () => {

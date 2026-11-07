@@ -10,10 +10,12 @@
  * Behavior mirrors the palette: a case-insensitive multi-token filter,
  * wrap-around selection, a scrolling window that keeps the selection visible,
  * empty/no-match states, Escape/palette-key close, and an exact `width ×
- * height` plain-text cell. Narrow terminals drop group headers, then the key
- * column, then descriptions, instead of truncating mid-glyph.
+ * height` cell. Narrow terminals drop group headers, then the key column, then
+ * descriptions, instead of truncating mid-glyph. Rows are painted through the
+ * semantic {@link Theme} (group headers, chords, descriptions, selected row);
+ * the default plain theme keeps the exact pre-theme bytes.
  *
- * No ANSI, no I/O; output is deterministic for the same inputs.
+ * No ANSI literals, no I/O; output is deterministic for the same inputs.
  */
 import {
   COMMAND_GROUPS,
@@ -27,12 +29,14 @@ import {
   type PaletteEntry,
   type TuiCommand,
 } from "../keymap.ts";
+import { plainTheme, type Theme } from "../theme.ts";
 import {
   dropLastGrapheme,
   entryKeyColumnWidth,
   entryRow,
   filterPaletteEntries,
   movePaletteSelection,
+  overlayRow,
   printableKeyText,
   viewPad,
   windowStart,
@@ -187,6 +191,8 @@ export interface HelpRenderOptions {
   title?: string;
   /** Override the registry-derived footer (tests/embedding). */
   hints?: string;
+  /** Theme for the overlay rows (default `plainTheme`). */
+  theme?: Theme;
 }
 
 /** The rendered help overlay plus its geometry. */
@@ -230,6 +236,7 @@ export function helpView(
 ): HelpView {
   const width = Number.isFinite(options.width) ? Math.max(0, Math.floor(options.width)) : 0;
   const height = Number.isFinite(options.height) ? Math.max(0, Math.floor(options.height)) : 0;
+  const theme = options.theme ?? plainTheme;
   const filtered = filterHelpEntries(entries, state.query);
   const groups = groupHelpEntries(filtered);
   const ordered = groups.flatMap((group) => group.entries);
@@ -237,9 +244,21 @@ export function helpView(
   const selected = noMatch
     ? -1
     : Math.min(Math.max(Math.floor(state.selected), 0), ordered.length - 1);
-  const header = viewPad(`${options.title ?? "Help"} (${ordered.length})`, width);
-  const filterLine = viewPad(`> ${state.query}`, width);
-  const footer = viewPad(options.hints ?? helpHints(commands), width);
+  const header = overlayRow(
+    theme,
+    [{ text: `${options.title ?? "Help"} (${ordered.length})`, tone: "strong" }],
+    width,
+  );
+  const filterLine = overlayRow(
+    theme,
+    [{ text: "> ", tone: "accent" }, { text: state.query, tone: "text" }],
+    width,
+  );
+  const footer = overlayRow(
+    theme,
+    [{ text: options.hints ?? helpHints(commands), tone: "dim" }],
+    width,
+  );
   if (height === 0) {
     return { lines: [], visible: [], noMatch, selectedRow: -1, groups };
   }
@@ -273,8 +292,10 @@ export function helpView(
         ? "No commands registered."
         : `No matches for "${state.query}".`;
     const hint = entries.length === 0 ? "" : "Backspace edits the filter · Esc closes.";
-    rendered.push(viewPad(message, width));
-    if (listRows > 1 && hint !== "") rendered.push(viewPad(hint, width));
+    rendered.push(overlayRow(theme, [{ text: message, tone: "muted" }], width));
+    if (listRows > 1 && hint !== "") {
+      rendered.push(overlayRow(theme, [{ text: hint, tone: "dim" }], width));
+    }
     while (rendered.length < listRows) rendered.push(viewPad("", width));
   } else {
     const start = windowStart(rows.length, Math.max(0, selectedRowInRows), listRows);
@@ -287,7 +308,7 @@ export function helpView(
     const showSlash = width >= 40;
     slice.forEach((row, index) => {
       if (row.kind === "group") {
-        rendered.push(viewPad(row.label, width));
+        rendered.push(overlayRow(theme, [{ text: row.label, tone: "accent" }], width));
         return;
       }
       const entry = row.entry;
@@ -302,6 +323,7 @@ export function helpView(
           keyWidth,
           showDescription,
           showSlash,
+          theme,
         }),
       );
     });

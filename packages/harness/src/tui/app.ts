@@ -1376,6 +1376,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         width: Math.max(10, boxW - 4),
         height: Math.max(3, boxH - 2),
         title: "Commands",
+        theme,
       }).lines;
       return renderBox(lines, { width: boxW, title: "COMMANDS", theme });
     }
@@ -1387,6 +1388,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         width: Math.max(10, boxW - 4),
         height: Math.max(3, boxH - 2),
         title: "Help",
+        theme,
       }).lines;
       return renderBox(lines, { width: boxW, title: "HELP", theme });
     }

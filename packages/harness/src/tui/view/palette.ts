@@ -8,16 +8,20 @@
  * - selection movement with wrap-around and a scrolling viewport,
  * - key handling for the overlay scope (arrows, Enter, Esc, typing,
  *   Backspace) driven by the shared registry — no key name is spelled here,
- * - a plain-text renderer that fits an exact `width × height` cell, degrades
- *   at narrow widths (description, then the key column, dropped) and always
- *   shows an empty / no-match state.
+ * - a renderer that fits an exact `width × height` cell, degrades at narrow
+ *   widths (description, then the key column, dropped) and always shows an
+ *   empty / no-match state. Rows are painted through the semantic {@link Theme}
+ *   (headings, chords, descriptions, the selected row) without ever changing
+ *   the plain text, so `plainTheme`/`NO_COLOR` output is byte-identical to the
+ *   pre-theme renderer.
  *
  * It also exports the small text-measure helpers the help view shares, so the
  * two overlays cannot disagree about truncation. All measurement delegates to
  * the grapheme- and East Asian-width-aware helpers in `text.ts`.
  *
- * No ANSI and no I/O: the screen layer owns colors, the dialog frame and the
- * cursor. Output is deterministic for the same state/entries/options.
+ * No ANSI literals and no I/O: the screen layer owns the palette, the dialog
+ * frame and the cursor; this module only asks the theme to paint. Output is
+ * deterministic for the same state/entries/options/theme.
  */
 import { graphemes } from "../editor.ts";
 import {
@@ -28,6 +32,7 @@ import {
   type TuiCommand,
 } from "../keymap.ts";
 import { displayWidth, padToWidth, truncateToWidth } from "../text.ts";
+import { plainTheme, type Theme, type ThemeToken } from "../theme.ts";
 
 /** Display width in terminal cells (East Asian wide and emoji count as 2). */
 export function viewTextWidth(text: string): number {
@@ -42,6 +47,36 @@ export function viewTruncate(text: string, width: number): string {
 /** Truncate or pad to exactly `width` cells. */
 export function viewPad(text: string, width: number): string {
   return padToWidth(text, width);
+}
+
+/** One semantic part of an overlay row; `tone` undefined leaves it unstyled. */
+export interface OverlayPart {
+  text: string;
+  tone?: ThemeToken;
+}
+
+/**
+ * Fit one overlay row to exactly `width` cells.
+ *
+ * A color-less theme (the default, `plainTheme`, `NO_COLOR`) returns exactly
+ * the pre-theme `viewPad` bytes. A color theme paints each part with its
+ * semantic token and pads the same visible text, so stripping SGR always
+ * reproduces the plain row; an over-wide row is cut at the same cell with no
+ * extra ellipsis, never mid-grapheme (the cut goes through `padToWidth`).
+ */
+export function overlayRow(
+  theme: Theme,
+  parts: readonly OverlayPart[],
+  width: number,
+): string {
+  const plain = parts.map((part) => part.text).join("");
+  if (!theme.color) return viewPad(plain, width);
+  let styled = "";
+  for (const part of parts) {
+    if (part.text === "") continue;
+    styled += part.tone === undefined ? part.text : theme.paint(part.tone, part.text);
+  }
+  return padToWidth(styled, width);
 }
 
 /** Drop the final user-perceived character of a filter query. */
@@ -238,21 +273,52 @@ export interface EntryRowOptions {
   keyWidth: number;
   showDescription?: boolean;
   showSlash?: boolean;
+  /** Theme for the row (default `plainTheme`: the pre-theme bytes). */
+  theme?: Theme;
 }
 
+/**
+ * Render one list row. The plain text (and its width cut) is exactly the
+ * pre-theme row; a color theme layers the semantic tokens — accent chords,
+ * muted descriptions, a warning for unavailable rows and an inverse selected
+ * row — on top of that same text.
+ */
 export function entryRow(entry: PaletteEntry, options: EntryRowOptions): string {
+  const theme = options.theme ?? plainTheme;
   const marker = options.selected ? "› " : "  ";
   const keyCell = options.keyWidth > 0 ? `${viewPad(entry.keys, options.keyWidth)}  ` : "";
-  let row = `${marker}${keyCell}${entry.title}`;
-  if (entry.argumentHint !== "") row += ` ${entry.argumentHint}`;
-  if (options.showSlash === true && entry.kind === "command" && entry.slash !== "") {
-    row += ` (${entry.slash})`;
+  const argumentHint = entry.argumentHint !== "" ? ` ${entry.argumentHint}` : "";
+  const slash =
+    options.showSlash === true && entry.kind === "command" && entry.slash !== ""
+      ? ` (${entry.slash})`
+      : "";
+  const description =
+    options.showDescription === true && entry.description !== ""
+      ? ` — ${entry.description}`
+      : "";
+  const unavailable = entry.disabled ? " [unavailable]" : "";
+  if (options.selected) {
+    // The inverse run covers the padded row, so the selection reads as one
+    // full-width bar; the padding stays outside the plain text either way.
+    const plainRow = viewPad(
+      `${marker}${keyCell}${entry.title}${argumentHint}${slash}${description}${unavailable}`,
+      options.width,
+    );
+    return theme.color ? theme.paint("inverse", plainRow) : plainRow;
   }
-  if (options.showDescription === true && entry.description !== "") {
-    row += ` — ${entry.description}`;
-  }
-  if (entry.disabled) row += " [unavailable]";
-  return viewPad(row, options.width);
+  return overlayRow(
+    theme,
+    [
+      { text: marker },
+      { text: keyCell, tone: entry.keys === "" ? undefined : "accent" },
+      { text: entry.title, tone: entry.disabled ? "muted" : "text" },
+      { text: argumentHint, tone: "dim" },
+      { text: slash, tone: "dim" },
+      { text: description, tone: "muted" },
+      { text: unavailable, tone: "warning" },
+    ],
+    options.width,
+  );
 }
 
 /** Footer hints for a list overlay, derived from the registry. */
@@ -271,6 +337,8 @@ export interface PaletteRenderOptions {
   title?: string;
   /** Override the registry-derived footer (tests/embedding). */
   hints?: string;
+  /** Theme for the overlay rows (default `plainTheme`). */
+  theme?: Theme;
 }
 
 /** The rendered palette plus the visible slice and selection geometry. */
@@ -286,7 +354,9 @@ export interface PaletteView {
 /**
  * Render the palette into an exact `width × height` cell. Descriptions are
  * dropped below 60 cells, the key column below 30, and every row is
- * truncated (never exceeding the terminal width) at the extremes.
+ * truncated (never exceeding the terminal width) at the extremes. Rows are
+ * painted through `options.theme`; the default plain theme keeps the exact
+ * pre-theme bytes.
  */
 export function paletteView(
   commands: readonly TuiCommand[],
@@ -296,13 +366,23 @@ export function paletteView(
 ): PaletteView {
   const width = Number.isFinite(options.width) ? Math.max(0, Math.floor(options.width)) : 0;
   const height = Number.isFinite(options.height) ? Math.max(0, Math.floor(options.height)) : 0;
+  const theme = options.theme ?? plainTheme;
   const filtered = filterPaletteEntries(entries, state.query);
   const noMatch = filtered.length === 0;
   const selected = noMatch ? -1 : clamp(Math.floor(state.selected), 0, filtered.length - 1);
-  const header = viewPad(`${options.title ?? "Commands"} (${filtered.length})`, width);
-  const filterLine = viewPad(`> ${state.query}`, width);
-  const footer = viewPad(
-    options.hints ?? paletteHints(commands),
+  const header = overlayRow(
+    theme,
+    [{ text: `${options.title ?? "Commands"} (${filtered.length})`, tone: "strong" }],
+    width,
+  );
+  const filterLine = overlayRow(
+    theme,
+    [{ text: "> ", tone: "accent" }, { text: state.query, tone: "text" }],
+    width,
+  );
+  const footer = overlayRow(
+    theme,
+    [{ text: options.hints ?? paletteHints(commands), tone: "dim" }],
     width,
   );
   if (height === 0) {
@@ -325,8 +405,10 @@ export function paletteView(
     const message =
       entries.length === 0 ? "No commands available." : `No matches for "${state.query}".`;
     const hint = entries.length === 0 ? "" : "Backspace edits the filter · Esc closes.";
-    rendered.push(viewPad(message, width));
-    if (listRows > 1 && hint !== "") rendered.push(viewPad(hint, width));
+    rendered.push(overlayRow(theme, [{ text: message, tone: "muted" }], width));
+    if (listRows > 1 && hint !== "") {
+      rendered.push(overlayRow(theme, [{ text: hint, tone: "dim" }], width));
+    }
     while (rendered.length < listRows) rendered.push(viewPad("", width));
   } else {
     const start = windowStart(filtered.length, selected, listRows);
@@ -338,7 +420,7 @@ export function paletteView(
       if (isSelected) selectedRow = 2 + index;
       visible.push(entry);
       rendered.push(
-        entryRow(entry, { width, selected: isSelected, keyWidth, showDescription }),
+        entryRow(entry, { width, selected: isSelected, keyWidth, showDescription, theme }),
       );
     });
     while (rendered.length < listRows) rendered.push(viewPad("", width));

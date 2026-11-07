@@ -1,10 +1,13 @@
 import { isStreamingBlock, type TuiModel } from "../model.ts";
 import { fitStyled } from "../screen.ts";
 import {
+  TRANSCRIPT_LABEL_WIDTH,
+  markTopSliceRow,
   renderBlock,
   renderThinkingBlock,
   type TranscriptOptions,
 } from "../transcript.ts";
+import { plainTheme } from "../theme.ts";
 
 /** Stable pseudo block id of the live reasoning rows (never a document block). */
 export const LIVE_THINKING_BLOCK_ID = "live-thinking";
@@ -34,6 +37,8 @@ export interface TranscriptView {
 interface PositionedRow {
   blockId: string;
   text: string;
+  /** True for the blank row that separates a block from the one above it. */
+  separator?: boolean;
 }
 
 /**
@@ -59,14 +64,14 @@ function positionedRows(model: TuiModel, options: TranscriptOptions): Positioned
       ...(options.theme !== undefined ? { theme: options.theme } : {}),
     });
     if (rendered.length === 0) return;
-    if (rows.length > 0) rows.push({ blockId: LIVE_THINKING_BLOCK_ID, text: "" });
+    if (rows.length > 0) rows.push({ blockId: LIVE_THINKING_BLOCK_ID, text: "", separator: true });
     for (const text of rendered) rows.push({ blockId: LIVE_THINKING_BLOCK_ID, text });
   };
   blocks.forEach((block, index) => {
     if (index === streamingLastIndex) insertThinking();
     const rendered = renderBlock(block, options);
     if (rendered.length === 0) return;
-    if (rows.length > 0) rows.push({ blockId: block.id, text: "" });
+    if (rows.length > 0) rows.push({ blockId: block.id, text: "", separator: true });
     for (const text of rendered) rows.push({ blockId: block.id, text });
   });
   if (!thinkingInserted) insertThinking();
@@ -114,6 +119,21 @@ export function homeTranscriptScroll(model: TuiModel): TranscriptScroll {
     : { followLatest: false, anchorId: first.id, offset: 0 };
 }
 
+/**
+ * True when the viewport's top row continues a block whose label row is above
+ * the window: the row shares its block with the row before it and neither is
+ * the blank separator. A window that starts on a separator still shows the next
+ * block's label row, so it does not count as a cut.
+ */
+function startsMidBlock(rows: readonly PositionedRow[], start: number): boolean {
+  if (start <= 0 || start >= rows.length) return false;
+  const row = rows[start];
+  const previous = rows[start - 1];
+  if (row === undefined || previous === undefined) return false;
+  if (row.separator === true || previous.separator === true) return false;
+  return row.blockId === previous.blockId;
+}
+
 /** Render a fixed-height window anchored by block identity across resize. */
 export function transcriptView(model: TuiModel, options: TranscriptViewOptions): TranscriptView {
   const width = Math.max(0, Math.floor(options.width));
@@ -123,6 +143,16 @@ export function transcriptView(model: TuiModel, options: TranscriptViewOptions):
   const start = height === 0 ? 0 : startFor(rows, height, requested);
   const visible = rows.slice(start, start + height);
   const lines = visible.map((row) => fitStyled(row.text, width));
+  // A window that starts inside a block marks the hidden label row in the
+  // gutter, so the top row is not mistaken for the start of the block. Compact
+  // rows have no gutter, so the marker only exists in the inline layout.
+  if (
+    lines.length > 0 &&
+    width > TRANSCRIPT_LABEL_WIDTH + 8 &&
+    startsMidBlock(rows, start)
+  ) {
+    lines[0] = markTopSliceRow(lines[0] ?? "", width, options.theme ?? plainTheme);
+  }
   while (lines.length < height) lines.push(" ".repeat(width));
   const scroll = scrollFor(rows, start, height);
   return {

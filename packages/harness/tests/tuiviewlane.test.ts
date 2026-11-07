@@ -65,6 +65,7 @@ import { renderToast, renderToasts } from "../src/tui/view/toast.ts";
 import {
   homeTranscriptScroll,
   latestTranscriptScroll,
+  scrollToBlock,
   scrollTranscript,
   transcriptView,
 } from "../src/tui/view/transcript.ts";
@@ -242,9 +243,18 @@ test("status bar: a tool row adds the fold hint and keeps the default commands/h
   ]);
   assert.equal(defaultHints, "Ctrl+P commands · ? / F1 help");
 
-  // No tool row: the app passes no hints at all, so the default row is byte-identical.
+  // No tool row: the app passes no hints at all, so the default helper text is
+  // used. The hint now has priority over metrics and the duplicate settings
+  // warning, so it is the first segment of row two, not the last.
   assert.equal(composedStatusHints(createTuiModel(), new Set()), undefined);
-  assert.equal(statusBarSegments({ mode: "consult" })[1].at(-1)?.text, defaultHints);
+  const defaultSecond = statusBarSegments({ mode: "consult" })[1];
+  assert.equal(defaultSecond[0]?.text, defaultHints);
+  assert.equal(defaultSecond.at(-1)?.text, "/settings configures models");
+  assert.ok(
+    defaultSecond.findIndex((segment) => segment.text === defaultHints) <
+      defaultSecond.findIndex((segment) => segment.text === "/settings configures models"),
+    "hints are fitted before the duplicated settings warning",
+  );
 
   const model = toolModel("call-1");
   const collapsed = composedStatusHints(model, new Set());
@@ -255,7 +265,11 @@ test("status bar: a tool row adds the fold hint and keeps the default commands/h
 
   // The hint is one dim row-two segment, fitted whole like every other segment.
   const [, second] = statusBarSegments({ mode: "consult", hints: collapsed });
-  assert.deepEqual(second.at(-1), { text: collapsed, tone: "dim" });
+  assert.deepEqual(
+    second.find((segment) => segment.text === collapsed),
+    { text: collapsed, tone: "dim" },
+  );
+  assert.equal(second[0]?.text, collapsed, "the hint leads row two once activity is absent");
   for (const width of [8, 20, 32, 40, 60, 100, 160]) {
     assertRows(renderStatusBar({ mode: "consult", hints: collapsed }, { width }), width, 2);
   }
@@ -267,6 +281,75 @@ test("status bar: a tool row adds the fold hint and keeps the default commands/h
   const narrow = renderStatusBar({ mode: "consult", hints: collapsed }, { width: 40 })[1] ?? "";
   assert.equal(narrow.trimEnd(), "/settings configures models");
   assert.ok(!narrow.includes(chord("tool-expand")));
+});
+
+test("status bar: hint priority fits the fold hint at ordinary widths, before optional metrics", () => {
+  // A realistic populated row two: the old last-place hint was squeezed out by
+  // these metrics on an ordinary 120-column terminal.
+  const metrics = {
+    mode: "consult",
+    seniorModel: "s",
+    juniorModel: "j",
+    contextTokens: 12_500,
+    contextWindow: 200_000,
+    inputTokens: 1_200,
+    outputTokens: 300,
+    cachedTokens: 50,
+    cost: 0.0123,
+    elapsedMs: 65_000,
+  };
+  const collapsed = `${chord("tool-expand")} expand tool · Ctrl+P commands · ? / F1 help`;
+  assert.equal(
+    (renderStatusBar({ ...metrics, hints: collapsed }, { width: 120 })[1] ?? "").trimEnd(),
+    `${collapsed} · context 12.5k/200k · tokens 1.2k in · 300 out · cache 50 · 1m 5s`,
+    "at 120 columns the fold hint wins a seat; cost is the first low-value metric dropped",
+  );
+  assert.equal(
+    (renderStatusBar({ ...metrics, hints: collapsed }, { width: 80 })[1] ?? "").trimEnd(),
+    `${collapsed} · context 12.5k/200k · 1m 5s`,
+    "at 80 the hint still wins; tokens/cache/cost give way before it",
+  );
+  assert.equal(
+    (renderStatusBar({ ...metrics, hints: collapsed }, { width: 60 })[1] ?? "").trimEnd(),
+    `${collapsed} · 1m 5s`,
+  );
+  // An over-wide segment is skipped whole, so the smaller metrics after it can
+  // still appear — the hint itself is never cut into a false label.
+  assert.equal(
+    (renderStatusBar({ ...metrics, hints: collapsed }, { width: 40 })[1] ?? "").trimEnd(),
+    "context 12.5k/200k · cache 50 · 1m 5s",
+  );
+
+  // A long activity line is the highest-priority segment; the hint yields only
+  // when it genuinely cannot fit, and never becomes a truncated key label.
+  const activity = { mode: "consult", activity: "ready — 1200/300 tokens (in/out)" };
+  const withTool = renderStatusBar({ ...activity, hints: collapsed }, { width: 120 })[1] ?? "";
+  assert.ok(withTool.includes(collapsed), "activity does not evict the hint at 120");
+  const narrowActivity = renderStatusBar({ ...activity, hints: collapsed }, { width: 80 })[1] ?? "";
+  assert.ok(!narrowActivity.includes(chord("tool-expand")), "an over-wide hint is omitted whole");
+  assert.ok(narrowActivity.includes("/settings configures models"), "the warning still fits");
+
+  // No-tool-row behavior: the default hints now appear at 60/80 columns where
+  // the old last-place segment was dropped. This is the deliberate priority
+  // trade: discoverability outranks optional metrics on row two.
+  assert.equal(
+    (renderStatusBar({ mode: "consult" }, { width: 80 })[1] ?? "").trimEnd(),
+    "Ctrl+P commands · ? / F1 help · /settings configures models",
+  );
+  assert.equal(
+    (renderStatusBar({ mode: "consult" }, { width: 60 })[1] ?? "").trimEnd(),
+    "Ctrl+P commands · ? / F1 help · /settings configures models",
+  );
+  assert.equal(
+    (renderStatusBar({ mode: "consult" }, { width: 40 })[1] ?? "").trimEnd(),
+    "Ctrl+P commands · ? / F1 help",
+    "the default hint fits alone even at 40 columns",
+  );
+
+  // No width ever overflows, and every row stays exactly two lines.
+  for (const width of [1, 4, 8, 20, 40, 60, 80, 100, 120, 160, 300]) {
+    assertRows(renderStatusBar({ ...metrics, hints: collapsed }, { width }), width, 2);
+  }
 });
 
 test("spinner: frame selection is deterministic, bounded and reduced-motion aware", () => {
@@ -295,7 +378,7 @@ test("toasts: textual levels, details and stacks wrap without truncation", () =>
   assert.deepEqual(renderToast(toasts[0]!, { width: 0 }), []);
 });
 
-test("composer: contained multiline draft shows mode, both models and key hints", () => {
+test("composer: contained multiline draft shows only input and key hints", () => {
   const rows = renderComposer({
     width: 64,
     editor: createEditor("first line\nsecond line"),
@@ -304,10 +387,26 @@ test("composer: contained multiline draft shows mode, both models and key hints"
     juniorModel: "j-model",
   });
   const text = rows.join("\n");
-  for (const expected of ["MESSAGE", "MODE work", "SENIOR s-model", "JUNIOR j-model", "first line", "second line", "Enter send", "Shift+Enter", "newline"]) {
+  for (const expected of ["MESSAGE", "first line", "second line", "Enter send", "Shift+Enter", "newline"]) {
     assert.ok(text.includes(expected), expected);
   }
+  // The two-line status bar owns mode/models; the composer no longer repeats
+  // them in a meta row (the duplicated row cost two message rows at every
+  // width and said nothing the status bar does not).
+  for (const gone of ["MODE work", "SENIOR s-model", "JUNIOR j-model", "MODE "]) {
+    assert.ok(!text.includes(gone), `composer must not repeat ${gone}`);
+  }
   assertRows(rows, 64);
+
+  // The compact layout stays width-safe at every narrow width, with the input
+  // and hint rows still present.
+  for (const width of [1, 4, 20, 28, 40]) {
+    const narrow = composerView({ width, editor: createEditor("draft"), mode: "consult" });
+    assertRows(narrow.lines, width);
+  }
+  const at28 = renderComposer({ width: 28, editor: createEditor("draft") }).join("\n");
+  assert.ok(at28.includes("draft"), "the input survives the narrow layout");
+  assert.ok(at28.includes("send"), "the key hint survives the narrow layout");
 });
 
 test("composer: bounded internal scrolling keeps a Unicode cursor visible", () => {
@@ -427,6 +526,65 @@ test("transcript window: stable block anchors survive resize and support home/la
   const latest = transcriptView(model, { width: 50, height: 5, scroll: latestTranscriptScroll() });
   assert.equal(latest.atLatest, true);
   assert.ok(latest.visibleBlockIds.includes(model.blocks[4]!.id));
+});
+
+test("transcript window: a window that starts mid-block marks the cut in the label gutter", () => {
+  // One long reply: the bottom-anchored window necessarily starts inside it.
+  let model = createTuiModel();
+  model = commitEnvelope(
+    model,
+    message("m0", "senior", "long reply " + "word ".repeat(200), 1),
+  );
+  for (const width of [40, 60, 80, 120]) {
+    const latest = transcriptView(model, { width, height: 5, scroll: latestTranscriptScroll() });
+    assertRows(latest.lines, width, 5);
+    assert.ok(latest.startRow > 0, `${width}: the window starts inside the block`);
+    const top = latest.lines[0] ?? "";
+    assert.ok(stripAnsi(top).includes("⋯"), `${width}: the mid-block cut is marked`);
+    assert.equal(styledWidth(top), width, "the marker swaps gutter cells, never adds width");
+    assert.ok(stripAnsi(top).startsWith("       ⋯"), "the marker sits in the label gutter");
+    assert.ok(!top.includes("\u001b"), "NO_COLOR output carries no escape byte");
+    assert.ok(
+      !stripAnsi(latest.lines.join("\n")).includes("SENIOR"),
+      "the hidden label row is not re-invented at the top",
+    );
+  }
+
+  // A window that starts at a block boundary shows no marker: the blank
+  // separator and the next block's label row are both honest starts.
+  let two = createTuiModel();
+  two = commitEnvelope(two, message("a", "senior", "first block " + "text ".repeat(40), 1));
+  two = commitEnvelope(two, message("b", "junior", "second block " + "text ".repeat(40), 2));
+  const target = two.blocks[1];
+  assert.ok(target !== undefined);
+  const anchored = transcriptView(two, {
+    width: 60,
+    height: 6,
+    scroll: scrollToBlock(target.id),
+  });
+  assertRows(anchored.lines, 60, 6);
+  assert.equal(anchored.visibleBlockIds[0], target.id);
+  assert.equal(stripAnsi(anchored.lines[0] ?? "").trim(), "", "the separator row starts the window");
+  assert.ok(!(anchored.lines[0] ?? "").includes("⋯"), "a separator start is not a mid-block cut");
+  assert.ok(
+    stripAnsi(anchored.lines[1] ?? "").startsWith("JUNIOR"),
+    "the next row is the block label, so the top is not cut",
+  );
+
+  // Home is the first label row and is never marked.
+  const home = transcriptView(two, { width: 60, height: 6, scroll: homeTranscriptScroll(two) });
+  assert.ok(stripAnsi(home.lines[0] ?? "").startsWith("SENIOR"));
+  assert.ok(!(home.lines[0] ?? "").includes("⋯"));
+
+  // Compact rows have no label gutter, so the marker is not drawn there and
+  // the exact-width contract is untouched.
+  const compact = transcriptView(model, {
+    width: 12,
+    height: 4,
+    scroll: latestTranscriptScroll(),
+  });
+  assertRows(compact.lines, 12, 4);
+  assert.ok(!compact.lines.join("\n").includes("⋯"));
 });
 
 test("screen: empty and populated frames are exact, themed and overlay-safe", () => {

@@ -48,6 +48,13 @@ import { plainTheme, type Theme, type ThemeToken } from "./theme.ts";
 /** Minimum label column for the inline transcript layout. */
 export const TRANSCRIPT_LABEL_WIDTH = 8;
 
+/**
+ * Gutter glyph that marks a transcript window whose top row starts inside a
+ * block (the label row scrolled out of view). It occupies the last cell of the
+ * label gutter so the cut is honest without changing any row's width.
+ */
+export const TOP_SLICE_MARKER = "⋯";
+
 /** Default number of collapsed tool-result visual rows (and of bounded detail rows). */
 export const DEFAULT_MAX_TOOL_ROWS = 6;
 
@@ -645,4 +652,32 @@ export function renderTranscript(
     out.push(...rows);
   }
   return out;
+}
+
+/**
+ * Replace the label gutter of an already-rendered transcript row with a dim
+ * `⋯` continuation marker. The viewport calls this on its top row when the
+ * window starts inside a block, so a scroll that hides the block label says so
+ * instead of presenting a continuation row as the start of the block.
+ *
+ * The marker only ever replaces the plain 8-cell continuation gutter that
+ * `renderBlock` writes for non-label rows; it never touches model text, never
+ * changes the row width (the gutter is swapped cell for cell), and under
+ * `plainTheme`/`NO_COLOR` it is the only visible byte change — `⋯` and the
+ * spaces around it, with no escape byte.
+ */
+export function markTopSliceRow(row: string, width: number, theme: Theme = plainTheme): string {
+  const columns = Math.max(0, Math.floor(width));
+  if (columns <= TRANSCRIPT_LABEL_WIDTH) {
+    return clipStyled(theme.paint("dim", TOP_SLICE_MARKER), columns);
+  }
+  const gutter = " ".repeat(TRANSCRIPT_LABEL_WIDTH);
+  // Continuation rows begin with the exact plain gutter (model text is
+  // sanitized and renderBlock writes this prefix), so swapping it is exact.
+  const body = row.startsWith(gutter) ? row.slice(gutter.length) : row;
+  const marker = theme.paint(
+    "dim",
+    `${" ".repeat(TRANSCRIPT_LABEL_WIDTH - 1)}${TOP_SLICE_MARKER}`,
+  );
+  return marker + clipStyled(body, columns - TRANSCRIPT_LABEL_WIDTH);
 }

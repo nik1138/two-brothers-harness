@@ -45,7 +45,14 @@ import {
   wrapText,
 } from "../src/tui/text.ts";
 import { createTheme, plainTheme, resolveTheme } from "../src/tui/theme.ts";
-import { renderBlock, renderTranscript } from "../src/tui/transcript.ts";
+import { markTopSliceRow, renderBlock, renderTranscript } from "../src/tui/transcript.ts";
+import {
+  TUI_COMMANDS,
+  paletteEntries,
+  type PaletteEntry,
+} from "../src/tui/keymap.ts";
+import { createPaletteState, paletteView } from "../src/tui/view/palette.ts";
+import { createHelpState, helpEntries, helpView } from "../src/tui/view/help.ts";
 import { latestTranscriptScroll, transcriptView } from "../src/tui/view/transcript.ts";
 
 const ESC = "\u001b";
@@ -626,4 +633,200 @@ test("streaming: a partially streamed reply renders emphasis and closes safely",
   const painted = renderTranscript(model, { width: 40, theme }).join("\n");
   assert.ok(painted.includes(`${ESC}[1m`), "the streamed reply gains span emphasis");
   assert.deepEqual(stripAnsi(painted), text);
+});
+
+// --------------------------------------------------------------------------- //
+// themed overlays (palette + help inner rows)
+// --------------------------------------------------------------------------- //
+
+test("overlay theme: palette and help rows paint through the theme and strip back to plain", () => {
+  const theme = createTheme("dark");
+  const entries: PaletteEntry[] = [
+    {
+      id: "one",
+      title: "One",
+      description: "First action",
+      group: "General",
+      keys: "Ctrl+O",
+      slash: "/one",
+      argumentHint: "",
+      kind: "command",
+      disabled: false,
+      disabledReason: "",
+      mode: "",
+    },
+    {
+      id: "two",
+      title: "Two",
+      description: "Second action",
+      group: "General",
+      keys: "",
+      slash: "",
+      argumentHint: "",
+      kind: "command",
+      disabled: true,
+      disabledReason: "unavailable while a turn is running",
+      mode: "",
+    },
+    {
+      id: "cjk",
+      title: "你好😀 command",
+      description: "描述文本",
+      group: "General",
+      keys: "Ctrl+你",
+      slash: "/cjk",
+      argumentHint: "<参数>",
+      kind: "command",
+      disabled: false,
+      disabledReason: "",
+      mode: "",
+    },
+  ];
+
+  // Every palette row keeps the exact plain bytes and width once stripped,
+  // including CJK/emoji titles, at wide and narrow cells.
+  for (const width of [20, 40, 60, 100]) {
+    for (const height of [4, 8]) {
+      const plain = paletteView(TUI_COMMANDS, createPaletteState(), entries, { width, height });
+      const themed = paletteView(TUI_COMMANDS, createPaletteState(), entries, { width, height, theme });
+      assert.equal(themed.lines.length, plain.lines.length);
+      for (let index = 0; index < plain.lines.length; index += 1) {
+        assert.equal(
+          stripAnsi(themed.lines[index] ?? ""),
+          plain.lines[index],
+          `palette @${width}x${height} row ${index}`,
+        );
+        assert.equal(displayWidth(plain.lines[index] ?? ""), width, "exact width");
+      }
+      assert.ok(themed.lines.some((row) => row.includes(ESC)), "the palette paints when color is on");
+    }
+  }
+
+  const palette = paletteView(TUI_COMMANDS, createPaletteState(), entries, {
+    width: 60,
+    height: 8,
+    theme,
+  });
+  assert.ok((palette.lines[0] ?? "").startsWith(theme.tokens.strong), "the header is strong");
+  assert.ok(
+    (palette.lines[1] ?? "").includes(`${theme.tokens.accent}> ${ESC}[0m`),
+    "the filter caret is accent",
+  );
+  assert.ok(
+    (palette.lines[2] ?? "").startsWith(theme.tokens.inverse),
+    "the selected row is one inverse run",
+  );
+  assert.ok((palette.lines[2] ?? "").endsWith(`${ESC}[0m`), "the selected row closes its run");
+  assert.ok(
+    palette.lines.join("\n").includes(`${theme.tokens.accent}Ctrl+你`),
+    "key chords are accent-painted",
+  );
+  assert.ok(
+    palette.lines.join("\n").includes(`${theme.tokens.muted} — Second action${ESC}[0m`),
+    "descriptions are muted",
+  );
+  const disabledRow = palette.lines.find((row) => stripAnsi(row).includes("Two"));
+  assert.ok(
+    disabledRow?.includes(`${theme.tokens.warning} [unavailable]${ESC}[0m`),
+    "the unavailable marker is warning-toned",
+  );
+
+  // The help overlay shares the row painter: headers accent, selected inverse,
+  // and every themed row strips back to the plain bytes at exact width.
+  const documented = helpEntries();
+  for (const width of [24, 40, 64, 100]) {
+    const plain = helpView(TUI_COMMANDS, createHelpState(), documented, { width, height: 10 });
+    const themed = helpView(TUI_COMMANDS, createHelpState(), documented, {
+      width,
+      height: 10,
+      theme,
+    });
+    assert.equal(themed.lines.length, plain.lines.length);
+    for (let index = 0; index < plain.lines.length; index += 1) {
+      assert.equal(
+        stripAnsi(themed.lines[index] ?? ""),
+        plain.lines[index],
+        `help @${width} row ${index}`,
+      );
+      assert.equal(displayWidth(plain.lines[index] ?? ""), width);
+    }
+    assert.ok(themed.lines.some((row) => row.includes(ESC)));
+  }
+  const help = helpView(TUI_COMMANDS, createHelpState(), documented, {
+    width: 100,
+    height: 12,
+    theme,
+  });
+  assert.ok(
+    help.lines.join("\n").includes(`${theme.tokens.accent}[General]${ESC}[0m`),
+    "group headers are accent-painted",
+  );
+  assert.ok(
+    (help.lines[3] ?? "").startsWith(theme.tokens.inverse),
+    "the selected help row is inverse",
+  );
+
+  // NO_COLOR and plainTheme are the identity: byte-identical to no theme at all.
+  const noColorTheme = resolveTheme({ env: { NO_COLOR: "1" } });
+  assert.deepEqual(
+    paletteView(TUI_COMMANDS, createPaletteState(), entries, { width: 60, height: 8, theme: noColorTheme }).lines,
+    paletteView(TUI_COMMANDS, createPaletteState(), entries, { width: 60, height: 8 }).lines,
+  );
+  assert.deepEqual(
+    helpView(TUI_COMMANDS, createHelpState(), documented, { width: 80, height: 10, theme: plainTheme }).lines,
+    helpView(TUI_COMMANDS, createHelpState(), documented, { width: 80, height: 10 }).lines,
+  );
+});
+
+// --------------------------------------------------------------------------- //
+// transcript top-slice marker
+// --------------------------------------------------------------------------- //
+
+test("top slice: the mid-block gutter marker is width-safe and theme-painted only", () => {
+  const theme = createTheme("dark");
+  const row = fitStyled("        continuation", 24);
+  assert.equal(styledWidth(row), 24);
+  const plain = markTopSliceRow(row, 24, plainTheme);
+  assert.equal(styledWidth(plain), 24, "swapping gutter cells never changes the width");
+  assert.equal(stripAnsi(plain), "       ⋯continuation".padEnd(24));
+  assert.ok(!plain.includes(ESC), "the plain marker is one glyph, no escape");
+
+  const themed = markTopSliceRow(row, 24, theme);
+  assert.equal(styledWidth(themed), 24);
+  assert.equal(stripAnsi(themed), stripAnsi(plain), "the theme only paints the marker");
+  assert.ok(themed.startsWith(theme.tokens.dim), "the marker is dim-painted");
+
+  // Grapheme/EAW safety: CJK and emoji in the continuation body are preserved.
+  const cjk = fitStyled("        你好 😀 tail", 30);
+  const markedCjk = markTopSliceRow(cjk, 30, plainTheme);
+  assert.equal(styledWidth(markedCjk), 30);
+  assert.ok(stripAnsi(markedCjk).includes("你好 😀 tail"));
+
+  // The view applies the marker at the contiguous top of a mid-block window and
+  // paints it through the theme, so a color row strips back to the plain row.
+  const model = commitEnvelope(
+    createTuiModel(),
+    message("m-top", "senior", "message", { text: "reply " + "word ".repeat(80) }),
+  );
+  const plainView = transcriptView(model, {
+    width: 60,
+    height: 6,
+    theme: plainTheme,
+    scroll: latestTranscriptScroll(),
+  });
+  const themedView = transcriptView(model, {
+    width: 60,
+    height: 6,
+    theme,
+    scroll: latestTranscriptScroll(),
+  });
+  assert.ok(plainView.lines[0]?.includes("⋯"), "the mid-block cut is marked");
+  assert.ok(themedView.lines[0]?.includes(theme.tokens.dim), "the marker uses the dim token");
+  for (let index = 0; index < plainView.lines.length; index += 1) {
+    assert.equal(
+      stripAnsi(themedView.lines[index] ?? ""),
+      plainView.lines[index] ?? "",
+      `row ${index}`,
+    );
+  }
 });

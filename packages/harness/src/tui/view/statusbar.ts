@@ -75,10 +75,23 @@ export function statusBarSegments(state: StatusBarState): [StatusSegment[], Stat
   if (state.sessionName?.trim()) first.push({ text: `session ${state.sessionName.trim()}`, tone: "muted" });
   if (state.cwd?.trim()) first.push({ text: state.cwd.trim(), tone: "dim" });
 
+  // Learned from the on-screen keys: the hint is a discoverability affordance,
+  // not a trailing flourish. It sits right after the live activity so the
+  // tool-fold hint ("Ctrl+T expand tool") and the default palette/help hints
+  // still fit at ordinary terminal widths; the metrics after it are optional
+  // detail that may be dropped first. The "/settings configures models"
+  // warning is last because row one already names an unset role as a warning.
   const second: StatusSegment[] = [];
   if (state.activity?.trim()) {
     second.push({ text: state.activity.trim(), tone: state.running === true ? "warning" : "notice" });
   }
+  second.push({
+    text: state.hints ?? hintSegments(TUI_COMMANDS, [
+      { id: "palette", label: "commands" },
+      { id: "help", label: "help" },
+    ]),
+    tone: "dim",
+  });
   if (state.contextTokens !== undefined || state.contextWindow !== undefined) {
     const used = state.contextTokens === undefined ? "?" : formatCount(state.contextTokens);
     const total = state.contextWindow === undefined ? "?" : formatCount(state.contextWindow);
@@ -106,13 +119,6 @@ export function statusBarSegments(state: StatusBarState): [StatusSegment[], Stat
   if ((state.seniorModel ?? "").trim() === "" || (state.juniorModel ?? "").trim() === "") {
     second.push({ text: "/settings configures models", tone: "warning" });
   }
-  second.push({
-    text: state.hints ?? hintSegments(TUI_COMMANDS, [
-      { id: "palette", label: "commands" },
-      { id: "help", label: "help" },
-    ]),
-    tone: "dim",
-  });
   return [first, second];
 }
 
