@@ -700,7 +700,7 @@ the serve `SIGHUP` path in `tests/serveshutdown.test.ts`; and
 unread-only-when-unselected rule, control/bidi sanitizing, blank/non-string
 inputs, the 120-character cap per shape including surrogate safety). Real POSIX
 signal delivery still needs POSIX hardware; the hermetic tests drive the
-injected platform/emitter seam. Web suite **449/449**; the browser-E2E matrix
+injected platform/emitter seam. Web suite **451/451**; the browser-E2E matrix
 is unchanged at **20 offline scenarios plus the opt-in `real` skip**. The
 full-gate package total is recorded in the wave-25 CHANGELOG entry.
 
