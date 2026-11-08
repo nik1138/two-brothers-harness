@@ -45,6 +45,7 @@ import { estimateRunCostFromUsage } from "../cost.ts";
 import { SharedContext } from "../context.ts";
 import { TwoBrothersHarness, type ToolScopes } from "../harness.ts";
 import { deriveTitle, SessionMetadataStore } from "../metadata.ts";
+import { SessionLayout } from "../sessionlayout.ts";
 import {
   loadMcpToolSpecs,
   loadMcpTools,
@@ -1485,6 +1486,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
 
   const cwd = options.cwd ?? process.cwd();
   const sessionsDir = options.sessionsDir ?? path.join(cwd, "sessions");
+  const layout = new SessionLayout(sessionsDir);
 
   /**
    * Persisted provider settings + the effective per-role endpoints (the same
@@ -1549,7 +1551,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
    * here (the TUI writes only plan snapshots — see `todoPersist.ts`), so the
    * plan of a session is durable across a TUI restart with the same file.
    */
-  const runtimeStore = new RuntimeEventStore(path.join(sessionsDir, "runtime"));
+  const runtimeStore = new RuntimeEventStore(path.join(sessionsDir, "runtime"), layout);
 
   /**
    * The last persisted plan snapshot for one session file, replayed from the
@@ -3254,11 +3256,12 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   const openSessionPicker = (): void => {
     const entries: SessionPickEntry[] = [];
     try {
-      const metadata = new SessionMetadataStore(sessionsDir);
-      for (const name of fs.readdirSync(sessionsDir).filter((n) => n.endsWith(".jsonl")).sort()) {
+      const metadata = new SessionMetadataStore(sessionsDir, layout);
+      for (const location of layout.list()) {
+        const name = location.name;
         let mtimeMs: number | null = null;
         try {
-          mtimeMs = fs.statSync(path.join(sessionsDir, name)).mtimeMs;
+          mtimeMs = fs.statSync(location.sessionPath).mtimeMs;
         } catch {
           // unreadable stat still lists the session with an honest unknown age
         }
@@ -3274,7 +3277,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         const events =
           typeof sidecarTitle === "string" && sidecarTitle.trim() !== ""
             ? undefined
-            : readSessionTitleEvents(path.join(sessionsDir, name));
+            : readSessionTitleEvents(location.sessionPath);
         entries.push({ name, sidecarTitle, events, mtimeMs });
       }
     } catch {
@@ -3301,7 +3304,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
           onAction: (id) => {
             if (id !== "resume") return;
             try {
-              const sessionFile = path.join(sessionsDir, item.id);
+              const sessionFile =
+                layout.resolve(item.id)?.sessionPath ??
+                path.join(sessionsDir, item.id);
               context = openTuiContext(
                 { ...sessionCfg, sessionFile, resume: true },
                 options.io,

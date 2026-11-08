@@ -21,6 +21,8 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+
+import type { SessionLayout } from "./sessionlayout.ts";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -352,13 +354,19 @@ export function toolEvidenceLine(compact: unknown, tool: string): string {
  */
 export class RuntimeEventStore {
   readonly directory: string;
+  private readonly layout: SessionLayout | null;
 
-  constructor(directory: string) {
+  constructor(directory: string, layout?: SessionLayout | null) {
     this.directory = directory;
+    this.layout = layout ?? null;
   }
 
   /** `path.basename` flattening: never allow path traversal out of the dir. */
   private pathFor(sessionName: string): string {
+    if (this.layout !== null) {
+      const resolved = this.layout.resolve(sessionName);
+      if (resolved !== null) return resolved.eventsPath;
+    }
     return path.join(this.directory, `${path.basename(sessionName)}.events.jsonl`);
   }
 
@@ -402,6 +410,14 @@ export class RuntimeEventStore {
    * and that run's events, or null when no sidecar has the run.
    */
   findRun(runId: string): { session: string; events: Array<Record<string, unknown>> } | null {
+    if (this.layout !== null) {
+      for (const location of this.layout.list()) {
+        const events = this.load(location.name).filter((event) => event.run_id === runId);
+        if (events.length > 0) return { session: location.name, events };
+      }
+      // A failed run may never have materialized its session file; its flat
+      // runtime sidecar still survives a backend restart.
+    }
     const suffix = ".events.jsonl";
     let files: string[];
     try {
@@ -420,8 +436,9 @@ export class RuntimeEventStore {
   }
 
   append(sessionName: string, event: unknown): void {
-    fs.mkdirSync(this.directory, { recursive: true });
-    fs.appendFileSync(this.pathFor(sessionName), JSON.stringify(event) + "\n", "utf-8");
+    const target = this.pathFor(sessionName);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.appendFileSync(target, JSON.stringify(event) + "\n", "utf-8");
   }
 
   /**

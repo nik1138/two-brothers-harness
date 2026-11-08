@@ -452,6 +452,19 @@ export {
 } from "./settings_store.ts";
 export { deriveTitle, SessionMetadataStore } from "./metadata.ts";
 export {
+  GLOBAL_PROJECT_KEY,
+  SESSION_LAYOUT_FILE,
+  SESSION_LAYOUT_VERSION,
+  SessionLayout,
+  canonicalSessionName,
+  migrateFlatSessions,
+  projectKeyFor,
+  type SessionLayoutMode,
+  type SessionLocation,
+  type SessionMigrationEntry,
+  type SessionMigrationResult,
+} from "./sessionlayout.ts";
+export {
   PluginError,
   PluginContext,
   PluginManager,

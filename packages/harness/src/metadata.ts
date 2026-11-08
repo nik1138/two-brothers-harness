@@ -14,6 +14,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+import type { SessionLayout } from "./sessionlayout.ts";
+
 const TITLE_MAX = 80;
 /** Suffix `deriveForkTitle` appends to the source title. */
 const FORK_TITLE_SUFFIX = " (fork)";
@@ -117,13 +119,28 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Sidecar `*.meta.json` store living next to the session files. */
 export class SessionMetadataStore {
   readonly sessionsDir: string;
+  private readonly layout: SessionLayout | null;
 
-  constructor(sessionsDir: string) {
+  constructor(sessionsDir: string, layout?: SessionLayout | null) {
     this.sessionsDir = sessionsDir;
+    this.layout = layout ?? null;
   }
 
+  /** Existing metadata path: the resolved layout, else the flat sidecar. */
   private metaPath(sessionName: string): string {
+    if (this.layout !== null) {
+      const resolved = this.layout.resolve(sessionName);
+      if (resolved !== null) return resolved.metaPath;
+    }
     return sessionMetaPath(this.sessionsDir, sessionName);
+  }
+
+  /** Write target: materialize a new dirs-layout session when needed. */
+  private metaPathForWrite(sessionName: string): string {
+    if (this.layout !== null && this.layout.resolve(sessionName) === null) {
+      return this.layout.materialize(sessionName).metaPath;
+    }
+    return this.metaPath(sessionName);
   }
 
   get(sessionName: string): Record<string, unknown> | null {
@@ -176,8 +193,9 @@ export class SessionMetadataStore {
       if (parent !== null) meta.parent = parent;
     }
     meta.updated = now;
-    fs.mkdirSync(this.sessionsDir, { recursive: true });
-    fs.writeFileSync(this.metaPath(sessionName), JSON.stringify(meta, null, 2), "utf-8");
+    const target = this.metaPathForWrite(sessionName);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, JSON.stringify(meta, null, 2), "utf-8");
     return meta;
   }
 

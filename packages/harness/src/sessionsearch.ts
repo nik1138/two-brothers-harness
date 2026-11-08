@@ -13,7 +13,6 @@
  * directory, corrupt file). Consumers: the HTTP server and the CLI.
  */
 import * as fs from "node:fs";
-import * as path from "node:path";
 
 import {
   deriveTitle,
@@ -23,6 +22,7 @@ import {
 } from "./metadata.ts";
 import type { Message } from "./protocol.ts";
 import { SessionStore, type SessionLoadResult } from "./session.ts";
+import { SessionLayout } from "./sessionlayout.ts";
 import { sanitizeText } from "./tui/text.ts";
 
 /** Shortest query (after trimming) that is actually searched. */
@@ -376,24 +376,25 @@ export function loadSessionDocs(
   const maxSessions = clampCap(options.maxSessions, SEARCH_MAX_SESSIONS);
   const maxEvents = clampCap(options.maxEventsPerSession, SEARCH_MAX_EVENTS_PER_SESSION);
   const dir = typeof sessionsDir === "string" ? sessionsDir : "";
+  const layout = new SessionLayout(dir);
 
-  let names: string[];
+  let locations;
   try {
-    names = fs.readdirSync(dir).filter((name) => name.endsWith(".jsonl"));
+    locations = layout.list();
   } catch {
     return { docs: [], skipped: 0, truncated: false };
   }
 
   let skipped = 0;
-  const entries: Array<{ name: string; mtimeMs: number }> = [];
-  for (const name of names) {
+  const entries: Array<{ name: string; path: string; mtimeMs: number }> = [];
+  for (const location of locations) {
     try {
-      const stat = fs.statSync(path.join(dir, name));
+      const stat = fs.statSync(location.sessionPath);
       if (!stat.isFile()) {
         skipped += 1;
         continue;
       }
-      entries.push({ name, mtimeMs: stat.mtimeMs });
+      entries.push({ name: location.name, path: location.sessionPath, mtimeMs: stat.mtimeMs });
     } catch {
       skipped += 1;
     }
@@ -401,14 +402,14 @@ export function loadSessionDocs(
   entries.sort((a, b) => b.mtimeMs - a.mtimeMs || a.name.localeCompare(b.name));
   const truncated = entries.length > maxSessions;
 
-  const metadata = new SessionMetadataStore(dir);
+  const metadata = new SessionMetadataStore(dir, layout);
   const docs: SessionSearchDoc[] = [];
   for (const entry of entries.slice(0, maxSessions)) {
     let loaded: SessionLoadResult;
     try {
       // Read-only: a torn final fragment is dropped in memory and reported in
       // the doc's additive fields; the file is never rewritten here.
-      loaded = new SessionStore(path.join(dir, entry.name)).loadDetailed();
+      loaded = new SessionStore(entry.path).loadDetailed();
     } catch {
       skipped += 1;
       continue;

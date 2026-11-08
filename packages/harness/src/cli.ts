@@ -100,6 +100,7 @@ import {
   type McpToolSet,
 } from "./mcp.ts";
 import { SessionMetadataStore } from "./metadata.ts";
+import { migrateFlatSessions, SessionLayout } from "./sessionlayout.ts";
 import { mergeSeedPresets, presetById, presetIds, seedPresets } from "./presets.ts";
 import { toNdjsonLine, type StreamEvent } from "./runstream.ts";
 import {
@@ -2592,12 +2593,9 @@ function scanSessionFile(filePath: string, name: string): SessionScan {
 }
 
 function listSessions(sessionsDir: string): SessionListing[] {
-  const names = fs
-    .readdirSync(sessionsDir)
-    .filter((name) => name.endsWith(".jsonl"))
-    .sort();
-  return names.map((name) => {
-    const scan = scanSessionFile(path.join(sessionsDir, name), name);
+  const layout = new SessionLayout(sessionsDir);
+  return layout.list().map((location) => {
+    const scan = scanSessionFile(location.sessionPath, location.name);
     return {
       name: scan.name,
       title: scan.title,
@@ -2628,6 +2626,7 @@ const SESSIONS_OPTIONS = {
   run: { type: "string" as const },
   apply: { type: "boolean" as const, default: false },
   discard: { type: "boolean" as const, default: false },
+  "dry-run": { type: "boolean" as const, default: false },
   ...HELP_OPTIONS,
 } satisfies ParseArgsOptionsConfig;
 
@@ -2649,6 +2648,12 @@ function parseLimit(raw: unknown, io: CliIO): LimitParse {
 function resolveSessionFile(sessionsDir: string, requested: string): string | null {
   const name = requested.trim();
   if (!name) return null;
+  // Explicit paths keep their historical resolution (they may point outside
+  // the sessions root); bare names resolve through either layout.
+  if (!/[\\/]/.test(name) && !path.isAbsolute(name)) {
+    const resolved = new SessionLayout(sessionsDir).resolve(name);
+    if (resolved !== null) return resolved.sessionPath;
+  }
   const candidates = name.endsWith(".jsonl") ? [name] : [`${name}.jsonl`, name];
   for (const candidate of candidates) {
     const resolved = path.resolve(sessionsDir, candidate);
@@ -2873,7 +2878,10 @@ function exportDocForCli(sessionsDir: string, filePath: string): SessionSearchDo
   const scan = scanSessionFile(filePath, name);
   if (scan.title === "(unreadable)") return null;
   const stem = name.replace(/\.jsonl$/, "");
-  const meta = new SessionMetadataStore(sessionsDir).get(name);
+  const meta = new SessionMetadataStore(
+    sessionsDir,
+    new SessionLayout(sessionsDir),
+  ).get(name);
   const metaTitle = meta !== null && typeof meta.title === "string" ? meta.title.trim() : "";
   const workspaceId =
     meta !== null && typeof meta.workspace_id === "string" && meta.workspace_id
@@ -3073,7 +3081,10 @@ function rewindSessionCommand(
   let runtimeEventsClearError: string | null = null;
   if (result.rewritten) {
     try {
-      runtimeEventsCleared = new RuntimeEventStore(path.join(sessionsDir, "runtime")).delete(name);
+      runtimeEventsCleared = new RuntimeEventStore(
+        path.join(sessionsDir, "runtime"),
+        new SessionLayout(sessionsDir),
+      ).delete(name);
     } catch (exc) {
       runtimeEventsClearError = exc instanceof Error ? exc.message : String(exc);
     }
@@ -3206,7 +3217,10 @@ function undoSessionCommand(
   // The session's workspace link is the authority (same rule the HTTP route
   // applies through the live registry); a session without a link or a record
   // from another workspace is refused instead of restoring into a guess.
-  const meta = new SessionMetadataStore(sessionsDir).get(name);
+  const meta = new SessionMetadataStore(
+    sessionsDir,
+    new SessionLayout(sessionsDir),
+  ).get(name);
   const workspaceId =
     meta !== null && typeof meta.workspace_id === "string" ? meta.workspace_id.trim() : "";
   const linked =
@@ -3322,6 +3336,51 @@ function undoCliError(exc: unknown, io: CliIO): number {
   return 1;
 }
 
+/** `sessions migrate`: move flat sessions into project/session directories. */
+function migrateSessionsCommand(
+  sessionsDir: string,
+  jsonMode: boolean,
+  dryRun: boolean,
+  io: CliIO,
+): number {
+  let result;
+  try {
+    const registry = new WorkspaceRegistry(path.join(sessionsDir, "workspaces.json"));
+    result = migrateFlatSessions(sessionsDir, {
+      dryRun,
+      workspacePathFor: (id) => registry.get(id)?.path ?? null,
+    });
+  } catch (exc) {
+    io.error(`[error] ${exc instanceof Error ? exc.message : String(exc)}`);
+    return 1;
+  }
+  if (jsonMode) {
+    io.log(JSON.stringify(result, null, 2));
+  } else {
+    if (result.entries.length === 0) io.log(`no flat sessions in ${sessionsDir}`);
+    for (const entry of result.entries) {
+      if (entry.status === "migrated") {
+        io.log(
+          `${dryRun ? "would migrate" : "migrated"} ${entry.name} -> ${entry.targetPath}`,
+        );
+      } else if (entry.status === "already") {
+        io.log(`already migrated ${entry.name}`);
+      } else {
+        io.error(
+          `[error] ${entry.name}: ${entry.status}` +
+            (entry.detail ? `: ${entry.detail}` : ""),
+        );
+      }
+    }
+    io.log(`layout: ${result.layout}${dryRun ? " (dry run; nothing written)" : ""}`);
+  }
+  return result.entries.some(
+    (entry) => entry.status === "conflict" || entry.status === "error",
+  )
+    ? 1
+    : 0;
+}
+
 function doSessions(
   argv: string[],
   io: CliIO,
@@ -3390,10 +3449,18 @@ function doSessions(
       io,
     );
   }
+  if (subcommand === "migrate") {
+    return migrateSessionsCommand(
+      sessionsDir,
+      jsonMode,
+      values["dry-run"] === true,
+      io,
+    );
+  }
   // Kept as a thrown argument error (the long-standing contract for extra
   // positionals, covered by tests/cli.test.ts).
   throw new Error(
-    `unexpected argument '${subcommand}' (sessions takes 'list', 'show', 'search', 'export', 'fork', 'rewind' or 'undo')`,
+    `unexpected argument '${subcommand}' (sessions takes 'list', 'show', 'search', 'export', 'fork', 'rewind', 'undo' or 'migrate')`,
   );
 }
 
