@@ -1035,6 +1035,24 @@ Design anchors that already exist:
   env rows). Proven to bite by mis-scoping a documented flag and reverting
   byte-identically.
 
+## Shipped 2026-11-08 (wave 15: test-enforced AA floors for accent text)
+
+- **Accessibility floors closed** — value-only changes plus test-enforced WCAG
+  AA: accent-coloured text now clears 4.5:1 on every surface it is actually
+  used on in both schemes (panel/canvas, hovered and selected rows, soft accent
+  chips; light soft/selected tints lightened imperceptibly — blue 4.42→4.58,
+  amber 4.49→4.57, highlight 4.497→4.59; violet/teal and light hover surfaces
+  already passed), and white text on native naive-ui primary/hover/pressed
+  clears AA for all four accents in both schemes. To get there the dark accent
+  hover deepens instead of lightening for blue/violet/teal (white 3.80→5.61,
+  4.23→6.38, 4.02→5.22; amber keeps its lighter hover, already 5.02), with CSS
+  `--accent-hover` and the naive palette changed in tandem so the drift test
+  stays green; hover/pressed stay visibly distinct from primary. The token
+  suite (14 tests) documents the accent-text surfaces, computes the floors with
+  exact failure messages, and was proven to bite by temporarily reverting each
+  value (byte-identical revert). Token inventory unchanged at 94; web suite
+  338.
+
 ## Open items (deferred)
 
 - **WAN fault / long-soak coverage (manual)** — WAN latency/load and

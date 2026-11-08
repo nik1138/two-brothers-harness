@@ -483,6 +483,25 @@ suite: **1 526 tests (1 524 pass, 2 environment skips)**; web suite 337
 (tokens 13, uiPrefs 9); browser suite 17 offline scenarios + the opt-in `real`
 skip; reference tree unchanged at 33/33.
 
+Wave 15 closes the remaining contrast gaps with test-enforced WCAG AA floors
+(value-only changes): accent-coloured text now clears 4.5:1 on every surface it
+is actually used on in both schemes (panel/canvas, hovered and selected rows,
+and the soft accent chips; the light soft/selected tints were lightened
+imperceptibly to move blue 4.42→4.58, amber 4.49→4.57 and the base highlight
+4.497→4.59, while violet/teal and the light hover surfaces already passed), and
+**white text on native naive-ui primary, hover and pressed states clears AA
+for all four accents in both schemes** (the token test computes the floors and
+fails with the pair and ratio; hover/pressed must stay distinct from primary).
+To make dark native hover AA-compliant without changing the light look, the
+dark accent hover now *deepens* instead of lightening for blue/violet/teal
+(white 3.80→5.61, 4.23→6.38, 4.02→5.22; amber already passed at 5.02), with
+the CSS `--accent-hover` tokens and the naive palette changed in tandem so the
+drift test stays green; amber keeps its lighter hover. The token suite (14
+tests) documents the surfaces that host accent text and excludes
+`--surface-active` deliberately (no such rule today; it would need adding if
+one is introduced). Web suite 338 (tokens 14, uiPrefs 9); package suite and
+browser scenarios unchanged this wave.
+
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
 subprocess against the mock provider — **17 scenarios**: consult, chat-repl,

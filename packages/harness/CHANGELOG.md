@@ -758,6 +758,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Test-enforced WCAG AA floors for accent text and native primary states**
+  (wave 15): value-only accessibility hardening that closes the two remaining
+  contrast gaps. Accent-coloured text now clears 4.5:1 on every surface it is
+  actually used on in both schemes (panel/canvas, hovered and selected rows,
+  soft accent chips): the light soft/selected tints were lightened
+  imperceptibly (base `--accent-soft` #e8eefb→#ecf2fd, amber soft
+  #fdf1dc→#fdf3e2, base `--surface-highlight` #eaf0fc→#edf2fd; blue 4.42→4.58,
+  amber 4.49→4.57, highlight 4.497→4.59) while violet/teal and the light hover
+  surfaces already passed. White text on native naive-ui
+  `primaryColor`/`primaryColorHover`/`primaryColorPressed` now clears AA for
+  all four accents in both schemes: the dark accent hover *deepens* instead of
+  lightening for blue/violet/teal (blue #4f7fe8→#2b5fd9, white 3.80→5.61;
+  violet #8b5cf6→#7433e0, 4.23→6.38; teal #0e8aa8→#0e7692, 4.02→5.22; amber
+  keeps its lighter hover and already passed) with the CSS `--accent-hover`
+  tokens and `ACCENT_NAIVE_PALETTES`/base dark overrides changed in tandem so
+  the drift test stays green; hover/pressed remain visibly distinct from
+  primary (naive uses them for switch rails and input focus borders). The
+  token suite (13→14 tests) computes the floors, documents the surfaces that
+  host accent text (deliberately excluding the currently-unused
+  `--surface-active`), and fails with the exact pair and ratio; the 94-token
+  inventory, variant parity and existing AA floors are unchanged.
 - **Native naive-ui controls follow the accent; per-command docs guard**
   (wave 14): `web/src/theme.ts` gains the pure
   `accentThemeOverrides(accent, scheme)` mapping and the canonical
