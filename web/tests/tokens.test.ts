@@ -490,6 +490,22 @@ const DARK_TEXT_SURFACES = [
   '--surface-active',
 ] as const
 
+/**
+ * Light surfaces that actually host `--accent-text`: the panel/canvas inherited
+ * by links and toggles, the hovered session row, the selected row
+ * (`--surface-highlight`) and the soft accent chips (`.mention-badge`,
+ * `.tool-running`, `.approval-waiting`, `.diff-review-count`, ...).
+ * `--surface-active` is deliberately absent: no accent-text class sits on a
+ * pressed neutral surface (pressed states are transparent or the primary fill).
+ */
+const LIGHT_TEXT_SURFACES = [
+  '--surface-panel',
+  '--surface-canvas',
+  '--surface-hover',
+  '--surface-highlight',
+  '--accent-soft',
+] as const
+
 /** WCAG AA for normal-size text. */
 const ACCENT_TEXT_MIN_CONTRAST = 4.5
 
@@ -689,6 +705,18 @@ test('token layer: accent variants override the same accent/focus/selected set i
           `(WCAG AA needs ${ACCENT_TEXT_MIN_CONTRAST}:1)`,
       )
     }
+    // Light scheme: the accent text (== the accent) must clear AA on every
+    // light surface it sits on, including the selected row and soft chips.
+    const lightText = light.get('--accent-text')!
+    for (const surface of LIGHT_TEXT_SURFACES) {
+      const background = (light.get(surface) ?? LIGHT.get(surface))!
+      const ratio = contrastRatio(lightText, background)
+      assert.ok(
+        ratio >= ACCENT_TEXT_MIN_CONTRAST,
+        `${name}: light --accent-text on ${surface} is ${ratio.toFixed(2)}:1 ` +
+          `(WCAG AA needs ${ACCENT_TEXT_MIN_CONTRAST}:1)`,
+      )
+    }
     assert.notEqual(
       light.get('--accent'),
       LIGHT.get('--accent'),
@@ -717,7 +745,7 @@ test('token layer: accent variants override the same accent/focus/selected set i
   )
 })
 
-test('token layer: the base blue accent text also clears AA on dark surfaces', () => {
+test('token layer: the base blue accent text clears AA on every surface it sits on', () => {
   assert.ok(LIGHT.has('--accent-text'), 'the light block must define --accent-text')
   assert.ok(DARK_MEDIA.has('--accent-text'), 'the dark media block must define --accent-text')
   assert.ok(DARK_PINNED.has('--accent-text'), 'the dark pinned block must define --accent-text')
@@ -745,6 +773,53 @@ test('token layer: the base blue accent text also clears AA on dark surfaces', (
       `base dark --accent-text on ${surface} is ${ratio.toFixed(2)}:1 ` +
         `(WCAG AA needs ${ACCENT_TEXT_MIN_CONTRAST}:1)`,
     )
+  }
+  for (const surface of LIGHT_TEXT_SURFACES) {
+    const ratio = contrastRatio(LIGHT.get('--accent-text')!, LIGHT.get(surface)!)
+    assert.ok(
+      ratio >= ACCENT_TEXT_MIN_CONTRAST,
+      `base light --accent-text on ${surface} is ${ratio.toFixed(2)}:1 ` +
+        `(WCAG AA needs ${ACCENT_TEXT_MIN_CONTRAST}:1)`,
+    )
+  }
+})
+
+test('token layer: naive-ui primary states keep white text at WCAG AA in both schemes', () => {
+  // naive-ui paints normal-size white text on the primary family (buttons,
+  // checked switch rails), and primaryColorHover is also used for input focus
+  // borders, so every state a user can see must clear AA. The drift test above
+  // pins these values to the CSS accent tokens, so this floor covers both.
+  const WHITE = '#ffffff'
+  for (const accent of ['blue', 'violet', 'teal', 'amber'] as const) {
+    for (const scheme of ['light', 'dark'] as const) {
+      const common = accentThemeOverrides(accent, scheme).common as unknown as Record<
+        string,
+        string
+      >
+      for (const key of ['primaryColor', 'primaryColorHover', 'primaryColorPressed'] as const) {
+        const ratio = contrastRatio(WHITE, common[key]!)
+        assert.ok(
+          ratio >= 4.5,
+          `${accent} ${scheme}: white on ${key} (${common[key]}) is ` +
+            `${ratio.toFixed(2)}:1 — WCAG AA needs 4.5:1`,
+        )
+      }
+      assert.notEqual(
+        common.primaryColorHover,
+        common.primaryColor,
+        `${accent} ${scheme}: hover must stay visibly distinct from the primary`,
+      )
+      assert.notEqual(
+        common.primaryColorPressed,
+        common.primaryColor,
+        `${accent} ${scheme}: pressed must stay visibly distinct from the primary`,
+      )
+      assert.notEqual(
+        common.primaryColorHover,
+        common.primaryColorPressed,
+        `${accent} ${scheme}: hover and pressed must remain distinguishable`,
+      )
+    }
   }
 })
 

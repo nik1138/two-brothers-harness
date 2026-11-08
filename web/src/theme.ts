@@ -121,7 +121,7 @@ export const darkThemeOverrides: GlobalThemeOverrides = {
     ...SHAPE,
     ...MOTION,
     primaryColor: '#2f6fed',
-    primaryColorHover: '#4f7fe8',
+    primaryColorHover: '#2b5fd9',
     primaryColorPressed: '#2753c9',
     primaryColorSuppl: '#2f6fed',
     errorColor: '#d54941',
@@ -178,6 +178,14 @@ export interface AccentNaivePalette {
  * scheme and `data-accent` variant. This is the only place outside tokens.css
  * that may spell these colours; the drift test in tokens.test.ts keeps the two
  * sources identical (all four variants × light/dark).
+ *
+ * Dark hover values are intentionally DEEPER than the base accent (blue,
+ * violet, teal) instead of naive-ui's usual lightening: the hover surface
+ * carries normal-size white text and naive-ui also uses `primaryColorHover` for
+ * switch rails and input focus borders, so it must both clear WCAG AA 4.5:1
+ * against white and stay visibly distinct from the base and pressed colours.
+ * Amber's existing lighter hover already clears AA (5.02:1) and is unchanged.
+ * tokens.test.ts enforces the white-text floor for every accent × scheme.
  */
 export const ACCENT_NAIVE_PALETTES: Record<
   AccentTheme,
@@ -185,15 +193,15 @@ export const ACCENT_NAIVE_PALETTES: Record<
 > = {
   blue: {
     light: { accent: '#3568d4', hover: '#2a56b4', pressed: '#234a9e' },
-    dark: { accent: '#2f6fed', hover: '#4f7fe8', pressed: '#2753c9' },
+    dark: { accent: '#2f6fed', hover: '#2b5fd9', pressed: '#2753c9' },
   },
   violet: {
     light: { accent: '#6d28d9', hover: '#5b21b6', pressed: '#4c1d95' },
-    dark: { accent: '#7c3aed', hover: '#8b5cf6', pressed: '#6d28d9' },
+    dark: { accent: '#7c3aed', hover: '#7433e0', pressed: '#6d28d9' },
   },
   teal: {
     light: { accent: '#0e7490', hover: '#155e75', pressed: '#164e63' },
-    dark: { accent: '#0f7d99', hover: '#0e8aa8', pressed: '#0b6080' },
+    dark: { accent: '#0f7d99', hover: '#0e7692', pressed: '#0b6080' },
   },
   amber: {
     light: { accent: '#b45309', hover: '#92400e', pressed: '#78350f' },

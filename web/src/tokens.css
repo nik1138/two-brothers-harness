@@ -47,7 +47,7 @@
   --surface-bubble-operator: #3568d4;
   --surface-hover: #f1f3f7;
   --surface-active: #e7ebf1;
-  --surface-highlight: #eaf0fc;
+  --surface-highlight: #edf2fd;
 
   /* --- borders ---------------------------------------------------------- */
   --border-subtle: #e4e7ec;
@@ -65,7 +65,7 @@
   --accent: #3568d4;
   --accent-hover: #2a56b4;
   --accent-pressed: #234a9e;
-  --accent-soft: #e8eefb;
+  --accent-soft: #ecf2fd;
   /* Text-only companion to --accent: surfaces/fills stay on the accent colour,
      normal-size text uses this token so it can be lightened for AA contrast in
      the dark accent variants. In the light schemes it simply equals --accent. */
@@ -212,7 +212,7 @@
   --accent: #b45309;
   --accent-hover: #92400e;
   --accent-pressed: #78350f;
-  --accent-soft: #fdf1dc;
+  --accent-soft: #fdf3e2;
   --accent-text: #b45309;
   --focus-ring: #b45309;
   --border-focus: #b45309;
@@ -242,7 +242,7 @@
     --text-on-accent: #ffffff;
     --text-on-danger: #ffffff;
     --accent: #2f6fed;
-    --accent-hover: #4f7fe8;
+    --accent-hover: #2b5fd9;
     --accent-pressed: #2753c9;
     --accent-soft: #1e2a44;
     --accent-text: #6c9bff;
@@ -280,7 +280,7 @@
      byte-identical to the pinned variants after the dark block below. */
   :root:not([data-theme='light'])[data-accent='violet'] {
     --accent: #7c3aed;
-    --accent-hover: #8b5cf6;
+    --accent-hover: #7433e0;
     --accent-pressed: #6d28d9;
     --accent-soft: #221740;
     --accent-text: #a78bfa;
@@ -291,7 +291,7 @@
 
   :root:not([data-theme='light'])[data-accent='teal'] {
     --accent: #0f7d99;
-    --accent-hover: #0e8aa8;
+    --accent-hover: #0e7692;
     --accent-pressed: #0b6080;
     --accent-soft: #0d2830;
     --accent-text: #5eead4;
@@ -332,7 +332,7 @@
   --text-on-accent: #ffffff;
   --text-on-danger: #ffffff;
   --accent: #2f6fed;
-  --accent-hover: #4f7fe8;
+  --accent-hover: #2b5fd9;
   --accent-pressed: #2753c9;
   --accent-soft: #1e2a44;
   --accent-text: #6c9bff;
@@ -370,7 +370,7 @@
    variants above (tokens.test.ts checks the parity). */
 :root[data-theme='dark'][data-accent='violet'] {
   --accent: #7c3aed;
-  --accent-hover: #8b5cf6;
+  --accent-hover: #7433e0;
   --accent-pressed: #6d28d9;
   --accent-soft: #221740;
   --accent-text: #a78bfa;
@@ -381,7 +381,7 @@
 
 :root[data-theme='dark'][data-accent='teal'] {
   --accent: #0f7d99;
-  --accent-hover: #0e8aa8;
+  --accent-hover: #0e7692;
   --accent-pressed: #0b6080;
   --accent-soft: #0d2830;
   --accent-text: #5eead4;
