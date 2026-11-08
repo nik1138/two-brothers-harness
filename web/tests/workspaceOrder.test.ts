@@ -7,6 +7,8 @@ import { test } from 'node:test'
 
 import {
   WORKSPACE_NAME_MAX,
+  dropReorderDelta,
+  dropReorderIds,
   isSameOrder,
   moveWorkspaceId,
   moveWorkspaceTo,
@@ -114,6 +116,88 @@ test('moveWorkspaceTo: unknown ids and bad targets are a no-op copy', () => {
   assert.deepEqual(moveWorkspaceTo(original, 'b', Number.NEGATIVE_INFINITY), original)
   assert.deepEqual(original, ids('a', 'b', 'c'), 'input is never mutated')
   assert.deepEqual(moveWorkspaceTo(null, 'b', 0), [])
+})
+
+// -- dropReorderDelta / dropReorderIds (drag-and-drop) -------------------------
+
+test('dropReorderDelta: before/after drops map to the menu-move delta', () => {
+  const original = ids('a', 'b', 'c', 'd')
+  // down: a dropped after c is two slots down
+  assert.equal(dropReorderDelta(original, 'a', 'c', 'after'), 2)
+  assert.equal(dropReorderDelta(original, 'b', 'd', 'after'), 2)
+  // up: d dropped before b is two slots up
+  assert.equal(dropReorderDelta(original, 'd', 'b', 'before'), -2)
+  assert.equal(dropReorderDelta(original, 'c', 'a', 'before'), -2)
+  // one step in each direction
+  assert.equal(dropReorderDelta(original, 'b', 'c', 'after'), 1)
+  assert.equal(dropReorderDelta(original, 'c', 'b', 'before'), -1)
+  // boundaries: first after last / last before first
+  assert.equal(dropReorderDelta(original, 'a', 'd', 'after'), 3)
+  assert.equal(dropReorderDelta(original, 'd', 'a', 'before'), -3)
+  // default position is "before"
+  assert.equal(dropReorderDelta(original, 'd', 'a'), -3)
+})
+
+test('dropReorderDelta: identity and already-ordered drops are no-ops', () => {
+  const original = ids('a', 'b', 'c', 'd')
+  // dropping a group on itself in either half
+  assert.equal(dropReorderDelta(original, 'b', 'b', 'before'), 0)
+  assert.equal(dropReorderDelta(original, 'b', 'b', 'after'), 0)
+  // neighbour drops that already describe the current order
+  assert.equal(dropReorderDelta(original, 'b', 'c', 'before'), 0)
+  assert.equal(dropReorderDelta(original, 'b', 'a', 'after'), 0)
+  assert.equal(dropReorderDelta(original, 'a', 'b', 'before'), 0)
+  assert.equal(dropReorderDelta(original, 'd', 'c', 'after'), 0)
+})
+
+test('dropReorderDelta: unknown ids and unusable lists are no-ops', () => {
+  const original = ids('a', 'b', 'c')
+  assert.equal(dropReorderDelta(original, 'nope', 'a', 'before'), 0)
+  assert.equal(dropReorderDelta(original, 'a', 'nope', 'after'), 0)
+  assert.equal(dropReorderDelta([], 'a', 'b', 'before'), 0)
+  assert.equal(dropReorderDelta(null, 'a', 'b', 'after'), 0)
+  assert.equal(dropReorderDelta(undefined, 'a', 'b', 'before'), 0)
+  assert.equal(dropReorderDelta(ids('a'), 'a', 'a', 'after'), 0)
+})
+
+test('dropReorderIds: returns the full new order and never mutates the input', () => {
+  const original = ids('a', 'b', 'c', 'd')
+  assert.deepEqual(dropReorderIds(original, 'a', 'c', 'after'), ids('b', 'c', 'a', 'd'))
+  assert.deepEqual(dropReorderIds(original, 'd', 'b', 'before'), ids('a', 'd', 'b', 'c'))
+  assert.deepEqual(dropReorderIds(original, 'a', 'd', 'after'), ids('b', 'c', 'd', 'a'))
+  assert.deepEqual(dropReorderIds(original, 'd', 'a', 'before'), ids('d', 'a', 'b', 'c'))
+  assert.deepEqual(original, ids('a', 'b', 'c', 'd'), 'input is never mutated')
+
+  const moved = dropReorderIds(original, 'b', 'd', 'after')
+  assert.notEqual(moved, original)
+  moved.push('e')
+  assert.deepEqual(original, ids('a', 'b', 'c', 'd'), 'result is an independent copy')
+})
+
+test('dropReorderIds: boundary and identity drops are a no-op copy of the order', () => {
+  const original = ids('a', 'b', 'c')
+  for (const [from, to, position] of [
+    ['a', 'b', 'before'],
+    ['c', 'b', 'after'],
+    ['b', 'b', 'before'],
+    ['nope', 'a', 'before'],
+  ] as const) {
+    const result = dropReorderIds(original, from, to, position)
+    assert.deepEqual(result, original, `${from} ${position} ${to}`)
+    assert.notEqual(result, original, 'still a fresh copy')
+  }
+  assert.deepEqual(dropReorderIds(['a'], 'a', 'a', 'after'), ['a'])
+  assert.deepEqual(dropReorderIds([], 'a', 'b', 'before'), [])
+  assert.deepEqual(dropReorderIds(null, 'a', 'b', 'before'), [])
+})
+
+test('dropReorderIds agrees with moveWorkspaceTo for the same destination', () => {
+  const original = ids('a', 'b', 'c', 'd')
+  // dropping a after c lands it at index 2; dropping d before b lands at index 1
+  assert.deepEqual(dropReorderIds(original, 'a', 'c', 'after'), moveWorkspaceTo(original, 'a', 2))
+  assert.deepEqual(dropReorderIds(original, 'd', 'b', 'before'), moveWorkspaceTo(original, 'd', 1))
+  assert.deepEqual(dropReorderIds(original, 'c', 'a', 'before'), moveWorkspaceTo(original, 'c', 0))
+  assert.deepEqual(dropReorderIds(original, 'b', 'd', 'after'), moveWorkspaceTo(original, 'b', 3))
 })
 
 // -- isSameOrder --------------------------------------------------------------

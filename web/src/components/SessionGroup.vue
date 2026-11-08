@@ -35,6 +35,14 @@ const props = defineProps<{
   canMoveUp?: boolean
   /** Move down is possible (the workspace is not last). */
   canMoveDown?: boolean
+  /** The group header is a drag source (registered workspace, unfiltered list). */
+  canDrag?: boolean
+  /** A workspace-group drag is in progress somewhere in the sidebar. */
+  dragActive?: boolean
+  /** This group is the drag source currently being dragged. */
+  dragging?: boolean
+  /** Honest drop indicator: before/after this group while it is hovered. */
+  dropPosition?: 'before' | 'after' | null
 }>()
 
 const emit = defineEmits<{
@@ -47,6 +55,16 @@ const emit = defineEmits<{
   renameWorkspace: [id: string]
   /** Header actions menu: move this workspace by `delta` slots (-1/+1). */
   moveWorkspace: [id: string, delta: number]
+  /** Drag handle: this group's workspace drag started. */
+  dragStart: [id: string]
+  /** Drag over another group's header: drop before/after it. */
+  dragOver: [id: string, position: 'before' | 'after']
+  /** The drag left this group without dropping. */
+  dragLeave: [id: string]
+  /** Dropped on this group: before/after it (the parent computes the move). */
+  drop: [id: string, position: 'before' | 'after']
+  /** The drag ended (dropped or cancelled) — always clears the drag state. */
+  dragEnd: []
 }>()
 
 const liveSet = computed(() => new Set(props.liveNames))
@@ -66,6 +84,72 @@ const groupLabel = computed(() => {
 // Tab closes, and the teleported menu escapes the sidebar's scroll clipping.
 
 const showActions = computed(() => props.collapsible && !!props.workspaceId)
+
+// -- drag-and-drop reorder -----------------------------------------------------
+// Progressive enhancement over the actions menu: the dedicated handle is the
+// only drag source (the header buttons keep their click/keyboard behavior), a
+// plain click on it does nothing, and the parent turns a drop into the existing
+// moveWorkspace event so App.vue keeps the optimistic update/revert + API call.
+
+/** Only registered workspace groups in the unfiltered list are draggable. */
+const showDrag = computed(() => props.canDrag === true)
+
+const headingRef = ref<HTMLElement | null>(null)
+
+/** Before/after the header midpoint: the honest insert position for a drop. */
+function dropPositionFor(event: DragEvent): 'before' | 'after' {
+  const heading = headingRef.value
+  if (!heading) return 'before'
+  const rect = heading.getBoundingClientRect()
+  const y = typeof event.clientY === 'number' && Number.isFinite(event.clientY)
+    ? event.clientY
+    : rect.top
+  return y < rect.top + rect.height / 2 ? 'before' : 'after'
+}
+
+function onHandleDragStart(event: DragEvent) {
+  const id = props.workspaceId
+  if (!showDrag.value || !id) {
+    event.preventDefault()
+    return
+  }
+  // The custom type identifies the payload if it is ever dropped outside the
+  // app; the sidebar tracks the drag in memory, so it relies on its own state.
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('application/x-twobrothers-workspace', id)
+    event.dataTransfer.setData('text/plain', props.label)
+  }
+  emit('dragStart', id)
+}
+
+function onHandleDragEnd() {
+  emit('dragEnd')
+}
+
+function onGroupDragOver(event: DragEvent) {
+  if (!props.dragActive || !showDrag.value || !props.workspaceId) return
+  // Only our own drag may drop here (a file drag over the header is ignored).
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  emit('dragOver', props.workspaceId, dropPositionFor(event))
+}
+
+function onGroupDragLeave(event: DragEvent) {
+  const current = event.currentTarget as Node | null
+  const related = event.relatedTarget as Node | null
+  // Moving between child elements is not leaving the group.
+  if (current && related && current.contains(related)) return
+  if (!props.dragActive || !props.workspaceId) return
+  emit('dragLeave', props.workspaceId)
+}
+
+function onGroupDrop(event: DragEvent) {
+  if (!props.dragActive || !showDrag.value || !props.workspaceId) return
+  event.preventDefault()
+  event.stopPropagation()
+  emit('drop', props.workspaceId, dropPositionFor(event))
+}
 
 const menuOpen = ref(false)
 const menuStyle = ref<Record<string, string>>({})
@@ -206,8 +290,23 @@ onUnmounted(removeMenuListeners)
 </script>
 
 <template>
-  <section class="session-group">
-    <h3 v-if="collapsible" class="group-heading" :class="{ 'has-actions': showActions }">
+  <section
+    class="session-group"
+    :class="{
+      'is-dragging': dragging,
+      'is-drop-before': dropPosition === 'before',
+      'is-drop-after': dropPosition === 'after',
+    }"
+    @dragover="onGroupDragOver"
+    @dragleave="onGroupDragLeave"
+    @drop="onGroupDrop"
+  >
+    <h3
+      v-if="collapsible"
+      ref="headingRef"
+      class="group-heading"
+      :class="{ 'has-actions': showActions, 'has-drag': showDrag }"
+    >
       <button
         type="button"
         class="group-toggle"
@@ -224,6 +323,26 @@ onUnmounted(removeMenuListeners)
         <AppIcon :name="unassigned ? 'inbox' : 'folder'" class="icon group-folder" />
         <span class="group-label" :title="label">{{ label }}</span>
         <span class="group-count" aria-hidden="true">{{ total }}</span>
+      </button>
+
+      <!-- Dedicated drag source: out of the tab order on purpose (keyboard users
+           reorder through the actions menu below); the grip is decorative. The
+           grip span itself is also draggable so native drag initiation works on
+           every engine (some suppress it on interactive elements); the event
+           bubbles to this handle's handlers. -->
+      <button
+        v-if="showDrag"
+        type="button"
+        class="group-drag-handle"
+        tabindex="-1"
+        draggable="true"
+        :aria-label="`Drag ${label} to reorder`"
+        aria-describedby="workspace-drag-help"
+        :title="`Drag ${label} to reorder`"
+        @dragstart="onHandleDragStart"
+        @dragend="onHandleDragEnd"
+      >
+        <span class="drag-grip" draggable="true" aria-hidden="true"></span>
       </button>
 
       <button
@@ -322,6 +441,11 @@ onUnmounted(removeMenuListeners)
   flex: none;
 }
 
+/* Positioning context for the header controls and the drop indicator. */
+.session-group {
+  position: relative;
+}
+
 .group-heading {
   position: sticky;
   top: 0;
@@ -331,6 +455,11 @@ onUnmounted(removeMenuListeners)
   background: var(--surface-panel);
   font-size: inherit;
   font-weight: inherit;
+}
+
+.group-heading.has-drag .group-toggle {
+  /* Reserve both the drag handle and the actions trigger slot. */
+  padding-right: 58px;
 }
 
 .session-group + .session-group {
@@ -446,6 +575,90 @@ onUnmounted(removeMenuListeners)
   outline-offset: 0;
 }
 
+/* Dedicated drag handle: pointer-only affordance (tabindex=-1) — the actions
+   menu remains the keyboard path. A quiet grip stays visible so the affordance
+   is discoverable; hover/drag makes it solid. */
+.group-drag-handle {
+  position: absolute;
+  top: 50%;
+  right: var(--space-7);
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: grab;
+  opacity: 0.5;
+  -webkit-user-drag: element;
+  user-select: none;
+  transition:
+    opacity var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.group-drag-handle:hover,
+.group-drag-handle:active {
+  opacity: 1;
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.group-drag-handle:active {
+  cursor: grabbing;
+}
+
+.group-drag-handle:focus-visible {
+  outline-offset: 0;
+}
+
+.drag-grip {
+  width: 12px;
+  height: 18px;
+  background-image: radial-gradient(circle, currentColor 1px, transparent 1.2px);
+  background-size: 6px 6px;
+  background-position: center;
+  border-radius: 2px;
+  -webkit-user-drag: element;
+  user-select: none;
+}
+
+.session-group.is-dragging .group-drag-handle {
+  opacity: 1;
+  cursor: grabbing;
+}
+
+.session-group.is-dragging {
+  opacity: 0.55;
+}
+
+/* Honest insert indicator: an accent line on the edge the drop will use. */
+.session-group.is-drop-before::before,
+.session-group.is-drop-after::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+  z-index: 3;
+}
+
+.session-group.is-drop-before::before {
+  top: -1px;
+}
+
+.session-group.is-drop-after::after {
+  bottom: -1px;
+}
+
 .session-list {
   list-style: none;
   margin: 0;
@@ -540,6 +753,16 @@ onUnmounted(removeMenuListeners)
     height: 28px;
   }
 
+  /* Touch has no native HTML5 drag: hide the pointer-only handle and fall back
+     to the actions menu (the header keeps the trigger slot reserved). */
+  .group-drag-handle {
+    display: none;
+  }
+
+  .group-heading.has-drag .group-toggle {
+    padding-right: 26px;
+  }
+
   .group-menu-item {
     height: 36px;
   }
@@ -551,6 +774,10 @@ onUnmounted(removeMenuListeners)
   }
 
   .group-menu-trigger {
+    transition: none;
+  }
+
+  .group-drag-handle {
     transition: none;
   }
 }

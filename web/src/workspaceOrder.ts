@@ -96,6 +96,56 @@ export function isSameOrder(
   return true
 }
 
+// -- drag-and-drop reordering --------------------------------------------------
+// The sidebar's drag handle (an HTML5 drag source) drops a workspace group
+// before or after another group header. Both helpers are pure and share the
+// same boundary rules as the menu moves: identity drops and unknown ids are a
+// no-op, and a drop on the other side of an adjacent neighbour is already the
+// requested order. `App.vue` still owns the optimistic update + API call: the
+// sidebar only translates a drop into the delta its existing `moveWorkspace`
+// event carries.
+
+/** Where a dragged workspace group is dropped relative to another group. */
+export type WorkspaceDropPosition = 'before' | 'after'
+
+/**
+ * The `delta` a drop represents for {@link moveWorkspaceId}: drop `fromId`
+ * before/after `toId` and the target index (after removing the dragged id)
+ * minus its current index is exactly the menu-move delta. Returns 0 for a
+ * no-op — same item, unknown ids, an adjacent drop that is already the
+ * current order, or a non-array input.
+ */
+export function dropReorderDelta(
+  ids: readonly string[] | null | undefined,
+  fromId: string,
+  toId: string,
+  position: WorkspaceDropPosition = 'before',
+): number {
+  const current = copyIds(ids)
+  const from = typeof fromId === 'string' ? current.indexOf(fromId) : -1
+  const to = typeof toId === 'string' ? current.indexOf(toId) : -1
+  if (from < 0 || to < 0 || from === to) return 0
+  // Index the dragged id lands on in the list with it removed: a drop before
+  // an id below the source has to shift by one, an `after` drop does not.
+  const insertAt =
+    position === 'after' ? (to > from ? to : to + 1) : to > from ? to - 1 : to
+  return insertAt - from
+}
+
+/**
+ * The full id order after a drop, with the same boundary rules as
+ * {@link dropReorderDelta}. Always returns a fresh array; the input is never
+ * mutated.
+ */
+export function dropReorderIds(
+  ids: readonly string[] | null | undefined,
+  fromId: string,
+  toId: string,
+  position: WorkspaceDropPosition = 'before',
+): string[] {
+  return moveWorkspaceId(ids, fromId, dropReorderDelta(ids, fromId, toId, position))
+}
+
 /**
  * Defensive copy of a workspace list for rendering: drops malformed entries and
  * duplicate ids (first occurrence wins) while preserving the server's order.

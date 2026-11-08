@@ -38,6 +38,13 @@
 //                  preview toggle expands the diff as plain text (aria-expanded,
 //                  no HTML injection) and collapses again; the allow path still
 //                  removes the file
+//   workspace-drag mock provider: three registered workspaces (API) show group
+//                  headers; dragging a group by its dedicated handle reorders
+//                  the sidebar optimistically and persists through
+//                  PUT /api/workspaces/order, with an honest drop indicator,
+//                  no accidental session selection/filter change, plain clicks
+//                  still collapsing/selecting, and the menu Move up/down
+//                  fallback still working
 //   real           opt-in (TWO_BROTHERS_REAL_E2E=1): real models via LM Studio
 //
 // Backend: every scenario runs against the TypeScript server
@@ -2191,6 +2198,199 @@ async function scenarioApprovalReason(runner) {
   }
 }
 
+// -- scenario: workspace drag-and-drop reorder ---------------------------------
+//
+// Three registered workspaces (created through the API) plus two sessions make
+// the sidebar render workspace group headers. Dragging a group by its dedicated
+// handle (native HTML5 drag events, dispatched deterministically here) reorders
+// the sidebar optimistically and persists through PUT /api/workspaces/order;
+// the drop must not select a session or change the workspace filter, a plain
+// header click still collapses/expands the group, a plain row click still
+// selects a session, and the actions-menu Move up/down fallback still works.
+
+async function scenarioWorkspaceDrag(runner) {
+  const be = await startBackend({ kind: 'mock' })
+  const wsDirs = [
+    tmpDir('tb-e2e-ws-drag-a'),
+    tmpDir('tb-e2e-ws-drag-b'),
+    tmpDir('tb-e2e-ws-drag-c'),
+  ]
+  const names = wsDirs.map((dir) => path.basename(dir))
+  const FIRST = names[0]
+  const SECOND = names[1]
+  const THIRD = names[2]
+  const SESSION_ONE = 'E2E workspace drag session'
+  const SESSION_TWO = 'E2E workspace drag second'
+  const { context, page, consoleGuard } = await newScenarioPage()
+  const groupByLabel = (label) =>
+    page.locator('.session-group').filter({ has: page.locator(`.group-label:text-is("${label}")`) })
+  const sidebarOrder = async () =>
+    (await page.locator('.session-group .group-label').allInnerTexts())
+      .map((label) => label.trim())
+      .filter((label) => names.includes(label))
+  const workspaceOrder = async () => {
+    const list = await apiCall(be.base, 'GET', '/api/workspaces')
+    assert.equal(list.status, 200, `GET /api/workspaces -> HTTP ${list.status}`)
+    return (list.json ?? []).map((workspace) => workspace.name).filter((name) => names.includes(name))
+  }
+  try {
+    for (const [index, dir] of wsDirs.entries()) {
+      const created = await apiCall(be.base, 'POST', '/api/workspaces', {
+        path: dir,
+        name: names[index],
+      })
+      assert.equal(created.status, 201, `POST /api/workspaces -> HTTP ${created.status}`)
+    }
+
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    // Sessions are what makes the sidebar render its groups (otherwise it shows
+    // the empty state); both stay unassigned so every workspace group is empty.
+    await createSession(page, SESSION_ONE)
+    await createSession(page, SESSION_TWO)
+    await waitFor(async () => (await sidebarOrder()).length === names.length, {
+      desc: 'three workspace group headers in the sidebar',
+    })
+    assert.deepEqual(await sidebarOrder(), names, 'the initial sidebar order is the API order')
+    const filter = page.locator('select[title="Filter sessions by workspace"]')
+    assert.equal(await filter.inputValue(), 'all')
+    await waitFor(
+      async () => (await page.locator('.chat-title').innerText()).trim() === SESSION_TWO,
+      { desc: 'the newest session selected after creation' },
+    )
+    const titleBefore = (await page.locator('.chat-title').innerText()).trim()
+
+    // -- drag the first group before the third ------------------------------
+    const source = groupByLabel(FIRST)
+    const target = groupByLabel(THIRD)
+    const handle = source.locator('.group-drag-handle')
+    const targetHeading = target.locator('.group-heading')
+    await handle.waitFor({ state: 'attached' })
+    const dataTransfer = await page.evaluateHandle(() => new DataTransfer())
+    const targetBox = await targetHeading.boundingBox()
+    assert.ok(targetBox, 'the third group header has a bounding box')
+
+    await handle.dispatchEvent('dragstart', { dataTransfer })
+    await waitFor(
+      async () => ((await source.getAttribute('class')) ?? '').includes('is-dragging'),
+      { desc: 'drag source marked while dragging' },
+    )
+    await targetHeading.dispatchEvent('dragover', {
+      dataTransfer,
+      clientX: targetBox.x + 8,
+      clientY: targetBox.y + 2,
+    })
+    await waitFor(
+      async () => ((await target.getAttribute('class')) ?? '').includes('is-drop-before'),
+      { desc: 'honest drop indicator above the target group' },
+    )
+    await targetHeading.dispatchEvent('drop', {
+      dataTransfer,
+      clientX: targetBox.x + 8,
+      clientY: targetBox.y + 2,
+    })
+    await handle.dispatchEvent('dragend', { dataTransfer })
+
+    await waitFor(
+      async () => JSON.stringify(await sidebarOrder()) === JSON.stringify([SECOND, FIRST, THIRD]),
+      { desc: 'optimistic sidebar order after the drop' },
+    )
+    // The sidebar updates optimistically before the PUT resolves; poll the API
+    // so a slow backend cannot race this assertion.
+    await waitFor(
+      async () => JSON.stringify(await workspaceOrder()) === JSON.stringify([SECOND, FIRST, THIRD]),
+      { desc: 'the persisted API order after the drop' },
+    )
+    assert.deepEqual(await workspaceOrder(), [SECOND, FIRST, THIRD], 'the drop persisted via the API')
+    assert.ok(
+      !((await source.getAttribute('class')) ?? '').includes('is-dragging'),
+      'the drag source state is cleared after the drop',
+    )
+    assert.ok(
+      !((await target.getAttribute('class')) ?? '').includes('is-drop'),
+      'the drop indicator is cleared after the drop',
+    )
+
+    // The drop is a reorder, never a navigation or a filter change.
+    assert.equal(await filter.inputValue(), 'all', 'the drop must not change the workspace filter')
+    assert.equal(
+      (await page.locator('.chat-title').innerText()).trim(),
+      titleBefore,
+      'the drop must not select a different session',
+    )
+
+    // -- plain clicks keep working after a drag -----------------------------
+    const firstToggle = groupByLabel(SECOND).locator('.group-toggle')
+    await firstToggle.click()
+    assert.equal(await firstToggle.getAttribute('aria-expanded'), 'false', 'header click collapses')
+    await firstToggle.click()
+    assert.equal(await firstToggle.getAttribute('aria-expanded'), 'true', 'header click expands')
+    assert.deepEqual(
+      await sidebarOrder(),
+      [SECOND, FIRST, THIRD],
+      'collapsing/expanding never reorders',
+    )
+
+    const firstSessionRow = page
+      .locator('.session-row')
+      .filter({ has: page.locator(`.session-title:text-is("${SESSION_ONE}")`) })
+      .locator('.session-item')
+    await firstSessionRow.click()
+    await waitFor(
+      async () => (await page.locator('.chat-title').innerText()).trim() === SESSION_ONE,
+      { desc: 'a plain session-row click selects that session' },
+    )
+
+    // -- the workspace filter still works ----------------------------------
+    await selectWorkspaceFilter(page, SECOND)
+    await waitFor(async () => (await filter.inputValue()) !== 'all', {
+      desc: 'the workspace filter selection',
+    })
+    // The filter narrows the sidebar to one workspace; drag handles belong to
+    // the unfiltered multi-workspace list only, so none must remain.
+    assert.equal(
+      await page.locator('.group-drag-handle').count(),
+      0,
+      'dragging is disabled while filtering one workspace',
+    )
+    await filter.selectOption('all')
+    await waitFor(async () => (await sidebarOrder()).length === names.length, {
+      desc: 'the full workspace list after clearing the filter',
+    })
+
+    // -- the actions-menu fallback still reorders (keyboard path) ----------
+    const firstGroup = groupByLabel(SECOND)
+    await firstGroup.locator('.group-heading').hover()
+    await firstGroup.locator('.group-menu-trigger').click()
+    const menu = page.locator('.group-menu')
+    await menu.waitFor({ state: 'visible' })
+    assert.equal(
+      await menu.locator('button[aria-label="Move workspace up"]').isDisabled(),
+      true,
+      'Move up is disabled for the first workspace',
+    )
+    assert.equal(
+      await menu.locator('button[aria-label="Move workspace down"]').isDisabled(),
+      false,
+      'Move down is available for the first workspace',
+    )
+    await menu.locator('button[aria-label="Move workspace down"]').click()
+    await waitFor(
+      async () => JSON.stringify(await sidebarOrder()) === JSON.stringify(names),
+      { desc: 'menu Move down restores the original order' },
+    )
+    assert.deepEqual(await workspaceOrder(), names, 'the menu fallback persisted via the API')
+
+    consoleGuard.assertClean()
+    runner.pass('workspace-drag')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    for (const dir of wsDirs) rmTree(dir)
+    rmTree(be.dir)
+  }
+}
+
 // -- scenario: real models (opt-in) ---------------------------------------------------
 
 async function scenarioReal(runner) {
@@ -2432,6 +2632,13 @@ async function main() {
           scenarioApprovalReason(currentRunner)
         ),
       },
+      {
+        label: 'workspace-drag',
+        run: () => (
+          (currentRunner = makeRunner('workspace-drag')),
+          scenarioWorkspaceDrag(currentRunner)
+        ),
+      },
     ]
     blocks.push(...hermetic.filter((block) => scenarioSelected(block.label)))
     if (realEnabled && scenarioSelected('real')) {
@@ -2461,6 +2668,7 @@ async function main() {
       'hero-starters',
       'composer-recall',
       'approval-reason',
+      'workspace-drag',
       'real',
     ].filter(scenarioSelected)) {
       results.push({

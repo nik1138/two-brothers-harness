@@ -5,7 +5,7 @@ import { sessionTitle } from '../chat'
 import type { SessionStatusView } from '../sessionStatus'
 import type { ThemeMode } from '../themeMode'
 import type { SessionInfo, Workspace } from '../types'
-import { orderedWorkspaces } from '../workspaceOrder'
+import { dropReorderDelta, orderedWorkspaces } from '../workspaceOrder'
 import AppIcon from './AppIcon.vue'
 import SessionGroup from './SessionGroup.vue'
 import SidebarFooter from './SidebarFooter.vue'
@@ -283,6 +283,52 @@ function onGroupMove(id: string, delta: number) {
   emit('moveWorkspace', id, delta)
 }
 
+// -- workspace drag-and-drop reorder -------------------------------------------
+// A drag handle in each workspace group header (SessionGroup) is the source;
+// this column only tracks the drag/drop state for the honest indicator and
+// translates a drop into the SAME delta event the actions menu emits, so the
+// shell keeps its optimistic reorder + persist + revert-on-failure behavior.
+
+type GroupDropPosition = 'before' | 'after'
+
+const draggingWorkspaceId = ref<string | null>(null)
+const dropTarget = ref<{ id: string; position: GroupDropPosition } | null>(null)
+
+function startWorkspaceDrag(id: string) {
+  draggingWorkspaceId.value = id
+  dropTarget.value = null
+}
+
+function hoverWorkspaceDrop(id: string, position: GroupDropPosition) {
+  const source = draggingWorkspaceId.value
+  if (source === null || id === source) {
+    if (dropTarget.value !== null) dropTarget.value = null
+    return
+  }
+  const current = dropTarget.value
+  if (current !== null && current.id === id && current.position === position) return
+  dropTarget.value = { id, position }
+}
+
+function leaveWorkspaceDrop(id: string) {
+  if (dropTarget.value?.id === id) dropTarget.value = null
+}
+
+function endWorkspaceDrag() {
+  draggingWorkspaceId.value = null
+  dropTarget.value = null
+}
+
+/** Drop happened on `targetId`: emit the equivalent delta move, if any. */
+function dropWorkspace(targetId: string, position: GroupDropPosition) {
+  const sourceId = draggingWorkspaceId.value
+  endWorkspaceDrag()
+  if (sourceId === null || sourceId === targetId) return
+  const ids = orderedWorkspaceList.value.map((workspace) => workspace.id)
+  const delta = dropReorderDelta(ids, sourceId, targetId, position)
+  if (delta !== 0) emit('moveWorkspace', sourceId, delta)
+}
+
 let narrowViewport: MediaQueryList | null = null
 
 function collapseSidebar() {
@@ -306,6 +352,10 @@ onUnmounted(() => {
 
 <template>
   <nav class="sidebar" aria-label="Sessions">
+    <p id="workspace-drag-help" class="visually-hidden">
+      Drag a workspace group with its handle to reorder it, or use the workspace actions menu
+      to move it up or down with the keyboard.
+    </p>
     <div class="sidebar-top">
       <div class="brand-row">
         <span class="brand-mark" aria-hidden="true">TB</span>
@@ -464,6 +514,12 @@ onUnmounted(() => {
             :workspace-id="g.workspaceId"
             :can-move-up="g.canMoveUp"
             :can-move-down="g.canMoveDown"
+            :can-drag="g.collapsible && !!g.workspaceId"
+            :dragging="draggingWorkspaceId === g.workspaceId"
+            :drag-active="draggingWorkspaceId !== null"
+            :drop-position="
+              dropTarget !== null && dropTarget.id === g.workspaceId ? dropTarget.position : null
+            "
             @toggle-collapse="toggleGroup(g.key)"
             @toggle-expand="toggleExpand(g.key)"
             @select="emit('select', $event)"
@@ -471,6 +527,11 @@ onUnmounted(() => {
             @deleted="onRowDeleted"
             @rename-workspace="onGroupRename"
             @move-workspace="onGroupMove"
+            @drag-start="startWorkspaceDrag"
+            @drag-over="hoverWorkspaceDrop"
+            @drag-leave="leaveWorkspaceDrop"
+            @drop="dropWorkspace"
+            @drag-end="endWorkspaceDrag"
           />
         </template>
       </div>
