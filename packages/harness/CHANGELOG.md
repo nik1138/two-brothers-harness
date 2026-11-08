@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **TUI replay of persisted reasoning** (wave 8): a session that carries
+  persisted `reasoning` sidecar events now shows a bounded, dim
+  `THINKING (replayed) · <ROLE> · <kind>` section in the TUI transcript on
+  load/resume/session switch (sidecar append order = run order): up to four
+  wrapped preview rows per record with honest `… +N lines` / `… clipped for
+  length` markers, at most 24 records (older ones collapse behind one count
+  marker), one record per provider call. It is read-only and fail-soft (no
+  sidecar, torn/malformed/oversized rows => no crash, nothing invented), the
+  TUI never writes reasoning events, live thinking is unchanged, and frames
+  without replay payload are byte-identical (plainTheme/NO_COLOR too). Files:
+  `src/tui/reasoningPersist.ts` (new), `src/tui/view/reasoning.ts` (new),
+  `src/tui/app.ts`, `src/tui/view/transcript.ts`,
+  `src/tui/view/screen.ts`; tests `tests/tuireasoningreplay.test.ts` (14).
 - **Persisted reasoning replay** (wave 7): thinking/reasoning deltas are no
   longer live-only. When token streaming is active, the harness buffers the
   sanitized reasoning per provider call and emits one additive
@@ -648,6 +661,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Final web chrome sheets use the design tokens** (wave 8): `App.vue`,
+  `ChatView.vue` and `Composer.vue` — the last large component sheets — moved
+  their canonical radii and scale spacing to the existing
+  `--radius-*`/`--space-*` tokens (32 value-for-value replacements), so the
+  deterministic token test now covers all 17 migrated sheets and bans
+  canonical radius/scale-spacing literals there. Token inventory is unchanged
+  (93); dark parity untouched; zero visual delta (CSS-only, expansion
+  byte-equality verified). Files: the three sheets + `web/tests/tokens.test.ts`.
+- **`TWO_BROTHERS_JSON` now means `--json`** (wave 8, contract alignment): the
+  env var selects the same single machine-readable output object as a bare
+  `--json` (`{task, events, decision, usage, cost, rounds, errors}` on stdout,
+  diagnostics on stderr) instead of the retired legacy behavior (the human
+  transcript followed by the decision JSON on the last line); it applies to
+  `run` (and its `--dry-run` plan) and to each `chat` REPL turn, whose banner
+  and blank separators are suppressed in machine modes. Precedence is
+  unchanged: `--stream`, `--json-events` and an explicit `--mode print|json`
+  win over the env var, explicit flags win over an env `0`/`false`, and the
+  env var is not a JSON modifier on `--mode print` (use the `--json` flag
+  there). Also fixes the flag-default bug that made the env var inert through
+  the CLI (`argsToConfigArgs` no longer forwards a default `json: false`).
+  `PROTOCOL.md` §7's env row is updated; no envelope or JSON-Schema change,
+  and `Config.jsonOut` parsing stays stable for embedders. Migration: parse the
+  new object's `decision` key, or use `--mode print` for the decision text /
+  `--mode print --json` for the decision-only object. Tests:
+  `tests/printmode.test.ts` (+5), `tests/cli.test.ts` (+1 spawned-CLI parity).
 - **Remaining web chrome sheets use the design tokens** (wave 7): nine more
   component sheets (`CommandPalette`, `ToolActivity`, `ApprovalCard`,
   `UsageFooter`, `ContextMeter`, `PromptAudit`, `CommandResult`,

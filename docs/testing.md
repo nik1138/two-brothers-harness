@@ -77,7 +77,7 @@ npm run test:spawn      # node --test tests/ (child processes allowed)
 ```
 
 On the canonical integrated run for this round the in-process suite is
-**1 481 tests: 1 479 pass, 0 fail, 2 skipped** (exit 0); the two skips are
+**1 501 tests: 1 499 pass, 0 fail, 2 skipped** (exit 0); the two skips are
 environment-gated and never failures — the workspace symlink-parity test and
 the MCP stdio spawn are unavailable in this environment. `npm run typecheck`
 and `npm run build` pass, the hermetic CLI E2E is 17/17 on sources and 17/17
@@ -279,9 +279,24 @@ tool-loop rounds; the web timeline projection tolerates malformed/oversized/
 old-backend rows and renders replayed thinking collapsed-by-default) and
 extends the web timeline suite by four replay-projection tests. It also adds
 the design-token migration invariants: `web/tests/tokens.test.ts` now covers
-14 migrated component sheets and bans canonical radius/scale-spacing literals
+17 migrated component sheets and bans canonical radius/scale-spacing literals
 in them (9 tests). The package suite is now 1 481 tests (1 479 pass, 2
 environment skips) and the web suite 323.
+
+Wave 8 adds `tests/tuireasoningreplay.test.ts` (14 tests: read-only sidecar
+reasoning extraction/order/role/kind, malformed/torn/oversized tolerance, the
+bounded width-safe `THINKING (replayed)` renderer incl. CJK/emoji and
+plain/NO_COLOR equality, the screen option's welcome-vs-transcript gate with
+byte-identical frames when no replay payload exists, and the assembled TUI on
+load/resume at 40/80/120 columns with unchanged sidecar bytes) and the
+`TWO_BROTHERS_JSON` contract-alignment tests (`tests/printmode.test.ts` +5:
+env/flag byte parity, truthy/falsey spellings, explicit-mode-over-env matrix,
+dry-run equality, per-turn chat; `tests/cli.test.ts` +1 spawned-CLI parity
+with FORCE_COLOR purity). The final token migration adds `App.vue`,
+`ChatView.vue` and `Composer.vue` to `web/tests/tokens.test.ts`, which now
+guards 17 migrated sheets. The package suite is now 1 501 tests (1 499 pass, 2
+environment skips); the web suite stays 323 and the reference tree 33/33
+(its `TWO_BROTHERS_JSON` handling was updated with the same alignment fix).
 
 ### Real-socket fault injection (in the smoke gate)
 
@@ -400,7 +415,7 @@ key classifier), the Settings → Approvals model
 patch omitted for an unsupported backend and for a server-pinned mode (a
 pin is never persisted by a normal save), and the pinned/unsupported
 read-only reasons), and the design-token layer (`tests/tokens.test.ts`, 9
-tests: every `var(--x)` reference in `style.css` and the 14 migrated component
+tests: every `var(--x)` reference in `style.css` and the 17 migrated component
 sheets is defined, every core colour token exists in the light block and both
 dark blocks — which must stay identical —, the spacing scale is complete and
 ordered, no colour literal is left in the migrated sheets, canonical

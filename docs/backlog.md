@@ -837,27 +837,46 @@ Design anchors that already exist:
   offline smoke gate now runs it; real external-network load/fault injection
   remains an open item.
 
+## Shipped 2026-11-08 (wave 8: TUI reasoning replay, JSON env alignment, token completion)
+
+- **TUI replay of persisted reasoning** — a session carrying persisted
+  `reasoning` sidecar events now shows a bounded, dim
+  `THINKING (replayed) · ROLE · kind` section in the TUI transcript on
+  load/resume/session switch (sidecar order; ≤4 preview rows per record with
+  `… +N lines` / `… clipped for length` markers, ≤24 records with older ones
+  collapsed behind a count). Read-only, fail-soft on missing/torn/malformed
+  rows, never writes reasoning events; live thinking unchanged; frames without
+  replay payload are byte-identical. Files: `src/tui/reasoningPersist.ts`,
+  `src/tui/view/reasoning.ts` (new), `app.ts`, `view/transcript.ts`,
+  `view/screen.ts`; tests `tests/tuireasoningreplay.test.ts` (14).
+- **`TWO_BROTHERS_JSON` aligned with `--json`** — the env var now selects the
+  same single machine-readable output object as a bare `--json` (for `run`,
+  `--dry-run` plans and each `chat` turn, with REPL decoration suppressed),
+  instead of the retired legacy "decision JSON on the last line after the
+  transcript". Precedence stays unchanged (`--stream`, `--json-events`,
+  explicit `--mode` and explicit flags win); PROTOCOL.md §7's env row is
+  updated with no envelope/schema change; the reference `typescript/` tree got
+  the same 6-line fix (it had the identical flag-default shadowing bug).
+  Migration note documented (parse the new object's `decision` key, or use
+  `--mode print` / `--mode print --json`). Tests: `printmode` (+5), `cli`
+  (+1 spawned parity).
+- **Final web chrome sheets on the design tokens** — `App.vue`,
+  `ChatView.vue`, `Composer.vue` migrated their canonical radii/scale spacing
+  to the token layer (32 value-for-value replacements, token inventory still
+  93, zero visual delta); `web/tests/tokens.test.ts` now guards 17 migrated
+  sheets. The design-token migration is complete; only documented one-off
+  values stay literal.
+
 ## Open items (deferred)
 
-- **Web design-token follow-through** — the semantic layer and most chrome
-  shipped 2026-11-08 (see the wave-4/wave-5/wave-7 sections). Remaining
-  optional work: `App.vue`, `ChatView.vue` and `Composer.vue` still carry
-  component-local literals, as do deliberately one-off values (menu-row 5px
-  radii, fractional paddings) the layer documents as staying literal.
 - **Reasoning passback (part 2)** — Anthropic extended thinking with tool use
   expects signed thinking blocks passed back on assistant turns: capture and
   replay them in the Anthropic adapter if thinking-enabled tool loops become a
-  supported configuration. (Part 1 — persistence/replay — shipped in wave 7;
-  TUI replay remains optional.)
+  supported configuration. (Part 1 persistence/replay — web and TUI — shipped
+  in waves 7–8.)
 - **Real external-network load/fault injection** — the hermetic scale suite
   and the loopback fault runner cover bounded behavior; WAN latency/load and
   real-provider fault injection are not covered by the offline gates.
-- **`TWO_BROTHERS_JSON` vs bare `--json`** — the flag is now an output
-  mode (the `--mode json` object), while the env var keeps its
-  `PROTOCOL.md` contract (decision as JSON on the last line, after the
-  transcript). Align the env var with the flag — or document the split in
-  `docs/cli-reference.md` — once `PROTOCOL.md` (the contract owner
-  for the env var) is updated.
 - **Approval repeat cap at the broker** — **shipped 2026-11-06**:
   `RunApprovalBroker` counts operator denials per identical
   `(action, normalized target)` pair and auto-denies the next identical
