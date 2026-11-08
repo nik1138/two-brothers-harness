@@ -24,8 +24,9 @@
  * - no protocol envelope / session-JSONL change: reasoning text and signatures
  *   never enter the shared context.
  *
- * Everything is hermetic: every request goes to a scripted `FetchLike`, no
- * socket, no real model.
+ * Everything is hermetic: adapter-level requests go to a scripted `FetchLike`;
+ * the per-role endpoint/provider-wiring cases use a loopback (127.0.0.1) stub
+ * server only. No external network, no real model.
  *
  * Run with: node --test tests/thinkingpassback.test.ts
  */
@@ -189,6 +190,48 @@ function thinkingThenToolUseSse(input: {
     }),
     sseFrame("content_block_stop", { type: "content_block_stop", index: 1 }),
     sseFrame("message_delta", { type: "message_delta", usage: { output_tokens: 9 } }),
+    sseFrame("message_stop", { type: "message_stop" }),
+  ]);
+}
+
+/**
+ * A streamed Anthropic reply whose first block is a `redacted_thinking` block
+ * (opaque `data`, no deltas) followed by a call to `toolName`.
+ */
+function redactedThenToolUseSse(input: {
+  redacted: string;
+  callId: string;
+  toolName: string;
+  args: Record<string, unknown>;
+}): Response {
+  return sseResponse([
+    sseFrame("message_start", {
+      type: "message_start",
+      message: { usage: { input_tokens: 17, output_tokens: 0 } },
+    }),
+    sseFrame("content_block_start", {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "redacted_thinking", data: input.redacted },
+    }),
+    sseFrame("content_block_stop", { type: "content_block_stop", index: 0 }),
+    sseFrame("content_block_start", {
+      type: "content_block_start",
+      index: 1,
+      content_block: {
+        type: "tool_use",
+        id: input.callId,
+        name: input.toolName,
+        input: {},
+      },
+    }),
+    sseFrame("content_block_delta", {
+      type: "content_block_delta",
+      index: 1,
+      delta: { type: "input_json_delta", partial_json: JSON.stringify(input.args) },
+    }),
+    sseFrame("content_block_stop", { type: "content_block_stop", index: 1 }),
+    sseFrame("message_delta", { type: "message_delta", usage: { output_tokens: 8 } }),
     sseFrame("message_stop", { type: "message_stop" }),
   ]);
 }
@@ -541,6 +584,88 @@ test("harness: signed thinking blocks are echoed verbatim on the next tool-loop 
   assert.equal(reasoning.some((event) => event.text.includes(SIGNATURE)), false);
 });
 
+test("harness: a redacted_thinking block is echoed verbatim before the tool_use", async () => {
+  // Deliberately awkward opaque payload: base64-ish characters plus control
+  // bytes and an ANSI sequence. A sanitizer/trimmer anywhere on the path would
+  // change it, so byte equality here proves the replay is verbatim.
+  const REDACTED = "opaque+Redacted/Data==\u0000\u001b[31mXYZ\u0007";
+  const requests: RecordedRequest[] = [];
+  const handler: FetchLike = async (url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, any>;
+    requests.push({ url, headers: {}, body, method: init?.method ?? "POST" });
+    switch (requests.length - 1) {
+      case 0:
+        return redactedThenToolUseSse({
+          redacted: REDACTED,
+          callId: "call_redacted",
+          toolName: "read_note",
+          args: { path: "b.txt" },
+        });
+      case 1:
+        return textSse(VALID_CONSULT);
+      case 2:
+        return textSse(VALID_REVIEW);
+      default:
+        return textSse(VALID_DECISION);
+    }
+  };
+  const streamEvents: StreamEvent[] = [];
+  const runtimeEvents: RuntimeEvent[] = [];
+  const harness = new TwoBrothersHarness(resolveConfig({ provider: "mock", mode: "consult" }), {
+    senior: anthropic(handler, { thinkingBudgetTokens: 2048 }),
+    toolScopes: { senior: [READ_TOOL] },
+    streamTokens: true,
+    onStreamEvent: (event) => streamEvents.push(event),
+    onEvent: (event) => runtimeEvents.push(event),
+  });
+
+  const result = await harness.run("continue after a redacted thinking block");
+
+  // Round 1 asked for thinking; its reply captured the opaque redacted block.
+  assert.deepEqual(requests[0]!.body.thinking, { type: "enabled", budget_tokens: 2048 });
+  assert.equal(requests.length >= 2, true);
+
+  // Round 2: the assistant turn starts with the SAME opaque redacted block
+  // (exactly as received — no sanitizing, no trimming), then the tool_use.
+  const roundTwo = requests[1]!;
+  const assistant = (roundTwo.body.messages as Array<Record<string, any>>).find(
+    (message) => message.role === "assistant",
+  );
+  assert.ok(assistant, "the tool-loop request carries the assistant turn");
+  assert.deepEqual(assistant.content, [
+    { type: "redacted_thinking", data: REDACTED },
+    { type: "tool_use", id: "call_redacted", name: "read_note", input: { path: "b.txt" } },
+  ]);
+  assert.equal(assistant.content[0].data, REDACTED, "the opaque payload is byte-verbatim");
+  assert.equal(assistant.content[0].data.length, REDACTED.length);
+
+  // The loop completed and drove the structured node from the final reply.
+  assert.deepEqual(result.errors, []);
+  assert.equal(
+    result.messages.find((message) => message.kind === "consult")?.payload.ask,
+    "after tools",
+  );
+
+  // The opaque payload never leaks into the protocol transcript, and it is not
+  // surfaced as live reasoning text either (a redacted block carries no text).
+  assert.equal(JSON.stringify(result.messages).includes("opaque+Redacted"), false);
+  assert.equal(JSON.stringify(result.messages).includes("\u0000"), false);
+  assert.equal(
+    streamEvents.some(
+      (event) => event.type === "token" && String(event.delta).includes("opaque"),
+    ),
+    false,
+  );
+  // A redacted block produces no SENIOR persisted reasoning record (there is no
+  // displayable text), so only the junior mock's own thinking records exist.
+  assert.equal(
+    runtimeEvents.some(
+      (event) => event.type === "reasoning" && event.role === "senior",
+    ),
+    false,
+  );
+});
+
 test("harness: the assistant turn with thinking survives JSONL-free context (no session write)", async () => {
   // Same two-round shape, but the private assistant message must not appear in
   // a persisted protocol session: the harness writes only envelopes.
@@ -776,6 +901,282 @@ test("serve/TUI endpoint path: both role endpoints carry the thinking option", a
     } finally {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (f2) mixed per-role wire kinds: only the Anthropic role sends thinking
+// ---------------------------------------------------------------------------
+
+interface MixedCapture {
+  role: "senior" | "junior";
+  family: "anthropic" | "openai-compatible";
+  /** The exact request-body bytes the provider sent. */
+  raw: string;
+  body: Record<string, any>;
+}
+
+interface MixedKindServer {
+  baseUrl: string;
+  captures: MixedCapture[];
+  reset(): void;
+  close(): Promise<void>;
+}
+
+/** The strict-valid node reply a mixed-kind run needs, derived from the transcript. */
+function mixedReplyText(body: Record<string, any>): string {
+  const transcript = JSON.stringify(body.messages ?? []);
+  if (transcript.includes("review:")) return JSON.stringify({ decision: "done", confidence: 0.8 });
+  if (transcript.includes("proposal:")) {
+    return JSON.stringify({ verdict: "accept", notes: "ok", points: [] });
+  }
+  if (transcript.includes("consult:")) {
+    return JSON.stringify({ title: "P", answer: "A", confidence: 0.7 });
+  }
+  return JSON.stringify({ task: "t", ask: "a", expect: "proposal" });
+}
+
+/** A loopback stub serving both wire families for one mixed-kind run at a time. */
+async function startMixedKindServer(): Promise<MixedKindServer> {
+  const captures: MixedCapture[] = [];
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf-8");
+      const body = JSON.parse(raw) as Record<string, any>;
+      const url = req.url ?? "";
+      const family = url.endsWith("/v1/messages") ? "anthropic" : "openai-compatible";
+      const role = url.includes("/senior") ? "senior" : "junior";
+      captures.push({ role, family, raw, body });
+      const reply = mixedReplyText(body);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      if (family === "anthropic") {
+        res.end(
+          JSON.stringify({
+            content: [{ type: "text", text: reply }],
+            usage: { input_tokens: 2, output_tokens: 1 },
+          }),
+        );
+      } else {
+        res.end(
+          JSON.stringify({
+            choices: [{ message: { content: reply } }],
+            usage: { prompt_tokens: 2, completion_tokens: 1 },
+          }),
+        );
+      }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  return {
+    baseUrl: `http://127.0.0.1:${port}`,
+    captures,
+    reset: () => {
+      captures.length = 0;
+    },
+    close: async () => {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
+}
+
+/** A serve/TUI-style harness over one mixed-kind endpoint pair. */
+function mixedKindHarness(
+  server: MixedKindServer,
+  kinds: { senior: "anthropic" | "openai-compatible"; junior: "anthropic" | "openai-compatible" },
+  budget: number,
+): TwoBrothersHarness {
+  const cfg = resolveConfig({
+    provider: "openai",
+    baseUrl: server.baseUrl,
+    apiKey: "k",
+    seniorModel: "m-senior",
+    juniorModel: "m-junior",
+    temperature: 0.2,
+    retries: 0,
+    timeout: 10,
+    thinkingBudget: budget,
+  });
+  return new TwoBrothersHarness(cfg, {
+    endpoints: {
+      senior: {
+        provider: "openai",
+        baseUrl: `${server.baseUrl}/senior`,
+        apiKey: "k",
+        model: "m-senior",
+        kind: kinds.senior,
+      },
+      junior: {
+        provider: "openai",
+        baseUrl: `${server.baseUrl}/junior`,
+        apiKey: "k",
+        model: "m-junior",
+        kind: kinds.junior,
+      },
+    },
+  });
+}
+
+test("per-role forwarding: each role's provider config receives the run-level budget", async () => {
+  const server = await startMixedKindServer();
+  try {
+    const bothAnthropic = mixedKindHarness(
+      server,
+      { senior: "anthropic", junior: "anthropic" },
+      2048,
+    );
+    const bothSenior = bothAnthropic.providers.senior;
+    const bothJunior = bothAnthropic.providers.junior;
+    assert.ok(bothSenior instanceof AnthropicProvider);
+    assert.ok(bothJunior instanceof AnthropicProvider);
+    assert.equal(bothSenior.thinkingBudgetTokens, 2048, "senior ProviderConfig got the option");
+    assert.equal(bothJunior.thinkingBudgetTokens, 2048, "junior ProviderConfig got the option");
+
+    // Either mixed arrangement: the Anthropic role's provider (whichever role
+    // it is) received the option, so a later kind switch cannot drop it.
+    const seniorAnthropic = mixedKindHarness(
+      server,
+      { senior: "anthropic", junior: "openai-compatible" },
+      2048,
+    );
+    assert.ok(seniorAnthropic.providers.senior instanceof AnthropicProvider);
+    assert.equal(seniorAnthropic.providers.senior.thinkingBudgetTokens, 2048);
+    assert.ok(seniorAnthropic.providers.junior instanceof OpenAICompatibleProvider);
+
+    const juniorAnthropic = mixedKindHarness(
+      server,
+      { senior: "openai-compatible", junior: "anthropic" },
+      2048,
+    );
+    assert.ok(juniorAnthropic.providers.junior instanceof AnthropicProvider);
+    assert.equal(juniorAnthropic.providers.junior.thinkingBudgetTokens, 2048);
+    assert.ok(juniorAnthropic.providers.senior instanceof OpenAICompatibleProvider);
+  } finally {
+    await server.close();
+  }
+});
+
+test("mixed per-role kinds: only the senior Anthropic role sends thinking; the junior OpenAI body is byte-identical", async () => {
+  await withCleanCliEnv(async () => {
+    const server = await startMixedKindServer();
+    try {
+      const kinds = {
+        senior: "anthropic",
+        junior: "openai-compatible",
+      } as const;
+      // Run 1: run-level budget enabled.
+      const withBudget = mixedKindHarness(server, kinds, 2048);
+      const first = await withBudget.run("mixed kinds: senior anthropic");
+      assert.deepEqual(first.errors, []);
+      const enabledCaptures = [...server.captures];
+      server.reset();
+      // Run 2 (control): same task, same scripted replies, no budget.
+      const withoutBudget = mixedKindHarness(server, kinds, 0);
+      const second = await withoutBudget.run("mixed kinds: senior anthropic");
+      assert.deepEqual(second.errors, []);
+      const controlCaptures = [...server.captures];
+
+      const seniorEnabled = enabledCaptures.filter((capture) => capture.role === "senior");
+      const juniorEnabled = enabledCaptures.filter((capture) => capture.role === "junior");
+      const seniorControl = controlCaptures.filter((capture) => capture.role === "senior");
+      const juniorControl = controlCaptures.filter((capture) => capture.role === "junior");
+      assert.equal(seniorEnabled.length, 3, "senior consult -> review -> decision");
+      assert.equal(juniorEnabled.length, 1, "junior proposal");
+      assert.deepEqual(
+        juniorEnabled.map((capture) => capture.family),
+        ["openai-compatible"],
+      );
+      for (const capture of seniorEnabled) {
+        assert.equal(capture.family, "anthropic");
+        assert.deepEqual(capture.body.thinking, { type: "enabled", budget_tokens: 2048 });
+        assert.equal("temperature" in capture.body, false);
+        assert.ok((capture.body.max_tokens as number) > 2048);
+        assert.equal(capture.body.model, "m-senior");
+      }
+      for (const capture of juniorEnabled) {
+        assert.equal("thinking" in capture.body, false, "the OpenAI-compatible body never gets thinking");
+        assert.equal(capture.body.temperature, 0.2);
+        assert.equal(capture.body.model, "m-junior");
+      }
+      // The non-Anthropic role's request bytes are identical with and without
+      // the run-level option (only the transcript-derived content, which is the
+      // same scripted flow in both runs).
+      assert.deepEqual(
+        juniorEnabled.map((capture) => capture.raw),
+        juniorControl.map((capture) => capture.raw),
+        "the junior OpenAI-compatible body is byte-identical to the no-budget run",
+      );
+      // The Anthropic role's body is the one that changed: thinking added and
+      // temperature dropped.
+      for (const capture of seniorControl) {
+        assert.equal("thinking" in capture.body, false);
+        assert.equal(capture.body.temperature, 0.2);
+      }
+      assert.notEqual(
+        JSON.stringify(seniorEnabled.map((capture) => capture.raw)),
+        JSON.stringify(seniorControl.map((capture) => capture.raw)),
+      );
+    } finally {
+      await server.close();
+    }
+  });
+});
+
+test("mixed per-role kinds: only the junior Anthropic role sends thinking; the senior OpenAI body is byte-identical", async () => {
+  await withCleanCliEnv(async () => {
+    const server = await startMixedKindServer();
+    try {
+      const kinds = {
+        senior: "openai-compatible",
+        junior: "anthropic",
+      } as const;
+      const withBudget = mixedKindHarness(server, kinds, 2048);
+      const first = await withBudget.run("mixed kinds: junior anthropic");
+      assert.deepEqual(first.errors, []);
+      const enabledCaptures = [...server.captures];
+      server.reset();
+      const withoutBudget = mixedKindHarness(server, kinds, 0);
+      const second = await withoutBudget.run("mixed kinds: junior anthropic");
+      assert.deepEqual(second.errors, []);
+      const controlCaptures = [...server.captures];
+
+      const seniorEnabled = enabledCaptures.filter((capture) => capture.role === "senior");
+      const juniorEnabled = enabledCaptures.filter((capture) => capture.role === "junior");
+      const seniorControl = controlCaptures.filter((capture) => capture.role === "senior");
+      const juniorControl = controlCaptures.filter((capture) => capture.role === "junior");
+      assert.equal(seniorEnabled.length, 3, "senior consult -> review -> decision");
+      assert.equal(juniorEnabled.length, 1, "junior proposal");
+      assert.deepEqual(
+        [...new Set(seniorEnabled.map((capture) => capture.family))],
+        ["openai-compatible"],
+      );
+      for (const capture of juniorEnabled) {
+        assert.equal(capture.family, "anthropic");
+        assert.deepEqual(capture.body.thinking, { type: "enabled", budget_tokens: 2048 });
+        assert.equal("temperature" in capture.body, false);
+        assert.ok((capture.body.max_tokens as number) > 2048);
+        assert.equal(capture.body.model, "m-junior");
+      }
+      for (const capture of seniorEnabled) {
+        assert.equal("thinking" in capture.body, false);
+        assert.equal(capture.body.temperature, 0.2);
+        assert.equal(capture.body.model, "m-senior");
+      }
+      assert.deepEqual(
+        seniorEnabled.map((capture) => capture.raw),
+        seniorControl.map((capture) => capture.raw),
+        "the senior OpenAI-compatible body is byte-identical to the no-budget run",
+      );
+      for (const capture of juniorControl) {
+        assert.equal("thinking" in capture.body, false);
+        assert.equal(capture.body.temperature, 0.2);
+      }
+    } finally {
+      await server.close();
     }
   });
 });
