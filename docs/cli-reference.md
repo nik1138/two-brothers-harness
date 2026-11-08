@@ -1119,7 +1119,7 @@ per-role connection without leaving the terminal.
 | `--max-rounds` | int | `3` | maximum revise rounds |
 | `--temperature` | float | `0.4` | temperature |
 | `--timeout` | int | `120` | per-request HTTP timeout, seconds; bounds every attempt of the retry loop (see [Local models and timeouts](#local-models-lm-studio-and-timeouts)) |
-| `--retries` | int | `6` | retries after a failed model call (`0` = single attempt); backoff 2 s, 4 s, 8 s, … capped at 30 s (7 attempts total by default); a stopped run aborts the loop between attempts |
+| `--retries` | int | `6` | retries after a failed model call (`0` = single attempt); backoff 2 s, 4 s, 8 s, … capped at 30 s with a 0–25% jitter reduction (so those values are the upper bound; 7 attempts total by default); a provider's `retry-after-ms`/`Retry-After` replaces that attempt's backoff; a stopped run aborts the loop between attempts |
 | `--max-tokens` | int | — | (TS package) output-token cap for both roles (env `TWO_BROTHERS_MAX_TOKENS`; per-role `TWO_BROTHERS_SENIOR_MAX_TOKENS` / `TWO_BROTHERS_JUNIOR_MAX_TOKENS` override it); Anthropic's default stays 4096, OpenAI/Gemini omit the cap when unset |
 | `--thinking-budget` | int | — | (TS package) Anthropic extended-thinking budget in tokens, run-level for both roles (min 1024; only Anthropic Messages roles use it, other providers ignore it; env `TWO_BROTHERS_THINKING_BUDGET`; never persisted). When an Anthropic provider's effective `--max-tokens` does not exceed the budget, that provider's request cap is raised to budget + 1024 with one honest warning per provider instance (up to two when both roles are Anthropic); `temperature` is omitted while thinking is enabled (see [Anthropic extended thinking](#anthropic-extended-thinking-ts-package)) |
 | `--mode` | `consult`, `work`, `auto` | `consult` | cooperation mode |
@@ -1551,8 +1551,11 @@ them):
 - **Provider error classification** — an ordered registry decides which
   failures retry (408/409/429/5xx and transport errors) and which fail fast
   (other 4xx, quota/billing, context overflow); a retryable response's
-  `Retry-After` replaces that attempt's fixed backoff, and a context-overflow
-  payload triggers compact-and-retry instead of burning the retry budget.
+  `retry-after-ms` (milliseconds) or `Retry-After` (seconds or HTTP-date)
+  replaces that attempt's fixed backoff — both capped at 120 s, with
+  `retry-after-ms` winning — the fallback exponential schedule carries a
+  0–25% jitter reduction, and a context-overflow payload triggers
+  compact-and-retry instead of burning the retry budget.
 - **Anthropic extended thinking** (TS package) — `--thinking-budget <n>`
   (`TWO_BROTHERS_THINKING_BUDGET`, run-level for both roles) makes every
   Anthropic Messages request carry

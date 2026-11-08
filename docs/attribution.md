@@ -29,7 +29,7 @@ permission text.
 
 | Here | Upstream | What was ported |
 |---|---|---|
-| `packages/harness/src/provider.ts` | pi-ai `utils/retry.ts`, `utils/provider-retry.ts`, `utils/overflow.ts` | The ordered provider-error classification registry: retryable 408/409/429/5xx and transport errors, `Retry-After` parsing (capped at 120 s), context-overflow detection (`ProviderContextOverflowError`), and non-retryable quota/billing failures. |
+| `packages/harness/src/provider.ts` | pi-ai `utils/retry.ts`, `utils/provider-retry.ts`, `utils/overflow.ts` | The ordered provider-error classification registry: retryable 408/409/429/5xx and transport errors, `retry-after-ms`/`Retry-After` parsing (capped at 120 s), bounded 0–25% backoff jitter, context-overflow detection (`ProviderContextOverflowError`), and non-retryable quota/billing failures. |
 | `packages/harness/src/workspace.ts` | coding-agent `edit-diff.ts`, `file-mutation-queue.ts` | `normalizeForFuzzyMatch` (NFKC, trailing whitespace, smart quotes/dashes/spaces) and the robust-edit matching strategy; the per-path write/edit/delete mutation queue keyed by realpath. |
 | `packages/harness/src/compaction.ts` | coding-agent `core/compaction/compaction.ts` | Cut-point selection, the 2000-char serialization cap, the pinned cold and update summarization prompts (verbatim), incremental `<previous-summary>` chaining, and the split-payload cut. |
 | `packages/harness/src/mcp.ts` | coding-agent `extensions/mcp/tools.ts` | `createMcpToolName`: `mcp__<server>__<tool>` sanitizing, the 64-character cap, and a stable sha256 suffix on truncation/collision. The 20 KiB result cap follows pi's `MCP_OUTPUT_MAX_BYTES`. |

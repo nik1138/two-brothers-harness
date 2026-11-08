@@ -111,8 +111,9 @@ servers. The `doctor` row `mcp-config` validates the env-named file read-only.
 `doctor`'s `--timeout` bounds only the model-list probe; a run has its own
 per-attempt timeout — 120 s by default (`--timeout`, or
 `TWO_BROTHERS_TIMEOUT` for `serve`). A failed call is retried 6 times by
-default with a 2/4/8/16/30/30 s backoff, and each retry re-requests the whole
-reply. For a slow local model, raise the timeout instead of the retry count:
+default with a 2/4/8/16/30/30 s backoff (0–25% jitter reduces each wait, so
+those values are the upper bound), and each retry re-requests the whole reply.
+For a slow local model, raise the timeout instead of the retry count:
 
 ```powershell
 node dist/cli.js run "Your task" --timeout 900

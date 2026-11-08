@@ -17,6 +17,7 @@ import "./adapters.test.ts";
 import "./anthropiccache.test.ts";
 import "./usagecache.test.ts";
 import "./retryregistry.test.ts";
+import "./retryjitter.test.ts";
 import "./workspace.test.ts";
 import "./editqueue.test.ts";
 import "./output.test.ts";

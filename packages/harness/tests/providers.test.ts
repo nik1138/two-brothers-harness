@@ -83,6 +83,7 @@ function makeProvider(overrides: Partial<ProviderConfig & {
   signal: AbortSignal;
   fetchImpl: FetchLike;
   sleeper: (s: number) => Promise<void>;
+  rng: () => number;
 }> = {}) {
   return new OpenAICompatibleProvider({
     provider: "openai",
@@ -94,6 +95,9 @@ function makeProvider(overrides: Partial<ProviderConfig & {
     timeout: 120,
     retries: 6,
     model: "m",
+    // Pin the 0–25% backoff jitter to "no reduction" so the schedule these
+    // tests assert stays exact (jitter itself is covered by retryjitter.test).
+    rng: () => 0,
     ...overrides,
   });
 }
