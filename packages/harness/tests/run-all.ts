@@ -101,3 +101,4 @@ import "./clidocs.test.ts";
 import "./steering.test.ts";
 import "./sessionrewind.test.ts";
 import "./workspaceundo.test.ts";
+import "./serverundo.test.ts";

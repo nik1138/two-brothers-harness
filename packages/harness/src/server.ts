@@ -150,6 +150,20 @@
  *   `reason` explains why). 400 non-integer/out-of-range depth, 404 unknown
  *   session, 409 live run/manual compaction, 422 corrupt session, 500 a
  *   failed rewrite. The kept prefix keeps its dense `seq`, so resume works.
+ * - `GET|POST|DELETE /api/sessions/{name}/undo/{run_id}` (wave 23) expose the
+ *   run-scoped workspace edit undo store (`src/workspacehistory.ts`), which is
+ *   a persisted side artifact under `<sessions>/undo` and therefore survives a
+ *   backend restart. GET previews every recorded file against the LIVE
+ *   workspace (`applicable` / `created` / `deleted` / `changed-since` /
+ *   `skipped` / `missing` + counts + `workspace_root`); POST applies the
+ *   reversible entries (re-classified immediately before each file) and returns
+ *   `{applied, refused, failed, files, counts}`; DELETE discards the record.
+ *   404 unknown session/record, 409 while a run for that id is still active in
+ *   memory or the record itself is unusable (corrupt/oversized/unsupported
+ *   version/its workspace is no longer registered), 422 unexpected store IO.
+ *   A workspace-bound run captures its pre/post images and closes the capture
+ *   in the run's `finally`; a capture failure is one diagnostic and never
+ *   changes the run or its result.
  * - `GET /api/search?q=<query>&limit=<n>` full-text searches every session
  *   document (`src/sessionsearch.ts`, newest session first) and returns the
  *   bounded `SessionSearchResult` hit list. A trimmed query shorter than
@@ -327,6 +341,17 @@ import {
   WorkspaceRegistry,
   type RegisteredWorkspace,
 } from "./workspace.ts";
+import {
+  applyUndo,
+  beginUndoCapture,
+  discardUndo,
+  loadUndoRecord,
+  previewUndo,
+  WorkspaceUndoError,
+  type WorkspaceUndoCapture,
+  type WorkspaceUndoRecord,
+  type WorkspaceUndoStatus,
+} from "./workspacehistory.ts";
 import {
   indexWorkspaceFiles,
   searchWorkspaceFiles,
@@ -930,6 +955,10 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   });
 
   const runtimeEvents = new RuntimeEventStore(path.join(sessionsDir, "runtime"));
+  // Run-scoped workspace edit undo (wave 23): one persisted, content-addressed
+  // store for every workspace-bound run. It is a session side artifact (never
+  // a protocol/session record); the store creates its directories lazily.
+  const undoRoot = path.join(sessionsDir, "undo");
   const runs = new RunManager({ persist: runtimeEvents.asPersist(), workers: options.workers });
   const providerOverrides = options.providerOverrides ?? null;
 
@@ -1192,6 +1221,98 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   }
 
   /**
+   * The registered workspace whose canonical path equals an undo record's
+   * recorded root. Undo records are restart-resilient, so the workspace is
+   * resolved through the live registry on every request; a record whose
+   * workspace is no longer registered (moved, removed, or produced by another
+   * checkout) is an honest 409 instead of silently restoring into a directory
+   * the operator no longer selected.
+   */
+  function undoWorkspaceRoot(recorded: string): string {
+    for (const workspace of state.workspaces.list()) {
+      let real: string;
+      try {
+        real = fs.realpathSync(workspace.path);
+      } catch {
+        continue; // a registered path that vanished cannot match the record
+      }
+      const same =
+        process.platform === "win32"
+          ? real.toLowerCase() === recorded.toLowerCase()
+          : real === recorded;
+      if (same) return real;
+    }
+    throw new WorkspaceUndoError(
+      "workspace_mismatch",
+      `undo record belongs to workspace ${recorded}, which is not registered`,
+    );
+  }
+
+  /**
+   * Map a workspace-undo store failure onto the routes' honest contract:
+   * unknown/invalid records are 404, unusable records (corrupt, oversized,
+   * unsupported version, no longer registered workspace) 409, and unexpected
+   * store IO 422. A non-store exception is a 422 with a generic detail — the
+   * store is a local side artifact, never a request-shape problem.
+   */
+  function undoHttpError(exc: unknown): HttpError {
+    if (exc instanceof HttpError) return exc;
+    if (exc instanceof WorkspaceUndoError) {
+      switch (exc.code) {
+        case "invalid_run_id":
+        case "unknown_record":
+          return new HttpError(404, "not found");
+        case "corrupt_record":
+        case "unsupported_version":
+        case "oversized_record":
+        case "workspace_mismatch":
+          return new HttpError(409, exc.message);
+        default:
+          return new HttpError(422, exc.message);
+      }
+    }
+    return new HttpError(422, `undo store error: ${errorDetail(exc)}`);
+  }
+
+  /**
+   * Shared admission + guard pass for the undo routes: session exists (the
+   * caller checked), the record loads from disk (restart-resilient), a record
+   * that names its session matches the URL, the run is not active in memory
+   * (previewing/applying while it can still mutate would be misleading — the
+   * decision applies to preview AND apply), and its recorded workspace is
+   * still registered. Returns the canonical workspace root preview/apply re-
+   * validate against.
+   */
+  function openUndoRequest(name: string, runId: string): {
+    record: WorkspaceUndoRecord;
+    workspaceRoot: string;
+  } {
+    let record: WorkspaceUndoRecord;
+    try {
+      record = loadUndoRecord(undoRoot, runId);
+    } catch (exc) {
+      throw undoHttpError(exc);
+    }
+    if (record.session !== undefined && record.session !== name) {
+      throw new HttpError(404, "not found");
+    }
+    const live = state.runs.get(runId);
+    if (live !== null && ACTIVE_STATES.has(live.status)) {
+      throw new HttpError(
+        409,
+        `the run is still ${live.status}; stop it before previewing or applying undo`,
+      );
+    }
+    let workspaceRoot: string;
+    try {
+      workspaceRoot = undoWorkspaceRoot(record.workspace_root);
+    } catch (exc) {
+      throw undoHttpError(exc);
+    }
+    return { record, workspaceRoot };
+  }
+
+  /**
    * Build the summarizer provider for a manual compaction through the exact
    * provider construction a run uses (per-role resolved endpoints / presets +
    * the server's test provider overrides) so the endpoint never grows a second
@@ -1312,6 +1433,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     injections?: string[],
     onToken?: LiveTokenHook,
     steering?: () => string[],
+    runIdOf?: () => string | null,
   ): Promise<HarnessResult> {
     const store = storeFor(name);
     const context = store.exists() ? restoreContext(store) : new SharedContext(store);
@@ -1369,6 +1491,25 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         console.warn(`[two-brothers] MCP: ${errorDetail(exc)}`);
       }
     }
+    // Run-scoped workspace edit undo (wave 23): a workspace-bound run captures
+    // the exact pre/post bytes of every write/edit/delete under
+    // `<sessions>/undo`, so the operator can preview/apply/discard it later.
+    // Fail-soft by contract: a capture that cannot start is ONE diagnostic and
+    // the run proceeds normally; the recorder itself is bounded (2 MiB per
+    // side, 64 entries, 8 MiB per run) and never throws into the tool path.
+    const undoRunId = runIdOf?.() ?? null;
+    let undoCapture: WorkspaceUndoCapture | null = null;
+    if (workspace !== undefined && undoRunId !== null) {
+      try {
+        undoCapture = beginUndoCapture(undoRoot, undoRunId, workspace.root, { session: name });
+        workspace.setMutationRecorder(undoCapture.recorder, (line) =>
+          console.warn(`[two-brothers] ${line}`),
+        );
+      } catch (exc) {
+        console.warn(`[two-brothers] undo capture disabled: ${errorDetail(exc)}`);
+        undoCapture = null;
+      }
+    }
     const harness = new TwoBrothersHarness(cfg, {
       workspace,
       signal,
@@ -1413,6 +1554,9 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     try {
       return await harness.run(task, context);
     } finally {
+      // The run is over: stop accepting undo records (idempotent, never throws,
+      // and salvages a record whose last per-mutation write failed).
+      undoCapture?.close();
       // connections stay open for the whole run; closed once it settles
       await mcp?.client.close();
     }
@@ -1442,6 +1586,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     broker: RunApprovalBroker,
     injections: string[] = [],
     steering?: () => string[],
+    runIdOf?: () => string | null,
   ): RunJob {
     // The config is built inside the job so a run picks up settings current
     // at start time; the broker binds the per-run emit hook and cancel
@@ -1476,6 +1621,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         // other run leaves the harness on its non-streaming provider path.
         req.stream_tokens === true ? onToken : undefined,
         steering,
+        runIdOf,
       );
       return {
         cancelled: result.cancelled,
@@ -2765,7 +2911,8 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       // The steering drain reads the run record that `submit` creates; the
       // back-reference is assigned synchronously before the worker can start
       // the job (dispatch resolves in a later microtask), so the closure is
-      // never called with a null record.
+      // never called with a null record. The undo capture uses the same
+      // back-reference for its run id.
       let record: RunRecord | null = null;
       record = state.runs.submit(
         prepared.task,
@@ -2777,6 +2924,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
           broker,
           prepared.injections,
           () => record?.drainSteering() ?? [],
+          () => record?.runId ?? null,
         ),
         effectiveMode(runReq),
         { streamTokens: req.stream_tokens === true },
@@ -2864,6 +3012,101 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       const accepted = result.record;
       if (accepted === null) throw new HttpError(404, "not found");
       return { run_id: accepted.runId, status: accepted.status, pending: result.pending };
+    }),
+  );
+
+  /**
+   * Run-scoped workspace edit undo (wave 23): preview/apply/discard the file
+   * mutations one workspace-bound run made. The store is persisted under
+   * `<sessions>/undo`, so these routes are restart-resilient; the guards are
+   * shared with `openUndoRequest` (unknown/invalid 404, unusable record or
+   * active in-memory run 409, unexpected store IO 422) and the workspace root
+   * is matched against the LIVE registry on every request (a record whose
+   * workspace is no longer registered is an honest 409, never a blind restore).
+   * Apply re-classifies each file immediately before touching it, so a file
+   * changed after the preview is refused per file, never overwritten.
+   */
+  routes.push(
+    compileRoute("GET", "/api/sessions/{name}/undo/{run_id}", (ctx) => {
+      const name = sessionFileName(ctx.params.name);
+      if (!storeFor(name).exists()) throw new HttpError(404, "not found");
+      const { workspaceRoot } = openUndoRequest(name, ctx.params.run_id);
+      let preview;
+      try {
+        preview = previewUndo(undoRoot, ctx.params.run_id, workspaceRoot);
+      } catch (exc) {
+        throw undoHttpError(exc);
+      }
+      return {
+        session: name,
+        run_id: ctx.params.run_id,
+        statuses: preview.entries,
+        counts: preview.counts,
+        workspace_root: preview.workspace_root,
+        created_at: preview.created_at,
+        ...(preview.omitted !== undefined ? { omitted: preview.omitted } : {}),
+      };
+    }),
+  );
+
+  routes.push(
+    compileRoute("POST", "/api/sessions/{name}/undo/{run_id}", (ctx) => {
+      const name = sessionFileName(ctx.params.name);
+      if (!storeFor(name).exists()) throw new HttpError(404, "not found");
+      const { workspaceRoot } = openUndoRequest(name, ctx.params.run_id);
+      let result;
+      try {
+        result = applyUndo(undoRoot, ctx.params.run_id, workspaceRoot);
+      } catch (exc) {
+        throw undoHttpError(exc);
+      }
+      const statusCount = (status: WorkspaceUndoStatus): number =>
+        result.entries.filter((entry) => entry.preview_status === status).length;
+      return {
+        session: name,
+        run_id: ctx.params.run_id,
+        workspace_root: workspaceRoot,
+        applied: result.applied,
+        refused: result.refused,
+        failed: result.failed,
+        files: result.entries,
+        counts: {
+          applicable: statusCount("applicable"),
+          created: statusCount("created"),
+          deleted: statusCount("deleted"),
+          changed_since: statusCount("changed-since"),
+          skipped: statusCount("skipped"),
+          missing: statusCount("missing"),
+          total: result.entries.length,
+        },
+        ...(result.omitted !== undefined ? { omitted: result.omitted } : {}),
+      };
+    }),
+  );
+
+  routes.push(
+    compileRoute("DELETE", "/api/sessions/{name}/undo/{run_id}", (ctx) => {
+      const name = sessionFileName(ctx.params.name);
+      if (!storeFor(name).exists()) throw new HttpError(404, "not found");
+      // The record is read first so a URL that names another session's run id
+      // is a 404 (same rule as preview/apply), never a cross-session delete.
+      let record: WorkspaceUndoRecord;
+      try {
+        record = loadUndoRecord(undoRoot, ctx.params.run_id);
+      } catch (exc) {
+        throw undoHttpError(exc);
+      }
+      if (record.session !== undefined && record.session !== name) {
+        throw new HttpError(404, "not found");
+      }
+      let removed: boolean;
+      try {
+        removed = discardUndo(undoRoot, ctx.params.run_id);
+      } catch (exc) {
+        throw undoHttpError(exc);
+      }
+      if (!removed) throw new HttpError(404, "not found");
+      return { discarded: true, session: name, run_id: ctx.params.run_id };
     }),
   );
 
