@@ -16,12 +16,11 @@
  * persist seeds into `settings.json` — `mergeSeedPresets()` layers stored
  * presets on top of the seed list at read time.
  *
- * Integration TODO (server lane, `src/server.ts`): `GET /api/providers`,
- * `provider_ref` resolution and the settings write-path validation still read
- * `settingsStore.readProviders()` (stored presets only). Swap that read for
- * `mergeSeedPresets(store.readProviders())`, resolve keys through
- * `presetApiKey(preset)` and keep `publicProvider`'s masking (the resolved
- * key must never be echoed). `SettingsStore.write()` does not persist
+ * Integration is wired (server, `src/server.ts`): `GET /api/providers`,
+ * `provider_ref` resolution and the settings write-path validation read the
+ * merged table via `mergeSeedPresets(store.readProviders())`, resolve keys
+ * through `presetApiKey(preset)` and keep `publicProvider`'s masking (the
+ * resolved key is never echoed). `SettingsStore.write()` does not persist
  * `api_key_env` — a stored preset always speaks for itself, so an
  * env-backed seed that gets edited turns into a normal stored preset.
  */

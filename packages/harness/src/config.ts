@@ -474,11 +474,10 @@ export function resolveConfig(args: Args = {}): Config {
  * Seeded provider presets (see `src/presets.ts`): curated well-known
  * endpoints offered on top of the user's stored presets.
  *
- * TODO(server integration lane): `server.ts` still serves
- * `settingsStore.readProviders()` (stored only) on `GET /api/providers` and
- * for `provider_ref` validation/resolution. Switch those reads to
- * `mergeSeedPresets(store.readProviders())` and resolve env-backed keys
- * through `presetApiKey(preset)`; keep the key out of every response.
+ * The server integration is wired: `server.ts` serves
+ * `mergeSeedPresets(settingsStore.readProviders())` on `GET /api/providers`,
+ * uses the merged table for `provider_ref` validation/resolution and resolves
+ * env-backed keys through `presetApiKey(preset)` (the key is never echoed).
  * `SettingsStore.write()` is unchanged — seeds are never persisted, so a
  * stored same-name preset overrides its seed.
  */

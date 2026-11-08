@@ -9,7 +9,7 @@
  * tools — workspace confinement, the central PermissionManager approval
  * broker, and the runtime-event history.
  *
- * **Tool scope is shared by default** (owner decision 2026-11-03: for now,
+ * **Tool scope is shared by default** (owner decision 2026-11-03:
  * adding a plugin makes it work for both agents). `add_tool` can opt a tool
  * into one scope explicitly — `{ scope: "senior" | "junior" }` — and the
  * declared scope is recorded on the registered tool so a scope-aware caller
