@@ -163,8 +163,17 @@ same generated key guide, resolved from `TWO_BROTHERS_TUI_KEYS_FILE` or the
 default `~/.two-brothers/tui-keys.json` (the `help` command has no
 `--keys-file` flag; use `two-brothers tui --help --keys-file <path>` for a
 flag-selected file). An invalid file prints one `[tui keys]` diagnostic and
-falls back to the defaults; a missing default file is silent. `Ctrl+F` (or
-`/find [query]`) opens find-in-transcript: a live
+falls back to the defaults; a missing default file is silent. Inside the TUI,
+`/keys` (or `/keys show`) prints the three effective global chords and the
+captured keys-file path/origin (flag, env or default) with the last load
+state — it never claims overrides that are not active. `/keys reload` re-reads
+the same startup-captured file and applies valid changes immediately to
+matching, the palette/help listings and the status hints (the success notice
+names the new chords); an invalid/unreadable file keeps the previous chords
+and prints one bounded diagnostic, and an absent file keeps them with an
+informational notice. The path/origin are captured at startup, so an
+env/flag change needs a TUI restart. `Ctrl+F` (or `/find [query]`) opens
+find-in-transcript: a live
 case-insensitive filter over the whole transcript with `current/total`,
 `Enter`/`Down` next, `Shift+Enter`/`Up` previous (wrap), the active match
 marked and scrolled into view, and `Esc` restoring the draft and scroll

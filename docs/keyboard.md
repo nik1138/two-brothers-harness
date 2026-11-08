@@ -291,7 +291,13 @@ appear in both `tui --help` (honors `--keys-file`) and `help tui` (the
 env/default file only — the `help` command has no `--keys-file` flag), as well
 as in the `?` overlay, the palette and the status hints;
 typing keys, Escape/quit layering, the composer, pickers/overlays, the
-approval panel and the find bar stay fixed.
+approval panel and the find bar stay fixed. Edit the file externally, then run
+`/keys reload` inside the TUI to apply it without restarting; `/keys show`
+reports the effective global chords, the file path/origin (flag, env or
+default) and the last load diagnostics. A failed reload keeps the previous
+chords (one bounded diagnostic), and a missing file keeps them with an
+informational notice; the path/origin are captured at startup, so changing
+`--keys-file`/the env needs a restart.
 
 ### Compose and send
 

@@ -114,7 +114,7 @@ npm run test:spawn      # node --test tests/ (child processes allowed)
 ```
 
 On the canonical integrated run for this round the in-process suite is
-**1 555 tests: 1 553 pass, 0 fail, 2 skipped** (exit 0); the two skips are
+**1 559 tests: 1 557 pass, 0 fail, 2 skipped** (exit 0); the two skips are
 environment-gated and never failures — the workspace symlink-parity test and
 the MCP stdio spawn are unavailable in this environment. `npm run typecheck`
 and `npm run build` pass, the hermetic CLI E2E is 17/17 on sources and 17/17
@@ -558,7 +558,22 @@ suite pins the variant sets, light/dark parity and computed WCAG-AA role-text
 floors, and the browser suite covers `appearance-roles` (19 offline scenarios).
 Package suite: **1 555 tests (1 553 pass, 2 environment skips)**; web suite
 **355 tests** (tokens 15, uiPrefs 13, keybindings 13); browser 19 offline
-scenarios. The Default role palette keeps the historic look (documented as not
+scenarios.
+
+Wave 22 adds the TUI's `/keys` built-in: `/keys show` reports the effective
+palette/help/stash chords plus the captured keys-file path, origin
+(flag/env/default) and last load state with a bounded diagnostic line, and
+`/keys reload` re-reads the startup-captured file and live-swaps the active
+command table (matching, palette/help listings, hints) — a failed reload keeps
+the last good table and prints one bounded diagnostic, an absent file keeps
+the chords with an informational notice, and a file absent at startup loads on
+a later reload. `tests/tuikeys.test.ts` covers the registry entry
+(non-rebindable, discoverable once), the status wording/overclaim rules and
+the reload last-good semantics; `tests/tuiintegration.test.ts` covers an
+on-disk edit + `/keys reload` (new chord works, old stops, listings update)
+and a corrupt-file reload that keeps the previous table. Package suite:
+**1 559 tests (1 557 pass, 2 environment skips)**; web suite 355 and browser
+19 offline scenarios are unchanged. The Default role palette keeps the historic look (documented as not
 AA on every documented surface in either scheme — worst in dark — which is why
 the two accessible palettes exist); role avatar/dot fills stay decorative
 (aria-hidden, with the adjacent labels carrying identity — in the dark

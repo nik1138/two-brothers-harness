@@ -491,6 +491,20 @@ the protocol reference and is not modified by work here either.
    wrong-version/unreadable/unknown/duplicate/fixed-conflict files. Tests:
    `tests/tuikeys.test.ts` (25) + 2 `tuiintegration` cases; `clihelp.ts`
    catalogues the flag/env (docs↔CLI drift guard green).
+   **wave 22:** the TUI gains a chordless `/keys` built-in (Settings group):
+   `/keys show` reports the effective palette/help/stash chords plus the
+   captured keys-file path, origin (flag/env/default) and last load state with
+   one bounded diagnostic (`describeTuiKeys`/`globalKeySummary`, never
+   claiming overrides that are not active), and `/keys reload` re-reads the
+   startup-captured file via `reloadTuiCommands` and live-swaps the active
+   command table in place — matching, palette/help listings and hints update
+   immediately; failures keep the last good table with one bounded warning,
+   absent files keep the current chords with an informational notice (and a
+   file absent at startup loads on a later reload). CLI tracks the keys-file
+   origin/state (`TuiAppOptions.keysSource/keysState/keysDiagnostics`); tests
+   `tuikeys` +3 and `tuiintegration` +1; all 21 `tui*.test.ts` suites stay
+   green. Remaining: in-TUI editor, file watcher/auto-reload, rebinding beyond
+   the three global chords.
 
 ## Commands
 

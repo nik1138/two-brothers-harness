@@ -1118,6 +1118,26 @@ Design anchors that already exist:
   palettes the aria-hidden initials sit white-on-light while the labels carry
   identity), with a fill/text token split recorded as an optional follow-up.
 
+## Shipped 2026-11-08 (wave 22: TUI `/keys` show + live reload)
+
+- **TUI `/keys` built-in** — a chordless `keys` command (Settings group,
+  `/keys [show|reload]`) now exposes the file-configured global chords inside
+  the TUI: `/keys show` reports the effective palette/help/stash chords plus
+  the captured keys-file path, origin (flag/env/default), honest load state
+  and one bounded last-diagnostic line (never claiming overrides that are not
+  active); `/keys reload` re-reads the startup-captured path (env/flag changes
+  need a restart), validates with the existing fail-soft resolver and
+  live-swaps the active command table so matching, palette/help listings and
+  hints use the new chords immediately. Failures keep the **last good table**
+  and post one bounded diagnostic; absent files keep the current chords with
+  an informational notice, and a file absent at startup loads on a later
+  reload. Files: `src/tui/keyoverrides.ts` (additive reload/describe helpers),
+  `src/tui/app.ts`, `src/tui/keymap.ts`, `src/cli.ts` (origin/state capture);
+  tests `tests/tuikeys.test.ts` (+3) and `tests/tuiintegration.test.ts` (+1);
+  all 21 `tui*.test.ts` suites stay green with no changed listing/frame
+  assertions. Remaining: in-TUI editor, file watcher/auto-reload, rebinding
+  beyond the three global chords.
+
 ## Open items (deferred)
 
 - **Remaining key-binding surfaces** — wave 16 shipped the web's three
@@ -1127,7 +1147,8 @@ Design anchors that already exist:
   `tui --keys-file`/`TWO_BROTHERS_TUI_KEYS_FILE`. Still fixed by design:
   composer/typing keys (IME- and picker-sensitive), picker/overlay
   navigation, dual-Escape stop, `?`/search/scroll keys, approval-panel keys
-  and the find bar; the TUI has no in-app editor or hot reload yet.
+  and the find bar; the TUI has no in-TUI editor or file watcher yet (wave 22
+  added explicit `/keys show` + `/keys reload`, not automatic reload).
   Extending rebinding there needs a per-surface conflict model.
 - **WAN fault / long-soak coverage (manual)** — WAN latency/load and
   real-provider fault injection are not covered by the offline gates, and long

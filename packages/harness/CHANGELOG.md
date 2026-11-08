@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **TUI `/keys` command (show + live reload)** (wave 22): the TUI gains a
+  built-in, chordless `keys` command (Settings group, `/keys [show|reload]`)
+  so the file-configured global chords can be inspected and reloaded without a
+  restart. `/keys`/`/keys show` posts bounded info notices with the three
+  effective global chords (`palette … · help … · stash …`), the captured
+  keys-file path and origin (flag / env / default), the honest load state
+  (`loaded`, `loaded; defaults active (no overrides)`, `absent; defaults
+  active`, `invalid; defaults active`, plus the `previous chords kept`
+  variants) and one bounded last-diagnostic line — it never claims overrides
+  that are not active (embedded callers without a captured source see
+  `keys file: none …`). `/keys reload` re-reads the same startup-captured
+  path/origin (env/flag changes need a restart), validates with the existing
+  fail-soft loader and live-swaps the app's active command table so key
+  matching, the palette/help listings, status hints and all footer surfaces
+  immediately use the new chords; a failed read/parse/validation keeps the
+  last good table and posts one bounded
+  `keys reload failed: … — keeping the current chords` warning, while an
+  absent file keeps the chords with an informational notice and a file absent
+  at startup loads on a later reload. CLI now tracks the keys-file origin and
+  state and passes `keysSource`/`keysState`/`keysDiagnostics` into
+  `TuiAppOptions`; new additive helpers in `src/tui/keyoverrides.ts`
+  (`loadTuiKeyCommands`, `reloadTuiCommands`, `describeTuiKeys`,
+  `globalKeySummary`). Registry entry appears exactly once in the palette,
+  `?` overlay and `tui --help`/`help tui`. Tests: `tests/tuikeys.test.ts` +3
+  (registry/discoverability/non-rebindability, status wording/overclaim
+  rules, reload success/failure/absence/last-good) and
+  `tests/tuiintegration.test.ts` +1 (on-disk edit + `/keys reload`; corrupt
+  file keeps the previous table); all 21 `tui*.test.ts` suites stay green and
+  no existing listing/byte-stability assertions needed changes.
 - **Role-colour palettes (web)** (wave 21): Settings → Appearance gains a
   native **Role colours** radio group — Default (the previous blue/teal/grey
   identity colours), **High contrast** (WCAG-AA-tuned role-text colours in
