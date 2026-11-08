@@ -76,10 +76,20 @@ jobs:
         run: node e2e/cli.ts --dist
         working-directory: packages/harness
 
+      # Real-socket fault injection: a scripted loopback node:http server drives
+      # the package's real retry/timeout/overflow machinery over actual TCP
+      # (no fetch stubs, no external network; ~0.3 s, sources only). Cheap
+      # enough for both Node versions, so it is not gated to the 22 floor.
+      - name: Real-socket fault-injection E2E
+        run: node e2e/faults.ts
+        working-directory: packages/harness
+
       # Hermetic server-status/prompt-audit suites. The override points the
       # runner at a closed loopback port, so the endpoint probe fails at once
       # and the live-model suites report SKIP; the hermetic suites still run
-      # and the runner exits 0.
+      # and the runner exits 0. (The browser E2E and live-model suites stay
+      # opt-in/manual: CI has no system Edge/Playwright browser and no model
+      # endpoint.)
       - name: Hermetic server E2E (no live endpoint)
         run: node e2e/run.ts
         working-directory: packages/harness
@@ -97,6 +107,12 @@ jobs:
       - name: Web build
         run: npm run build
         working-directory: web
+
+      # The browser-E2E packaged-web freshness guard is plain node:test with no
+      # dependencies and no browser (the Playwright suite itself stays manual),
+      # so its staleness/auto-sync logic is proven here on a clean checkout.
+      - name: Browser-E2E freshness unit tests
+        run: node --test e2e/web-freshness.test.mjs
 
       # Release rehearsal: `npm pack` (whose prepack runs build + sync-web),
       # install the tarball in a fresh temp dir, then exercise the installed

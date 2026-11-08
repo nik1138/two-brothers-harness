@@ -20,7 +20,7 @@
  *                     the provider's `sleeper` seam so the run stays fast).
  *   5xx-transient     500 then 503 then success: exactly 3 attempts, waits equal
  *                     the documented exponential backoff, one recorded usage.
- *   timeout-retry     first attempt hangs past a 150 ms per-attempt timeout,
+ *   timeout-retry     first attempt hangs past a 400 ms per-attempt timeout,
  *                     retry succeeds: documented [warn] line, 1 successful call.
  *   overflow-surface  413/context-overflow body: `ProviderContextOverflowError`
  *                     fails fast after ONE request even with 6 retries, no wait,
@@ -369,7 +369,7 @@ function cycleReply(body: Record<string, unknown>): string {
 
 interface FaultProviderOptions {
   retries?: number;
-  /** Per-attempt timeout in seconds (tiny values are fine: 0.15 = 150 ms). */
+  /** Per-attempt timeout in seconds (tiny values are fine: 0.4 = 400 ms). */
   timeout?: number;
   backoffBase?: number;
   backoffCap?: number;
@@ -506,13 +506,13 @@ async function scenarioAttemptTimeout(): Promise<string> {
   return withFaultServer(
     (request) =>
       request.index === 0
-        ? { status: 200, body: completion("TOO LATE"), delayMs: 500 }
+        ? { status: 200, body: completion("TOO LATE"), delayMs: 1200 }
         : { status: 200, body: completion(PROBE_CONTENT) },
     async (server) => {
       const warnings: string[] = [];
       const provider = faultProvider(server.baseUrl, {
         retries: 2,
-        timeout: 0.15, // 150 ms per attempt
+        timeout: 0.4, // 400 ms per attempt
         backoffBase: 0.01,
         backoffCap: 0.01,
         onWarning: (line) => warnings.push(line),
@@ -522,7 +522,7 @@ async function scenarioAttemptTimeout(): Promise<string> {
       check(server.requests.length === 2, `expected 2 attempts, got ${server.requests.length}`);
       check(warnings.length === 1, `expected exactly one timeout warning, got ${warnings.length}`);
       check(
-        /provider attempt timed out after 0\.15s/.test(warnings[0] ?? ""),
+        /provider attempt timed out after 0\.4s/.test(warnings[0] ?? ""),
         `unexpected timeout warning: ${warnings[0] ?? "(none)"}`,
       );
       check(
@@ -536,7 +536,7 @@ async function scenarioAttemptTimeout(): Promise<string> {
         "the retry must re-send the same request messages",
       );
       check(provider.usageSnapshot().model_calls === 1, "the timed-out attempt records no usage");
-      return `150 ms per-attempt timeout then success over ${server.requests.length} real attempts; ` +
+      return `400 ms per-attempt timeout then success over ${server.requests.length} real attempts; ` +
         `documented timeout warning emitted once`;
     },
   );
