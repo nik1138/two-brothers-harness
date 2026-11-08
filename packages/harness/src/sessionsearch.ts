@@ -22,7 +22,7 @@ import {
   SESSION_NAME_MAX_CHARS,
 } from "./metadata.ts";
 import type { Message } from "./protocol.ts";
-import { SessionStore } from "./session.ts";
+import { SessionStore, type SessionLoadResult } from "./session.ts";
 import { sanitizeText } from "./tui/text.ts";
 
 /** Shortest query (after trimming) that is actually searched. */
@@ -80,6 +80,10 @@ export interface SessionSearchDoc {
   workspace_id?: string | null;
   /** Unix seconds, optional. */
   updated?: number | null;
+  /** Additive: true when only a torn final JSONL fragment was dropped. */
+  recovered?: boolean;
+  /** Additive: bytes of the dropped torn fragment (present when recovered). */
+  dropped_bytes?: number;
 }
 
 /** Bounds for `loadSessionDocs`. */
@@ -400,13 +404,16 @@ export function loadSessionDocs(
   const metadata = new SessionMetadataStore(dir);
   const docs: SessionSearchDoc[] = [];
   for (const entry of entries.slice(0, maxSessions)) {
-    let events: Message[];
+    let loaded: SessionLoadResult;
     try {
-      events = new SessionStore(path.join(dir, entry.name)).load();
+      // Read-only: a torn final fragment is dropped in memory and reported in
+      // the doc's additive fields; the file is never rewritten here.
+      loaded = new SessionStore(path.join(dir, entry.name)).loadDetailed();
     } catch {
       skipped += 1;
       continue;
     }
+    let events = loaded.events;
     if (events.length > maxEvents) events = events.slice(0, maxEvents);
 
     let meta: Record<string, unknown> | null = null;
@@ -428,6 +435,10 @@ export function loadSessionDocs(
         : Math.floor(entry.mtimeMs / 1000);
 
     docs.push({ name: entry.name, title, events, workspace_id: workspaceId, updated });
+    if (loaded.recovered) {
+      docs[docs.length - 1].recovered = true;
+      docs[docs.length - 1].dropped_bytes = loaded.droppedBytes;
+    }
   }
   return { docs, skipped, truncated };
 }

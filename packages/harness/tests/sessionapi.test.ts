@@ -441,6 +441,50 @@ test("GET export?format=html: self-contained page, escaped payload, no scripts/l
 });
 
 // ---------------------------------------------------------------------------
+// torn tail (vendor scout F3)
+// ---------------------------------------------------------------------------
+
+test("a torn final line stays listed/detail-readable; rewind refuses 422", async () => {
+  const srv = await startServer();
+  try {
+    const file = writeSession(srv.sessionsDir, "torn.jsonl", [
+      ...turn(1, "redis migration task"),
+    ]);
+    fs.appendFileSync(file, '{"v":1,"id":"msg-torn","seq":3,"ts":"2026-', "utf-8");
+    const beforeBytes = fs.readFileSync(file);
+
+    const list = await request<Array<Record<string, unknown>>>(srv.base, "/api/sessions");
+    assert.equal(list.status, 200, list.text);
+    assert.ok(
+      (list.body as unknown as Array<Record<string, unknown>>).some(
+        (item) => item.name === "torn.jsonl",
+      ),
+      list.text,
+    );
+
+    const detail = await request<Record<string, unknown>>(srv.base, "/api/sessions/torn.jsonl");
+    assert.equal(detail.status, 200, detail.text);
+    assert.deepEqual(
+      (detail.body.events as Array<Record<string, unknown>>).map((event) => event.seq),
+      [1, 2],
+    );
+
+    // Read-only routes never rewrite the torn file.
+    assert.deepEqual(fs.readFileSync(file), beforeBytes);
+
+    // A destructive rewind still refuses before rewriting (strict read).
+    const rewind = await request(srv.base, "/api/sessions/torn.jsonl/rewind", {
+      method: "POST",
+      body: { turns: 1 },
+    });
+    assert.equal(rewind.status, 422, rewind.text);
+    assert.deepEqual(fs.readFileSync(file), beforeBytes);
+  } finally {
+    await srv.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // rewind
 // ---------------------------------------------------------------------------
 

@@ -122,6 +122,36 @@ test("resolveKey honors registry priority and app/overlay scopes", () => {
   assert.equal(resolveKey(TUI_COMMANDS, key("escape", "\u001b"), "overlay")?.command.id, "list-close");
 });
 
+test("steer is one composer chord, documented once and unavailable in exclusive scopes", () => {
+  const steer = findCommand(TUI_COMMANDS, "steer");
+  assert.ok(steer, "the registry has a steer command");
+  assert.equal(steer.when, "composer");
+  assert.equal(formatKeys(steer), "Ctrl+N");
+  assert.match(steer.description, /not a new task/);
+  assert.equal(
+    TUI_COMMANDS.filter((command) => formatKeys(command) === "Ctrl+N").length,
+    1,
+    "the chord is registered exactly once",
+  );
+
+  const paletteRows = entries().filter((entry) => entry.id === "steer");
+  const helpRows = documented().filter((entry) => entry.id === "steer");
+  assert.equal(paletteRows.length, 1, "the palette lists steer once");
+  assert.equal(helpRows.length, 1, "help lists steer once");
+  assert.equal(paletteRows[0]?.keys, "Ctrl+N");
+  const helpText = tuiHelpLines(TUI_COMMANDS, { commands: templates }).join("\n");
+  assert.equal(helpText.match(/Ctrl\+N/g)?.length, 1, "the CLI key guide spells it once");
+
+  assert.equal(resolveKey(TUI_COMMANDS, key("n", "\u000e", { ctrl: true }))?.command.id, "steer");
+  for (const context of ["overlay", "find", "mention", "approval"] as const) {
+    assert.equal(
+      resolveKey(TUI_COMMANDS, key("n", "\u000e", { ctrl: true }), context),
+      null,
+      `steer is not offered in the ${context} scope`,
+    );
+  }
+});
+
 test("command lookup, slash aliases and running guards use registry metadata", () => {
   assert.equal(findCommand(TUI_COMMANDS, "help")?.title, "Keyboard help");
   assert.equal(findCommand(TUI_COMMANDS, "missing"), undefined);

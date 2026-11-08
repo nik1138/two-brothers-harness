@@ -52,7 +52,9 @@
  * consequence of removing a *suffix* of a dense log. Malformed but parseable
  * records are tolerated by the pure helpers (they are simply not turn
  * boundaries); a torn/corrupt JSONL line surfaces through
- * `SessionStore.load()` as `SessionError` before anything is rewritten.
+ * `SessionStore.loadStrict()` as `SessionError` before anything is rewritten.
+ * (Read/resume paths recover a torn FINAL fragment instead; a destructive
+ * rewind deliberately stays strict so it never rewrites on a partial read.)
  *
  * ## Provenance
  *
@@ -322,14 +324,15 @@ export function computeRewindCut(events: readonly Message[], turns: number): Rew
  * Rewind one persisted session: load → compute → rewrite the kept prefix.
  *
  * Errors are consistent with `SessionStore`/`SessionError`: an invalid depth,
- * a torn/corrupt session file and a failed rewrite all throw `SessionError`
- * before/without leaving a partially rewritten file (the store's rewrite is
- * atomic). A cut that removes nothing does not touch the file at all.
+ * a torn/corrupt session file (through the strict read) and a failed rewrite
+ * all throw `SessionError` before/without leaving a partially rewritten file
+ * (the store's rewrite is atomic). A cut that removes nothing does not touch
+ * the file at all.
  */
 export function rewindSession(store: SessionStore, turns: unknown): RewindSessionResult {
   const parsed = validateRewindTurns(turns);
   if (!parsed.ok) throw new SessionError(parsed.error);
-  const events = store.load();
+  const events = store.loadStrict();
   const cut = computeRewindCut(events, parsed.turns);
   if (cut.removedCount === 0) return { cut, rewritten: false, path: store.path };
   // The kept prefix is an unchanged suffix-free copy of a dense log, so its
