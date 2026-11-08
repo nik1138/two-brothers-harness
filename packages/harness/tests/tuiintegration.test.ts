@@ -678,6 +678,10 @@ test("/keys show and /keys reload reflect and live-apply keys-file edits", async
       "the source is reported honestly",
     );
     assert.ok(
+      await waitFor(() => textOf(output).includes("keys watch: off ")),
+      "the watch state is reported honestly (off without --keys-watch)",
+    );
+    assert.ok(
       await waitFor(() => textOf(output).includes("help ? / F1")),
       "the untouched global chords are reported too",
     );
@@ -751,4 +755,150 @@ test("/keys show and /keys reload reflect and live-apply keys-file edits", async
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("--keys-watch: valid edits live-reload; invalid and absent changes keep the last good table", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tui-keys-watch-app-"));
+  const keysFile = path.join(root, "keys.json");
+  const source: TuiKeysSource = { path: keysFile, origin: "env" };
+  fs.writeFileSync(
+    keysFile,
+    `${JSON.stringify({ version: 1, bindings: { palette: ["ctrl+g"] } }, null, 2)}\n`,
+    "utf8",
+  );
+  const initial = loadTuiKeyCommands(source);
+  assert.equal(initial.state, "loaded");
+  const { app, input, output } = startApp({
+    commands: initial.commands,
+    keysSource: source,
+    keysState: initial.state,
+    keysDiagnostics: initial.diagnostics,
+    keysWatch: true,
+  });
+  try {
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+
+    // The startup override is active and /keys show reports the watcher state.
+    input.key("g", { ctrl: true });
+    assert.ok(await waitFor(() => lastFrameText(output).includes("COMMANDS")));
+    input.key("escape");
+    assert.ok(await waitFor(() => !lastFrameText(output).includes("COMMANDS")));
+    input.type("/keys show");
+    input.enter();
+    assert.ok(await waitFor(() => textOf(output).includes("keys watch: on ")));
+    assert.match(textOf(output), /keys watch: on \(valid file changes apply automatically/);
+
+    // A valid external edit is applied automatically through the same validated
+    // path as `/keys reload`, with exactly one bounded notice naming the chords.
+    fs.writeFileSync(
+      keysFile,
+      `${JSON.stringify(
+        { version: 1, bindings: { palette: ["ctrl+u"], help: ["f2"] } },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+    assert.ok(await waitFor(() => textOf(output).includes("keys auto-reloaded:")), "the edit is noticed");
+    assert.match(textOf(output), /keys auto-reloaded:[\s\S]{0,200}palette Ctrl\+U/);
+    assert.match(textOf(output), /keys auto-reloaded:[\s\S]{0,200}help F2/);
+    assert.match(textOf(output), /keys auto-reloaded:[\s\S]{0,300}\(env\)/);
+
+    // The live table swapped: the new chord works and the old one is dead.
+    input.key("u", { ctrl: true });
+    assert.ok(await waitFor(() => lastFrameText(output).includes("COMMANDS")), "Ctrl+U opens the palette");
+    assert.match(lastFrameText(output), /Ctrl\+U/, "the palette lists the effective palette chord");
+    assert.match(lastFrameText(output), /F2/, "the palette lists the effective help chord");
+    input.key("escape");
+    assert.ok(await waitFor(() => !lastFrameText(output).includes("COMMANDS")));
+    input.key("g", { ctrl: true });
+    assert.equal(
+      await waitFor(() => lastFrameText(output).includes("COMMANDS"), 300),
+      false,
+      "Ctrl+G is dead after the auto-reload",
+    );
+    input.key("f2");
+    assert.ok(await waitFor(() => lastFrameText(output).includes("HELP")), "F2 opens help");
+    assert.match(lastFrameText(output), /Ctrl\+U/, "the help overlay lists the effective palette chord");
+    assert.doesNotMatch(lastFrameText(output), /Ctrl\+P/, "the dead default chord is not advertised");
+    input.key("escape");
+    assert.ok(await waitFor(() => !lastFrameText(output).includes("HELP")));
+
+    // Status hints derive from the live table: two accepted turns rotate the
+    // footer to the palette tip, which must advertise Ctrl+U, never Ctrl+P.
+    input.type("first task");
+    input.enter();
+    assert.ok(await waitFor(() => textOf(output).includes("decision:"), 30_000));
+    input.type("second task");
+    input.enter();
+    assert.ok(
+      await waitFor(() => textOf(output).split("decision:").length - 1 >= 2, 30_000),
+      "both mock turns completed",
+    );
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("Ctrl+U commands")),
+      "the status hint uses the reloaded palette chord",
+    );
+    assert.doesNotMatch(lastFrameText(output), /Ctrl\+P commands/);
+
+    // An invalid edit keeps the last good table with one bounded warning.
+    fs.writeFileSync(keysFile, "{oops\n", "utf8");
+    assert.ok(
+      await waitFor(() => textOf(output).includes("keeping the current chords")),
+      "the invalid edit is noticed",
+    );
+    assert.match(textOf(output), /keys watch:[\s\S]{0,400}keeping the current chords/);
+    assert.equal(
+      lastFrameText(output).split("keeping the current chords").length - 1,
+      1,
+      "exactly one bounded warning in the current frame",
+    );
+    input.key("u", { ctrl: true });
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("COMMANDS")),
+      "the last good table stays active after an invalid auto-reload",
+    );
+    input.key("escape");
+    assert.ok(await waitFor(() => !lastFrameText(output).includes("COMMANDS")));
+
+    // Absence is informational and also keeps the last good table.
+    fs.unlinkSync(keysFile);
+    assert.ok(
+      await waitFor(() => textOf(output).includes("keys watch: no file at")),
+      "absence is reported informationally",
+    );
+    input.key("f2");
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("HELP")),
+      "the last good table stays active after deletion",
+    );
+    input.key("escape");
+    assert.ok(await waitFor(() => !lastFrameText(output).includes("HELP")));
+    assert.equal(await quit(input, app), 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("/keys show reports an unwatchable embedded session honestly", async () => {
+  // No keysSource/keysWatch: the embedding injected the table directly.
+  const { app, input, output } = startApp();
+  assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+  input.type("/keys show");
+  input.enter();
+  assert.ok(
+    await waitFor(() => textOf(output).includes("keys file: none (no keys-file source captured")),
+  );
+  assert.ok(
+    await waitFor(() => textOf(output).includes("keys watch: unavailable ")),
+    "no captured source means no possible watcher",
+  );
+  // The watcher is opt-in at startup only: there is no runtime toggle command.
+  input.type("/keys watch on");
+  input.enter();
+  assert.ok(
+    await waitFor(() => textOf(output).includes("usage: /keys [show|reload]")),
+    "/keys watch is not a command; the flag/env are captured at startup",
+  );
+  assert.equal(await quit(input, app), 0);
 });

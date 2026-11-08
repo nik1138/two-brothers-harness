@@ -166,8 +166,12 @@ import {
   describeTuiKeys,
   globalKeySummary,
   reloadTuiCommands,
+  watchTuiKeysFile,
+  type TuiKeysLoadResult,
   type TuiKeysLoadState,
   type TuiKeysSource,
+  type TuiKeysWatchHandle,
+  type TuiKeysWatchState,
 } from "./keyoverrides.ts";
 import {
   addNotice,
@@ -327,6 +331,14 @@ export interface TuiAppOptions {
   keysState?: TuiKeysLoadState;
   /** Diagnostics from the startup load (reported by `/keys show`). */
   keysDiagnostics?: readonly string[];
+  /**
+   * `tui --keys-watch` / `TWO_BROTHERS_TUI_KEYS_WATCH=1`: poll the captured
+   * keys file and apply valid edits automatically (fail-soft, last-good table;
+   * one bounded notice per detected change). Off by default and never
+   * persisted; the flag/env are captured at startup (changing them needs a
+   * restart), while the FILE's contents keep reloading.
+   */
+  keysWatch?: boolean;
   /**
    * `tui --approval-mode` / `TWO_BROTHERS_APPROVAL_MODE`: pin the workspace
    * approval policy for this TUI process. Never persisted; without a pin the
@@ -1286,12 +1298,17 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   /** One resolved registry table for matching, labels, palette/help and hints. */
   let commands = options.commands ?? TUI_COMMANDS;
   // `/keys` state: the captured source is reloaded on demand; the diagnostics
-  // and load state are the last attempt's (startup or latest reload). A failed
-  // reload keeps the previous table (see `reloadTuiCommands`).
+  // and load state are the last attempt's (startup or latest reload/auto-reload).
+  // A failed reload keeps the previous table (see `reloadTuiCommands`).
   let keysSource: TuiKeysSource | null = options.keysSource ?? null;
   let keysState: TuiKeysLoadState | "none" =
     options.keysState ?? (keysSource === null ? "none" : "loaded");
   let keysDiagnostics: readonly string[] = options.keysDiagnostics ?? [];
+  // The opt-in file watcher: `off` unless `--keys-watch`/the pinned env asked
+  // for it; there is nothing to watch when an embedding injected commands
+  // directly (honest `unavailable`). `/keys show` reports this state.
+  let keysWatchState: TuiKeysWatchState = keysSource === null ? "unavailable" : "off";
+  let keysWatcher: TuiKeysWatchHandle | null = null;
   // `tui --workspace <dir>`: validate the confined root before the screen is
   // built. A bad root is a clear startup error (exit 2) and never opens the
   // alternate screen; an omitted flag keeps the TUI exactly as before.
@@ -3573,9 +3590,82 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   };
 
   /**
+   * Apply one keys reload outcome to the live app: a valid table is swapped in
+   * place, and every outcome posts exactly one bounded notice. Shared by
+   * `/keys reload` (`via` "manual") and the file watcher ("watch"), so both
+   * surfaces use the same validated path, the same last-good-table rule and
+   * the same no-spam budget (one notice per attempted reload/change).
+   */
+  const applyKeysLoadResult = (result: TuiKeysLoadResult, via: "manual" | "watch"): void => {
+    keysState = result.state;
+    keysDiagnostics = result.diagnostics;
+    const sourceText =
+      keysSource === null ? "" : `${keysSource.path} (${keysSource.origin})`;
+    if (result.state === "loaded") {
+      commands = result.commands;
+      const label = via === "watch" ? "keys auto-reloaded" : "keys reloaded";
+      model = addNotice(
+        model,
+        "info",
+        boundTuiKeysNotice(`${label}: ${globalKeySummary(commands)} — ${sourceText}`),
+      );
+      return;
+    }
+    if (result.state === "missing") {
+      model = addNotice(
+        model,
+        "info",
+        boundTuiKeysNotice(
+          via === "watch"
+            ? `keys watch: no file at ${sourceText} — keeping the current chords`
+            : `keys: no file at ${sourceText} — keeping the current chords`,
+        ),
+      );
+      return;
+    }
+    const detail =
+      result.diagnostics.length > 0 ? result.diagnostics.join("; ") : "invalid keys file";
+    model = addNotice(
+      model,
+      "warn",
+      boundTuiKeysNotice(
+        via === "watch"
+          ? `keys watch: ${detail} — keeping the current chords`
+          : `keys reload failed: ${detail} — keeping the current chords`,
+      ),
+    );
+  };
+
+  /**
+   * Start the opt-in keys-file watcher. `--keys-watch`/the pinned env are
+   * captured at startup (changing them needs a restart); only the FILE's
+   * contents are watched, and `/keys show` reports `on`/`off`/`unavailable`.
+   */
+  const startKeysWatch = (): void => {
+    if (options.keysWatch !== true || keysSource === null || keysWatcher !== null) return;
+    const source = keysSource;
+    keysWatcher = watchTuiKeysFile(source, {
+      current: () => commands,
+      onChange: (result) => {
+        applyKeysLoadResult(result, "watch");
+        render();
+      },
+    });
+    keysWatchState = keysWatcher === null ? "unavailable" : "on";
+  };
+
+  /** Stop and unwatch the opt-in poll (idempotent; used on every exit path). */
+  const stopKeysWatch = (): void => {
+    const watcher = keysWatcher;
+    if (watcher !== null) watcher.stop();
+    keysWatcher = null;
+  };
+
+  /**
    * `/keys` (show) and `/keys reload`: report the three effective global chords
-   * plus the captured keys-file source, or re-read that source and swap the
-   * active table in place. Reload failure/absence keeps the last good table.
+   * plus the captured keys-file source and watch state, or re-read that source
+   * and swap the active table in place. Reload failure/absence keeps the last
+   * good table.
    */
   const dispatchKeys = (args: string): void => {
     const sub = args.trim().toLowerCase();
@@ -3584,6 +3674,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         source: keysSource,
         state: keysState,
         diagnostics: keysDiagnostics,
+        watch: keysWatchState,
       });
       for (const line of lines) model = addNotice(model, "info", line);
       render();
@@ -3604,34 +3695,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       return;
     }
     const result = reloadTuiCommands(keysSource, commands);
-    keysState = result.state;
-    keysDiagnostics = result.diagnostics;
-    if (result.state === "loaded") {
-      commands = result.commands;
-      model = addNotice(
-        model,
-        "info",
-        boundTuiKeysNotice(
-          `keys reloaded: ${globalKeySummary(commands)} — ${keysSource.path} (${keysSource.origin})`,
-        ),
-      );
-    } else if (result.state === "missing") {
-      model = addNotice(
-        model,
-        "info",
-        boundTuiKeysNotice(
-          `keys: no file at ${keysSource.path} (${keysSource.origin}) — keeping the current chords`,
-        ),
-      );
-    } else {
-      const detail =
-        result.diagnostics.length > 0 ? result.diagnostics.join("; ") : "invalid keys file";
-      model = addNotice(
-        model,
-        "warn",
-        boundTuiKeysNotice(`keys reload failed: ${detail} — keeping the current chords`),
-      );
-    }
+    applyKeysLoadResult(result, "manual");
     render();
   };
 
@@ -4041,6 +4105,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
 
   try {
     terminal.enter();
+    // Start the opt-in watcher only once the screen owns the terminal; every
+    // exit path below stops and unwatches it in the `finally`.
+    if (options.keysWatch === true) startKeysWatch();
     render();
     if (options.initialTask !== undefined && options.initialTask.trim() !== "") {
       executeTurn(options.initialTask.trim(), mode, options.initialTask.trim());
@@ -4106,6 +4173,8 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     if (!(exc instanceof TuiExit)) throw exc;
     return 0;
   } finally {
+    // Stop and unwatch the opt-in poll on every exit path (no leaked timer).
+    stopKeysWatch();
     unsubscribeResize();
     clearInterval(spinnerTimer);
     abortRunningTurn();

@@ -310,6 +310,12 @@ export const FLAGS: Record<string, FlagHelp> = {
       "TWO_BROTHERS_TUI_KEYS_FILE; missing file = defaults; invalid file prints one " +
       "diagnostic and keeps the defaults; tui only)",
   },
+  "keys-watch": {
+    name: "keys-watch",
+    description:
+      "poll the TUI keys file and apply valid chord edits automatically " +
+      "(env TWO_BROTHERS_TUI_KEYS_WATCH; tui only; never persisted)",
+  },
   host: {
     name: "host",
     value: "<addr>",
@@ -634,7 +640,10 @@ defineCommand({
     "generated from the same registry that powers the in-app command palette and " +
     "help overlay; the three global chords (palette, help, draft stash) can be " +
     "rebound from a versioned JSON file with --keys-file (env " +
-    "TWO_BROTHERS_TUI_KEYS_FILE).",
+    "TWO_BROTHERS_TUI_KEYS_FILE), and --keys-watch (env " +
+    "TWO_BROTHERS_TUI_KEYS_WATCH) keeps watching that file so valid edits apply " +
+    "without a restart (/keys reload applies one edit on demand; the watcher is " +
+    "started by the flag or env and is captured at startup).",
   flags: [
     "provider",
     "provider-kind",
@@ -671,11 +680,19 @@ defineCommand({
     "commands-dir",
     "workspace",
     "keys-file",
+    "keys-watch",
     "stream-tokens",
     "approval-mode",
     "help",
   ],
-  acceptedFlags: [...SHARED_FLAGS, "workspace", "keys-file", "thinking-budget", "approval-mode"],
+  acceptedFlags: [
+    ...SHARED_FLAGS,
+    "workspace",
+    "keys-file",
+    "keys-watch",
+    "thinking-budget",
+    "approval-mode",
+  ],
   flagNotes: {
     mode: "cooperation mode consult|work|auto (print/json are run output modes)",
     workspace:
@@ -683,8 +700,13 @@ defineCommand({
     "keys-file":
       "user-authored JSON with chord overrides for the palette, help and draft-stash " +
       "commands (env TWO_BROTHERS_TUI_KEYS_FILE; missing file = defaults; invalid file " +
-      "prints one diagnostic and keeps the defaults; never persisted, reloaded at " +
-      "startup only)",
+      "prints one diagnostic and keeps the defaults; never persisted; read at startup, " +
+      "re-read by /keys reload or by --keys-watch)",
+    "keys-watch":
+      "keep polling the keys file and live-apply valid edits through the same " +
+      "validated reload path; invalid/absent files keep the last good chords with " +
+      "one bounded notice (env TWO_BROTHERS_TUI_KEYS_WATCH; captured at startup, " +
+      "never persisted)",
     "approval-mode":
       "pin the approval mode for this TUI process (never persisted); without it " +
       "the saved approval_policy setting (or ask) applies and /permission writes it",
@@ -1628,6 +1650,7 @@ export const ENVIRONMENT: readonly EnvironmentHelp[] = [
   { variable: "TWO_BROTHERS_STREAM_TOKENS", flag: "--stream-tokens", note: "boolean" },
   { variable: "TWO_BROTHERS_APPROVAL_MODE", flag: "--approval-mode" },
   { variable: "TWO_BROTHERS_TUI_KEYS_FILE", flag: "--keys-file", note: "tui" },
+  { variable: "TWO_BROTHERS_TUI_KEYS_WATCH", flag: "--keys-watch", note: "boolean, tui" },
   { variable: "TWO_BROTHERS_WORKERS", flag: "--workers", note: "serve" },
 ];
 

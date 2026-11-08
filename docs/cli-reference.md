@@ -158,7 +158,7 @@ and draft stash — can be rebound from a versioned JSON file with
 `~/.two-brothers/tui-keys.json`; a missing file means the defaults; an
 invalid file prints one diagnostic line and keeps the defaults); the effective
 chords appear in `tui --help`, the `?` overlay, the palette and the status
-hints, and the file is read at startup only. `two-brothers help tui` shows the
+hints, and the file is read at startup. `two-brothers help tui` shows the
 same generated key guide, resolved from `TWO_BROTHERS_TUI_KEYS_FILE` or the
 default `~/.two-brothers/tui-keys.json` (the `help` command has no
 `--keys-file` flag; use `two-brothers tui --help --keys-file <path>` for a
@@ -166,13 +166,21 @@ flag-selected file). An invalid file prints one `[tui keys]` diagnostic and
 falls back to the defaults; a missing default file is silent. Inside the TUI,
 `/keys` (or `/keys show`) prints the three effective global chords and the
 captured keys-file path/origin (flag, env or default) with the last load
-state — it never claims overrides that are not active. `/keys reload` re-reads
+state and the honest watch state — it never claims overrides that are not
+active. `/keys reload` re-reads
 the same startup-captured file and applies valid changes immediately to
 matching, the palette/help listings and the status hints (the success notice
 names the new chords); an invalid/unreadable file keeps the previous chords
 and prints one bounded diagnostic, and an absent file keeps them with an
-informational notice. The path/origin are captured at startup, so an
-env/flag change needs a TUI restart. `Ctrl+F` (or `/find [query]`) opens
+informational notice. `tui --keys-watch` (or `TWO_BROTHERS_TUI_KEYS_WATCH=1`,
+off by default and never persisted) keeps watching that captured path and
+live-applies valid edits through the same validated reload path: a detected
+change posts one bounded notice naming the new chords, an invalid file keeps
+the last good chords with one bounded warning per detected change, and an
+absent/unreadable file keeps them with an informational notice. The watcher
+uses `fs.watchFile` polling (~twice a second, debounced/coalesced). The
+path/origin and the watch flag/env are captured at startup (a flag/env change
+needs a TUI restart); only the file's contents keep reloading live. `Ctrl+F` (or `/find [query]`) opens
 find-in-transcript: a live
 case-insensitive filter over the whole transcript with `current/total`,
 `Enter`/`Down` next, `Shift+Enter`/`Up` previous (wrap), the active match
@@ -874,7 +882,8 @@ per-role connection without leaving the terminal.
 | `--task-file` | path | — | (TS package, `run` only) read the task from a file — missing/unreadable/blank exits 2; mutually exclusive with a positional task. `run -` reads the task from stdin instead (bounded to 1 MiB, blank exits 2) |
 | `--commands-dir` | path | — (repeatable) | (TS package) extra slash-command root for the chat REPL and `tui`; defaults are `TWO_BROTHERS_COMMANDS_DIR` (OS path list), then `<cwd>/commands` and `~/.two-brothers/commands` |
 | `--workspace` | dir | — | (TS package, `tui` only) bind every turn to one confined workspace root: `workspace_*` tools for the junior, the read-only verify slice for the senior, the operator approval panel for mutations/shell, and `@path` file mentions. An invalid root exits 2 before the screen opens |
-| `--keys-file` | path | `~/.two-brothers/tui-keys.json` | (TS package, `tui` only) user-authored JSON with TUI chord overrides for the rebindable global commands (command palette, shortcut reference, draft stash); a missing file means the defaults, an invalid file prints one diagnostic and falls back to the defaults without touching the screen; env `TWO_BROTHERS_TUI_KEYS_FILE`; never persisted, reloaded at startup only |
+| `--keys-file` | path | `~/.two-brothers/tui-keys.json` | (TS package, `tui` only) user-authored JSON with TUI chord overrides for the rebindable global commands (command palette, shortcut reference, draft stash); a missing file means the defaults, an invalid file prints one diagnostic and falls back to the defaults without touching the screen; env `TWO_BROTHERS_TUI_KEYS_FILE`; never persisted; read at startup and re-read by `/keys reload` (or by `--keys-watch`) |
+| `--keys-watch` | flag | off | (TS package, `tui` only) keep polling the captured keys file and live-apply valid chord edits through the same validated reload path as `/keys reload`; a valid change swaps the active table and posts one bounded notice naming the new chords, an invalid file keeps the last good chords with one bounded warning per detected change, an absent/unreadable file keeps them with an informational notice. `fs.watchFile` polling (~twice a second, debounced/coalesced); captured at startup, never persisted; `/keys show` reports the watch state (`on`/`off`/`unavailable`); env `TWO_BROTHERS_TUI_KEYS_WATCH=1` |
 | `--approval-mode` | `ask`, `readonly`, `edits`, `allow-all` | `ask` | (TS package) operator [approval mode](#approval-modes) for workspace actions (env `TWO_BROTHERS_APPROVAL_MODE`). `serve` pins it for its web runs and `tui` for the TUI process (in-memory only, never persisted; the saved `approval_policy` setting applies without a pin); `run`/`chat` accept it but bind no workspace. An unknown value is a usage error (exit 2); `allow-all` prints one visible warning |
 
 ## Environment variables
@@ -922,6 +931,7 @@ per-role connection without leaving the terminal.
 | `TWO_BROTHERS_PLUGINS_SENIOR` / `TWO_BROTHERS_PLUGINS_JUNIOR` | — (comma-separated plugin names; see `docs/plugins.md`) |
 | `TWO_BROTHERS_SHELL_PATH_EXTRA` | — (path-separated dirs prepended to the confined workspace-shell `PATH`, e.g. the directory holding the binaries your tool proofs call) |
 | `TWO_BROTHERS_TUI_KEYS_FILE` | `--keys-file` (TS package, `tui` only; pinned, never persisted) |
+| `TWO_BROTHERS_TUI_KEYS_WATCH` | `--keys-watch` (`1`/`true`/`yes`/`on`; TS package, `tui` only; pinned, never persisted) |
 
 **Precedence:** CLI flags > environment variables > defaults. Persisted
 settings from `onboard` / the web Settings sit between env vars and defaults,

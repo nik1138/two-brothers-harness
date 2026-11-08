@@ -235,6 +235,7 @@ const THINKING_BUDGET_OPTIONS = {
 const TUI_OPTIONS = {
   workspace: { type: "string" as const },
   "keys-file": { type: "string" as const },
+  "keys-watch": { type: "boolean" as const, default: false },
 } satisfies ParseArgsOptionsConfig;
 
 const RUN_INPUT_OPTIONS = {
@@ -812,6 +813,20 @@ export function tuiKeysFileForCli(
   const envFile = (env.TWO_BROTHERS_TUI_KEYS_FILE ?? "").trim();
   if (envFile !== "") return { path: path.resolve(envFile), origin: "env", explicit: true };
   return { path: defaultTuiKeysPath(home), origin: "default", explicit: false };
+}
+
+/**
+ * Opt-in keys-file watching for the TUI: `tui --keys-watch` or the pinned
+ * `TWO_BROTHERS_TUI_KEYS_WATCH` environment variable (`1`/`true`/`yes`/`on`,
+ * the usual boolean convention). Pinned like every other env value — never
+ * persisted; off by default, so an invocation without either behaves exactly
+ * like the on-demand-only TUI.
+ */
+export function tuiKeysWatchForCli(
+  values: Record<string, any>,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return values["keys-watch"] === true || envFlag(env, "TWO_BROTHERS_TUI_KEYS_WATCH");
 }
 
 /**
@@ -2239,10 +2254,11 @@ async function doTui(
   );
   if (parsed === null) return 2;
   const { values, positionals } = parsed;
-  // The keys file is read once at startup (no hot reload): the same resolved
-  // table drives `--help`, matching, labels, the palette/help listings and the
-  // status hints. An unreadable/invalid file prints one honest line and keeps
-  // the defaults.
+  // The keys file is read once at startup: the same resolved table drives
+  // `--help`, matching, labels, the palette/help listings and the status hints.
+  // An unreadable/invalid file prints one honest line and keeps the defaults.
+  // `--keys-watch`/TWO_BROTHERS_TUI_KEYS_WATCH then keeps watching the captured
+  // path and applies valid edits through the same validated reload path.
   const keyResolution = resolveTuiKeyCommandsForCli(values);
   if (keyResolution.diagnostics.length > 0) {
     io.error(`[tui keys] ${keyResolution.diagnostics.join("; ")}`);
@@ -2292,6 +2308,7 @@ async function doTui(
     keysSource: { path: keyResolution.file.path, origin: keyResolution.file.origin },
     keysState: keyResolution.state,
     keysDiagnostics: keyResolution.diagnostics,
+    ...(tuiKeysWatchForCli(values) ? { keysWatch: true } : {}),
     pluginsDir: pluginsDirForCli(values),
     skillsRoots: skillsRootsForCli(values),
     commandsRoots: commandsRootsForCli(values),

@@ -9,7 +9,7 @@
  * suite stays pure and hermetic (temp files only).
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
@@ -17,6 +17,7 @@ import { test } from "node:test";
 import {
   defaultTuiKeysPath,
   describeTuiKeys,
+  describeTuiKeysWatch,
   loadTuiKeyCommands,
   parseTuiChord,
   parseTuiKeysDocument,
@@ -25,10 +26,17 @@ import {
   reloadTuiCommands,
   resolveTuiCommands,
   resolveTuiCommandsFromFile,
+  resolvedTuiKeysWatchState,
   TUI_KEYS_MAX_BYTES,
   TUI_KEYS_MAX_CHORDS_PER_COMMAND,
   TUI_KEYS_VERSION,
+  TUI_KEYS_WATCH_DEBOUNCE_MS,
+  TUI_KEYS_WATCH_INTERVAL_MS,
+  watchTuiKeysFile,
+  type TuiKeysLoadResult,
+  type TuiKeysLoadState,
   type TuiKeysSource,
+  type TuiKeysWatchState,
 } from "../src/tui/keyoverrides.ts";
 import {
   TUI_COMMANDS,
@@ -46,6 +54,7 @@ import {
   main,
   resolveTuiKeyCommandsForCli,
   tuiKeysFileForCli,
+  tuiKeysWatchForCli,
 } from "../src/cli.ts";
 
 function chord(name: string, extras: Partial<KeyChord> = {}): KeyChord {
@@ -62,6 +71,18 @@ function tempFile(name: string, content: string): { dir: string; file: string } 
 function doc(bindings: Record<string, readonly string[]>): string {
   return JSON.stringify({ version: TUI_KEYS_VERSION, bindings });
 }
+
+/** Bounded polling wait for the watcher tests (never a fixed sleep assertion). */
+async function waitUntil(predicate: () => boolean, timeoutMs = 3_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return predicate();
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 // --------------------------------------------------------------------------- //
 // chord grammar
@@ -397,6 +418,43 @@ test("catalogue: --keys-file is a documented tui flag with the env mirror", () =
   assert.equal(REBINDABLE_TUI_COMMAND_IDS.join(","), "palette,help,stash");
 });
 
+test("catalogue: --keys-watch is a documented tui-only flag with its env mirror", () => {
+  assert.ok("keys-watch" in FLAGS, "FLAGS has keys-watch");
+  const tui = commandHelp("tui");
+  assert.ok(tui !== undefined, "tui command spec exists");
+  const accepted = tui?.acceptedFlags ?? tui?.flags ?? [];
+  assert.ok(accepted.includes("keys-watch"), "tui accepts --keys-watch");
+  assert.ok((tui?.flags ?? []).includes("keys-watch"), "tui help lists --keys-watch");
+  const env = ENVIRONMENT.find((entry) => entry.variable === "TWO_BROTHERS_TUI_KEYS_WATCH");
+  assert.ok(env !== undefined, "environment table has the keys-watch env");
+  assert.equal(env?.flag, "--keys-watch");
+  // Off by default: a bare tui never enables the watcher.
+  assert.equal(tuiKeysWatchForCli({}, {}), false);
+});
+
+test("CLI resolution: --keys-watch flag or the boolean env enables watching (pinned)", () => {
+  assert.equal(tuiKeysWatchForCli({ "keys-watch": true }, {}), true);
+  for (const raw of ["1", "true", "TRUE", "yes", "on"]) {
+    assert.equal(
+      tuiKeysWatchForCli({}, { TWO_BROTHERS_TUI_KEYS_WATCH: raw }),
+      true,
+      `env ${raw} enables watching`,
+    );
+  }
+  for (const raw of ["", "0", "false", "off", "no"]) {
+    assert.equal(
+      tuiKeysWatchForCli({}, { TWO_BROTHERS_TUI_KEYS_WATCH: raw }),
+      false,
+      `env ${JSON.stringify(raw)} leaves watching off`,
+    );
+  }
+  // The flag wins; an absent flag means the env decides (never written anywhere).
+  assert.equal(
+    tuiKeysWatchForCli({ "keys-watch": false }, { TWO_BROTHERS_TUI_KEYS_WATCH: "1" }),
+    true,
+  );
+});
+
 test("CLI resolution: flag beats env beats the default path; explicit problems are diagnosed", () => {
   const home = mkdtempSync(path.join(tmpdir(), "tui-keys-home-"));
   const flagFile = tempFile("flag.json", doc({ palette: ["ctrl+g"] }));
@@ -534,7 +592,8 @@ test("describeTuiKeys: effective chords, source origin and last diagnostics, nev
   const defaults = describeTuiKeys(TUI_COMMANDS, { source, state: "missing", diagnostics: [] });
   assert.equal(defaults[0], "keys: palette Ctrl+P · help ? / F1 · stash Ctrl+O");
   assert.match(defaults[1] ?? "", /\(default\) — absent; defaults active/);
-  assert.equal(defaults.length, 2, "no diagnostics line when the load was clean");
+  assert.match(defaults[2] ?? "", /^keys watch: off /, "watch is off by default");
+  assert.equal(defaults.length, 3, "no diagnostics line when the load was clean");
 
   const overridden = resolveTuiCommands({ palette: [chord("g", { ctrl: true })] }).commands;
   const loaded = describeTuiKeys(overridden, {
@@ -551,11 +610,78 @@ test("describeTuiKeys: effective chords, source origin and last diagnostics, nev
     diagnostics: [`x`.repeat(500)],
   });
   assert.match(failed[1] ?? "", /\(flag\) — invalid; previous chords kept/);
-  assert.ok(failed[2]?.startsWith("keys diagnostics: "), "the last diagnostics are reported");
-  assert.ok((failed[2]?.length ?? 0) < 300, "the diagnostic line is bounded");
+  assert.ok(failed[3]?.startsWith("keys diagnostics: "), "the last diagnostics are reported");
+  assert.ok((failed[3]?.length ?? 0) < 300, "the diagnostic line is bounded");
 
   const embedded = describeTuiKeys(TUI_COMMANDS, { source: null, state: "none", diagnostics: [] });
   assert.match(embedded[1] ?? "", /none/);
+  assert.match(
+    embedded[2] ?? "",
+    /^keys watch: unavailable /,
+    "an embedded session with no source reports honest unavailability",
+  );
+});
+
+test("describeTuiKeys: all six load-state/override combinations are covered and honest", () => {
+  const source: TuiKeysSource = { path: "/tmp/tui-keys.json", origin: "flag" };
+  const overridden = resolveTuiCommands({ palette: [chord("g", { ctrl: true })] }).commands;
+  const matrix: Array<{
+    state: TuiKeysLoadState;
+    commands: readonly TuiCommand[];
+    expected: string;
+  }> = [
+    { state: "loaded", commands: overridden, expected: "loaded" },
+    {
+      state: "loaded",
+      commands: TUI_COMMANDS,
+      expected: "loaded; defaults active (no overrides)",
+    },
+    { state: "missing", commands: overridden, expected: "absent; previous chords kept" },
+    { state: "missing", commands: TUI_COMMANDS, expected: "absent; defaults active" },
+    { state: "invalid", commands: overridden, expected: "invalid; previous chords kept" },
+    { state: "invalid", commands: TUI_COMMANDS, expected: "invalid; defaults active" },
+  ];
+  assert.equal(matrix.length, 6, "3 load states × overrides on/off");
+  for (const entry of matrix) {
+    const lines = describeTuiKeys(entry.commands, {
+      source,
+      state: entry.state,
+      diagnostics: [],
+      watch: "off",
+    });
+    assert.equal(
+      lines[1],
+      `keys file: ${source.path} (flag) — ${entry.expected}`,
+      `${entry.state}/${entry.expected}`,
+    );
+    assert.match(lines[2] ?? "", /^keys watch: off /);
+    assert.equal(lines.length, 3);
+  }
+
+  // An override is only claimed when it is actually active: the same loaded
+  // file with the default table in force reports "defaults active".
+  const overriddenLines = describeTuiKeys(overridden, { source, state: "loaded", diagnostics: [] });
+  assert.match(overriddenLines[1] ?? "", /loaded$/);
+  const plainLines = describeTuiKeys(TUI_COMMANDS, { source, state: "loaded", diagnostics: [] });
+  assert.match(plainLines[1] ?? "", /defaults active \(no overrides\)/);
+});
+
+test("describeTuiKeys: watch state is reported as on / off / unavailable", () => {
+  const source: TuiKeysSource = { path: "/tmp/keys.json", origin: "env" };
+  const cases: Array<[TuiKeysWatchState, RegExp]> = [
+    ["on", /^keys watch: on /],
+    ["off", /^keys watch: off /],
+    ["unavailable", /^keys watch: unavailable /],
+  ];
+  for (const [watch, pattern] of cases) {
+    const lines = describeTuiKeys(TUI_COMMANDS, { source, state: "loaded", diagnostics: [], watch });
+    assert.match(lines[2] ?? "", pattern, watch);
+  }
+  // The line never runs away: an unwatchable embedded session says why once.
+  assert.match(describeTuiKeysWatch("unavailable"), /no keys-file source captured/);
+  assert.equal(resolvedTuiKeysWatchState(null, "on"), "unavailable");
+  assert.equal(resolvedTuiKeysWatchState(source, undefined), "off");
+  assert.equal(resolvedTuiKeysWatchState(source, "on"), "on");
 });
 
 test("reloadTuiCommands: success swaps the table; failure or absence keeps the last good one", () => {
@@ -607,4 +733,217 @@ test("reloadTuiCommands: success swaps the table; failure or absence keeps the l
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// --------------------------------------------------------------------------- //
+// opt-in file watcher (`tui --keys-watch` / `TWO_BROTHERS_TUI_KEYS_WATCH`)
+// --------------------------------------------------------------------------- //
+
+test("watch defaults: bounded polling, debounce below the interval ceiling, honest copy", () => {
+  assert.ok(
+    TUI_KEYS_WATCH_INTERVAL_MS >= 100 && TUI_KEYS_WATCH_INTERVAL_MS <= 5_000,
+    "the production poll interval stays polite",
+  );
+  assert.ok(
+    TUI_KEYS_WATCH_DEBOUNCE_MS >= 0 &&
+      TUI_KEYS_WATCH_DEBOUNCE_MS <= TUI_KEYS_WATCH_INTERVAL_MS * 2,
+    "the debounce window coalesces a burst without hiding a real edit",
+  );
+  assert.match(describeTuiKeysWatch("off"), /--keys-watch/);
+  assert.match(describeTuiKeysWatch("on"), /automatically/);
+});
+
+test("watch: a valid change live-loads through the reload path and reports exactly once", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "tui-watch-"));
+  const file = path.join(dir, "keys.json");
+  const source: TuiKeysSource = { path: file, origin: "env" };
+  writeFileSync(file, doc({ palette: ["ctrl+g"] }), "utf8");
+  let commands: readonly TuiCommand[] = loadTuiKeyCommands(source).commands;
+  const results: TuiKeysLoadResult[] = [];
+  const watcher = watchTuiKeysFile(source, {
+    current: () => commands,
+    onChange: (result) => {
+      results.push(result);
+      if (result.state === "loaded") commands = result.commands;
+    },
+    intervalMs: 20,
+    debounceMs: 30,
+  });
+  assert.notEqual(watcher, null, "the watcher installs for a temp keys file");
+  try {
+    assert.equal(watcher?.active, true);
+    writeFileSync(file, doc({ palette: ["ctrl+u"], help: ["f2"] }), "utf8");
+    assert.ok(await waitUntil(() => results.length > 0), "the change is detected");
+    const first = results[0];
+    assert.equal(first?.state, "loaded");
+    assert.equal(first?.diagnostics.length, 0);
+    assert.equal(
+      formatKeys({ keys: first?.commands.find((command) => command.id === "palette")?.keys }),
+      "Ctrl+U",
+    );
+    assert.equal(
+      formatKeys({ keys: first?.commands.find((command) => command.id === "help")?.keys }),
+      "F2",
+    );
+    await sleep(150);
+    assert.equal(results.length, 1, "one reload per detected change");
+  } finally {
+    watcher?.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("watch: an invalid change keeps the last good table, warns once, and recovers", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "tui-watch-bad-"));
+  const file = path.join(dir, "keys.json");
+  const source: TuiKeysSource = { path: file, origin: "flag" };
+  writeFileSync(file, doc({ palette: ["ctrl+g"] }), "utf8");
+  let commands: readonly TuiCommand[] = loadTuiKeyCommands(source).commands;
+  const results: TuiKeysLoadResult[] = [];
+  const watcher = watchTuiKeysFile(source, {
+    current: () => commands,
+    onChange: (result) => {
+      results.push(result);
+      if (result.state === "loaded") commands = result.commands;
+    },
+    intervalMs: 20,
+    debounceMs: 30,
+  });
+  assert.notEqual(watcher, null);
+  try {
+    writeFileSync(file, "{oops\n", "utf8");
+    assert.ok(await waitUntil(() => results.length > 0), "the corrupt file is detected");
+    assert.equal(results[0]?.state, "invalid");
+    assert.equal(results[0]?.commands, commands, "the last good table is kept by identity");
+    assert.match(results[0]?.diagnostics.join("; ") ?? "", /invalid JSON/);
+    await sleep(150);
+    assert.equal(results.length, 1, "no warning spam while the file stays corrupt");
+
+    // A later valid write applies and keeps the same validated path.
+    writeFileSync(file, doc({ help: ["f2"] }), "utf8");
+    assert.ok(
+      await waitUntil(() => results.length === 2),
+      "a repaired file reloads",
+    );
+    assert.equal(results[1]?.state, "loaded");
+    assert.equal(
+      formatKeys({ keys: commands.find((command) => command.id === "help")?.keys }),
+      "F2",
+    );
+  } finally {
+    watcher?.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("watch: an absent path loads when created and reports absence when deleted", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "tui-watch-absent-"));
+  const file = path.join(dir, "keys.json");
+  const source: TuiKeysSource = { path: file, origin: "default" };
+  // The session's last good table (e.g. defaults loaded before the file existed).
+  let commands: readonly TuiCommand[] = resolveTuiCommands({
+    palette: [chord("g", { ctrl: true })],
+  }).commands;
+  const results: TuiKeysLoadResult[] = [];
+  const watcher = watchTuiKeysFile(source, {
+    current: () => commands,
+    onChange: (result) => {
+      results.push(result);
+      if (result.state === "loaded") commands = result.commands;
+    },
+    intervalMs: 20,
+    debounceMs: 20,
+  });
+  assert.notEqual(watcher, null);
+  try {
+    await sleep(100);
+    assert.equal(results.length, 0, "absence at start is not a change");
+
+    writeFileSync(file, doc({ help: ["f2"] }), "utf8");
+    assert.ok(await waitUntil(() => results.length === 1), "the created file loads");
+    assert.equal(results[0]?.state, "loaded");
+    assert.equal(
+      formatKeys({ keys: results[0]?.commands.find((command) => command.id === "help")?.keys }),
+      "F2",
+    );
+
+    unlinkSync(file);
+    assert.ok(await waitUntil(() => results.length === 2), "the deletion is reported");
+    assert.equal(results[1]?.state, "missing");
+    assert.equal(results[1]?.commands, commands, "the last good table survives absence");
+  } finally {
+    watcher?.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("watch: stop() unwatches, drops a pending reload and is idempotent", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "tui-watch-stop-"));
+  const file = path.join(dir, "keys.json");
+  const source: TuiKeysSource = { path: file, origin: "env" };
+  writeFileSync(file, doc({ palette: ["ctrl+g"] }), "utf8");
+  const results: TuiKeysLoadResult[] = [];
+  const watcher = watchTuiKeysFile(source, {
+    current: () => TUI_COMMANDS,
+    onChange: (result) => results.push(result),
+    intervalMs: 20,
+    debounceMs: 30,
+  });
+  assert.notEqual(watcher, null);
+  try {
+    writeFileSync(file, doc({ palette: ["ctrl+u"] }), "utf8");
+    watcher?.stop();
+    assert.equal(watcher?.active, false);
+    watcher?.stop(); // idempotent: no throw, no second unwatch side effect
+    assert.equal(watcher?.active, false);
+    await sleep(150);
+    assert.equal(results.length, 0, "no reload fires after stop (the timer is cleared)");
+
+    // A later edit is invisible: the poll is gone.
+    writeFileSync(file, doc({ palette: ["ctrl+j"] }), "utf8");
+    await sleep(120);
+    assert.equal(results.length, 0);
+  } finally {
+    watcher?.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("watch: rapid writes inside the debounce window coalesce into one reload", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "tui-watch-coalesce-"));
+  const file = path.join(dir, "keys.json");
+  const source: TuiKeysSource = { path: file, origin: "env" };
+  writeFileSync(file, doc({ palette: ["ctrl+g"] }), "utf8");
+  const results: TuiKeysLoadResult[] = [];
+  const watcher = watchTuiKeysFile(source, {
+    current: () => TUI_COMMANDS,
+    onChange: (result) => results.push(result),
+    intervalMs: 10,
+    debounceMs: 200,
+  });
+  assert.notEqual(watcher, null);
+  try {
+    writeFileSync(file, doc({ palette: ["ctrl+u"] }), "utf8");
+    await sleep(60);
+    writeFileSync(file, doc({ palette: ["ctrl+y"] }), "utf8");
+    assert.ok(await waitUntil(() => results.length > 0), "the burst reloads");
+    await sleep(350);
+    assert.equal(results.length, 1, "one coalesced reload, not one per write");
+    assert.equal(
+      formatKeys({ keys: results[0]?.commands.find((command) => command.id === "palette")?.keys }),
+      "Ctrl+Y",
+      "the reload sees the final file content",
+    );
+  } finally {
+    watcher?.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("watch: an uninstallable path reports null instead of throwing", () => {
+  const watcher = watchTuiKeysFile(
+    { path: "bad\u0000path", origin: "env" },
+    { current: () => TUI_COMMANDS, onChange: () => {} },
+  );
+  assert.equal(watcher, null);
 });

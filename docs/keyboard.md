@@ -275,7 +275,7 @@ versioned JSON file:
 Point the TUI at it with `tui --keys-file <path>` or
 `TWO_BROTHERS_TUI_KEYS_FILE` (flag > env > default
 `~/.two-brothers/tui-keys.json`; a missing file means the defaults, and the
-file is read at startup only, never persisted). Chord specs are
+file is read at startup, never persisted). Chord specs are
 `[ctrl+][shift+][alt+]key` in any modifier order and case-insensitive
 (`control`, `meta` and `opt` are accepted aliases for the three modifiers),
 where `key` is one named terminal key (`return`, `escape`, `tab`, `pageup`,
@@ -291,13 +291,35 @@ appear in both `tui --help` (honors `--keys-file`) and `help tui` (the
 env/default file only — the `help` command has no `--keys-file` flag), as well
 as in the `?` overlay, the palette and the status hints;
 typing keys, Escape/quit layering, the composer, pickers/overlays, the
-approval panel and the find bar stay fixed. Edit the file externally, then run
-`/keys reload` inside the TUI to apply it without restarting; `/keys show`
-reports the effective global chords, the file path/origin (flag, env or
-default) and the last load diagnostics. A failed reload keeps the previous
-chords (one bounded diagnostic), and a missing file keeps them with an
-informational notice; the path/origin are captured at startup, so changing
-`--keys-file`/the env needs a restart.
+approval panel and the find bar stay fixed.
+
+Edit the file externally and apply the edit without restarting in one of two
+ways:
+
+- **On demand — `/keys reload`.** Re-reads the startup-captured file and
+  live-swaps the active table, so matching, the palette/help listings and the
+  status hints use the new chords immediately; the notice names the new
+  chords. A failed reload keeps the previous chords with one bounded
+  diagnostic, and a missing file keeps them with an informational notice.
+- **Automatically — `tui --keys-watch` or `TWO_BROTHERS_TUI_KEYS_WATCH=1`.**
+  Opt-in and off by default (never persisted): the TUI polls the captured
+  path with `fs.watchFile` (about twice a second, debounced/coalesced, so a
+  save-by-rename or the creation of a previously absent file is seen) and
+  applies each detected change through the same validated reload path. A
+  valid change swaps the table and posts one bounded notice naming the new
+  chords; an invalid file keeps the last good chords with one bounded warning
+  per detected change (no repeat spam while the file stays unchanged); an
+  absent or unreadable file keeps them with an informational notice. The flag
+  and env var are captured at startup (changing them needs a restart); only
+  the file's contents keep reloading. Without the flag or env var, the TUI
+  behaves exactly like the on-demand-only session, including byte-identical
+  startup frames.
+
+`/keys show` reports the effective global chords, the file path/origin (flag,
+env or default), the last load state and the honest watch state (`on`, `off`,
+or `unavailable` when the session has no captured keys-file source to watch);
+it never claims overrides that are not active. The path/origin are captured
+at startup, so changing `--keys-file`/the env needs a restart.
 
 ### Compose and send
 

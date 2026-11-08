@@ -15,6 +15,16 @@
  * defaults stay in force (fail-soft, never a crash, never a partial table that
  * could bind the same key twice).
  *
+ * ## Live reload surfaces
+ *
+ * `/keys reload` re-reads the startup-captured path on demand; the opt-in
+ * watcher (`tui --keys-watch` or `TWO_BROTHERS_TUI_KEYS_WATCH=1`, both
+ * captured at startup) polls the same path with `node:fs.watchFile` and
+ * applies a detected change through the same validated reload path, so both
+ * surfaces share one last-good-table rule and one bounded notice. Watching is
+ * off unless asked for: a session without the flag/env behaves exactly like
+ * the on-demand-only one.
+ *
  * ## Why an allowlist?
  *
  * Only commands that are global, non-typing and outside the app's modal
@@ -63,7 +73,7 @@
  * an action the operator has no way to discover.
  */
 
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync, unwatchFile, watchFile } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -600,6 +610,13 @@ export interface TuiKeysSource {
 /** What one load attempt found (`loaded` / absent / unreadable-or-invalid). */
 export type TuiKeysLoadState = "loaded" | "missing" | "invalid";
 
+/**
+ * How a TUI session's keys file is kept up to date: `off` (on-demand reload
+ * only), `on` (the watcher polls the captured path) or `unavailable` (there is
+ * no captured source to watch — embedded callers that inject commands).
+ */
+export type TuiKeysWatchState = "off" | "on" | "unavailable";
+
 /** Result of loading or reloading one keys file. */
 export interface TuiKeysLoadResult {
   /** The new table on a successful load; the caller's previous table otherwise. */
@@ -615,6 +632,11 @@ export interface TuiKeysStatus {
   source: TuiKeysSource | null;
   state: TuiKeysLoadState | "none";
   diagnostics: readonly string[];
+  /**
+   * How the file is kept up to date. Omitted by older callers: a session with
+   * a captured source then reports `off`, one without a source `unavailable`.
+   */
+  watch?: TuiKeysWatchState;
 }
 
 /** Bound for one displayed diagnostic line (the notice stays readable). */
@@ -680,6 +702,174 @@ export function reloadTuiCommands(
   return { commands: previous, diagnostics: loaded.diagnostics, state: loaded.state };
 }
 
+// --------------------------------------------------------------------------- //
+// opt-in file watcher (`tui --keys-watch` / `TWO_BROTHERS_TUI_KEYS_WATCH`)
+// --------------------------------------------------------------------------- //
+
+/** Default polling interval of the opt-in keys-file watcher (milliseconds). */
+export const TUI_KEYS_WATCH_INTERVAL_MS = 500;
+
+/** Default debounce/coalescing window for one detected change (milliseconds). */
+export const TUI_KEYS_WATCH_DEBOUNCE_MS = 200;
+
+/** Options for {@link watchTuiKeysFile}. */
+export interface TuiKeysWatchOptions {
+  /**
+   * Called once per coalesced detected change with the reload outcome. The
+   * callback only reports: the watcher itself never renders or exits, and a
+   * throwing consumer cannot break the poll loop.
+   */
+  onChange: (result: TuiKeysLoadResult) => void;
+  /**
+   * The table the caller currently uses. A failed reload keeps it (the same
+   * last-good rule as `/keys reload`).
+   */
+  current: () => readonly TuiCommand[];
+  /** Poll interval override in milliseconds (tests/embedding); default 500. */
+  intervalMs?: number;
+  /** Debounce window override in milliseconds (tests/embedding); default 200. */
+  debounceMs?: number;
+}
+
+/** A running watcher: `active` stays honest until {@link TuiKeysWatchHandle.stop}. */
+export interface TuiKeysWatchHandle {
+  readonly active: boolean;
+  stop(): void;
+}
+
+/** Stat identity compared between polls; an absent path is representable. */
+interface TuiKeysFileSignature {
+  exists: boolean;
+  size: number;
+  mtimeMs: number;
+  ino: number;
+}
+
+function tuiKeysFileSignature(filePath: string): TuiKeysFileSignature {
+  try {
+    const stats = statSync(filePath);
+    return { exists: true, size: stats.size, mtimeMs: stats.mtimeMs, ino: stats.ino };
+  } catch {
+    // Fail soft: an unreadable/absent path is just "not there" for watching.
+    return { exists: false, size: 0, mtimeMs: 0, ino: 0 };
+  }
+}
+
+function sameTuiKeysFileSignature(
+  left: TuiKeysFileSignature,
+  right: TuiKeysFileSignature,
+): boolean {
+  return (
+    left.exists === right.exists &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ino === right.ino
+  );
+}
+
+function watchDuration(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback;
+  return Math.max(0, Math.floor(value));
+}
+
+/**
+ * Start the opt-in keys-file watcher.
+ *
+ * `node:fs.watchFile` is a stat poll, which is portable on Windows and notices
+ * both an editor's save-by-rename (a new file identity) and the creation of a
+ * path that was absent. Each detected change is debounced/coalesced and then
+ * reloaded through {@link reloadTuiCommands}, so a watcher-triggered reload and
+ * `/keys reload` share one validated path and one last-good-table rule.
+ *
+ * Fail-soft: an unreadable path is watched like an absent one (absence is a
+ * valid state the caller reports), and a file whose stat identity cannot change
+ * (same size, same mtime, same file identity) is not observable. Returns `null`
+ * when the poll cannot be installed at all instead of throwing.
+ */
+export function watchTuiKeysFile(
+  source: TuiKeysSource,
+  options: TuiKeysWatchOptions,
+): TuiKeysWatchHandle | null {
+  const intervalMs = watchDuration(options.intervalMs, TUI_KEYS_WATCH_INTERVAL_MS);
+  const debounceMs = watchDuration(options.debounceMs, TUI_KEYS_WATCH_DEBOUNCE_MS);
+  let signature = tuiKeysFileSignature(source.path);
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let active = false;
+
+  const listener = (): void => {
+    const seen = tuiKeysFileSignature(source.path);
+    if (sameTuiKeysFileSignature(seen, signature)) return;
+    signature = seen;
+    if (timer !== null) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      if (!active) return;
+      let result: TuiKeysLoadResult;
+      try {
+        result = reloadTuiCommands(source, options.current());
+      } catch {
+        // The reload path is fail-soft by contract; this only guards a broken
+        // caller table, and still keeps it with one honest diagnostic.
+        result = {
+          commands: options.current(),
+          diagnostics: [`${source.path}: reload failed (unexpected error)`],
+          state: "invalid",
+        };
+      }
+      try {
+        options.onChange(result);
+      } catch {
+        // A consumer/render error must never break the poll loop.
+      }
+    }, debounceMs);
+    timer.unref?.();
+  };
+
+  try {
+    watchFile(source.path, { persistent: false, interval: intervalMs }, listener);
+  } catch {
+    return null;
+  }
+  active = true;
+  return {
+    get active(): boolean {
+      return active;
+    },
+    stop(): void {
+      if (!active) return;
+      active = false;
+      unwatchFile(source.path, listener);
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    },
+  };
+}
+
+/** The `/keys show` watch line: honest `on` / `off` / `unavailable`. */
+export function describeTuiKeysWatch(watch: TuiKeysWatchState): string {
+  if (watch === "on") {
+    return "keys watch: on (valid file changes apply automatically)";
+  }
+  if (watch === "off") {
+    return (
+      "keys watch: off (enable with --keys-watch or TWO_BROTHERS_TUI_KEYS_WATCH=1; " +
+      "captured at startup)"
+    );
+  }
+  return "keys watch: unavailable (no keys-file source captured for this TUI session)";
+}
+
+/** The watcher state a session should report: no source can never be watched. */
+export function resolvedTuiKeysWatchState(
+  source: TuiKeysSource | null,
+  watch: TuiKeysWatchState | undefined,
+): TuiKeysWatchState {
+  if (source === null) return "unavailable";
+  return watch ?? "off";
+}
+
 /** The three effective global chords as `palette Ctrl+P · help ? / F1 · stash Ctrl+O`. */
 export function globalKeySummary(commands: readonly TuiCommand[]): string {
   const parts: string[] = [];
@@ -714,9 +904,9 @@ export function boundTuiKeysNotice(text: string): string {
 
 /**
  * The `/keys show` lines: the three effective global chords, the captured
- * source (resolved path, origin, last load state) and the last diagnostics.
- * The source line never claims overrides are active when the defaults are in
- * force, and distinguishes "loaded" from absence/failure.
+ * source (resolved path, origin, last load state), the honest watch state and
+ * the last diagnostics. The source line never claims overrides are active when
+ * the defaults are in force, and distinguishes "loaded" from absence/failure.
  */
 export function describeTuiKeys(
   commands: readonly TuiCommand[],
@@ -741,6 +931,7 @@ export function describeTuiKeys(
             : "invalid; defaults active";
     lines.push(boundTuiKeysNotice(`keys file: ${status.source.path} (${status.source.origin}) — ${stateText}`));
   }
+  lines.push(describeTuiKeysWatch(resolvedTuiKeysWatchState(status.source, status.watch)));
   if (status.diagnostics.length > 0) {
     lines.push(`keys diagnostics: ${boundedDiagnostic(status.diagnostics)}`);
   }
