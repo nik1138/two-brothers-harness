@@ -1436,6 +1436,23 @@ Design anchors that already exist:
   `docs/quickstart.md` → step 3 and `docs/cli-reference.md` → `GET/PUT
   /api/settings`.
 
+## Shipped 2026-11-09 (wave 27: session directory layout)
+
+`src/sessionlayout.ts` adds the opt-in project/session directory store
+(`<project>/<stem>/session.jsonl` + `meta.json` + `events.jsonl`), a compat
+reader for the legacy flat layout, and `sessions migrate` (copy-first,
+workspace-grouped, idempotent, conflict-reporting). The server materialises a
+session directory before the run manager persists its first event; metadata,
+runtime sidecars, the TUI picker, search/export, fork/rewind and the web API
+all follow both layouts. Flat stores remain the default until migrated; the
+public session name and envelope bytes are unchanged. Tests:
+`sessionlayout`, `serverlayout`, `sessionsmigrate`.
+
+Deferred follow-ups: settings schema versioning and a backend choice
+(JSON now, optional `node:sqlite`), session-format version headers plus frozen
+adjacent migrations, optional compression, projection caches for large
+corpora, and a migration backup/rollback helper.
+
 ## Open items (deferred)
 
 - **Remaining key-binding surfaces** — wave 16 shipped the web's three

@@ -411,7 +411,13 @@ export class RuntimeEventStore {
    */
   findRun(runId: string): { session: string; events: Array<Record<string, unknown>> } | null {
     if (this.layout !== null) {
-      for (const location of this.layout.list()) {
+      const seen = new Set<string>();
+      for (const location of [
+        ...this.layout.list(),
+        ...this.layout.listEventSessions(),
+      ]) {
+        if (seen.has(location.name)) continue;
+        seen.add(location.name);
         const events = this.load(location.name).filter((event) => event.run_id === runId);
         if (events.length > 0) return { session: location.name, events };
       }

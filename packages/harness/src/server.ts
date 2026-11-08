@@ -2620,6 +2620,16 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       fs.unlinkSync(store.path);
       state.metadata.delete(safe);
       state.runtimeEvents.delete(safe);
+      // A directory-layout session owns its directory; remove it when empty so
+      // the name is fully released.
+      const location = layout.resolve(safe);
+      if (location?.dir) {
+        try {
+          fs.rmdirSync(location.dir);
+        } catch {
+          // not empty (unexpected extra file) or already gone
+        }
+      }
       return { deleted: safe };
     }),
   );

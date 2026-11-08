@@ -273,6 +273,38 @@ export class SessionLayout {
       found.set(name, flatLocation(this.root, name));
     }
 
+    for (const location of this.scanDirectorySessions()) {
+      found.set(location.name, location);
+    }
+
+    return [...found.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  /**
+   * Session directories that carry `events.jsonl`, including ones whose
+   * transcript was never written (a failed run can persist runtime evidence
+   * before its first envelope). Used by restart recovery.
+   */
+  listEventSessions(): SessionLocation[] {
+    const found = new Map<string, SessionLocation>();
+    for (const project of readdir(this.root, { withFileTypes: true })) {
+      if (!project.isDirectory() || project.name.startsWith(".")) continue;
+      if (RESERVED_DIRS.has(project.name)) continue;
+      const projectDir = path.join(this.root, project.name);
+      for (const candidate of readdir(projectDir, { withFileTypes: true })) {
+        if (!candidate.isDirectory() || candidate.name.startsWith(".")) continue;
+        const name = canonicalSessionName(candidate.name + JSONL_SUFFIX);
+        if (name === null) continue;
+        const location = dirLocation(this.root, project.name, name);
+        if (isFile(location.eventsPath)) found.set(name, location);
+      }
+    }
+    return [...found.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  /** Directory-layout sessions with a transcript, one per name. */
+  private scanDirectorySessions(): SessionLocation[] {
+    const found = new Map<string, SessionLocation>();
     for (const project of readdir(this.root, { withFileTypes: true })) {
       if (!project.isDirectory() || project.name.startsWith(".")) continue;
       if (RESERVED_DIRS.has(project.name)) continue;
@@ -286,8 +318,7 @@ export class SessionLayout {
         found.set(name, location);
       }
     }
-
-    return [...found.values()].sort((a, b) => a.name.localeCompare(b.name));
+    return [...found.values()];
   }
 
   /**
@@ -382,11 +413,14 @@ export function migrateFlatSessions(
     const eventsPath = path.join(layout.root, RUNTIME_DIR, `${name}${RUNTIME_SUFFIX}`);
 
     let meta: Record<string, unknown> | null = null;
+    let metaRaw: string | null = null;
     try {
-      const parsed: unknown = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+      metaRaw = fs.readFileSync(metaPath, "utf-8");
+      const parsed: unknown = JSON.parse(metaRaw);
       if (isRecord(parsed)) meta = parsed;
     } catch {
-      // no/unreadable metadata: migrate the session alone
+      // no/unreadable metadata: preserve raw bytes when readable, else migrate
+      // the session alone
     }
     const workspaceId =
       meta !== null && typeof meta.workspace_id === "string" ? meta.workspace_id : null;
@@ -413,8 +447,8 @@ export function migrateFlatSessions(
         if (!dryRun) {
           // Adopt an interrupted previous migration: fill missing sidecars,
           // then remove the flat source files.
-          if (meta !== null && !fs.existsSync(target.metaPath)) {
-            fs.copyFileSync(metaPath, target.metaPath);
+          if (metaRaw !== null && !fs.existsSync(target.metaPath)) {
+            fs.writeFileSync(target.metaPath, metaRaw, "utf-8");
           }
           if (fs.existsSync(eventsPath) && !fs.existsSync(target.eventsPath)) {
             fs.copyFileSync(eventsPath, target.eventsPath);
@@ -441,6 +475,24 @@ export function migrateFlatSessions(
       continue;
     }
 
+    // An empty session directory left by an interrupted previous attempt does
+    // not block the migration; a non-empty one does (never delete content we
+    // did not create). A dry run must not touch it.
+    if (!dryRun && fs.existsSync(target.dir as string)) {
+      try {
+        fs.rmdirSync(target.dir as string);
+      } catch (exc) {
+        entries.push({
+          name,
+          sourcePath,
+          targetPath: target.sessionPath,
+          status: "conflict",
+          detail: `target directory is not empty: ${exc instanceof Error ? exc.message : String(exc)}`,
+        });
+        continue;
+      }
+    }
+
     if (dryRun) {
       entries.push({
         name,
@@ -459,7 +511,7 @@ export function migrateFlatSessions(
       ensureDir(tempDir);
       const sessionBytes = fs.readFileSync(sourcePath);
       fs.writeFileSync(path.join(tempDir, "session.jsonl"), sessionBytes);
-      if (meta !== null) fs.writeFileSync(path.join(tempDir, "meta.json"), JSON.stringify(meta, null, 2));
+      if (metaRaw !== null) fs.writeFileSync(path.join(tempDir, "meta.json"), metaRaw);
       if (fs.existsSync(eventsPath)) {
         fs.copyFileSync(eventsPath, path.join(tempDir, "events.jsonl"));
       }

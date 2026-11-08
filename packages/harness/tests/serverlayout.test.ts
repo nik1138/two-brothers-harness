@@ -164,6 +164,14 @@ test("dirs store: create, run, sidecars, list, fork and restart recovery", async
     assert.equal(fs.existsSync(forkLocation.sessionPath), true);
     assert.equal(fs.readFileSync(location.sessionPath, "utf-8").length > 0, true);
 
+    const deleted = await api<{ deleted: string }>(
+      server.base,
+      "DELETE",
+      `/api/sessions/${encodeURIComponent(forked.body.name)}`,
+    );
+    assert.equal(deleted.status, 200);
+    assert.equal(fs.existsSync(forkLocation.dir!), false);
+
     await server.close();
     server = null;
 

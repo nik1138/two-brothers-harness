@@ -182,7 +182,8 @@ test("migration moves session, metadata and events byte-exactly", () => {
   try {
     const workspace = path.join(os.tmpdir(), "migrated-workspace");
     writeFlat(root, "move.jsonl");
-    writeMeta(root, "move.jsonl", { title: "Move", workspace_id: "ws-1" });
+    const metaFile = writeMeta(root, "move.jsonl", { title: "Move", workspace_id: "ws-1" });
+    const metaText = fs.readFileSync(metaFile, "utf-8");
     fs.mkdirSync(path.join(root, "runtime"), { recursive: true });
     fs.writeFileSync(
       path.join(root, "runtime", "move.jsonl.events.jsonl"),
@@ -199,6 +200,7 @@ test("migration moves session, metadata and events byte-exactly", () => {
     const key = projectKeyFor(workspace);
     const dir = path.join(root, key, "move");
     assert.equal(fs.readFileSync(path.join(dir, "session.jsonl"), "utf-8"), RAW);
+    assert.equal(fs.readFileSync(path.join(dir, "meta.json"), "utf-8"), metaText);
     assert.equal(
       JSON.parse(fs.readFileSync(path.join(dir, "meta.json"), "utf-8")).title,
       "Move",
@@ -234,6 +236,24 @@ test("migration adopts an interrupted copy and is idempotent", () => {
     const second = migrateFlatSessions(root);
     assert.equal(second.entries.length, 0);
     assert.equal(new SessionLayout(root).mode(), "dirs");
+  } finally {
+    cleanup(root);
+  }
+});
+
+test("migration removes an empty interrupted target directory", () => {
+  const root = tmpdir();
+  try {
+    writeFlat(root, "empty-target.jsonl");
+    const dir = path.join(root, GLOBAL_PROJECT_KEY, "empty-target");
+    fs.mkdirSync(dir, { recursive: true });
+    const dry = migrateFlatSessions(root, { dryRun: true });
+    assert.equal(dry.entries[0]!.status, "migrated");
+    assert.equal(fs.existsSync(dir), true, "dry run touches nothing");
+    const result = migrateFlatSessions(root);
+    assert.equal(result.entries[0]!.status, "migrated");
+    assert.equal(fs.existsSync(path.join(dir, "session.jsonl")), true);
+    assert.equal(fs.existsSync(path.join(root, "empty-target.jsonl")), false);
   } finally {
     cleanup(root);
   }
@@ -291,6 +311,25 @@ test("fork of a flat source in dirs mode lands under _global", () => {
     assert.ok(target);
     assert.equal(target.projectKey, GLOBAL_PROJECT_KEY);
     assert.equal(fs.existsSync(target.sessionPath), true);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test("event-only session directories are recoverable by findRun", () => {
+  const root = tmpdir();
+  try {
+    const layout = new SessionLayout(root);
+    layout.setMode("dirs");
+    const location = layout.materialize("failed.jsonl", path.join(os.tmpdir(), "ws"));
+    const events = new RuntimeEventStore(path.join(root, "runtime"), layout);
+    events.append("failed", { type: "run_error", run_id: "run-failed", message: "boom" });
+    assert.equal(fs.existsSync(location.sessionPath), false);
+    assert.equal(layout.list().length, 0, "no transcript yet");
+    const found = events.findRun("run-failed");
+    assert.ok(found);
+    assert.equal(found.session, "failed.jsonl");
+    assert.equal(found.events[0]!.message, "boom");
   } finally {
     cleanup(root);
   }

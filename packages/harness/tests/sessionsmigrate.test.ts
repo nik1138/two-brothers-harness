@@ -145,6 +145,37 @@ test("sessions migrate is idempotent on an empty flat store", async () => {
   });
 });
 
+test("sessions list and show resolve a migrated directory session", async () => {
+  await withTempDir(async (dir) => {
+    seedFlat(dir, "show-me.jsonl");
+    const migrate = makeIO();
+    assert.equal(
+      await main(["sessions", "migrate", "--sessions-dir", dir], migrate),
+      0,
+      migrate.err.join("\n"),
+    );
+
+    const list = makeIO();
+    assert.equal(
+      await main(["sessions", "--sessions-dir", dir, "--json"], list),
+      0,
+      list.err.join("\n"),
+    );
+    const parsed = JSON.parse(list.out.at(-1)!);
+    assert.equal(parsed.length, 1);
+    assert.equal(parsed[0].name, "show-me.jsonl");
+
+    const show = makeIO();
+    assert.equal(
+      await main(["sessions", "show", "show-me", "--sessions-dir", dir], show),
+      0,
+      show.err.join("\n"),
+    );
+    assert.ok(show.out.some((line) => line.startsWith("session:")));
+    assert.ok(show.out.some((line) => line.includes("hello")));
+  });
+});
+
 test("sessions migrate exits 1 on a conflicting target", async () => {
   await withTempDir(async (dir) => {
     seedFlat(dir, "clash.jsonl");
