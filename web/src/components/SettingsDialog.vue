@@ -17,8 +17,8 @@ import { applyThemeAttribute, readThemeMode, resolveDark, saveThemeMode } from '
 import type { ThemeMode } from '../themeMode'
 import { applyDensityAttribute, readDensity, saveDensity } from '../density'
 import type { Density } from '../density'
-import { applyAccentAttribute, readUiPrefs, saveUiPrefs } from '../uiPrefs'
-import type { AccentTheme } from '../uiPrefs'
+import { applyAccentAttribute, applyRoleThemeAttribute, readUiPrefs, saveUiPrefs } from '../uiPrefs'
+import type { AccentTheme, RoleTheme } from '../uiPrefs'
 import ModelsRolesSection from './settings/ModelsRolesSection.vue'
 import ProvidersSection from './settings/ProvidersSection.vue'
 import PluginsSection from './settings/PluginsSection.vue'
@@ -42,6 +42,7 @@ const props = defineProps<{
   themeMode?: ThemeMode
   density?: Density
   accent?: AccentTheme
+  roleTheme?: RoleTheme
   showPromptAudits?: boolean
   /** Current rebindable key bindings; omitted = the panel reads the device store. */
   keybindings?: Keybindings
@@ -53,6 +54,7 @@ const emit = defineEmits<{
   'theme-change': [ThemeMode]
   'density-change': [Density]
   'accent-change': [AccentTheme]
+  'role-theme-change': [RoleTheme]
   'show-prompt-audits-change': [boolean]
   'keybindings-change': [Keybindings]
 }>()
@@ -258,6 +260,22 @@ function onAccentChange(accent: AccentTheme) {
     fallbackAccent.value = accent
   }
   emit('accent-change', accent)
+}
+
+// -- role colour palette --------------------------------------------------------
+
+/** Mirror used only while no `roleTheme` prop is bound (standalone mount). */
+const fallbackRoleTheme = ref<RoleTheme>(readUiPrefs().roleTheme)
+const activeRoleTheme = computed(() => props.roleTheme ?? fallbackRoleTheme.value)
+
+function onRoleThemeChange(roleTheme: RoleTheme) {
+  if (props.roleTheme === undefined) {
+    // No host binding yet: persist and apply locally, like the other fallbacks.
+    saveUiPrefs({ roleTheme })
+    applyRoleThemeAttribute(roleTheme)
+    fallbackRoleTheme.value = roleTheme
+  }
+  emit('role-theme-change', roleTheme)
 }
 
 // -- data --------------------------------------------------------------------
@@ -644,9 +662,11 @@ async function save() {
                 :mode="activeTheme"
                 :density="activeDensity"
                 :accent="activeAccent"
+                :role-theme="activeRoleTheme"
                 @change="onThemeChange"
                 @density-change="onDensityChange"
                 @accent-change="onAccentChange"
+                @role-theme-change="onRoleThemeChange"
               />
             </div>
 

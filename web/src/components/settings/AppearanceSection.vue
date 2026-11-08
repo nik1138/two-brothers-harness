@@ -1,14 +1,20 @@
 <script setup lang="ts">
 import type { Density } from '../../density'
 import type { ThemeMode } from '../../themeMode'
-import type { AccentTheme } from '../../uiPrefs'
+import type { AccentTheme, RoleTheme } from '../../uiPrefs'
 
-defineProps<{ mode: ThemeMode; density: Density; accent: AccentTheme }>()
+defineProps<{
+  mode: ThemeMode
+  density: Density
+  accent: AccentTheme
+  roleTheme: RoleTheme
+}>()
 
 const emit = defineEmits<{
   change: [ThemeMode]
   densityChange: [Density]
   accentChange: [AccentTheme]
+  roleThemeChange: [RoleTheme]
 }>()
 
 const options: { value: ThemeMode; label: string; description: string }[] = [
@@ -42,6 +48,22 @@ const accentOptions: { value: AccentTheme; label: string; description: string }[
   { value: 'amber', label: 'Amber', description: 'A warm accent for daylight.' },
 ]
 
+/**
+ * Role-colour palettes map 1:1 to the `data-roles` token blocks in tokens.css;
+ * the default palette is the base `:root` role tokens (no attribute block). The
+ * labels name the palettes because a per-palette swatch would need raw hex
+ * outside the token layer.
+ */
+const roleThemeOptions: { value: RoleTheme; label: string; description: string }[] = [
+  { value: 'default', label: 'Default', description: 'Blue, teal and grey role colours.' },
+  {
+    value: 'contrast',
+    label: 'High contrast',
+    description: 'Darker in light, lighter in dark; AA-tuned text.',
+  },
+  { value: 'neutral', label: 'Neutral', description: 'Muted tones; labels carry identity.' },
+]
+
 function select(mode: ThemeMode) {
   emit('change', mode)
 }
@@ -52,6 +74,10 @@ function selectDensity(density: Density) {
 
 function selectAccent(accent: AccentTheme) {
   emit('accentChange', accent)
+}
+
+function selectRoleTheme(roleTheme: RoleTheme) {
+  emit('roleThemeChange', roleTheme)
 }
 </script>
 
@@ -127,6 +153,34 @@ function selectAccent(accent: AccentTheme) {
     <p class="settings-note">
       The accent applies immediately and is remembered for the next visit. Theme and density stay
       independent of it.
+    </p>
+
+    <h4 class="settings-subhead">Role colours</h4>
+    <div class="role-theme-grid" role="radiogroup" aria-label="Role colours">
+      <label
+        v-for="option in roleThemeOptions"
+        :key="option.value"
+        class="role-theme-option"
+        :class="{ selected: roleTheme === option.value }"
+      >
+        <input
+          class="role-theme-input"
+          type="radio"
+          name="role-theme"
+          :value="option.value"
+          :checked="roleTheme === option.value"
+          @change="selectRoleTheme(option.value)"
+        />
+        <span class="role-theme-copy">
+          <span class="role-theme-name">{{ option.label }}</span>
+          <span class="role-theme-description">{{ option.description }}</span>
+        </span>
+      </label>
+    </div>
+
+    <p class="settings-note">
+      Role colours apply immediately and are remembered for the next visit. The palette changes
+      only the Senior / Junior / Operator identity colours, never the accent.
     </p>
 
     <h4 class="settings-subhead">Density</h4>
@@ -335,6 +389,71 @@ function selectAccent(accent: AccentTheme) {
 }
 
 .accent-description {
+  font-size: 0.7rem;
+  line-height: 1.35;
+  color: var(--text-secondary);
+}
+
+/* Role-colour chooser: same card language as the accent group, own class
+   names so the appearance-density browser scenario keeps measuring exactly
+   theme + density `.appearance-card`s. */
+.role-theme-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+}
+
+.role-theme-option {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 10px;
+  cursor: pointer;
+  background: var(--surface-panel);
+}
+
+.role-theme-option:hover {
+  background: var(--surface-hover);
+}
+
+.role-theme-option.selected {
+  border-color: var(--accent);
+  background: var(--surface-highlight);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.role-theme-option:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.role-theme-input {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.role-theme-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.role-theme-name {
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.role-theme-description {
   font-size: 0.7rem;
   line-height: 1.35;
   color: var(--text-secondary);

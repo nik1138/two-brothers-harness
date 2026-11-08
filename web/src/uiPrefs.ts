@@ -1,12 +1,12 @@
 /**
- * Small persisted UI preferences that are not layout-critical (prompt audits
- * and the accent theme).
+ * Small persisted UI preferences that are not layout-critical (prompt audits,
+ * the accent theme and the role-colour palette).
  *
  * Follows the density/drafts pattern: one versioned localStorage key, no DOM
  * or Vue dependency, an injectable storage backend, and fail-soft reads/writes.
  * A missing, unreadable or corrupt value resolves to the defaults, so a broken
  * blob can never leave the conversation without its usual clean transcript or
- * with an unknown accent.
+ * with an unknown accent/role palette.
  */
 
 import type { StorageLike } from './drafts'
@@ -23,6 +23,18 @@ export const DEFAULT_ACCENT: AccentTheme = 'blue'
 /** Attribute written on <html>; tokens.css keys the variant blocks off it. */
 export const ACCENT_ATTRIBUTE = 'data-accent'
 
+/** Operator-selectable role-colour palette; `default` is the product default. */
+export type RoleTheme = 'default' | 'contrast' | 'neutral'
+
+/** Every supported role palette, default first (the order the chooser renders). */
+export const ROLE_THEMES: readonly RoleTheme[] = ['default', 'contrast', 'neutral']
+
+/** Used whenever nothing usable is stored; the base role tokens are it. */
+export const DEFAULT_ROLE_THEME: RoleTheme = 'default'
+
+/** Attribute written on <html>; tokens.css keys the role palette blocks off it. */
+export const ROLE_ATTRIBUTE = 'data-roles'
+
 /** Persisted UI preferences. */
 export interface UiPrefs {
   /**
@@ -36,6 +48,12 @@ export interface UiPrefs {
    * missing/unknown stored value reads as the default.
    */
   accent: AccentTheme
+  /**
+   * Role-colour palette (`default`, `contrast`, `neutral`). Applied as
+   * `data-roles` on <html> and persisted beside the other preferences; a
+   * missing/unknown stored value reads as the default palette.
+   */
+  roleTheme: RoleTheme
 }
 
 /** Versioned key: bump the suffix when the stored shape changes incompatibly. */
@@ -45,6 +63,7 @@ export const UI_PREFS_STORAGE_KEY = 'two-brothers.ui-prefs.v1'
 export const DEFAULT_UI_PREFS: UiPrefs = Object.freeze({
   showPromptAudits: false,
   accent: DEFAULT_ACCENT,
+  roleTheme: DEFAULT_ROLE_THEME,
 })
 
 /** Timeline entry type hidden by the transcript preference. */
@@ -58,6 +77,16 @@ export function isAccentTheme(value: unknown): value is AccentTheme {
 /** Strict normalization: an unknown/absent accent reads as the default blue. */
 export function normalizeAccentTheme(value: unknown): AccentTheme {
   return isAccentTheme(value) ? value : DEFAULT_ACCENT
+}
+
+/** Runtime guard for values that crossed a storage or type boundary. */
+export function isRoleTheme(value: unknown): value is RoleTheme {
+  return typeof value === 'string' && (ROLE_THEMES as readonly string[]).includes(value)
+}
+
+/** Strict normalization: an unknown/absent role palette reads as the default. */
+export function normalizeRoleTheme(value: unknown): RoleTheme {
+  return isRoleTheme(value) ? value : DEFAULT_ROLE_THEME
 }
 
 /** Anything that can carry the attribute — an Element satisfies it. */
@@ -83,6 +112,32 @@ export function applyAccentAttribute(
       : host
   if (!target) return
   target.setAttribute(ACCENT_ATTRIBUTE, normalizeAccentTheme(accent))
+}
+
+/** Anything that can carry the attribute — an Element satisfies it. */
+export interface RoleAttributeHost {
+  setAttribute(name: string, value: string): void
+}
+
+/**
+ * Write the role-palette attribute tokens.css reads. The default palette is
+ * written explicitly (`data-roles="default"`, what the chooser shows selected);
+ * the sheet defines no block for it, so the base `:root` role tokens stay
+ * authoritative. An invalid value falls back to the default rather than writing
+ * junk onto the root.
+ */
+export function applyRoleThemeAttribute(
+  roleTheme: RoleTheme,
+  host?: RoleAttributeHost | null,
+): void {
+  const target =
+    host === undefined
+      ? typeof document === 'undefined'
+        ? null
+        : document.documentElement
+      : host
+  if (!target) return
+  target.setAttribute(ROLE_ATTRIBUTE, normalizeRoleTheme(roleTheme))
 }
 
 /** The minimal Storage surface this module needs (a `Storage` satisfies it). */
@@ -111,8 +166,9 @@ function resolveStorage(options: UiPrefsStoreOptions): StorageLike | null {
 
 /**
  * Stored preferences, merged over the defaults. Only a stored `boolean` is
- * accepted for `showPromptAudits` and only a known accent name for `accent`;
- * anything else falls back to that field's default.
+ * accepted for `showPromptAudits`, only a known accent name for `accent` and
+ * only a known role palette for `roleTheme`; anything else falls back to that
+ * field's default.
  */
 export function readUiPrefs(options: UiPrefsStoreOptions = {}): UiPrefs {
   const storage = resolveStorage(options)
@@ -131,6 +187,7 @@ export function readUiPrefs(options: UiPrefsStoreOptions = {}): UiPrefs {
           ? record.showPromptAudits
           : DEFAULT_UI_PREFS.showPromptAudits,
       accent: normalizeAccentTheme(record.accent),
+      roleTheme: normalizeRoleTheme(record.roleTheme),
     }
   } catch {
     return { ...DEFAULT_UI_PREFS }
@@ -153,6 +210,7 @@ export function saveUiPrefs(
       ? { showPromptAudits: patch.showPromptAudits }
       : {}),
     ...(isAccentTheme(patch.accent) ? { accent: patch.accent } : {}),
+    ...(isRoleTheme(patch.roleTheme) ? { roleTheme: patch.roleTheme } : {}),
   }
   const storage = resolveStorage(options)
   if (!storage) return next

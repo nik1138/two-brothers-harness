@@ -11,8 +11,8 @@ import {
 import type { ThemeMode } from './themeMode'
 import { applyDensityAttribute, readDensity, saveDensity } from './density'
 import type { Density } from './density'
-import { applyAccentAttribute, readUiPrefs, saveUiPrefs } from './uiPrefs'
-import type { AccentTheme, UiPrefs } from './uiPrefs'
+import { applyAccentAttribute, applyRoleThemeAttribute, readUiPrefs, saveUiPrefs } from './uiPrefs'
+import type { AccentTheme, RoleTheme, UiPrefs } from './uiPrefs'
 import {
   ApiError,
   answerRunApproval,
@@ -613,6 +613,27 @@ function setAccent(next: AccentTheme): void {
 
 // apply before the first paint, like the theme/density attributes below
 syncAccent()
+
+// -- role colour palette ------------------------------------------------------
+// Default (the :root role tokens) or the contrast/neutral palettes from
+// Settings → Appearance. Persisted beside the other UI preferences and applied
+// as `data-roles` on <html>; tokens.css owns every palette value.
+const roleTheme = computed(() => uiPrefs.value.roleTheme)
+
+function syncRoleTheme(): void {
+  applyRoleThemeAttribute(uiPrefs.value.roleTheme)
+}
+
+function setRoleTheme(next: RoleTheme): void {
+  if (uiPrefs.value.roleTheme !== next) {
+    uiPrefs.value = saveUiPrefs({ roleTheme: next })
+  }
+  // always re-apply: a stale attribute (e.g. another tab) self-heals on use
+  syncRoleTheme()
+}
+
+// apply before the first paint, beside the accent attribute
+syncRoleTheme()
 
 /** Density is exposed from the palette and from Settings → Appearance; the
  * hint marks the active mode. */
@@ -2329,6 +2350,7 @@ onUnmounted(() => {
       :theme-mode="themeMode"
       :density="density"
       :accent="accent"
+      :role-theme="roleTheme"
       :show-prompt-audits="showPromptAudits"
       :keybindings="keybindings"
       @close="settingsOpen = false"
@@ -2336,6 +2358,7 @@ onUnmounted(() => {
       @theme-change="onThemeChange"
       @density-change="setDensity"
       @accent-change="setAccent"
+      @role-theme-change="setRoleTheme"
       @show-prompt-audits-change="setShowPromptAudits"
       @keybindings-change="onKeybindingsChange"
     />

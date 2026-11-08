@@ -18,7 +18,10 @@
 //      belong, and theme.ts maps the documented naive-ui colours to tokens;
 //   6. every accent theme overrides the same accent/focus/selected token set in
 //      the light and both dark blocks, without growing the token inventory; the
-//      text-only accent token keeps AA contrast on the dark surfaces it sits on.
+//      text-only accent token keeps AA contrast on the dark surfaces it sits on;
+//   7. every role palette overrides exactly the three role identity tokens in
+//      the light and both dark blocks, and role-coloured text keeps AA contrast
+//      on the surfaces it sits on in both schemes.
 
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -743,6 +746,169 @@ test('token layer: accent variants override the same accent/focus/selected set i
     false,
     "the default blue accent must stay the base :root values (no override block)",
   )
+})
+
+const ROLE_VARIANT_NAMES = ['contrast', 'neutral'] as const
+
+/** The only tokens a role palette may override. */
+const ROLE_TOKENS = ['--senior', '--junior', '--operator'] as const
+
+/** WCAG AA floor for normal-size text (same floor as the accent text tokens). */
+const ROLE_TEXT_MIN_CONTRAST = 4.5
+
+/**
+ * Surfaces role-coloured text actually sits on: panel/canvas rows, the hovered
+ * provider row, and every accent theme's soft/selected tint (an open or selected
+ * provider row changes its background while the role label keeps the role
+ * colour). Avatar/dot fills are not text surfaces — the initial glyph is
+ * aria-hidden decorative chrome and the adjacent speaker name carries the
+ * accessible identity.
+ */
+function roleTextSurfaces(scheme: 'light' | 'dark'): Array<[string, string]> {
+  const base = scheme === 'light' ? LIGHT : DARK_PINNED
+  const neutralSurfaces =
+    scheme === 'light'
+      ? (['--surface-panel', '--surface-canvas', '--surface-hover'] as const)
+      : ([
+          '--surface-panel',
+          '--surface-canvas',
+          '--surface-raised',
+          '--surface-hover',
+        ] as const)
+  const surfaces: Array<[string, string]> = neutralSurfaces.map((token) => [
+    token,
+    base.get(token)!,
+  ])
+  surfaces.push(
+    ['--accent-soft', base.get('--accent-soft')!],
+    ['--surface-highlight', base.get('--surface-highlight')!],
+  )
+  for (const accent of ['violet', 'teal', 'amber'] as const) {
+    const palette =
+      scheme === 'light'
+        ? declarations(
+            tokenBlocks.find((block) => block.prelude === `:root[data-accent='${accent}']`)!.body,
+          )
+        : declarations(
+            tokenBlocks.find(
+              (block) => block.prelude === `:root[data-theme='dark'][data-accent='${accent}']`,
+            )!.body,
+          )
+    surfaces.push(
+      [`--accent-soft (${accent})`, palette.get('--accent-soft')!],
+      [`--surface-highlight (${accent})`, palette.get('--surface-highlight')!],
+    )
+  }
+  return surfaces
+}
+
+test('token layer: role palettes override exactly the role tokens and clear AA in both schemes', () => {
+  const sortedEntries = (map: Map<string, string>): Record<string, string> =>
+    Object.fromEntries([...map.entries()].sort(([a], [b]) => a.localeCompare(b)))
+  const expectedKeys = [...ROLE_TOKENS].sort()
+  const variantNames = tokenBlocks
+    .map((block) => /^:root\[data-roles='([a-z-]+)'\]$/.exec(block.prelude)?.[1])
+    .filter((name): name is string => name !== undefined)
+    .sort()
+  assert.deepEqual(
+    variantNames,
+    [...ROLE_VARIANT_NAMES].sort(),
+    'exactly the documented role palettes must be defined',
+  )
+  assert.equal(
+    tokenBlocks.some((block) => block.prelude === ":root[data-roles='default']"),
+    false,
+    'the default palette must stay the base :root role tokens (no override block)',
+  )
+
+  const lightPalettes = new Map<string, Map<string, string>>()
+  const darkPalettes = new Map<string, Map<string, string>>()
+  for (const name of ROLE_VARIANT_NAMES) {
+    const light = declarations(
+      tokenBlocks.find((block) => block.prelude === `:root[data-roles='${name}']`)!.body,
+    )
+    const mediaBlock = blocks(mediaDark!.body).find(
+      (block) => block.prelude === `:root:not([data-theme='light'])[data-roles='${name}']`,
+    )
+    assert.ok(mediaBlock, `the dark media block must define the ${name} role palette`)
+    const media = declarations(mediaBlock.body)
+    const pinned = declarations(
+      tokenBlocks.find(
+        (block) => block.prelude === `:root[data-theme='dark'][data-roles='${name}']`,
+      )!.body,
+    )
+    for (const [label, palette] of [
+      ['light', light],
+      ['dark (media)', media],
+      ['dark (pinned)', pinned],
+    ] as const) {
+      assert.deepEqual(
+        [...palette.keys()].sort(),
+        expectedKeys,
+        `${label} ${name}: a role palette may only override the three role identity tokens`,
+      )
+      for (const token of ROLE_TOKENS) {
+        assert.ok(
+          LIGHT.has(token) && DARK_PINNED.has(token),
+          `${token} must stay an existing token — role palettes may not grow the inventory`,
+        )
+      }
+    }
+    assert.deepEqual(
+      sortedEntries(media),
+      sortedEntries(pinned),
+      `the dark ${name} role palette must be identical in the media and pinned blocks`,
+    )
+    for (const token of ROLE_TOKENS) {
+      assert.notEqual(
+        light.get(token),
+        pinned.get(token),
+        `${name}: ${token} must differ between the light and dark palettes`,
+      )
+      assert.notEqual(
+        light.get(token),
+        LIGHT.get(token),
+        `${name}: light ${token} must differ from the default palette`,
+      )
+      assert.notEqual(
+        pinned.get(token),
+        DARK_PINNED.get(token),
+        `${name}: dark ${token} must differ from the default palette`,
+      )
+    }
+    for (const [scheme, palette] of [
+      ['light', light],
+      ['dark', pinned],
+    ] as const) {
+      for (const token of ROLE_TOKENS) {
+        const text = palette.get(token)!
+        for (const [surface, background] of roleTextSurfaces(scheme)) {
+          const ratio = contrastRatio(text, background)
+          assert.ok(
+            ratio >= ROLE_TEXT_MIN_CONTRAST,
+            `${name} ${scheme}: ${token} on ${surface} is ${ratio.toFixed(2)}:1 ` +
+              `(WCAG AA needs ${ROLE_TEXT_MIN_CONTRAST}:1)`,
+          )
+        }
+      }
+    }
+    lightPalettes.set(name, light)
+    darkPalettes.set(name, pinned)
+  }
+
+  // The two palettes are meaningfully different from each other.
+  for (const token of ROLE_TOKENS) {
+    assert.notEqual(
+      lightPalettes.get('contrast')!.get(token),
+      lightPalettes.get('neutral')!.get(token),
+      `${token}: the contrast and neutral light palettes must differ`,
+    )
+    assert.notEqual(
+      darkPalettes.get('contrast')!.get(token),
+      darkPalettes.get('neutral')!.get(token),
+      `${token}: the contrast and neutral dark palettes must differ`,
+    )
+  }
 })
 
 test('token layer: the base blue accent text clears AA on every surface it sits on', () => {

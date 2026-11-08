@@ -181,11 +181,11 @@
    (Settings → Appearance, persisted in uiPrefs). Each variant overrides ONLY
    the accent/focus/selected semantic tokens below, in both schemes: the accent
    family, the text-only `--accent-text` companion, the focus ring/border and
-   the selected-surface tint. Role identity colours
-   (--senior/--junior/--operator), intent colours, surfaces and every other
-   token keep their values. The default `blue` needs no block: the :root values
-   above are it, so an absent/unknown attribute renders today's look. The
-   variant declaration set is frozen by tokens.test.ts. */
+   the selected-surface tint. Role identity colours are themed separately by the
+   role-palette blocks below (`data-roles`), never here; intent colours,
+   surfaces and every other token keep their values. The default `blue` needs no
+   block: the :root values above are it, so an absent/unknown attribute renders
+   today's look. The variant declaration set is frozen by tokens.test.ts. */
 :root[data-accent='violet'] {
   --accent: #6d28d9;
   --accent-hover: #5b21b6;
@@ -217,6 +217,32 @@
   --focus-ring: #b45309;
   --border-focus: #b45309;
   --surface-highlight: #fdf3e2;
+}
+
+/* Role identity palettes — an operator preference written as `data-roles` on
+   <html> (Settings → Appearance, persisted in uiPrefs). The base `:root`
+   values above are the default palette; each variant overrides ONLY the three
+   role identity tokens, in both schemes. `contrast` darkens the role colours in
+   the light scheme and lightens them in the dark scheme so role-coloured
+   normal-size text (provider role labels/status text) clears WCAG AA 4.5:1 on
+   the surfaces role text sits on: panel/canvas/hover and every accent theme's
+   soft/selected tints. `neutral` replaces the hue coding with three muted
+   neutral tones that still clear AA — the labels carry role identity. Role
+   tokens also fill the role avatars/dots, so these palettes retint those too
+   (the avatar initial is aria-hidden decorative chrome; the adjacent speaker
+   label is the accessible identity). The default palette needs no block: the
+   :root values are it, and `data-roles="default"` deliberately has no CSS
+   block. The variant declaration set is frozen by tokens.test.ts. */
+:root[data-roles='contrast'] {
+  --senior: #2456d2;
+  --junior: #0f6d5a;
+  --operator: #545c6a;
+}
+
+:root[data-roles='neutral'] {
+  --senior: #3f4653;
+  --junior: #515866;
+  --operator: #616876;
 }
 
 /* Dark palette — duplicated for OS preference and a pinned `data-theme`.
@@ -310,6 +336,20 @@
     --border-focus: #fbbf24;
     --surface-highlight: #31220e;
   }
+
+  /* Role palettes, dark scheme: same token set as the light blocks above,
+     byte-identical to the pinned dark role blocks below. */
+  :root:not([data-theme='light'])[data-roles='contrast'] {
+    --senior: #7d9fdd;
+    --junior: #46baa0;
+    --operator: #a3abba;
+  }
+
+  :root:not([data-theme='light'])[data-roles='neutral'] {
+    --senior: #b4bac4;
+    --junior: #a3aab5;
+    --operator: #949ba8;
+  }
 }
 
 :root[data-theme='dark'] {
@@ -399,6 +439,20 @@
   --focus-ring: #fbbf24;
   --border-focus: #fbbf24;
   --surface-highlight: #31220e;
+}
+
+/* Role palettes, pinned dark scheme — byte-identical to the media-query role
+   variants above (tokens.test.ts checks the parity). */
+:root[data-theme='dark'][data-roles='contrast'] {
+  --senior: #7d9fdd;
+  --junior: #46baa0;
+  --operator: #a3abba;
+}
+
+:root[data-theme='dark'][data-roles='neutral'] {
+  --senior: #b4bac4;
+  --junior: #a3aab5;
+  --operator: #949ba8;
 }
 
 :root[data-theme='light'] {

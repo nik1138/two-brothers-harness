@@ -14,6 +14,11 @@
 //                  changes the root `data-accent` attribute and the effective
 //                  accent token (keyboard-selected Violet), survives a reload,
 //                  and restores the default blue palette
+//   appearance-roles mock provider: Settings -> Appearance role-colour radio
+//                  group changes the root `data-roles` attribute and the role
+//                  identity tokens (keyboard-selected High contrast in light
+//                  and dark, then the Neutral muted palette), survives a
+//                  reload, and restores the default palette
 //   keybindings   mock provider: Settings -> Keyboard rebinds the palette chord
 //                  from a real Ctrl+Shift+P capture (applied immediately, old
 //                  Ctrl+K dead, header + /help follow); a duplicate is rejected
@@ -1274,6 +1279,184 @@ async function scenarioAppearanceAccent(runner) {
 
     consoleGuard.assertClean()
     runner.pass('appearance-accent')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(be.dir)
+  }
+}
+
+// -- scenario: Settings -> Appearance role-colour palette -------------------------------
+// The role chooser is a native radio group persisted in the uiPrefs blob and
+// applied as `data-roles` on <html>; tokens.css owns the contrast/neutral role
+// palettes (default is the base :root role tokens). Verifies the default, a
+// keyboard-chosen high-contrast palette in light and dark (root attribute +
+// computed role tokens + the rendered role dots), reload persistence, the
+// neutral muted palette, and restoring the default — with the theme/density
+// `.appearance-card` group still at 5 cards.
+
+async function scenarioAppearanceRoles(runner) {
+  const be = await startBackend({ kind: 'mock' })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  const roleAttribute = () =>
+    page.evaluate(() => document.documentElement.getAttribute('data-roles'))
+  const roleTokens = () =>
+    page.evaluate(() => {
+      const style = getComputedStyle(document.documentElement)
+      return {
+        senior: style.getPropertyValue('--senior').trim(),
+        junior: style.getPropertyValue('--junior').trim(),
+        operator: style.getPropertyValue('--operator').trim(),
+      }
+    })
+  /** The rendered role dots (Models & roles pane, mounted when Settings opens). */
+  const roleDotBackgrounds = () =>
+    page.evaluate(() =>
+      [...document.querySelectorAll('.role-dot')].map(
+        (dot) => getComputedStyle(dot).backgroundColor,
+      ),
+    )
+  /** True when an rgb() string is within a small channel tolerance of `hex`. */
+  const matchesHex = (actual, hex) => {
+    const channels = (value) => (value.match(/\d+/g) ?? []).slice(0, 3).map(Number)
+    const expected = (hex.replace('#', '').match(/../g) ?? []).map((pair) =>
+      Number.parseInt(pair, 16),
+    )
+    const rgb = channels(actual)
+    return (
+      rgb.length === 3 && rgb.every((channel, index) => Math.abs(channel - expected[index]) <= 2)
+    )
+  }
+  const themeCard = (pane, label) =>
+    pane
+      .locator('.appearance-card')
+      .filter({ has: page.locator(`.appearance-name:text-is("${label}")`) })
+  const waitForRoleTokens = async (expected, label) => {
+    await waitFor(
+      async () => {
+        const tokens = await roleTokens()
+        return Object.entries(expected).every(([name, value]) => tokens[name] === value)
+      },
+      { desc: label },
+    )
+  }
+  const LIGHT_BASE = { senior: '#3568d4', junior: '#0d7f69', operator: '#6f7684' }
+  const LIGHT_CONTRAST = { senior: '#2456d2', junior: '#0f6d5a', operator: '#545c6a' }
+  const DARK_CONTRAST = { senior: '#7d9fdd', junior: '#46baa0', operator: '#a3abba' }
+  const LIGHT_NEUTRAL = { senior: '#3f4653', junior: '#515866', operator: '#616876' }
+  try {
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+
+    // Default: the base role palette, with the attribute written on mount.
+    assert.equal(await roleAttribute(), 'default', 'the default role palette is default')
+    assert.deepEqual(await roleTokens(), LIGHT_BASE, 'default is the base :root role palette')
+
+    const first = await openAppearanceSettings(page)
+    assert.equal(
+      await first.pane.locator('.appearance-card').count(),
+      5,
+      'the theme + density card groups stay exactly 5 cards',
+    )
+    const roleGroup = first.pane.getByRole('radiogroup', { name: 'Role colours' })
+    assert.equal(
+      await roleGroup.locator('input[type="radio"]').count(),
+      3,
+      'three role-colour options are offered',
+    )
+    assert.equal(
+      await roleGroup.locator('input[name="role-theme"]:checked').inputValue(),
+      'default',
+      'Default is selected initially',
+    )
+    const defaultDots = await roleDotBackgrounds()
+    assert.ok(defaultDots.length >= 2, 'the role dots are rendered in the roles pane')
+    assert.ok(matchesHex(defaultDots[0], LIGHT_BASE.senior), 'the senior dot uses --senior')
+    assert.ok(matchesHex(defaultDots[1], LIGHT_BASE.junior), 'the junior dot uses --junior')
+
+    // Keyboard-only change: focus the checked radio and use native radio-group
+    // arrow navigation (no mouse), which checks the next option (High contrast).
+    await roleGroup.locator('input[name="role-theme"][value="default"]').focus()
+    await page.keyboard.press('ArrowDown')
+    await page.waitForFunction(
+      () => document.documentElement.getAttribute('data-roles') === 'contrast',
+      null,
+      { timeout: 5000 },
+    )
+    assert.equal(
+      await roleGroup.locator('input[name="role-theme"]:checked').inputValue(),
+      'contrast',
+      'keyboard navigation selects the High contrast role palette',
+    )
+    await waitForRoleTokens(LIGHT_CONTRAST, 'the light high-contrast role tokens')
+    const contrastDots = await roleDotBackgrounds()
+    assert.ok(matchesHex(contrastDots[0], LIGHT_CONTRAST.senior), 'the senior dot follows --senior')
+
+    // The palette is independent of the light/dark control and follows the dark
+    // role blocks after switching the theme.
+    await themeCard(first.pane, 'Dark').click()
+    await page.waitForFunction(
+      () => document.documentElement.getAttribute('data-theme') === 'dark',
+      null,
+      { timeout: 5000 },
+    )
+    assert.equal(await roleAttribute(), 'contrast', 'the role palette survives a theme change')
+    await waitForRoleTokens(DARK_CONTRAST, 'the dark high-contrast role tokens')
+
+    // Reload: both the uiPrefs blob and the theme survive; the dark role palette
+    // is re-applied with the pinned dark tokens.
+    await page.reload()
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    assert.equal(await roleAttribute(), 'contrast', 'the role palette survives a reload')
+    await waitForRoleTokens(DARK_CONTRAST, 'the reloaded dark high-contrast role tokens')
+    const reloaded = await openAppearanceSettings(page)
+    assert.equal(
+      await reloaded.pane
+        .getByRole('radiogroup', { name: 'Role colours' })
+        .locator('input[name="role-theme"]:checked')
+        .inputValue(),
+      'contrast',
+      'the chooser restores the stored palette',
+    )
+
+    // Back to the light theme, then the muted neutral palette.
+    await themeCard(reloaded.pane, 'Light').click()
+    await page.waitForFunction(
+      () => document.documentElement.getAttribute('data-theme') === 'light',
+      null,
+      { timeout: 5000 },
+    )
+    await reloaded.pane.locator('.role-theme-option', { hasText: 'Neutral' }).click()
+    await page.waitForFunction(
+      () => document.documentElement.getAttribute('data-roles') === 'neutral',
+      null,
+      { timeout: 5000 },
+    )
+    await waitForRoleTokens(LIGHT_NEUTRAL, 'the light neutral role tokens')
+    assert.equal(
+      await reloaded.pane
+        .getByRole('radiogroup', { name: 'Role colours' })
+        .locator('input[name="role-theme"]:checked')
+        .inputValue(),
+      'neutral',
+      'the neutral option is selected',
+    )
+
+    // Restore the default palette.
+    await reloaded.pane.locator('.role-theme-option', { hasText: 'Default' }).click()
+    await page.waitForFunction(
+      () => document.documentElement.getAttribute('data-roles') === 'default',
+      null,
+      { timeout: 5000 },
+    )
+    await waitForRoleTokens(LIGHT_BASE, 'the restored base role tokens')
+    await page.reload()
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    assert.equal(await roleAttribute(), 'default', 'restoring the default survives a reload')
+    assert.deepEqual(await roleTokens(), LIGHT_BASE, 'the reloaded default role palette is the base one')
+
+    consoleGuard.assertClean()
+    runner.pass('appearance-roles')
   } finally {
     await context.close().catch(() => {})
     await killBackend(be)
@@ -3259,6 +3442,13 @@ async function main() {
         ),
       },
       {
+        label: 'appearance-roles',
+        run: () => (
+          (currentRunner = makeRunner('appearance-roles')),
+          scenarioAppearanceRoles(currentRunner)
+        ),
+      },
+      {
         label: 'keybindings',
         run: () => (
           (currentRunner = makeRunner('keybindings')),
@@ -3351,6 +3541,7 @@ async function main() {
       'mobile',
       'appearance-density',
       'appearance-accent',
+      'appearance-roles',
       'keybindings',
       'provider-reset',
       'folding',
