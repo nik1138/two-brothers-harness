@@ -53,8 +53,11 @@ its history is in git history, and the captured `SPARK-TRANSCRIPT.md` /
 | `SPARK-TRANSCRIPT.md` | captured real-model cooperation cycle (evidence) |
 | `LMSTUDIO-TRANSCRIPT.md` | LM Studio run evidence (`spark-x2.6-4b@q4_k_m` + `lfm3-1.7b`) |
 
-Subdirectories with their own agent guidance: `typescript/AGENTS.md`,
-`web/AGENTS.md`.
+Every major tree has a short `AGENTS.md`: `packages/harness/` plus
+`packages/harness/src/`, `packages/harness/tests/`, `packages/harness/e2e/`,
+`packages/harness/scripts/`, `web/` plus `web/src/`, `web/tests/`,
+`typescript/` plus `typescript/src/`, `typescript/tests/`, and the root
+`e2e/`, `scripts/`, `plugins/`, `shared/`, `docs/` trees.
 
 ## Hard Rules
 
@@ -84,6 +87,30 @@ Subdirectories with their own agent guidance: `typescript/AGENTS.md`,
 6. **`web/` is a Vue 3 + Vite app.** `npm run build` (to `web/dist`) must keep
    passing; the TypeScript server serves the built app (repo `web/dist` in a
    checkout, the packaged copy in the npm tarball).
+
+## Subagent Lanes
+
+Long or parallel work runs in **short-lived lanes**, not shared working
+copies:
+
+- **One lane = one concern.** Branch from current `main` in its own worktree
+  (`agents-<concern>`, `fix-<concern>`); never edit `main` directly and never
+  work in another lane's tree. Remove the worktree and branch after merge.
+- **A lane starts with an explicit brief.** The owner/parent states the goal,
+  allowed paths, non-goals, acceptance commands and forbidden actions. If the
+  brief is missing or ambiguous, stop and ask instead of widening scope.
+- **Stay inside the brief.** A docs lane does not change product code; a code
+  lane does not rewrite unrelated docs. No drive-by renames or reformatting.
+- **Evidence, not adjectives.** Report the commit SHA, exact commands, working
+  directory, and PASS/FAIL counts (plus skips). "Tests pass" without a command
+  and counts is not evidence; a gate that could not run is reported as such.
+- **No publish side effects without owner approval.** Commit locally when the
+  brief asks; never push, merge, tag, publish, force-push, or delete shared
+  branches/worktrees on your own.
+- **The implementer is not the only sign-off.** Acceptance runs again in a
+  separate lane (or by the owner) on the merged tree before release; one FAIL
+  blocks the merge/publish. See "Release gate: independent subagent E2E" under
+  Testing Notes.
 
 ## Common Commands
 
@@ -131,7 +158,7 @@ node dist/cli.js run "Plan a migration from Redis to Valkey" --provider mock
 - `selftest` is the fastest offline gate (`node dist/selftest.js` in
   `packages/harness` after a build; `node src/selftest.ts` in `typescript/`).
 - Package tests: `npm test` (in-process `node:test` runner) and
-  `npm run test:spawn` (`node --test tests/`). Hermetic CLI E2E:
+  `npm run test:spawn` (`node --test`). Hermetic CLI E2E:
   `node e2e/cli.ts` and `node e2e/cli.ts --dist`.
 - Live/opt-in E2E: `packages/harness/e2e/` (`npm run test:e2e`,
   `npm run test:e2e:dist`) against LM Studio; the hermetic server-status and

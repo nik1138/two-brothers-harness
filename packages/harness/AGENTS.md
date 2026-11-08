@@ -19,7 +19,7 @@ the protocol reference and is not modified by work here either.
 
 - `src/` — package sources (public API via `src/index.ts`)
 - `tests/` — `node:test` suites; `run-all.ts` is the in-process runner
-  (`npm test`); `npm run test:spawn` = `node --test tests/`
+  (`npm test`); `npm run test:spawn` = `node --test`
 - `shared/prompts.json` — copy of the repo-root `shared/prompts.json`
   (loaded at runtime relative to the module; must stay in sync — the
   protocol tests check parity when the repo-root copy is reachable)
@@ -29,6 +29,10 @@ the protocol reference and is not modified by work here either.
 - `web/` — generated copy of the built Vue app (gitignored; created by
   `npm run sync-web`, served by `createServer` when present)
 - `dist/` — build output (tsc), not committed
+- Inner guidance: `src/AGENTS.md` (module map + invariants),
+  `tests/AGENTS.md` (suite registration + commands), `e2e/AGENTS.md`
+  (hermetic vs live layers), `scripts/AGENTS.md` (prepack web copy). Lane
+  workflow: `../../AGENTS.md` ("Subagent Lanes").
 
 ## Rules specific to this tree
 
@@ -562,6 +566,23 @@ the protocol reference and is not modified by work here either.
    `RunUndoDialog.vue` (12 tests). The rewind route clears the session
    runtime-event sidecar; the transcript is kept. No
    PROTOCOL/schema/session-format change; no new runtime dependencies.
+
+## Subagent lanes
+
+Lane workflow lives in `../../AGENTS.md` ("Subagent Lanes"). For a lane in
+this package:
+
+- Minimum code-lane gate: `npm run typecheck` + `npm test`; report the test
+  counts, not just "green". A change to `src/` behavior also runs
+  `node e2e/cli.ts` (hermetic CLI E2E). Pre-push/release lanes add
+  `node e2e/cli.ts --dist`, `node e2e/faults.ts`, and, from the repo root,
+  `node scripts/tarball-smoke.mjs`.
+- A docs-only lane does not need the build. A lane that changes
+  `package.json` dependencies or packaging also runs `npm run check` (repo
+  root) and `npm run pack:check` here.
+- Keep changes inside this package. Web sources (`../../web/`) and browser
+  E2E (`../../e2e/`) are separate lanes; never edit `dist/`, the generated
+  `web/` copy, or `e2e/runs/` evidence.
 
 ## Commands
 

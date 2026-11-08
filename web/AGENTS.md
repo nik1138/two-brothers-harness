@@ -69,6 +69,9 @@ The backend is the TypeScript server in `packages/harness`:
 - `src/uiPrefs.ts` — persisted device-local conversation preferences (`showPromptAudits`, default off, versioned key + injectable storage) and the pure transcript visibility filter; used by `App.vue`, `ChatView.vue` and Settings → Advanced
 - `src/components/` help/status dialogs: `ShortcutHelpDialog` (`/help`, `?`), `SessionStatusDialog` (`/status`), `PermissionInfoDialog` (`/permission`)
 - `vite.config.ts` — dev proxy `/api` → `http://127.0.0.1:8600`
+- Inner guidance: `src/AGENTS.md` (app modules + invariants),
+  `tests/AGENTS.md` (unit-test bootstrap + registration). Lane workflow:
+  `../AGENTS.md` ("Subagent Lanes").
 
 ## Rules specific to this tree
 

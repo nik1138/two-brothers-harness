@@ -15,6 +15,9 @@ is not the implementation — `../packages/harness/` is.
 - `src/` — protocol reference modules
 - `tests/` — in-process test runner (`run-all.ts`) plus `node --test` suites
 - `tsconfig.json` — native type stripping (Node ≥ 22.6), no build step
+- Inner guidance: `src/AGENTS.md` (module map + invariants),
+  `tests/AGENTS.md` (suite registration + commands). Lane workflow:
+  `../AGENTS.md` ("Subagent Lanes").
 
 ## Rules specific to this tree
 
@@ -24,7 +27,8 @@ is not the implementation — `../packages/harness/` is.
    `../packages/harness/` — see `../docs/history/ts-rewrite-plan.md`; that
    tree has its own dependency rules. This reference stays zero-dependency.)
 2. Run tests with `node tests/run-all.ts` (works in sandboxes);
-   `node --test tests/` is the alternative where process spawning is allowed.
+   `node --test` (no path; run from `typescript/`) is the alternative where
+   process spawning is allowed.
 3. Protocol changes come from `../PROTOCOL.md` + `../shared/protocol.schema.json`
    and must be reflected here and in `../packages/harness/` together.
 4. Context markers and rendered transcript strings are byte-stable contract
