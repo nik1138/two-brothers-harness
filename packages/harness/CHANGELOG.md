@@ -9,6 +9,162 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Wave 26: browser coverage for the wave-25 web surfaces, TUI clipboard and
+  attention, an external editor, the undo lifecycle, fork-from-here, session
+  hardening, a doctor MCP check and per-preset context windows:**
+  - **Browser E2E for the wave-25 web surfaces:** two hermetic scenarios close
+    the wave-25 coverage gap without a product-source change. `tab-title`
+    drives one scripted run through the running marker (`▶`), the real
+    approval parking (`!`) and the plain title after completion, then asserts
+    the unread/selection rules — a selected session never carries the unread
+    count, deleting the open session shows `(1) Two Brothers`, and opening the
+    unread session consumes it. The full title matrix (queued, `(failed)`,
+    sanitize/cap) is covered by `web/tests/tabTitle.test.ts` (16).
+    `settings-advanced` asserts the Settings → Advanced **Auto-compaction**
+    card end to end: the four labelled inputs, per-field effective/source
+    lines, native `min=0` blocking of a negative value, inline `role="alert"`
+    validation (with `aria-invalid` and a footer alert) blocking Save, exactly
+    one `PUT /api/settings` for a valid save, persistence in
+    `sessions/settings.json`, and survival after reload. Files: `e2e/run.mjs`,
+    `e2e/fixtures/scripted-server.mjs` (and its README); no product source
+    change.
+  - **TUI clipboard and terminal attention:** `Ctrl+X` copies the last
+    completed reply as plain text — the newest committed decision, or the
+    newest completed outgoing senior reply when there is no decision (junior
+    proposals, tool results, notices, streaming drafts and operator text are
+    never selected). Native clipboard writers are tried first (PowerShell or
+    `clip.exe` on Windows, `pbcopy` on macOS, `wl-copy`/`xclip`/`xsel` on
+    Linux/BSD); where there is no OS clipboard to reach (remote/SSH, a
+    container, WSL without WSLg) or every native writer fails, the TUI writes
+    one OSC 52 sequence, capped at 100 000 base64 characters, and reports the
+    route honestly instead of claiming a clipboard write. Each writer has a
+    5 s timeout; an empty transcript answers `nothing to copy yet`. `Ctrl+X` is
+    a fixed app-scope binding (not one of the three rebindable global chords)
+    and appears in the `Ctrl+P` palette, the `?`/`F1` overlay and `tui --help`.
+    The terminal driver now sets an OSC 0 title
+    (`Two Brothers — <session> · working|approval|done|failed`, plain when
+    idle, `Two Brothers` with no session; sanitized, ≤120 chars) on session
+    start/switch and run transitions, restores `Two Brothers` on exit when it
+    changed the title, and emits exactly one OSC 9/BEL notification per parked
+    approval id (never on a normal turn end or a cancelled run; tmux gets a DCS
+    passthrough). Non-TTY and `TERM=dumb` sessions write nothing. Files:
+    `src/tui/clipboard.ts`, `src/tui/copytext.ts`, `src/tui/attention.ts` (new),
+    `src/tui/terminal.ts`, `src/tui/app.ts`, `src/tui/keymap.ts`; tests
+    `tests/tuicopy.test.ts` (18), `tests/tuiattention.test.ts` (11) and the
+    assembled-app cases in `tests/tuiintegration.test.ts`.
+  - **TUI external editor:** `Ctrl+G` opens the composer draft in
+    `$VISUAL`/`$EDITOR` (Windows falls back to the system `notepad.exe` only
+    when neither is set; POSIX with neither refuses honestly). The executable
+    resolves through `PATH`/`PATHEXT` to an absolute path, a hit inside the
+    workspace is refused (binary planting), arguments are tokenized without a
+    shell, and Windows `.cmd`/`.bat` shims use an absolute `cmd.exe /d /s /c`
+    wrapper. A mode-0600 temp file is spawned asynchronously with inherited
+    stdio; a nonzero exit, signal, spawn error or oversized draft leaves the
+    draft untouched, and the temp directory is always removed. On success the
+    saved text is read back at most 256 KiB, one BOM is stripped, CRLF is
+    normalized to LF and one final newline is dropped. `Ctrl+G` is idle-only
+    (it refuses during a turn/compaction or while an overlay/find/approval owns
+    the keyboard); the terminal driver gains idempotent `suspend()`/`resume()`
+    so a failed editor never leaves the screen broken, and default frames stay
+    byte-identical when the feature is unused. Files:
+    `src/tui/externaleditor.ts` (new), `src/tui/terminal.ts`, `src/tui/app.ts`,
+    `src/tui/keymap.ts`; tests `tests/tuiexternaleditor.test.ts` (20), plus
+    `tests/tuiintegration.test.ts` and `tests/tuikeymap.test.ts` cases.
+  - **Undo lifecycle:** the run-scoped workspace undo store under
+    `<sessions>/undo` is now bounded. When a capture closes, the newest 20
+    records per session are kept and records older than 30 days are pruned
+    (age pruning can be disabled; the count cap still applies), and blobs no
+    surviving record references are deleted in the same pass — a deduped blob
+    survives while any record needs it, and a corrupt/unreadable record refuses
+    the whole blob pass rather than guessing. A prune/GC failure is one bounded
+    diagnostic and never breaks a run or an apply; pruning never touches
+    workspace files, it only makes an old run stop being undoable. Active runs
+    are never pruned. On apply, a restored POSIX file regains the permission
+    bits recorded at capture time, and ownership is restored only where the
+    process may set it (best effort, disclosed per file; it never turns a byte
+    restore into a failed apply). A delete records the live file's mode at the
+    mutation seam, so a delete-first run restores bytes and permission bits.
+    The CLI gains `sessions undo <name> [--run <id>] [--apply | --discard] [--json]`
+    — preview by default against the session's linked workspace, the line-mode
+    counterpart of the `GET`/`POST`/`DELETE .../undo/{run_id}` routes — and
+    `DELETE` now returns additive `blobs_removed?`/`gc_diagnostics?`. Files:
+    `src/workspacehistory.ts`, `src/server.ts`, `src/cli.ts`, `src/clihelp.ts`;
+    tests `tests/workspaceundo.test.ts` (42), `tests/serverundo.test.ts` (9),
+    `tests/sessionscommands.test.ts` (18) and `tests/cliergonomics.test.ts`
+    additions. Record format version stays 1; all new fields are additive.
+  - **Web Fork from here…:** an operator message bubble exposes a compact
+    `fork` button whose accessible name is **Fork from here…** (the full label
+    and reason are announced while disabled). It calls the existing
+    `POST /api/sessions/{name}/fork` with that bubble's `{seq}` — so the new
+    session is the conversation up to and including that message — and opens
+    the new fork; the source JSONL and sidecar stay byte-identical, the fork
+    keeps its `parent` lineage link and `<source title> (fork)` title, and the
+    action is unavailable while a run is active for the session. Failure
+    (404/409/422/other) stays inline in the confirmation with no local state
+    change or partial refresh. Files: `web/src/sessionFork.ts`,
+    `web/src/components/ChatView.vue`, `web/src/App.vue`; tests
+    `web/tests/sessionFork.test.ts` (9).
+  - **Session-recovery hardening:** the torn-tail repair is now a full
+    compare-and-swap. `SessionStore.scan()` captures `{size, mtimeMs, ino}`
+    immediately before reading, and `rewritePrefixAtomically` re-stats and
+    compares all three fields immediately before the atomic rename; any
+    mismatch (or a missing re-stat/signature) removes the temp file and throws
+    a `SessionError` with the additive `retryable: true`, leaving every
+    original byte — including a concurrent appender's — intact. The documented
+    single-writer assumption is unchanged, and the test-only `beforeRename`
+    seam was added. Forking a crash-torn source now mirrors the reader: an
+    unterminated final fragment that fails JSON parsing is dropped, so the fork
+    copies only the complete-line prefix byte-exactly with dense `seq`;
+    newline-terminated corruption, interior corruption and parseable
+    non-objects still fail `source-unreadable` (422). Files:
+    `src/session.ts`, `src/sessionfork.ts`; tests `tests/session.test.ts` (14),
+    `tests/sessionfork.test.ts` (23) and `tests/sessionapi.test.ts` (11).
+  - **Doctor MCP configuration check:** `doctor` gains one deterministic,
+    read-only `mcp-config` row after the TUI checks. It resolves
+    `TWO_BROTHERS_MCP_CONFIG` against the working directory; unset/blank is a
+    skip (`TWO_BROTHERS_MCP_CONFIG not set`, not a failure), a missing/unreadable/invalid-JSON/
+    wrong-shape file is a `warn` with one bounded reason, and a valid file
+    passes with `N servers: …` (names sorted, at most eight listed). It never
+    starts a server, never makes a network call and never prints a spec value
+    (command, args, URL, env or header value). Files: `src/doctor.ts`,
+    `src/clihelp.ts`; tests `tests/doctor.test.ts` (45).
+  - **MCP env wiring:** `TWO_BROTHERS_MCP_CONFIG` is now actually honored by
+    `run`, `chat`, `tui`, `serve` and `--dry-run` through one helper — a
+    non-blank `--mcp-config` wins, a blank flag falls back to the env, and
+    blank on both means "not configured". This closes the pre-existing
+    docs/CLI drift the doctor check exposed. File: `src/cli.ts`; tests
+    `tests/cliergonomics.test.ts` (48).
+  - **Per-preset context windows:** provider presets gain the additive
+    `context_window?: number` (tokens; a positive safe integer, `0`/absent =
+    unknown). Seeds omit it; stored overrides survive unrelated saves and
+    corrupt values fail soft; `GET /api/providers` exposes it only when
+    positive (old rows stay byte-compatible), and `PUT`/`POST` validate it
+    strictly (an explicit `0` clears; absent/null on an update keeps the stored
+    value; negative/float/string/boolean/unsafe is a 400). Endpoint resolution carries the window from the role's named preset,
+    and compaction adds it as the last fallback after an explicit
+    `ServerOptions.compaction`, the run-level `--context-window`/
+    `TWO_BROTHERS_CONTEXT_WINDOW` and the persisted
+    `compaction.context_window` in `serve` runs (CLI `run`/`chat`/`tui` use
+    their configured budgets only): when both roles resolve to a window the
+    **smaller** one applies (a summary sized for the larger model must not
+    overflow the smaller one), and the settings view reports the honest
+    `preset` source. Settings → Providers gains a labelled **Context window
+    (tokens)** input (0 = unknown) with the same strict validation and a
+    preset-aware explanation. Provider wire requests are unchanged. Files:
+    `src/presets.ts`, `src/settings_store.ts`, `src/config.ts`,
+    `src/runtime.ts`, `src/server.ts`, `web/src/types.ts`,
+    `web/src/providerSettings.ts`, `web/src/api.ts`,
+    `web/src/compactionSettings.ts`,
+    `web/src/components/settings/ProvidersSection.vue`; tests
+    `tests/presets.test.ts`, `tests/settings.test.ts`, `tests/server.test.ts`,
+    `tests/serverbase.test.ts` and the web provider/compaction suites.
+
+  Package suite `1 912 tests` (1 906 pass and 6 platform skips on Windows; the
+  WSL Linux pass is 1 911 pass with 1 skip); web suite `459/459`; the
+  browser-E2E matrix is `21` offline scenarios plus the opt-in `real` skip
+  (`21 PASS, 0 FAIL, 1 SKIP`). No protocol or session-format change (all
+  record/API additions are optional), and no new runtime dependency.
+
 - **Wave 25: crash-torn session resume, TUI steering, persisted compaction
   settings, cooperative CLI cancellation and a live tab title:**
   - **Crash-torn session resume:** a session whose final JSONL line was

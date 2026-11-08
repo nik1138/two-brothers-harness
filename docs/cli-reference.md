@@ -252,6 +252,46 @@ keep `Ctrl+S` for XOFF flow control, which makes the screen look frozen; the
 palette row queues the same text, and `Ctrl+Q` (XON) resumes output if a
 terminal paused. There is no typed `/steer` form.
 
+**Copying and terminal attention.** `Ctrl+X` copies the last completed reply to
+the clipboard as plain text: the newest committed decision, or the newest
+completed outgoing senior reply when the run has no decision yet. Junior
+proposals, tool results, streaming drafts, notices and operator text are never
+copied. The platform clipboard is tried first (PowerShell/`clip.exe` on
+Windows, `pbcopy` on macOS, `wl-copy`/`xclip`/`xsel` on Linux/BSD); where there
+is no OS clipboard to reach (remote/SSH, a container, WSL without WSLg) or
+every native writer fails, the TUI falls back to one terminal OSC 52 sequence.
+OSC 52 is a request the terminal may ignore, so the toast names the route
+(`via OSC 52`) instead of claiming a clipboard write, and an empty transcript
+answers `nothing to copy yet` without copying. `Ctrl+X` is a fixed binding (not
+one of the three rebindable global chords) and appears in the `Ctrl+P` palette,
+the `?`/`F1` overlay and `tui --help`.
+
+While it runs, the TUI keeps the terminal's attention state. The OSC 0 title is
+`Two Brothers — <session> · working|approval|done|failed` (the status suffix
+is omitted when idle, and the product name alone when no session is open),
+sanitized and capped at 120 characters. It changes on session start/switch and
+run transitions: `working` on a run start or an approval resolution, `approval`
+when an approval parks, `done` on completion/cancellation, `failed` on a failed
+run or a completed run with errors. Every exit path restores the title the
+driver set (`Two Brothers`) when the driver changed it, and a non-TTY or
+`TERM=dumb` session writes nothing. When an approval parks, the TUI emits
+exactly one notification per approval id — an OSC 9 where the terminal is known
+to support it (iTerm2, WezTerm, Ghostty, Warp, kitty), a tmux DCS passthrough
+inside `tmux`, otherwise one BEL — never on a normal turn end or a cancelled
+run. Notification text is sanitized and capped at 200 characters.
+
+**External editor.** `Ctrl+G` opens the current composer draft in
+`$VISUAL`/`$EDITOR` (in that order; Windows falls back to the system
+`notepad.exe` only when it exists, and a POSIX process with neither variable
+set refuses honestly). The editor inherits the terminal while it runs; on a
+clean exit the saved text replaces the draft (a UTF-8 BOM is stripped, CRLF is
+normalized to LF, one final newline is dropped, and the read-back is capped at
+256 KiB). A nonzero exit, a spawn failure or an oversized draft leaves the
+draft untouched, and the temp file is always removed. `Ctrl+G` is idle-only: it
+refuses while a turn or compaction runs, or while an overlay/find/approval owns
+the keyboard, and it never launches an executable inside the workspace (PATH
+resolution refuses a hit under the working directory).
+
 ```powershell
 node dist/cli.js tui --provider mock
 node dist/cli.js tui --workspace ./repo --provider mock
@@ -488,7 +528,9 @@ List the JSONL session files of a sessions directory (default `sessions`)
 with readable titles derived from the first operator message, envelope counts
 and the last-modified time. Mostly read-only: listing, `show`, `search` and
 `export` never change a file; `sessions fork` creates a new session file (the
-source is never modified) and `sessions rewind` rewrites one. A read also
+source is never modified), `sessions undo` previews, applies or discards a
+run's workspace undo record (a preview and a discard change no session file)
+and `sessions rewind` rewrites one. A read also
 tolerates a crash-torn final line: `sessions search` (and the web search
 corpus, detail and export routes) load through the torn-tail-aware reader,
 which ignores only the incomplete trailing fragment, and the search document
@@ -635,6 +677,44 @@ node dist/cli.js sessions rewind session --turns 1
 node dist/cli.js sessions rewind session --turns 2 --json
 ```
 
+#### `sessions undo <name> [--run <id>] [--apply | --discard] [--json]`
+
+Preview, apply or discard the run-scoped workspace undo record a
+workspace-bound `serve` run left under `<sessions>/undo` — the CLI counterpart
+of `GET`/`POST`/`DELETE /api/sessions/{name}/undo/{run_id}`. The server does
+not need to be running: the record and the session's workspace link
+(`<name>.meta.json` → `workspaces.json`) are persisted. Without `--apply` or
+`--discard` the command previews only and touches nothing; without `--run` it
+selects the newest record whose recorded session is `<name>`.
+
+The preview prints one row per mutated file with its action and its status
+against the live workspace (`applicable`, `created`, `deleted`,
+`changed-since`, `skipped`, `missing`) plus a counts footer. `--apply` restores
+write/edit pre-images and deletes files the run created, re-classifying each
+file immediately before it is touched so a file changed since the run is
+refused rather than overwritten; per-file rows report `applied`, `refused` or
+`failed` with the driving preview status. `--discard` removes the record and
+collects blobs no surviving record references, without touching the workspace.
+`--json` prints the stable object shapes: preview
+`{session, run_id, workspace_root, created_at, statuses, counts, omitted?}`,
+apply `{session, run_id, workspace_root, applied, refused, failed, files, counts, omitted?}`,
+discard `{discarded, session, run_id, blobs_removed?, gc_diagnostics?}`.
+
+```powershell
+node dist/cli.js sessions undo session                              # preview the newest record
+node dist/cli.js sessions undo session --run run-abc123 --apply
+node dist/cli.js sessions undo session --run run-abc123 --discard
+```
+
+CLI/TUI runs never capture, so this surface only reports records made by
+`serve`; shell-made changes, external edits, untracked files and file
+mode/ownership changes outside the recorded bytes are out of scope exactly as
+in the API. A missing session, no record for the selected run, an unregistered
+workspace link or a record from another workspace exits 1, and a per-file
+`failed` also exits 1 (refusals alone exit 0 — the report is the honest
+result). A missing name, an unexpected argument, `--apply` combined with
+`--discard` or a malformed `--run` is a usage error (exit 2).
+
 ### `doctor`
 
 Local, read-only diagnostics: one `[pass]` / `[warn]` / `[fail]` / `[skip]`
@@ -642,8 +722,9 @@ line per check, in this order — Node engine (the package's `>= 22.19` floor),
 settings file (`<sessions-dir>/settings.json`), sessions-directory
 writability, per-role provider configuration (kind, base URL, model, key
 presence), the provider endpoint (`GET {base-url}/models`; skipped for
-`mock`), built web assets, the `<cwd>/plugins` directory, the TUI keys file and
-the TUI prompt history file. API keys are never printed. The endpoint probe is
+`mock`), built web assets, the `<cwd>/plugins` directory, the TUI keys file,
+the TUI prompt history file and the MCP config named by
+`TWO_BROTHERS_MCP_CONFIG`. API keys are never printed. The endpoint probe is
 bounded by `--timeout` (seconds, default 5) and only runs for `openai`.
 
 The two TUI rows are read-only and content-blind: `tui-keys` resolves the same
@@ -655,6 +736,17 @@ active / prompt history is optional); a missing explicitly named file, invalid
 JSON, an unsupported version, an oversized file or an unreadable path warns
 with only the first bounded resolver diagnostic — the file itself is never
 dumped, and no chord or prompt text is echoed.
+
+The `mcp-config` row reads the file named by `TWO_BROTHERS_MCP_CONFIG` (the
+same env the `run`/`chat`/`tui`/`serve` paths now honor; the flag wins when
+both are set) and validates only its top-level shape: well-formed JSON with an
+`mcpServers` object. It never starts a server, never makes a network call and
+never prints a spec value (command, args, URL, env or header value) — only the
+resolved path, the server count and the server names. Unset/blank is a `skip`
+(`TWO_BROTHERS_MCP_CONFIG not set`, not a failure); a missing, unreadable, invalid-JSON or
+wrong-shape file is a `warn` with one bounded reason; a valid file passes with
+`N servers: …` (names sorted, at most eight listed). A warning never fails the
+report.
 
 Exit code: `0` when no check failed, `1` when at least one check failed, `2` on
 a usage/config error. Warnings (a missing settings file or plugins directory,
@@ -794,15 +886,15 @@ The backend is a **local single-user workspace server**. API overview:
 | `POST /api/sessions/{name}/compact` | compact the session in place on demand: the older context is summarized by the configured summarizer role (senior by default) and the session JSONL is rewritten with dense `seq`, so a reload shows the summary. `200 {"compacted": true, "before_events": N, "after_events": M}`; `200 {"compacted": false, "reason": "nothing to compact"}` when there is nothing to cut; 404 unknown session, 400 invalid session name, 409 while a run for that session is active or another compaction is already running, 422 when the session file is unreadable/corrupt, and 502 with the provider message (nothing written) when summarization fails. A run submitted for a session while it is being compacted is a 409 (`a compaction is in progress for this session; retry in a moment`) — the two operations are mutually exclusive so a run's envelopes can never be lost to the rewrite. The summarizer budgets follow the resolved run config (`--compact-*`/`TWO_BROTHERS_COMPACT*`), an explicit `ServerOptions.compaction` still wins, and a client disconnect aborts the provider call and releases the session |
 | `POST /api/sessions/{name}/fork` | copy a session (or its first `seq` envelopes) into a NEW session file, for "what-if" branches. Body `{seq?: integer, name?: string}` (both optional; `seq` defaults to the whole session). `201 {name, title, events, forked_from: {name, seq}}`; the copy is a byte-exact prefix (dense `seq` preserved), the new sidecar gets `forked_from`'s `parent` lineage link and a `<source title> (fork)` title, and the source is never modified. Errors: 400 invalid `seq`/`name`, 404 unknown source, 409 name taken or a live run/manual compaction on the session (`a run is active for this session; stop it before forking it` / `a compaction is in progress for this session; retry in a moment`), 422 corrupt source, 500 unwritable sessions directory (a partial file is rolled back) |
 | `POST /api/sessions/{name}/rewind` | drop the last `turns` operator turns (each task plus every envelope produced for it) from a persisted session. Body `{turns}` strict integer 1–100. `200 {name, rewritten, kept, removed, turns, requested_turns, stopped_at_compaction, stops_before, reason, runtime_events_cleared, runtime_events_clear_error?}` — `rewritten: false` with a `reason` when there is nothing to cut (not an error). The kept prefix is rewritten atomically with dense `seq` intact, and a successful rewrite clears the session's runtime-event sidecar (`sessions/runtime/<name>.jsonl.events.jsonl`): tool/approval history for the removed runs is gone, while the kept transcript remains (`runtime_events_cleared` says whether the sidecar was cleared; a clear failure is disclosed instead of pretending success). Harness-generated context (compaction summaries, repair requests, operator steers, skill/file blocks) is never counted as a turn, and a compaction summary is a hard floor (`stopped_at_compaction`/`stops_before` report an honest clamp). Errors: 400 non-integer/out-of-range depth, 404 unknown session, 409 a live run/manual compaction or a session changed during the read+rewrite CAS, 422 corrupt session, 500 failed rewrite |
-| `GET/POST/DELETE /api/sessions/{name}/undo/{run_id}` | run-scoped workspace edit undo (wave 23) over the persisted `<sessions>/undo` side artifact (survives a backend restart). `GET` previews every file the run mutated against the LIVE workspace as `{session, run_id, statuses, counts, workspace_root, created_at, omitted?}` with per-file status `applicable` / `created` / `deleted` / `changed-since` / `skipped` / `missing`; `POST` applies only the reversible entries (each file is re-classified immediately before it is touched, so a file changed after the preview is refused, never overwritten) and returns `{session, run_id, workspace_root, applied, refused, failed, files, counts, omitted?}` with per-file `applied`/`refused`/`failed` + the driving `preview_status`; `DELETE` discards the record (`{discarded: true, session, run_id}`; content-addressed blobs stay for sharing — garbage collection is a later phase). Only workspace-bound `serve` runs capture (recorder fail-soft and closed in the run's `finally`); shell-made changes and untracked files are out of scope. Errors: 404 unknown session or no undo record for the run, 409 while a run for that id is still active in memory or the record is unusable (corrupt/oversized/unsupported version, or its recorded workspace is no longer registered — the record is matched to a registered workspace by canonical path on every request), 422 unexpected store IO |
-| `GET /PUT /api/settings` | per-role Senior/Junior provider/model/base URL/API key (keys are write-only; responses show `api_key_set` only). Both carry the additive top-level `approval_policy` section for the [approval mode](#approval-modes): `GET` returns `{mode, pinned}` (the effective mode, and whether a `serve` flag/env pin overrides the persisted one), `PUT` accepts `{"approval_policy": {"mode": "ask\|readonly\|edits\|allow-all"}}` — a strict enum (400 for an unknown mode, 500 if the atomic settings write fails, absent leaves the persisted mode untouched) and returns the same view. The mode is stored in `sessions/settings.json`; a per-run flag/env pin is never written there. Both directions also carry the additive top-level `compaction` section: `GET` returns `{threshold_chars, threshold_tokens, keep_recent_chars, context_window}` as per-field `{persisted, effective, source}` (`source` is `options`/`flag`/`persisted`/`absent`; `effective` 0 means not configured, so the harness default still applies) plus `force` (the config/options one-shot `--compact`; a persisted force is deliberately out of scope) and `pinned` (a flag/env or `ServerOptions` owns at least one field); `PUT` accepts the budget object (non-negative integers; `0` means off for a threshold and unknown for the context window; unknown keys, non-integers and negatives are a `400` before any mutation, a failed atomic write is a `500`, a present section replaces the stored section wholesale and `{}` clears it, and an absent section leaves it untouched), returning the refreshed view. The persisted section is one layer of the run's compaction precedence: an explicit `ServerOptions.compaction` wins wholesale, then an explicitly-set non-zero `--compact*` / `--context-window` flag or `TWO_BROTHERS_COMPACT*` / `TWO_BROTHERS_CONTEXT_WINDOW` env field (provenance-tracked, so the 40 000 keep-recent default never shadows a saved value), then the saved section, then absent. A per-run flag/env pin is never written to the file; the view reports it instead of pretending a save took effect |
+| `GET/POST/DELETE /api/sessions/{name}/undo/{run_id}` | run-scoped workspace edit undo (wave 23) over the persisted `<sessions>/undo` side artifact (survives a backend restart). `GET` previews every file the run mutated against the LIVE workspace as `{session, run_id, statuses, counts, workspace_root, created_at, omitted?}` with per-file status `applicable` / `created` / `deleted` / `changed-since` / `skipped` / `missing`; `POST` applies only the reversible entries (each file is re-classified immediately before it is touched, so a file changed after the preview is refused, never overwritten) and returns `{session, run_id, workspace_root, applied, refused, failed, files, counts, omitted?}` with per-file `applied`/`refused`/`failed` + the driving `preview_status`; a restored POSIX file also regains its captured mode (and ownership only where the process may set it) with `mode_restored`/`ownership_restored` disclosed per file — a best-effort failure keeps the byte restore `applied`; `DELETE` discards the record and collects blobs no surviving record references, returning the additive `blobs_removed?` count and `gc_diagnostics?` (a shared content-addressed blob survives until its last record is gone). Records are bounded: the newest 20 per session and records older than 30 days are pruned when a capture closes, and active runs are never pruned. Only workspace-bound `serve` runs capture (recorder fail-soft and closed in the run's `finally`); shell-made changes and untracked files are out of scope. Errors: 404 unknown session or no undo record for the run, 409 while a run for that id is still active in memory or the record is unusable (corrupt/oversized/unsupported version, or its recorded workspace is no longer registered — the record is matched to a registered workspace by canonical path on every request), 422 unexpected store IO |
+| `GET /PUT /api/settings` | per-role Senior/Junior provider/model/base URL/API key (keys are write-only; responses show `api_key_set` only). Both carry the additive top-level `approval_policy` section for the [approval mode](#approval-modes): `GET` returns `{mode, pinned}` (the effective mode, and whether a `serve` flag/env pin overrides the persisted one), `PUT` accepts `{"approval_policy": {"mode": "ask\|readonly\|edits\|allow-all"}}` — a strict enum (400 for an unknown mode, 500 if the atomic settings write fails, absent leaves the persisted mode untouched) and returns the same view. The mode is stored in `sessions/settings.json`; a per-run flag/env pin is never written there. Both directions also carry the additive top-level `compaction` section: `GET` returns `{threshold_chars, threshold_tokens, keep_recent_chars, context_window}` as per-field `{persisted, effective, source}` (`source` is `options`/`flag`/`persisted`/`preset`/`absent`; `effective` 0 means not configured, so the harness default still applies) plus `force` (the config/options one-shot `--compact`; a persisted force is deliberately out of scope) and `pinned` (a flag/env or `ServerOptions` owns at least one field); `PUT` accepts the budget object (non-negative integers; `0` means off for a threshold and unknown for the context window; unknown keys, non-integers and negatives are a `400` before any mutation, a failed atomic write is a `500`, a present section replaces the stored section wholesale and `{}` clears it, and an absent section leaves it untouched), returning the refreshed view. The persisted section is one layer of the run's compaction precedence: an explicit `ServerOptions.compaction` wins wholesale, then an explicitly-set non-zero `--compact*` / `--context-window` flag or `TWO_BROTHERS_COMPACT*` / `TWO_BROTHERS_CONTEXT_WINDOW` env field (provenance-tracked, so the 40 000 keep-recent default never shadows a saved value), then the saved section, then the smaller of the two resolved provider-preset `context_window` values (only for `context_window`; `source: "preset"`), then absent. A per-run flag/env pin is never written to the file; the view reports it instead of pretending a save took effect |
 | `POST /api/runs` | start a background run (`{"task", "mode"?, "session"?, "provider"?, "workspace_id"?, "stream_tokens"?}` → `202 {"run_id", "session", "status"}`); a leading `/name` command is expanded and `@skill:`/`@file` mentions are attached before the run (see [Composer mentions and slash commands](#composer-mentions-and-slash-commands)); `stream_tokens: true` additionally streams live `token` frames on the run SSE endpoint (strict boolean, default off); runs are FIFO — one active, the rest `queued`, so a submission for a session that already has a live run is still accepted (`202` with `status: "queued"`) and starts after the earlier one finishes |
 | `GET /api/runs`, `GET /api/runs/{run_id}` | list runs / run status (`queued`/`running`/`waiting`/`completed`/`failed`/`cancelled`); records carry a per-run `usage` object (`model_calls`, `input_tokens`, `output_tokens`, `cached_tokens`, `cache_write_tokens`; zeros while running) plus an additive `cost` object (`{currency: "USD", total, model}` or `null` — computed at run completion, recomputed from the persisted usage for sidecar-rebuilt terminal records, and `null` when the usage cannot be attributed to one priced model). Records also carry, additively, `steering_pending` (steering texts waiting for the run's next step, present only while live and non-empty) and `steering_dropped` (`dropped` texts discarded at the per-run envelope cap; present only when > 0) |
 | `POST /api/runs/{run_id}/stop` | cooperative stop (pending approvals are denied); a `queued` run is marked cancelled immediately, without waiting for a worker |
 | `POST /api/runs/{run_id}/steer` | mid-run operator steering: queue `{"text": "..."}` for an ACTIVE run — `running`, or `waiting` on an approval (applied at the next step after it resolves). Accepted `200 {"run_id", "status", "pending"}` (`pending` = steering texts now waiting, 1–8); the text is trimmed, must be non-empty and at most 4 000 characters (`400` otherwise; a non-string `text` is the standard `400 invalid request body`), an unknown run is `404`, and a queued/terminal run or a full pending queue is an honest `409` (the detail names the run's status, or `steering queue is full …`). Acceptance emits **no** event: the steer is appended to the shared context as an ordinary `user`→`senior` `message` envelope (payload text prefixed `[[OPERATOR STEER]] `) when the harness reaches the next node boundary/tool-loop iteration, so SSE consumers see the normal `envelope` frame with its dense `seq` at that moment. Pending steering is in-memory only: a stopped run appends nothing more and drops what was queued, and a backend restart loses the queue (`404` for the run id) |
 | `GET /api/runs/{run_id}/events?after=N` | SSE of typed runtime events (`run_status`, `envelope`, `tool_started`, `tool_completed`, `approval_requested`, `approval_resolved`, `approval_auto_allowed`, `approval_auto_denied`, `todo_updated`, `prompt_audit`, `reasoning`, `steering_dropped`, `run_error`, `run_end`); reconnectable via `after`. `approval_requested` additively carries `reason` and a bounded `detail` (`{kind, diff?, addedLines?, removedLines?, command?, truncated?}` preview) when the request has one; `todo_updated` carries the model's complete sanitized plan snapshot; `steering_dropped` carries `{dropped, applied, limit}` when a 200-accepted steer later hit the per-run envelope cap. When the run was started with `stream_tokens`, the same stream additionally carries ephemeral named `token` frames (`event: token`, data `{type, run_id, role, kind: "text"\\|"thinking", delta, at}`) with no SSE id — they are live-only, never persisted and never replayed |
 | `GET /api/runs/{run_id}/approvals`, `POST /api/runs/{run_id}/approvals/{id}` | list/answer pending operator approvals (`{"allow": bool, "scope"?: "once" \| "session"}` → `{approval_id, decision, scope}`; `scope` defaults to `once`, an invalid value or `session` with a deny is a 400, an unknown/already-resolved approval id is a 404). See the session-scope paragraph below |
-| `GET /api/providers`, `POST /api/providers`, `PUT /api/providers/{seed}`, `POST /api/providers/{name}/reset`, `POST /api/providers/{name}/discover`, `DELETE /api/providers/{name}` | provider presets (seeded: openai, deepseek, anthropic, gemini, openrouter, lmstudio, custom). `GET` returns `{name, base_url, api_key_set, kind, models}` plus additive `seed` (the name comes from the built-in seed table) and `customized` (a stored override of that name exists), so a client can tell a pristine seed from an edited/custom entry. `POST` creates a custom provider (409 on a duplicate name, including a seed name); `PUT` updates it, and on a seed name materializes a stored override (blank `base_url` is a 400); `DELETE` removes a stored preset/override and clears any role `provider_ref` that pointed at it (a pristine seed is a 404); `POST /api/providers/{name}/reset` restores a customized built-in seed without clearing role references (see below); `POST /api/providers/{name}/discover` probes a draft endpoint for its model list without saving (see the discovery paragraph below). Keys are never returned — responses carry `api_key_set` only. The Settings → Providers tab is the operator UI for these routes |
+| `GET /api/providers`, `POST /api/providers`, `PUT /api/providers/{seed}`, `POST /api/providers/{name}/reset`, `POST /api/providers/{name}/discover`, `DELETE /api/providers/{name}` | provider presets (seeded: openai, deepseek, anthropic, gemini, openrouter, lmstudio, custom). `GET` returns `{name, base_url, api_key_set, kind, models}` plus additive `seed` (the name comes from the built-in seed table) and `customized` (a stored override of that name exists), so a client can tell a pristine seed from an edited/custom entry; a positive preset `context_window` (tokens, used only as a compaction fallback) is exposed additively, while `0`/absent stays unknown and omitted so pre-wave presets keep the exact old shape. `POST` creates a custom provider (409 on a duplicate name, including a seed name); `PUT` updates it, and on a seed name materializes a stored override (blank `base_url` is a 400); both accept `context_window` as a positive safe integer; an explicit `0` clears it, an absent/null field on an update leaves the stored value untouched (a create starts without one), and negative/float/string/boolean/unsafe values are a `400` before any write; `DELETE` removes a stored preset/override and clears any role `provider_ref` that pointed at it (a pristine seed is a 404); `POST /api/providers/{name}/reset` restores a customized built-in seed without clearing role references (see below); `POST /api/providers/{name}/discover` probes a draft endpoint for its model list without saving (see the discovery paragraph below). Keys are never returned — responses carry `api_key_set` only. The Settings → Providers tab is the operator UI for these routes |
 | `GET /api/plugins` | discovered plugins (`name`, `description`, `roles`, load `errors`, `diagnostics`) |
 | `GET /api/skills` | discovered skills metadata (`name`, `description`, `scope`, `tools`, `file`) — never bodies |
 | `GET /api/commands` | discovered slash-command metadata (`name`, `description`, `argumentHint`, `mode?`, `file`) plus the additive first-party `baseCommands` list (`name`, `aliases`, `description`, `argumentHint`, `kind: "prompt"\|"action"`, `action?`, `requiresArguments`, `priority`) — never bodies |
@@ -832,7 +924,11 @@ acceptance and applied at the run's next step (see
 new dense-`seq` session file (the source is never modified) and records a
 local-only `parent: {name, seq}` link in the new `.meta.json` — the protocol
 JSONL shape is unchanged, and a fork deliberately does not copy the
-runtime-event sidecar or inherit the source's workspace link. A rewind rewrites
+runtime-event sidecar or inherit the source's workspace link. In the web
+transcript, an operator message bubble offers **Fork from here…**, which sends
+the same route with that bubble's `{seq}` and opens the new fork, so the copy
+ends exactly at that message; the original file and sidecar stay byte-identical,
+and the action is unavailable while a run is active for the session. A rewind rewrites
 the kept prefix atomically and clears the session's runtime-event sidecar, so
 tool/approval history for the removed runs is gone while the kept transcript
 remains (the response states whether the clear succeeded). `format=html`
@@ -846,11 +942,21 @@ session side artifact — never a protocol envelope — so it survives a backend
 restart). Preview classifies each file against the live workspace; apply
 restores write/edit pre-images, deletes files the run created, and refuses any
 file whose content changed after the run (per file, re-checked immediately
-before it is touched — never overwritten); discard is the explicit cleanup
-step and leaves the content-addressed blobs for sharing (garbage collection is
-a later phase). Files the run did not mutate through the workspace tools
-(shell-made changes, external edits, untracked files) are out of scope, as are
-file mode/ownership restoration and CLI/TUI runs (those do not capture).
+before it is touched — never overwritten); discard removes the record and
+collects blobs no surviving record references (a deduped blob survives until
+its last record is gone). The store is bounded: the newest 20 records per
+session and records older than 30 days are pruned when a capture closes, active
+runs are never pruned, and a prune/GC failure is one bounded diagnostic that
+never breaks a run or an apply — pruning only makes an old run stop being
+undoable, it never touches workspace files. On apply, a restored POSIX file
+regains the permission bits recorded at capture time, and ownership is restored
+only where the process may set it (best effort; a failure is disclosed per file
+and never turns the byte restore into a failed apply). A run whose first mutation
+of a path is a delete records that file's live mode at the mutation seam, so
+the bytes and the permission bits are restored. Files the run did not mutate
+through the workspace tools (shell-made changes, external edits, untracked
+files) are out of scope, and CLI/TUI runs never capture. The CLI counterpart is
+[`sessions undo`](#sessions).
 
 **Provider reset vs. delete.** `POST /api/providers/{name}/reset` restores a
 customized built-in seed: it deletes only that name's stored override
@@ -1175,7 +1281,11 @@ node dist/cli.js run "Now plan the rollback" --provider mock --session-file sess
 ## MCP tools
 
 `--mcp-config <path>` (env `TWO_BROTHERS_MCP_CONFIG`) points at a JSON file
-with MCP server definitions. In `work` mode the junior receives those tools
+with MCP server definitions. A non-blank flag wins over the env; a blank flag
+falls back to it, and blank/whitespace on both means "not configured". The
+`doctor` command inspects the env-named file read-only (well-formed JSON with
+an `mcpServers` object) without starting a server. In `work` mode the junior
+receives those tools
 and can execute real work during a delegation. The format follows the
 Claude-Desktop style — a server is either a local command or a remote URL. A
 server may carry a `"role"` field (`"shared" | "senior" | "junior"`, default
@@ -1421,7 +1531,14 @@ These ship in the TypeScript package (the original prototype had none of
 them):
 
 - **Context compaction** — `--compact`, `--compact-threshold`,
-  `--compact-keep-recent` (see [Sessions](#sessions)).
+  `--compact-keep-recent` (see [Sessions](#sessions)). In `serve` runs, a
+  provider preset's additive `context_window` (Settings → Providers, tokens) is
+  the fallback when no `--context-window`/`TWO_BROTHERS_CONTEXT_WINDOW` and no
+  persisted `compaction.context_window` is set; when both roles resolve to a
+  preset window the **smaller** one applies (a summary sized for the larger
+  model must not overflow the smaller one), and the settings view reports it as
+  `source: "preset"`. CLI `run`/`chat`/`tui` build compaction from their
+  configured budgets only and do not read preset windows.
 - **MCP role scoping** — the per-server `"role"` field (see [MCP tools](#mcp-tools)).
 - **Automation output modes** — `--mode print|json`, `--json-events`
   (a bare `--json` selects `--mode json`; `TWO_BROTHERS_JSON` is its env
@@ -1470,6 +1587,16 @@ them):
   queues the composer text with `Ctrl+N` (also the palette) under the same
   bounds, clears the draft only on acceptance and reports leftovers honestly;
   see [`tui`](#tui-initial-task) and the API row below.
+- **TUI copy, terminal attention and external editor** — `Ctrl+X` copies the
+  newest committed decision (or the newest completed senior reply) as plain
+  text, native clipboard first with an OSC 52 fallback and an honest
+  route-specific notice; `Ctrl+G` edits the composer draft in
+  `$VISUAL`/`$EDITOR` (idle-only, 256 KiB read-back cap, workspace binary
+  planting refused); the OSC 0 title carries
+  `Two Brothers — <session> · working|approval|done|failed`, is restored on
+  every exit path, and a parked approval emits one OSC 9/BEL notification
+  (tmux DCS passthrough inside `tmux`). See
+  [`tui`](#tui-initial-task) and [`keyboard.md`](keyboard.md).
 - **Anthropic prompt caching** (TS package) — every Anthropic Messages
   request carries up to three `cache_control:{type:"ephemeral"}` breakpoints:
   the merged system prompt, the last tool definition and the last content
@@ -1484,20 +1611,23 @@ them):
   are not hits), so the existing footer `cache N%` segment becomes
   meaningful for Anthropic; no real-model cache-hit evidence is recorded yet
   and `ttl`/opt-out are follow-ups.
-- **Run-scoped file undo (web + API)** — a workspace-bound `serve` run records
-  the pre/post bytes of every `workspace_write_file`/`workspace_edit_file`/
+- **Run-scoped file undo (web + API + CLI)** — a workspace-bound `serve` run
+  records the pre/post bytes of every `workspace_write_file`/`workspace_edit_file`/
   `workspace_delete_file` mutation under `<sessions>/undo` (bounded, fail-soft,
-  content-addressed, never part of the session JSONL). `GET
-  /api/sessions/{name}/undo/{run_id}` previews each recorded file against the
-  live workspace (`applicable`/`created`/`deleted`/`changed-since`/`skipped`/
+  content-addressed, never part of the session JSONL; newest 20 per session and
+  30-day retention, with orphan-blob GC on capture close and on discard).
+  `GET /api/sessions/{name}/undo/{run_id}` previews each recorded file against
+  the live workspace (`applicable`/`created`/`deleted`/`changed-since`/`skipped`/
   `missing`), `POST` restores/deletes the reversible ones (re-checking each file
-  immediately before touching it, so post-run edits are refused per file), and
-  `DELETE` discards the record. The web workspace offers **Undo file
-  changes…** for the newest completed run of the selected session; the action
-  is hidden with an honest notice when the backend has no record (404) and is
-  unavailable while a run is live or a compaction is in flight. Shell-made
-  changes, untracked files, file mode/ownership and CLI/TUI runs are out of
-  scope. See the API row below for the exact contract.
+  immediately before touching it, so post-run edits are refused per file; POSIX
+  mode is restored best-effort), and `DELETE` discards the record and collects
+  unreferenced blobs. `two-brothers sessions undo <name> [--run <id>]
+  [--apply|--discard] [--json]` is the CLI counterpart (preview by default).
+  The web workspace offers **Undo file changes…** for the newest completed run
+  of the selected session; the action is hidden with an honest notice when the
+  backend has no record (404) and is unavailable while a run is live or a
+  compaction is in flight. Shell-made changes, untracked files and CLI/TUI runs
+  are out of scope. See the API row below for the exact contract.
 - **Plugins** — see `docs/plugins.md`.
 - **Skills** — role-scoped `SKILL.md` catalogs (see [Skills](#skills-ts-package)).
 - **Provider presets, onboarding, cost** — seeded presets (openai, deepseek,

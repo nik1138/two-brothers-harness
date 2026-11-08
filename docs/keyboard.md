@@ -19,6 +19,7 @@ The CLI is command-driven; these are its help and discovery paths.
 | Resolved configuration | `two-brothers config [--json]` |
 | Local diagnostics | `two-brothers doctor [--json]` |
 | One stored session | `two-brothers sessions show <name> [--json] [--limit N]` |
+| Undo a run's file changes | `two-brothers sessions undo <name> [--run <id>] [--apply\|--discard] [--json]` (preview by default) |
 | Search stored sessions | `two-brothers sessions search <query> [--json] [--limit N]` |
 | Export a session | `two-brothers sessions export <name> [--format markdown\|json] [--output <path>]` |
 | Completion script | `two-brothers completions <bash\|zsh\|fish\|powershell>` |
@@ -101,6 +102,12 @@ HTML`; the file downloads with a name derived from the session), and offers
 original left untouched and forking unavailable while a run is active for that
 session. The session actions trigger row covers the menu's keyboard navigation
 (including these new items).
+
+A message bubble in the transcript also offers **Fork from here…** (the
+accessible name of a compact `fork` button on operator messages). It copies the
+conversation up to and including that message into a new session (`{seq}`) and
+opens the fork; the original file and sidecar are untouched, and the action is
+unavailable while a run is active for the session.
 
 An operator message in the transcript carries a **Rewind** button (a real
 button: `Tab` to it, then `Enter`/`Space`): it opens a destructive confirmation
@@ -295,7 +302,7 @@ reference (`?`/`F1`) and the draft stash (`Ctrl+O`) — can be rebound from a
 versioned JSON file:
 
 ```json
-{"version": 1, "bindings": {"palette": ["ctrl+g"], "help": ["f2"], "stash": ["ctrl+u"]}}
+{"version": 1, "bindings": {"palette": ["ctrl+y"], "help": ["f2"], "stash": ["ctrl+u"]}}
 ```
 
 Point the TUI at it with `tui --keys-file <path>` or
@@ -357,6 +364,8 @@ at startup, so changing `--keys-file`/the env needs a restart.
 | `Up` / `Down` | Recall earlier submitted tasks: a single-line draft recalls immediately; on a multi-line draft the arrows only leave the composer at its very start (Up) or very end (Down) and otherwise move the caret inside the draft. The live draft is preserved and restored exactly when you come back to it, and recall never adds to the persisted history. |
 | `Ctrl+R` | Incremental prompt-history search, newest first; accepting puts the entry back in the composer. |
 | `Ctrl+O` | Stash the draft, or restore the stashed draft. |
+| `Ctrl+G` | Edit the composer draft in `$VISUAL`/`$EDITOR` (Windows falls back to `notepad.exe` when no variable is set); idle-only, refuses while a turn/compaction runs or an overlay owns the keyboard. A nonzero exit leaves the draft untouched. |
+| `Ctrl+X` | Copy the last completed reply (the newest decision, or the newest completed senior reply) as plain text: the platform clipboard is tried first, then OSC 52 where no OS clipboard is reachable, with an honest route-specific notice. A fixed binding, not one of the three rebindable global chords. |
 | `Ctrl+N` | Queue the composer text for the **running** turn; it applies at the run's next step (never a new task). At most 4 000 characters and eight pending texts; a blank/oversized draft or a full queue is refused with an honest notice, never silently truncated. The draft clears only on acceptance, the notices distinguish a queued steer from still-pending leftovers (an applied steer appears in the transcript), and leftovers at turn end are reported. `Enter` while a turn runs still refuses (and names this chord). The `Ctrl+P` palette's **Steer the running turn** row does the same. |
 | `/` (line start) | Inline command picker. It groups the TUI's own commands first, then built-in prompts and built-in actions (each row badged `builtin`/`action`), then discovered `<name>.md` templates with a `usage — description` footer for the highlighted row. `↑`/`↓` move, `Enter`/`Tab` insert or run, `Shift+Tab`/`Esc` closes and keeps the draft. |
 | `@` (token start) | Inline mention picker. Shared skills insert `@skill:name ` and role-scoped rows are visible but disabled; in a `--workspace` run, a path-like `@dir/file` token opens the workspace-file picker and inserts the canonical `@path ` token (the file is attached read-only before the turn). File mentions stay literal text only when no workspace is bound. |
@@ -380,6 +389,37 @@ says so. Unlike the web, the TUI has no queue dock: the pending count is
 reported in the notice, not as a list. `Ctrl+N` is a fixed composer binding,
 not one of the three rebindable global chords; the palette row is the fallback
 that works on every terminal.
+
+### Copying and terminal attention
+
+`Ctrl+X` copies the last completed reply — the newest committed decision, or
+the newest completed senior reply when there is no decision yet — as plain
+text; junior proposals, tool results, streaming drafts and operator text are
+never selected. The platform clipboard is tried first; where there is no OS
+clipboard to reach (a remote/SSH session, a container, WSL without WSLg) or
+every native writer fails, the TUI writes one terminal OSC 52 sequence. OSC 52
+is a request the terminal may ignore (and `tmux` only forwards it with
+clipboard passthrough configured), so when that is the only route the notice
+names it (`via OSC 52`) instead of claiming a clipboard write. With nothing to
+copy yet it prints one honest notice and copies nothing.
+
+The terminal title (OSC 0) follows the session and run status:
+`Two Brothers — <session> · working|approval|done|failed`, the plain
+`Two Brothers — <session>` when idle, and `Two Brothers` with no session. It
+changes on session start/switch and run transitions, is sanitized and capped at
+120 characters, and every exit path restores the title the driver set. When an
+approval parks, one attention notification is emitted — OSC 9 where the
+terminal is known to support it, a tmux DCS passthrough inside `tmux`, a bare
+BEL otherwise — never on a normal turn end or a cancelled run. The notification
+text is sanitized and bounded, and a non-TTY or `TERM=dumb` session writes no
+escape byte.
+
+`Ctrl+G` opens the draft in `$VISUAL`/`$EDITOR` (Windows uses `notepad.exe`
+only when neither variable is set). The editor owns the terminal while it
+runs; on a clean exit the saved text replaces the draft (BOM stripped, CRLF
+normalized, one final newline removed, read-back capped at 256 KiB). A nonzero
+exit or spawn failure leaves the draft unchanged, and the action refuses while
+a turn/compaction runs or an overlay, find bar or approval owns the keyboard.
 
 ### Read the transcript
 

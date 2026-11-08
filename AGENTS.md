@@ -142,6 +142,13 @@ node dist/cli.js run "Plan a migration from Redis to Valkey" --provider mock
 - CI (see `docs/testing.md`): `.github/workflows/ci.yml` runs the hermetic
   gates on an ubuntu matrix (Node 22/24) and a Windows leg (Node 24 on
   `windows-latest`); the Node-22-only release rehearsal runs once on ubuntu.
+- **Release gate: independent subagent E2E.** Before publishing a release,
+  spawn separate subagent lanes on the merged tree to run the browser E2E
+  matrix, the hermetic CLI E2E (sources and `dist`), the packed-tarball
+  smoke/clean-install flow, and a Linux pass on WSL (typecheck + full package
+  suite, so POSIX-only tests run). Each lane reports its exact command, run
+  count and PASS/FAIL; a single FAIL blocks the publish. The implementer of a
+  feature must not be the only one to sign off its E2E evidence.
 - Session persistence: `--session-file` writes every envelope as JSONL
   (flushed immediately); `--resume` rebuilds the context with dense `seq`
   numbering. Covered by `tests/session.test.ts`. The web workspace adds

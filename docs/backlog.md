@@ -1238,8 +1238,8 @@ Design anchors that already exist:
   `web/src/App.vue`, `web/src/components/Composer.vue`,
   `web/src/shortcuts.ts`; tests `tests/steering.test.ts` (20) and
   `web/tests/steering.test.ts` (6). TUI steering shipped in wave 25
-  (`Ctrl+N`); remaining: a browser E2E scenario (deferred again in wave 24 —
-  see "Later goals / items") and real-provider validation.
+  (`Ctrl+N`); remaining: a browser E2E scenario for steering and real-provider
+  validation (wave 26 added the tab-title and auto-compaction scenarios only).
 - **Session fork + self-contained HTML export** — `POST
   /api/sessions/{name}/fork` and `sessions fork <name> [--at <seq>] [--name
   <new>]` copy a session prefix byte-for-byte into a NEW session file (dense
@@ -1255,7 +1255,8 @@ Design anchors that already exist:
   `src/clihelp.ts`; tests `tests/sessionfork.test.ts` (20) plus the HTML
   export cases in `tests/sessionsearch.test.ts` (35); the web session row menu
   ships `Fork session…` and `Export as HTML`
-  (forking is unavailable while a run is active). Remaining: TUI surfaces.
+  (forking is unavailable while a run is active). Wave 26 added the transcript's
+  **Fork from here…** (`{seq}`) action; remaining: TUI fork surfaces.
 - **Session rewind** — `POST /api/sessions/{name}/rewind` (`{turns}` 1–100)
   and `sessions rewind <name> --turns <n>` drop the last N operator turns, so
   a better task can be retyped without a growing context or a new session.
@@ -1297,9 +1298,11 @@ Design anchors that already exist:
   `src/server.ts`, `src/index.ts`, `web/src/runUndo.ts`,
   `web/src/components/RunUndoDialog.vue`, `web/src/api.ts`, `web/src/App.vue`,
   `web/src/types.ts`; tests `tests/workspaceundo.test.ts` (28),
-  `tests/serverundo.test.ts` (8), `web/tests/runUndo.test.ts` (12). Remaining:
-  blob GC/retention (records and deduped blobs accumulate), a TUI/CLI undo
-  surface (those runs do not capture), and mode/ownership restoration.
+  `tests/serverundo.test.ts` (8), `web/tests/runUndo.test.ts` (12).
+  **Closed in wave 26 (2026-11-08):** bounded retention plus orphan-blob GC,
+  POSIX mode restoration (best-effort ownership), and a CLI `sessions undo`
+  preview/apply/discard surface. A TUI undo surface is still absent because TUI
+  runs do not capture.
 - **Anthropic prompt caching + honest cache accounting** — every Anthropic
   Messages request carries up to three `cache_control:{type:"ephemeral"}`
   breakpoints (merged system prompt, last tool definition, newest conversation
@@ -1362,6 +1365,76 @@ Design anchors that already exist:
   capped at 120 characters. Files: `web/src/tabTitle.ts` (new),
   `web/src/App.vue`; tests `web/tests/tabTitle.test.ts` (16). See
   `docs/quickstart.md` → step 4.
+
+## Shipped 2026-11-08 (wave 26: browser coverage, TUI clipboard/attention/editor, undo lifecycle, fork-from-here, hardening, doctor MCP, preset windows)
+
+- **Browser E2E for the wave-25 web surfaces** — two hermetic scenarios close
+  the coverage gap without a product-source change: `tab-title` (running
+  `▶`, real-approval `!`, plain after completion, and the unread/selection
+  rules; the full matrix including queued/`(failed)` stays unit-covered) and
+  `settings-advanced` (the Auto-compaction card's four inputs, effective/source
+  lines, inline validation blocking Save, one PUT, persistence and reload).
+  Files: `e2e/run.mjs`, `e2e/fixtures/scripted-server.mjs` (and README). See
+  `docs/testing.md`.
+- **TUI clipboard and terminal attention** — `Ctrl+X` copies the newest
+  committed decision (or newest completed senior reply) as plain text, native
+  clipboard first with an OSC 52 fallback and an honest route-specific notice.
+  The OSC 0 title carries `Two Brothers — <session> · working|approval|done|failed`,
+  is restored on every exit path, and a parked approval emits one OSC 9/BEL
+  notification (tmux DCS passthrough inside `tmux`). Files:
+  `src/tui/clipboard.ts`, `src/tui/copytext.ts`, `src/tui/attention.ts` (new),
+  `src/tui/terminal.ts`, `src/tui/app.ts`, `src/tui/keymap.ts`; tests
+  `tests/tuicopy.test.ts` (18), `tests/tuiattention.test.ts` (11) and
+  `tests/tuiintegration.test.ts`. See `docs/keyboard.md` → “Copying and
+  terminal attention”.
+- **TUI external editor** — `Ctrl+G` opens the draft in `$VISUAL`/`$EDITOR`
+  (Windows notepad fallback, POSIX refusal), resolves an absolute executable,
+  refuses workspace binary planting, spawns without a shell, caps the read-back
+  at 256 KiB, normalizes BOM/CRLF/final newline, and restores the terminal on
+  every path. Idle-only. Files: `src/tui/externaleditor.ts` (new),
+  `src/tui/terminal.ts`, `src/tui/app.ts`, `src/tui/keymap.ts`; tests
+  `tests/tuiexternaleditor.test.ts` (20). See `docs/keyboard.md` → “Compose and
+  send”.
+- **Undo lifecycle** — bounded retention (newest 20 per session, 30-day age),
+  orphan-blob GC with shared-blob survival, POSIX mode restoration
+  (best-effort ownership), and
+  `sessions undo <name> [--run <id>] [--apply|--discard] [--json]` previewing by
+  default; `DELETE` returns additive `blobs_removed?`/`gc_diagnostics?`. Files:
+  `src/workspacehistory.ts`, `src/server.ts`, `src/cli.ts`, `src/clihelp.ts`;
+  tests `tests/workspaceundo.test.ts` (42), `tests/serverundo.test.ts` (9),
+  `tests/sessionscommands.test.ts` (18). See `docs/cli-reference.md` →
+  `sessions undo` and “Run-scoped file undo”.
+- **Web Fork from here…** — an operator bubble sends `{seq}` to the existing
+  fork route and opens the new session; the source stays byte-identical, the
+  lineage link and `<source> (fork)` title are unchanged, and the action is
+  unavailable while a run is live. Files: `web/src/sessionFork.ts`,
+  `web/src/components/ChatView.vue`, `web/src/App.vue`; tests
+  `web/tests/sessionFork.test.ts` (9). See `docs/quickstart.md` → step 7.
+- **Session-recovery hardening** — the torn-tail repair is a full
+  `{size, mtimeMs, ino}` compare-and-swap before rename (mismatch throws a
+  retryable `SessionError` and leaves every byte intact), and a fork of a
+  torn-tail source copies only the complete-line prefix byte-exactly; interior
+  corruption still fails 422. Files: `src/session.ts`, `src/sessionfork.ts`;
+  tests `tests/session.test.ts` (14), `tests/sessionfork.test.ts` (23),
+  `tests/sessionapi.test.ts` (11).
+- **Doctor MCP config + MCP env wiring** — `doctor` gains a read-only
+  `mcp-config` check (unset = skip, invalid = bounded warn, valid = pass with
+  sorted server names; never starts a server or prints spec values), and
+  `TWO_BROTHERS_MCP_CONFIG` is now honored by `run`/`chat`/`tui`/`serve`/
+  `--dry-run` (flag > env, blank = not configured). Files: `src/doctor.ts`,
+  `src/clihelp.ts`, `src/cli.ts`; tests `tests/doctor.test.ts` (45),
+  `tests/cliergonomics.test.ts` (48).
+- **Per-preset context windows** — provider presets gain additive
+  `context_window` (positive safe integer; 0/absent = unknown), validated on
+  GET/PUT/POST and preserved across unrelated saves. Compaction precedence:
+  explicit `ServerOptions.compaction` > run-level flag/env > persisted >
+  smaller of the two resolved preset windows, reported honestly as
+  `source: "preset"`. Settings → Providers gains the labelled input. Files:
+  `src/presets.ts`, `src/settings_store.ts`, `src/config.ts`,
+  `src/runtime.ts`, `src/server.ts`, the web provider/compaction model and
+  `ProvidersSection.vue`; tests 143 backend + 45 web focused. See
+  `docs/quickstart.md` → step 3 and `docs/cli-reference.md` → `GET/PUT
+  /api/settings`.
 
 ## Open items (deferred)
 

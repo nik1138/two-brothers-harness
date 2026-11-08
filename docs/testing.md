@@ -30,12 +30,35 @@ The script runs:
    step folding, composer status seats, plan docks, streaming, composer prompt
    recall, the approval-policy model, the design-token layer, mid-run steering,
    session fork/rewind, run-scoped file undo, the HTML export helpers,
-   transcript windowing and the run-cost footer, the persisted compaction card
-   and the tab-title model)
+   transcript windowing and the run-cost footer, the persisted compaction card,
+   the tab-title model and the fork-from-here request model)
 10. the `web/` build
 
 Expected final line: `SMOKE TEST: PASS`. It is an offline pre-flight, not the
 whole product gate — run the package gates below for that.
+
+## Release gate: independent subagent E2E
+
+A release is not ready because its implementers ran focused tests. Before
+publishing, spawn **separate** subagent lanes on the merged tree and require
+PASS from each:
+
+1. browser E2E — `scripts/e2e-test.ps1` (or `e2e/run.mjs`) with the full
+   offline matrix plus `e2e/web-freshness.test.mjs`;
+2. hermetic CLI E2E — `node e2e/cli.ts` and `node e2e/cli.ts --dist`;
+3. tarball flow — `scripts/tarball-smoke.mjs` (pack → install → run) and
+   `npm run pack:check` in `packages/harness`;
+4. clean-install smoke — install the packed tarball into an empty temp project
+   and run `two-brothers --version`, `doctor` and a mock `run`;
+5. Linux parity — on WSL (Ubuntu, Node 24) run `npm run typecheck` and the full
+   package suite so POSIX-only mode/ownership tests actually execute (on
+   Windows they skip). The worktree is on `/mnt/c`, so chmod semantics differ
+   from ext4; CI's ubuntu legs remain the final POSIX evidence.
+
+Each lane reports the exact command, scenario/test counts and PASS/FAIL; one
+FAIL blocks the publish. The subagent must not be the author of the feature
+under test when that is avoidable, and its evidence is recorded in the lane
+report (or the release PR).
 
 ## CI coverage
 
@@ -701,8 +724,58 @@ unread-only-when-unselected rule, control/bidi sanitizing, blank/non-string
 inputs, the 120-character cap per shape including surrogate safety). Real POSIX
 signal delivery still needs POSIX hardware; the hermetic tests drive the
 injected platform/emitter seam. Web suite **451/451**; the browser-E2E matrix
-is unchanged at **20 offline scenarios plus the opt-in `real` skip**. The
+is unchanged at **19 offline scenarios plus the opt-in `real` skip**. The
 full-gate package total is recorded in the wave-25 CHANGELOG entry.
+
+Wave 26 adds browser coverage for the wave-25 web surfaces plus the TUI
+clipboard/attention, external-editor, undo-lifecycle, fork-from-here,
+session-hardening, doctor-MCP and preset-window lanes, all hermetic:
+`e2e/run.mjs` gains `tab-title` (one scripted run: plain title, `▶` running,
+`!` waiting on the real approval, plain after completion, plus the
+unread/selection rules — a selected session never carries the unread count,
+deleting the open session shows `(1) Two Brothers`, and opening the unread
+session consumes it; the full title matrix including queued and `(failed)` is
+unit-covered by `web/tests/tabTitle.test.ts`) and `settings-advanced` (the
+Settings → Advanced card's four labelled inputs, per-field effective/source
+lines, native `min=0` blocking of a negative value, inline `role="alert"`
+validation blocking Save, exactly one `PUT /api/settings` for a valid save,
+persistence in `sessions/settings.json`, and survival after reload). The TUI
+lane adds
+`tests/tuicopy.test.ts` (18: selection of the newest committed
+decision/senior reply, native-first transport ordering, OSC 52 fallback and
+caps, empty/refusal notices), `tests/tuiattention.test.ts` (11: title grammar,
+sanitize/cap, OSC 9 allow-list and tmux DCS wrap, one notification per
+approval id) and `tests/tuiexternaleditor.test.ts` (20: editor resolution and
+refusal, PATH/PATHEXT and workspace refusal, shim wrapping, injected-spawn
+success/failure, BOM/CRLF/oversize/cleanup, terminal suspend/resume), plus
+assembled-app and keymap cases in `tests/tuiintegration.test.ts` and
+`tests/tuikeymap.test.ts`. The undo lane extends
+`tests/workspaceundo.test.ts` (42: count/age retention, active-run protection,
+shared-blob survival, orphan collection, corrupt-store fail-soft, close-time
+trigger, POSIX mode capture/restore including delete-first runs, failed-unlink
+blob safety, old-record compatibility, mode-failure disclosure, record
+listing), `tests/serverundo.test.ts` (9: discard + GC, the active-run guard on
+all three verbs and the additive response), `tests/sessionscommands.test.ts`
+(18: `sessions undo` preview/apply/discard, `--run`, JSON shapes and exit
+codes) and `tests/cliergonomics.test.ts` (48). Fork-from-here extends
+`web/tests/sessionFork.test.ts` (9: bubble selection, `{seq}` body,
+confirmation copy, source-level wiring). Session hardening extends
+`tests/session.test.ts` (14: append-race and same-size in-place rewrite CAS,
+retryable error, untouched bytes, clean retry), `tests/sessionfork.test.ts`
+(23: torn-tail full/prefix fork, byte-identical source, valid no-newline fork,
+interior corruption still failing) and `tests/sessionapi.test.ts` (11).
+Doctor extends `tests/doctor.test.ts` (45: unset/valid/missing/unreadable/
+invalid-JSON/wrong-shape/oversized, secret-looking values never rendered,
+deterministic order, additive `--json`); the MCP env wiring adds those cases to
+`tests/cliergonomics.test.ts`. The preset-window lane extends
+`tests/presets.test.ts`, `tests/settings.test.ts`, `tests/server.test.ts` and
+`tests/serverbase.test.ts` (143 focused: schema/validation, stored-override
+preservation, run-level > persisted > smaller-preset precedence, old presets
+byte-compatible) and the web provider/compaction suites (45 focused).
+Package suite **1 912 tests** (1 906 pass and 6 platform skips on Windows; the
+WSL Linux pass is 1 911 pass with 1 skip); web suite **459/459**; the browser
+matrix is **21 offline scenarios plus the opt-in `real` skip**
+(**21 PASS, 0 FAIL, 1 SKIP**).
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
@@ -967,9 +1040,23 @@ file is previewed as "will be deleted" and is gone after applying
 two-turn session while the source session file stays byte-identical; rewinding
 the fork's second turn removes it and everything after it from the transcript
 and the session file; and a rejected mid-run steer keeps the draft while an
-accepted Alt+Enter steer clears it and reports the queued notice). The offline
-suite now holds 20 scenarios; the last canonical run before this addition was
-**19 PASS, 0 FAIL, 1 SKIP** (the opt-in `real` scenario). The queue dock and the session-scope approval decisions
+accepted Alt+Enter steer clears it and reports the queued notice), plus
+`tab-title` (the selected session's `document.title` is
+`<session title> — Two Brothers`; a fixture-held model opening makes the
+documented `▶ ` running marker observable with a deterministic poll, the parked
+real approval shows `! `, completion returns to the plain title, a selected
+session never carries the unread count even when another session has an
+unread run, deleting the open session leaves no selection so
+`(1) Two Brothers` shows, and opening the unread session consumes it), and
+`settings-advanced` (Settings → Advanced's Auto-compaction card lists its four
+labelled budgets and their effective-value lines; a negative value is refused
+by the number input's native floor and sends no `PUT /api/settings`, while a
+native-valid but non-whole value is an inline `role=alert` with `aria-invalid`
+that blocks the save before any PUT; a corrected save rides the dialog's single
+Save action, persists the budgets in `sessions/settings.json`, and the
+persisted values plus their effective lines survive a reload). The offline
+suite now holds 21 scenarios; the last canonical run is **21 PASS, 0 FAIL,
+1 SKIP** (the opt-in `real` scenario). The queue dock and the session-scope approval decisions
 remain covered by the web unit suites, not by separate browser scenarios. The
 default suite is fully offline; the
 opt-in `real` scenario (below) reports `SKIP` unless an endpoint is configured.

@@ -291,7 +291,11 @@ the same hero appears inside a selected session that has no transcript yet.
    actually use and where it came from. An explicitly-set non-zero serve flag
    or `TWO_BROTHERS_*` env value wins over the saved value and is shown as
    pinned instead of pretending the save took effect; an older backend renders
-   an unsupported state and changes nothing.
+   an unsupported state and changes nothing. As a last fallback — only when no
+   flag/env and no saved value is set — a role's provider preset may carry a
+   **Context window (tokens)** (Settings → Providers); if both roles resolve to
+   one, the smaller window applies (safer compaction), and the Advanced card
+   reports the source honestly (`from the provider preset`).
 4. **Read the run at a glance.** Older tool/activity rows of completed runs
    fold into one muted disclosure row — `… N tool calls · expand` (the label
    adds `in M runs` when the folded group spans several runs) —
@@ -362,6 +366,16 @@ the same hero appears inside a selected session that has no transcript yet.
    saved copy is missing`) and the apply reports per-file
    restored/deleted/refused/failed outcomes. Files changed after the run are
    never overwritten, and shell-made or untracked changes are out of scope.
+   Restored files keep the permission they had when the run captured them where
+   the platform supports it (ownership only where the process may set it), and
+   files the run created are deleted. The stored records are bounded — the
+   newest 20 per session and records older than 30 days are pruned when a
+   capture finishes, and unreferenced blobs are collected in the same pass — so
+   `<sessions>/undo` cannot grow without limit; an old run simply stops being
+   undoable. The terminal counterpart is
+   `two-brothers sessions undo <name> [--run <id>] [--apply|--discard] [--json]`
+   (preview by default; see
+   [the CLI reference](cli-reference.md#sessions)).
    The bar only appears while no run is live and no compaction is in flight,
    and an older backend without the route hides it after one honest notice.
 7. **Jump around with `Ctrl+K`** (`Cmd+K` on macOS) — the command palette
@@ -378,6 +392,12 @@ the same hero appears inside a selected session that has no transcript yet.
    compacted, and a task already folded into a compaction summary cannot be
    rewound). A rewind also clears the removed runs' tool/approval history
    from the runtime sidecar and cannot be undone.
+
+   A message bubble also offers **Fork from here…**: it copies the conversation
+   up to and including that message into a new session (`{seq}`, the original
+   file stays untouched) and opens the fork, so a what-if branch starts from the
+   exact point you choose. Like the row menu's fork, it is unavailable while a
+   run is active for the session.
 
 Sessions are plain JSONL files under `--sessions-dir`; each has a
 `<name>.meta.json` sidecar (title, workspace link, and — for a fork — a local
@@ -412,6 +432,11 @@ before anything else. While a turn runs, `Ctrl+N` (or the palette's **Steer
 the running turn** row) queues the composer text for that turn at its next
 step — not a new task — bounded to eight pending texts of 4 000 characters;
 the draft clears only on acceptance and leftovers are reported honestly.
+`Ctrl+X` copies the last completed reply (native clipboard first, OSC 52 where
+there is no OS clipboard, with an honest route-specific notice), `Ctrl+G` opens
+the draft in `$VISUAL`/`$EDITOR`, and the terminal title shows
+`Two Brothers — <session> · working|approval|done|failed`; a parked approval
+raises one OSC 9/BEL notification and every exit path restores the title.
 Typing `/` at the start of the composer opens the
 command menu (the TUI's own commands, then built-in prompts/actions, then
 discovered templates) and `@` opens the mention picker: shared skills are
