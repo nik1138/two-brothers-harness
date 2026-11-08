@@ -108,7 +108,7 @@ without giving up hermeticity; the in-process registry/logic coverage stays in
 |---|---|
 | `429-retry-after` | `429` + `Retry-After: 1` then success: exactly 2 attempts, and the header replaces the fixed backoff (the documented 1 s wait is recorded through the provider's `sleeper` seam); one recorded model call. |
 | `5xx-transient` | `500`, `503` then success: exactly 3 attempts; waits equal the documented exponential backoff; one recorded model call. |
-| `timeout-retry` | The first attempt hangs past a 150 ms per-attempt timeout and the retry succeeds: the documented `[warn] provider attempt timed out …` line, the same request re-sent, one recorded model call. |
+| `timeout-retry` | The first attempt hangs past a 400 ms per-attempt timeout and the retry succeeds: the documented `[warn] provider attempt timed out …` line, the same request re-sent, one recorded model call. |
 | `overflow-surface` | A `413` context-overflow body raises `ProviderContextOverflowError` after ONE attempt even with 6 retries configured: no wait, classification `context-overflow`, no recorded usage. |
 | `overflow-recovery` | A real seeded ~92 KB session: the first senior call overflows, the harness compacts once through the same socket-backed provider and retries the node once; the cycle completes (`consult → proposal → review → decision`), the session JSONL keeps exactly one summary and still restores/appends with dense `seq`. |
 | `overflow-bounded` | The same seeded session against an always-overflow server: exactly 3 requests (overflow → one compaction → retried overflow) and then the documented error; never an infinite retry. |
@@ -123,6 +123,66 @@ line per scenario. Evidence (scenario results, durations, request counts) is
 written to `e2e/runs/faults-report-<ts>.json` (gitignored). It is not part of
 `npm test`; the offline smoke gate runs it as a package-gate step, and you can
 also run it directly or via `npm run test:e2e:faults`.
+
+## Real-network load run (opt-in/manual)
+
+`node e2e/load.ts` (npm script `test:e2e:load`) is an **opt-in, manual**
+real-network load runner: it spawns bounded-concurrency real CLI runs against
+an operator-provided OpenAI-compatible endpoint and reports honest per-run
+latency/outcome plus a summary. It fills the "real external-network load" gap
+next to the hermetic real-socket fault layer (`e2e/faults.ts`); the in-process
+registry coverage stays in `tests/`.
+
+> **Warning:** it needs a **reachable endpoint** and sends **real model calls**
+> (local or paid, depending on the endpoint). It is **never** run by
+> `npm test`, the offline smoke gate or CI — there is no endpoint there. Run it
+> manually / for release observation only.
+
+It drives the published artifact: each run is
+`node dist/cli.js run "<task>" --base-url … --senior-model <id> --junior-model <id>
+--mode consult|work --timeout … --retries … --no-live`, so it exercises the same
+provider path an operator would. **Run `npm run build` first**; when `dist/` is
+missing the runner warns and falls back to `src/cli.ts` through Node native type
+stripping. No new dependencies; nothing is built here.
+
+```powershell
+cd packages/harness
+npm run build   # the runner prefers dist/cli.js
+node e2e/load.ts --base-url http://localhost:1234/v1 --model lfm3-1.7b
+node e2e/load.ts --base-url http://192.168.31.123:1234/v1 --model lfm3-1.7b `
+  --concurrency 2 --runs 3 --timeout 900 --retries 1
+npm run test:e2e:load -- --base-url http://localhost:1234/v1 --model lfm3-1.7b
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--base-url <url>` | `TWO_BROTHERS_E2E_BASE_URL` (required) | OpenAI-compatible base URL; `http(s)` only. |
+| `--model <id>` | `TWO_BROTHERS_E2E_MODEL` (required) | Model id used for **both** roles. |
+| (endpoint auth) | `TWO_BROTHERS_API_KEY` | Read from the environment when the endpoint needs a key; this runner never passes keys in argv and never prints them. |
+| `--concurrency <n>` | `3` (max 16) | Parallel CLI runs; the pool never exceeds it. |
+| `--runs <n>` | = concurrency (max 100) | Total runs to execute. |
+| `--mode <consult\|work>` | `consult` | Cooperation mode for each run. |
+| `--timeout <s>` | `120` (max 3600) | Per-attempt provider timeout passed to the CLI. |
+| `--retries <n>` | `1` (max 10) | Retries after a failed model call. |
+| `--task <text>` | Redis→Valkey planning prompt | Task text for every run. |
+| `-h`, `--help` | — | Usage, exit 0. |
+
+Semantics: a run **succeeds** when its CLI child exits 0 (the CLI's own
+definition: one completed cooperation cycle; a model produced decision is not
+otherwise parsed here — use `--json` by hand if you need the protocol object).
+The runner prints one `run <n>: PASS|FAIL in <s>s (exit …)` line per run (plus
+a bounded stdout/stderr tail on failures) and a final `=== Real-network load
+summary ===` block: planned runs, configured concurrency, **observed max
+concurrency**, successes/failures with exit codes, latency `min/median/max`, and
+total wall time. It deliberately prints **no invented throughput numbers** —
+only measured values. Exit codes: `0` all runs succeeded, `1` at least one
+failed, `2` invalid usage (with the reason and usage text on stderr). A soft
+`GET <base-url>/models` probe runs first and reports reachability/model presence
+without failing the run (some endpoints do not expose `/models`).
+
+SIGINT/SIGTERM terminate every child run (`SIGTERM`, then `SIGKILL` after a
+2 s grace) and exit 130/143; a normal exit sweeps any straggler child too, so a
+cancelled load never leaves orphan CLI runs behind.
 
 ## Automation mode (`--mode print|json`)
 
