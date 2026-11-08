@@ -530,6 +530,38 @@ the protocol reference and is not modified by work here either.
    `appearance-roles` browser scenario asserts the rendered dots follow the
    fills; web suite 356/356. Package suite **1 572 tests (1 570 pass, 2
    environment skips)**; no new runtime dependencies; no protocol change.
+   **wave 23 (steering, prompt caching, session lineage and safety nets):**
+   mid-run operator steering — `HarnessOptions.steering` is drained at every
+   state-machine node boundary (after `maybeCompact`) and every tool-loop
+   iteration; each text is appended as an ordinary `message` envelope from
+   `user` to `senior` whose payload text starts with `STEERING_PREFIX`
+   (`[[OPERATOR STEER]] `). The runtime queue is bounded (8 pending,
+   `STEER_TEXT_MAX_CHARS` 4000) and at most
+   `MAX_STEERING_ENVELOPES_PER_RUN` (16) envelopes apply per run; the
+   additive `steering_dropped` runtime event plus the run record's
+   `steering_dropped`/`steering_pending` fields keep a cap drop honest.
+   `POST /api/runs/{run_id}/steer`; web `src/steering.ts` and the composer
+   **Steer run** action (`Alt+Enter`); tests `steering` 20 + web 6.
+   Anthropic prompt caching in `provider.ts`: three
+   `cache_control:{type:"ephemeral"}` breakpoints (merged system block, last
+   tool definition, newest turn) with `cache_read_input_tokens` mapped to
+   `cached_tokens`; tests `anthropiccache` 9 plus the intentional wire change
+   pinned in `adapters`/`thinkingpassback`. Session lineage and safety nets
+   landed in the same wave: `src/sessionfork.ts` (verbatim prefix copy + the
+   additive `parent` sidecar link in `src/metadata.ts`; 20 tests),
+   `sessionsearch.ts::sessionToHtmlString` (self-contained HTML export; 35
+   sessionsearch tests), `src/sessionrewind.ts` (operator-turn cut with the
+   compaction floor; 19 tests) and `src/workspacehistory.ts` (content-addressed
+   pre/post images under `<sessions>/undo`) with the additive
+   `WorkspaceOptions.mutationRecorder` capture seam in `src/workspace.ts`,
+   wired into workspace-bound serve runs (recorder closed in the run's
+   `finally`, fail-soft) and exposed by the restart-resilient
+   `GET/POST/DELETE /api/sessions/{name}/undo/{run_id}` routes (404 unknown,
+   409 active run/unusable record/workspace mismatch, 422 store IO; 28
+   `workspaceundo` + 8 `serverundo` tests) plus web `src/runUndo.ts`/
+   `RunUndoDialog.vue` (12 tests). The rewind route clears the session
+   runtime-event sidecar; the transcript is kept. No
+   PROTOCOL/schema/session-format change; no new runtime dependencies.
 
 ## Commands
 

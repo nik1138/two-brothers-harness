@@ -62,6 +62,7 @@ From a checkout, replace `two-brothers` with `node dist/cli.js` after
 | Sidebar search | `Esc` | clear the query, then close search |
 | Composer | `Enter` | send the task |
 | Composer | `Ctrl+Enter` / `Cmd+Enter` | send without waiting (accelerated submit) |
+| Composer | `Alt+Enter` | steer the followed run with the draft (applies at the run's next step; only while a run is working or waiting on an approval — it never queues a task) |
 | Composer | `Shift+Enter` | insert a newline |
 | Composer | `↑` / `↓` | recall the previous/next accepted task at the draft edges (single-line draft: anywhere; multiline: only at the very start/end); stepping past the newest entry restores the draft you were writing exactly |
 | Composer `@` / line-start `/` | open the mention or command picker; `↑`/`↓` move, `Enter`/`Tab` insert, `Shift+Tab`/`Esc` dismiss (the draft is kept) |
@@ -93,9 +94,30 @@ while filtering one workspace or on touch devices, and the whole header is not
 a drag source. The menu only appears in the unfiltered, non-searching list where
 group headers exist, and the trigger never collapses the group.
 
-The row menu also exports the session as Markdown or JSON (`Export as
-Markdown` / `Export as JSON`); the file downloads with a name derived from the
-session.
+The row menu also exports the session as Markdown, JSON or a single
+self-contained HTML page (`Export as Markdown` / `Export as JSON` / `Export as
+HTML`; the file downloads with a name derived from the session), and offers
+`Fork session…` — a copy of the conversation into a new session file, with the
+original left untouched and forking unavailable while a run is active for that
+session. The session actions trigger row covers the menu's keyboard navigation
+(including these new items).
+
+An operator message in the transcript carries a **Rewind** button (a real
+button: `Tab` to it, then `Enter`/`Space`): it opens a destructive confirmation
+naming the messages and operator tasks that would be removed, then rewrites the
+session file so that task and everything after it is gone while the earlier
+transcript is kept. It is unavailable while a run is active for the session or
+the context is being compacted, and a task already folded into a compaction
+summary cannot be rewound. A rewind also clears the removed runs'
+tool/approval history from the runtime sidecar; it cannot be undone.
+
+Below the conversation, the newest completed run of the selected session also
+offers an **Undo file changes…** bar (a real button: `Tab` to it, then
+`Enter`/`Space`; only while no run is live and no compaction is in flight).
+It opens a per-file preview and apply dialog for exactly the files that run
+mutated through the workspace tools — files changed since the run are refused,
+never overwritten, and shell-made or untracked changes are out of scope. An
+older backend without the undo routes hides the bar after one honest notice.
 
 - **Palette.** Opens with the search field focused and empty; typing filters
   sessions, workspaces and actions, grouped in that order. Once the query is
@@ -128,7 +150,11 @@ session.
   cancelled with its row's **Stop** in the queue dock). `Enter` becomes a
   newline only while a run waits for approval (the box stays usable for a
   draft), and a one-task-at-a-time guard keeps a second `Enter` from sending
-  the same text twice before the first submission is accepted.
+  the same text twice before the first submission is accepted. While a run
+  works, `Alt+Enter` (or the **Steer run** button) applies the draft to that
+  run at its next step; `Enter` still queues a new task behind it, the steer
+  is not recorded as a recalled task, and the draft clears only when the
+  server accepts it.
 
 - **Mentions and commands.** Type `@` at a token start for the `@` picker over
   shared skills and workspace files (emails/word-internal `@` never trigger;

@@ -466,7 +466,9 @@ is served, metadata only, at `GET /api/commands` (`baseCommands`).
 
 List the JSONL session files of a sessions directory (default `sessions`)
 with readable titles derived from the first operator message, envelope counts
-and the last-modified time. Output-only — it never touches the files.
+and the last-modified time. Mostly read-only: listing, `show`, `search` and
+`export` never change a file; `sessions fork` creates a new session file (the
+source is never modified) and `sessions rewind` rewrites one.
 
 ```powershell
 node dist/cli.js sessions [--sessions-dir sessions] [--limit N] [--json]
@@ -528,7 +530,7 @@ sessions`, exit 0); a query shorter than 2 characters is a usage error
 (exit 2); corrupt session files are skipped, never fatal. No matches prints
 `no matches` and exits 0.
 
-#### `sessions export <name> [--format markdown|json] [--output <path>]`
+#### `sessions export <name> [--format markdown|json|html] [--output <path>]`
 
 Render one session for reading, sharing or archival. The default format is a
 Markdown transcript: a header (`# <title>`, session name, workspace, updated
@@ -538,11 +540,18 @@ a readable payload (message text verbatim; structured payloads as bullet
 fields; nested values as JSON). Each payload is bounded to 20 000 characters
 with an explicit truncation marker. `--format json` prints a stable pretty
 object `{name, title, workspace_id, updated, exported_at, envelopes}` with the
-envelopes verbatim.
+envelopes verbatim. `--format html` prints one self-contained HTML page:
+inlined CSS, escaped title/metadata and payloads (hostile markup stays text,
+ANSI/control bytes are stripped), one section per envelope, and no scripts,
+links or external URLs. It uses the same 20 000-character per-payload cap plus
+a 2 000 000-character whole-document cap; when that cap drops envelopes the
+page says `Document truncated … showing N of M envelopes` and stays
+well-formed (the JSON export is the complete form).
 
 ```powershell
 node dist/cli.js sessions export session --sessions-dir sessions           # Markdown to stdout
 node dist/cli.js sessions export session --format json --output out.json   # write a file
+node dist/cli.js sessions export session --format html --output out.html   # self-contained page
 ```
 
 The name resolves with or without the `.jsonl` suffix; the `--format` value is
@@ -550,6 +559,52 @@ case-insensitive. `--output <path>` writes the body to that file and prints
 `wrote <abs path>` on stderr; `--output -` keeps stdout. A missing session or
 an unwritable output path exits 1; an unknown format or a missing name is a
 usage error (exit 2).
+
+#### `sessions fork <name> [--at <seq>] [--name <new>]`
+
+Copy a session (or its first `--at` envelopes) into a new session file, for
+"what-if" branches that keep the original run untouched. The copy is a prefix
+of the source JSONL, so the envelope bytes and the dense `seq` numbering are
+unchanged; the new session's `.meta.json` sidecar gets an additive
+`parent: {name, seq}` lineage link and a `<source title> (fork)` title (bounded
+to 80 characters). `--name` must be one portable file name (no path
+separators); without it the smallest free `<source>-fork-<k>` is used, and an
+existing session is never overwritten. The source file and its sidecar are
+never modified. The CLI prints the new session name (with `--json`, the full
+`{name, title, events, forked_from}` object). A missing source, an out-of-range
+`--at`, an invalid or taken `--name` or a write failure exits 1; a
+non-numeric `--at` is a usage error (exit 2).
+
+```powershell
+node dist/cli.js sessions fork session                       # session-fork-1.jsonl
+node dist/cli.js sessions fork session --at 4 --name branch-a
+node dist/cli.js sessions fork session --json
+```
+
+#### `sessions rewind <name> --turns <n>`
+
+Drop the last `n` operator turns (each operator task plus every envelope the
+brothers produced for it) from a persisted session, so a better task can be
+retyped without a growing context or a new session file. `--turns` is a strict
+integer 1–100; a request deeper than the session holds is clamped honestly at
+the session start. A compaction summary is a hard floor: everything the
+summary covers is kept and the cut reports `stopped_at_compaction` /
+`stops_before`, so after a compaction rewind keeps the summary and the
+original `[[TASK]]` head rather than "replacing" the first task. The kept
+prefix is rewritten atomically (temp file + rename) with its dense `seq`
+intact, so `--resume` keeps working. A successful rewrite also clears the
+session's runtime-event sidecar (`sessions/runtime/<name>.jsonl.events.jsonl`):
+tool and approval history for the removed runs is gone, while the kept
+transcript remains. A cut that removes nothing is a success that reports the
+honest reason. A missing or corrupt session exits 1; a bad `--turns` is a
+usage error (exit 2). `--json` prints the full cut object (`rewritten`,
+`kept`, `removed`, `turns`, `requested_turns`, `stopped_at_compaction`,
+`stops_before`, `reason`, `runtime_events_cleared`).
+
+```powershell
+node dist/cli.js sessions rewind session --turns 1
+node dist/cli.js sessions rewind session --turns 2 --json
+```
 
 ### `doctor`
 
@@ -676,18 +731,22 @@ The backend is a **local single-user workspace server**. API overview:
 | `PUT /api/workspaces/order` | persist the operator's workspace order (`{"ids": ["id1", ...]}` must be an exact permutation → `{"workspaces": [...]}`; 400 for duplicates/unknown/missing ids) |
 | `GET /api/sessions` | list sessions (`?workspace_id=` filters); titles/workspace links from `<name>.meta.json` sidecars |
 | `GET /api/search?q=&limit=` | full-text search over session titles and envelope payload strings; returns `{query, scanned_sessions, truncated, hits[]}`; `q` shorter than 2 characters is a 400 |
-| `GET /api/sessions/{name}/export?format=markdown\|json` | download one session as Markdown (default) or JSON with `Content-Disposition: attachment`; 404 for an unknown session, 400 for an unknown format (HEAD supported) |
+| `GET /api/sessions/{name}/export?format=markdown\|json\|html` | download one session as Markdown (default), JSON or one self-contained HTML page with `Content-Disposition: attachment` (the HTML page inlines its CSS, escapes payloads and has no scripts/links; markdown/json stay byte-identical to the pre-wave-23 exporter); 404 for an unknown session, 400 for an unknown format (`format must be markdown, json or html`) (HEAD supported) |
 | `POST /api/sessions` | create a session (`{"title"?, "workspace_id"?}`) |
 | `PATCH /api/sessions/{name}` | rename a session (set a readable title) |
 | `DELETE /api/sessions/{name}` | delete a session — the JSONL, its `<name>.meta.json` and the runtime sidecar (`200 {"deleted": name}`; 404 on unknown) |
 | `GET /api/sessions/{name}` | all protocol envelopes of one session |
 | `GET /api/sessions/{name}/events` | runtime sidecar events (tool calls, approvals) for browser reload |
 | `POST /api/sessions/{name}/compact` | compact the session in place on demand: the older context is summarized by the configured summarizer role (senior by default) and the session JSONL is rewritten with dense `seq`, so a reload shows the summary. `200 {"compacted": true, "before_events": N, "after_events": M}`; `200 {"compacted": false, "reason": "nothing to compact"}` when there is nothing to cut; 404 unknown session, 400 invalid session name, 409 while a run for that session is active or another compaction is already running, 422 when the session file is unreadable/corrupt, and 502 with the provider message (nothing written) when summarization fails. A run submitted for a session while it is being compacted is a 409 (`a compaction is in progress for this session; retry in a moment`) — the two operations are mutually exclusive so a run's envelopes can never be lost to the rewrite. The summarizer budgets follow the resolved run config (`--compact-*`/`TWO_BROTHERS_COMPACT*`), an explicit `ServerOptions.compaction` still wins, and a client disconnect aborts the provider call and releases the session |
+| `POST /api/sessions/{name}/fork` | copy a session (or its first `seq` envelopes) into a NEW session file, for "what-if" branches. Body `{seq?: integer, name?: string}` (both optional; `seq` defaults to the whole session). `201 {name, title, events, forked_from: {name, seq}}`; the copy is a byte-exact prefix (dense `seq` preserved), the new sidecar gets `forked_from`'s `parent` lineage link and a `<source title> (fork)` title, and the source is never modified. Errors: 400 invalid `seq`/`name`, 404 unknown source, 409 name taken or a live run/manual compaction on the session (`a run is active for this session; stop it before forking it` / `a compaction is in progress for this session; retry in a moment`), 422 corrupt source, 500 unwritable sessions directory (a partial file is rolled back) |
+| `POST /api/sessions/{name}/rewind` | drop the last `turns` operator turns (each task plus every envelope produced for it) from a persisted session. Body `{turns}` strict integer 1–100. `200 {name, rewritten, kept, removed, turns, requested_turns, stopped_at_compaction, stops_before, reason, runtime_events_cleared, runtime_events_clear_error?}` — `rewritten: false` with a `reason` when there is nothing to cut (not an error). The kept prefix is rewritten atomically with dense `seq` intact, and a successful rewrite clears the session's runtime-event sidecar (`sessions/runtime/<name>.jsonl.events.jsonl`): tool/approval history for the removed runs is gone, while the kept transcript remains (`runtime_events_cleared` says whether the sidecar was cleared; a clear failure is disclosed instead of pretending success). Harness-generated context (compaction summaries, repair requests, operator steers, skill/file blocks) is never counted as a turn, and a compaction summary is a hard floor (`stopped_at_compaction`/`stops_before` report an honest clamp). Errors: 400 non-integer/out-of-range depth, 404 unknown session, 409 a live run/manual compaction or a session changed during the read+rewrite CAS, 422 corrupt session, 500 failed rewrite |
+| `GET/POST/DELETE /api/sessions/{name}/undo/{run_id}` | run-scoped workspace edit undo (wave 23) over the persisted `<sessions>/undo` side artifact (survives a backend restart). `GET` previews every file the run mutated against the LIVE workspace as `{session, run_id, statuses, counts, workspace_root, created_at, omitted?}` with per-file status `applicable` / `created` / `deleted` / `changed-since` / `skipped` / `missing`; `POST` applies only the reversible entries (each file is re-classified immediately before it is touched, so a file changed after the preview is refused, never overwritten) and returns `{session, run_id, workspace_root, applied, refused, failed, files, counts, omitted?}` with per-file `applied`/`refused`/`failed` + the driving `preview_status`; `DELETE` discards the record (`{discarded: true, session, run_id}`; content-addressed blobs stay for sharing — garbage collection is a later phase). Only workspace-bound `serve` runs capture (recorder fail-soft and closed in the run's `finally`); shell-made changes and untracked files are out of scope. Errors: 404 unknown session or no undo record for the run, 409 while a run for that id is still active in memory or the record is unusable (corrupt/oversized/unsupported version, or its recorded workspace is no longer registered — the record is matched to a registered workspace by canonical path on every request), 422 unexpected store IO |
 | `GET /PUT /api/settings` | per-role Senior/Junior provider/model/base URL/API key (keys are write-only; responses show `api_key_set` only). Both carry the additive top-level `approval_policy` section for the [approval mode](#approval-modes): `GET` returns `{mode, pinned}` (the effective mode, and whether a `serve` flag/env pin overrides the persisted one), `PUT` accepts `{"approval_policy": {"mode": "ask\|readonly\|edits\|allow-all"}}` — a strict enum (400 for an unknown mode, 500 if the atomic settings write fails, absent leaves the persisted mode untouched) and returns the same view. The mode is stored in `sessions/settings.json`; a per-run flag/env pin is never written there |
 | `POST /api/runs` | start a background run (`{"task", "mode"?, "session"?, "provider"?, "workspace_id"?, "stream_tokens"?}` → `202 {"run_id", "session", "status"}`); a leading `/name` command is expanded and `@skill:`/`@file` mentions are attached before the run (see [Composer mentions and slash commands](#composer-mentions-and-slash-commands)); `stream_tokens: true` additionally streams live `token` frames on the run SSE endpoint (strict boolean, default off); runs are FIFO — one active, the rest `queued`, so a submission for a session that already has a live run is still accepted (`202` with `status: "queued"`) and starts after the earlier one finishes |
-| `GET /api/runs`, `GET /api/runs/{run_id}` | list runs / run status (`queued`/`running`/`waiting`/`completed`/`failed`/`cancelled`); records carry a per-run `usage` object (`model_calls`, `input_tokens`, `output_tokens`, `cached_tokens`; zeros while running) |
+| `GET /api/runs`, `GET /api/runs/{run_id}` | list runs / run status (`queued`/`running`/`waiting`/`completed`/`failed`/`cancelled`); records carry a per-run `usage` object (`model_calls`, `input_tokens`, `output_tokens`, `cached_tokens`; zeros while running) and, additively, `steering_pending` (steering texts waiting for the run's next step, present only while live and non-empty) and `steering_dropped` (`dropped` texts discarded at the per-run envelope cap; present only when > 0) |
 | `POST /api/runs/{run_id}/stop` | cooperative stop (pending approvals are denied); a `queued` run is marked cancelled immediately, without waiting for a worker |
-| `GET /api/runs/{run_id}/events?after=N` | SSE of typed runtime events (`run_status`, `envelope`, `tool_started`, `tool_completed`, `approval_requested`, `approval_resolved`, `approval_auto_allowed`, `approval_auto_denied`, `todo_updated`, `prompt_audit`, `run_error`, `run_end`); reconnectable via `after`. `approval_requested` additively carries `reason` and a bounded `detail` (`{kind, diff?, addedLines?, removedLines?, command?, truncated?}` preview) when the request has one; `todo_updated` carries the model's complete sanitized plan snapshot. When the run was started with `stream_tokens`, the same stream additionally carries ephemeral named `token` frames (`event: token`, data `{type, run_id, role, kind: "text"\\|"thinking", delta, at}`) with no SSE id — they are live-only, never persisted and never replayed |
+| `POST /api/runs/{run_id}/steer` | mid-run operator steering: queue `{"text": "..."}` for an ACTIVE run — `running`, or `waiting` on an approval (applied at the next step after it resolves). Accepted `200 {"run_id", "status", "pending"}` (`pending` = steering texts now waiting, 1–8); the text is trimmed, must be non-empty and at most 4 000 characters (`400` otherwise; a non-string `text` is the standard `400 invalid request body`), an unknown run is `404`, and a queued/terminal run or a full pending queue is an honest `409` (the detail names the run's status, or `steering queue is full …`). Acceptance emits **no** event: the steer is appended to the shared context as an ordinary `user`→`senior` `message` envelope (payload text prefixed `[[OPERATOR STEER]] `) when the harness reaches the next node boundary/tool-loop iteration, so SSE consumers see the normal `envelope` frame with its dense `seq` at that moment. Pending steering is in-memory only: a stopped run appends nothing more and drops what was queued, and a backend restart loses the queue (`404` for the run id) |
+| `GET /api/runs/{run_id}/events?after=N` | SSE of typed runtime events (`run_status`, `envelope`, `tool_started`, `tool_completed`, `approval_requested`, `approval_resolved`, `approval_auto_allowed`, `approval_auto_denied`, `todo_updated`, `prompt_audit`, `reasoning`, `steering_dropped`, `run_error`, `run_end`); reconnectable via `after`. `approval_requested` additively carries `reason` and a bounded `detail` (`{kind, diff?, addedLines?, removedLines?, command?, truncated?}` preview) when the request has one; `todo_updated` carries the model's complete sanitized plan snapshot; `steering_dropped` carries `{dropped, applied, limit}` when a 200-accepted steer later hit the per-run envelope cap. When the run was started with `stream_tokens`, the same stream additionally carries ephemeral named `token` frames (`event: token`, data `{type, run_id, role, kind: "text"\\|"thinking", delta, at}`) with no SSE id — they are live-only, never persisted and never replayed |
 | `GET /api/runs/{run_id}/approvals`, `POST /api/runs/{run_id}/approvals/{id}` | list/answer pending operator approvals (`{"allow": bool, "scope"?: "once" \| "session"}` → `{approval_id, decision, scope}`; `scope` defaults to `once`, an invalid value or `session` with a deny is a 400, an unknown/already-resolved approval id is a 404). See the session-scope paragraph below |
 | `GET /api/providers`, `POST /api/providers`, `PUT /api/providers/{seed}`, `POST /api/providers/{name}/reset`, `POST /api/providers/{name}/discover`, `DELETE /api/providers/{name}` | provider presets (seeded: openai, deepseek, anthropic, gemini, openrouter, lmstudio, custom). `GET` returns `{name, base_url, api_key_set, kind, models}` plus additive `seed` (the name comes from the built-in seed table) and `customized` (a stored override of that name exists), so a client can tell a pristine seed from an edited/custom entry. `POST` creates a custom provider (409 on a duplicate name, including a seed name); `PUT` updates it, and on a seed name materializes a stored override (blank `base_url` is a 400); `DELETE` removes a stored preset/override and clears any role `provider_ref` that pointed at it (a pristine seed is a 404); `POST /api/providers/{name}/reset` restores a customized built-in seed without clearing role references (see below); `POST /api/providers/{name}/discover` probes a draft endpoint for its model list without saving (see the discovery paragraph below). Keys are never returned — responses carry `api_key_set` only. The Settings → Providers tab is the operator UI for these routes |
 | `GET /api/plugins` | discovered plugins (`name`, `description`, `roles`, load `errors`, `diagnostics`) |
@@ -696,6 +755,45 @@ The backend is a **local single-user workspace server**. API overview:
 | `GET /api/fs/browse` | browse the filesystem for workspace registration (UI helper) |
 | `POST /api/run` | legacy synchronous run (body `{"task", "mode"?, "session"?, "provider"?}` → `{"session", "events", "decision"}`); slash commands and mentions are expanded the same way, but there is no token streaming |
 | `GET /api/stream?session=<name>` | legacy SSE tail of a session file |
+
+**Mid-run steering.** A steering text is not a queued task: it is appended to
+the run's shared context as a normal `message` envelope from `user` to
+`senior` (the initial-task shape plus the documented `[[OPERATOR STEER]] `
+marker in the payload text), so the next provider call renders it inside
+`Context events:`. The harness drains the bounded in-memory queue (8 pending
+texts, each trimmed and at most 4 000 characters) at each state-machine node
+boundary and each tool-loop iteration; a tool-loop steer re-renders the
+opening transcript so the in-flight wire conversation stays legal (never a
+second consecutive user turn, which Anthropic/Google reject). At most 16 steer
+envelopes are applied per run — beyond that an additive `steering_dropped`
+runtime event reports the discarded texts — a broken drain callback records
+one warning and never breaks the run, and nothing is appended after a stop.
+The web composer exposes the action as **Steer run** / `Alt+Enter`; TUI
+steering is still a follow-up.
+
+**Session lineage, rewind and export.** A fork copies a session prefix into a
+new dense-`seq` session file (the source is never modified) and records a
+local-only `parent: {name, seq}` link in the new `.meta.json` — the protocol
+JSONL shape is unchanged, and a fork deliberately does not copy the
+runtime-event sidecar or inherit the source's workspace link. A rewind rewrites
+the kept prefix atomically and clears the session's runtime-event sidecar, so
+tool/approval history for the removed runs is gone while the kept transcript
+remains (the response states whether the clear succeeded). `format=html`
+export is one self-contained page (inline CSS, escaped payloads, no
+scripts/links) bounded to 2 000 000 characters at envelope boundaries with an
+explicit truncation note; markdown/json output is unchanged.
+
+**Run-scoped file undo.** Workspace-bound `serve` runs capture the exact
+pre/post bytes of every write/edit/delete under `<sessions>/undo` (a persisted
+session side artifact — never a protocol envelope — so it survives a backend
+restart). Preview classifies each file against the live workspace; apply
+restores write/edit pre-images, deletes files the run created, and refuses any
+file whose content changed after the run (per file, re-checked immediately
+before it is touched — never overwritten); discard is the explicit cleanup
+step and leaves the content-addressed blobs for sharing (garbage collection is
+a later phase). Files the run did not mutate through the workspace tools
+(shell-made changes, external edits, untracked files) are out of scope, as are
+file mode/ownership restoration and CLI/TUI runs (those do not capture).
 
 **Provider reset vs. delete.** `POST /api/providers/{name}/reset` restores a
 customized built-in seed: it deletes only that name's stored override
@@ -1273,6 +1371,49 @@ them):
   the option and keep byte-identical requests. Unset keeps every request
   byte-identical to before. See
   [Anthropic extended thinking](#anthropic-extended-thinking-ts-package).
+- **Mid-run steering** — an operator can steer a cooperation cycle that is
+  already working instead of only queueing the next task. A steer is appended
+  to the shared context as an ordinary `user`→`senior` `message` envelope
+  whose payload text starts with the documented `[[OPERATOR STEER]] ` marker
+  (dense `seq`, session JSONL included; no protocol kind/field change), so
+  the next provider call sees it inside `Context events:`. `POST
+  /api/runs/{run_id}/steer` queues one text for a `running` run or one parked
+  on an approval (`waiting`); the web composer exposes it as **Steer run** /
+  `Alt+Enter`, and a bounded in-memory queue (8 pending texts of at most
+  4 000 characters, at most 16 steer envelopes per run) is drained at every
+  state-machine node boundary and tool-loop iteration. A text accepted with a
+  `200` that later hits the per-run envelope cap is reported through the
+  additive `steering_dropped` runtime event and the run record's
+  `steering_dropped` field, and nothing is appended after a stop. TUI
+  steering is still a follow-up (see the API table below).
+- **Anthropic prompt caching** (TS package) — every Anthropic Messages
+  request carries up to three `cache_control:{type:"ephemeral"}` breakpoints:
+  the merged system prompt, the last tool definition and the last content
+  block of the newest conversation turn. The repeated prefix of a cooperation
+  cycle (system + tool schemas + growing transcript) is therefore read from
+  Anthropic's 5-minute prompt cache on the 2nd..Nth call, which lowers latency
+  and input cost; a single-call run instead pays the 1.25× cache-write premium
+  on the marked prefix (prompts below the model's cache minimum are accepted
+  with the markers ignored). There is no flag or setting — caching is
+  unconditional — and OpenAI-compatible/Gemini request bodies never carry the
+  field. `cache_read_input_tokens` is mapped to `cached_tokens` (cache writes
+  are not hits), so the existing footer `cache N%` segment becomes
+  meaningful for Anthropic; no real-model cache-hit evidence is recorded yet
+  and `ttl`/opt-out are follow-ups.
+- **Run-scoped file undo (web + API)** — a workspace-bound `serve` run records
+  the pre/post bytes of every `workspace_write_file`/`workspace_edit_file`/
+  `workspace_delete_file` mutation under `<sessions>/undo` (bounded, fail-soft,
+  content-addressed, never part of the session JSONL). `GET
+  /api/sessions/{name}/undo/{run_id}` previews each recorded file against the
+  live workspace (`applicable`/`created`/`deleted`/`changed-since`/`skipped`/
+  `missing`), `POST` restores/deletes the reversible ones (re-checking each file
+  immediately before touching it, so post-run edits are refused per file), and
+  `DELETE` discards the record. The web workspace offers **Undo file
+  changes…** for the newest completed run of the selected session; the action
+  is hidden with an honest notice when the backend has no record (404) and is
+  unavailable while a run is live or a compaction is in flight. Shell-made
+  changes, untracked files, file mode/ownership and CLI/TUI runs are out of
+  scope. See the API row below for the exact contract.
 - **Plugins** — see `docs/plugins.md`.
 - **Skills** — role-scoped `SKILL.md` catalogs (see [Skills](#skills-ts-package)).
 - **Provider presets, onboarding, cost** — seeded presets (openai, deepseek,
@@ -1346,12 +1487,17 @@ them):
   `run --task-file <path>` feed the task without shell quoting, and
   `run`/`chat --dry-run` print the resolved plan (config, tools, session,
   compaction, limits) with no model call and no session write.
-- **Session search and export** — `sessions search <query>` (human or
-  `--json`, bounded snippets, newest sessions first) and
-  `sessions export <name> [--format markdown|json] [--output <path>]`; the
-  server exposes the same data at `GET /api/search` and
-  `GET /api/sessions/{name}/export`. The web workspace searches message
-  content from the Ctrl+K palette and exports a session from its row menu.
+- **Session search, export, fork and rewind** — `sessions search <query>`
+  (human or `--json`, bounded snippets, newest sessions first),
+  `sessions export <name> [--format markdown|json|html] [--output <path>]`,
+  `sessions fork <name> [--at <seq>] [--name <new>]` (a verbatim prefix copy
+  with an additive `parent` lineage link; the source is never modified) and
+  `sessions rewind <name> --turns <n>` (drop the last operator turns; the
+  rewritten session clears the removed runs' runtime-event sidecar). The
+  server exposes the same data at `GET /api/search`,
+  `GET /api/sessions/{name}/export` and the matching session mutation routes.
+  The web workspace searches message content from the Ctrl+K palette and
+  exports a session from its row menu.
 - **TUI** — `tui [task]` (also the bare interactive `two-brothers`) is a
   zero-dependency full-screen chat in the terminal's alternate screen over
   the same harness and flags: block transcript with textual role labels, a

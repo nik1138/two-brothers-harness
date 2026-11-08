@@ -456,8 +456,10 @@ Design anchors that already exist:
   behind the session's FIFO with `status: "queued"`, and a bounded queue dock
   above the composer lists `#N` positions, task snippets, queued-at times and a
   per-row **Stop** (queued cancel is immediate through the existing stop
-  route), with a `+N more` tail, an aria-live summary and honest copy — a
-  queue, never "steering"; there is no mid-turn injection. The next queued run
+  route), with a `+N more` tail, an aria-live summary and honest queue copy;
+  mid-run steering is a separate explicit action (wave 23:
+  `POST /api/runs/{run_id}/steer` plus the composer **Steer run**/`Alt+Enter`),
+  never a queued task. The next queued run
   is adopted/followed on `run_end`, and an older backend with no active run
   records shows no dock. Files: `web/src/queueState.ts`,
   `web/src/components/QueueDock.vue`, `web/src/App.vue`,
@@ -1176,6 +1178,105 @@ Design anchors that already exist:
   embedded `unavailable`). Package suite 1 572 tests (1 570 pass, 2
   environment skips); typecheck green. Remaining: an in-TUI key-binding
   editor.
+
+## Shipped 2026-11-08 (wave 23: steering, session lineage/rewind, file undo, prompt caching)
+
+- **Mid-run operator steering** — the operator can steer a working
+  cooperation cycle instead of only queueing the next task. A steer rides the
+  shared context as an ordinary `message` envelope from `user` to `senior`
+  (payload `{text}` prefixed with the documented `[[OPERATOR STEER]] `
+  marker, dense `seq`, session JSONL included), so no protocol kind/field or
+  session-format change exists; the harness drains a bounded in-memory queue
+  (8 pending texts of at most 4 000 characters) at every state-machine node
+  boundary (after `maybeCompact`) and tool-loop iteration, re-rendering the
+  opening transcript inside a tool loop so the in-flight wire conversation
+  stays legal for Anthropic/Google. At most 16 steer envelopes apply per run;
+  an additive `steering_dropped` runtime event plus the run record's
+  `steering_dropped`/`steering_pending` fields keep a cap drop honest, a
+  broken drain callback is fail-soft, and nothing is appended after a stop.
+  `POST /api/runs/{run_id}/steer` accepts a text only for `running` or
+  approval-parked (`waiting`) runs; the web composer exposes **Steer run** /
+  `Alt+Enter` and clears the draft only on a 200. Files: `src/harness.ts`,
+  `src/runtime.ts`, `src/server.ts`, `src/runevents.ts`, `src/index.ts`,
+  `web/src/steering.ts`, `web/src/api.ts`, `web/src/types.ts`,
+  `web/src/App.vue`, `web/src/components/Composer.vue`,
+  `web/src/shortcuts.ts`; tests `tests/steering.test.ts` (20) and
+  `web/tests/steering.test.ts` (6). Remaining: TUI steering, a browser E2E
+  scenario, real-provider validation.
+- **Session fork + self-contained HTML export** — `POST
+  /api/sessions/{name}/fork` and `sessions fork <name> [--at <seq>] [--name
+  <new>]` copy a session prefix byte-for-byte into a NEW session file (dense
+  `seq` preserved, source untouched), title `<source> (fork)`, local-only
+  `parent: {name, seq}` sidecar link, and typed 400/404/409/422/500 errors; a
+  fork does not inherit `workspace_id` or copy the runtime-event sidecar.
+  `GET /api/sessions/{name}/export?format=html` and `sessions export <name>
+  --format html` render one self-contained page (inline CSS, escaped
+  payloads, no scripts/links/external URLs; 20 000-char per-payload and
+  2 000 000-char document caps with an explicit truncation note), while
+  markdown/json output stays byte-identical. Files: `src/sessionfork.ts`,
+  `src/sessionsearch.ts`, `src/metadata.ts`, `src/server.ts`, `src/cli.ts`,
+  `src/clihelp.ts`; tests `tests/sessionfork.test.ts` (20) plus the HTML
+  export cases in `tests/sessionsearch.test.ts` (35); the web session row menu
+  ships `Fork session…` and `Export as HTML`
+  (forking is unavailable while a run is active). Remaining: TUI surfaces.
+- **Session rewind** — `POST /api/sessions/{name}/rewind` (`{turns}` 1–100)
+  and `sessions rewind <name> --turns <n>` drop the last N operator turns, so
+  a better task can be retyped without a growing context or a new session.
+  The kept prefix is rewritten atomically with dense `seq` intact; harness
+  context (compaction summaries, repair requests, operator steers, skill/file
+  attachment blocks) is never counted as a turn; a compaction summary is a
+  hard floor with an honest `stopped_at_compaction`/`stops_before`/`reason`
+  clamp; nothing-to-cut is a 200 with `rewritten: false`. The route refuses a
+  live run or manual compaction (409) and takes a read CAS against concurrent
+  writers; a successful rewrite also clears the session's runtime-event
+  sidecar (`sessions/runtime/<name>.jsonl.events.jsonl`) — tool/approval
+  history for the removed runs is gone, the kept transcript remains, and the
+  response reports `runtime_events_cleared`. Files: `src/sessionrewind.ts`,
+  `src/server.ts`, `src/cli.ts`, `src/clihelp.ts`; tests
+  `tests/sessionrewind.test.ts` (19). The web transcript offers **Rewind** on
+  operator messages (destructive confirmation; blocked while a run is
+  active/compacting, and at a compaction floor). Remaining: a TUI rewind
+  surface.
+- **Run-scoped workspace edit undo** — after a workspace-bound `serve` run,
+  the operator can revert exactly the files that run mutated through
+  `workspace_write_file`/`workspace_edit_file`/`workspace_delete_file` (shell
+  commands, external edits and untracked files are never touched). The run
+  captures bounded content-addressed pre/post images under `<sessions>/undo`
+  (a restart-resilient session side artifact, never protocol JSONL; one entry
+  per file = the net effect; capture is fail-soft and closes in the run's
+  `finally`). `GET /api/sessions/{name}/undo/{run_id}` previews every recorded
+  file against the live workspace (`applicable`/`created`/`deleted`/
+  `changed-since`/`skipped`/`missing` + counts), `POST` applies the reversible
+  entries (each file re-classified immediately before it is touched, so a file
+  changed since the run is refused, never overwritten) and reports
+  `applied`/`refused`/`failed`, and `DELETE` discards the record. Errors: 404
+  unknown session/record, 409 a still-active in-memory run or an unusable
+  record (corrupt/oversized/unsupported version/its workspace no longer
+  registered), 422 store IO. The web workspace shows **Undo file changes…**
+  for the newest completed run of the selected session (hidden with an honest
+  notice on 404, unavailable while a run is live or a compaction is in
+  flight) with a per-file preview/apply dialog. Files:
+  `src/workspacehistory.ts`, `src/workspace.ts` (capture seam),
+  `src/server.ts`, `src/index.ts`, `web/src/runUndo.ts`,
+  `web/src/components/RunUndoDialog.vue`, `web/src/api.ts`, `web/src/App.vue`,
+  `web/src/types.ts`; tests `tests/workspaceundo.test.ts` (28),
+  `tests/serverundo.test.ts` (8), `web/tests/runUndo.test.ts` (12). Remaining:
+  blob GC/retention (records and deduped blobs accumulate), a TUI/CLI undo
+  surface (those runs do not capture), and mode/ownership restoration.
+- **Anthropic prompt caching + honest cache accounting** — every Anthropic
+  Messages request carries up to three `cache_control:{type:"ephemeral"}`
+  breakpoints (merged system prompt, last tool definition, newest conversation
+  turn), so the repeated prefix of a cooperation cycle is read from the
+  5-minute prompt cache on the 2nd..Nth call; multi-call runs save latency and
+  input cost, a single-call run pays the write premium, and prompts below the
+  model's cache minimum ignore the markers. No flag/setting; OpenAI-compatible
+  and Gemini bodies are byte-identical. `cache_read_input_tokens` →
+  `cached_tokens` makes the existing `cache N%` footer meaningful (writes are
+  not hits; absent reports stay 0). Files: `src/provider.ts`; tests
+  `tests/anthropiccache.test.ts` (9) with the intentional wire change pinned
+  in `tests/adapters.test.ts`/`tests/thinkingpassback.test.ts`. Remaining:
+  real-model cache-hit evidence, `ttl`/opt-out, cost-table cached-input
+  discount.
 
 ## Open items (deferred)
 

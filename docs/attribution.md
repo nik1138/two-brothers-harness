@@ -38,12 +38,13 @@ permission text.
 `SUMMARIZATION_PROMPT` and `UPDATE_SUMMARIZATION_PROMPT` in `compaction.ts` are
 verbatim copies of pi's prompts, as recorded in `NOTICE`.
 
-## Conventions adopted from kimi-code, opencode and deepseek-harness
+## Conventions adopted from the vendored references
 
-No source code is copied from these three — only wire shapes and design
+No source code is copied from these references — only wire shapes and design
 conventions, recorded in this index (most adapted modules also name their
 upstream in a header comment). `NOTICE` changes only for a substantial block
-(`NOTICE` is unchanged by the 2026-11-07 surface adaptations below).
+(`NOTICE` is unchanged by the 2026-11-07 surface adaptations and the wave-23
+ones below).
 
 | Project | Here | What was adopted |
 |---|---|---|
@@ -57,6 +58,11 @@ upstream in a header comment). `NOTICE` changes only for a substantial block
 | kimi-code | `packages/harness/src/tui/keymap.ts`, `src/tui/view/statusbar.ts` | The status-bar footer slot/tip idea: a rotating discoverability tip plus a separate transient hint line, derived from one command registry so copy can never describe a missing binding. Our rotation is a deterministic turn counter with registry-derived chords, and the transient slot is priority-clipped; implemented locally, no code copied. |
 | kimi-code | `web/src/tokens.css`, `web/src/style.css`, `web/src/main.ts` | The role-named semantic token vocabulary: surfaces by role, three foreground tiers, `border`/`border-strong`, intent accents with soft companions, dedicated diff add/remove and search-hit roles, and duration/ease/radius/space scales (from `apps/vis/web/src/theme.css` and the web bundle's `--color-*` layer). The curated subset, values and the light/dark mechanism are ours; no token block copied. |
 | deepseek-harness, kimi-code | `packages/harness/src/permissions.ts`, `src/tui/app.ts`, `web/src/approvalPolicy.ts`, `web/src/components/settings/ApprovalPolicySection.vue` | The operator approval-mode idea: an explicit ask/read-only/edits/allow-all decision table, a persisted policy with a fail-closed default, and a visible destructive warning for the permissive mode, translated to our `PermissionPolicy`/`SettingsStore`/dialog surfaces. Implemented locally on our own approval broker; no code copied. |
+| pi | `packages/harness/src/harness.ts`, `src/runtime.ts`, `src/server.ts`, `web/src/steering.ts`, `web/src/components/Composer.vue` | The steering/follow-up queue idea (`packages/agent/src/agent.ts` `steer`/`followUp`, `agent-loop.ts` steering drained between turns): operator input classified as steering takes effect after the current turn and is delivered one-at-a-time in order. Reimplemented locally as a bounded drain at the cooperation state-machine node boundaries and tool-loop iterations, transported as our own protocol `message` envelope; no agent-loop, queue-classification or session-format code copied. |
+| pi-ai | `packages/harness/src/provider.ts` | The Anthropic prompt-cache breakpoint placement (`api/anthropic-messages.ts`: `getCacheControl`, system text-block markers, last-tool marker, newest-turn marker). Reimplemented locally (~20 lines) for this adapter's merged-system and tool-loop shapes; no code copied. |
+| opencode | `packages/harness/src/workspacehistory.ts` | The content-addressed capture and per-file restore/preview model for run-scoped workspace edit undo (`packages/core/src/snapshot.ts`, `session/revert.ts`). The git shadow-tree machinery is deliberately not vendored: our store is a plain session side artifact with hash-verified pre/post images; design only, no code copied. |
+| kimi-code, opencode | `packages/harness/src/sessionrewind.ts`, `src/sessionfork.ts`, `src/metadata.ts` | The conversation-undo cut rules (`agent-core-v2/src/agent/undo/undoService.ts`, `contextMemory/contextOps.ts` `computeUndoCut`, the compaction floor and honest requested-vs-undoable reporting) and the fork UX (`docs/en/guides/sessions.md` `/fork`; opencode `Session.fork` boundary before/through) translated to a flat dense-`seq` JSONL prefix copy with a local `parent` sidecar link. Design only, no code copied. |
+| pi | `packages/harness/src/sessionsearch.ts` (`sessionToHtmlString`) | The self-contained single-file session export inspiration (`coding-agent/src/core/export-html`: inlined template/CSS/JS, vendored highlight.js/marked). The templates and bundled third-party libraries were not copied: our renderer is hand-rolled HTML with an inline stylesheet and escaped plain text; no code copied. |
 
 ## Other MIT references
 

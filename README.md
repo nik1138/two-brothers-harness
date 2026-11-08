@@ -139,6 +139,15 @@ server then serves (the npm tarball ships its own copy of that build).
   and unset requests stay byte-identical. A cap that does not exceed the
   budget is raised with one honest warning and `temperature` is omitted while
   thinking is on.
+- **Anthropic prompt caching.** Every Anthropic Messages request carries
+  explicit `cache_control:{type:"ephemeral"}` breakpoints for the system
+  prompt, the tool schemas and the newest conversation turn, so the repeated
+  prefix of a cooperation cycle is read from Anthropic's 5-minute prompt cache
+  on the 2nd..Nth call (lower latency and input cost; a single-call run pays
+  the cache-write premium, prompts below the cache minimum ignore the markers,
+  and OpenAI-compatible/Gemini request bodies are unchanged). Usage reports
+  real cached tokens, so the compact footer's `cache N%` segment becomes
+  meaningful for Anthropic.
 - **Configurable keys and accent themes.** Settings → **Appearance** picks a
   web accent (Blue/Violet/Teal/Amber, light and dark, with WCAG-AA text and
   native naive-ui controls) and Settings → **Keyboard** rebinds the
@@ -195,9 +204,29 @@ server then serves (the npm tarball ships its own copy of that build).
   denies without asking, and neither a model reply nor a tool call can change
   it. The TUI `/permission` dialog also states the effective mode and accepts
   `/permission <mode>`.
+- **Mid-run steering.** While a run works (or waits on an approval), the web
+  composer's explicit **Steer run** action (or `Alt+Enter`) adds the draft to
+  the **current** cooperation cycle: it is appended to the shared context as
+  an ordinary operator message and applied at the run's next step — it never
+  starts or queues a task, and `Enter` keeps queueing a new task behind the
+  run. The same bounded in-memory queue is exposed as
+  `POST /api/runs/{run_id}/steer`; a text that later hits the per-run envelope
+  cap is reported through the additive `steering_dropped` run field/event,
+  and nothing is appended after a stop. TUI steering is a follow-up.
 - **Sessions and resume.** Every envelope is appended to a JSONL session file
   (flushed immediately, dense `seq`); `--resume` rebuilds the shared context,
   and `sessions` lists files with readable titles.
+- **Run-scoped file undo.** A workspace-bound run records the exact pre/post
+  bytes of every file it mutated through the workspace tools (persisted under
+  `<sessions>/undo`, never part of the session JSONL), so the operator can
+  revert exactly that run's changes: the web workspace shows **Undo file
+  changes…** for the newest completed run, with a per-file preview
+  (`applicable`/`created`/`deleted`/`changed-since`/`skipped`/`missing`) and
+  per-file apply results. Files changed after the run are refused, never
+  overwritten; shell-made changes, untracked files and file mode/ownership are
+  out of scope. The same operation is exposed as
+  `GET/POST/DELETE /api/sessions/{name}/undo/{run_id}` (restart-resilient;
+  blob garbage collection is a follow-up).
 - **Web workspace.** A Vue 3 + Vite group chat (Operator / Senior / Junior)
   with registered workspaces, workspace-grouped sessions, background runs
   over SSE, docked approval cards (a mobile drawer below the breakpoint) that

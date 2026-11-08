@@ -28,7 +28,8 @@ The script runs:
    session-status, recents, density, find, content-search, mentions, provider
    settings and model discovery, queue visibility, session-scope approvals,
    step folding, composer status seats, plan docks, streaming, composer prompt
-   recall, the approval-policy model and the design-token layer)
+   recall, the approval-policy model, the design-token layer, mid-run steering,
+   session fork/rewind, run-scoped file undo and the HTML export helpers)
 10. the `web/` build
 
 Expected final line: `SMOKE TEST: PASS`. It is an offline pre-flight, not the
@@ -114,10 +115,10 @@ npm run test:spawn      # node --test tests/ (child processes allowed)
 ```
 
 On the canonical integrated run for this round the in-process suite is
-**1 572 tests: 1 570 pass, 0 fail, 2 skipped** (exit 0); the two skips are
+**1 693 tests: 1 691 pass, 0 fail, 2 skipped** (exit 0); the two skips are
 environment-gated and never failures — the workspace symlink-parity test and
 the MCP stdio spawn are unavailable in this environment. `npm run typecheck`
-and `npm run build` pass, the hermetic CLI E2E is 17/17 on sources and 17/17
+and `npm run build` pass, the hermetic CLI E2E is 19/19 on sources and 19/19
 against `--dist`, the tarball smoke is 7/7 and `pack:check` passes. The
 tarball smoke pins its own consumer manifest inside the temp dir, so it also
 passes when `TEMP`/`TMP` points inside the checkout (the documented Windows
@@ -615,16 +616,56 @@ auto-reload, honest embedded `unavailable`), alongside the wave-22 review's
 post-reload status-hint/footer assertions. Package suite: **1 572 tests
 (1 570 pass, 2 environment skips)**; `npm run typecheck` green.
 
+Wave 23 also ships the cooperation-core and user-facing slices.
+**Mid-run operator steering:** `tests/steering.test.ts` (20 tests: bounded
+queue/drain contract, node-boundary and tool-loop delivery, the
+8-pending/4 000-character/16-envelope bounds, the `steering_dropped` runtime
+event and run-record fields, the fail-soft callback, no append after a stop,
+and Anthropic/Google wire legality for a steer drained inside a tool loop) and
+`web/tests/steering.test.ts` (6: steerable statuses only, draft-safe
+accept/reject, honest pending/clamp and confirmation copy). **Anthropic prompt
+caching:** `tests/anthropiccache.test.ts` (9: exact breakpoint placement,
+plain vs tool-loop, newest-turn marker movement, no empty system block,
+streaming parity, cached-read vs cache-write accounting, OpenAI/Google body
+byte identity), with the intentional Anthropic wire change pinned in
+`tests/adapters.test.ts` and `tests/thinkingpassback.test.ts`. **Session fork
+and self-contained HTML export:** `tests/sessionfork.test.ts` (20: verbatim
+prefix copy, dense-`seq`/resume, generated and explicit names/titles, the
+`parent` sidecar link, typed errors, metadata-write rollback, empty-session
+fork) and `tests/sessionsearch.test.ts` (35 now: the HTML renderer's
+escaping/sanitizing, self-contained shape, per-payload and whole-document caps
+with the truncation note, filename helper, HEAD/route behaviour). **Session
+rewind:** `tests/sessionrewind.test.ts` (19: operator-turn detection with the
+harness-context exclusions and attachment absorption, the compaction floor and
+honest clamps, session-start clamping, atomic rewrite with dense `seq` and
+resume, no-op and corrupt-input handling). **Run-scoped workspace edit undo:**
+`tests/workspaceundo.test.ts` (28: capture bounds and net-effect entries,
+status classification, per-file refusals re-checked at apply, binary content,
+corrupt pre-images, blob dedupe, record-version/traversal/workspace-mismatch
+handling, discard) and `tests/serverundo.test.ts` (8: preview/apply/discard
+route contracts, active-run/record-unusable/store-IO statuses, session
+scoping, restart resilience). Web models: `web/tests/sessionFork.test.ts` (5),
+`sessionRewind.test.ts` (14), `runUndo.test.ts` (12) and
+`sessionExport.test.ts` (2). Final measured totals: package suite **1 693
+tests (1 691 pass, 2 environment skips)**, web suite **403/403**, hermetic CLI
+E2E **19/19** on sources and `--dist`, browser E2E **19 offline scenarios + 1
+opt-in `real` skip** (no new browser scenario this wave), `npm run typecheck`
+green.
+
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
-subprocess against the mock provider — **17 scenarios**: consult, chat-repl,
+subprocess against the mock provider — **19 scenarios**: consult, chat-repl,
 help, work, session+resume, mcp, serve, doctor (`--json`), completions
 (`bash`), config (`--json`, masked keys), dry-run (plan text/JSON, no session
 file), stdin (`run -`), sessions-json, sessions-show, sessions-search
 (human and `--json`, short-query exit 2), sessions-export (Markdown
-stdout, `--output` file, missing session exit 1) and style (FORCE_COLOR/
+stdout, `--output` file, missing session exit 1), sessions-fork (whole-session
+and `--at` prefix copies, dense `seq`, `parent` sidecar, source untouched,
+`--json` result), sessions-rewind (two-turn session rewound honestly, the
+session's runtime sidecar cleared while another session's sidecar is
+untouched, `--json` summary) and style (FORCE_COLOR/
 NO_COLOR paint matrix, `stripAnsi` byte-identity, machine modes escape-free,
-palette pinning). Both runners pass all 17 scenarios (`node e2e/cli.ts` and
+palette pinning). Both runners pass all 19 scenarios (`node e2e/cli.ts` and
 `--dist`). The human consult scenario's anchors follow the text
 layout — separated envelope blocks, the `── decision ──` rule, the compact
 `tokens … in / … out · … calls` footer and no `tokens:` line on stdout — and
@@ -659,7 +700,10 @@ The suite (`tests/chat.test.ts`, `tests/timeline.test.ts`,
 `tests/queueState.test.ts`, `tests/approvalSession.test.ts`,
 `tests/folding.test.ts`, `tests/composerStatus.test.ts`,
 `tests/todo.test.ts`, `tests/recall.test.ts`,
-`tests/approvalPolicy.test.ts`, `tests/tokens.test.ts`) covers the
+`tests/approvalPolicy.test.ts`, `tests/steering.test.ts`,
+`tests/sessionFork.test.ts`, `tests/sessionRewind.test.ts`,
+`tests/runUndo.test.ts`, `tests/sessionExport.test.ts`,
+`tests/tokens.test.ts`) covers the
 envelope→group-chat projection, the runtime-event timeline merge, per-session
 unsent drafts, palette building/scoring/filtering, sidebar row status, the MRU
 workspace list, the persisted UI density preference, find-in-transcript
@@ -730,7 +774,14 @@ override the three role tokens and their three decorative fill companions
 (the default palette's fills equal its role tokens) and are held to the
 computed white-on-fill WCAG-AA floor, and the accent-text
 WCAG-AA floors plus the computed naive-ui primary-family contrast floors fail
-with the exact pair and ratio); 356/356 web tests. The modules are
+with the exact pair and ratio), and the wave-23 web models: mid-run steering
+availability/help/notice copy (`tests/steering.test.ts`, 6), session fork
+request/success/refusal copy + availability (`tests/sessionFork.test.ts`, 5),
+the rewind action/preview/outcome model including the compaction floor and
+sidecar-clear disclosure (`tests/sessionRewind.test.ts`, 14), the run-scoped
+file-undo preview/apply/discard vocabulary and notices
+(`tests/runUndo.test.ts`, 12), and the self-contained HTML export helpers
+(`tests/sessionExport.test.ts`, 2); 403/403 web tests. The modules are
 dependency-free at runtime, so plain `node --test` runs them
 via the `tests/register-ts.mjs` bootstrap (a tiny resolve hook for the
 extensionless imports); `npm test` wires that up. The full `web/` gate also

@@ -176,6 +176,12 @@ Runs use the configured models — the UI has no separate
   for corrupt/missing policy, workspace confinement and sensitive-path
   refusals unaffected by the mode, and the policy cannot be set by a model or
   a tool.
+- **Mid-run steering**: an operator can steer a cooperation cycle that is
+  already working (`POST /api/runs/{run_id}/steer`; web composer **Steer
+  run**/`Alt+Enter`): the text is appended to the shared context as an
+  ordinary operator message at the run's next step — never a queued task —
+  with a bounded pending queue and an honest `steering_dropped` report when
+  the per-run envelope cap is reached. TUI steering is a follow-up.
 - **Composer prompt recall**: Up/Down walk accepted submissions in the TUI and
   the web composer, newest first, preserving and restoring the live draft
   exactly (multiline drafts only leave at their edges; only submitted tasks
@@ -192,11 +198,24 @@ Runs use the configured models — the UI has no separate
   `POST /api/providers/{name}/discover` probes a draft OpenAI-compatible
   endpoint for its model list without saving (empty answers valid, typed key
   one-shot).
+- **Anthropic prompt caching**: every Anthropic Messages request carries up to
+  three `cache_control:{type:"ephemeral"}` breakpoints (merged system prompt,
+  last tool definition, newest conversation turn), so the repeated prefix of a
+  cooperation cycle is read from the 5-minute cache on the 2nd..Nth call;
+  usage reports real cached tokens and the OpenAI-compatible/Gemini request
+  bodies are unchanged.
 - **MCP tool loading** (stdio + streamable HTTP) with role scoping,
   `mcp__server__tool` namespacing, result caps, and per-call timeouts.
 - **Session persistence** as JSONL transcripts (dense `seq`, `--resume`),
   context **compaction** with token-aware budgets
   (`--context-window`, `--compact-threshold-tokens`).
+- **Run-scoped file undo**: a workspace-bound run captures the pre/post bytes
+  of every `workspace_write_file`/`workspace_edit_file`/`workspace_delete_file`
+  mutation under `<sessions>/undo` (a persisted session side artifact), and
+  `GET/POST/DELETE /api/sessions/{name}/undo/{run_id}` preview, apply or
+  discard the revert — per file, refusing files changed since the run and
+  never overwriting them; the web workspace exposes **Undo file changes…** for
+  the newest completed run.
 - **Plugins**: drop ES-module files in `plugins/` exposing
   `register(ctx)` — tools are shared by both brothers.
 - **Skills**: `<root>/<name>/SKILL.md` files become a role-scoped

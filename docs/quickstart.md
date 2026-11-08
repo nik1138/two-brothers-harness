@@ -141,8 +141,17 @@ layout.
 `sessions` lists the JSONL files under `--sessions-dir`; `sessions show <name>`
 prints one session's summary and envelopes; `sessions search <query>`
 full-text searches every session (title and envelope text); and
-`sessions export <name>` renders one session as Markdown (default) or JSON.
-All accept `--json`, and the `--limit N` flag caps rows, envelopes or hits.
+`sessions export <name> [--format markdown|json|html]` renders one session as
+Markdown (default), JSON or a single self-contained HTML page (inline CSS,
+escaped payloads, no scripts or external URLs). `sessions fork <name>
+[--at <seq>] [--name <new>]` copies the session — or its first `--at`
+envelopes — into a new session file and prints the new name (the source is
+never modified; the copy keeps dense `seq` and gets a local parent link).
+`sessions rewind <name> --turns <n>` drops the last `n` operator turns from
+one session (the transcript is rewritten in place; the kept prefix and its
+dense `seq` survive, while the removed runs' tool/approval history sidecar is
+cleared). All accept `--json`, and the `--limit N` flag caps rows, envelopes
+or hits.
 
 ```powershell
 node dist/cli.js help sessions
@@ -150,6 +159,9 @@ node dist/cli.js sessions --sessions-dir sessions --json
 node dist/cli.js sessions show <name> --sessions-dir sessions --limit 20
 node dist/cli.js sessions search "migration" --sessions-dir sessions
 node dist/cli.js sessions export <name> --format markdown --output session.md
+node dist/cli.js sessions export <name> --format html --output session.html
+node dist/cli.js sessions fork <name> --at 4 --name branch-a
+node dist/cli.js sessions rewind <name> --turns 1
 ```
 
 Completion scripts are generated from the same catalog; for an installed
@@ -235,10 +247,17 @@ the same hero appears inside a selected session that has no transcript yet.
    the server's per-session FIFO and a queue dock above the composer lists the
    waiting tasks with their `#N` position, a snippet, the queued-at time and a
    per-row **Stop** (a queued task is cancelled immediately; the dock shows up
-   to five rows plus a `+N more` tail). It is a queue, not steering — a queued
+   to five rows plus a `+N more` tail). That queue is not steering: a queued
    task starts only after the current run finishes, in order, and the next one
-   is followed automatically. Stop the active run, or reload the page
-   (progress is recovered from the runtime sidecar), at any time.
+   is followed automatically. Steering is the explicit neighbour of the queue —
+   while the run is working (or parked on an approval) the composer shows
+   **Steer run** (also `Alt+Enter`), which sends the draft to the **current**
+   run and applies it at its next step: it never starts or queues a task, the
+   draft clears only when the server accepts the steer, the confirmation says
+   "Steer queued — it is applied at the run's next step", and the steer appears
+   in the transcript (a `You` message marked as an operator steer) once the run
+   reaches that step. Stop the active run, or reload the page (progress is
+   recovered from the runtime sidecar), at any time.
    In the composer, `@` opens a picker over shared skills and workspace files
    and `/` at the start of a line opens the command menu — built-in commands
    first (`plan`, `goal`, `feedback`, then the actions `compact`, `export`,
@@ -316,16 +335,34 @@ the same hero appears inside a selected session that has no transcript yet.
    degrades to the previous card. On narrow screens the sidebar
    becomes a drawer over the chat.
 6. **Review the changes** — files touched by tools are collected with their
-   unified diffs.
+   unified diffs. For the newest completed run of the selected session, an
+   **Undo file changes…** bar offers to revert exactly the files that run
+   mutated through the workspace tools: the confirmation lists every file with
+   an honest status (`will be restored`, `will be deleted (created by the
+   run)`, `refused — changed since the run`, `not captured`, `refused — the
+   saved copy is missing`) and the apply reports per-file
+   restored/deleted/refused/failed outcomes. Files changed after the run are
+   never overwritten, and shell-made or untracked changes are out of scope.
+   The bar only appears while no run is live and no compaction is in flight,
+   and an older backend without the route hides it after one honest notice.
 7. **Jump around with `Ctrl+K`** (`Cmd+K` on macOS) — the command palette
    searches sessions, workspaces, and actions; from two typed characters it
    also searches message content across all sessions and lists the hits in a
    `Messages` group. The sidebar footer's Light/Dark/System selector sets the
-   theme. A session row's `⋯` menu can rename, export as Markdown/JSON, or
-   delete it.
+   theme. A session row's `⋯` menu can rename the session, export it as
+   Markdown, JSON or a self-contained HTML page, fork it into a new session
+   (`Fork session…`, unavailable while a run is active for that session), or
+   delete it. An operator message in the transcript also offers a **Rewind**
+   action: after a destructive confirmation it removes that task and
+   everything after it from the session file while keeping the earlier
+   transcript (unavailable while a run is active or the context is being
+   compacted, and a task already folded into a compaction summary cannot be
+   rewound). A rewind also clears the removed runs' tool/approval history
+   from the runtime sidecar and cannot be undone.
 
 Sessions are plain JSONL files under `--sessions-dir`; each has a
-`<name>.meta.json` sidecar (title, workspace link) and a runtime sidecar in
+`<name>.meta.json` sidecar (title, workspace link, and — for a fork — a local
+`parent` link) and a runtime sidecar in
 `sessions/runtime/<name>.events.jsonl` (tool calls, approvals, diffs, plan
 snapshots).
 

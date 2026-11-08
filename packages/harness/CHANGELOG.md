@@ -9,6 +9,183 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Mid-run operator steering (wave 23):** the operator can steer a
+  cooperation cycle that is already working instead of only queueing the next
+  task. A steer is protocol-compatible by construction: it is appended to the
+  shared context as an ordinary `message` envelope from `user` to `senior`
+  (payload `{text}`, dense `seq`, session JSONL included) whose payload text
+  starts with the documented marker `[[OPERATOR STEER]] `, so the model can
+  tell it from the task and no protocol kind, field or session record changes.
+  `HarnessOptions.steering` is a return-and-clear drain callback read once per
+  state-machine node boundary (after `maybeCompact`, so a summary produced by
+  that boundary cannot fold the steer away) and once per tool-loop iteration;
+  in a tool loop the opening system+user pair is re-rendered from the shared
+  context so the next request carries the steer inside the canonical
+  transcript (never a second consecutive user turn, which Anthropic/Google
+  reject; hermetic wire tests cover both). The runtime keeps a bounded
+  in-memory pending queue per run (8 texts of at most 4 000 characters, each
+  trimmed) and applies at most 16 steer envelopes per run; reaching that
+  run-lifetime cap emits one additive `steering_dropped` runtime event
+  (`{dropped, applied, limit}`) and the run record aggregates it as
+  `steering_dropped`, so a text accepted with a `200` is never dropped
+  silently (the record also reports `steering_pending`). A throwing/malformed
+  drain callback is fail-soft (one warning, the run continues) and nothing is
+  appended after a stop. `POST /api/runs/{run_id}/steer` accepts `{text}` for
+  a `running` run or one parked on an approval (`waiting`) and answers
+  `200 {run_id, status, pending}`; `400` for an empty/oversized text (or a
+  non-string `text`), `404` for an unknown run, and `409` for a queued/terminal
+  run (the detail names the real status) or a full pending queue — it never
+  fakes an SSE event on acceptance. In the web composer an explicit
+  **Steer run** action (and `Alt+Enter`) appears only while the followed run
+  is steerable; `Enter`/Send keep queueing byte-identically, the draft clears
+  only after a `200`, and the confirmation says "Steer queued — it is applied
+  at the run's next step" (naming the pending count when above one). Files:
+  `src/harness.ts`, `src/runtime.ts`, `src/server.ts`, `src/runevents.ts`,
+  `src/index.ts`, `web/src/steering.ts`, `web/src/api.ts`,
+  `web/src/types.ts`, `web/src/App.vue`, `web/src/components/Composer.vue`,
+  `web/src/shortcuts.ts`; tests `tests/steering.test.ts` (+20 package) and
+  `web/tests/steering.test.ts` (+6 web). No protocol/session-format change, no
+  new runtime dependency, `NOTICE` unchanged. Idea from pi's
+  `steer`/`followUp` queues (design only; see `docs/attribution.md`).
+  Remaining: TUI steering, a browser E2E scenario, real-provider validation.
+- **Session fork + self-contained HTML export (wave 23):** a persisted session
+  can be branched by copy: `POST /api/sessions/{name}/fork` (body
+  `{seq?: integer, name?: string}`) and
+  `sessions fork <name> [--at <seq>] [--name <new>]` copy the first N
+  envelopes (default: the whole session) byte-for-byte into a NEW session
+  file, so the copied prefix keeps its exact envelope bytes and dense `seq`
+  numbering and `--resume` keeps working; the source file and sidecar are
+  never modified. The new session gets `<source title> (fork)` (bounded) and a
+  local-only additive `.meta.json` lineage link `parent: {name, seq}` (never a
+  protocol record); without `--name` the smallest free `<source>-fork-<k>` is
+  used and an existing session is never overwritten, and a fork deliberately
+  does not inherit the source's `workspace_id` or copy the runtime-event
+  sidecar (a branch starts with a clean tool/approval trail). Errors are
+  typed: 400 invalid seq/name, 404 unknown source, 409 name taken or a live
+  run/manual compaction on the session, 422 corrupt source, 500 unwritable
+  sessions directory (a partial file is rolled back). The export route and CLI
+  gain a third format: `GET /api/sessions/{name}/export?format=html` and
+  `sessions export <name> --format html` render ONE self-contained HTML
+  document — inlined stylesheet, no scripts/links/external URLs, escaped
+  title/metadata and payloads (hostile markup stays literal text, ANSI/C0/C1
+  bytes stripped via the display sanitizer), one section per envelope with
+  `seq`/`from`/`to`/`kind` labels, an optional timestamp and the payload in a
+  `<pre>`. Caps are honest: the same 20 000-character per-payload bound as
+  Markdown plus a 2 000 000-character whole-document cap applied at envelope
+  boundaries, with a visible `showing N of M envelopes` note when envelopes
+  are omitted (JSON stays the complete form); markdown and JSON output stay
+  byte-identical, and the download filename helper adds `.html`. Files:
+  `src/sessionfork.ts` (new), `src/sessionsearch.ts`
+  (`sessionToHtmlString`), `src/metadata.ts` (`deriveForkTitle`,
+  `SessionParentLink`), `src/server.ts`, `src/cli.ts`, `src/clihelp.ts`;
+  tests `tests/sessionfork.test.ts` (20) plus the HTML export cases in
+  `tests/sessionsearch.test.ts` (35). No protocol/session-format change, no new
+  runtime dependency, `NOTICE` unchanged (the renderer is hand-rolled; no
+  third-party template/library copied). The web session row menu ships
+  `Fork session…` and `Export as HTML` (the original is untouched and forking
+  is unavailable while a run is active for the session). Remaining: TUI
+  surfaces. Idea from pi's branched sessions/export-html
+  and kimi's `/fork` UX (design only; see `docs/attribution.md`).
+- **Session rewind (wave 23):** `POST /api/sessions/{name}/rewind`
+  (`{turns}`, strict integer 1–100) and `sessions rewind <name> --turns <n>`
+  drop the last N operator turns — each operator task plus every envelope the
+  brothers produced for it — from a persisted session, so a better task can
+  be retyped without a growing context or a new session file. The kept prefix
+  is written back atomically (`SessionStore.rewrite`, temp file + rename) with
+  its dense `seq` intact, so `--resume` keeps working; metadata is untouched.
+  Harness-generated context is never counted as a turn (compaction summaries,
+  structured-payload repair requests, mid-run operator steers, and
+  `<skill-loaded>`/`<file>` attachment blocks), continuation attachment blocks
+  immediately in front of the earliest removed task are removed with it, and a
+  compaction summary is a hard floor: the cut never crosses it and reports an
+  honest clamp (`stopped_at_compaction`, `stops_before`, `reason`; a request
+  deeper than the session clamps at session start). A cut that removes nothing
+  is a 200 with `rewritten: false` and a `reason`, never a fake error. The
+  route refuses a session with a live run or a manual compaction (409, the
+  same reservation the compact route uses) and takes a size+mtime+inode CAS
+  around the read so a concurrently changed file is a 409 instead of a stale
+  rewrite; a corrupt file is 422 before any write. **A successful rewrite also
+  clears the session's runtime-event sidecar**
+  (`sessions/runtime/<name>.jsonl.events.jsonl`): tool and approval history
+  for the removed runs is gone while the kept transcript remains, and the
+  response/CLI report `runtime_events_cleared` (a clear failure is disclosed
+  as `runtime_events_clear_error` instead of pretending success). Files:
+  `src/sessionrewind.ts` (new), `src/server.ts`, `src/cli.ts`,
+  `src/clihelp.ts`; tests `tests/sessionrewind.test.ts` (19). No
+  protocol/session-format change, no new runtime dependency, `NOTICE`
+  unchanged. The web transcript offers **Rewind** on operator messages (a
+  destructive confirmation, blocked while a run is active/compacting and at a
+  compaction floor). Remaining: a TUI rewind surface. Design from kimi
+  conversation undo and opencode session revert (no code copied; see
+  `docs/attribution.md`).
+- **Run-scoped workspace edit undo (wave 23):** after a workspace-bound
+  `serve` run, the operator can revert exactly the files that run mutated
+  through the workspace tools
+  (`workspace_write_file`/`workspace_edit_file`/`workspace_delete_file`) —
+  shell commands, external edits and untracked files are never touched. Each
+  such run
+  captures the exact pre/post bytes under `<sessions>/undo` (a session side
+  artifact, never a protocol envelope or session-JSONL record; content-addressed
+  blobs are shared across runs, one entry per file records the net effect), with
+  honest bounds (2 MiB per side, 64 entries per run, 8 MiB of new blob bytes per
+  run; capture limits, budget skips and duplicate entries become `skipped`
+  entries, never silent drops). Capture is fail-soft: a recorder error is one
+  diagnostic and the tool call/run still succeeds, the capture closes in the
+  run's `finally`, and a capture that cannot start leaves the run unchanged.
+  Three restart-resilient routes operate over the live workspace:
+  `GET /api/sessions/{name}/undo/{run_id}` previews every recorded file against
+  the LIVE workspace (`applicable`, `created`, `deleted`, `changed-since`,
+  `skipped`, `missing` plus counts, `workspace_root`, `created_at`),
+  `POST` the same path applies the reversible entries — re-classifying each file
+  immediately before touching it, so a file changed after the preview is
+  refused rather than overwritten — and returns per-file
+  `applied`/`refused`/`failed` rows plus counts, and `DELETE` discards the
+  record (content-addressed blobs stay for sharing; garbage collection is a
+  later phase). Errors are honest: 404 unknown session/record, 409 while a run
+  for that id is still active in memory or the record itself is unusable
+  (corrupt, oversized, unsupported version, or its recorded workspace is no
+  longer registered — the record is matched to a registered workspace by
+  canonical path on every request), 422 unexpected store IO. Files:
+  `src/workspacehistory.ts` (new), `src/workspace.ts` (the additive
+  `WorkspaceOptions.mutationRecorder` capture seam), `src/server.ts`,
+  `src/index.ts`, `web/src/runUndo.ts` (new), `web/src/api.ts`,
+  `web/src/App.vue`, `web/src/types.ts`,
+  `web/src/components/RunUndoDialog.vue` (new); tests
+  `tests/workspaceundo.test.ts` (28), `tests/serverundo.test.ts` (8) and
+  `web/tests/runUndo.test.ts` (12). The web workspace shows an **Undo file
+  changes…** bar for the newest completed run of the selected session (only
+  while no run is live and no compaction is in flight; a 404 hides the action
+  with one honest notice instead of a dead control), and the dialog lists every
+  file's preview status and the applied/refused/failed outcome. No CLI or TUI
+  undo surface yet (those runs do not capture), and restored files get default
+  filesystem mode/ownership (mode is not captured or restored). Design from
+  opencode's content-addressed snapshot + revert model (no code copied; see
+  `docs/attribution.md`).
+- **Anthropic prompt caching + honest cache accounting (wave 23):** every
+  Anthropic Messages request now carries up to three
+  `cache_control: {type: "ephemeral"}` breakpoints — the merged system prompt
+  (as one text block), the last tool definition, and the last content block of
+  the newest conversation turn — so the repeated prefix of a cooperation cycle
+  (system + tool schemas + growing transcript) is served from Anthropic's
+  5-minute prompt cache on the 2nd..Nth provider call: multi-call runs
+  (`run`/`serve`) get lower latency and lower input cost, while a single-call
+  run pays the 1.25× cache-write premium on the marked prefix (prompts below
+  the model's cache minimum are accepted with the markers ignored). Caching is
+  unconditional — there is no new flag, setting or protocol field — and the
+  OpenAI-compatible/Google request bodies stay byte-identical
+  (`cache_control` never appears there). `cache_read_input_tokens` was already
+  mapped to `cached_tokens`; it is now actually populated by real Anthropic
+  traffic, so the existing `cache N%` usage/footer segment becomes meaningful
+  for Anthropic (cache writes are not counted as hits; an absent report maps
+  to 0 — no invented hits). Files: `src/provider.ts` (the breakpoint constant
+  and the newest-turn/tool/system placement); tests
+  `tests/anthropiccache.test.ts` (new, 9 tests: exact marker placement, plain
+  vs tool-loop, marker movement, no empty system block, streaming parity,
+  cached-read accounting, OpenAI/Google byte identity), with the intentional
+  Anthropic wire change pinned in `tests/adapters.test.ts` and
+  `tests/thinkingpassback.test.ts`. No real-model cache-hit evidence recorded
+  yet; cache retention (`ttl`), a per-run opt-out and the cost-table
+  cached-input discount are follow-ups.
 - **TUI keys-file auto-reload, opt-in** (wave 23): `tui --keys-watch` (or the
   pinned `TWO_BROTHERS_TUI_KEYS_WATCH=1` boolean env; both captured at
   startup, never persisted) keeps polling the startup-captured keys file and
