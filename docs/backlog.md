@@ -1097,6 +1097,27 @@ Design anchors that already exist:
   picker/overlay navigation, approval keys, the find bar, an in-TUI editor
   and hot reload.
 
+## Shipped 2026-11-08 (wave 21: role-colour palettes, web theming gap closed)
+
+- **Operator-selectable role-colour palettes (web)** — Settings → Appearance's
+  native **Role colours** radio group offers Default (the historic
+  blue/teal/grey identity colours, unchanged look), High contrast and Neutral
+  (muted labels-only), for the Senior/Junior/Operator colours independent of
+  the accent theme. Persisted additively in the versioned `uiPrefs` blob and
+  applied as `data-roles`; the token blocks override only
+  `--senior`/`--junior`/`--operator` in light + both dark blocks (inventory
+  stays 94). Contrast palettes: light senior/junior/operator
+  `#2456d2/#0f6d5a/#545c6a`, dark `#7d9fdd/#46baa0/#a3abba` (worst computed
+  role-text AA 5.45/5.41/5.83 light and 5.36/5.98/6.19 dark over the
+  documented host surfaces); neutral palettes are muted AA greys. Tests:
+  token-suite role-palette parity + computed AA floors (15 tests), uiPrefs
+  9→13; new hermetic `appearance-roles` browser scenario (offline suite 19).
+  The historic Default palette is unchanged (not AA on every documented
+  surface in either scheme, worst in dark — the documented reason for the
+  alternatives); role avatar/dot fills stay decorative (in the dark accessible
+  palettes the aria-hidden initials sit white-on-light while the labels carry
+  identity), with a fill/text token split recorded as an optional follow-up.
+
 ## Open items (deferred)
 
 - **Remaining key-binding surfaces** — wave 16 shipped the web's three
@@ -1116,6 +1137,12 @@ Design anchors that already exist:
   exercises the real RunManager/worker pool/queue over HTTP in mock or real
   modes; recorded 2026-11-08 against the owner's LM Studio (workers 1,
   runs 2): 2/2 completed in 230.8 s, run 2 queued 117.7 s behind run 1.
+- **Role fill/text token split (web, non-blocker)** — the three role tokens
+  are dual-use: the accessible palettes tune them for text, while the
+  decorative avatar/dot fills derive from the same values, so in the dark
+  contrast/neutral palettes the (aria-hidden, label-duplicated) avatar
+  initials sit white-on-light; splitting dedicated fill tokens (inventory +3)
+  would let both stay correct.
 - **Subagents** — spawning nested cooperation runs (and likely child
   sessions) beyond the two-brother senior/junior pair. The context and
   approval machinery are the prerequisites; not started.

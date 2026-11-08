@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Role-colour palettes (web)** (wave 21): Settings → Appearance gains a
+  native **Role colours** radio group — Default (the previous blue/teal/grey
+  identity colours), **High contrast** (WCAG-AA-tuned role-text colours in
+  light and dark) and **Neutral** (muted labels-only greys) — for the
+  Senior/Junior/Operator identity colours, independent of the accent theme
+  and persisted per device in the versioned `uiPrefs` blob (old/unknown values
+  read as Default). Applied as `data-roles="contrast|neutral"` on the root;
+  the token blocks override only `--senior`/`--junior`/`--operator` in the
+  light and both dark scheme blocks (the token inventory stays 94). The token
+  suite pins the variant sets, light/dark parity and computed WCAG-AA
+  role-text floors across the documented surfaces (panel/canvas/hover and
+  every accent theme's soft/selected tints; worst ratios ≥4.85 light and
+  ≥5.11 dark for the accessible palettes), and a new hermetic
+  `appearance-roles` browser scenario covers keyboard-only High contrast,
+  light/dark computed role tokens and rendered role dots, reload persistence,
+  Neutral and the Default restore. The historic Default palette is unchanged
+  and deliberately not AA on every documented surface in either scheme (worst
+  in dark — the reason the two accessible palettes exist); role avatar/dot
+  fills remain decorative (in the dark accessible palettes the aria-hidden
+  initials sit white-on-light while the adjacent labels carry identity) and a
+  split fill/text token pair is recorded as an optional follow-up. Files:
+  `web/src/tokens.css`, `uiPrefs.ts`, `App.vue`, Settings → Appearance;
+  tests `web/tests/tokens.test.ts` (15), `uiPrefs.test.ts` (13), browser
+  suite 19 scenarios.
 - **TUI key rebinding (global slice)** (wave 19): `tui --keys-file <path>` /
   `TWO_BROTHERS_TUI_KEYS_FILE` (pinned, never persisted; default
   `~/.two-brothers/tui-keys.json`, missing = defaults) reads a versioned JSON

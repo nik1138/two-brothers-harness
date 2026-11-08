@@ -548,9 +548,22 @@ env/default keys file as `tui --help` (identical effective key rows; one
 stdout note points at `tui --help --keys-file` for a flag-selected file; an
 invalid file prints one `[tui keys]` diagnostic and falls back to defaults),
 and the printable-rebound-help typing rule has integration coverage (opens
-help on an empty composer, types into a non-empty draft). Package suite:
-**1 555 tests (1 553 pass, 2 environment skips)**; web suite 350 and browser
-18 offline scenarios are unchanged.
+help on an empty composer, types into a non-empty draft). Wave 21 closes the
+theming epic's last gap with operator-selectable **role-colour palettes** for
+the web workspace: Default (the previous look), High contrast (WCAG-AA tuned
+role-text colours in light and dark) and Neutral (muted labels-only), persisted
+in `uiPrefs` and applied via `data-roles` token blocks that override only
+`--senior`/`--junior`/`--operator` (token inventory unchanged at 94); the token
+suite pins the variant sets, light/dark parity and computed WCAG-AA role-text
+floors, and the browser suite covers `appearance-roles` (19 offline scenarios).
+Package suite: **1 555 tests (1 553 pass, 2 environment skips)**; web suite
+**355 tests** (tokens 15, uiPrefs 13, keybindings 13); browser 19 offline
+scenarios. The Default role palette keeps the historic look (documented as not
+AA on every documented surface in either scheme — worst in dark — which is why
+the two accessible palettes exist); role avatar/dot fills stay decorative
+(aria-hidden, with the adjacent labels carrying identity — in the dark
+accessible palettes the initials sit white-on-light), with a split fill/text
+token pair left as a documented follow-up.
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
@@ -781,9 +794,15 @@ without closing Settings; the rebound chord opens the palette while the old
 Ctrl+K no longer does; `?` still opens `/help`, whose palette row shows the
 custom chord and a rebindable badge while Esc/Esc stays fixed; after a reload
 the custom chord is live and the old one dead; Reset all restores Ctrl+K and
-the defaults and the custom chord stops working; console guard clean).
-On the canonical run that is
-**18 PASS, 0 FAIL, 1 SKIP** (the opt-in `real` scenario). The queue dock and the session-scope approval decisions
+the defaults and the custom chord stops working; console guard clean), plus
+`appearance-roles` (Settings → Appearance's native Role colours radio group:
+the theme/density `.appearance-card` count stays 5; a keyboard-only move to
+High contrast flips the root `data-roles` attribute and the computed
+`--senior`/`--junior` role tokens plus the rendered role dots in light and
+after switching to dark (the dark contrast palette), the choice survives a
+reload, Neutral shows the muted labels-only palette, and restoring Default
+returns the base role colours). On the canonical run that is
+**19 PASS, 0 FAIL, 1 SKIP** (the opt-in `real` scenario). The queue dock and the session-scope approval decisions
 remain covered by the web unit suites, not by separate browser scenarios. The
 default suite is fully offline; the
 opt-in `real` scenario (below) reports `SKIP` unless an endpoint is configured.

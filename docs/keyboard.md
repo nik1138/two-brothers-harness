@@ -76,6 +76,7 @@ From a checkout, replace `two-brothers` with `node dist/cli.js` after
 | Mobile drawer | `Esc` | close the drawer when it is the topmost layer |
 | Dialog | `Esc` | close the topmost dialog |
 | Accent radio group (Settings → Appearance) | `Tab` into the group, then `↑`/`↓` | choose Blue, Violet, Teal or Amber; applies immediately and persists per device (independent of light/dark and density) |
+| Role colours radio group (Settings → Appearance) | `Tab` into the group, then `↑`/`↓` | choose Default, High contrast or Neutral; changes only the Senior/Junior/Operator identity colours (never the accent), applies immediately and persists per device |
 | Session actions trigger | `↓` | open the row menu; `↑`/`↓`/`Home`/`End` move, `Esc`/`Tab` close |
 | Workspace actions trigger | `↓` | open the workspace group menu (`Rename…`, `Move up`, `Move down`); same keys as the session menu; the trigger is revealed on hover/focus |
 
