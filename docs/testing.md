@@ -36,20 +36,23 @@ whole product gate — run the package gates below for that.
 
 ## CI coverage
 
-`.github/workflows/ci.yml` runs on every push and pull request to `main`, on
-Node 22 and 24 (the `engines` floor and the next supported release), in this
-order:
+`.github/workflows/ci.yml` runs on every push and pull request to `main` on
+two platforms: an **ubuntu matrix** (Node 22 and 24 — the `engines` floor and
+the next supported release) and a **Windows leg** (Node 24 on
+`windows-latest` — the platform this project is developed and gated on).
+Both legs run the same hermetic gates, in this order:
 
 1. `typescript/`: `node src/selftest.ts`, then `node tests/run-all.ts`
    (no install step: the reference is zero-dependency);
-2. `packages/harness`: typecheck, build, `npm test`, `npm run test:spawn`,
-   `node dist/selftest.js`, and the mock CLI run;
+2. `packages/harness`: typecheck, build, `npm test`,
+   `npm run test:spawn` (ubuntu only — the same suites run in-process on
+   Windows), `node dist/selftest.js`, and the mock CLI run;
 3. `packages/harness`: the hermetic CLI E2E — `node e2e/cli.ts` (sources)
    and then `node e2e/cli.ts --dist` (the built CLI);
 4. `packages/harness`: the real-socket fault-injection runner
    (`node e2e/faults.ts` — loopback only, seven retry/timeout/overflow/quota
    scenarios over real TCP);
-5. `packages/harness`: `node e2e/run.ts` with
+5. ubuntu only — `packages/harness`: `node e2e/run.ts` with
    `TWO_BROTHERS_E2E_BASE_URL=http://127.0.0.1:9/v1`. The closed port makes
    the endpoint probe fail immediately: the runner logs one `E2E SKIP:` line
    (and records a synthetic `connection` SKIP entry), omits the live-model
@@ -59,11 +62,20 @@ order:
 7. at the repo root: the browser-E2E packaged-web freshness unit tests
    (`node --test e2e/web-freshness.test.mjs` — plain `node:test`, no deps and
    no browser);
-8. Node 22 only, after the web build: `node scripts/tarball-smoke.mjs` at
+8. ubuntu Node 22 only, after the web build: `node scripts/tarball-smoke.mjs` at
    the repo root and `npm run pack:check` in `packages/harness`. Both trigger
    the package `prepack` (build + `sync-web`), which is why they need
    `web/dist`; the packed artifact is identical on both matrix legs, so the
    heavier release checks run once, on the engines floor.
+
+The Windows leg (`windows-latest`, Node 24) runs the same hermetic gates
+(items 1–4 and 6–7) and prepends Git Bash to `PATH` before the suite so the
+package's shell-spawning tests resolve it deterministically; it deliberately
+skips `test:spawn`, the ubuntu-only server E2E and the Node-22 release
+rehearsal, keeping the job bounded. The Windows leg and the shared gate
+commands are validated locally on the repository's own platform (Windows);
+the ubuntu matrix is validated by CI only — it cannot be executed on this
+host.
 
 npm caching covers the root and `web/` lockfiles (`setup-node`); the
 reference tree needs none. Network use is limited to npm (`npm ci` and the
@@ -86,7 +98,7 @@ npm run test:spawn      # node --test tests/ (child processes allowed)
 ```
 
 On the canonical integrated run for this round the in-process suite is
-**1 518 tests: 1 516 pass, 0 fail, 2 skipped** (exit 0); the two skips are
+**1 524 tests: 1 522 pass, 0 fail, 2 skipped** (exit 0); the two skips are
 environment-gated and never failures — the workspace symlink-parity test and
 the MCP stdio spawn are unavailable in this environment. `npm run typecheck`
 and `npm run build` pass, the hermetic CLI E2E is 17/17 on sources and 17/17
@@ -423,6 +435,22 @@ evidence-only naive-ui investigation that kept the stacked-dialog guard — see
 `docs/backlog.md`); the package suite count is unchanged (1 518 tests:
 1 516 pass, 2 environment skips) and web/reference are untouched.
 
+Wave 13 adds operator-selectable web **accent themes** (Blue default plus
+Violet/Teal/Amber; light and both dark scheme blocks override only the
+accent/focus/selected tokens, role identity colours stay stable; the choice
+is persisted in the versioned `uiPrefs` blob and applied as `data-accent`,
+with the browser scenario listed below) and a **Windows CI leg** (Node 24) alongside
+the ubuntu matrix, plus `tests/clidocs.test.ts` (6 tests, part of
+`npm test`) guarding the docs↔CLI flag/env contract described under
+[CI coverage](#ci-coverage). Package suite: **1 524 tests (1 522 pass,
+2 environment skips)**; web suite 336 (tokens 12, uiPrefs 9; the token suite
+pins the 94-token inventory and the accent-text WCAG-AA contrast floor);
+browser suite
+17 offline scenarios + the opt-in `real` skip; reference tree unchanged at
+33/33. Known scope limit: naive-ui's static theme overrides do not follow the
+accent, so native naive-ui primary controls keep the brand blue — the accent
+applies to the app chrome that consumes the token layer.
+
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
 subprocess against the mock provider — **17 scenarios**: consult, chat-repl,
@@ -624,9 +652,15 @@ session must hold none; after a page reload the collapsed
 `Thinking · replayed` rows match the sidecar, expanding shows escaped plain
 text — an injected `<img onerror=…>` payload stays text and runs no handler —
 the over-long record keeps its head+tail plus the clipping marker and stays
-bounded, and switching to the plain session shows no replay rows).
-On the canonical run that is
-**16 PASS, 0 FAIL, 1 SKIP** (the opt-in `real` scenario). The queue dock and the session-scope approval decisions
+bounded, and switching to the plain session shows no replay rows), plus
+`appearance-accent` (Settings → Appearance's native Accent radio group:
+a keyboard-only move to Violet flips the root `data-accent` attribute and the
+computed `--accent`/`--accent-text` tokens in light and after switching to
+dark (the dark accent text clears WCAG AA 4.5:1 against the panel surface),
+the choice survives a reload, restoring Blue returns the base palette, and the
+theme/density cards keep their count and measurements). On the canonical run
+that is
+**17 PASS, 0 FAIL, 1 SKIP** (the opt-in `real` scenario). The queue dock and the session-scope approval decisions
 remain covered by the web unit suites, not by separate browser scenarios. The
 default suite is fully offline; the
 opt-in `real` scenario (below) reports `SKIP` unless an endpoint is configured.

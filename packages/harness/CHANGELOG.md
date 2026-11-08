@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Operator-selectable web accent themes** (wave 13): Settings → Appearance
+  gains an accessible native radio group for the web app's accent — Blue
+  (default, the previous look) plus Violet, Teal and Amber. Each variant
+  overrides only the accent/focus/selected semantic tokens
+  (`--accent`, `-hover`, `-pressed`, `-soft`, `--focus-ring`,
+  `--border-focus`, `--surface-highlight`, plus the new `--accent-text`) in
+  the light and both dark scheme blocks with byte-identical dark variants;
+  the light/dark parity and per-variant token-set completeness are
+  test-enforced, and role identity colours deliberately stay stable. Accent
+  text uses a dedicated `--accent-text` token (94-token inventory): in the
+  light scheme it equals the accent (no visual change), while the dark
+  schemes and variants use lightened values (blue `#6c9bff`, violet
+  `#a78bfa`, teal `#5eead4`, amber `#fbbf24`) that clear WCAG AA 4.5:1 on
+  the dark surfaces — computed in the token test, which also pins the
+  94-token inventory — while fills, borders and focus rings stay on
+  `--accent`. The choice persists in the versioned
+  `two-brothers.ui-prefs.v1` blob (additive, unknown values normalize to
+  Blue) and is applied immediately as `data-accent` on the root; a hermetic
+  browser scenario covers keyboard-only selection, the computed `--accent`
+  and `--accent-text` in light and dark (including its dark contrast),
+  reload persistence and restoring Blue. Files: `web/src/tokens.css`,
+  `uiPrefs.ts`, `App.vue`, `SettingsDialog.vue`, Appearance section and the
+  12 sheets whose accent text moved to `--accent-text`; tests
+  `web/tests/tokens.test.ts` (12), `uiPrefs.test.ts` (9), browser suite
+  17 scenarios. Known scope limit: naive-ui's static theme overrides do not
+  follow the variant, so native naive-ui primary controls keep the brand
+  blue — the accent applies to the app chrome that consumes the token layer.
 - **Opt-in serve-level load/soak runner** (wave 12): new
   `packages/harness/e2e/serve-load.ts` (`npm run test:e2e:serve-load`) starts
   the real `serve` backend (hermetic `--mock` self-test or real
@@ -731,6 +758,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Two-platform CI and a docs↔CLI drift guard** (wave 13):
+  `.github/workflows/ci.yml` now runs the hermetic gates on two platforms — the
+  existing ubuntu matrix (Node 22/24) plus a `windows-latest` Node 24 leg
+  (this project's development platform) that prepends Git Bash to `PATH` for
+  the shell-spawning suites, runs the same reference/package/CLI-E2E/fault/
+  web/freshness gates, and deliberately skips the Node-22-only release
+  rehearsal to stay bounded. Locally validated step-by-step on Windows
+  (15/15 commands green). New `tests/clidocs.test.ts` (6 tests, part of
+  `npm test`) keeps `docs/cli-reference.md` in sync with the code-owned CLI
+  catalogue: two-way env-var coverage against `clihelp.ts::ENVIRONMENT`,
+  env→flag mapping, two-way long-flag coverage for the
+  run/chat/tui/serve accepted flags, and a tolerant command-heading check,
+  with sorted set-diff failures and a skip when the reference file is absent.
 - **CI runs the new hermetic gates; Anthropic thinking coverage extended**
   (wave 11): `.github/workflows/ci.yml` now also executes the real-socket
   fault-injection runner (`node e2e/faults.ts`) and the packaged-web

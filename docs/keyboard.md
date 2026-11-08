@@ -75,6 +75,7 @@ From a checkout, replace `two-brothers` with `node dist/cli.js` after
 | Welcome hero starter | `Tab`, then `Enter` / `Space` | put the suggestion in the composer (editable, never sent) |
 | Mobile drawer | `Esc` | close the drawer when it is the topmost layer |
 | Dialog | `Esc` | close the topmost dialog |
+| Accent radio group (Settings → Appearance) | `Tab` into the group, then `↑`/`↓` | choose Blue, Violet, Teal or Amber; applies immediately and persists per device (independent of light/dark and density) |
 | Session actions trigger | `↓` | open the row menu; `↑`/`↓`/`Home`/`End` move, `Esc`/`Tab` close |
 | Workspace actions trigger | `↓` | open the workspace group menu (`Rename…`, `Move up`, `Move down`); same keys as the session menu; the trigger is revealed on hover/focus |
 

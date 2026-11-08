@@ -971,6 +971,45 @@ Design anchors that already exist:
   naive-ui release > 2.45.3 that makes mask clicks attributable/stacking
   aware.
 
+## Shipped 2026-11-08 (wave 13: accent themes, Windows CI leg, docs↔CLI drift guard)
+
+- **Operator-selectable web accent themes** — Settings → Appearance gains an
+  accessible native radio group for the accent: **Blue (default)**, Violet,
+  Teal, Amber. The variants are token-layer scoped overrides
+  (`:root[data-accent=…]` plus matching media/pinned dark blocks) of exactly
+  eight accent/focus/selected tokens, including a new `--accent-text` (the
+  now-94-token inventory, light/dark parity, per-variant completeness and the
+  untouched role identity colours are test-enforced). Accent-coloured text
+  uses `--accent-text`: in the light scheme it equals the accent (no visual
+  change), while the dark schemes and variants use lightened values (blue
+  `#6c9bff`, violet `#a78bfa`, teal `#5eead4`, amber `#fbbf24`) verified to
+  clear WCAG AA 4.5:1 against the dark surfaces by the token test; fills,
+  borders and focus rings stay on `--accent`. The choice persists in the
+  versioned `two-brothers.ui-prefs.v1` blob (unknown → Blue) and applies
+  immediately as `data-accent`; new hermetic browser scenario
+  `appearance-accent` covers keyboard-only selection, computed
+  `--accent`/`--accent-text` in light/dark (including the dark contrast),
+  reload persistence and restoring Blue (browser suite 17 offline scenarios,
+  web suite 336 tests). Documented limit: naive-ui's static theme overrides do
+  not follow the variant, so native naive-ui primary controls keep the brand
+  blue — the accent applies to the app chrome that consumes the token layer.
+- **Windows CI leg** — `.github/workflows/ci.yml` now runs the hermetic gates
+  on a `windows-latest` Node 24 job as well as the ubuntu Node 22/24 matrix:
+  reference selftest/tests, package typecheck/build/tests/dist selftest/mock,
+  CLI E2E sources + dist, fault injection, web install/tests/build and the
+  packaged-web freshness tests, with Git Bash prepended to `PATH` for the
+  shell-spawning suites. The Node-22-only release rehearsal stays on ubuntu;
+  browser E2E and live/real-network layers remain opt-in/manual. Locally
+  validated step by step on Windows (15/15 commands green).
+- **Docs↔CLI drift guard** — new `packages/harness/tests/clidocs.test.ts`
+  (6 tests, part of `npm test`) keeps `docs/cli-reference.md` in sync with
+  the code-owned CLI catalogue: two-way env-var coverage against
+  `clihelp.ts::ENVIRONMENT`, env→flag mapping, two-way long-flag coverage for
+  the run/chat/tui/serve accepted flags, and a tolerant command-heading
+  check, with sorted set-diff failures and a skip when the reference file is
+  absent (bare npm tarball). Proven to bite by temporarily introducing a
+  divergent row and observing the exact failure before reverting.
+
 ## Open items (deferred)
 
 - **WAN fault / long-soak coverage (manual)** — WAN latency/load and

@@ -215,7 +215,9 @@ the same hero appears inside a selected session that has no transcript yet.
    saved/env-backed key is only used when the probed URL is the preset's own
    endpoint — otherwise type the key for that probe. The offline equivalent is
    `node dist/cli.js models --base-url <url>`. Settings → **Appearance** sets
-   the theme and the Comfortable/Compact density for this device.
+   the theme and the Comfortable/Compact density for this device, and picks
+   the accent theme (Blue default, or Violet/Teal/Amber) — the accent applies
+   immediately and is remembered for the next visit.
 3. **Send a task** in `work` mode. The run proceeds in the background; the
    chat updates live over SSE — a folded **Thinking** row (reasoning) and the
    **Response** block stream in as the models generate, then resolve into the

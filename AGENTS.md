@@ -134,6 +134,9 @@ node dist/cli.js run "Plan a migration from Redis to Valkey" --provider mock
   Browser E2E: `e2e/` + `scripts/e2e-test.ps1` (Playwright on the system Edge,
   headless, TypeScript backend). All hermetic and offline; see
   `docs/testing.md`.
+- CI (see `docs/testing.md`): `.github/workflows/ci.yml` runs the hermetic
+  gates on an ubuntu matrix (Node 22/24) and a Windows leg (Node 24 on
+  `windows-latest`); the Node-22-only release rehearsal runs once on ubuntu.
 - Session persistence: `--session-file` writes every envelope as JSONL
   (flushed immediately); `--resume` rebuilds the context with dense `seq`
   numbering. Covered by `tests/session.test.ts`. The web workspace adds
