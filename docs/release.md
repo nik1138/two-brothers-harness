@@ -39,7 +39,7 @@ workaround).
    captured output tail and exit 1: clean tree → candidate build +
    `npm run check` → `scripts/smoke-test.ps1` (`SMOKE TEST: PASS`) →
    `node scripts/tarball-smoke.mjs` (`TARBALL SMOKE: PASS (7/7)`) and
-   `npm run pack:check` → `scripts/e2e-test.ps1` (20 PASS / 0 FAIL / 1 SKIP;
+   `npm run pack:check` → `scripts/e2e-test.ps1` (21 PASS / 0 FAIL / 1 SKIP;
    needs system Edge, not run in CI) → final clean-tree check.
 
    Fast iterations: `-SkipBrowser` (skip the system-Edge pass) and
@@ -47,9 +47,15 @@ workaround).
    needs the full run. The manual steps below remain the fallback when one
    step must be run alone.
 
-3. Push and confirm CI green on the ubuntu Node 22/24 matrix and the
+3. **Independent subagent E2E gate.** On the merged tree, spawn separate
+   subagent lanes (not the feature author) for the browser matrix, the CLI E2E
+   on sources and `dist`, the packed-tarball/clean-install flow, and a WSL
+   Linux pass (typecheck + full package suite, so POSIX-only tests run). Each
+   lane must report its command, count and PASS; one FAIL blocks publishing.
+   The rehearsal above is the single-machine counterpart, not a replacement.
+4. Push and confirm CI green on the ubuntu Node 22/24 matrix and the
    `windows-latest` Node 24 leg.
-4. Only then follow the publishing checklist below (tag + workflow).
+5. Only then follow the publishing checklist below (tag + workflow).
 
 ## One-time external setup (owner, ~15 minutes, no repo changes)
 
@@ -136,6 +142,18 @@ two-brothers serve --port 8600   # http://127.0.0.1:8600 serves the packaged web
 Expected: `--version` prints `0.0.1`; the mock run prints a decision with the
 compact `tokens … in / … out` usage footer and exits 0; `serve` serves the
 built Vue workspace from the tarball (no separate frontend build).
+
+### Source maps ship in the tarball
+
+The package keeps its tsc source maps (`dist/*.js.map` and the declaration
+maps): `sourceMap`/`declarationMap` are on in
+`packages/harness/tsconfig.build.json`, and every `dist/*.js` already carries a
+`sourceMappingURL`, so dropping the maps would leave dead links and a stack
+trace that points into nowhere. Measured on the final package: **369 files,
+1.28 MB packed / 5.17 MB unpacked**, of which **180 `.map` files are 1.60 MB
+unpacked (30.9%)** — a small packed cost because maps compress well. That is
+the deliberate trade: an npm-installed user, or a crash report from their
+machine, gets a stack trace that resolves back to the TypeScript sources.
 
 ## Promote to `latest` and drop the pre-release notes
 
