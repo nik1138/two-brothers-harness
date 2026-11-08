@@ -69,6 +69,7 @@ import { join } from "node:path";
 
 import {
   formatChord,
+  formatKeys,
   TUI_COMMANDS,
   type KeyChord,
   type TuiCommand,
@@ -389,6 +390,18 @@ export function parseTuiKeysDocument(text: string, source: string): TuiKeysParse
   return { bindings, diagnostics: [] };
 }
 
+/** Options for {@link readTuiKeysFile}. */
+export interface TuiKeysFileOptions {
+  /** Report an absent file (the operator named it explicitly). */
+  missingIsDiagnostic?: boolean;
+  /**
+   * What the diagnostics say happens on failure. The startup resolver keeps the
+   * default chords; a live reload keeps the previous (last good) table, so the
+   * reload path passes its own honest wording.
+   */
+  fallbackMessage?: string;
+}
+
 /**
  * Read and parse one keys file. A missing path is not an error by itself (the
  * default location is optional); pass `missingIsDiagnostic` when the operator
@@ -396,8 +409,9 @@ export function parseTuiKeysDocument(text: string, source: string): TuiKeysParse
  */
 export function readTuiKeysFile(
   filePath: string,
-  options: { missingIsDiagnostic?: boolean } = {},
+  options: TuiKeysFileOptions = {},
 ): TuiKeysFileResult {
+  const fallback = options.fallbackMessage ?? "using the default chords";
   let stats;
   try {
     stats = statSync(filePath);
@@ -408,21 +422,21 @@ export function readTuiKeysFile(
         bindings: {},
         diagnostics:
           options.missingIsDiagnostic === true
-            ? [`${filePath}: file not found; using the default chords`]
+            ? [`${filePath}: file not found; ${fallback}`]
             : [],
         found: false,
       };
     }
     return {
       bindings: {},
-      diagnostics: [`${filePath}: cannot read (${errorMessage(exc)}); using the default chords`],
+      diagnostics: [`${filePath}: cannot read (${errorMessage(exc)}); ${fallback}`],
       found: false,
     };
   }
   if (!stats.isFile()) {
     return {
       bindings: {},
-      diagnostics: [`${filePath}: not a file; using the default chords`],
+      diagnostics: [`${filePath}: not a file; ${fallback}`],
       found: true,
     };
   }
@@ -430,7 +444,7 @@ export function readTuiKeysFile(
     return {
       bindings: {},
       diagnostics: [
-        `${filePath}: file is ${stats.size} bytes (max ${TUI_KEYS_MAX_BYTES}); using the default chords`,
+        `${filePath}: file is ${stats.size} bytes (max ${TUI_KEYS_MAX_BYTES}); ${fallback}`,
       ],
       found: true,
     };
@@ -441,14 +455,14 @@ export function readTuiKeysFile(
   } catch (exc) {
     return {
       bindings: {},
-      diagnostics: [`${filePath}: cannot read (${errorMessage(exc)}); using the default chords`],
+      diagnostics: [`${filePath}: cannot read (${errorMessage(exc)}); ${fallback}`],
       found: true,
     };
   }
   if (Buffer.byteLength(text, "utf8") > TUI_KEYS_MAX_BYTES) {
     return {
       bindings: {},
-      diagnostics: [`${filePath}: file exceeds ${TUI_KEYS_MAX_BYTES} bytes; using the default chords`],
+      diagnostics: [`${filePath}: file exceeds ${TUI_KEYS_MAX_BYTES} bytes; ${fallback}`],
       found: true,
     };
   }
@@ -568,4 +582,167 @@ export function resolveTuiCommandsFromFile(
     };
   }
   return resolved;
+}
+
+// --------------------------------------------------------------------------- //
+// live status + reload for the in-TUI `/keys` command
+// --------------------------------------------------------------------------- //
+
+/** Where the configured keys-file path came from. */
+export type TuiKeysOrigin = "flag" | "env" | "default";
+
+/** One captured keys-file location: resolved path + where it came from. */
+export interface TuiKeysSource {
+  path: string;
+  origin: TuiKeysOrigin;
+}
+
+/** What one load attempt found (`loaded` / absent / unreadable-or-invalid). */
+export type TuiKeysLoadState = "loaded" | "missing" | "invalid";
+
+/** Result of loading or reloading one keys file. */
+export interface TuiKeysLoadResult {
+  /** The new table on a successful load; the caller's previous table otherwise. */
+  commands: readonly TuiCommand[];
+  /** Empty on success; honest lines on failure. */
+  diagnostics: readonly string[];
+  state: TuiKeysLoadState;
+}
+
+/** Status reported by `/keys show`. */
+export interface TuiKeysStatus {
+  /** Captured at startup; `null` when an embedding injected commands directly. */
+  source: TuiKeysSource | null;
+  state: TuiKeysLoadState | "none";
+  diagnostics: readonly string[];
+}
+
+/** Bound for one displayed diagnostic line (the notice stays readable). */
+export const TUI_KEYS_DIAGNOSTIC_MAX_CHARS = 240;
+
+function sourceMissingIsDiagnostic(source: TuiKeysSource): boolean {
+  return source.origin !== "default";
+}
+
+/**
+ * Load the captured keys-file source once. Fail-soft like the startup resolver:
+ * a missing default file is silent, an absent explicit path is diagnosed, and
+ * an unreadable/invalid file reports diagnostics. `state` separates a real load
+ * from absence/failure so `/keys` can report the truth.
+ */
+export function loadTuiKeyCommands(
+  source: TuiKeysSource,
+  options: { fallbackMessage?: string } = {},
+): TuiKeysLoadResult {
+  const file = readTuiKeysFile(source.path, {
+    missingIsDiagnostic: sourceMissingIsDiagnostic(source),
+    ...(options.fallbackMessage !== undefined ? { fallbackMessage: options.fallbackMessage } : {}),
+  });
+  if (file.diagnostics.length > 0) {
+    return {
+      commands: TUI_COMMANDS,
+      diagnostics: file.diagnostics,
+      state: file.found ? "invalid" : "missing",
+    };
+  }
+  if (!file.found) {
+    return { commands: TUI_COMMANDS, diagnostics: [], state: "missing" };
+  }
+  const resolved = resolveTuiCommands(file.bindings);
+  if (resolved.diagnostics.length > 0) {
+    return {
+      commands: TUI_COMMANDS,
+      diagnostics: resolved.diagnostics.map((line) => `${source.path}: ${line}`),
+      state: "invalid",
+    };
+  }
+  return { commands: resolved.commands, diagnostics: [], state: "loaded" };
+}
+
+/**
+ * Reload the captured source for `/keys reload`.
+ *
+ * Rule: **keep the last good command table on every non-loaded outcome.** A
+ * broken, unreadable or absent file never silently replaces a previously
+ * loaded valid table with the defaults; only a successful load swaps the table.
+ * Absence keeps the previous chords and is reported without a diagnostic when
+ * the source is the optional default path.
+ */
+export function reloadTuiCommands(
+  source: TuiKeysSource,
+  previous: readonly TuiCommand[],
+  options: { fallbackMessage?: string } = {},
+): TuiKeysLoadResult {
+  const loaded = loadTuiKeyCommands(source, {
+    fallbackMessage: options.fallbackMessage ?? "the previous chords were kept",
+  });
+  if (loaded.state === "loaded") return loaded;
+  return { commands: previous, diagnostics: loaded.diagnostics, state: loaded.state };
+}
+
+/** The three effective global chords as `palette Ctrl+P · help ? / F1 · stash Ctrl+O`. */
+export function globalKeySummary(commands: readonly TuiCommand[]): string {
+  const parts: string[] = [];
+  for (const id of REBINDABLE_TUI_COMMAND_IDS) {
+    const command = commands.find((candidate) => candidate.id === id);
+    const keys = command === undefined ? "" : formatKeys(command);
+    parts.push(`${id} ${keys === "" ? "(unbound)" : keys}`);
+  }
+  return parts.join(" · ");
+}
+
+function hasGlobalOverrides(commands: readonly TuiCommand[]): boolean {
+  return REBINDABLE_TUI_COMMAND_IDS.some((id) => {
+    const current = commands.find((candidate) => candidate.id === id);
+    const fallback = TUI_COMMANDS.find((candidate) => candidate.id === id);
+    return formatKeys({ keys: current?.keys }) !== formatKeys({ keys: fallback?.keys });
+  });
+}
+
+function boundedDiagnostic(diagnostics: readonly string[]): string {
+  const joined = diagnostics.join("; ");
+  return joined.length > TUI_KEYS_DIAGNOSTIC_MAX_CHARS
+    ? `${joined.slice(0, TUI_KEYS_DIAGNOSTIC_MAX_CHARS - 1)}…`
+    : joined;
+}
+
+/** Bound a composed `/keys` notice line. */
+export function boundTuiKeysNotice(text: string): string {
+  const max = TUI_KEYS_DIAGNOSTIC_MAX_CHARS + 80;
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+/**
+ * The `/keys show` lines: the three effective global chords, the captured
+ * source (resolved path, origin, last load state) and the last diagnostics.
+ * The source line never claims overrides are active when the defaults are in
+ * force, and distinguishes "loaded" from absence/failure.
+ */
+export function describeTuiKeys(
+  commands: readonly TuiCommand[],
+  status: TuiKeysStatus,
+): string[] {
+  const lines = [`keys: ${globalKeySummary(commands)}`];
+  const overrides = hasGlobalOverrides(commands);
+  if (status.source === null) {
+    lines.push("keys file: none (no keys-file source captured for this TUI session)");
+  } else {
+    const stateText =
+      status.state === "loaded"
+        ? overrides
+          ? "loaded"
+          : "loaded; defaults active (no overrides)"
+        : status.state === "missing"
+          ? overrides
+            ? "absent; previous chords kept"
+            : "absent; defaults active"
+          : overrides
+            ? "invalid; previous chords kept"
+            : "invalid; defaults active";
+    lines.push(boundTuiKeysNotice(`keys file: ${status.source.path} (${status.source.origin}) — ${stateText}`));
+  }
+  if (status.diagnostics.length > 0) {
+    lines.push(`keys diagnostics: ${boundedDiagnostic(status.diagnostics)}`);
+  }
+  return lines;
 }

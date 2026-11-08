@@ -162,6 +162,14 @@ import {
   type TuiCommand,
 } from "./keymap.ts";
 import {
+  boundTuiKeysNotice,
+  describeTuiKeys,
+  globalKeySummary,
+  reloadTuiCommands,
+  type TuiKeysLoadState,
+  type TuiKeysSource,
+} from "./keyoverrides.ts";
+import {
   addNotice,
   addUserBlock,
   commitEnvelope,
@@ -309,6 +317,16 @@ export interface TuiAppOptions {
    * chords from this one table.
    */
   commands?: readonly TuiCommand[];
+  /**
+   * The keys-file source captured at startup (path + origin) for `/keys show`
+   * and `/keys reload`. Absent when an embedding injects `commands` directly;
+   * the built-in command then reports that no source was captured.
+   */
+  keysSource?: TuiKeysSource;
+  /** Result of the startup load (reported by `/keys show`, maintained on reload). */
+  keysState?: TuiKeysLoadState;
+  /** Diagnostics from the startup load (reported by `/keys show`). */
+  keysDiagnostics?: readonly string[];
   /**
    * `tui --approval-mode` / `TWO_BROTHERS_APPROVAL_MODE`: pin the workspace
    * approval policy for this TUI process. Never persisted; without a pin the
@@ -1266,7 +1284,14 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   const input = options.input ?? process.stdin;
   const output = options.output ?? process.stdout;
   /** One resolved registry table for matching, labels, palette/help and hints. */
-  const commands = options.commands ?? TUI_COMMANDS;
+  let commands = options.commands ?? TUI_COMMANDS;
+  // `/keys` state: the captured source is reloaded on demand; the diagnostics
+  // and load state are the last attempt's (startup or latest reload). A failed
+  // reload keeps the previous table (see `reloadTuiCommands`).
+  let keysSource: TuiKeysSource | null = options.keysSource ?? null;
+  let keysState: TuiKeysLoadState | "none" =
+    options.keysState ?? (keysSource === null ? "none" : "loaded");
+  let keysDiagnostics: readonly string[] = options.keysDiagnostics ?? [];
   // `tui --workspace <dir>`: validate the confined root before the screen is
   // built. A bad root is a clear startup error (exit 2) and never opens the
   // alternate screen; an omitted flag keeps the TUI exactly as before.
@@ -3461,6 +3486,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       case "stash":
         toggleStash();
         break;
+      case "keys":
+        dispatchKeys("");
+        break;
       case "history-search":
         openHistorySearchOverlay();
         break;
@@ -3544,6 +3572,69 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     }
   };
 
+  /**
+   * `/keys` (show) and `/keys reload`: report the three effective global chords
+   * plus the captured keys-file source, or re-read that source and swap the
+   * active table in place. Reload failure/absence keeps the last good table.
+   */
+  const dispatchKeys = (args: string): void => {
+    const sub = args.trim().toLowerCase();
+    if (sub === "" || sub === "show") {
+      const lines = describeTuiKeys(commands, {
+        source: keysSource,
+        state: keysState,
+        diagnostics: keysDiagnostics,
+      });
+      for (const line of lines) model = addNotice(model, "info", line);
+      render();
+      return;
+    }
+    if (sub !== "reload") {
+      model = addNotice(model, "warn", "usage: /keys [show|reload]");
+      render();
+      return;
+    }
+    if (keysSource === null) {
+      model = addNotice(
+        model,
+        "warn",
+        "keys: no keys-file source was captured for this TUI session — reload is unavailable",
+      );
+      render();
+      return;
+    }
+    const result = reloadTuiCommands(keysSource, commands);
+    keysState = result.state;
+    keysDiagnostics = result.diagnostics;
+    if (result.state === "loaded") {
+      commands = result.commands;
+      model = addNotice(
+        model,
+        "info",
+        boundTuiKeysNotice(
+          `keys reloaded: ${globalKeySummary(commands)} — ${keysSource.path} (${keysSource.origin})`,
+        ),
+      );
+    } else if (result.state === "missing") {
+      model = addNotice(
+        model,
+        "info",
+        boundTuiKeysNotice(
+          `keys: no file at ${keysSource.path} (${keysSource.origin}) — keeping the current chords`,
+        ),
+      );
+    } else {
+      const detail =
+        result.diagnostics.length > 0 ? result.diagnostics.join("; ") : "invalid keys file";
+      model = addNotice(
+        model,
+        "warn",
+        boundTuiKeysNotice(`keys reload failed: ${detail} — keeping the current chords`),
+      );
+    }
+    render();
+  };
+
   /** Slash forms for registry commands that `resolveTuiInput` does not own
    *  (`/models`, `/sessions`, `/theme`, …). Returns false when the caller
    *  should fall back to the template/builtin resolver. */
@@ -3611,6 +3702,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         return true;
       case "stash":
         toggleStash();
+        return true;
+      case "keys":
+        dispatchKeys(args);
         return true;
       case "settings":
         if (!gateIdleCommand(command)) return true;

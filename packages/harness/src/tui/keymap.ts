@@ -473,6 +473,16 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
     idleOnly: true,
   },
   {
+    id: "keys",
+    title: "Key bindings",
+    description: "Show the effective global chords and reload the TUI keys file.",
+    group: "Settings",
+    slash: "keys",
+    argumentHint: "[show|reload]",
+    keys: [],
+    when: "always",
+  },
+  {
     id: "provider",
     title: "Connect a provider",
     description: "Connect or change the provider endpoint used by this session.",

@@ -19,7 +19,11 @@ import { test } from "node:test";
 import { resolveConfig } from "../src/config.ts";
 import { toNdjsonLine, type ToolCallStreamEvent } from "../src/runstream.ts";
 import { CANCELLED_TURN_HINT, runTuiApp, type TuiIO } from "../src/tui/app.ts";
-import { resolveTuiCommands } from "../src/tui/keyoverrides.ts";
+import {
+  loadTuiKeyCommands,
+  resolveTuiCommands,
+  type TuiKeysSource,
+} from "../src/tui/keyoverrides.ts";
 import { stripAnsi } from "../src/tui/render.ts";
 import { ANSI } from "../src/tui/render.ts";
 import { resolveTheme } from "../src/tui/theme.ts";
@@ -643,4 +647,108 @@ test("injected key overrides: a printable help chord opens help only on an empty
     "a non-empty composer never opens help from the printable chord",
   );
   assert.equal(await quit(input, app), 0);
+});
+
+test("/keys show and /keys reload reflect and live-apply keys-file edits", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tui-keys-app-"));
+  const keysFile = path.join(root, "keys.json");
+  const source: TuiKeysSource = { path: keysFile, origin: "env" };
+  fs.writeFileSync(
+    keysFile,
+    `${JSON.stringify({ version: 1, bindings: { palette: ["ctrl+g"] } }, null, 2)}\n`,
+    "utf8",
+  );
+  const initial = loadTuiKeyCommands(source);
+  assert.equal(initial.state, "loaded");
+  const { app, input, output } = startApp({
+    commands: initial.commands,
+    keysSource: source,
+    keysState: initial.state,
+    keysDiagnostics: initial.diagnostics,
+  });
+  try {
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+
+    // `/keys show` reports the captured source and the effective chords.
+    input.type("/keys show");
+    input.enter();
+    assert.ok(await waitFor(() => textOf(output).includes("keys: palette Ctrl+G")));
+    assert.ok(
+      await waitFor(() => /keys file:[\s\S]{0,400}\(env\)[\s\S]{0,60}loaded/.test(textOf(output))),
+      "the source is reported honestly",
+    );
+    assert.ok(
+      await waitFor(() => textOf(output).includes("help ? / F1")),
+      "the untouched global chords are reported too",
+    );
+
+    // The startup override works and the default palette chord is dead.
+    input.key("g", { ctrl: true });
+    assert.ok(await waitFor(() => lastFrameText(output).includes("COMMANDS")));
+    input.key("escape");
+    assert.ok(await waitFor(() => !lastFrameText(output).includes("COMMANDS")));
+    input.key("p", { ctrl: true });
+    assert.equal(
+      await waitFor(() => lastFrameText(output).includes("COMMANDS"), 300),
+      false,
+      "Ctrl+P is still dead before the reload",
+    );
+
+    // Edit the file externally, then reload: help moves from ?/F1 to F2.
+    fs.writeFileSync(
+      keysFile,
+      `${JSON.stringify(
+        { version: 1, bindings: { palette: ["ctrl+g"], help: ["f2"] } },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+    input.type("/keys reload");
+    input.enter();
+    assert.ok(await waitFor(() => textOf(output).includes("keys reloaded:")), "success notice");
+    assert.match(textOf(output), /help F2/);
+    assert.match(textOf(output), /keys reloaded:[\s\S]{0,300}\(env\)/);
+
+    // The new chord opens help; the previous default help chord is dead.
+    input.key("f2");
+    assert.ok(await waitFor(() => lastFrameText(output).includes("HELP")), "F2 opens help after reload");
+    input.key("escape");
+    assert.ok(await waitFor(() => !lastFrameText(output).includes("HELP")));
+    input.key("f1");
+    assert.equal(
+      await waitFor(() => lastFrameText(output).includes("HELP"), 300),
+      false,
+      "the previous help chord is dead after reload",
+    );
+
+    // The palette listing uses the effective help chord too.
+    input.key("g", { ctrl: true });
+    assert.ok(await waitFor(() => lastFrameText(output).includes("COMMANDS")));
+    assert.ok(await waitFor(() => lastFrameText(output).includes("F2")), "palette lists F2");
+    input.key("escape");
+    assert.ok(await waitFor(() => !lastFrameText(output).includes("COMMANDS")));
+
+    // A corrupt file fails one bounded notice and keeps the last good table.
+    fs.writeFileSync(keysFile, "{oops\n", "utf8");
+    input.type("/keys reload");
+    input.enter();
+    assert.ok(await waitFor(() => textOf(output).includes("keys reload failed:")));
+    assert.match(textOf(output), /keeping the current chords/);
+    assert.equal(
+      lastFrameText(output).split("keys reload failed:").length - 1,
+      1,
+      "exactly one diagnostic notice in the current frame",
+    );
+    input.key("f2");
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("HELP")),
+      "the last good table stays active after a failed reload",
+    );
+    input.key("escape");
+    assert.ok(await waitFor(() => !lastFrameText(output).includes("HELP")));
+    assert.equal(await quit(input, app), 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

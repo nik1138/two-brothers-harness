@@ -16,15 +16,19 @@ import { test } from "node:test";
 
 import {
   defaultTuiKeysPath,
+  describeTuiKeys,
+  loadTuiKeyCommands,
   parseTuiChord,
   parseTuiKeysDocument,
   readTuiKeysFile,
   REBINDABLE_TUI_COMMAND_IDS,
+  reloadTuiCommands,
   resolveTuiCommands,
   resolveTuiCommandsFromFile,
   TUI_KEYS_MAX_BYTES,
   TUI_KEYS_MAX_CHORDS_PER_COMMAND,
   TUI_KEYS_VERSION,
+  type TuiKeysSource,
 } from "../src/tui/keyoverrides.ts";
 import {
   TUI_COMMANDS,
@@ -400,10 +404,12 @@ test("CLI resolution: flag beats env beats the default path; explicit problems a
 
   assert.deepEqual(tuiKeysFileForCli({}, {}, home), {
     path: defaultTuiKeysPath(home),
+    origin: "default",
     explicit: false,
   });
   assert.deepEqual(tuiKeysFileForCli({}, { TWO_BROTHERS_TUI_KEYS_FILE: envFile.file }, home), {
     path: path.resolve(envFile.file),
+    origin: "env",
     explicit: true,
   });
   assert.deepEqual(
@@ -412,13 +418,15 @@ test("CLI resolution: flag beats env beats the default path; explicit problems a
       { TWO_BROTHERS_TUI_KEYS_FILE: envFile.file },
       home,
     ),
-    { path: path.resolve(flagFile.file), explicit: true },
+    { path: path.resolve(flagFile.file), origin: "flag", explicit: true },
   );
 
   // Missing default file: defaults, no diagnostics.
   const silent = resolveTuiKeyCommandsForCli({}, {}, home);
   assert.equal(silent.commands, TUI_COMMANDS);
   assert.deepEqual(silent.diagnostics, []);
+  assert.equal(silent.state, "missing");
+  assert.equal(silent.file.origin, "default");
 
   // Explicit invalid file: defaults plus one honest diagnostic.
   const corrupt = tempFile("bad.json", "{nope");
@@ -483,5 +491,120 @@ test("CLI: help tui resolves the env/default keys file and matches tui --help", 
     if (previous === undefined) delete process.env.TWO_BROTHERS_TUI_KEYS_FILE;
     else process.env.TWO_BROTHERS_TUI_KEYS_FILE = previous;
     for (const temp of [good, bad]) rmSync(temp.dir, { recursive: true, force: true });
+  }
+});
+
+// --------------------------------------------------------------------------- //
+// `/keys` command: registry entry, status description, reload semantics
+// --------------------------------------------------------------------------- //
+
+test("registry: /keys is a chordless, non-rebindable, discoverable Settings command", () => {
+  const matches = TUI_COMMANDS.filter((command) => command.id === "keys");
+  assert.equal(matches.length, 1, "one /keys command");
+  const command = matches[0]!;
+  assert.equal(command.slash, "keys");
+  assert.equal(command.group, "Settings");
+  assert.deepEqual(command.keys ?? [], [], "chordless by design");
+  assert.equal(command.when, "always");
+  assert.ok(
+    !(REBINDABLE_TUI_COMMAND_IDS as readonly string[]).includes("keys"),
+    "keys is a command, not a chord target",
+  );
+
+  const palette = paletteEntries(TUI_COMMANDS).filter((entry) => entry.id === "keys");
+  assert.equal(palette.length, 1, "the palette lists /keys once");
+  assert.equal(palette[0]?.slash, "/keys");
+  assert.equal(palette[0]?.keys, "", "no chord column");
+  const helpRows = documentEntries(TUI_COMMANDS).filter((entry) => entry.id === "keys");
+  assert.equal(helpRows.length, 1, "the ? overlay lists /keys once");
+  const helpText = tuiHelpLines(TUI_COMMANDS).join("\n");
+  assert.match(helpText, /\/keys \[show\|reload\]/, "tui --help lists the slash form");
+  assert.equal(
+    TUI_COMMANDS.filter((candidate) => candidate.slash === "keys").length,
+    1,
+    "the slash spelling is unique",
+  );
+});
+
+test("describeTuiKeys: effective chords, source origin and last diagnostics, never overclaiming", () => {
+  const source: TuiKeysSource = {
+    path: "/home/operator/.two-brothers/tui-keys.json",
+    origin: "default",
+  };
+  const defaults = describeTuiKeys(TUI_COMMANDS, { source, state: "missing", diagnostics: [] });
+  assert.equal(defaults[0], "keys: palette Ctrl+P · help ? / F1 · stash Ctrl+O");
+  assert.match(defaults[1] ?? "", /\(default\) — absent; defaults active/);
+  assert.equal(defaults.length, 2, "no diagnostics line when the load was clean");
+
+  const overridden = resolveTuiCommands({ palette: [chord("g", { ctrl: true })] }).commands;
+  const loaded = describeTuiKeys(overridden, {
+    source: { path: "/etc/two-brothers/keys.json", origin: "env" },
+    state: "loaded",
+    diagnostics: [],
+  });
+  assert.match(loaded[0] ?? "", /palette Ctrl\+G/);
+  assert.match(loaded[1] ?? "", /\(env\) — loaded$/);
+
+  const failed = describeTuiKeys(overridden, {
+    source: { path: "/etc/two-brothers/keys.json", origin: "flag" },
+    state: "invalid",
+    diagnostics: [`x`.repeat(500)],
+  });
+  assert.match(failed[1] ?? "", /\(flag\) — invalid; previous chords kept/);
+  assert.ok(failed[2]?.startsWith("keys diagnostics: "), "the last diagnostics are reported");
+  assert.ok((failed[2]?.length ?? 0) < 300, "the diagnostic line is bounded");
+
+  const embedded = describeTuiKeys(TUI_COMMANDS, { source: null, state: "none", diagnostics: [] });
+  assert.match(embedded[1] ?? "", /none/);
+});
+
+test("reloadTuiCommands: success swaps the table; failure or absence keeps the last good one", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "tui-reload-"));
+  const file = path.join(dir, "keys.json");
+  const source: TuiKeysSource = { path: file, origin: "env" };
+  const previous = resolveTuiCommands({ palette: [chord("g", { ctrl: true })] }).commands;
+  try {
+    // Absent explicit file: keep the previous table, one honest diagnostic.
+    const absent = reloadTuiCommands(source, previous);
+    assert.equal(absent.commands, previous);
+    assert.equal(absent.state, "missing");
+    assert.match(absent.diagnostics[0] ?? "", /file not found.*previous chords were kept/);
+
+    // The file appears: a reload applies it (the absent-at-startup case).
+    const first = loadTuiKeyCommands({ path: file, origin: "default" });
+    assert.equal(first.state, "missing");
+    assert.deepEqual(first.diagnostics, [], "a missing default file is silent");
+    writeFileSync(file, doc({ help: ["f2"] }), "utf8");
+    const loaded = reloadTuiCommands(source, previous);
+    assert.equal(loaded.state, "loaded");
+    assert.deepEqual(loaded.diagnostics, []);
+    assert.notEqual(loaded.commands, previous, "a fresh table on success");
+    assert.equal(
+      formatKeys({ keys: loaded.commands.find((command) => command.id === "help")?.keys }),
+      "F2",
+    );
+    // Only the allowlisted ids are replaced; unrelated commands keep identity.
+    assert.equal(
+      loaded.commands.find((command) => command.id === "find"),
+      previous.find((command) => command.id === "find"),
+    );
+
+    // A corrupt file keeps the last good table and reports diagnostics.
+    writeFileSync(file, "{oops", "utf8");
+    const failed = reloadTuiCommands(source, loaded.commands);
+    assert.equal(failed.commands, loaded.commands);
+    assert.equal(failed.state, "invalid");
+    assert.match(failed.diagnostics[0] ?? "", /invalid JSON/);
+
+    // Absence on the optional default path is silent.
+    const missingDefault = reloadTuiCommands(
+      { path: path.join(dir, "default.json"), origin: "default" },
+      previous,
+    );
+    assert.equal(missingDefault.commands, previous);
+    assert.equal(missingDefault.state, "missing");
+    assert.deepEqual(missingDefault.diagnostics, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

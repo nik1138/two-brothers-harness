@@ -134,7 +134,10 @@ import { envPinnedPairs, SettingsStore } from "./settings_store.ts";
 import { runTuiApp } from "./tui/app.ts";
 import {
   defaultTuiKeysPath,
-  resolveTuiCommandsFromFile,
+  loadTuiKeyCommands,
+  type TuiKeysLoadState,
+  type TuiKeysOrigin,
+  type TuiKeysSource,
 } from "./tui/keyoverrides.ts";
 import { tuiHelpLines, TUI_COMMANDS, type TuiCommand } from "./tui/keymap.ts";
 
@@ -787,6 +790,8 @@ export function streamTokensForCli(
 /** Resolved TUI keys-file choice (`--keys-file` > env > default path). */
 export interface CliTuiKeysFile {
   path: string;
+  /** Where the path came from (`help tui`/`/keys show` report this honestly). */
+  origin: TuiKeysOrigin;
   /** The operator named the path (flag or env), so a missing file is reported. */
   explicit: boolean;
 }
@@ -803,10 +808,10 @@ export function tuiKeysFileForCli(
   home: string = os.homedir(),
 ): CliTuiKeysFile {
   const flag = typeof values["keys-file"] === "string" ? values["keys-file"].trim() : "";
-  if (flag !== "") return { path: path.resolve(flag), explicit: true };
+  if (flag !== "") return { path: path.resolve(flag), origin: "flag", explicit: true };
   const envFile = (env.TWO_BROTHERS_TUI_KEYS_FILE ?? "").trim();
-  if (envFile !== "") return { path: path.resolve(envFile), explicit: true };
-  return { path: defaultTuiKeysPath(home), explicit: false };
+  if (envFile !== "") return { path: path.resolve(envFile), origin: "env", explicit: true };
+  return { path: defaultTuiKeysPath(home), origin: "default", explicit: false };
 }
 
 /**
@@ -819,10 +824,21 @@ export function resolveTuiKeyCommandsForCli(
   values: Record<string, any>,
   env: NodeJS.ProcessEnv = process.env,
   home: string = os.homedir(),
-): { commands: readonly TuiCommand[]; diagnostics: readonly string[]; file: CliTuiKeysFile } {
+): {
+  commands: readonly TuiCommand[];
+  diagnostics: readonly string[];
+  file: CliTuiKeysFile;
+  state: TuiKeysLoadState;
+} {
   const file = tuiKeysFileForCli(values, env, home);
-  const resolved = resolveTuiCommandsFromFile(file.path, { explicit: file.explicit });
-  return { commands: resolved.commands, diagnostics: resolved.diagnostics, file };
+  const source: TuiKeysSource = { path: file.path, origin: file.origin };
+  const loaded = loadTuiKeyCommands(source);
+  return {
+    commands: loaded.commands,
+    diagnostics: loaded.diagnostics,
+    file,
+    state: loaded.state,
+  };
 }
 
 /** One `run`/`chat` process's plugin + skill resources. */
@@ -2273,6 +2289,9 @@ async function doTui(
     cfg,
     io,
     commands: keyResolution.commands,
+    keysSource: { path: keyResolution.file.path, origin: keyResolution.file.origin },
+    keysState: keyResolution.state,
+    keysDiagnostics: keyResolution.diagnostics,
     pluginsDir: pluginsDirForCli(values),
     skillsRoots: skillsRootsForCli(values),
     commandsRoots: commandsRootsForCli(values),
