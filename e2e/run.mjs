@@ -10,6 +10,10 @@
 //   appearance-density mock provider: Settings -> Appearance cards stay readable
 //                  under compact density; the footer theme switch shrinks and the
 //                  preference survives a reload
+//   appearance-accent mock provider: Settings -> Appearance accent radio group
+//                  changes the root `data-accent` attribute and the effective
+//                  accent token (keyboard-selected Violet), survives a reload,
+//                  and restores the default blue palette
 //   provider-reset mock provider: a built-in seed customized through the API is
 //                  reset in Settings -> Providers; pristine flags and both role
 //                  assignments survive (offline, no model run)
@@ -1068,6 +1072,163 @@ async function scenarioAppearanceDensity(runner) {
 
     consoleGuard.assertClean()
     runner.pass('appearance-density')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(be.dir)
+  }
+}
+
+// -- scenario: Settings -> Appearance accent theme -----------------------------------
+// The accent chooser is a native radio group persisted in the uiPrefs blob and
+// applied as `data-accent` on <html>; tokens.css owns the violet/teal/amber
+// palettes (blue is the base :root palette). Verifies the default, a keyboard-
+// chosen non-default accent (root attribute + computed accent token), reload
+// persistence, and restoring the default — with the theme/density groups intact.
+// Under the dark variant it also asserts the text-only `--accent-text` token is
+// the lightened AA-compliant value (computed contrast vs the dark panel).
+
+async function scenarioAppearanceAccent(runner) {
+  const be = await startBackend({ kind: 'mock' })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  const accentAttribute = () =>
+    page.evaluate(() => document.documentElement.getAttribute('data-accent'))
+  const accentToken = () =>
+    page.evaluate(() =>
+      getComputedStyle(document.documentElement).getPropertyValue('--accent').trim(),
+    )
+  try {
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+
+    // Default: the base palette, with the attribute written on mount.
+    assert.equal(await accentAttribute(), 'blue', 'the default accent is blue')
+    assert.equal(await accentToken(), '#3568d4', 'blue is the base accent token')
+
+    const { pane } = await openAppearanceSettings(page)
+    assert.equal(
+      await pane.locator('.appearance-card').count(),
+      5,
+      'the theme + density card groups stay exactly 5 cards',
+    )
+    const accentGroup = pane.getByRole('radiogroup', { name: 'Accent' })
+    assert.equal(
+      await accentGroup.locator('input[type="radio"]').count(),
+      4,
+      'four accent options are offered',
+    )
+    assert.equal(
+      await accentGroup.locator('input[name="accent-theme"]:checked').inputValue(),
+      'blue',
+      'blue is selected initially',
+    )
+
+    // Keyboard-only change: focus the checked radio and use native radio-group
+    // arrow navigation (no mouse), which checks the next option (Violet).
+    await accentGroup.locator('input[name="accent-theme"][value="blue"]').focus()
+    await page.keyboard.press('ArrowDown')
+    await page.waitForFunction(
+      () => document.documentElement.getAttribute('data-accent') === 'violet',
+      null,
+      { timeout: 5000 },
+    )
+    assert.equal(
+      await accentGroup.locator('input[name="accent-theme"]:checked').inputValue(),
+      'violet',
+      'keyboard navigation selects the Violet accent',
+    )
+    assert.equal(await accentToken(), '#6d28d9', 'violet changes the effective accent token')
+    assert.equal(
+      await pane.locator('.appearance-card').count(),
+      5,
+      'changing the accent leaves the theme/density cards untouched',
+    )
+
+    // The accent is independent of the light/dark control and follows the dark
+    // variant block after switching the theme.
+    const themeCard = (label) =>
+      pane
+        .locator('.appearance-card')
+        .filter({ has: page.locator(`.appearance-name:text-is("${label}")`) })
+    await themeCard('Dark').click()
+    await page.waitForFunction(
+      () => document.documentElement.getAttribute('data-theme') === 'dark',
+      null,
+      { timeout: 5000 },
+    )
+    assert.equal(await accentAttribute(), 'violet', 'the accent survives a theme change')
+    assert.equal(await accentToken(), '#7c3aed', 'the dark violet accent block applies in dark')
+
+    // The text-only accent token is lightened for AA contrast on dark surfaces.
+    assert.equal(
+      await page.evaluate(() =>
+        getComputedStyle(document.documentElement).getPropertyValue('--accent-text').trim(),
+      ),
+      '#a78bfa',
+      'the dark violet accent text is the lightened AA value',
+    )
+    const darkTextContrast = await page.evaluate(() => {
+      const style = getComputedStyle(document.documentElement)
+      const channels = (hex) =>
+        hex.trim().replace('#', '').match(/../g).map((pair) => Number.parseInt(pair, 16))
+      const luminance = (hex) => {
+        const [r, g, b] = channels(hex).map((channel) => {
+          const c = channel / 255
+          return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4
+        })
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+      }
+      const text = luminance(style.getPropertyValue('--accent-text'))
+      const panel = luminance(style.getPropertyValue('--surface-panel'))
+      return (Math.max(text, panel) + 0.05) / (Math.min(text, panel) + 0.05)
+    })
+    assert.ok(
+      darkTextContrast >= 4.5,
+      `dark accent text contrast is ${darkTextContrast.toFixed(2)}:1 (WCAG AA needs 4.5:1)`,
+    )
+
+    // Reload: the uiPrefs blob and the theme both survive; the dark accent is
+    // re-applied with the pinned dark palette.
+    await page.reload()
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    assert.equal(await accentAttribute(), 'violet', 'the violet accent survives a reload')
+    assert.equal(await accentToken(), '#7c3aed', 'the reloaded page keeps the dark violet palette')
+    await openAppearanceSettings(page)
+    assert.equal(
+      await page
+        .getByRole('radiogroup', { name: 'Accent' })
+        .locator('input[name="accent-theme"]:checked')
+        .inputValue(),
+      'violet',
+      'the chooser restores the stored selection',
+    )
+
+    // Back to the light theme and the default accent: both variants go away.
+    const reloadedPane = page.locator('[role="region"][aria-label="Appearance"]')
+    await reloadedPane
+      .locator('.appearance-card')
+      .filter({ has: page.locator('.appearance-name:text-is("Light")') })
+      .click()
+    await page.waitForFunction(
+      () => document.documentElement.getAttribute('data-theme') === 'light',
+      null,
+      { timeout: 5000 },
+    )
+    assert.equal(await accentToken(), '#6d28d9', 'light restores the light violet accent block')
+    await page.locator('.accent-option', { hasText: 'Blue' }).click()
+    await page.waitForFunction(
+      () => document.documentElement.getAttribute('data-accent') === 'blue',
+      null,
+      { timeout: 5000 },
+    )
+    assert.equal(await accentToken(), '#3568d4', 'blue restores the default accent token')
+    await page.reload()
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    assert.equal(await accentAttribute(), 'blue', 'restoring the default survives a reload')
+    assert.equal(await accentToken(), '#3568d4', 'the reloaded default palette is the base one')
+
+    consoleGuard.assertClean()
+    runner.pass('appearance-accent')
   } finally {
     await context.close().catch(() => {})
     await killBackend(be)
@@ -2849,6 +3010,13 @@ async function main() {
         ),
       },
       {
+        label: 'appearance-accent',
+        run: () => (
+          (currentRunner = makeRunner('appearance-accent')),
+          scenarioAppearanceAccent(currentRunner)
+        ),
+      },
+      {
         label: 'provider-reset',
         run: () => (
           (currentRunner = makeRunner('provider-reset')),
@@ -2933,6 +3101,7 @@ async function main() {
       'stop',
       'mobile',
       'appearance-density',
+      'appearance-accent',
       'provider-reset',
       'folding',
       'plan-dock',

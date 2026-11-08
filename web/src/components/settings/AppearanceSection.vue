@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import type { Density } from '../../density'
 import type { ThemeMode } from '../../themeMode'
+import type { AccentTheme } from '../../uiPrefs'
 
-defineProps<{ mode: ThemeMode; density: Density }>()
+defineProps<{ mode: ThemeMode; density: Density; accent: AccentTheme }>()
 
 const emit = defineEmits<{
   change: [ThemeMode]
   densityChange: [Density]
+  accentChange: [AccentTheme]
 }>()
 
 const options: { value: ThemeMode; label: string; description: string }[] = [
@@ -28,12 +30,28 @@ const densityOptions: { value: Density; label: string; description: string }[] =
   { value: 'compact', label: 'Compact', description: 'Tighter rows, more visible at once.' },
 ]
 
+/**
+ * Accent themes map 1:1 to the `data-accent` token blocks in tokens.css; the
+ * default blue is the base `:root` palette (no attribute block). Labels name the
+ * colour because the swatch would need raw hex outside the token layer.
+ */
+const accentOptions: { value: AccentTheme; label: string; description: string }[] = [
+  { value: 'blue', label: 'Blue', description: 'The default workspace accent.' },
+  { value: 'violet', label: 'Violet', description: 'A deeper, calmer accent.' },
+  { value: 'teal', label: 'Teal', description: 'A cool, restrained accent.' },
+  { value: 'amber', label: 'Amber', description: 'A warm accent for daylight.' },
+]
+
 function select(mode: ThemeMode) {
   emit('change', mode)
 }
 
 function selectDensity(density: Density) {
   emit('densityChange', density)
+}
+
+function selectAccent(accent: AccentTheme) {
+  emit('accentChange', accent)
 }
 </script>
 
@@ -81,6 +99,34 @@ function selectDensity(density: Density) {
 
     <p class="settings-note">
       System follows the operating system's light or dark preference and updates when it changes.
+    </p>
+
+    <h4 class="settings-subhead">Accent</h4>
+    <div class="accent-grid" role="radiogroup" aria-label="Accent">
+      <label
+        v-for="option in accentOptions"
+        :key="option.value"
+        class="accent-option"
+        :class="{ selected: accent === option.value }"
+      >
+        <input
+          class="accent-input"
+          type="radio"
+          name="accent-theme"
+          :value="option.value"
+          :checked="accent === option.value"
+          @change="selectAccent(option.value)"
+        />
+        <span class="accent-copy">
+          <span class="accent-name">{{ option.label }}</span>
+          <span class="accent-description">{{ option.description }}</span>
+        </span>
+      </label>
+    </div>
+
+    <p class="settings-note">
+      The accent applies immediately and is remembered for the next visit. Theme and density stay
+      independent of it.
     </p>
 
     <h4 class="settings-subhead">Density</h4>
@@ -224,6 +270,71 @@ function selectDensity(density: Density) {
 }
 
 .appearance-description {
+  font-size: 0.7rem;
+  line-height: 1.35;
+  color: var(--text-secondary);
+}
+
+/* Accent chooser: the same card language as the theme/density radios, but its
+   own class names so the appearance-density browser scenario (which measures
+   `.appearance-card`) keeps measuring exactly theme + density. */
+.accent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+}
+
+.accent-option {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 10px;
+  cursor: pointer;
+  background: var(--surface-panel);
+}
+
+.accent-option:hover {
+  background: var(--surface-hover);
+}
+
+.accent-option.selected {
+  border-color: var(--accent);
+  background: var(--surface-highlight);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.accent-option:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.accent-input {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.accent-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.accent-name {
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.accent-description {
   font-size: 0.7rem;
   line-height: 1.35;
   color: var(--text-secondary);

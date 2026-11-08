@@ -178,7 +178,7 @@ watch(
   font: inherit;
   font-size: 0.72rem;
   font-weight: 600;
-  color: var(--accent);
+  color: var(--accent-text);
   background: transparent;
   border: 0;
   cursor: pointer;
@@ -225,7 +225,7 @@ watch(
 }
 
 .todo-panel-row-in_progress .todo-panel-marker {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .todo-panel-row-pending .todo-panel-marker {

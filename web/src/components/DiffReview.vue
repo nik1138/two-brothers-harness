@@ -188,7 +188,7 @@ onUnmounted(() => {
   border-radius: 999px;
   padding: 0.05rem 0.5rem;
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .diff-review-totals {

@@ -418,7 +418,7 @@ const expandable = computed(
 
 .tool-running {
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .tool-toggle {
@@ -426,7 +426,7 @@ const expandable = computed(
   z-index: 2;
   border: none;
   background: transparent;
-  color: var(--accent);
+  color: var(--accent-text);
   cursor: pointer;
   font-size: 0.78rem;
   padding: 0.15rem 0.3rem;

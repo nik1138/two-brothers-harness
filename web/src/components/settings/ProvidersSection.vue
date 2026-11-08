@@ -1296,7 +1296,7 @@ async function submitAdd(): Promise<void> {
 
 .provider-row.is-open {
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .provider-row:focus-visible {
@@ -1431,7 +1431,7 @@ async function submitAdd(): Promise<void> {
 }
 
 .provider-badge.is-role {
-  color: var(--accent);
+  color: var(--accent-text);
   background: var(--accent-soft);
   border-color: transparent;
 }
@@ -1609,7 +1609,7 @@ async function submitAdd(): Promise<void> {
   font: inherit;
   font-size: 0.78rem;
   font-weight: 600;
-  color: var(--accent);
+  color: var(--accent-text);
   text-decoration: underline;
   cursor: pointer;
   background: none;

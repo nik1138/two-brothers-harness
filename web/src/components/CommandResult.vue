@@ -180,7 +180,7 @@ onUnmounted(() => {
 .cmd-toggle {
   border: none;
   background: transparent;
-  color: var(--accent);
+  color: var(--accent-text);
   cursor: pointer;
   font-size: 0.78rem;
   padding: 0.15rem 0.3rem;

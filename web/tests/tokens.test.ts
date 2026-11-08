@@ -13,7 +13,10 @@
 //   4. canonical radius sizes and spacing-scale steps are tokens in the
 //      migrated sheets (the mechanical migration contract);
 //   5. the spacing scale, type/motion/radius/focus tokens exist where they
-//      belong, and theme.ts maps the documented naive-ui colours to tokens.
+//      belong, and theme.ts maps the documented naive-ui colours to tokens;
+//   6. every accent theme overrides the same accent/focus/selected token set in
+//      the light and both dark blocks, without growing the token inventory; the
+//      text-only accent token keeps AA contrast on the dark surfaces it sits on.
 
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -145,7 +148,10 @@ const DARK_PINNED = declarations(pinnedDark.body)
 /** Every custom property the token sheet defines, anywhere. */
 const ALL_TOKENS = new Set<string>()
 for (const block of tokenBlocks) {
-  for (const name of declarations(block.body).keys()) ALL_TOKENS.add(name)
+  // An at-rule body (the media query) already contains its nested blocks, so a
+  // token appears more than once there by design; plain rule bodies stay strict.
+  const atRule = block.prelude.startsWith('@')
+  for (const name of declarations(block.body, !atRule).keys()) ALL_TOKENS.add(name)
   for (const inner of blocks(block.body)) {
     for (const name of declarations(inner.body).keys()) ALL_TOKENS.add(name)
   }
@@ -174,6 +180,7 @@ const CORE_COLOUR_TOKENS = [
   '--accent-hover',
   '--accent-pressed',
   '--accent-soft',
+  '--accent-text',
   '--senior',
   '--junior',
   '--operator',
@@ -244,6 +251,25 @@ const SPACING_SCALE = [
   '--space-6',
   '--space-7',
   '--space-8',
+] as const
+
+/** The accent-theme variant names the token sheet must define. */
+const ACCENT_VARIANT_NAMES = ['violet', 'teal', 'amber'] as const
+
+/**
+ * The only tokens an accent theme may (and must) override: the accent family,
+ * the focus ring/border and the selected-surface tint. Role identity colours,
+ * intent colours, surfaces and everything else keep their values.
+ */
+const ACCENT_VARIANT_TOKENS = [
+  '--accent',
+  '--accent-hover',
+  '--accent-pressed',
+  '--accent-soft',
+  '--accent-text',
+  '--focus-ring',
+  '--border-focus',
+  '--surface-highlight',
 ] as const
 
 test('token layer: :root defines the scheme-independent core once', () => {
@@ -429,6 +455,191 @@ test('token layer: naive theme overrides stay mapped to the colour tokens', () =
   assert.equal(darkCommon.popoverColor?.toLowerCase(), DARK_PINNED.get('--surface-raised'))
   const lightCommon = themeOverrides.common as unknown as Record<string, string>
   assert.equal(lightCommon.popoverColor?.toLowerCase(), LIGHT.get('--surface-panel'))
+})
+
+// --- accent contrast helpers -------------------------------------------------
+
+/** WCAG relative luminance for a 6-digit hex colour (throws on other shapes). */
+function relativeLuminance(hex: string): number {
+  const match = /^#([0-9a-f]{6})$/i.exec(hex.trim())
+  assert.ok(match, `expected a 6-digit hex colour, got ${String(hex)}`)
+  const value = Number.parseInt(match[1]!, 16)
+  const [r, g, b] = [(value >> 16) & 0xff, (value >> 8) & 0xff, value & 0xff].map((channel) => {
+    const c = channel / 255
+    return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4
+  })
+  return 0.2126 * r! + 0.7152 * g! + 0.0722 * b!
+}
+
+/** WCAG contrast ratio between two hex colours. */
+function contrastRatio(a: string, b: string): number {
+  const la = relativeLuminance(a)
+  const lb = relativeLuminance(b)
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05)
+}
+
+/** Dark surfaces the accent-as-text classes actually sit on. */
+const DARK_TEXT_SURFACES = [
+  '--surface-canvas',
+  '--surface-panel',
+  '--surface-raised',
+  '--surface-sunken',
+  '--surface-hover',
+  '--surface-active',
+] as const
+
+/** WCAG AA for normal-size text. */
+const ACCENT_TEXT_MIN_CONTRAST = 4.5
+
+test('token layer: accent variants override the same accent/focus/selected set in both schemes', () => {
+  const sortedEntries = (map: Map<string, string>): Record<string, string> =>
+    Object.fromEntries([...map.entries()].sort(([a], [b]) => a.localeCompare(b)))
+  const expectedKeys = [...ACCENT_VARIANT_TOKENS].sort()
+  const variantNames = tokenBlocks
+    .map((block) => /^:root\[data-accent='([a-z]+)'\]$/.exec(block.prelude)?.[1])
+    .filter((name): name is string => name !== undefined)
+    .sort()
+  assert.deepEqual(
+    variantNames,
+    [...ACCENT_VARIANT_NAMES].sort(),
+    'exactly the documented accent variants must be defined',
+  )
+
+  for (const name of ACCENT_VARIANT_NAMES) {
+    const light = declarations(
+      tokenBlocks.find((block) => block.prelude === `:root[data-accent='${name}']`)!.body,
+    )
+    const mediaBlock = blocks(mediaDark!.body).find(
+      (block) => block.prelude === `:root:not([data-theme='light'])[data-accent='${name}']`,
+    )
+    assert.ok(mediaBlock, `the dark media block must define the ${name} accent`)
+    const media = declarations(mediaBlock.body)
+    const pinned = declarations(
+      tokenBlocks.find(
+        (block) => block.prelude === `:root[data-theme='dark'][data-accent='${name}']`,
+      )!.body,
+    )
+
+    for (const [label, palette] of [
+      ['light', light],
+      ['dark (media)', media],
+      ['dark (pinned)', pinned],
+    ] as const) {
+      assert.deepEqual(
+        [...palette.keys()].sort(),
+        expectedKeys,
+        `${label} ${name}: an accent theme may only override the documented accent/focus/selected tokens`,
+      )
+      for (const token of ACCENT_VARIANT_TOKENS) {
+        assert.ok(
+          LIGHT.has(token),
+          `${token} must stay an existing token — accent themes may not grow the inventory`,
+        )
+      }
+    }
+    assert.deepEqual(
+      sortedEntries(media),
+      sortedEntries(pinned),
+      `the dark ${name} accent must be identical in the media and pinned blocks`,
+    )
+    // Text-only accent token: light equals the variant accent (AA on light
+    // surfaces); dark is a lightened value that clears AA on every dark surface
+    // the accent-as-text classes sit on, including the variant's own soft and
+    // selected-surface tints.
+    assert.equal(
+      light.get('--accent-text'),
+      light.get('--accent'),
+      `${name}: the light --accent-text must equal the variant accent`,
+    )
+    assert.notEqual(
+      media.get('--accent-text'),
+      media.get('--accent'),
+      `${name}: the dark --accent-text must be lightened past the fill accent`,
+    )
+    assert.equal(
+      media.get('--accent-text'),
+      pinned.get('--accent-text'),
+      `${name}: both dark blocks must agree on --accent-text`,
+    )
+    const accentText = pinned.get('--accent-text')!
+    const darkSurfaces: Array<[string, string]> = [
+      ...DARK_TEXT_SURFACES.map(
+        (token) => [token, DARK_PINNED.get(token)!] as [string, string],
+      ),
+      ['--accent-soft', pinned.get('--accent-soft')!],
+      ['--surface-highlight', pinned.get('--surface-highlight')!],
+    ]
+    for (const [surface, background] of darkSurfaces) {
+      const ratio = contrastRatio(accentText, background)
+      assert.ok(
+        ratio >= ACCENT_TEXT_MIN_CONTRAST,
+        `${name}: dark --accent-text on ${surface} is ${ratio.toFixed(2)}:1 ` +
+          `(WCAG AA needs ${ACCENT_TEXT_MIN_CONTRAST}:1)`,
+      )
+    }
+    assert.notEqual(
+      light.get('--accent'),
+      LIGHT.get('--accent'),
+      `${name} must change the default accent in light`,
+    )
+    assert.notEqual(
+      media.get('--accent'),
+      DARK_MEDIA.get('--accent'),
+      `${name} must change the default accent in dark`,
+    )
+    // Role identity colours are deliberately not themable.
+    for (const roleToken of ['--senior', '--junior', '--operator']) {
+      assert.equal(
+        light.has(roleToken) || media.has(roleToken) || pinned.has(roleToken),
+        false,
+        `${roleToken} is role identity and must not follow the accent theme`,
+      )
+    }
+  }
+
+  // Blue is the default `:root` palette and needs no override block.
+  assert.equal(
+    tokenBlocks.some((block) => block.prelude === ":root[data-accent='blue']"),
+    false,
+    "the default blue accent must stay the base :root values (no override block)",
+  )
+})
+
+test('token layer: the base blue accent text also clears AA on dark surfaces', () => {
+  assert.ok(LIGHT.has('--accent-text'), 'the light block must define --accent-text')
+  assert.ok(DARK_MEDIA.has('--accent-text'), 'the dark media block must define --accent-text')
+  assert.ok(DARK_PINNED.has('--accent-text'), 'the dark pinned block must define --accent-text')
+  assert.equal(LIGHT.get('--accent-text'), LIGHT.get('--accent'), 'light --accent-text is the accent')
+  assert.notEqual(
+    DARK_PINNED.get('--accent-text'),
+    DARK_PINNED.get('--accent'),
+    'dark --accent-text is lightened past the fill accent',
+  )
+  assert.equal(
+    DARK_MEDIA.get('--accent-text'),
+    DARK_PINNED.get('--accent-text'),
+    'both dark blocks must agree on the base --accent-text',
+  )
+  const accentText = DARK_PINNED.get('--accent-text')!
+  const darkSurfaces: Array<[string, string]> = [
+    ...DARK_TEXT_SURFACES.map((token) => [token, DARK_PINNED.get(token)!] as [string, string]),
+    ['--accent-soft', DARK_PINNED.get('--accent-soft')!],
+    ['--surface-highlight', DARK_PINNED.get('--surface-highlight')!],
+  ]
+  for (const [surface, background] of darkSurfaces) {
+    const ratio = contrastRatio(accentText, background)
+    assert.ok(
+      ratio >= ACCENT_TEXT_MIN_CONTRAST,
+      `base dark --accent-text on ${surface} is ${ratio.toFixed(2)}:1 ` +
+        `(WCAG AA needs ${ACCENT_TEXT_MIN_CONTRAST}:1)`,
+    )
+  }
+})
+
+test('token layer: the token inventory is the documented 94 tokens', () => {
+  // 93 shared tokens + the --accent-text AA companion. Adding a token means
+  // updating this expectation and the layer docs deliberately.
+  assert.equal(ALL_TOKENS.size, 94, 'the token inventory must stay at the documented size')
 })
 
 test('token layer: diff chrome tokens freeze the intent colours they replaced', () => {

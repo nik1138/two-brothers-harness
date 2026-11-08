@@ -11,8 +11,8 @@ import {
 import type { ThemeMode } from './themeMode'
 import { applyDensityAttribute, readDensity, saveDensity } from './density'
 import type { Density } from './density'
-import { readUiPrefs, saveUiPrefs } from './uiPrefs'
-import type { UiPrefs } from './uiPrefs'
+import { applyAccentAttribute, readUiPrefs, saveUiPrefs } from './uiPrefs'
+import type { AccentTheme, UiPrefs } from './uiPrefs'
 import {
   ApiError,
   answerRunApproval,
@@ -576,6 +576,27 @@ function setShowPromptAudits(next: boolean): void {
   if (uiPrefs.value.showPromptAudits === next) return
   uiPrefs.value = saveUiPrefs({ showPromptAudits: next })
 }
+
+// -- accent theme -------------------------------------------------------------
+// Blue (the :root palette) or a violet/teal/amber variant from Settings →
+// Appearance. The choice is persisted beside the other UI preferences and
+// applied as `data-accent` on <html>; tokens.css owns every variant value.
+const accent = computed(() => uiPrefs.value.accent)
+
+function syncAccent(): void {
+  applyAccentAttribute(uiPrefs.value.accent)
+}
+
+function setAccent(next: AccentTheme): void {
+  if (uiPrefs.value.accent !== next) {
+    uiPrefs.value = saveUiPrefs({ accent: next })
+  }
+  // always re-apply: a stale attribute (e.g. another tab) self-heals on use
+  syncAccent()
+}
+
+// apply before the first paint, like the theme/density attributes below
+syncAccent()
 
 /** Density is exposed from the palette and from Settings → Appearance; the
  * hint marks the active mode. */
@@ -2277,11 +2298,13 @@ onUnmounted(() => {
       v-if="settingsOpen"
       :theme-mode="themeMode"
       :density="density"
+      :accent="accent"
       :show-prompt-audits="showPromptAudits"
       @close="settingsOpen = false"
       @saved="onSettingsSaved"
       @theme-change="onThemeChange"
       @density-change="setDensity"
+      @accent-change="setAccent"
       @show-prompt-audits-change="setShowPromptAudits"
     />
     <WorkspaceDialog v-if="workspaceDialogOpen" @close="onWorkspaceDialogClose" />

@@ -282,7 +282,7 @@ function onKeydown(e: KeyboardEvent) {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .approval-status {
@@ -294,7 +294,7 @@ function onKeydown(e: KeyboardEvent) {
 
 .approval-waiting {
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .approval-allowed {
@@ -360,7 +360,7 @@ function onKeydown(e: KeyboardEvent) {
   font-size: 0.78rem;
   font-weight: 600;
   text-align: left;
-  color: var(--accent);
+  color: var(--accent-text);
   background: transparent;
   border: 0;
   cursor: pointer;

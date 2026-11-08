@@ -17,6 +17,8 @@ import { applyThemeAttribute, readThemeMode, resolveDark, saveThemeMode } from '
 import type { ThemeMode } from '../themeMode'
 import { applyDensityAttribute, readDensity, saveDensity } from '../density'
 import type { Density } from '../density'
+import { applyAccentAttribute, readUiPrefs, saveUiPrefs } from '../uiPrefs'
+import type { AccentTheme } from '../uiPrefs'
 import ModelsRolesSection from './settings/ModelsRolesSection.vue'
 import ProvidersSection from './settings/ProvidersSection.vue'
 import PluginsSection from './settings/PluginsSection.vue'
@@ -37,6 +39,7 @@ import type { ApprovalMode } from '../types'
 const props = defineProps<{
   themeMode?: ThemeMode
   density?: Density
+  accent?: AccentTheme
   showPromptAudits?: boolean
 }>()
 
@@ -45,6 +48,7 @@ const emit = defineEmits<{
   saved: []
   'theme-change': [ThemeMode]
   'density-change': [Density]
+  'accent-change': [AccentTheme]
   'show-prompt-audits-change': [boolean]
 }>()
 
@@ -221,6 +225,22 @@ function onDensityChange(density: Density) {
     fallbackDensity.value = density
   }
   emit('density-change', density)
+}
+
+// -- accent theme ---------------------------------------------------------------
+
+/** Mirror used only while no `accent` prop is bound (standalone mount). */
+const fallbackAccent = ref<AccentTheme>(readUiPrefs().accent)
+const activeAccent = computed(() => props.accent ?? fallbackAccent.value)
+
+function onAccentChange(accent: AccentTheme) {
+  if (props.accent === undefined) {
+    // No host binding yet: persist and apply locally, like the other fallbacks.
+    saveUiPrefs({ accent })
+    applyAccentAttribute(accent)
+    fallbackAccent.value = accent
+  }
+  emit('accent-change', accent)
 }
 
 // -- data --------------------------------------------------------------------
@@ -590,8 +610,10 @@ async function save() {
               <AppearanceSection
                 :mode="activeTheme"
                 :density="activeDensity"
+                :accent="activeAccent"
                 @change="onThemeChange"
                 @density-change="onDensityChange"
+                @accent-change="onAccentChange"
               />
             </div>
 

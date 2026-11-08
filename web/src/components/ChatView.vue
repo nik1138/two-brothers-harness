@@ -1540,7 +1540,7 @@ watch(
 .find-btn-active {
   background: var(--accent-soft);
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-text);
   font-weight: 600;
 }
 
@@ -1745,7 +1745,7 @@ watch(
 }
 
 .md-body .body-link {
-  color: var(--accent);
+  color: var(--accent-text);
   text-decoration: underline;
   overflow-wrap: anywhere;
 }

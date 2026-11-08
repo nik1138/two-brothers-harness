@@ -147,7 +147,7 @@ const toggleLabel = computed(() => (open.value ? 'Hide prompt' : 'Show prompt'))
 .audit-toggle {
   border: none;
   background: transparent;
-  color: var(--accent);
+  color: var(--accent-text);
   cursor: pointer;
   font-size: 0.72rem;
   padding: 0.1rem 0.3rem;

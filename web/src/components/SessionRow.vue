@@ -526,7 +526,7 @@ onUnmounted(() => {
 }
 
 .session-status.tone-accent {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .status-dot {

@@ -715,7 +715,7 @@ onMounted(() => {
 
 .wsf-recent.is-current {
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .wsf-recent:disabled {
@@ -731,7 +731,7 @@ onMounted(() => {
 }
 
 .wsf-recent.is-current .wsf-recent-icon {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .wsf-recent-name {
@@ -904,7 +904,7 @@ onMounted(() => {
 }
 
 .wsf-row.is-selected .wsf-row-icon {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .wsf-entry-name {
@@ -1020,7 +1020,7 @@ onMounted(() => {
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: 0.76rem;
   cursor: pointer;
 }

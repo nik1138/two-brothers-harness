@@ -166,7 +166,7 @@ const hasCommands = computed(
 }
 
 .help-badge.is-action {
-  color: var(--accent);
+  color: var(--accent-text);
   background: var(--accent-soft);
 }
 

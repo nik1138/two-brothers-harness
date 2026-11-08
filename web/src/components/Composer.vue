@@ -1963,7 +1963,7 @@ onBeforeUnmount(() => {
 }
 
 .route-role.is-senior {
-  color: var(--senior, var(--accent));
+  color: var(--senior, var(--accent-text));
 }
 
 .route-role.is-junior {
@@ -2097,7 +2097,7 @@ onBeforeUnmount(() => {
   font-weight: 650;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--accent);
+  color: var(--accent-text);
   background: var(--accent-soft);
   border-radius: var(--radius-pill);
 }
@@ -2286,7 +2286,7 @@ onBeforeUnmount(() => {
   font: inherit;
   font-size: 0.8rem;
   font-weight: 600;
-  color: var(--accent);
+  color: var(--accent-text);
   text-align: left;
   background: transparent;
   border: none;
