@@ -93,3 +93,4 @@ import "./approvalshellcaution.test.ts";
 import "./thinkingpersist.test.ts";
 import "./tuireasoningreplay.test.ts";
 import "./thinkingpassback.test.ts";
+import "./clidocs.test.ts";
