@@ -217,7 +217,9 @@ the same hero appears inside a selected session that has no transcript yet.
    `node dist/cli.js models --base-url <url>`. Settings → **Appearance** sets
    the theme and the Comfortable/Compact density for this device, and picks
    the accent theme (Blue default, or Violet/Teal/Amber) — the accent applies
-   immediately and is remembered for the next visit.
+   immediately and is remembered for the next visit. Settings → **Keyboard**
+   rebinds the palette, find and shortcut-reference chords on this device
+   (Ctrl and ⌘ count as the same modifier; every other shortcut stays fixed).
 3. **Send a task** in `work` mode. The run proceeds in the background; the
    chat updates live over SSE — a folded **Thinking** row (reasoning) and the
    **Response** block stream in as the models generate, then resolve into the

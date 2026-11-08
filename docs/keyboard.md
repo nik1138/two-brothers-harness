@@ -232,6 +232,22 @@ session.
   while open and restore it to their trigger on close. The first Tab stop is
   the Skip to composer link; `Enter` moves focus into the task box.
 
+### Rebinding the three global chords
+
+Settings → **Keyboard** rebinds three device-local chords: the command palette
+(default `Ctrl/⌘ K`), find in the conversation (default `Ctrl/⌘ F`) and this
+shortcut reference (default `Ctrl/⌘ /`). Ctrl and ⌘ are treated as the same
+modifier — labels show your platform's key — so one binding works across
+devices. A chord needs `Ctrl/⌘` plus one printable key; duplicates across the
+three actions, `Alt` combinations, plain keys and chords the browser reserves
+(`Ctrl/⌘` + `L`/`W`/`T`/`N`/`R`/`Q`, plus their Shift variants) are refused
+inline and not saved. A Change button enters capture mode (announced through
+`role=status`); Escape cancels the capture without closing Settings, and
+conflicts show a `role=alert` message while capture stays active. `?` stays a
+fixed alias for the shortcut reference, and every other shortcut in the tables
+above is fixed. The choice is stored in this browser only
+(`two-brothers.keybindings.v1`); `Reset all to defaults` restores the defaults.
+
 ## Terminal UI (TUI)
 
 `tui --help` prints the same lines, and the help overlay and palette are built

@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Configurable web key bindings (first slice)** (wave 16): the three
+  modifier-based global chords — command palette (default Ctrl/⌘+K), find in
+  the conversation (default Ctrl/⌘+F) and the shortcut reference (default
+  Ctrl/⌘+/, with plain `?` kept as a fixed alias) — are rebindable per device
+  through Settings → Keyboard. A pure module (`web/src/keybindings.ts`) owns
+  the structured binding model (one platform "Mod": Ctrl outside macOS, ⌘ on
+  macOS; matching accepts either so one binding travels), validation (Mod plus
+  one printable key; duplicate chords, Alt combos, plain keys and documented
+  browser-reserved chords refused with inline conflict copy), a versioned,
+  bounded, injectable fail-soft store (`two-brothers.keybindings.v1`,
+  JSON-duplicate-aware repair back to defaults), event parsing/matching, and
+  platform-aware label rendering. One reactive keybindings ref in `App.vue`
+  drives the palette/find/help handlers (existing guards preserved), the header
+  palette-chip label, `ChatView`'s find handler, the Settings dialog and the
+  `/help` overlay, which now renders the current chords and badges only the
+  three rebindable entries while noting that every other shortcut is fixed.
+  Settings → Keyboard uses native Change/Reset buttons and a window-capture
+  keydown handler (announced via `role=status`; conflicts via `role=alert`;
+  Escape cancels a capture without closing the dialog; per-row and global
+  reset) with semantic tokens only. Tests: `web/tests/keybindings.test.ts`
+  (13) + the hermetic browser scenario `keybindings` (offline suite 17→18).
+  Files: `web/src/keybindings.ts`, `web/src/components/settings/KeyboardSection.vue`,
+  `web/src/App.vue`, `web/src/components/ChatView.vue`,
+  `web/src/components/ShortcutHelpDialog.vue`, `web/src/shortcuts.ts`,
+  `e2e/run.mjs`. The remaining key-binding surfaces (composer/picker/fixed
+  keys, TUI rebinding) stay open in `docs/backlog.md`.
 - **Operator-selectable web accent themes** (wave 13): Settings → Appearance
   gains an accessible native radio group for the web app's accent — Blue
   (default, the previous look) plus Violet, Teal and Amber. Each variant

@@ -1053,8 +1053,33 @@ Design anchors that already exist:
   value (byte-identical revert). Token inventory unchanged at 94; web suite
   338.
 
+## Shipped 2026-11-08 (wave 16: configurable web key bindings, first slice)
+
+- **Configurable web key bindings (three global chords)** — Settings → Keyboard
+  rebinds the command palette (default Ctrl/⌘+K), find in the conversation
+  (default Ctrl/⌘+F) and the shortcut reference (default Ctrl/⌘+/, `?` stays a
+  fixed alias), persisted per device in a versioned bounded fail-soft store
+  (`two-brothers.keybindings.v1`). A pure module owns the binding model (one
+  platform Mod; Ctrl and ⌘ match each other so one binding travels), strict
+  validation (Mod + one printable key; duplicate/Alt/plain/browser-reserved
+  chords refused inline), event parsing/matching and platform-aware labels.
+  One reactive keybindings ref drives App/ChatView/Settings/`/help` (dynamic
+  current chords, rebindable badges, fixed-keys note; existing guards kept).
+  The capture UI uses native buttons, `role=status` announcements, inline
+  `role=alert` conflicts, per-row/global reset, and Escape cancels capture
+  without closing Settings. Tests: `web/tests/keybindings.test.ts` (13) and
+  the hermetic browser scenario `keybindings` (offline suite 18). All other
+  shortcuts stay fixed in this slice.
+
 ## Open items (deferred)
 
+- **Remaining key-binding surfaces** — wave 16 shipped the three modifier
+  global chords (palette/find/shortcut-reference) plus the Settings capture UI.
+  Still fixed by design/authored elsewhere: composer keys (send/newline/recall,
+  which are also IME- and picker-sensitive), picker navigation, dual-Escape
+  stop, `?`, and the whole TUI keymap; extending rebinding there needs a
+  per-surface conflict model and (for the TUI) an on-disk binding profile.
+  Treat as the next slice of the same epic.
 - **WAN fault / long-soak coverage (manual)** — WAN latency/load and
   real-provider fault injection are not covered by the offline gates, and long
   soaks are an operator choice; keep those manual (they need a real endpoint

@@ -502,6 +502,26 @@ tests) documents the surfaces that host accent text and excludes
 one is introduced). Web suite 338 (tokens 14, uiPrefs 9); package suite and
 browser scenarios unchanged this wave.
 
+Wave 16 ships the first slice of **configurable key bindings** (web): the
+three modifier global chords — command palette (default Ctrl/⌘+K), find in
+the conversation (default Ctrl/⌘+F) and the shortcut reference (default
+Ctrl/⌘+/, with plain `?` kept as a fixed alias) — are rebindable per device
+through Settings → Keyboard. A pure module (`web/src/keybindings.ts`) owns the
+binding model (one platform "Mod"), validation (Mod plus one printable key;
+duplicate chords, Alt combos, plain keys and documented browser-reserved
+chords refused), a versioned bounded fail-soft store
+(`two-brothers.keybindings.v1`), event parsing/matching (either Ctrl or Meta
+matches "Mod"; labels follow the detected platform) and label rendering;
+App.vue/ChatView/Settings/`/help` share one reactive keybindings ref, so a
+rebind applies immediately and the help overlay renders the current chords
+(rebindable entries badged, fixed keys noted). Settings → Keyboard uses a
+window-capture key handler with `role=status` announcements, inline
+`role=alert` conflicts, per-row/global reset, and Escape cancels a capture
+without closing the dialog. All other shortcuts stay fixed. Web suite 350
+(keybindings 13 new); browser suite 18 offline scenarios. The remaining
+key-binding surfaces (composer/picker/fixed keys, TUI rebinding) stay open in
+`docs/backlog.md`.
+
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
 subprocess against the mock provider — **17 scenarios**: consult, chat-repl,
@@ -711,9 +731,19 @@ dark (the dark accent text clears WCAG AA 4.5:1 against the panel surface), a
 native naive-ui primary control (the Settings primary action) follows the
 accent in light and dark and returns to the base blue after restoring it, the
 choice survives a reload, restoring Blue returns the base palette, and the
-theme/density cards keep their count and measurements). On the canonical run
-that is
-**17 PASS, 0 FAIL, 1 SKIP** (the opt-in `real` scenario). The queue dock and the session-scope approval decisions
+theme/density cards keep their count and measurements), plus `keybindings`
+(Settings → Keyboard rebinds the three modifier global chords: capture
+Control+Shift+P for the command palette via real key events, the row and the
+header chip update and the choice is persisted in the versioned
+`two-brothers.keybindings.v1` document; a conflicting binding is rejected with
+an inline `role=alert` message and is not saved; Escape cancels capture
+without closing Settings; the rebound chord opens the palette while the old
+Ctrl+K no longer does; `?` still opens `/help`, whose palette row shows the
+custom chord and a rebindable badge while Esc/Esc stays fixed; after a reload
+the custom chord is live and the old one dead; Reset all restores Ctrl+K and
+the defaults and the custom chord stops working; console guard clean).
+On the canonical run that is
+**18 PASS, 0 FAIL, 1 SKIP** (the opt-in `real` scenario). The queue dock and the session-scope approval decisions
 remain covered by the web unit suites, not by separate browser scenarios. The
 default suite is fully offline; the
 opt-in `real` scenario (below) reports `SKIP` unless an endpoint is configured.
