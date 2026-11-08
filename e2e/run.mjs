@@ -45,6 +45,13 @@
 //                  no accidental session selection/filter change, plain clicks
 //                  still collapsing/selecting, and the menu Move up/down
 //                  fallback still working
+//   reasoning-replay scripted fixture: a marked task is answered with SSE
+//                  `delta.reasoning_content` chunks, so the backend persists
+//                  bounded `reasoning` runtime events; after a reload the web
+//                  replays them as collapsed "Thinking · replayed" rows —
+//                  expandable plain text (literal HTML stays escaped text), the
+//                  over-long record clipped with the honest marker, and a plain
+//                  reply (no reasoning events) shows no row at all
 //   real           opt-in (TWO_BROTHERS_REAL_E2E=1): real models via LM Studio
 //
 // Backend: every scenario runs against the TypeScript server
@@ -358,7 +365,8 @@ function tsEnv(overrides = {}) {
  *                          fixtures/scripted-server.mjs is an
  *                          OpenAI-compatible model server the backend talks to
  *                          (provider=openai)
- *   scenario fixture scenario name (approval | slow | plan | folding)
+ *   scenario fixture scenario name (approval | slow | plan | folding | delete |
+ *            reasoning)
  *   lingerMs optional --linger-ms forwarded to the fixture (slow's first
  *            answer delay; folding's second-run deliverable delay)
  * The returned handle may carry a `modelServer` (fixture runs) that
@@ -2391,6 +2399,263 @@ async function scenarioWorkspaceDrag(runner) {
   }
 }
 
+// -- scenario: persisted reasoning replay ----------------------------------------------
+//
+// The backend persists the model's streamed thinking as ONE bounded `reasoning`
+// runtime event per provider call (runtime sidecar); the web never maps a live
+// reasoning event into the transcript, it replays those persisted records as
+// collapsed "Thinking · replayed" disclosure rows on a session load.
+//
+// This scenario drives the real streaming path: the web always requests
+// `stream_tokens: true`, so the backend's provider calls opt into streaming and
+// the scripted fixture answers the marked task with genuine SSE
+// `delta.reasoning_content` chunks before the reply content. It then verifies
+// the sidecar records via the API, reloads the page and asserts the replay
+// contract: rows collapsed by default, an expanded row is plain sanitized text
+// (literal HTML-looking reasoning never becomes markup), the over-long record is
+// clipped with the honest marker, and a plain (non-streaming) reply in the same
+// fixture process produces no replay row at all.
+
+async function scenarioReasoningReplay(runner) {
+  // Keep the prose markers in sync with fixtures/scripted-server.mjs.
+  const REASONING_SESSION = 'E2E reasoning replay session'
+  const PLAIN_SESSION = 'E2E plain reply session'
+  const REASONING_TASK = 'Reasoning replay: e2e-reasoning explain the decision'
+  const PLAIN_TASK = 'Plain reply: no scripted thinking should exist here'
+  const HTML_PROBE = 'window.__e2e_reasoning_pwned'
+  const LONG_HEAD = 'LONG_REASONING_HEAD'
+  const LONG_TAIL = 'LONG_REASONING_TAIL'
+  const CLIPPED_COPY = 'This reasoning was clipped for length.'
+  const be = await startBackend({ kind: 'fixture', scenario: 'reasoning' })
+  const { context, page, consoleGuard } = await newScenarioPage()
+
+  /** The persisted runtime sidecar events for one session title. */
+  const runtimeEventsOf = async (title) => {
+    const name = await sessionNameByTitle(be.base, title)
+    const response = await apiCall(
+      be.base,
+      'GET',
+      `/api/sessions/${encodeURIComponent(name)}/events`,
+    )
+    assert.equal(response.status, 200, `GET session runtime events -> HTTP ${response.status}`)
+    return response.json?.events ?? []
+  }
+
+  try {
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+
+    // -- 1. the marked task runs against the real SSE streaming path ----------
+    await createSession(page, REASONING_SESSION)
+    await sendTask(page, REASONING_TASK)
+    await waitForRunEnd(page)
+
+    const reasoningEvents = await waitFor(
+      async () => {
+        const events = (await runtimeEventsOf(REASONING_SESSION)).filter(
+          (event) => event.type === 'reasoning',
+        )
+        return events.length > 0 ? events : null
+      },
+      { desc: 'bounded reasoning runtime events in the session sidecar' },
+    )
+    // one record per provider call: consult, proposal, review, decision
+    assert.ok(
+      reasoningEvents.length >= 4,
+      `expected one reasoning record per node call, got ${reasoningEvents.length}`,
+    )
+    for (const event of reasoningEvents) {
+      assert.ok(
+        event.role === 'senior' || event.role === 'junior',
+        `reasoning record role: ${JSON.stringify(event.role)}`,
+      )
+      assert.equal(typeof event.kind, 'string', 'reasoning records must name the node kind')
+      assert.equal(typeof event.text, 'string', 'reasoning records must carry text')
+      assert.equal(
+        typeof event.truncated,
+        'boolean',
+        'reasoning records must carry the truncation flag',
+      )
+      assert.equal(typeof event.run_id, 'string', 'reasoning records must carry their run id')
+      assert.equal(typeof event.at, 'number', 'reasoning records must carry an epoch time')
+    }
+    // the streamed consult thinking was persisted and sanitized (ANSI + control
+    // bytes stripped by the backend; the HTML-looking text survives as text)
+    const consultReasoning = reasoningEvents.find((event) => event.kind === 'consult')
+    assert.ok(consultReasoning, 'no reasoning record for the senior consult call')
+    assert.equal(consultReasoning.role, 'senior')
+    assert.equal(consultReasoning.truncated, false, 'the short consult reasoning is not clipped')
+    assert.ok(
+      consultReasoning.text.includes(HTML_PROBE),
+      'the streamed reasoning text was not persisted',
+    )
+    assert.ok(!consultReasoning.text.includes('\u001b'), 'ANSI escapes must be stripped')
+    assert.ok(
+      !/[\u0000-\u0008\u000b-\u001f]/.test(consultReasoning.text),
+      'control bytes must be stripped',
+    )
+    // the over-long proposal thinking was bounded head+tail and flagged
+    const boundedReasoning = reasoningEvents.find((event) => event.kind === 'proposal')
+    assert.ok(boundedReasoning, 'no reasoning record for the junior proposal call')
+    assert.equal(boundedReasoning.role, 'junior')
+    assert.equal(
+      boundedReasoning.truncated,
+      true,
+      'the over-long reasoning must be flagged truncated',
+    )
+    assert.ok(
+      boundedReasoning.text.includes(LONG_HEAD) && boundedReasoning.text.includes(LONG_TAIL),
+      'the bounded record must keep its head and tail',
+    )
+    assert.match(
+      boundedReasoning.text,
+      /\[truncated \d+ chars\]/,
+      'the bounded record must carry the documented truncation marker',
+    )
+    assert.ok(
+      boundedReasoning.text.length <= 10_200,
+      `the persisted reasoning must stay bounded (got ${boundedReasoning.text.length} chars)`,
+    )
+
+    // -- 2. a plain reply (JSON fixture path, no thinking deltas) persists none
+    await createSession(page, PLAIN_SESSION)
+    await sendTask(page, PLAIN_TASK)
+    await waitForRunEnd(page)
+    const plainEvents = await waitFor(
+      async () => {
+        const events = await runtimeEventsOf(PLAIN_SESSION)
+        return events.some((event) => event.type === 'run_end') ? events : null
+      },
+      { desc: 'the plain session runtime sidecar to reach run_end' },
+    )
+    assert.equal(
+      plainEvents.filter((event) => event.type === 'reasoning').length,
+      0,
+      'a non-streaming/plain reply must persist no reasoning record',
+    )
+
+    // -- 3. reload: persisted records replay as collapsed disclosure rows -----
+    await page.reload()
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    const reasoningItem = page.locator('.session-item', { hasText: REASONING_SESSION }).first()
+    await reasoningItem.waitFor({ timeout: 10000 })
+    await reasoningItem.click()
+    await page.locator('.chat-scroll').waitFor({ state: 'visible' })
+    const rows = page.locator('.reasoning-row')
+    await waitFor(async () => (await rows.count()) === reasoningEvents.length, {
+      desc: `${reasoningEvents.length} replayed reasoning rows after the reload`,
+    })
+    for (let index = 0; index < reasoningEvents.length; index += 1) {
+      const row = rows.nth(index)
+      const head = row.locator('button.stream-thinking-head')
+      const label = (await row.locator('.stream-thinking-label').innerText())
+        .replace(/\s+/g, ' ')
+        .trim()
+      assert.ok(
+        label.startsWith('Thinking · replayed'),
+        `unexpected replayed-row label: ${label}`,
+      )
+      assert.match(label, /(Senior|Junior)$/, `the replayed row must name its role: ${label}`)
+      assert.equal(
+        await head.getAttribute('aria-expanded'),
+        'false',
+        'a replayed reasoning row starts collapsed',
+      )
+      const body = row.locator('.stream-thinking-body')
+      assert.equal(await body.isVisible(), false, 'a collapsed reasoning body is hidden')
+      assert.equal(
+        await body.getAttribute('id'),
+        await head.getAttribute('aria-controls'),
+        'the disclosure aria-controls must point at its body',
+      )
+    }
+
+    // locate the two scripted records by their distinctive text
+    const bodyTexts = []
+    for (let index = 0; index < reasoningEvents.length; index += 1) {
+      bodyTexts.push((await rows.nth(index).locator('.stream-thinking-body').textContent()) ?? '')
+    }
+    const htmlRowIndex = bodyTexts.findIndex((text) => text.includes(HTML_PROBE))
+    const clippedRowIndex = bodyTexts.findIndex((text) => text.includes(LONG_HEAD))
+    assert.ok(htmlRowIndex >= 0, 'no replayed row carries the persisted consult reasoning')
+    assert.ok(clippedRowIndex >= 0, 'no replayed row carries the bounded long reasoning')
+
+    // expanding is plain text only: Vue escapes the literal markup, no node or
+    // handler can be created by reasoning content
+    const htmlRow = rows.nth(htmlRowIndex)
+    assert.equal(
+      await htmlRow.locator('.stream-clipped').count(),
+      0,
+      'short reasoning is not marked clipped',
+    )
+    const htmlHead = htmlRow.locator('button.stream-thinking-head')
+    await htmlHead.click()
+    assert.equal(await htmlHead.getAttribute('aria-expanded'), 'true', 'the row expands')
+    const htmlBody = htmlRow.locator('.stream-thinking-body')
+    await htmlBody.waitFor({ state: 'visible' })
+    const htmlText = await htmlBody.innerText()
+    assert.ok(
+      htmlText.includes(HTML_PROBE),
+      `the expanded row must show the persisted reasoning: ${htmlText}`,
+    )
+    assert.ok(
+      htmlText.includes('<img src=x onerror='),
+      'HTML-looking reasoning must stay literal text',
+    )
+    const htmlMarkup = await htmlBody.evaluate((el) => el.innerHTML)
+    assert.ok(htmlMarkup.includes('&lt;img src=x'), 'the reasoning body must be escaped text')
+    assert.equal(await htmlRow.locator('img').count(), 0, 'reasoning must never create a DOM node')
+    assert.equal(
+      await page.evaluate(() => window.__e2e_reasoning_pwned ?? null),
+      null,
+      'no injected handler may run',
+    )
+
+    // the over-long record is clipped with the documented honest marker
+    const clippedRow = rows.nth(clippedRowIndex)
+    const clippedNote = clippedRow.locator('.stream-clipped')
+    await clippedNote.waitFor({ state: 'visible' })
+    assert.equal((await clippedNote.innerText()).trim(), CLIPPED_COPY)
+    const clippedHead = clippedRow.locator('button.stream-thinking-head')
+    await clippedHead.click()
+    assert.equal(await clippedHead.getAttribute('aria-expanded'), 'true')
+    const clippedBody = clippedRow.locator('.stream-thinking-body')
+    await clippedBody.waitFor({ state: 'visible' })
+    const clippedText = await clippedBody.innerText()
+    assert.ok(
+      clippedText.includes(LONG_HEAD) && clippedText.includes(LONG_TAIL),
+      'the replayed bounded text keeps its head and tail',
+    )
+    assert.match(
+      clippedText,
+      /\[truncated \d+ chars\]/,
+      'the replayed text carries the truncation marker',
+    )
+    assert.ok(
+      clippedText.length < 11_000,
+      `the replayed reasoning must stay bounded (got ${clippedText.length} chars)`,
+    )
+
+    // -- 4. a session without reasoning events renders no replay row ----------
+    const plainItem = page.locator('.session-item', { hasText: PLAIN_SESSION }).first()
+    await plainItem.click()
+    await waitFor(
+      async () => (await page.locator('.chat-title').innerText()).trim() === PLAIN_SESSION,
+      { desc: 'the plain session to load after the reload' },
+    )
+    await waitFor(async () => (await page.locator('.reasoning-row').count()) === 0, {
+      desc: 'no replayed reasoning row for a session without reasoning events',
+    })
+
+    consoleGuard.assertClean()
+    runner.pass('reasoning-replay')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(be.dir)
+  }
+}
+
 // -- scenario: real models (opt-in) ---------------------------------------------------
 
 async function scenarioReal(runner) {
@@ -2639,6 +2904,13 @@ async function main() {
           scenarioWorkspaceDrag(currentRunner)
         ),
       },
+      {
+        label: 'reasoning-replay',
+        run: () => (
+          (currentRunner = makeRunner('reasoning-replay')),
+          scenarioReasoningReplay(currentRunner)
+        ),
+      },
     ]
     blocks.push(...hermetic.filter((block) => scenarioSelected(block.label)))
     if (realEnabled && scenarioSelected('real')) {
@@ -2669,6 +2941,7 @@ async function main() {
       'composer-recall',
       'approval-reason',
       'workspace-drag',
+      'reasoning-replay',
       'real',
     ].filter(scenarioSelected)) {
       results.push({

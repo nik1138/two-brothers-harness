@@ -51,6 +51,15 @@
 //                                    approval request carries the documented
 //                                    DELETE_APPROVAL_REASON (the browser scenario
 //                                    asserts the card renders it verbatim)
+//                          reasoning: a task whose text carries the
+//                                    `e2e-reasoning` marker is answered with
+//                                    real SSE chat-completion chunks that stream
+//                                    `delta.reasoning_content` thinking before
+//                                    the reply content, so the harness' real
+//                                    streaming path persists bounded reasoning
+//                                    runtime events; a task without the marker
+//                                    keeps the historical non-streaming JSON
+//                                    reply (and persists no reasoning record)
 //   --senior-model NAME    default: e2e-senior
 //   --junior-model NAME    default: e2e-junior
 //   --linger-ms MS         slow: how long the senior's first answer takes
@@ -64,7 +73,10 @@
 // one, so multi-run scenarios need no hidden server state.
 //
 // Endpoints: GET /v1/models, POST /v1/chat/completions (OpenAI wire shape,
-// including tool_calls and usage). Everything is offline and deterministic.
+// including tool_calls and usage; the `reasoning` scenario answers a streaming
+// request (`stream: true`) with `text/event-stream` chunks and everything else
+// with the non-streaming JSON completion). Everything is offline and
+// deterministic.
 
 import http from 'node:http'
 
@@ -279,6 +291,67 @@ function foldingAlignMs() {
   return 1000 - (Date.now() % 1000) + 50
 }
 
+// -- reasoning-replay scenario -------------------------------------------------
+//
+// The browser scenario drives the real streaming path: the web app always asks
+// the backend for live token streaming (`stream_tokens: true`), the backend
+// therefore calls the provider with its thinking/text sinks, the provider sends
+// `stream: true`, and this fixture answers that request with genuine SSE
+// chunks. `delta.reasoning_content` is the OpenAI-compatible thinking side
+// channel the harness forwards to `ChatOptions.onThinkingDelta` and persists as
+// one bounded `reasoning` runtime event per provider call.
+//
+// The reasoning session is marked by a task containing `e2e-reasoning`; every
+// provider call in that run streams thinking (one distinct scripted text per
+// node kind). A task without the marker keeps the historical JSON reply, so the
+// same fixture process also proves that a non-streaming reply persists NO
+// reasoning record. Keep the prose markers in sync with ../run.mjs.
+
+const REASONING_MARKER = 'e2e-reasoning'
+
+/** SSE frames are small so the browser backend really consumes a delta stream. */
+const REASONING_CHUNK_CHARS = 256
+
+/**
+ * The senior consult call's thinking: includes an ANSI escape and a BEL control
+ * byte (both must be sanitized away by the backend) plus a literal HTML-looking
+ * string (which must survive only as text in the replayed row).
+ */
+const REASONING_HTML =
+  'Scripted consult reasoning: \u001b[31mANSI red\u001b[0m\u0007 and ' +
+  '<img src=x onerror="window.__e2e_reasoning_pwned=1"> stay literal text.'
+
+/**
+ * The junior proposal call's thinking: deliberately longer than the backend's
+ * 10 000-character cap, so the persisted record must be head+tail bounded and
+ * flagged truncated (the browser asserts the documented clipping marker).
+ * LONG_REASONING_HEAD/LONG_REASONING_TAIL are asserted by ../run.mjs.
+ */
+const REASONING_LONG = 'LONG_REASONING_HEAD ' + 'x'.repeat(12_000) + ' LONG_REASONING_TAIL'
+
+/** Review/decision nodes stream a short, clean thinking record. */
+const REASONING_SHORT = 'Weighing the scripted proposal before the senior decision.'
+
+/**
+ * The reasoning text this call should stream, by the node kind the reply
+ * answers (the same inference `decide()` already makes for the payload).
+ */
+function reasoningForKind(kind) {
+  if (kind === 'consult') return REASONING_HTML
+  if (kind === 'proposal') return REASONING_LONG
+  if (kind === 'review' || kind === 'decision') return REASONING_SHORT
+  return undefined
+}
+
+/** True when the rendered transcript carries an operator task with the marker. */
+function transcriptHasReasoning(messages) {
+  for (const message of messages) {
+    if (message.role !== 'user' || typeof message.content !== 'string') continue
+    if (message.content.includes(REASONING_MARKER)) return true
+  }
+  return false
+}
+
 /** One assistant reply carrying a single tool call. */
 function toolCall(name, args) {
   callCounter += 1
@@ -406,6 +479,13 @@ function decide(body) {
   if (OPTS.scenario === 'folding' && role === 'senior' && newTask) {
     reply.linger = Math.max(reply.linger ?? 0, foldingAlignMs())
   }
+  // reasoning-replay: attach the scripted thinking for this node kind. The HTTP
+  // layer streams replies that carry it as SSE `delta.reasoning_content`
+  // chunks; a task without the marker never gets one.
+  if (OPTS.scenario === 'reasoning' && transcriptHasReasoning(messages)) {
+    const reasoning = reasoningForKind(kind)
+    if (reasoning !== undefined) reply.reasoning = reasoning
+  }
   return reply
 }
 
@@ -431,6 +511,80 @@ function completionJson(model, decision) {
       prompt_tokens_details: { cached_tokens: 0 },
     },
   }
+}
+
+// -- streaming (reasoning-replay scenario) -------------------------------------
+
+/** One SSE frame in the OpenAI chat-completion chunk shape. */
+function streamFrame(model, delta, finishReason = null) {
+  return (
+    'data: ' +
+    JSON.stringify({
+      id: 'chatcmpl-e2e-stream',
+      object: 'chat.completion.chunk',
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [{ index: 0, delta, finish_reason: finishReason }],
+    }) +
+    '\n\n'
+  )
+}
+
+/** Split text into deterministic SSE-sized chunks (UTF-16 code units). */
+function chunksOf(text, size) {
+  const chunks = []
+  for (let at = 0; at < text.length; at += size) chunks.push(text.slice(at, at + size))
+  return chunks
+}
+
+/**
+ * Answer a streaming chat completion with real SSE: the scripted thinking as
+ * `delta.reasoning_content` chunks first, then the reply content (and tool
+ * calls), one usage chunk and `[DONE]`. The harness' OpenAI adapter reassembles
+ * exactly the JSON it would have received from the non-streaming endpoint, so
+ * the run behaves identically while the thinking side channel is populated.
+ */
+function sendStreamedCompletion(res, body, decision) {
+  const model = String(body.model ?? '')
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  })
+  for (const chunk of chunksOf(String(decision.reasoning), REASONING_CHUNK_CHARS)) {
+    res.write(streamFrame(model, { reasoning_content: chunk }))
+  }
+  for (const chunk of chunksOf(String(decision.content ?? ''), REASONING_CHUNK_CHARS)) {
+    res.write(streamFrame(model, { content: chunk }))
+  }
+  decision.toolCalls.forEach((call, index) => {
+    res.write(
+      streamFrame(model, {
+        tool_calls: [{ index, id: call.id, type: 'function', function: call.function }],
+      }),
+    )
+  })
+  res.write(streamFrame(model, {}, decision.toolCalls.length > 0 ? 'tool_calls' : 'stop'))
+  // A final usage-only chunk mirrors OpenAI's include_usage stream shape.
+  res.write(
+    'data: ' +
+      JSON.stringify({
+        id: 'chatcmpl-e2e-stream',
+        object: 'chat.completion.chunk',
+        created: Math.floor(Date.now() / 1000),
+        model,
+        choices: [],
+        usage: {
+          prompt_tokens: 10,
+          completion_tokens: 5,
+          total_tokens: 15,
+          prompt_tokens_details: { cached_tokens: 0 },
+        },
+      }) +
+      '\n\n',
+  )
+  res.write('data: [DONE]\n\n')
+  res.end()
 }
 
 function readJson(req) {
@@ -469,6 +623,14 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/v1/chat/completions') {
       const body = await readJson(req)
       const decision = decide(body)
+      // reasoning-replay: a streaming request whose scripted reply carries
+      // thinking text is answered with real SSE (thinking chunks first, then the
+      // content), so the harness' streaming path persists bounded reasoning
+      // runtime events. Everything else keeps the JSON reply.
+      if (body.stream === true && typeof decision.reasoning === 'string') {
+        sendStreamedCompletion(res, body, decision)
+        return
+      }
       const send = () => {
         if (res.writableEnded) return
         res.writeHead(200, { 'Content-Type': 'application/json' })

@@ -1,20 +1,25 @@
 # E2E fixtures
 
-The `approval-*`, `stop`, `folding` and `plan-dock` scenarios in `../run.mjs`
-need scripted, deterministic model responses. Every scenario runs against the
-TypeScript server (`packages/harness/dist/cli.js serve`). That server has no
+The `approval-*`, `stop`, `folding`, `plan-dock`, `approval-reason` and
+`reasoning-replay` scenarios in `../run.mjs` need scripted, deterministic model
+responses. Every scenario runs against the TypeScript server
+(`packages/harness/dist/cli.js serve`). That server has no
 responder-monkeypatching hook, so the fixture is a scripted
 **OpenAI-compatible model server**:
 
 ```
-node scripted-server.mjs --port P --scenario approval|slow|plan|folding|delete \
+node scripted-server.mjs --port P --scenario approval|slow|plan|folding|delete|reasoning \
   [--senior-model e2e-senior] [--junior-model e2e-junior] [--linger-ms 30000]
 ```
 
 Endpoints: `GET /v1/models`, `POST /v1/chat/completions` (queued,
 deterministic responses: a junior `workspace_write_file` tool call, then a
 deliverable after the tool result; a plain-text senior verification; fixed
-consult/delegation/proposal/review/decision payloads; per-call usage).
+consult/delegation/proposal/review/decision payloads; per-call usage). The
+`reasoning` scenario additionally answers a streaming request (`stream: true`)
+with real `text/event-stream` chat-completion chunks (`delta.reasoning_content`
+thinking first, then content, a usage chunk and `[DONE]`); every other request
+keeps the non-streaming JSON completion.
 
 Scenario scripts (all inferred from the rendered transcript, so multi-run
 scenarios need no hidden server state — a fresh task message after the previous
@@ -45,6 +50,15 @@ run's decision starts the next run):
   `approval-reason` scenario creates the target file before the run), then the
   deliverable after the operator decision; the request carries the product's
   documented `DELETE_APPROVAL_REASON`, which the approval card renders.
+- `reasoning` — a task whose text carries the `e2e-reasoning` marker is
+  answered with SSE `delta.reasoning_content` thinking chunks before the reply
+  content: the senior consult call streams thinking with an ANSI escape, a BEL
+  control byte and literal `<img onerror=…>` markup (must be sanitized and stay
+  text), the junior proposal call streams ~12 000 chars (must be head+tail
+  clipped by the backend), and review/decision stream a short clean record. A
+  task without the marker gets the historical JSON reply and therefore persists
+  no reasoning record — the browser scenario uses both sessions in one fixture
+  process to prove the "no events, no replayed row" case.
 
 `../run.mjs` starts it automatically next to the server, which is
 spawned as:
@@ -67,7 +81,12 @@ approval card; stop → "Run stopped" toast + no active run on `GET
 /api/runs`; folding → completed-run tool cards collapse into an
 `aria-expanded` summary that expands/collapses in place; plan-dock → the Plan
 dock counts/markers, its bounded "+N more" expand control and the
-"Plan updated"/"Plan cleared." announcements.
+"Plan updated"/"Plan cleared." announcements; reasoning-replay → the session
+runtime sidecar (via `GET /api/sessions/<name>/events`) carries bounded
+`reasoning` events, and after a reload the web replays them as collapsed
+"Thinking · replayed" rows whose expanded body is escaped plain text, with the
+documented clipping marker on the over-long record and no row at all for a
+session without reasoning events.
 
 While `packages/harness/dist/cli.js` does not exist (build it with
 `cd packages/harness && npm run build`), every scenario is reported as
