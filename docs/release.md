@@ -19,23 +19,35 @@ promoted below.
 
 Run from a clean `main` on Windows with Git Bash first on `PATH` and
 `TEMP`/`TMP` pointing at the checkout's `.tmp` (the documented Vite
-workaround):
+workaround).
 
 1. `git status --short` is empty and `git log -1 --oneline` is the intended
    commit.
-2. Root `npm run check` passes (pinned deps + runtime-dependency list).
-3. `scripts/smoke-test.ps1` ends with `SMOKE TEST: PASS` (package
-   typecheck/build/tests/dist selftest/mock run/CLI E2E/real-socket faults,
-   reference selftest, web tests/build).
-4. `node scripts/tarball-smoke.mjs` prints `TARBALL SMOKE: PASS (7/7)` (it is
-   robust to `TEMP` inside the checkout) and
-   `cd packages/harness && npm run pack:check` exits 0.
-5. `scripts/e2e-test.ps1` finishes **18 PASS / 0 FAIL / 1 SKIP** (the opt-in
-   `real` scenario) after the web build; the packaged-web freshness guard
-   auto-syncs the copy.
-6. Push and confirm CI green on the ubuntu Node 22/24 matrix and the
+2. Run the one-command rehearsal from the repo root (Windows PowerShell 5.1;
+   it prepends Git Bash and points `TEMP`/`TMP` at the checkout's `.tmp`
+   itself):
+
+   ```powershell
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/release-rehearsal.ps1
+   ```
+
+   It runs the checklist below in order, prints a PASS/FAIL line with timings
+   per step plus a summary table, and ends with
+   `RELEASE REHEARSAL: PASS (7/7)`; any child non-zero exit stops it with the
+   captured output tail and exit 1: clean tree → candidate build +
+   `npm run check` → `scripts/smoke-test.ps1` (`SMOKE TEST: PASS`) →
+   `node scripts/tarball-smoke.mjs` (`TARBALL SMOKE: PASS (7/7)`) and
+   `npm run pack:check` → `scripts/e2e-test.ps1` (18 PASS / 0 FAIL / 1 SKIP;
+   needs system Edge, not run in CI) → final clean-tree check.
+
+   Fast iterations: `-SkipBrowser` (skip the system-Edge pass) and
+   `-SkipTarball` (skip tarball smoke + pack:check); a release candidate
+   needs the full run. The manual steps below remain the fallback when one
+   step must be run alone.
+
+3. Push and confirm CI green on the ubuntu Node 22/24 matrix and the
    `windows-latest` Node 24 leg.
-7. Only then follow the publishing checklist below (tag + workflow).
+4. Only then follow the publishing checklist below (tag + workflow).
 
 ## One-time external setup (owner, ~15 minutes, no repo changes)
 

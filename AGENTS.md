@@ -96,6 +96,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-test.ps1
 # web/dist — scripts/e2e-test.ps1 builds the web app and installs e2e deps)
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/e2e-test.ps1
 
+# one-command pre-push release rehearsal (clean tree -> build + npm run check ->
+# smoke -> tarball smoke -> pack:check -> browser E2E; PASS/FAIL + timings,
+# exit 1 on any failure; -SkipBrowser / -SkipTarball for fast iterations)
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/release-rehearsal.ps1
+
 # TypeScript package (packages/harness — the implementation, npm package)
 cd packages/harness
 npm install
