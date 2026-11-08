@@ -16,8 +16,9 @@
 //                  and restores the default blue palette
 //   appearance-roles mock provider: Settings -> Appearance role-colour radio
 //                  group changes the root `data-roles` attribute and the role
-//                  identity tokens (keyboard-selected High contrast in light
-//                  and dark, then the Neutral muted palette), survives a
+//                  identity + decorative fill tokens (keyboard-selected High
+//                  contrast in light and dark, then the Neutral muted palette;
+//                  the rendered role dots follow the fill tokens), survives a
 //                  reload, and restores the default palette
 //   keybindings   mock provider: Settings -> Keyboard rebinds the palette chord
 //                  from a real Ctrl+Shift+P capture (applied immediately, old
@@ -1291,9 +1292,10 @@ async function scenarioAppearanceAccent(runner) {
 // applied as `data-roles` on <html>; tokens.css owns the contrast/neutral role
 // palettes (default is the base :root role tokens). Verifies the default, a
 // keyboard-chosen high-contrast palette in light and dark (root attribute +
-// computed role tokens + the rendered role dots), reload persistence, the
-// neutral muted palette, and restoring the default — with the theme/density
-// `.appearance-card` group still at 5 cards.
+// computed role identity and decorative fill tokens + the rendered role dots,
+// which follow the fill tokens), reload persistence, the neutral muted palette,
+// and restoring the default — with the theme/density `.appearance-card` group
+// still at 5 cards.
 
 async function scenarioAppearanceRoles(runner) {
   const be = await startBackend({ kind: 'mock' })
@@ -1307,6 +1309,16 @@ async function scenarioAppearanceRoles(runner) {
         senior: style.getPropertyValue('--senior').trim(),
         junior: style.getPropertyValue('--junior').trim(),
         operator: style.getPropertyValue('--operator').trim(),
+      }
+    })
+  /** The decorative fill companions painted behind avatars and role dots. */
+  const roleFillTokens = () =>
+    page.evaluate(() => {
+      const style = getComputedStyle(document.documentElement)
+      return {
+        senior: style.getPropertyValue('--senior-fill').trim(),
+        junior: style.getPropertyValue('--junior-fill').trim(),
+        operator: style.getPropertyValue('--operator-fill').trim(),
       }
     })
   /** The rendered role dots (Models & roles pane, mounted when Settings opens). */
@@ -1340,17 +1352,36 @@ async function scenarioAppearanceRoles(runner) {
       { desc: label },
     )
   }
+  const waitForRoleFills = async (expected, label) => {
+    await waitFor(
+      async () => {
+        const tokens = await roleFillTokens()
+        return Object.entries(expected).every(([name, value]) => tokens[name] === value)
+      },
+      { desc: label },
+    )
+  }
   const LIGHT_BASE = { senior: '#3568d4', junior: '#0d7f69', operator: '#6f7684' }
   const LIGHT_CONTRAST = { senior: '#2456d2', junior: '#0f6d5a', operator: '#545c6a' }
   const DARK_CONTRAST = { senior: '#7d9fdd', junior: '#46baa0', operator: '#a3abba' }
+  // The dark high-contrast fills are darker than its lightened text tokens so
+  // the white avatar/dot glyphs keep AA contrast; the light palettes reuse the
+  // role values, which already clear that floor.
+  const DARK_CONTRAST_FILL = { senior: '#3b64c9', junior: '#1a7a66', operator: '#666e7c' }
   const LIGHT_NEUTRAL = { senior: '#3f4653', junior: '#515866', operator: '#616876' }
   try {
     await page.goto(be.base)
     await page.locator('nav[aria-label="Sessions"]').waitFor()
 
-    // Default: the base role palette, with the attribute written on mount.
+    // Default: the base role palette, with the attribute written on mount. The
+    // fill companions equal the role tokens, so the default look is unchanged.
     assert.equal(await roleAttribute(), 'default', 'the default role palette is default')
     assert.deepEqual(await roleTokens(), LIGHT_BASE, 'default is the base :root role palette')
+    assert.deepEqual(
+      await roleFillTokens(),
+      LIGHT_BASE,
+      'the default fill tokens equal the role tokens (unchanged look)',
+    )
 
     const first = await openAppearanceSettings(page)
     assert.equal(
@@ -1371,8 +1402,14 @@ async function scenarioAppearanceRoles(runner) {
     )
     const defaultDots = await roleDotBackgrounds()
     assert.ok(defaultDots.length >= 2, 'the role dots are rendered in the roles pane')
-    assert.ok(matchesHex(defaultDots[0], LIGHT_BASE.senior), 'the senior dot uses --senior')
-    assert.ok(matchesHex(defaultDots[1], LIGHT_BASE.junior), 'the junior dot uses --junior')
+    assert.ok(
+      matchesHex(defaultDots[0], LIGHT_BASE.senior),
+      'the senior dot uses the default fill (equal to --senior)',
+    )
+    assert.ok(
+      matchesHex(defaultDots[1], LIGHT_BASE.junior),
+      'the junior dot uses the default fill (equal to --junior)',
+    )
 
     // Keyboard-only change: focus the checked radio and use native radio-group
     // arrow navigation (no mouse), which checks the next option (High contrast).
@@ -1389,8 +1426,16 @@ async function scenarioAppearanceRoles(runner) {
       'keyboard navigation selects the High contrast role palette',
     )
     await waitForRoleTokens(LIGHT_CONTRAST, 'the light high-contrast role tokens')
+    await waitForRoleFills(LIGHT_CONTRAST, 'the light high-contrast role fill tokens')
     const contrastDots = await roleDotBackgrounds()
-    assert.ok(matchesHex(contrastDots[0], LIGHT_CONTRAST.senior), 'the senior dot follows --senior')
+    assert.ok(
+      matchesHex(contrastDots[0], LIGHT_CONTRAST.senior),
+      'the senior dot follows the high-contrast fill',
+    )
+    assert.ok(
+      matchesHex(contrastDots[1], LIGHT_CONTRAST.junior),
+      'the junior dot follows the high-contrast fill',
+    )
 
     // The palette is independent of the light/dark control and follows the dark
     // role blocks after switching the theme.
@@ -1402,6 +1447,22 @@ async function scenarioAppearanceRoles(runner) {
     )
     assert.equal(await roleAttribute(), 'contrast', 'the role palette survives a theme change')
     await waitForRoleTokens(DARK_CONTRAST, 'the dark high-contrast role tokens')
+    // The dark palette lightens the role text tokens for dark surfaces, so the
+    // decorative dots must follow the dedicated (darker) fill tokens instead.
+    await waitForRoleFills(DARK_CONTRAST_FILL, 'the dark high-contrast role fill tokens')
+    const darkContrastDots = await roleDotBackgrounds()
+    assert.ok(
+      matchesHex(darkContrastDots[0], DARK_CONTRAST_FILL.senior),
+      'the senior dot follows the dark high-contrast fill token',
+    )
+    assert.ok(
+      matchesHex(darkContrastDots[1], DARK_CONTRAST_FILL.junior),
+      'the junior dot follows the dark high-contrast fill token',
+    )
+    assert.ok(
+      !matchesHex(darkContrastDots[0], DARK_CONTRAST.senior),
+      'the dark fill and the lightened role text token stay distinct',
+    )
 
     // Reload: both the uiPrefs blob and the theme survive; the dark role palette
     // is re-applied with the pinned dark tokens.
@@ -1409,6 +1470,7 @@ async function scenarioAppearanceRoles(runner) {
     await page.locator('nav[aria-label="Sessions"]').waitFor()
     assert.equal(await roleAttribute(), 'contrast', 'the role palette survives a reload')
     await waitForRoleTokens(DARK_CONTRAST, 'the reloaded dark high-contrast role tokens')
+    await waitForRoleFills(DARK_CONTRAST_FILL, 'the reloaded dark high-contrast role fill tokens')
     const reloaded = await openAppearanceSettings(page)
     assert.equal(
       await reloaded.pane
@@ -1433,6 +1495,7 @@ async function scenarioAppearanceRoles(runner) {
       { timeout: 5000 },
     )
     await waitForRoleTokens(LIGHT_NEUTRAL, 'the light neutral role tokens')
+    await waitForRoleFills(LIGHT_NEUTRAL, 'the light neutral role fill tokens')
     assert.equal(
       await reloaded.pane
         .getByRole('radiogroup', { name: 'Role colours' })
@@ -1450,10 +1513,16 @@ async function scenarioAppearanceRoles(runner) {
       { timeout: 5000 },
     )
     await waitForRoleTokens(LIGHT_BASE, 'the restored base role tokens')
+    await waitForRoleFills(LIGHT_BASE, 'the restored default role fill tokens')
     await page.reload()
     await page.locator('nav[aria-label="Sessions"]').waitFor()
     assert.equal(await roleAttribute(), 'default', 'restoring the default survives a reload')
     assert.deepEqual(await roleTokens(), LIGHT_BASE, 'the reloaded default role palette is the base one')
+    assert.deepEqual(
+      await roleFillTokens(),
+      LIGHT_BASE,
+      'the reloaded default fill tokens equal the role tokens',
+    )
 
     consoleGuard.assertClean()
     runner.pass('appearance-roles')

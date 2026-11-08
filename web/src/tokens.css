@@ -73,6 +73,16 @@
   --senior: #3568d4;
   --junior: #0d7f69;
   --operator: #6f7684;
+  /* Role identity has two companions. The role tokens above are the identity
+     colour used as text (provider role labels, composer route badges); the
+     `-fill` companions are the decorative background fills (avatars, role
+     dots) that carry white initials/glyphs. The split lets the accessible
+     palettes below retune text for AA without leaving white initials on a
+     light fill. The default palette keeps both values equal, so its look is
+     unchanged. */
+  --senior-fill: #3568d4;
+  --junior-fill: #0d7f69;
+  --operator-fill: #6f7684;
   --danger: #c8433b;
   --danger-soft: #fbecea;
   --warning: #946200;
@@ -221,28 +231,37 @@
 
 /* Role identity palettes — an operator preference written as `data-roles` on
    <html> (Settings → Appearance, persisted in uiPrefs). The base `:root`
-   values above are the default palette; each variant overrides ONLY the three
-   role identity tokens, in both schemes. `contrast` darkens the role colours in
-   the light scheme and lightens them in the dark scheme so role-coloured
-   normal-size text (provider role labels/status text) clears WCAG AA 4.5:1 on
-   the surfaces role text sits on: panel/canvas/hover and every accent theme's
-   soft/selected tints. `neutral` replaces the hue coding with three muted
-   neutral tones that still clear AA — the labels carry role identity. Role
-   tokens also fill the role avatars/dots, so these palettes retint those too
-   (the avatar initial is aria-hidden decorative chrome; the adjacent speaker
-   label is the accessible identity). The default palette needs no block: the
-   :root values are it, and `data-roles="default"` deliberately has no CSS
-   block. The variant declaration set is frozen by tokens.test.ts. */
+   values above are the default palette; each variant overrides the three role
+   identity tokens and their three decorative fill companions, in both schemes.
+   `contrast` darkens the role colours in the light scheme and lightens them in
+   the dark scheme so role-coloured normal-size text (provider role labels/status
+   text) clears WCAG AA 4.5:1 on the surfaces role text sits on: panel/canvas/
+   hover and every accent theme's soft/selected tints. `neutral` replaces the
+   hue coding with three muted neutral tones that still clear AA — the labels
+   carry role identity. The fill companions are background-only: they keep the
+   palette's role identity but are tuned independently so white initials/glyphs
+   on an avatar/dot clear WCAG AA 4.5:1 in both schemes (the light palettes
+   reuse the role value, which already clears the floor; the dark palettes need
+   dedicated darker values because their role text is lightened for dark
+   surfaces). The default palette needs no block: the :root values are it, and
+   `data-roles="default"` deliberately has no CSS block. The variant
+   declaration set is frozen by tokens.test.ts. */
 :root[data-roles='contrast'] {
   --senior: #2456d2;
   --junior: #0f6d5a;
   --operator: #545c6a;
+  --senior-fill: #2456d2;
+  --junior-fill: #0f6d5a;
+  --operator-fill: #545c6a;
 }
 
 :root[data-roles='neutral'] {
   --senior: #3f4653;
   --junior: #515866;
   --operator: #616876;
+  --senior-fill: #3f4653;
+  --junior-fill: #515866;
+  --operator-fill: #616876;
 }
 
 /* Dark palette — duplicated for OS preference and a pinned `data-theme`.
@@ -275,6 +294,9 @@
     --senior: #2f6fed;
     --junior: #0d7f69;
     --operator: #7a8194;
+    --senior-fill: #2f6fed;
+    --junior-fill: #0d7f69;
+    --operator-fill: #7a8194;
     --danger: #d54941;
     --danger-soft: #3a2224;
     --warning: #b07d10;
@@ -343,12 +365,18 @@
     --senior: #7d9fdd;
     --junior: #46baa0;
     --operator: #a3abba;
+    --senior-fill: #3b64c9;
+    --junior-fill: #1a7a66;
+    --operator-fill: #666e7c;
   }
 
   :root:not([data-theme='light'])[data-roles='neutral'] {
     --senior: #b4bac4;
     --junior: #a3aab5;
     --operator: #949ba8;
+    --senior-fill: #575e6a;
+    --junior-fill: #616874;
+    --operator-fill: #6b727e;
   }
 }
 
@@ -379,6 +407,9 @@
   --senior: #2f6fed;
   --junior: #0d7f69;
   --operator: #7a8194;
+  --senior-fill: #2f6fed;
+  --junior-fill: #0d7f69;
+  --operator-fill: #7a8194;
   --danger: #d54941;
   --danger-soft: #3a2224;
   --warning: #b07d10;
@@ -447,12 +478,18 @@
   --senior: #7d9fdd;
   --junior: #46baa0;
   --operator: #a3abba;
+  --senior-fill: #3b64c9;
+  --junior-fill: #1a7a66;
+  --operator-fill: #666e7c;
 }
 
 :root[data-theme='dark'][data-roles='neutral'] {
   --senior: #b4bac4;
   --junior: #a3aab5;
   --operator: #949ba8;
+  --senior-fill: #575e6a;
+  --junior-fill: #616874;
+  --operator-fill: #6b727e;
 }
 
 :root[data-theme='light'] {

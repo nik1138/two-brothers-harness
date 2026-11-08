@@ -388,11 +388,11 @@ samp {
 }
 
 .dot-senior {
-  background: var(--senior);
+  background: var(--senior-fill);
 }
 
 .dot-junior {
-  background: var(--junior);
+  background: var(--junior-fill);
 }
 
 .provider-chip {
@@ -465,15 +465,15 @@ samp {
 }
 
 .avatar-senior {
-  background: var(--senior);
+  background: var(--senior-fill);
 }
 
 .avatar-junior {
-  background: var(--junior);
+  background: var(--junior-fill);
 }
 
 .avatar-operator {
-  background: var(--operator);
+  background: var(--operator-fill);
 }
 
 .group-content {
@@ -654,6 +654,10 @@ samp {
   overflow: hidden;
 }
 
+/* The confidence bar is a data indicator, not a decorative role fill: it keeps
+   the role token so its contrast against the track follows the text tuning (the
+   dark-palette fill companions are darkened for white glyphs and would sink
+   into the track). */
 .confidence-fill {
   height: 100%;
   background: var(--junior);

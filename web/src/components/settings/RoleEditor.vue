@@ -127,11 +127,11 @@ function onApiKey(value: string) {
   height: 8px;
   margin-top: 7px;
   border-radius: 50%;
-  background: var(--senior);
+  background: var(--senior-fill);
 }
 
 .role-card--junior .role-dot {
-  background: var(--junior);
+  background: var(--junior-fill);
 }
 
 .role-card-copy {

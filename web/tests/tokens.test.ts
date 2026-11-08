@@ -19,9 +19,13 @@
 //   6. every accent theme overrides the same accent/focus/selected token set in
 //      the light and both dark blocks, without growing the token inventory; the
 //      text-only accent token keeps AA contrast on the dark surfaces it sits on;
-//   7. every role palette overrides exactly the three role identity tokens in
-//      the light and both dark blocks, and role-coloured text keeps AA contrast
-//      on the surfaces it sits on in both schemes.
+//   7. every role palette overrides exactly the role identity tokens and their
+//      three decorative fill companions in the light and both dark blocks;
+//      role-coloured text keeps AA contrast on the surfaces it sits on, and
+//      white on every accessible-palette fill keeps AA contrast, in both
+//      schemes;
+//   8. the default palette keeps each fill companion equal to its role token,
+//      so the default look is unchanged.
 
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -189,6 +193,9 @@ const CORE_COLOUR_TOKENS = [
   '--senior',
   '--junior',
   '--operator',
+  '--senior-fill',
+  '--junior-fill',
+  '--operator-fill',
   '--danger',
   '--danger-soft',
   '--warning',
@@ -750,11 +757,28 @@ test('token layer: accent variants override the same accent/focus/selected set i
 
 const ROLE_VARIANT_NAMES = ['contrast', 'neutral'] as const
 
-/** The only tokens a role palette may override. */
-const ROLE_TOKENS = ['--senior', '--junior', '--operator'] as const
+/** Role identity tokens: the colour role-coloured text renders in. */
+const ROLE_TEXT_TOKENS = ['--senior', '--junior', '--operator'] as const
+
+/**
+ * The decorative fill companions: backgrounds that carry white initials/glyphs
+ * (avatars, role dots). They keep the same role identity as the text tokens but
+ * are tuned independently so the accessible palettes can satisfy both the text
+ * contrast floor and the white-on-fill floor at the same time.
+ */
+const ROLE_FILL_TOKENS = ['--senior-fill', '--junior-fill', '--operator-fill'] as const
+
+/** The only tokens a role palette may override: three text + three fill. */
+const ROLE_VARIANT_TOKENS = [...ROLE_TEXT_TOKENS, ...ROLE_FILL_TOKENS] as const
 
 /** WCAG AA floor for normal-size text (same floor as the accent text tokens). */
 const ROLE_TEXT_MIN_CONTRAST = 4.5
+
+/** WCAG AA floor for white initials/glyphs painted on a decorative role fill. */
+const ROLE_FILL_MIN_CONTRAST = 4.5
+
+/** The colour the role avatars paint their initials/glyphs in (--text-on-accent). */
+const ROLE_FILL_GLYPH = '#ffffff'
 
 /**
  * Surfaces role-coloured text actually sits on: panel/canvas rows, the hovered
@@ -762,7 +786,8 @@ const ROLE_TEXT_MIN_CONTRAST = 4.5
  * provider row changes its background while the role label keeps the role
  * colour). Avatar/dot fills are not text surfaces — the initial glyph is
  * aria-hidden decorative chrome and the adjacent speaker name carries the
- * accessible identity.
+ * accessible identity — so they are checked against the white-on-fill floor
+ * below instead.
  */
 function roleTextSurfaces(scheme: 'light' | 'dark'): Array<[string, string]> {
   const base = scheme === 'light' ? LIGHT : DARK_PINNED
@@ -802,10 +827,10 @@ function roleTextSurfaces(scheme: 'light' | 'dark'): Array<[string, string]> {
   return surfaces
 }
 
-test('token layer: role palettes override exactly the role tokens and clear AA in both schemes', () => {
+test('token layer: role palettes override the role and fill tokens and clear AA in both schemes', () => {
   const sortedEntries = (map: Map<string, string>): Record<string, string> =>
     Object.fromEntries([...map.entries()].sort(([a], [b]) => a.localeCompare(b)))
-  const expectedKeys = [...ROLE_TOKENS].sort()
+  const expectedKeys = [...ROLE_VARIANT_TOKENS].sort()
   const variantNames = tokenBlocks
     .map((block) => /^:root\[data-roles='([a-z-]+)'\]$/.exec(block.prelude)?.[1])
     .filter((name): name is string => name !== undefined)
@@ -845,9 +870,9 @@ test('token layer: role palettes override exactly the role tokens and clear AA i
       assert.deepEqual(
         [...palette.keys()].sort(),
         expectedKeys,
-        `${label} ${name}: a role palette may only override the three role identity tokens`,
+        `${label} ${name}: a role palette must override exactly the role identity and fill tokens`,
       )
-      for (const token of ROLE_TOKENS) {
+      for (const token of ROLE_VARIANT_TOKENS) {
         assert.ok(
           LIGHT.has(token) && DARK_PINNED.has(token),
           `${token} must stay an existing token — role palettes may not grow the inventory`,
@@ -859,7 +884,7 @@ test('token layer: role palettes override exactly the role tokens and clear AA i
       sortedEntries(pinned),
       `the dark ${name} role palette must be identical in the media and pinned blocks`,
     )
-    for (const token of ROLE_TOKENS) {
+    for (const token of ROLE_TEXT_TOKENS) {
       assert.notEqual(
         light.get(token),
         pinned.get(token),
@@ -876,11 +901,31 @@ test('token layer: role palettes override exactly the role tokens and clear AA i
         `${name}: dark ${token} must differ from the default palette`,
       )
     }
+    // The fill companions follow the palette too, and the dark palettes need
+    // their own values: their role tokens are lightened for dark surfaces and
+    // cannot double as fills behind white glyphs.
+    for (const token of ROLE_FILL_TOKENS) {
+      assert.notEqual(
+        light.get(token),
+        LIGHT.get(token),
+        `${name}: light ${token} must differ from the default palette`,
+      )
+      assert.notEqual(
+        pinned.get(token),
+        DARK_PINNED.get(token),
+        `${name}: dark ${token} must differ from the default palette`,
+      )
+      assert.notEqual(
+        light.get(token),
+        pinned.get(token),
+        `${name}: ${token} must be tuned per scheme`,
+      )
+    }
     for (const [scheme, palette] of [
       ['light', light],
       ['dark', pinned],
     ] as const) {
-      for (const token of ROLE_TOKENS) {
+      for (const token of ROLE_TEXT_TOKENS) {
         const text = palette.get(token)!
         for (const [surface, background] of roleTextSurfaces(scheme)) {
           const ratio = contrastRatio(text, background)
@@ -891,13 +936,31 @@ test('token layer: role palettes override exactly the role tokens and clear AA i
           )
         }
       }
+      // The decorative fills carry white initials/glyphs: every fill must clear
+      // the AA floor against white in both schemes.
+      for (const token of ROLE_FILL_TOKENS) {
+        const fill = palette.get(token)!
+        const ratio = contrastRatio(ROLE_FILL_GLYPH, fill)
+        assert.ok(
+          ratio >= ROLE_FILL_MIN_CONTRAST,
+          `${name} ${scheme}: white on ${token} (${fill}) is ${ratio.toFixed(2)}:1 ` +
+            `(WCAG AA needs ${ROLE_FILL_MIN_CONTRAST}:1)`,
+        )
+      }
+      // Role identity must stay readable in the decorative chrome: the three
+      // fills are distinguishable from each other in a given palette/scheme.
+      assert.equal(
+        new Set(ROLE_FILL_TOKENS.map((token) => palette.get(token))).size,
+        ROLE_FILL_TOKENS.length,
+        `${name} ${scheme}: the three role fills must stay distinct from each other`,
+      )
     }
     lightPalettes.set(name, light)
     darkPalettes.set(name, pinned)
   }
 
   // The two palettes are meaningfully different from each other.
-  for (const token of ROLE_TOKENS) {
+  for (const token of ROLE_VARIANT_TOKENS) {
     assert.notEqual(
       lightPalettes.get('contrast')!.get(token),
       lightPalettes.get('neutral')!.get(token),
@@ -908,6 +971,30 @@ test('token layer: role palettes override exactly the role tokens and clear AA i
       darkPalettes.get('neutral')!.get(token),
       `${token}: the contrast and neutral dark palettes must differ`,
     )
+  }
+})
+
+test('token layer: the default palette fill companions mirror the role tokens', () => {
+  // The default palette's decorative fills are its role identity colours, so the
+  // default look is exactly the role-identity look in both schemes. This also
+  // freezes the default dark operator avatar's existing white-on-fill ratio; the
+  // accessible palettes are the ones held to the AA floor.
+  for (const [fillToken, roleToken] of [
+    ['--senior-fill', '--senior'],
+    ['--junior-fill', '--junior'],
+    ['--operator-fill', '--operator'],
+  ] as const) {
+    for (const [label, palette] of [
+      ['light', LIGHT],
+      ['dark (media)', DARK_MEDIA],
+      ['dark (pinned)', DARK_PINNED],
+    ] as const) {
+      assert.equal(
+        palette.get(fillToken),
+        palette.get(roleToken),
+        `${label}: ${fillToken} must equal ${roleToken} so the default palette keeps its look`,
+      )
+    }
   }
 })
 
@@ -989,10 +1076,11 @@ test('token layer: naive-ui primary states keep white text at WCAG AA in both sc
   }
 })
 
-test('token layer: the token inventory is the documented 94 tokens', () => {
-  // 93 shared tokens + the --accent-text AA companion. Adding a token means
-  // updating this expectation and the layer docs deliberately.
-  assert.equal(ALL_TOKENS.size, 94, 'the token inventory must stay at the documented size')
+test('token layer: the token inventory is the documented 97 tokens', () => {
+  // 93 shared tokens + the --accent-text AA companion + the three role fill
+  // companions. Adding a token means updating this expectation and the layer
+  // docs deliberately.
+  assert.equal(ALL_TOKENS.size, 97, 'the token inventory must stay at the documented size')
 })
 
 test('token layer: diff chrome tokens freeze the intent colours they replaced', () => {
