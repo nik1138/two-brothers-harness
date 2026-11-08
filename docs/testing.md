@@ -774,9 +774,9 @@ preservation, run-level > persisted > smaller-preset precedence, old presets
 byte-compatible) and the web provider/compaction suites (45 focused).
 Package suite **1 979 tests** (1 973 pass and 6 platform skips on Windows; the
 WSL Linux pass is 1 978 pass with 1 skip); web suite **469/469**; the browser
-matrix is **21 hermetic scenario blocks** (22 PASS lines — the `chat/resume`
+matrix is **22 hermetic scenario blocks** (23 PASS lines — the `chat/resume`
 block reports chat and resume separately) plus the opt-in `real` skip
-(**22 PASS, 0 FAIL, 1 SKIP**).
+(**23 PASS, 0 FAIL, 1 SKIP**).
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
