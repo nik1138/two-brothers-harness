@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Drag-and-drop workspace reordering (web)** (wave 9): each sidebar workspace
+  group now has a dedicated pointer-only grip handle; dragging a group and
+  dropping it on another header shows an honest insert indicator (accent line
+  before/after, source dimmed), optimistically reorders the sidebar through the
+  existing `PUT /api/workspaces/order` path and reverts with an error toast if
+  the backend rejects it. The whole header is not a drag source, the handle is
+  out of the tab order with an `aria-describedby` instruction, click/expand and
+  session selection are untouched, dragging is disabled while filtering, and
+  the menu **Move up / Move down** actions remain the keyboard path (touch
+  devices see the menu only). Pure helpers `dropReorderDelta` /
+  `dropReorderIds` (`web/src/workspaceOrder.ts`) define the clamped,
+  no-op-aware move; the hermetic browser suite gained the `workspace-drag`
+  scenario (sidebar order + persisted API order + fallback assertions).
+  Files: `web/src/components/SessionGroup.vue`, `Sidebar.vue`,
+  `web/src/workspaceOrder.ts`; tests `web/tests/workspaceOrder.test.ts` (21,
+  +6) and `e2e/run.mjs`.
 - **TUI replay of persisted reasoning** (wave 8): a session that carries
   persisted `reasoning` sidecar events now shows a bounded, dim
   `THINKING (replayed) · <ROLE> · <kind>` section in the TUI transcript on
@@ -661,6 +677,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`vue-tsc` bumped to 3.3.x** (wave 9): the web workspace devDependency moves
+  from the 2026-11-04 advisory pin `~3.0.2` (resolved 3.0.11) to `~3.3.0`
+  (resolved 3.3.14), pulling `@vue/language-core` 3.3.14 and
+  `@volar/typescript` 2.4.30 plus their subtree in the web-local
+  `web/package-lock.json` (the web app is not an npm workspace, so this
+  lockfile is separate from the root one). The template-scope behavior the old
+  pin was waiting on is clean: a forced `vue-tsc -b` over all 38 SFCs produces
+  zero diagnostics, the web suite (329/329) and `npm run build` pass with no
+  code changes. This closes the vue-tsc 3.3 follow-up.
 - **Final web chrome sheets use the design tokens** (wave 8): `App.vue`,
   `ChatView.vue` and `Composer.vue` — the last large component sheets — moved
   their canonical radii and scale spacing to the existing

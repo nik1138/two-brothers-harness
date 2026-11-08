@@ -68,6 +68,7 @@ From a checkout, replace `two-brothers` with `node dist/cli.js` after
 | Conversation (composer focused) | `Esc` `Esc` (within 500 ms) | stop the followed run; a single `Esc` keeps its normal layering |
 | Anywhere outside a text field | `?` | open the commands & shortcuts overlay |
 | Anywhere | `Ctrl+/` / `Cmd+/` | open the commands & shortcuts overlay |
+| Workspace group grip | drag / drop onto another group header | reorder workspaces (persisted; pointer only). The group `⋯` menu `Move up`/`Move down` is the keyboard path |
 | Approval card | `y` / `n` / `a` | allow once / deny / always allow this session while the card has focus |
 | Approval card preview | `Tab`, then `Enter` / `Space` | expand or collapse the bounded diff/command preview (native button; collapsed by default) |
 | Folded activity summary | `Tab`, then `Enter` / `Space` | expand or collapse that completed run's folded tool/activity rows (native button) |
@@ -82,8 +83,13 @@ selects the name: `Enter` saves, `Esc` cancels, blank names show an inline
 error, names are capped at 120 characters) or moves it up/down in the persisted
 order — `Move up`/`Move down` are disabled at the ends, the list updates
 optimistically and rolls back with a toast if the backend rejects the move.
-The menu only appears in the unfiltered, non-searching list where group
-headers exist, and the trigger never collapses the group.
+You can also drag a group by its pointer-only grip handle and drop it on
+another group header: an accent line shows the insert position, the order
+persists through the same API and rolls back with a toast on failure. The
+handle is out of the tab order (the menu stays the keyboard path), is hidden
+while filtering one workspace or on touch devices, and the whole header is not
+a drag source. The menu only appears in the unfiltered, non-searching list where
+group headers exist, and the trigger never collapses the group.
 
 The row menu also exports the session as Markdown or JSON (`Export as
 Markdown` / `Export as JSON`); the file downloads with a name derived from the

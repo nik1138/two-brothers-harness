@@ -298,6 +298,16 @@ guards 17 migrated sheets. The package suite is now 1 501 tests (1 499 pass, 2
 environment skips); the web suite stays 323 and the reference tree 33/33
 (its `TWO_BROTHERS_JSON` handling was updated with the same alignment fix).
 
+Wave 9 closes the tooling and reordering backlog: `vue-tsc` moves from the
+advisory `~3.0.2` pin to `~3.3.0` (resolved 3.3.14) with a forced
+`vue-tsc -b` over all 38 SFCs producing zero template-scope diagnostics, the
+web suite green, and only the web-local lockfile subtree changed; the sidebar
+gained pointer-only drag-and-drop workspace reordering (pure helpers
+`dropReorderDelta`/`dropReorderIds`, +6 `web/tests/workspaceOrder.test.ts`
+tests → 21) with the new hermetic browser scenario above. The web suite is now
+329 tests; the package suite and reference tree are unchanged (the wave-9
+lanes touched web/e2e/docs/tooling only).
+
 ### Real-socket fault injection (in the smoke gate)
 
 `cd packages/harness && npm run test:e2e:faults` (`node e2e/faults.ts`) is a
@@ -420,7 +430,7 @@ sheets is defined, every core colour token exists in the light block and both
 dark blocks — which must stay identical —, the spacing scale is complete and
 ordered, no colour literal is left in the migrated sheets, canonical
 radius/scale-spacing literals are banned there too, and `theme.ts`
-stays mapped to the colour tokens); 323/323 web tests. The modules are
+stays mapped to the colour tokens); 329/329 web tests. The modules are
 dependency-free at runtime, so plain `node --test` runs them
 via the `tests/register-ts.mjs` bootstrap (a tiny resolve hook for the
 extensionless imports); `npm test` wires that up. The full `web/` gate also
@@ -505,8 +515,15 @@ preview, Allow removes the file, no raw markers), plus `composer-recall`
 real textarea, the pre-recall draft is restored byte-exactly, multiline recall
 fires only at the absolute edges, an inactive ArrowDown falls through to the
 native caret-to-end movement, nothing submits during navigation, and the
-history survives a page reload). On the canonical run that is
-**14 PASS, 0 FAIL, 1 SKIP** (the opt-in `real` scenario). The queue dock and the session-scope approval decisions
+history survives a page reload), plus `workspace-drag` (three API-created
+workspaces render as sidebar groups; dragging one group onto another header
+via its grip handle shows the insert indicator and source dimming, reorders
+the sidebar optimistically, persists the new order through
+`PUT /api/workspaces/order`, clears the indicators, leaves session
+selection/filtering and header collapse untouched, hides the handles while
+filtering, and the group menu Move up/Move down fallback still reorders and
+persists). On the canonical run that is
+**15 PASS, 0 FAIL, 1 SKIP** (the opt-in `real` scenario). The queue dock and the session-scope approval decisions
 remain covered by the web unit suites, not by separate browser scenarios. The
 default suite is fully offline; the
 opt-in `real` scenario (below) reports `SKIP` unless an endpoint is configured.

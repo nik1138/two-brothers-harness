@@ -189,7 +189,10 @@ the same hero appears inside a selected session that has no transcript yet.
 1. **Register a workspace** with the workspace finder (a directory you pick —
    it is never scanned) and create a session linked to it. Sessions are
    grouped by workspace in the sidebar; each workspace group's `⋯` menu
-   renames it or moves it up/down, and the order is persisted.
+   renames it or moves it up/down, and the order is persisted. You can also
+   drag a group by its grip handle and drop it before/after another workspace
+   (pointer only, with an accent-line insert indicator; the `⋯` menu stays the
+   keyboard path).
 2. **Set the models** — the Settings dialog opens from the bottom-left of the
    sidebar; per-role Senior/Junior provider, model, base URL, and API key
    (keys are never echoed back; the server seals them at rest). Runs use the

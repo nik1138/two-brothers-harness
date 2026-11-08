@@ -867,6 +867,29 @@ Design anchors that already exist:
   sheets. The design-token migration is complete; only documented one-off
   values stay literal.
 
+## Shipped 2026-11-08 (wave 9: drag-and-drop reordering, vue-tsc 3.3)
+
+- **Drag-and-drop workspace reordering (web)** — each sidebar workspace group
+  has a dedicated pointer-only grip handle; dropping it on another header
+  shows an honest insert indicator and reorders optimistically through the
+  existing `PUT /api/workspaces/order` path (revert-with-toast on failure).
+  The whole header is not a drag source, the handle is out of the tab order
+  with an `aria-describedby` instruction, dragging is disabled while
+  filtering, touch devices use the menu, and the group `⋯` menu
+  Move up/Move down remains the keyboard path. Pure helpers
+  `dropReorderDelta`/`dropReorderIds` in `web/src/workspaceOrder.ts` (clamped,
+  no-op-aware); `web/tests/workspaceOrder.test.ts` 21 tests (+6); new
+  hermetic browser scenario `workspace-drag` (sidebar order + persisted API
+  order + click/expand/fallback assertions) — the browser suite is now
+  15 offline scenarios + the opt-in `real` skip.
+- **`vue-tsc` 3.3 bump** — the web devDependency moves from the 2026-11-04
+  advisory pin `~3.0.2` (resolved 3.0.11) to `~3.3.0` (resolved 3.3.14):
+  zero template-scope diagnostics in a forced `vue-tsc -b` across all 38
+  SFCs, web suite 329/329, `npm run build` green, and only the web-local
+  `web/package-lock.json` subtree changed (the web app is not an npm
+  workspace). Closes the follow-up; future web dependency bumps must run npm
+  inside `web/`.
+
 ## Open items (deferred)
 
 - **Reasoning passback (part 2)** — Anthropic extended thinking with tool use
@@ -913,7 +936,3 @@ Design anchors that already exist:
   every dialog's handler must ignore those via the `web/src/modal.ts`
   guard. Revisit when upstream fixes the stacked-dialog semantics (or
   replace the guard with upstream support).
-- **vue-tsc 3.3 follow-up (web, non-blocker)** — the `~3.0.2` pin
-  (2026-11-04 security update eliminating the minimatch advisory) stays
-  until vue-tsc 3.3's template-scope handling is verified; then bump and
-  re-check `npm run build`.
