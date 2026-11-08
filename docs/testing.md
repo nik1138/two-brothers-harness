@@ -388,8 +388,40 @@ are killed on SIGINT/SIGTERM and stragglers are swept on exit. It sends real
 model calls and is **never** run by `npm test`, the smoke gate or CI — the
 hermetic counterpart for fault behaviour is `e2e/faults.ts` above. Recorded
 run against the owner's LM Studio (`lfm3-1.7b`, 2026-11-08): concurrency 2 /
-runs 3 → 3/3 PASS, 78.7–93.7 s per run, 157.6 s wall. A `serve`
-RunManager/worker-pool soak remains a deliberate manual-only gap.
+runs 3 → 3/3 PASS, 78.7–93.7 s per run, 157.6 s wall.
+
+### serve-level load/soak (opt-in, manual)
+
+`cd packages/harness && npm run test:e2e:serve-load`
+(`node e2e/serve-load.ts`) starts the real `serve` backend (hermetic `--mock`
+mode, or real `--base-url`/`--model` with env fallbacks; a build is required
+and the script warns before falling back to `src/cli.ts`), registers a
+temporary workspace through `POST /api/workspaces`, creates one session per
+run (the protocol serializes same-session runs, so `--workers > 1` only
+parallelizes across sessions), submits bounded-concurrency runs and polls
+`GET /api/runs`; transitions are cross-checked against the persisted runtime
+sidecars (`run_status`/`run_end`) so fast states cannot be missed by polling.
+It prints per-run PASS/FAIL with `queued → running → completed` and
+queue/run/submit timings, then an honest summary (observed max in-flight
+POSTs, observed peak queue/running, persisted-sequence count,
+successes/terminal states, queue/exec/submit latency min/median/max, total
+wall — measured only), exits 0 iff every run completed (1 failure, 2 misuse),
+stops the server child on SIGINT/SIGTERM and normal exit, and removes temp
+dirs unless `--keep`. Arguments: `--runs` (default 3, max 50), `--workers`
+(default 1, passed to `serve`), `--concurrency` (default = runs), `--port`
+(default 8631, fail-fast if busy), `--timeout`, `--retries`, `--task`,
+`--keep`. It needs a reachable endpoint unless `--mock` and is **never** run
+by `npm test`, the smoke gate or CI. Recorded evidence (2026-11-08): mock
+self-test `--runs 3 --workers 1` → 3/3 completed (0.3–2.8 s depending on
+machine load; submit latency was load-dependent and is not the queueing
+proof — the persisted sidecar sequence is); owner LM Studio `lfm3-1.7b`,
+`--runs 2 --workers 1` → 2/2 completed in 230.8 s, run 2 queued 117.7 s
+behind run 1 (228.3 s / 7 calls vs 112.9 s / 8 calls), peak queued/running 1.
+Long soaks remain an operator choice; a WAN/real-provider fault gate is still
+deliberately manual. Wave 12 adds only this opt-in runner (plus an
+evidence-only naive-ui investigation that kept the stacked-dialog guard — see
+`docs/backlog.md`); the package suite count is unchanged (1 518 tests:
+1 516 pass, 2 environment skips) and web/reference are untouched.
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a

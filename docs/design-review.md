@@ -128,8 +128,11 @@ runner (`packages/harness/e2e/faults.ts`, part of the offline smoke gate and
 CI) — it is hermetic and fast, but deliberately not a WAN or load test.
 Real-network load is available as an opt-in manual runner
 (`packages/harness/e2e/load.ts`, `npm run test:e2e:load`) with recorded
-LM Studio evidence (concurrency 2 / runs 3: 3/3 PASS, 78.7–93.7 s per run);
-WAN fault injection, a `serve` RunManager/worker-pool load and long soaks
+LM Studio evidence (concurrency 2 / runs 3: 3/3 PASS, 78.7–93.7 s per run),
+and the serve-level RunManager/worker-pool/queue path has its own opt-in
+manual runner (`packages/harness/e2e/serve-load.ts`,
+`npm run test:e2e:serve-load`; recorded workers=1 run 2 queued 117.7 s
+behind run 1, 2/2 completed in 230.8 s). WAN fault injection and long soaks
 remain deliberately manual/out of the offline gates.
 
 ### 10. The web workspace is single-user, single-process

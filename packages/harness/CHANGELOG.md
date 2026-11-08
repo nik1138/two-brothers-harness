@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Opt-in serve-level load/soak runner** (wave 12): new
+  `packages/harness/e2e/serve-load.ts` (`npm run test:e2e:serve-load`) starts
+  the real `serve` backend (hermetic `--mock` self-test or real
+  `--base-url`/`--model` with env fallbacks; requires a build, warns before
+  falling back to sources), registers a temp workspace, creates one session
+  per run (same-session runs serialize by protocol, so `--workers > 1` only
+  parallelizes across sessions), submits bounded-concurrency runs through
+  `POST /api/runs`, polls `GET /api/runs` and cross-checks the persisted
+  runtime sidecars for authoritative `queued → running → completed`
+  transitions. It prints per-run PASS/FAIL with queue/run/submit timings and
+  an honest summary (observed max in-flight POSTs, peak queued/running,
+  persisted-sequence count, terminal states, latency min/median/max, total
+  wall), exits 0/1/2, stops the server child on SIGINT/SIGTERM and normal
+  exit, removes temp dirs unless `--keep`, forwards the opt-in
+  `TWO_BROTHERS_E2E_API_KEY` to the serve child as `TWO_BROTHERS_API_KEY` for
+  authenticated endpoints (ambient switches are scrubbed), and is deliberately
+  never wired into `npm test`, the smoke gate or CI. Recorded evidence (2026-11-08):
+  mock `--runs 3 --workers 1` → 3/3 completed (0.3–2.8 s depending on
+  machine load; the persisted sidecar sequence is the queueing evidence, not
+  submit latency); owner LM Studio `lfm3-1.7b`, `--runs 2 --workers 1` → 2/2
+  completed in 230.8 s (run 2 queued 117.7 s behind run 1). Long soaks remain
+  an operator choice; WAN/real-provider fault injection stays manual.
 - **Opt-in real-network load runner** (wave 11): new
   `packages/harness/e2e/load.ts` (`npm run test:e2e:load`) drives a bounded
   concurrency pool of real `dist/cli.js run` subprocesses against an

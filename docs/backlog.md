@@ -941,13 +941,46 @@ Design anchors that already exist:
   counterpart remains `e2e/faults.ts`; a `serve` RunManager/worker-pool soak
   is deliberately manual-only.
 
+## Shipped 2026-11-08 (wave 12: serve-level load/soak tooling, naive-ui guard investigation)
+
+- **Opt-in serve-level load/soak runner** — new
+  `packages/harness/e2e/serve-load.ts` (`npm run test:e2e:serve-load`): starts
+  the real `serve` backend (hermetic `--mock` self-test or real
+  `--base-url`/`--model` with env fallbacks), registers a temp workspace,
+  creates one session per run (the protocol serializes same-session runs, so
+  `--workers > 1` only helps across sessions), submits bounded-concurrency
+  runs and polls `GET /api/runs`, cross-checking transitions against the
+  persisted runtime sidecars. Per-run PASS/FAIL with `queued → running →
+  completed` + queue/run/submit timings, honest summary (observed in-flight
+  max, peak queued/running, persisted-sequence count, terminal states,
+  latency min/median/max, total wall), exit 0/1/2, child/temp cleanup and
+  signal handling; needs a build + endpoint (unless `--mock`) and is never in
+  `npm test`/smoke/CI. Recorded evidence (2026-11-08): mock `--runs 3
+  --workers 1` → 3/3 completed (0.3–2.8 s depending on machine load; the persisted sidecar sequence is the queueing evidence, not submit latency); owner LM Studio
+  `lfm3-1.7b`, `--runs 2 --workers 1` → 2/2 in 230.8 s (run 2 queued 117.7 s
+  behind run 1; 7 vs 8 model calls), peak queued/running 1. Long soaks remain
+  an operator choice.
+- **Stacked-dialog guard investigation (no change)** — version-bounded
+  evidence: `naive-ui` 2.45.3 is the latest published release (2026-08-27)
+  and its modal implementation still fires `mask-click` for clicks inside a
+  stacked second dialog (unconditional capture-phase `clickoutside` in
+  `BodyWrapper`; `Modal.handleClickoutside` calls `onMaskClick` for every
+  outside click; the `evtd` trap only checks the first dialog's own body),
+  while the 2.45.2 fix explicitly reverted the earlier mask-level click
+  design. The `web/src/modal.ts` guard therefore stays; re-check after a
+  naive-ui release > 2.45.3 that makes mask clicks attributable/stacking
+  aware.
+
 ## Open items (deferred)
 
-- **Deliberate manual-only soak / WAN fault coverage** — a `serve`
-  RunManager/worker-pool load and long-running soak are not in the offline
-  gates (the opt-in load runner above covers CLI cooperation cycles), and WAN
-  latency/load + real-provider fault injection are not covered by the offline
-  gates; keep those manual (they need a real endpoint and real time budget).
+- **WAN fault / long-soak coverage (manual)** — WAN latency/load and
+  real-provider fault injection are not covered by the offline gates, and long
+  soaks are an operator choice; keep those manual (they need a real endpoint
+  and real time budget). The serve-level tooling exists:
+  `packages/harness/e2e/serve-load.ts` (`npm run test:e2e:serve-load`)
+  exercises the real RunManager/worker pool/queue over HTTP in mock or real
+  modes; recorded 2026-11-08 against the owner's LM Studio (workers 1,
+  runs 2): 2/2 completed in 230.8 s, run 2 queued 117.7 s behind run 1.
 - **Approval repeat cap at the broker** — **shipped 2026-11-06**:
   `RunApprovalBroker` counts operator denials per identical
   `(action, normalized target)` pair and auto-denies the next identical
@@ -979,8 +1012,14 @@ Design anchors that already exist:
 - **Subagents** — spawning nested cooperation runs (and likely child
   sessions) beyond the two-brother senior/junior pair. The context and
   approval machinery are the prerequisites; not started.
-- **Stacked-dialog mask-click (web, non-blocker)** — naive-ui fires
-  `mask-click` for clicks that land inside a stacked second dialog, so
-  every dialog's handler must ignore those via the `web/src/modal.ts`
-  guard. Revisit when upstream fixes the stacked-dialog semantics (or
-  replace the guard with upstream support).
+- **Stacked-dialog mask-click (web, non-blocker)** — **blocked on upstream**
+  (evidence updated 2026-11-08): naive-ui fires `mask-click` for clicks that
+  land inside a stacked second dialog, so every dialog's handler must ignore
+  those via the `web/src/modal.ts` guard. Installed and latest published
+  naive-ui are both 2.45.3 (2026-08-27); its `BodyWrapper` unconditionally
+  binds a capture-phase `clickoutside`, `Modal.handleClickoutside` calls
+  `onMaskClick` for every outside click, and the `evtd` trap only checks the
+  first dialog's own body — while the 2.45.2 release explicitly reverted the
+  earlier mask-level click design. Re-check after the next naive-ui release
+  (> 2.45.3); optionally file an upstream repro (stacked `n-modal`s: a click
+  inside the second fires the first's `on-mask-click`).

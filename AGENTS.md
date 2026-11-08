@@ -141,13 +141,14 @@ node dist/cli.js run "Plan a migration from Redis to Valkey" --provider mock
   `sessions/runtime/*.events.jsonl` (tool/approval events). Run records and
   pending approvals are in-memory only; role settings persist to
   `sessions/settings.json` (keys encrypted at rest).
-- Known gaps (see `docs/design-review.md`): WAN fault injection, a `serve`
-  RunManager/worker-pool load and long soaks are deliberately manual/not in
-  the offline gates (a hermetic scale suite covers large sessions and
-  transcripts, 200-session listings, concurrent runs and repeated compaction;
-  the smoke gate and CI run a loopback real-TCP fault-injection runner for
-  retry/timeout/overflow/quota, and an opt-in manual real-network load runner
-  `packages/harness/e2e/load.ts` exists with recorded LM Studio evidence).
+- Known gaps (see `docs/design-review.md`): WAN fault injection and long soaks
+  are deliberately manual/not in the offline gates (a hermetic scale suite
+  covers large sessions and transcripts, 200-session listings, concurrent
+  runs and repeated compaction; the smoke gate and CI run a loopback
+  real-TCP fault-injection runner for retry/timeout/overflow/quota, and
+  opt-in manual real-network runners exist — `packages/harness/e2e/load.ts`
+  for CLI cooperation cycles and `packages/harness/e2e/serve-load.ts` for the
+  serve RunManager/worker pool/queue — with recorded LM Studio evidence).
   Timeout and shutdown behavior is covered hermetically (provider
   retry/timeout registry, `run_shell` timeout clamp, `serve` shutdown grace);
   real-network coverage exists only in the opt-in live layers
