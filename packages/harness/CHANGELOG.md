@@ -9,6 +9,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **TUI keys-file auto-reload, opt-in** (wave 23): `tui --keys-watch` (or the
+  pinned `TWO_BROTHERS_TUI_KEYS_WATCH=1` boolean env; both captured at
+  startup, never persisted) keeps polling the startup-captured keys file and
+  applies valid edits without a restart. The new
+  `src/tui/keyoverrides.ts::watchTuiKeysFile` uses `node:fs.watchFile`
+  (500 ms stat-poll interval — portable on Windows; notices an editor's
+  save-by-rename and the creation of an absent file), debounces/coalesces each
+  detected change (200 ms) and reloads through the same validated
+  `reloadTuiCommands` path as `/keys reload`, so both surfaces share one
+  last-good-table rule and one bounded notice: a valid edit live-swaps the
+  active command table (matching, palette/help listings, status hints) and
+  posts one bounded info notice naming the new chords; an invalid/unreadable
+  file keeps the last good table with one bounded warning per detected change
+  (no repeat spam while the file stays unchanged); an absent file keeps the
+  current chords with an informational notice, and one created later loads on
+  the next detected change. `/keys show` reports the honest watch state
+  (`on` / `off` / `unavailable` — an embedded session with no captured source
+  reports `unavailable`) next to the effective chords, the captured
+  path/origin and the last load state, and never claims overrides that are not
+  active. The watcher is stopped and unwatched on every TUI exit path (the
+  `finally`, so no leaked timers or polls), and a session without the flag/env
+  keeps byte-identical default startup behavior and frames. `src/cli.ts`
+  resolves the opt-in (`tuiKeysWatchForCli`) and threads it through
+  `TuiAppOptions.keysWatch`; `src/clihelp.ts` catalogues the flag/env so the
+  docs↔CLI drift guard stays green. Tests: `tests/tuikeys.test.ts` 29 → 40
+  (flag/env catalogue + resolution, watch defaults and honest copy, the full
+  6/6 `/keys show` load-state/override matrix, the watch-state line, and
+  valid/invalid/absent/stop/debounce/uninstallable watcher cases) and
+  `tests/tuiintegration.test.ts` 23 → 25 (assembled-app last-good auto-reload;
+  an embedded session reporting `unavailable`), with the wave-22 review's
+  post-reload status-hint/footer assertions. Package suite: 1 572 tests
+  (1 570 pass, 2 environment skips). No new runtime dependencies; no protocol
+  or default-behavior change.
+- **Role fill/text token split (web)** (wave 23): the web token layer gains
+  three decorative fill companions — `--senior-fill`, `--junior-fill`,
+  `--operator-fill` (token inventory 94 → 97) — so the accessible role
+  palettes can tune role text for WCAG AA without leaving white initials on a
+  light decorative fill. The role text tokens keep their meaning (provider
+  role labels and other identity text keep `--senior`/`--junior`/
+  `--operator`; the confidence bar deliberately keeps `--junior`), while
+  avatars, role dots and `.dot-*` backgrounds paint the fill tokens
+  (`web/src/style.css`, `web/src/components/settings/RoleEditor.vue`). Every
+  palette block defines the fills with light/dark parity: the default palette's
+  fills equal its role tokens, so the default look is byte-identical; the
+  accessible contrast/neutral palettes get dedicated fills (the light palettes
+  reuse values that already clear the floor, the dark contrast fills are
+  `#3b64c9`/`#1a7a66`/`#666e7c` and the dark neutral fills
+  `#575e6a`/`#616874`/`#6b727e`) so white initials/glyphs on every fill clear
+  WCAG AA 4.5:1 in both schemes. `web/tests/tokens.test.ts` 15 → 16 tests:
+  the palette declaration set now covers the three fill companions, their
+  light/dark parity and distinctness, the default palette's fill equality with
+  the role tokens, and the computed white-on-fill AA floors with the pair and
+  ratio in every failure message. The hermetic `appearance-roles` browser
+  scenario additionally asserts that the rendered role dots follow the fill
+  tokens in light and dark. Web suite 356/356 and `npm run build` green. Files:
+  `web/src/tokens.css`, `web/src/style.css`,
+  `web/src/components/settings/RoleEditor.vue`, `web/tests/tokens.test.ts`,
+  `e2e/run.mjs`.
 - **TUI `/keys` command (show + live reload)** (wave 22): the TUI gains a
   built-in, chordless `keys` command (Settings group, `/keys [show|reload]`)
   so the file-configured global chords can be inspected and reloaded without a

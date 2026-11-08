@@ -486,7 +486,8 @@ the protocol reference and is not modified by work here either.
    (`help`) and draft stash (`stash`); typing keys, structural/Escape/quit
    layering, pickers/overlays and approval keys stay fixed. CLI
    `--keys-file` / `TWO_BROTHERS_TUI_KEYS_FILE` (pinned; default
-   `~/.two-brothers/tui-keys.json`; startup-only, never persisted) with
+   `~/.two-brothers/tui-keys.json`; path/origin captured at startup, never
+   persisted) with
    fail-soft one-line `[tui keys]` diagnostics on invalid/oversized/
    wrong-version/unreadable/unknown/duplicate/fixed-conflict files. Tests:
    `tests/tuikeys.test.ts` (25) + 2 `tuiintegration` cases; `clihelp.ts`
@@ -505,6 +506,30 @@ the protocol reference and is not modified by work here either.
    `tuikeys` +3 and `tuiintegration` +1; all 21 `tui*.test.ts` suites stay
    green. Remaining: in-TUI editor, file watcher/auto-reload, rebinding beyond
    the three global chords.
+   **wave 23:** two feature slices. (1) TUI **keys-file auto-reload (opt-in):**
+   `tui --keys-watch` / `TWO_BROTHERS_TUI_KEYS_WATCH` (startup-captured, never
+   persisted, off by default) polls the captured keys file with
+   `fs.watchFile` (500 ms interval, 200 ms debounce/coalesce) and reloads
+   through the same validated `reloadTuiCommands` path as `/keys reload`: a
+   valid edit live-swaps the active command table (matching, palette/help
+   listings, status hints) with one bounded info notice naming the new chords;
+   an invalid/unreadable file keeps the last good table with one bounded
+   warning per detected change; absence keeps the chords with an informational
+   notice. `/keys show` reports the honest watch state
+   (`on`/`off`/`unavailable`); the watcher is stopped and unwatched on every
+   exit path and frames stay byte-identical when the flag/env is absent.
+   `clihelp.ts` catalogues the flag/env; tests `tuikeys` 40,
+   `tuiintegration` 25. (2) Web **role fill/text token split:**
+   `--senior-fill`/`--junior-fill`/`--operator-fill` join the token layer
+   (inventory 94 → 97) in every palette block with light/dark parity; the
+   default palette's fills equal the role tokens (unchanged default look),
+   while the accessible palettes get dedicated fills so white avatar/dot
+   initials clear WCAG AA 4.5:1 in both schemes (role text keeps
+   `--senior`/`--junior`/`--operator`; the confidence bar keeps `--junior`;
+   avatars/role dots/`.dot-*` paint the fills). Tokens suite 15 → 16; the
+   `appearance-roles` browser scenario asserts the rendered dots follow the
+   fills; web suite 356/356. Package suite **1 572 tests (1 570 pass, 2
+   environment skips)**; no new runtime dependencies; no protocol change.
 
 ## Commands
 

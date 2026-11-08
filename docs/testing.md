@@ -114,7 +114,7 @@ npm run test:spawn      # node --test tests/ (child processes allowed)
 ```
 
 On the canonical integrated run for this round the in-process suite is
-**1 559 tests: 1 557 pass, 0 fail, 2 skipped** (exit 0); the two skips are
+**1 572 tests: 1 570 pass, 0 fail, 2 skipped** (exit 0); the two skips are
 environment-gated and never failures — the workspace symlink-parity test and
 the MCP stdio spawn are unavailable in this environment. `npm run typecheck`
 and `npm run build` pass, the hermetic CLI E2E is 17/17 on sources and 17/17
@@ -537,7 +537,8 @@ iterations; validated full **PASS (7/7)**), with publish dry-run evidence on
 HEAD. Wave 19 made the three global TUI chords — command palette, shortcut
 reference and draft stash — rebindable from a versioned JSON file via
 `tui --keys-file <path>` / `TWO_BROTHERS_TUI_KEYS_FILE` (default
-`~/.two-brothers/tui-keys.json`; startup-only, never persisted): a pure
+`~/.two-brothers/tui-keys.json`; path/origin captured at startup, never
+persisted): a pure
 resolver (`src/tui/keyoverrides.ts`) validates the allowlist, chord grammar,
 reserved/typing/duplicate/fixed-conflict rules fail-softly (one `[tui keys]`
 diagnostic and defaults) and threads the resolved command table through
@@ -579,6 +580,40 @@ the two accessible palettes exist); role avatar/dot fills stay decorative
 (aria-hidden, with the adjacent labels carrying identity — in the dark
 accessible palettes the initials sit white-on-light), with a split fill/text
 token pair left as a documented follow-up.
+
+Wave 23 adds two feature slices. (1) The web **role fill/text token split**
+adds the three decorative fill companions `--senior-fill`/`--junior-fill`/
+`--operator-fill` to the token layer (inventory 94 → 97): every palette block
+defines them with light/dark parity, the default palette's fills equal its
+role tokens (byte-identical default look), and the accessible contrast/neutral
+palettes get dedicated fills (dark contrast `#3b64c9`/`#1a7a66`/`#666e7c`,
+dark neutral `#575e6a`/`#616874`/`#6b727e`) so the white avatar/dot initials
+clear WCAG AA 4.5:1 in both schemes while role text keeps its identity tokens
+(the confidence bar deliberately keeps `--junior`); avatars, role dots and
+`.dot-*` backgrounds paint the fills. `web/tests/tokens.test.ts` 15 → 16 tests
+(fill set + light/dark parity, default equality to the role tokens, computed
+white-on-fill AA floors with the pair and ratio, fill distinctness) and the
+hermetic `appearance-roles` browser scenario now asserts the rendered dots
+follow the fills in light and dark; web suite 356/356, build green. (2) The
+TUI gains **opt-in keys-file auto-reload**: `tui --keys-watch` /
+`TWO_BROTHERS_TUI_KEYS_WATCH` (startup-captured, never persisted, off by
+default) polls the captured keys file with `fs.watchFile` (500 ms interval,
+200 ms debounce/coalesce) and applies each detected change through the same
+validated `reloadTuiCommands` path as `/keys reload` — a valid edit live-swaps
+the command table (matching, palette/help listings, status hints) with one
+bounded info notice naming the new chords; an invalid/unreadable file keeps
+the last good table with one bounded warning per detected change (no repeat
+spam while unchanged); absence keeps the chords with an informational notice.
+`/keys show` reports the honest watch state (`on`/`off`/`unavailable`), the
+watcher is stopped and unwatched on every exit path, and a session without the
+flag/env keeps byte-identical default startup behavior and frames.
+`tests/tuikeys.test.ts` 29 → 40 (+11: flag/env catalogue and resolution, watch
+defaults/copy, the full 6/6 `/keys show` load-state matrix, the watch-state
+line, and valid/invalid/absent/stop/debounce/uninstallable watcher cases) and
+`tests/tuiintegration.test.ts` 23 → 25 (+2: assembled-app last-good
+auto-reload, honest embedded `unavailable`), alongside the wave-22 review's
+post-reload status-hint/footer assertions. Package suite: **1 572 tests
+(1 570 pass, 2 environment skips)**; `npm run typecheck` green.
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
@@ -683,16 +718,19 @@ key, Alt/duplicate/reserved refusal with the complete documented reserved set
 pinned by a table-driven test), the versioned bounded fail-soft store and its
 repair rules, event parsing/matching with Ctrl/Cmd equivalence, conflict-aware
 rebinds, platform labels, and the dynamic `/help` entries), and the
-design-token layer (`tests/tokens.test.ts`, 14
+design-token layer (`tests/tokens.test.ts`, 16
 tests: every `var(--x)` reference in `style.css` and the 17 migrated component
 sheets is defined, every core colour token exists in the light block and both
 dark blocks — which must stay identical —, the spacing scale is complete and
 ordered, no colour literal is left in the migrated sheets, canonical
 radius/scale-spacing literals are banned there too, `theme.ts`
-stays mapped to the colour tokens, the 94-token inventory is pinned, the
-accent variants and their light/dark parity are checked, and the accent-text
+stays mapped to the colour tokens, the 97-token inventory is pinned, the
+accent variants and their light/dark parity are checked, the role palettes
+override the three role tokens and their three decorative fill companions
+(the default palette's fills equal its role tokens) and are held to the
+computed white-on-fill WCAG-AA floor, and the accent-text
 WCAG-AA floors plus the computed naive-ui primary-family contrast floors fail
-with the exact pair and ratio); 350/350 web tests. The modules are
+with the exact pair and ratio); 356/356 web tests. The modules are
 dependency-free at runtime, so plain `node --test` runs them
 via the `tests/register-ts.mjs` bootstrap (a tiny resolve hook for the
 extensionless imports); `npm test` wires that up. The full `web/` gate also
@@ -813,8 +851,12 @@ the defaults and the custom chord stops working; console guard clean), plus
 `appearance-roles` (Settings → Appearance's native Role colours radio group:
 the theme/density `.appearance-card` count stays 5; a keyboard-only move to
 High contrast flips the root `data-roles` attribute and the computed
-`--senior`/`--junior` role tokens plus the rendered role dots in light and
-after switching to dark (the dark contrast palette), the choice survives a
+`--senior`/`--junior` role tokens, their
+`--senior-fill`/`--junior-fill`/`--operator-fill` companions and the rendered
+role dots in light and after switching to dark (the dark contrast palette's
+dedicated darker fills keep the white initials at AA while staying distinct
+from its lightened role text tokens), the default palette's fill companions
+equal its role tokens (unchanged look), the choice survives a
 reload, Neutral shows the muted labels-only palette, and restoring Default
 returns the base role colours). On the canonical run that is
 **19 PASS, 0 FAIL, 1 SKIP** (the opt-in `real` scenario). The queue dock and the session-scope approval decisions

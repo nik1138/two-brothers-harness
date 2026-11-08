@@ -1138,6 +1138,45 @@ Design anchors that already exist:
   assertions. Remaining: in-TUI editor, file watcher/auto-reload, rebinding
   beyond the three global chords.
 
+## Shipped 2026-11-08 (wave 23: web role fill tokens, TUI keys auto-reload)
+
+- **Role fill/text token split (web)** — closes the open item of the same
+  name. Three decorative fill companions join the token layer —
+  `--senior-fill`/`--junior-fill`/`--operator-fill` (inventory 94 → 97) — in
+  every palette block with light/dark parity. The role tokens keep their text
+  meaning (identity labels, markers; the confidence bar keeps `--junior`);
+  avatars, role dots and `.dot-*` backgrounds paint the fills. The default
+  palette's fills equal its role tokens (byte-identical default look); the
+  accessible contrast/neutral palettes get dedicated fills (dark contrast
+  `#3b64c9`/`#1a7a66`/`#666e7c`, dark neutral
+  `#575e6a`/`#616874`/`#6b727e`) so white initials/glyphs on every fill clear
+  WCAG AA 4.5:1 in both schemes. Files: `web/src/tokens.css`,
+  `web/src/style.css`, `web/src/components/settings/RoleEditor.vue`; tests
+  `web/tests/tokens.test.ts` (16: fill set/parity, default equality, computed
+  white-on-fill AA floors with pair+ratio messages, distinctness) and the
+  hermetic `appearance-roles` browser scenario now asserts the rendered dots
+  follow the fills in light and dark. Web suite 356/356, build green.
+- **TUI keys-file auto-reload (opt-in)** — `tui --keys-watch` /
+  `TWO_BROTHERS_TUI_KEYS_WATCH=1` (pinned, startup-captured, never persisted,
+  off by default) polls the captured keys file with `fs.watchFile` (500 ms
+  interval, 200 ms debounce/coalesce) and applies each detected change through
+  the same validated `reloadTuiCommands` path as `/keys reload`: a valid edit
+  live-swaps the command table (matching, palette/help listings, status hints)
+  with one bounded notice naming the new chords; an invalid/unreadable file
+  keeps the last good table with one bounded warning per detected change
+  (no repeat spam while unchanged); absence keeps the current chords with an
+  informational notice, and a later-created file loads on the next change.
+  `/keys show` reports the honest watch state (`on`/`off`/`unavailable`) and
+  the watcher is stopped/unwatched on every exit path; without the flag/env
+  the default startup frames are byte-identical. Files: `src/tui/app.ts`,
+  `src/tui/keyoverrides.ts`, `src/cli.ts`, `src/clihelp.ts`; tests
+  `tests/tuikeys.test.ts` (40: catalogue/env, the full 6/6 load-state matrix,
+  watch state, defaults, valid/invalid/absent/stop/debounce/uninstallable) and
+  `tests/tuiintegration.test.ts` (25: assembled-app last-good auto-reload,
+  embedded `unavailable`). Package suite 1 572 tests (1 570 pass, 2
+  environment skips); typecheck green. Remaining: an in-TUI key-binding
+  editor.
+
 ## Open items (deferred)
 
 - **Remaining key-binding surfaces** — wave 16 shipped the web's three
@@ -1147,9 +1186,11 @@ Design anchors that already exist:
   `tui --keys-file`/`TWO_BROTHERS_TUI_KEYS_FILE`. Still fixed by design:
   composer/typing keys (IME- and picker-sensitive), picker/overlay
   navigation, dual-Escape stop, `?`/search/scroll keys, approval-panel keys
-  and the find bar; the TUI has no in-TUI editor or file watcher yet (wave 22
-  added explicit `/keys show` + `/keys reload`, not automatic reload).
-  Extending rebinding there needs a per-surface conflict model.
+  and the find bar. The TUI also gained opt-in automatic reload of the
+  captured keys file in wave 23 (`tui --keys-watch` /
+  `TWO_BROTHERS_TUI_KEYS_WATCH=1`, off by default) alongside `/keys show` and
+  `/keys reload`; an in-TUI key-binding editor is still absent. Extending
+  rebinding there needs a per-surface conflict model.
 - **WAN fault / long-soak coverage (manual)** — WAN latency/load and
   real-provider fault injection are not covered by the offline gates, and long
   soaks are an operator choice; keep those manual (they need a real endpoint
@@ -1158,12 +1199,37 @@ Design anchors that already exist:
   exercises the real RunManager/worker pool/queue over HTTP in mock or real
   modes; recorded 2026-11-08 against the owner's LM Studio (workers 1,
   runs 2): 2/2 completed in 230.8 s, run 2 queued 117.7 s behind run 1.
-- **Role fill/text token split (web, non-blocker)** — the three role tokens
-  are dual-use: the accessible palettes tune them for text, while the
-  decorative avatar/dot fills derive from the same values, so in the dark
-  contrast/neutral palettes the (aria-hidden, label-duplicated) avatar
-  initials sit white-on-light; splitting dedicated fill tokens (inventory +3)
-  would let both stay correct.
+- **`serve` config-derived auto-compaction is silently inert (medium,
+  verified 2026-11-08)** — `two-brothers serve` accepts `--compact`,
+  `--compact-threshold <chars>`, `--compact-threshold-tokens <n>`,
+  `--compact-keep-recent <chars>` and `--context-window` (plus the
+  `TWO_BROTHERS_COMPACT*` env vars) but its runs never receive the resulting
+  compaction settings: only the manual `POST /api/sessions/{name}/compact`
+  route falls back to the resolved config, so the documented proactive
+  auto-compaction never fires on the primary (serve/web) surface. Evidence and
+  a decision-complete fix sketch (one shared `compactionSettingsFromConfig`
+  helper used by `run`/`chat`/`tui`/`serve`, explicit `ServerOptions`
+  still winning) are in `.tmp/research/wave24-proposals.md` §A1: the A/B probe
+  `.tmp/research/probe-serve-auto-compact.mjs` reports config-only
+  `{envelopes: 5, summaries: 0}` vs an explicit `compaction` option
+  `{envelopes: 4, summaries: 1}`, and a real
+  `serve --compact-threshold 200` run produced a session with 0 summaries
+  while the identical CLI `run` produced 1. Not fixed here.
+- **CLI `run --mode work` without a workspace binds no tools (medium,
+  verified 2026-11-08)** — the CLI has no workspace surface (`--workspace` is
+  TUI-only; `serve` is the workspace-bound path), so a `run --mode work` gives
+  the junior an empty tool belt while the senior's review/decision can still
+  accept a fabricated deliverable as verified. Live evidence:
+  `.tmp/livecheck/wave23/REPORT.md` §S2 / finding F1 — against LM Studio
+  `lfm3-1.7b`, the run exited 0 with the deliverable "Created
+  /workspace/hello.txt …", the review verdict `accept` and the decision "File
+  creation verified and accepted", yet no file existed and no tool was called.
+  Candidate hardening (not applied): when work mode resolves with no
+  workspace-bound tool belt for the junior, emit one visible warning
+  ("work mode without a workspace: the junior has no workspace tools;
+  deliverables cannot be verified") and/or add a no-tools sentence to the
+  delegation directive — the prompt already says "You have no tools; answer
+  from the transcript." but a 1.7B model ignored it.
 - **Subagents** — spawning nested cooperation runs (and likely child
   sessions) beyond the two-brother senior/junior pair. The context and
   approval machinery are the prerequisites; not started.
