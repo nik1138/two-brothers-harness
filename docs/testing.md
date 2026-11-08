@@ -134,8 +134,12 @@ head+tail output across chunk and UTF-8 boundaries, plus the injectable
 `tui-history` rows through injectable `env`/`home`), `tests/serverbase.test.ts`
 (compaction settings derived from config), `tests/server.test.ts` (run cost and
 serve compaction) and `tests/cli.test.ts` (one work-mode warning, unchanged
-stdout/exit code). The web workspace adds `tests/transcriptWindow.test.ts` and
-`tests/usageFooter.test.ts`.
+stdout/exit code; the predicate looks at the junior belt only).
+`tests/tuiintegration.test.ts` covers the bounded TUI drain wait (a turn that
+resolves after the old 1500 ms cap still delays terminal restore, and a
+never-settling turn still exits) and `tests/plugincore.test.ts` the plugin
+abort-signal forwarding through `ctx.workspace_shell`. The web workspace adds
+`tests/transcriptWindow.test.ts` and `tests/usageFooter.test.ts`.
 
 Environment note (Windows): the shell-execution tests spawn the `bash` found on
 `PATH`; the documented/verified environment is Git Bash
@@ -922,7 +926,14 @@ dedicated darker fills keep the white initials at AA while staying distinct
 from its lightened role text tokens), the default palette's fill companions
 equal its role tokens (unchanged look), the choice survives a
 reload, Neutral shows the muted labels-only palette, and restoring Default
-returns the base role colours). On the canonical run that is
+returns the base role colours), plus `cooperation-surfaces` (a run-created
+file is previewed as "will be deleted" and is gone after applying
+"Undo file changes…"; the session row's "Fork session…" opens a copied
+two-turn session while the source session file stays byte-identical; rewinding
+the fork's second turn removes it and everything after it from the transcript
+and the session file; and a rejected mid-run steer keeps the draft while an
+accepted Alt+Enter steer clears it and reports the queued notice). The offline
+suite now holds 20 scenarios; the last canonical run before this addition was
 **19 PASS, 0 FAIL, 1 SKIP** (the opt-in `real` scenario). The queue dock and the session-scope approval decisions
 remain covered by the web unit suites, not by separate browser scenarios. The
 default suite is fully offline; the

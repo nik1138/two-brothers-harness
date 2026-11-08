@@ -43,19 +43,6 @@ Design anchors that already exist:
 
 ## Later goals / items
 
-- **Browser E2E for the wave-23 cooperation surfaces** (deferred from wave 24)
-  — session fork, session rewind, run-scoped file undo and mid-run steering all
-  have unit + server coverage but no browser scenario. One hermetic
-  `cooperation-surfaces` scenario in `e2e/run.mjs` should assert user-visible
-  truths: the session-row **Fork session…** action creates a new session row
-  and the source is unchanged; the **Rewind** confirmation removes the turn;
-  the undo preview applies and the marker file the scripted run wrote is gone
-  (or the refusal is honest); steering POSTs and the draft clears only on
-  acceptance while the run acknowledges. It needs a scripted run that writes a
-  marker file (undo) and a slow/streaming run (steering) in the fixture server;
-  keep the browser matrix and `e2e/web-freshness.test.mjs` green, and do not
-  add sleeps where a deterministic poll exists. Wave 24 deliberately left this
-  uncovered rather than adding a flaky scenario.
 - **Crash-torn session resume (vendor scout F3)** — the pi/opencode scout
   reported that a session file whose last JSONL line was half-written when the
   process died is not resumed cleanly; the reference fix is to truncate to the
@@ -63,16 +50,30 @@ Design anchors that already exist:
   session, cut the final line mid-object, `--resume`), then make the reader
   drop the torn trailing record instead of failing the session, keeping dense
   `seq` intact and never rewriting the file behind the operator's back.
-- **Detached POSIX children on TUI shutdown (vendor scout F4)** — the shell
-  runner now kills its Windows tree reliably (wave 24), but the TUI's own exit
-  path does not reap a detached POSIX process group it may have started; a
-  Ctrl+C during a running turn should stop the group before restoring the
-  terminal. Audit the TUI shutdown path against the shell runner's `killpg`
-  behavior and cover it with a process-free assertion (no leftover pid after
-  exit), not a timing sleep.
+- **Detached POSIX children on TUI shutdown (vendor scout F4)** — shipped in
+  wave 24 for the cooperative paths: the TUI now waits for the running turn to
+  unwind `run_shell`'s kill/drain (bounded by the shared
+  `SHELL_DRAIN_BUDGET_MS`) before restoring the terminal, and plugin tools
+  receive the run's abort signal with `ctx.workspace_shell` forwarding it, so
+  a cancelled plugin-initiated shell is cancellable. Remaining: real POSIX
+  hardware validation of `killpg` when the leader already exited (this
+  machine is Windows; the Windows tests prove abort/drain propagation only),
+  and CLI per-turn abort/SIGINT/SIGTERM coverage is a wave-25 item.
 - **TUI steering surface** — wave 23 shipped steering end to end in the
   runtime, HTTP API and web composer; a TUI chord that queues the compose text
   for the running turn (and reports the pending count) is still missing.
+- **Torn trailing session record: decide recover-vs-refuse (vendor scout F3)**
+  — a crash mid-append leaves a half-written final JSONL line, and `--resume`
+  currently refuses that session: `SessionStore.load` throws `SessionError` on
+  any unparseable non-empty line, a behaviour `tests/session.test.ts` pins as
+  deliberate ("fail loudly, never guess"). The runtime-event sidecar already
+  skips a torn last line (`runevents.ts`) and the metadata sidecar is
+  fail-soft, so the strictness is session-file specific. `.tmp/wave24/f3.md`
+  records the reproduction (exit 1, file byte-identical afterwards) and a
+  minimal proposal: drop only the torn *trailing* record, report it once, keep
+  dense `seq`, never rewrite the file, and still throw on non-trailing
+  corruption. Decide the policy first; the change itself is small once the
+  answer is yes.
 
 - **npm publish prep** — verify `@two-brothers/harness` name availability
   (fallbacks), publishConfig + provenance (OIDC), `publint`/`attw` gates,
@@ -1347,22 +1348,25 @@ Design anchors that already exist:
   `{envelopes: 5, summaries: 0}` vs an explicit `compaction` option
   `{envelopes: 4, summaries: 1}`, and a real
   `serve --compact-threshold 200` run produced a session with 0 summaries
-  while the identical CLI `run` produced 1. Not fixed here.
-- **CLI `run --mode work` without a workspace binds no tools (medium,
-  verified 2026-11-08)** — the CLI has no workspace surface (`--workspace` is
-  TUI-only; `serve` is the workspace-bound path), so a `run --mode work` gives
-  the junior an empty tool belt while the senior's review/decision can still
-  accept a fabricated deliverable as verified. Live evidence:
-  `.tmp/livecheck/wave23/REPORT.md` §S2 / finding F1 — against LM Studio
-  `lfm3-1.7b`, the run exited 0 with the deliverable "Created
+  while the identical CLI `run` produced 1. Not fixed here. Shipped in wave 24:
+  `serve` now derives the same settings, see `src/server.ts` and
+  `docs/cli-reference.md`.
+- **CLI `run --mode work` without a workspace binds no tools** (medium,
+  verified 2026-11-08; **shipped in wave 24**) — the CLI has no workspace
+  surface (`--workspace` is TUI-only; `serve` is the workspace-bound path), so
+  a `run --mode work` gives the junior an empty tool belt while the senior's
+  review/decision can still accept a fabricated deliverable as verified. Live
+  evidence: `.tmp/livecheck/wave23/REPORT.md` §S2 / finding F1 — against LM
+  Studio `lfm3-1.7b`, the run exited 0 with the deliverable "Created
   /workspace/hello.txt …", the review verdict `accept` and the decision "File
   creation verified and accepted", yet no file existed and no tool was called.
-  Candidate hardening (not applied): when work mode resolves with no
-  workspace-bound tool belt for the junior, emit one visible warning
-  ("work mode without a workspace: the junior has no workspace tools;
-  deliverables cannot be verified") and/or add a no-tools sentence to the
-  delegation directive — the prompt already says "You have no tools; answer
-  from the transcript." but a 1.7B model ignored it.
+  Wave 24 ships the honest notice:
+  `packages/harness/src/cli.ts::workModeWithoutToolsWarning`, called from
+  `runOnce` after MCP/plugin binding, emits one
+  `[warn] work mode has no tools bound: ...` stderr line whenever the junior's
+  belt (`shared` + `junior`) is empty — a senior-only tool does not suppress
+  it — while stdout, exit codes and `--json` output stay unchanged. Tests:
+  `packages/harness/tests/cli.test.ts`; docs: `docs/cli-reference.md` §Modes.
 - **Subagents** — spawning nested cooperation runs (and likely child
   sessions) beyond the two-brother senior/junior pair. The context and
   approval machinery are the prerequisites; not started.

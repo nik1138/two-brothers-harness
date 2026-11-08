@@ -47,10 +47,12 @@ export function register(ctx: PluginContext): void { ... }
     result, so the model can repair the call.
   - `scope` — `"shared"` (default), `"senior"` or `"junior"`.
   - `timeoutMs` — cooperative deadline around the handler.
-- `handler(args)` receives the model's arguments as one object and returns
-  the tool result — a string, or any JSON-serializable value (objects let
-  the graph surface a structured status such as `"denied"`); a thrown
-  exception becomes a failed tool result, never a crashed run.
+- `handler(args, signal?)` receives the model's arguments as one object and
+  the run's `AbortSignal` as an optional second argument (aborted when the
+  operator cancels the turn) and returns the tool result — a string, or any
+  JSON-serializable value (objects let the graph surface a structured status
+  such as `"denied"`); a thrown exception becomes a failed tool result, never
+  a crashed run.
 - The legacy positional form `add_tool(name, handler, description?,
   paramsSchema?, role?)` still loads for plugin-source compatibility. Its
   `role` is validated and recorded but **does not scope assignment**
@@ -72,8 +74,10 @@ export function register(ctx: PluginContext): void { ... }
 - Confined workspace helpers bound to the *current run's* workspace:
   `ctx.workspace_read/list/search/write/edit/delete/shell`. They are thin
   bridges over `Workspace` — same confinement, same `PermissionManager`
-  approval broker. They raise `PluginError` when the run has no workspace
-  (plugin tools are only offered to workspace-bound runs).
+  approval broker. `ctx.workspace_shell(command, timeout?, signal?)` forwards
+  the handler's abort signal, so a cancelled turn cancels the shell. They
+  raise `PluginError` when the run has no workspace (plugin tools are only
+  offered to workspace-bound runs).
 
 Optional module exports:
 

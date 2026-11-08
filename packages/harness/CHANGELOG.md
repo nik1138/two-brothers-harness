@@ -57,10 +57,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `%SystemRoot%\System32\taskkill.exe` with a bounded wait
     (`TASKKILL_TIMEOUT_MS` 5000 ms) and a `child.kill()` fallback, so detached
     descendants do not outlive the run.
+  - **TUI shutdown waits for shell cleanup; plugin shells are cancellable:**
+    quitting or cancelling a TUI turn now waits for the turn to unwind
+    `run_shell`'s kill/drain, bounded by the shared `SHELL_DRAIN_BUDGET_MS`
+    (7 s) plus a small margin, with a live `stopping…` status; the terminal is
+    still restored when the budget expires, so exit never hangs and a turn-free
+    exit stays immediate. Plugin tool handlers now receive the run's
+    `AbortSignal`, and `ctx.workspace_shell(command, timeout?, signal?)`
+    forwards it to the existing cancellable shell path (one-argument handlers
+    keep working). Windows-verified abort/drain propagation only; a detached
+    POSIX process group still needs POSIX hardware validation.
+  - **Browser coverage for the cooperation surfaces:** one hermetic
+    `cooperation-surfaces` scenario joins the browser matrix. It previews and
+    applies the run-scoped file undo (the run-created marker is gone), forks a
+    two-turn session while the source JSONL stays byte-identical, rewinds the
+    fork's second turn (UI and file), and exercises both a rejected steer
+    (draft kept, honest error) and an accepted steer (draft cleared, queued
+    copy). The scripted fixture gained a marker-writing run and a slow steering
+    run; the scenario opens the row menu through the keyboard path because the
+    full-width select button wins the pointer hit-test in headless Edge.
 
-  Package suite **1 772 tests (1 770 pass, 2 environment skips)**; web suite
-  **421/421**; the browser-E2E matrix is unchanged (no scenario added this
-  wave). No protocol/session-format change; no new runtime dependency.
+  Package suite **1 776 tests (1 774 pass, 2 environment skips)**; web suite
+  **423/423**; the browser matrix is now **20 offline scenarios** (20 PASS +
+  the opt-in `real` skip). No protocol/session-format change; no new runtime
+  dependency.
 
 - **Mid-run operator steering (wave 23):** the operator can steer a
   cooperation cycle that is already working instead of only queueing the next
