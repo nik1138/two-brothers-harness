@@ -1252,32 +1252,34 @@ watch(
                 </details>
               </article>
 
-              <button
-                type="button"
-                class="bubble-copy"
-                aria-label="Copy message"
-                @click="copyMessage(m)"
-              >{{ copiedId === m.id ? 'copied' : 'copy' }}</button>
+              <div class="bubble-actions">
+                <button
+                  type="button"
+                  class="bubble-copy"
+                  aria-label="Copy message"
+                  @click="copyMessage(m)"
+                >{{ copiedId === m.id ? 'copied' : 'copy' }}</button>
 
-              <button
-                v-if="row.entry.group.author === 'operator' && forkAction(m)"
-                type="button"
-                class="bubble-copy bubble-fork"
-                :disabled="!forkAction(m)!.available"
-                :title="forkTitle(m)"
-                :aria-label="forkLabel(m)"
-                @click="requestForkFromHere(m)"
-              >fork</button>
+                <button
+                  v-if="row.entry.group.author === 'operator' && forkAction(m)"
+                  type="button"
+                  class="bubble-copy bubble-fork"
+                  :disabled="!forkAction(m)!.available"
+                  :title="forkTitle(m)"
+                  :aria-label="forkLabel(m)"
+                  @click="requestForkFromHere(m)"
+                >fork</button>
 
-              <button
-                v-if="row.entry.group.author === 'operator' && rewindAction(m)"
-                type="button"
-                class="bubble-copy bubble-rewind"
-                :disabled="!rewindAction(m)!.removable"
-                :title="rewindTitle(m)"
-                :aria-label="rewindTitle(m)"
-                @click="requestRewind(m)"
-              >rewind</button>
+                <button
+                  v-if="row.entry.group.author === 'operator' && rewindAction(m)"
+                  type="button"
+                  class="bubble-copy bubble-rewind"
+                  :disabled="!rewindAction(m)!.removable"
+                  :title="rewindTitle(m)"
+                  :aria-label="rewindTitle(m)"
+                  @click="requestRewind(m)"
+                >rewind</button>
+              </div>
             </div>
           </div>
         </section>
@@ -1418,17 +1420,26 @@ watch(
 }
 
 .bubble-wrap {
-  position: relative;
-  max-width: none;
+  max-width: 100%;
   align-self: flex-start;
+  /* The per-message toolbar lives beside the bubble, never over its text.
+     The gutter is always reserved (opacity only changes) so revealing the
+     actions on hover cannot reflow the transcript. */
+  display: flex;
+  align-items: flex-start;
+  gap: 0.35rem;
+  min-width: 0;
 }
 
 .side-operator .bubble-wrap {
   align-self: flex-end;
+  /* Bubble on the right, its actions in the reserved gutter to the left. */
+  flex-direction: row-reverse;
 }
 
 .bubble-wrap .bubble {
   max-width: none;
+  min-width: 0;
 }
 
 /* Compact neutral marker for internal protocol activity (payload repairs). */
@@ -1517,10 +1528,29 @@ watch(
   margin-bottom: 0.3rem;
 }
 
+.bubble-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding-top: 0.3rem;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.side-operator .bubble-actions {
+  /* Reuse the operator bubble's reading order: copy nearest the bubble. */
+  flex-direction: row-reverse;
+}
+
+.bubble-wrap:hover .bubble-actions,
+.bubble-wrap:focus-within .bubble-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 .bubble-copy {
-  position: absolute;
-  top: 0.3rem;
-  right: 0.4rem;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: var(--surface-panel);
@@ -1529,45 +1559,22 @@ watch(
   line-height: 1.4;
   padding: 0.05rem 0.45rem;
   cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.12s ease;
+  transition: color 0.12s ease, border-color 0.12s ease;
 }
 
-.bubble-wrap:hover .bubble-copy,
-.bubble-wrap:focus-within .bubble-copy {
-  opacity: 1;
+.bubble-copy:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
 }
 
-/* Rewind sits on the operator bubble's leading edge so it never overlaps the
-   copy control; a blocked action stays visible (disabled) with its reason. */
-.bubble-rewind {
-  right: auto;
-  left: 0.4rem;
+.bubble-copy:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
 }
 
-.bubble-rewind:disabled {
+/* A blocked action stays visible (disabled) with its reason. */
+.bubble-copy:disabled {
   cursor: not-allowed;
-  opacity: 0.55;
-}
-
-.bubble-wrap:hover .bubble-rewind:disabled,
-.bubble-wrap:focus-within .bubble-rewind:disabled {
-  opacity: 0.55;
-}
-
-/* Fork-from-here rides beside copy on the bubble's trailing edge, so it never
-   collides with the rewind control on real operator tasks. */
-.bubble-fork {
-  right: 4.2rem;
-}
-
-.bubble-fork:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
-}
-
-.bubble-wrap:hover .bubble-fork:disabled,
-.bubble-wrap:focus-within .bubble-fork:disabled {
   opacity: 0.55;
 }
 
