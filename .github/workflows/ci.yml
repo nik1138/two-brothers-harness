@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+# Two platforms: the hermetic gates run on Linux (Node 22/24 matrix) and on
+# Windows (Node 24 — the platform this project is developed and gated on:
+# Git Bash paths, process spawning, shell tests, temp dirs). Browser E2E
+# (Playwright + system Edge) and the live/real-network load runners stay
+# opt-in/manual: CI has neither a system browser nor a model endpoint.
 jobs:
   harness:
     runs-on: ubuntu-latest
@@ -130,3 +135,122 @@ jobs:
         if: matrix.node == 22
         run: npm run pack:check
         working-directory: packages/harness
+
+  # Windows leg: the same hermetic correctness gates on the platform this
+  # project is actually developed and gated on (Git Bash paths, child-process
+  # spawning, shell tests, temp dirs). A single Node version is enough here —
+  # the ubuntu matrix already covers the Node 22 engines floor and Node 24.
+  #
+  # Not included, deliberately:
+  # - Tarball install smoke and publint/attw (`pack:check`): those are
+  #   release-rehearsal steps (pack + fresh install + tarball format analysis),
+  #   not correctness gates. They stay on the ubuntu Node 22 engines floor so
+  #   this leg stays bounded and platform-identical to the release artifact.
+  # - `npm run test:spawn`: the same suites run in-process via `npm test`; a
+  #   second spawned pass adds minutes without new Windows coverage.
+  # - `node e2e/run.ts` (hermetic server E2E): covered on the ubuntu legs; this
+  #   job focuses on the gates most sensitive to Windows process/path behavior.
+  # - Browser E2E and the live/real-network load runners: opt-in/manual only
+  #   (no system Edge browser and no model endpoint on the runner).
+  #
+  # All `run:` steps below are plain `node`/`npm` commands, which the default
+  # Windows PowerShell shell executes directly; no `shell: bash` is needed and
+  # no step depends on a POSIX shell (Git Bash being on PATH on windows-latest
+  # is what the package's shell suites expect at runtime).
+  harness-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The package's shell suites spawn `bash` (confined workspace shells,
+      # `run_shell` tests). GitHub's Windows image ships Git Bash, but its bin
+      # dir is not guaranteed to be on PATH and a WSL shim must not win; put
+      # Git Bash first for every following step (GITHUB_PATH affects later
+      # steps only). This keeps the default PowerShell shell for `run:` while
+      # making the spawned shell deterministic.
+      - name: Put Git Bash on PATH
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "C:\Program Files\Git\bin\bash.exe")) {
+            throw "Git Bash not found at C:\Program Files\Git\bin (windows-latest image change?)"
+          }
+          "C:\Program Files\Git\bin" |
+            Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # Zero-dependency protocol reference: no install step of its own, the
+      # selftest and in-process suite run on the checked-in sources alone.
+      - name: Protocol reference selftest
+        run: node src/selftest.ts
+        working-directory: typescript
+
+      - name: Protocol reference tests
+        run: node tests/run-all.ts
+        working-directory: typescript
+
+      - name: Typecheck
+        run: npm run typecheck
+        working-directory: packages/harness
+
+      - name: Build
+        run: npm run build
+        working-directory: packages/harness
+
+      - name: Test (in-process)
+        run: npm test
+        working-directory: packages/harness
+
+      - name: Offline selftest
+        run: node dist/selftest.js
+        working-directory: packages/harness
+
+      - name: Mock end-to-end run
+        run: node dist/cli.js run "ci smoke" --provider mock
+        working-directory: packages/harness
+
+      # Hermetic CLI E2E: drives the CLI as a real subprocess against the mock
+      # provider (temp dirs, offline). Sources first, then `--dist` so the
+      # built artifact is proven too. This is the most Windows-sensitive gate
+      # (child processes, `.cmd` shims, paths, temp cleanup).
+      - name: Hermetic CLI E2E (sources)
+        run: node e2e/cli.ts
+        working-directory: packages/harness
+
+      - name: Hermetic CLI E2E (dist)
+        run: node e2e/cli.ts --dist
+        working-directory: packages/harness
+
+      # Real-socket fault injection: a scripted loopback node:http server drives
+      # the package's real retry/timeout/overflow machinery over actual TCP (no
+      # fetch stubs, no external network; ~0.3 s, sources only).
+      - name: Real-socket fault-injection E2E
+        run: node e2e/faults.ts
+        working-directory: packages/harness
+
+      - name: Web install
+        run: npm ci
+        working-directory: web
+
+      - name: Web unit tests
+        run: npm test
+        working-directory: web
+
+      - name: Web build
+        run: npm run build
+        working-directory: web
+
+      # The browser-E2E packaged-web freshness guard is plain node:test with no
+      # dependencies and no browser (the Playwright suite itself stays manual),
+      # so its staleness/auto-sync logic is proven here on a clean checkout too.
+      - name: Browser-E2E freshness unit tests
+        run: node --test e2e/web-freshness.test.mjs
