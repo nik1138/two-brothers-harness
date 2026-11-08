@@ -277,7 +277,7 @@ Environment variables and CLI flags (identical across implementations):
 | `TWO_BROTHERS_TIMEOUT` | `--timeout` | `120` | per-request HTTP timeout in seconds; bounds every attempt of the retry loop |
 | `TWO_BROTHERS_RETRIES` | `--retries` | `6` | retries after a failed model call (`0` = single attempt); backoff grows 2 s, 4 s, 8 s, … capped at 30 s — 7 attempts total by default |
 | `TWO_BROTHERS_VERBOSE` | `--verbose` | `false` | verbose output |
-| `TWO_BROTHERS_JSON` | `--json` | `false` | print the final `decision` as JSON |
+| `TWO_BROTHERS_JSON` | `--json` | `false` | equivalent to `--json` in the running implementation (explicit output flags/modes win over it): the TypeScript package emits its documented single machine-readable output object, while the zero-dependency reference keeps the §9 decision-line output |
 | `TWO_BROTHERS_SESSION_FILE` | `--session-file` | — | JSONL file to persist every envelope to |
 | `TWO_BROTHERS_RESUME` | `--resume` | `false` | resume the session file instead of starting a new one |
 
@@ -311,7 +311,10 @@ zero-dependency reference (`node src/cli.ts ...`).
 
 - With `--verbose`: every step with the role label and the message type.
 - Without `--verbose`: a compact conversation.
-- `--json`: the final `decision` as JSON.
+- `--json`: the final `decision` as JSON (the zero-dependency reference
+  behavior; the TypeScript package's `--json`/`TWO_BROTHERS_JSON` emit its
+  documented machine-readable output object instead — see
+  `docs/cli-reference.md`).
 
 ---
 

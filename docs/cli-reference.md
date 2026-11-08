@@ -832,13 +832,13 @@ per-role connection without leaving the terminal.
 | `--retries` | int | `6` | retries after a failed model call (`0` = single attempt); backoff 2 s, 4 s, 8 s, … capped at 30 s (7 attempts total by default); a stopped run aborts the loop between attempts |
 | `--max-tokens` | int | — | (TS package) output-token cap for both roles (env `TWO_BROTHERS_MAX_TOKENS`; per-role `TWO_BROTHERS_SENIOR_MAX_TOKENS` / `TWO_BROTHERS_JUNIOR_MAX_TOKENS` override it); Anthropic's default stays 4096, OpenAI/Gemini omit the cap when unset |
 | `--mode` | `consult`, `work`, `auto` | `consult` | cooperation mode |
-| `--mode` | `print`, `json` | — | (TS package, `run` only) non-interactive automation output — see [Automation output](#automation-output-ts-package); `--mode work --json-events` stays possible because `print`/`json` are output modes, not cooperation modes |
-| `--json-events` | flag | off | (TS package, `run` only) alias for `--mode json` |
-| `--stream` | flag | off | (TS package, `run` only) NDJSON run events on stdout as they happen: one JSON object per line from `run_status`, `envelope`, `repair`, `tool_call`, `tool_result`, `result`. Its own output mode — cannot combine with `--json`/`--json-events`/`--mode print|json` (usage error, exit 2); the human summary and cost line are suppressed |
+| `--mode` | `print`, `json` | — | (TS package, `run` and each `chat` REPL turn) non-interactive automation output — see [Automation output](#automation-output-ts-package); `--mode work --json-events` stays possible because `print`/`json` are output modes, not cooperation modes |
+| `--json-events` | flag | off | (TS package, `run` and each `chat` REPL turn) alias for `--mode json` |
+| `--stream` | flag | off | (TS package, `run` and each `chat` REPL turn) NDJSON run events on stdout as they happen: one JSON object per line from `run_status`, `envelope`, `repair`, `tool_call`, `tool_result`, `result`. Its own output mode — on `run` it cannot combine with `--json`/`--json-events`/`--mode print|json` (usage error, exit 2); the human summary and cost line are suppressed |
 | `--live` | flag | off (on for a TTY) | (TS package, `run`/`chat` only) stream the human transcript live on an interactive stdout: one envelope block as produced, dim `· …` activity rows between blocks, the decision rule and compact footer still once at the end. Never applies to a pipe, a machine output mode, or a sink without a TTY signal |
 | `--no-live` | flag | off | (TS package, `run`/`chat` only) disable live streaming and print the finished transcript once (the piped behavior); wins when both `--live` and `--no-live` are given |
 | `--verbose` | flag | off | print the full payload of every message |
-| `--json` | flag | off | with no explicit `--mode`: select `--mode json` (one machine-readable object). With an explicit `--mode print`: print the `decision` as JSON on the last line |
+| `--json` | flag | off | with no explicit `--mode`: select `--mode json` (one machine-readable object). With an explicit `--mode print`: print the `decision` as JSON on the last line. Env `TWO_BROTHERS_JSON` is the env spelling of a bare `--json` (same machine object; explicit output flags/modes win over it) |
 | `--session-file` | path | — | JSONL file to persist every protocol envelope to |
 | `--resume` | flag | off | resume the session file instead of starting a new one |
 | `--compact` | flag | off | (TS package) compact the context once before the run: an old prefix is summarized by the senior provider into a marked context event, keeping the session under the model's context window |
@@ -878,7 +878,7 @@ per-role connection without leaving the terminal.
 | `TWO_BROTHERS_RETRIES` | `--retries` |
 | `TWO_BROTHERS_MODE` | `--mode` (also accepts the TS-package output values `print`/`json`) |
 | `TWO_BROTHERS_VERBOSE` | `--verbose` (`true`/`1`) |
-| `TWO_BROTHERS_JSON` | `--json` (`true`/`1`) |
+| `TWO_BROTHERS_JSON` | `--json` (`true`/`1`) — equivalent to a bare `--json`: the machine-readable output object (explicit output flags/modes win over it), not the legacy decision-on-the-last-line output |
 | `TWO_BROTHERS_SESSION_FILE` | `--session-file` |
 | `TWO_BROTHERS_RESUME` | `--resume` (`true`/`1`) |
 | `TWO_BROTHERS_COMPACT` | `--compact` (`true`/`1`; TS package) |
@@ -1163,7 +1163,10 @@ enables the senior verify pass:
 
 `run` in the TypeScript package (`packages/harness`) accepts two extra
 `--mode` values — output modes, not cooperation modes (so
-`--mode work --json-events` is meaningful):
+`--mode work --json-events` is meaningful). Each `chat` REPL turn honors the
+same modes (one output per submitted task; the REPL banner and blank turn
+separators are suppressed in machine modes so every turn's payload stays
+parseable):
 
 - `--mode print` — stdout carries only the final decision text (with
   `--json`: the decision object as JSON). Warnings and the usage line go to
@@ -1174,6 +1177,19 @@ enables the senior verify pass:
   `{task, events, decision, usage, cost, rounds, errors}`; diagnostics stay on
   stderr. One event per line is intentionally not produced — the object is
   single-shot. (`run --stream` is the line-by-line NDJSON alternative.)
+
+`TWO_BROTHERS_JSON=1` (also `true`/`yes`/`on`) is the environment spelling of
+a bare `--json`: it selects the same single machine-readable object on stdout
+— never the retired "human transcript plus the decision on the last line"
+behavior. Precedence is unchanged: `--stream`, `--json-events` and an explicit
+`--mode print|json` win over the env var, and any explicit output flag wins
+over an env value of `0`/`false`; the env var is not a JSON modifier on
+`--mode print` (use the `--json` flag there for the decision object).
+
+**Migration note:** scripts that relied on the old `TWO_BROTHERS_JSON` output
+(a decision JSON object as the last line after the human transcript) should
+parse the new single object's `decision` key, or add `--mode print` for the
+decision text / `--mode print --json` for the decision-only object.
 
 Exit codes in both modes: `0` success, `1` run error (the `errors` array in
 JSON mode is non-empty), `2` usage error (unknown command/option, task not
@@ -1193,7 +1209,8 @@ them):
   `--compact-keep-recent` (see [Sessions](#sessions)).
 - **MCP role scoping** — the per-server `"role"` field (see [MCP tools](#mcp-tools)).
 - **Automation output modes** — `--mode print|json`, `--json-events`
-  (a bare `--json` selects `--mode json`), and `run --stream` NDJSON.
+  (a bare `--json` selects `--mode json`; `TWO_BROTHERS_JSON` is its env
+  spelling), and `run --stream` NDJSON.
 - **Token-level streaming & slash commands** — `run --stream
   --stream-tokens` adds one `token` NDJSON record per provider text delta
   (env `TWO_BROTHERS_STREAM_TOKENS=1`), and the chat REPL expands markdown

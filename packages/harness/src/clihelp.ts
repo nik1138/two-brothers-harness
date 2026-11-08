@@ -562,7 +562,7 @@ defineCommand({
     "approval-mode",
   ],
   flagNotes: {
-    mode: "cooperation mode consult|work|auto (the run output modes are not accepted here)",
+    mode: "cooperation mode consult|work|auto, or an output mode print|json for machine turns (chat accepts the run output modes too)",
     "compact-keep-recent":
       "recent chars kept verbatim by auto-compaction and by the REPL /compact action",
     "approval-mode":

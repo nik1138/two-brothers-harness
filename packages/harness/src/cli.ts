@@ -461,6 +461,12 @@ function argsToConfigArgs(values: Record<string, any>): Record<string, unknown> 
     // "print"/"json" are output modes for `run`, not cooperation modes —
     // leave cfg.mode at its default (or the env value) in that case
     if (flag === "mode" && isOutputMode(values[flag])) continue;
+    // Boolean flags default to `false`; forwarding that default would override
+    // a true TWO_BROTHERS_* env value (resolveConfig merges env before args).
+    // Forward `--json` only when set, so Config.jsonOut keeps reflecting the
+    // flag OR its env spelling (TWO_BROTHERS_JSON) for the output-mode
+    // resolution and for embedders.
+    if (flag === "json" && values[flag] !== true) continue;
     if (values[flag] !== undefined) result[configKey] = values[flag];
   }
   return result;
@@ -475,7 +481,14 @@ function isOutputMode(value: unknown): value is "print" | "json" {
   return value === "print" || value === "json";
 }
 
-function resolveOutputMode(values: Record<string, unknown>): OutputMode {
+/**
+ * Resolve the non-interactive output mode. Explicit output flags and modes
+ * come first (`--stream` > `--json-events` > `--mode print|json` > bare
+ * `--json`), then `Config.jsonOut` — the bare `--json` flag or its env
+ * spelling `TWO_BROTHERS_JSON` (aligned by contract) — then the human text
+ * default.
+ */
+function resolveOutputMode(values: Record<string, unknown>, jsonOut = false): OutputMode {
   if (values.stream === true) return "stream";
   if (values["json-events"] === true) return "json";
   // An explicit output mode wins, so the documented `--mode print --json`
@@ -484,6 +497,10 @@ function resolveOutputMode(values: Record<string, unknown>): OutputMode {
   // modifier that leaves the human transcript on stdout.
   if (isOutputMode(values.mode)) return values.mode;
   if (values.json === true) return "json";
+  // `TWO_BROTHERS_JSON=1|true` is the env spelling of a bare `--json`; an
+  // explicit output flag/mode above always wins over it (`--mode print` stays
+  // print, `--json` flag with env `0` stays JSON).
+  if (jsonOut) return "json";
   return "text";
 }
 
@@ -924,6 +941,14 @@ export interface RunOnceOptions {
   streamTokens?: boolean;
   /** Per-turn cooperation mode; a command's frontmatter `mode` overrides it. */
   mode?: Config["mode"];
+  /**
+   * Bare `--json` in `--mode print`: print the decision object as JSON on the
+   * last stdout line. This is keyed on the FLAG, not on `Config.jsonOut`:
+   * `TWO_BROTHERS_JSON` is a whole output mode (the machine object), and an
+   * explicit `--mode print` wins over it, so the env var never narrows a print
+   * run to the decision object.
+   */
+  jsonDecision?: boolean;
   /** Terminal style for the human text mode (machine modes always stay plain). */
   style?: CliStyle;
   /**
@@ -974,7 +999,7 @@ async function runOnce(
   // single final render below, so those bytes are unchanged from the
   // pre-live CLI. `--live` cannot force a pipe to stream live.
   const live =
-    outputMode === "text" && options.live !== false && io.isTTY === true && !cfg.jsonOut
+    outputMode === "text" && options.live !== false && io.isTTY === true
       ? createLiveTranscript(io, {
           style: textStyle,
           verbose: cfg.verbose,
@@ -1109,7 +1134,7 @@ async function runOnce(
       io.error(usageLine(result.usage ?? {}, textStyle)); // stdout carries decision only
       const cost = costLine(cfg, result.usage ?? {}, textStyle);
       if (cost) io.error(cost);
-      if (cfg.jsonOut) {
+      if (options.jsonDecision === true) {
         io.log(JSON.stringify(result.decision));
       } else {
         const text =
@@ -1138,27 +1163,25 @@ async function runOnce(
     for (const err of result.errors) {
       io.error(paintWarningPrefix(textStyle, `[warn] ${err}`));
     }
-    if (!cfg.jsonOut) {
-      // The compact human footer replaces the print-mode `tokens:`/`cost:`
-      // diagnostics lines here; machine modes keep those exact formats.
-      const cost = estimateRunCost(cfg, result.usage ?? {});
-      const footer = humanFooter(
-        result.usage ?? {},
-        cost === null ? null : cost.totalCost,
-        textStyle,
-        terminalWidth(),
-      );
-      if (footer !== null) {
-        // Live mode reserves the footer for the end (exactly once); the piped
-        // path keeps its historical blank-line + footer layout.
-        if (live !== null) live.foot(footer);
-        else {
-          io.log("");
-          io.log(footer);
-        }
+    // The compact human footer replaces the print-mode `tokens:`/`cost:`
+    // diagnostics lines here; machine modes keep those exact formats and never
+    // reach this text-only path.
+    const cost = estimateRunCost(cfg, result.usage ?? {});
+    const footer = humanFooter(
+      result.usage ?? {},
+      cost === null ? null : cost.totalCost,
+      textStyle,
+      terminalWidth(),
+    );
+    if (footer !== null) {
+      // Live mode reserves the footer for the end (exactly once); the piped
+      // path keeps its historical blank-line + footer layout.
+      if (live !== null) live.foot(footer);
+      else {
+        io.log("");
+        io.log(footer);
       }
     }
-    if (cfg.jsonOut) io.log(JSON.stringify(result.decision));
     return failed ? 1 : 0;
   } finally {
     await mcp?.client.close();
@@ -1507,7 +1530,7 @@ function printDryRun(
   task: ResolvedTask | undefined,
 ): number {
   const plan = buildDryRunPlan(command, cfg, values, task);
-  if (resolveOutputMode(values) === "json") {
+  if (resolveOutputMode(values, cfg.jsonOut) === "json") {
     io.log(JSON.stringify(plan));
     return 0;
   }
@@ -1579,7 +1602,8 @@ async function doRun(
     const resources = await loadRunResources(cfg, values, io);
     return await runOnce(cfg, resolved.task, io, context, {
       ...(values["mcp-config"] ? { mcpConfig: values["mcp-config"] } : {}),
-      outputMode: resolveOutputMode(values),
+      outputMode: resolveOutputMode(values, cfg.jsonOut),
+      jsonDecision: values.json === true,
       resources,
       streamTokens,
       style,
@@ -1705,6 +1729,15 @@ async function doChat(
     return 2;
   }
   if (values["dry-run"] === true) return printDryRun("chat", cfg, values, io, undefined);
+  // Automation output for every REPL turn: the same resolution `run` uses, so
+  // `TWO_BROTHERS_JSON` and the bare `--json` flag select the machine-readable
+  // object per turn (explicit --mode print|json / --json-events / --stream win).
+  // The REPL banner, resolved-role rows and blank turn separators are stdout
+  // decoration, so they are suppressed for machine modes to keep each turn's
+  // payload parseable.
+  const turnOutputMode = resolveOutputMode(values, cfg.jsonOut);
+  const turnJsonDecision = values.json === true;
+  const machineOutput = turnOutputMode !== "text";
   let context: SharedContext;
   try {
     context = openSession(cfg, io);
@@ -1751,11 +1784,13 @@ async function doChat(
     ].join("\n");
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
-  io.log(
-    `${style.paint("strong", "Two Brothers REPL.")} Enter a task (empty line or exit to quit). ` +
-      `Type ${style.paint("accent", "/help")} for commands.`,
-  );
-  printResolvedRoles(cfg, io);
+  if (!machineOutput) {
+    io.log(
+      `${style.paint("strong", "Two Brothers REPL.")} Enter a task (empty line or exit to quit). ` +
+        `Type ${style.paint("accent", "/help")} for commands.`,
+    );
+    printResolvedRoles(cfg, io);
+  }
   // The REPL's default cooperation mode for following turns. A discovered
   // template's or a built-in prompt command's `mode` overrides it for one turn.
   let replMode: Config["mode"] = cfg.mode;
@@ -1926,7 +1961,10 @@ async function doChat(
   // REPL; question() would drop them. The prompt is only displayed on an
   // interactive terminal — echoed onto a piped transcript it would glue the
   // first output line onto the prompt line.
-  const showPrompt = process.stdin.isTTY === true;
+  // The prompt is only displayed on an interactive terminal and never in a
+  // machine output mode: on a TTY, readline echoes the prompt on stdout, which
+  // would interleave with the per-turn JSON/NDJSON payload.
+  const showPrompt = process.stdin.isTTY === true && !machineOutput;
   rl.setPrompt("task> ");
   if (showPrompt) rl.prompt();
   // eslint-disable-next-line no-constant-condition
@@ -1963,13 +2001,14 @@ async function doChat(
       if (discovered !== undefined) {
         await runOnce(cfg, expandCommand(discovered, matched.args), io, context, {
           ...(values["mcp-config"] ? { mcpConfig: values["mcp-config"] } : {}),
-          outputMode: "text",
+          outputMode: turnOutputMode,
+          jsonDecision: turnJsonDecision,
           resources,
           style,
           live,
           ...(discovered.mode ? { mode: discovered.mode } : {}),
         });
-        io.log("");
+        if (!machineOutput) io.log("");
       } else {
         const base = findBaseCommand(matched.name);
         if (base === undefined) {
@@ -1992,13 +2031,14 @@ async function doChat(
           if (task !== null) {
             await runOnce(cfg, task, io, context, {
               ...(values["mcp-config"] ? { mcpConfig: values["mcp-config"] } : {}),
-              outputMode: "text",
+              outputMode: turnOutputMode,
+              jsonDecision: turnJsonDecision,
               resources,
               style,
               live,
               ...(base.mode ? { mode: base.mode } : {}),
             });
-            io.log("");
+            if (!machineOutput) io.log("");
           }
         } else {
           await performBaseAction(base, matched.args);
@@ -2009,13 +2049,14 @@ async function doChat(
     }
     await runOnce(cfg, trimmed, io, context, {
       ...(values["mcp-config"] ? { mcpConfig: values["mcp-config"] } : {}),
-      outputMode: "text",
+      outputMode: turnOutputMode,
+      jsonDecision: turnJsonDecision,
       resources,
       style,
       live,
       mode: replMode,
     });
-    io.log("");
+    if (!machineOutput) io.log("");
     if (showPrompt) rl.prompt();
   }
   // stdin closed (EOF) — e.g. a piped script that ended without an empty line

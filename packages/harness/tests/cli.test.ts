@@ -339,6 +339,61 @@ function ansi16Style(): ReturnType<typeof resolveCliStyle> {
   return resolveCliStyle({ depth: 4, env: {} });
 }
 
+/**
+ * The stable part of one machine-output object: protocol ids and timestamps are
+ * generated per run, so parity is asserted with those volatile fields
+ * normalized.
+ */
+function normalizeMachineOutput(line: string): string {
+  const parsed = JSON.parse(line) as {
+    events: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+  return JSON.stringify({
+    ...parsed,
+    events: parsed.events.map((event) => ({ ...event, id: "<id>", ts: "<ts>" })),
+  });
+}
+
+/**
+ * `TWO_BROTHERS_JSON` is the env spelling of a bare `--json` (contract
+ * alignment): a real spawned CLI must produce the same machine output either
+ * way, with no escapes despite FORCE_COLOR.
+ */
+test("spawned CLI: TWO_BROTHERS_JSON=1 matches bare --json output", () => {
+  const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+  const env: NodeJS.ProcessEnv = { ...process.env, FORCE_COLOR: "3" };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("TWO_BROTHERS_") || key === "NO_COLOR") delete env[key];
+  }
+  const run = (extraEnv: NodeJS.ProcessEnv, args: string[]) => {
+    const result = spawnSync(
+      process.execPath,
+      [cli, "run", "pick an approach", "--provider", "mock", ...args],
+      { encoding: "utf-8", env: { ...env, ...extraEnv }, timeout: 60_000 },
+    );
+    assert.equal(result.status, 0, result.stderr ?? String(result.error));
+    return result;
+  };
+
+  const flag = run({}, ["--json"]);
+  const envVar = run({ TWO_BROTHERS_JSON: "1" }, []);
+  const envTrue = run({ TWO_BROTHERS_JSON: "true" }, []);
+
+  assert.equal(flag.stdout.trim().split("\n").length, 1, "one machine line");
+  for (const result of [envVar, envTrue]) {
+    const lines = result.stdout.trim().split("\n");
+    assert.equal(lines.length, 1, "one machine line");
+    assert.equal(result.stderr, "", "a clean machine run keeps stderr silent");
+    assert.ok(!result.stdout.includes("\u001b"), "machine output carries no escapes");
+    assert.equal(
+      normalizeMachineOutput(lines[0]),
+      normalizeMachineOutput(flag.stdout.trim()),
+      "env and flag must produce the same machine object",
+    );
+  }
+});
+
 const MOCK_RUN_ARGS = ["run", "pick an approach", "--provider", "mock"] as const;
 
 test("run: text mode renders separated blocks, a ruled decision and the compact footer", async () => {

@@ -115,6 +115,12 @@ function renderMessages(messages: Array<Record<string, any>>, verbose: boolean):
 function argsToConfigArgs(values: Record<string, any>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const [flag, configKey] of Object.entries(FLAG_TO_CONFIG)) {
+    // Boolean flags default to `false`; forwarding that default would override
+    // a true TWO_BROTHERS_* env value (resolveConfig merges env before args).
+    // Forward `--json` only when set, so `Config.jsonOut` keeps reflecting the
+    // flag OR its env spelling (TWO_BROTHERS_JSON) — the contract says the env
+    // var is equivalent to `--json`.
+    if (flag === "json" && values[flag] !== true) continue;
     if (values[flag] !== undefined) result[configKey] = values[flag];
   }
   return result;
