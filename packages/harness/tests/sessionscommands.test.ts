@@ -20,6 +20,7 @@ import { test } from "node:test";
 
 import { main, type CliIO } from "../src/cli.ts";
 import { SessionMetadataStore } from "../src/metadata.ts";
+import { migrateFlatSessions } from "../src/sessionlayout.ts";
 import { Decision, PermissionManager, StaticBroker } from "../src/permissions.ts";
 import { Workspace, WorkspaceRegistry } from "../src/workspace.ts";
 import { beginUndoCapture } from "../src/workspacehistory.ts";
@@ -480,6 +481,22 @@ test("sessions undo: default previews the newest record against the linked works
       "edited\n",
     );
     assert.equal(fs.existsSync(path.join(fx.workspaceDir, "created.txt")), true);
+  });
+});
+
+test("sessions undo resolves a migrated directory session", async () => {
+  await withTempDir(async (dir) => {
+    const fx = await writeUndoFixture(dir);
+    migrateFlatSessions(fx.sessionsDir, {
+      workspacePathFor: (id) => (id === fx.workspaceId ? fx.workspaceDir : null),
+    });
+    const io = makeIO();
+    const code = await main(["sessions", "undo", "chat", "--sessions-dir", fx.sessionsDir], io);
+    assert.equal(code, 0, io.err.join("\n"));
+    const text = io.out.join("\n");
+    assert.match(text, /session: chat\.jsonl/);
+    assert.match(text, /run: run-1/);
+    assert.match(text, /workspace: /);
   });
 });
 

@@ -1406,7 +1406,7 @@ function usageOf(value: unknown): UsageSnapshot {  const record = (value ?? {}) 
  * driven by Escape/Ctrl+C under a safe precedence: overlay close → turn
  * cancel → composer clear → quit confirm (never an unexpected quit).
  */
-export async function runTuiApp(options: TuiAppOptions): Promise<number> {
+async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
   const input = options.input ?? process.stdin;
   const output = options.output ?? process.stdout;
   /** One resolved registry table for matching, labels, palette/help and hints. */
@@ -1573,7 +1573,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     // `RuntimeEventStore` appends `.events.jsonl` to its key and session file
     // names include the extension, so the sidecar is
     // `sessions/runtime/<session file>.events.jsonl`.
-    const name = sessionSidecarKey(sessionFile);
+    const name = sessionSidecarKey(sessionFile, sessionsDir);
     if (!name) return [];
     try {
       return todosFromRuntimeEvents(runtimeStore.load(name));
@@ -1593,7 +1593,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   let replayedReasoning: readonly ReplayedReasoning[] = [];
   let hiddenReplayedReasoning = 0;
   function loadSessionReasoningFor(sessionFile: string): void {
-    const loaded = loadSessionReasoning(runtimeStore, sessionFile);
+    const loaded = loadSessionReasoning(runtimeStore, sessionFile, { sessionsDir });
     replayedReasoning = loaded.blocks;
     hiddenReplayedReasoning = loaded.hidden;
   }
@@ -1803,7 +1803,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   };
 
   const sessionName = (): string =>
-    sessionCfg.sessionFile ? path.basename(sessionCfg.sessionFile) : "in-memory";
+    sessionCfg.sessionFile
+      ? sessionSidecarKey(sessionCfg.sessionFile, sessionsDir)
+      : "in-memory";
 
   const measureContext = (): void => {
     try {
@@ -2780,6 +2782,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
               persistTodoSnapshot(runtimeStore, turnSessionFile, snapshot, {
                 runId: turnRunId,
                 at: Math.floor(Date.now() / 1000),
+                sessionsDir,
                 ...(sessionCfg.verbose ? { onWarning } : {}),
               });
               rememberTodos(turnSessionFile, snapshot);
@@ -3570,14 +3573,18 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         baseNotice("info", "nothing to export yet — this session has no events");
         return;
       }
-      const name = sessionFile !== "" ? path.basename(sessionFile) : "session.jsonl";
+      const name = sessionFile !== "" ? sessionSidecarKey(sessionFile, sessionsDir) : "session.jsonl";
       const dir = sessionFile !== "" ? path.dirname(sessionFile) : cwd;
       let title = "";
       let workspaceId: string | null = null;
       let updated: number | null = null;
       if (sessionFile !== "") {
         try {
-          const meta = new SessionMetadataStore(dir).get(name);
+          const metaStore =
+            layout.resolve(name) !== null
+              ? new SessionMetadataStore(sessionsDir, layout)
+              : new SessionMetadataStore(dir);
+          const meta = metaStore.get(name);
           if (meta !== null) {
             title = typeof meta.title === "string" ? meta.title.trim() : "";
             workspaceId =
@@ -4660,5 +4667,32 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     }
     clearInterval(spinnerTimer);
     terminal.restore();
+  }
+}
+
+/**
+ * Run the TUI while holding the store's single-writer lock. The lock is
+ * released on every exit path (including a startup refusal), so `sessions
+ * migrate` can never move a transcript this TUI is still appending to.
+ */
+export async function runTuiApp(options: TuiAppOptions): Promise<number> {
+  const sessionsDir =
+    options.sessionsDir ?? path.join(options.cwd ?? process.cwd(), "sessions");
+  const layout = new SessionLayout(sessionsDir);
+  let release: (() => void) | null = null;
+  try {
+    release = layout.acquireWriterLock("tui");
+  } catch (exc) {
+    options.io.error(`[error] ${messageOf(exc)}`);
+    return 2;
+  }
+  try {
+    return await runTuiAppInner(options);
+  } finally {
+    try {
+      release();
+    } catch {
+      // best effort; a stale lock is reclaimed by pid liveness
+    }
   }
 }

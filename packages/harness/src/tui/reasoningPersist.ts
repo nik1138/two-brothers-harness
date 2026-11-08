@@ -125,9 +125,9 @@ export function reasoningFromRuntimeEvents(
 export function loadSessionReasoning(
   store: RuntimeEventStore,
   sessionFile: string,
-  options: { maxBlocks?: number } = {},
+  options: { maxBlocks?: number; sessionsDir?: string } = {},
 ): ReplayedReasoningSet {
-  const key = sessionSidecarKey(sessionFile);
+  const key = sessionSidecarKey(sessionFile, options.sessionsDir);
   if (key === "") return EMPTY_REPLAY;
   try {
     return reasoningFromRuntimeEvents(store.load(key), options);

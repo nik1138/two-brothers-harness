@@ -30,6 +30,8 @@ export interface TodoSnapshotOptions {
   at: number;
   /** Fail-soft warning sink; the TUI passes it only in verbose mode. */
   onWarning?: (line: string) => void;
+  /** Sessions root, so a directory-layout file maps to its public name. */
+  sessionsDir?: string;
 }
 
 /**
@@ -61,7 +63,7 @@ export function persistTodoSnapshot(
   todos: readonly TodoItem[],
   options: TodoSnapshotOptions,
 ): boolean {
-  const key = sessionSidecarKey(sessionFile);
+  const key = sessionSidecarKey(sessionFile, options.sessionsDir);
   if (key === "") return false;
   try {
     store.append(key, todoSnapshotEvent(todos, options));

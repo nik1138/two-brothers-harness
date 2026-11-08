@@ -215,22 +215,26 @@ export class BoundedOutput {
   }
 }
 
-/** Find an executable on PATH, mirroring shutil.which for a plain name. */
-function findOnPath(name: string): string | null {
+/** Find every executable named `name` on PATH, in PATH order. */
+function findAllOnPath(name: string): string[] {
   const exts = process.platform === "win32" ? [`${name}.exe`, name] : [name];
+  const found: string[] = [];
+  const seen = new Set<string>();
   for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
     if (!dir) continue;
-    for (const candidate of exts) {
-      const full = path.join(dir, candidate);
+    for (const ext of exts) {
+      const full = path.join(dir, ext);
+      if (seen.has(full)) continue;
       try {
         fs.accessSync(full, fs.constants.X_OK);
-        return full;
+        seen.add(full);
+        found.push(full);
       } catch {
         // not here — keep searching
       }
     }
   }
-  return null;
+  return found;
 }
 
 /**
@@ -258,18 +262,17 @@ export function isWslBashPath(bashPath: string): boolean {
  * passes the probe but runs commands in another filesystem.
  */
 function probeBash(): string | null {
-  const bash = findOnPath("bash");
-  if (!bash) return null;
-  if (process.platform === "win32" && isWslBashPath(bash)) return null;
-  try {
-    const probe = spawnSync(bash, ["-c", "exit 0"], {
-      stdio: "ignore",
-      timeout: 10_000,
-    });
-    if (probe.error) return null;
-    if (probe.status === 0) return bash;
-  } catch {
-    // fall through to the platform shell
+  for (const bash of findAllOnPath("bash")) {
+    if (process.platform === "win32" && isWslBashPath(bash)) continue;
+    try {
+      const probe = spawnSync(bash, ["-c", "exit 0"], {
+        stdio: "ignore",
+        timeout: 10_000,
+      });
+      if (!probe.error && probe.status === 0) return bash;
+    } catch {
+      // try the next candidate
+    }
   }
   return null;
 }
@@ -406,6 +409,12 @@ export interface ShellRunnerOptions {
    * sandboxes deny piped child spawns).
    */
   spawnChild?: ShellChildSpawn;
+  /**
+   * Explicit bash path. Omitted = probe PATH (skipping the WSL launcher on
+   * Windows); `null` disables bash and uses the platform shell. Passing a path
+   * explicitly also accepts the WSL launcher for operators who want it.
+   */
+  bash?: string | null;
 }
 
 /** Injectable child spawn used by `ShellRunner` (tests pass a fake). */
@@ -446,7 +455,10 @@ export class ShellRunner {
     } else {
       this.env = options.env;
     }
-    this.bash = probeBash();
+    this.bash =
+      options.bash === undefined
+        ? probeBash()
+        : (typeof options.bash === "string" && options.bash.trim()) || null;
   }
 
   /** True when a working bash was probed (mirrors `self._bash`). */

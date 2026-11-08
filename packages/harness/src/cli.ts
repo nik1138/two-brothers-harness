@@ -2637,6 +2637,7 @@ const SESSIONS_OPTIONS = {
   apply: { type: "boolean" as const, default: false },
   discard: { type: "boolean" as const, default: false },
   "dry-run": { type: "boolean" as const, default: false },
+  force: { type: "boolean" as const, default: false },
   ...HELP_OPTIONS,
 } satisfies ParseArgsOptionsConfig;
 
@@ -3382,18 +3383,31 @@ function migrateSessionsCommand(
   sessionsDir: string,
   jsonMode: boolean,
   dryRun: boolean,
+  force: boolean,
   io: CliIO,
 ): number {
   let result;
+  const missingWorkspaces = new Set<string>();
   try {
     const registry = new WorkspaceRegistry(path.join(sessionsDir, "workspaces.json"));
     result = migrateFlatSessions(sessionsDir, {
       dryRun,
-      workspacePathFor: (id) => registry.get(id)?.path ?? null,
+      force,
+      workspacePathFor: (id) => {
+        const workspacePath = registry.get(id)?.path ?? null;
+        if (workspacePath === null) missingWorkspaces.add(id);
+        return workspacePath;
+      },
     });
   } catch (exc) {
     io.error(`[error] ${exc instanceof Error ? exc.message : String(exc)}`);
     return 1;
+  }
+  if (missingWorkspaces.size > 0) {
+    io.error(
+      `[warning] workspace registry did not resolve: ${[...missingWorkspaces].sort().join(", ")} ` +
+        "(affected sessions were grouped under _global)",
+    );
   }
   if (jsonMode) {
     io.log(JSON.stringify(result, null, 2));
@@ -3495,6 +3509,7 @@ function doSessions(
       sessionsDir,
       jsonMode,
       values["dry-run"] === true,
+      values.force === true,
       io,
     );
   }

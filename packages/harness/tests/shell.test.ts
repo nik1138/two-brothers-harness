@@ -478,3 +478,21 @@ test("isWslBashPath rejects the WSL launchers but accepts native bash", () => {
   assert.equal(isWslBashPath("/bin/bash"), false);
   assert.equal(isWslBashPath("C:\\msys64\\usr\\bin\\bash.exe"), false);
 });
+
+test("an explicit bash option bypasses the PATH probe", async () => {
+  const child = new FakeChild();
+  const calls: Array<{ file: string; args: readonly string[] | undefined }> = [];
+  const runner = new ShellRunner({
+    bash: "/custom/bash",
+    spawnChild: (file, args) => {
+      calls.push({ file, args });
+      return child as unknown as ChildProcess;
+    },
+  });
+  const pending = runner.run("echo hi");
+  child.finish(0);
+  await pending;
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.file, "/custom/bash");
+  assert.deepEqual(calls[0]!.args, ["-c", "echo hi"]);
+});

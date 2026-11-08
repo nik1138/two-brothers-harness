@@ -233,6 +233,11 @@ export const FLAGS: Record<string, FlagHelp> = {
     description:
       "resolve the run (config, tools, session) and print the plan; no model calls, no session written",
   },
+  force: {
+    name: "force",
+    description:
+      "bypass the sessions-store single-writer lock (migrate; unsafe while serve/TUI is running)",
+  },
   "task-file": {
     name: "task-file",
     value: "<path>",
@@ -824,7 +829,7 @@ defineCommand({
     "sessions fork <name> [--at <seq>] [--name <new>] [--json]",
     "sessions rewind <name> --turns <n> [--json]",
     "sessions undo <name> [--run <id>] [--apply] [--discard] [--json]",
-    "sessions migrate [--sessions-dir <dir>] [--dry-run] [--json]",
+    "sessions migrate [--sessions-dir <dir>] [--dry-run] [--force] [--json]",
   ],
   description:
     "List the JSONL session files of a sessions directory with readable titles " +
@@ -859,6 +864,7 @@ defineCommand({
     "apply",
     "discard",
     "dry-run",
+    "force",
     "help",
   ],
   flagNotes: {
@@ -875,6 +881,8 @@ defineCommand({
     apply: "undo: restore/delete the reversible files instead of previewing",
     discard: "undo: drop the record and collect unreferenced blobs (cannot combine with --apply)",
     "dry-run": "migrate: print the planned moves without writing",
+    force:
+      "migrate: proceed even when serve/TUI holds the store lock (unsafe; stop the writer first)",
   },
   details: [
     "Subcommands:",

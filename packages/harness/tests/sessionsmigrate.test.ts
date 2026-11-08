@@ -199,6 +199,77 @@ test("sessions list and show resolve a migrated directory session", async () => 
   });
 });
 
+test("sessions migrate refuses a missing sessions directory", async () => {
+  await withTempDir(async (dir) => {
+    const missing = path.join(dir, "does-not-exist");
+    const io = makeIO();
+    assert.equal(await main(["sessions", "migrate", "--sessions-dir", missing], io), 1);
+    assert.ok(io.err.some((line) => line.includes("not found")));
+    assert.equal(fs.existsSync(missing), false);
+  });
+});
+
+test("sessions migrate refuses a live writer unless --force", async () => {
+  await withTempDir(async (dir) => {
+    seedFlat(dir, "busy.jsonl");
+    const layout = new SessionLayout(dir);
+    const release = layout.acquireWriterLock("writer");
+    try {
+      const refused = makeIO();
+      assert.equal(
+        await main(["sessions", "migrate", "--sessions-dir", dir], refused),
+        1,
+      );
+      assert.ok(refused.err.some((line) => line.includes("in use by writer")));
+      assert.equal(fs.existsSync(path.join(dir, "busy.jsonl")), true);
+
+      const forced = makeIO();
+      assert.equal(
+        await main(["sessions", "migrate", "--sessions-dir", dir, "--force"], forced),
+        0,
+        forced.err.join("\n"),
+      );
+      assert.equal(fs.existsSync(path.join(dir, "busy.jsonl")), false);
+    } finally {
+      release();
+    }
+  });
+});
+
+test("sessions fork and rewind work on a migrated directory session", async () => {
+  await withTempDir(async (dir) => {
+    seedFlat(dir, "branchy.jsonl");
+    const migrate = makeIO();
+    assert.equal(
+      await main(["sessions", "migrate", "--sessions-dir", dir], migrate),
+      0,
+      migrate.err.join("\n"),
+    );
+
+    const fork = makeIO();
+    assert.equal(
+      await main(
+        ["sessions", "fork", "branchy", "--name", "branch-fork", "--sessions-dir", dir],
+        fork,
+      ),
+      0,
+      fork.err.join("\n"),
+    );
+    const layout = new SessionLayout(dir);
+    const forked = layout.resolve("branch-fork");
+    assert.ok(forked);
+    assert.equal(fs.existsSync(forked.sessionPath), true);
+
+    const rewind = makeIO();
+    assert.equal(
+      await main(["sessions", "rewind", "branchy", "--turns", "1", "--sessions-dir", dir], rewind),
+      0,
+      rewind.err.join("\n"),
+    );
+    assert.ok(rewind.out.some((line) => line.includes("rewrote") || line.includes("kept") || line.includes("rewritten")));
+  });
+});
+
 test("sessions migrate exits 1 on a conflicting target", async () => {
   await withTempDir(async (dir) => {
     seedFlat(dir, "clash.jsonl");

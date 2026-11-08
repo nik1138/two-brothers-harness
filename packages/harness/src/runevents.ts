@@ -364,7 +364,7 @@ export class RuntimeEventStore {
   /** `path.basename` flattening: never allow path traversal out of the dir. */
   private pathFor(sessionName: string): string {
     if (this.layout !== null) {
-      const resolved = this.layout.resolve(sessionName);
+      const resolved = this.layout.resolveForWrite(sessionName);
       if (resolved !== null) return resolved.eventsPath;
     }
     return path.join(this.directory, `${path.basename(sessionName)}.events.jsonl`);

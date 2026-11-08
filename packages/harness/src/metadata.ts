@@ -137,7 +137,9 @@ export class SessionMetadataStore {
 
   /** Write target: materialize a new dirs-layout session when needed. */
   private metaPathForWrite(sessionName: string): string {
-    if (this.layout !== null && this.layout.resolve(sessionName) === null) {
+    if (this.layout !== null) {
+      const resolved = this.layout.resolveForWrite(sessionName);
+      if (resolved !== null) return resolved.metaPath;
       return this.layout.materialize(sessionName).metaPath;
     }
     return this.metaPath(sessionName);

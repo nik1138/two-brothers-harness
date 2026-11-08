@@ -191,3 +191,65 @@ test("dirs store: create, run, sidecars, list, fork and restart recovery", async
     cleanup(root);
   }
 });
+
+test("a second server cannot open the same store until the first closes", async () => {
+  const root = tmpdir("tb-server-layout-lock-");
+  const workspace = path.join(root, "workspace");
+  fs.mkdirSync(workspace, { recursive: true });
+  const sessionsDir = path.join(root, "sessions");
+  new SessionLayout(sessionsDir).setMode("dirs");
+  const first = await startServer(sessionsDir, workspace);
+  try {
+    assert.throws(
+      () =>
+        createServer({
+          configFactory: () => resolveConfig({ provider: "mock", mode: "consult" }),
+          sessionsDir,
+          webDist: null,
+          commandsDirs: [],
+          pluginsDir: path.join(sessionsDir, "missing-plugins"),
+        }),
+      /in use by serve/,
+    );
+  } finally {
+    await first.close();
+  }
+  const second = await startServer(sessionsDir, workspace);
+  await second.close();
+  cleanup(root);
+});
+
+test("a 404 read creates nothing; a later run uses the workspace project", async () => {
+  const root = tmpdir("tb-server-layout-miss-");
+  const workspace = path.join(root, "workspace");
+  fs.mkdirSync(workspace, { recursive: true });
+  const sessionsDir = path.join(root, "sessions");
+  const layout = new SessionLayout(sessionsDir);
+  layout.setMode("dirs");
+  const key = projectKeyFor(workspace);
+  let server: RunningServer | null = null;
+  try {
+    server = await startServer(sessionsDir, workspace);
+    const missed = await api(server.base, "GET", "/api/sessions/nope.jsonl");
+    assert.equal(missed.status, 404);
+    assert.equal(fs.existsSync(path.join(sessionsDir, key, "nope")), false);
+    assert.equal(layout.resolve("nope"), null);
+
+    const started = await api<{ run_id: string; session: string }>(
+      server.base,
+      "POST",
+      "/api/runs",
+      { task: "Say OK", session: "nope", workspace_id: "ws-1" },
+    );
+    assert.equal(started.status, 202);
+    const finished = await waitTerminal(server.base, started.body.run_id);
+    assert.equal(finished.status, "completed");
+    const location = layout.resolve("nope");
+    assert.ok(location);
+    assert.equal(location.projectKey, key);
+    assert.equal(fs.existsSync(path.join(sessionsDir, key, "nope")), true);
+  } finally {
+    if (server !== null) await server.close();
+    cleanup(root);
+  }
+});

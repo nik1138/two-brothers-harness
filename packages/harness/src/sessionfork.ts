@@ -220,7 +220,7 @@ function forkNameTaken(
   fileName: string,
   targetProjectKey: string | null,
 ): boolean {
-  if (layout.resolve(fileName) !== null) return true;
+  if (layout.resolveForWrite(fileName) !== null) return true;
   if (fs.existsSync(path.join(sessionsDir, stripJsonlSuffix(fileName) + META_SUFFIX))) return true;
   if (
     fs.existsSync(path.join(sessionsDir, "runtime", fileName + RUNTIME_EVENTS_SUFFIX))

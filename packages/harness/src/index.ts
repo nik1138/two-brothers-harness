@@ -484,7 +484,9 @@ export {
   GLOBAL_PROJECT_KEY,
   SESSION_LAYOUT_FILE,
   SESSION_LAYOUT_VERSION,
+  SESSION_LOCK_FILE,
   SessionLayout,
+  SessionLayoutLockedError,
   canonicalSessionName,
   migrateFlatSessions,
   projectKeyFor,
@@ -492,6 +494,7 @@ export {
   type SessionLocation,
   type SessionMigrationEntry,
   type SessionMigrationResult,
+  type SessionWriterLock,
 } from "./sessionlayout.ts";
 export {
   PluginError,

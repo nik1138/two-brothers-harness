@@ -5,9 +5,10 @@
  *
  * The legacy layout stays the default until a store is migrated. A migrated
  * store carries `.layout.json` (`{"version":1,"layout":"dirs"}`); writers then
- * materialize new sessions as directories while readers always accept both
- * layouts, so an operator can migrate without a flag day and an old checkout
- * can still read a migrated store's sessions.
+ * materialize new sessions as directories while this release's readers always
+ * accept both layouts, so an operator can migrate without a flag day. An older
+ * release only knows the flat layout, so a migrated store is not
+ * backward-compatible with older binaries; keep a backup before downgrading.
  *
  * Layouts:
  *
@@ -38,7 +39,43 @@ export const SESSION_LAYOUT_VERSION = 1;
 /** Directory for sessions with no known workspace/project path. */
 export const GLOBAL_PROJECT_KEY = "_global";
 
+/** Marker file describing the process currently writing this store. */
+export const SESSION_LOCK_FILE = ".writer.json";
+
 export type SessionLayoutMode = "flat" | "dirs";
+
+/** The writer lock record stored at `<root>/.writer.json`. */
+export interface SessionWriterLock {
+  owner: string;
+  pid: number;
+  created: string;
+}
+
+/** Raised when a writer (serve/TUI) already owns the store. */
+export class SessionLayoutLockedError extends Error {
+  readonly holder: SessionWriterLock | null;
+
+  constructor(holder: SessionWriterLock | null) {
+    super(
+      holder === null
+        ? "the sessions directory is locked by an unknown writer"
+        : `the sessions directory is in use by ${holder.owner} (pid ${holder.pid})`,
+    );
+    this.name = "SessionLayoutLockedError";
+    this.holder = holder;
+  }
+}
+
+/** True when `pid` names a live process (EPERM counts as alive). */
+function pidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (exc) {
+    return (exc as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
 
 /** One session's resolved paths. */
 export interface SessionLocation {
@@ -77,6 +114,8 @@ export interface SessionMigrationResult {
 
 export interface SessionMigrationOptions {
   dryRun?: boolean;
+  /** Proceed even when a live writer owns the store (dangerous; explicit). */
+  force?: boolean;
   /** Resolve a metadata `workspace_id` to its registered path. */
   workspacePathFor?: (workspaceId: string) => string | null;
 }
@@ -263,21 +302,18 @@ export class SessionLayout {
     writeDurable(marker, body + "\n");
   }
 
-  /** All sessions in this root, both layouts, newest layout wins on a name clash. */
+  /** All sessions in this root, both layouts; a directory session wins a clash. */
   list(): SessionLocation[] {
     const found = new Map<string, SessionLocation>();
-
+    for (const location of this.scanDirectorySessions()) {
+      if (!found.has(location.name)) found.set(location.name, location);
+    }
     for (const entry of readdir(this.root, { withFileTypes: true })) {
       if (!entry.isFile() || !entry.name.endsWith(JSONL_SUFFIX)) continue;
       const name = canonicalSessionName(entry.name);
-      if (name === null) continue;
+      if (name === null || found.has(name)) continue;
       found.set(name, flatLocation(this.root, name));
     }
-
-    for (const location of this.scanDirectorySessions()) {
-      found.set(location.name, location);
-    }
-
     return [...found.values()].sort((a, b) => a.name.localeCompare(b.name));
   }
 
@@ -288,33 +324,29 @@ export class SessionLayout {
    */
   listEventSessions(): SessionLocation[] {
     const found = new Map<string, SessionLocation>();
-    for (const project of readdir(this.root, { withFileTypes: true })) {
-      if (!project.isDirectory() || project.name.startsWith(".")) continue;
-      if (RESERVED_DIRS.has(project.name)) continue;
-      const projectDir = path.join(this.root, project.name);
+    for (const project of this.projectDirectories()) {
+      const projectDir = path.join(this.root, project);
       for (const candidate of readdir(projectDir, { withFileTypes: true })) {
         if (!candidate.isDirectory() || candidate.name.startsWith(".")) continue;
         const name = canonicalSessionName(candidate.name + JSONL_SUFFIX);
-        if (name === null) continue;
-        const location = dirLocation(this.root, project.name, name);
+        if (name === null || found.has(name)) continue;
+        const location = dirLocation(this.root, project, name);
         if (isFile(location.eventsPath)) found.set(name, location);
       }
     }
     return [...found.values()].sort((a, b) => a.name.localeCompare(b.name));
   }
 
-  /** Directory-layout sessions with a transcript, one per name. */
+  /** Sorted directory-layout sessions with a transcript, one per name. */
   private scanDirectorySessions(): SessionLocation[] {
     const found = new Map<string, SessionLocation>();
-    for (const project of readdir(this.root, { withFileTypes: true })) {
-      if (!project.isDirectory() || project.name.startsWith(".")) continue;
-      if (RESERVED_DIRS.has(project.name)) continue;
-      const projectDir = path.join(this.root, project.name);
+    for (const project of this.projectDirectories()) {
+      const projectDir = path.join(this.root, project);
       for (const candidate of readdir(projectDir, { withFileTypes: true })) {
         if (!candidate.isDirectory() || candidate.name.startsWith(".")) continue;
         const name = canonicalSessionName(candidate.name + JSONL_SUFFIX);
-        if (name === null) continue;
-        const location = dirLocation(this.root, project.name, name);
+        if (name === null || found.has(name)) continue;
+        const location = dirLocation(this.root, project, name);
         if (!isFile(location.sessionPath)) continue;
         found.set(name, location);
       }
@@ -322,24 +354,60 @@ export class SessionLayout {
     return [...found.values()];
   }
 
+  /** Sorted project directory names (reserved/hidden excluded). */
+  private projectDirectories(): string[] {
+    return readdir(this.root, { withFileTypes: true })
+      .filter(
+        (entry) =>
+          entry.isDirectory() &&
+          !entry.name.startsWith(".") &&
+          !RESERVED_DIRS.has(entry.name),
+      )
+      .map((entry) => entry.name)
+      .sort((a, b) => a.localeCompare(b));
+  }
+
+  /** A session directory is real when the transcript or either sidecar exists. */
+  private hasArtifact(location: SessionLocation): boolean {
+    return (
+      isFile(location.sessionPath) ||
+      isFile(location.metaPath) ||
+      isFile(location.eventsPath)
+    );
+  }
+
   /**
    * Resolve an existing session by public name (with or without `.jsonl`).
-   * Directory sessions win over a leftover flat file with the same name.
+   * Directory sessions win over a leftover flat file with the same name. An
+   * empty directory is not a session: read paths must not create or accept
+   * ghost artifacts (a 404 GET must leave the store untouched).
    */
   resolve(rawName: unknown): SessionLocation | null {
     const name = canonicalSessionName(rawName);
     if (name === null) return null;
-    const stem = stemOf(name);
+    for (const project of this.projectDirectories()) {
+      const location = dirLocation(this.root, project, name);
+      if (this.hasArtifact(location)) return location;
+    }
+    const flat = flatLocation(this.root, name);
+    if (isFile(flat.sessionPath)) return flat;
+    return null;
+  }
 
-    for (const project of readdir(this.root, { withFileTypes: true })) {
-      if (!project.isDirectory() || project.name.startsWith(".")) continue;
-      if (RESERVED_DIRS.has(project.name)) continue;
-      const location = dirLocation(this.root, project.name, name);
-      // A materialized session directory counts even before its first
-      // envelope: metadata/events may be written while a run is still queued.
+  /**
+   * Like `resolve`, but also accepts a materialized session directory before
+   * its first artifact (metadata/events may be written while a run is queued).
+   * Write-side callers only; reads use `resolve`.
+   */
+  resolveForWrite(rawName: unknown): SessionLocation | null {
+    const existing = this.resolve(rawName);
+    if (existing !== null) return existing;
+    const name = canonicalSessionName(rawName);
+    if (name === null) return null;
+    for (const project of this.projectDirectories()) {
+      const location = dirLocation(this.root, project, name);
       if (fs.existsSync(location.dir as string)) return location;
     }
-
     const flat = flatLocation(this.root, name);
     if (isFile(flat.sessionPath)) return flat;
     return null;
@@ -351,7 +419,7 @@ export class SessionLayout {
    * is created for the `dirs` layout; the envelope file is not.
    */
   materialize(rawName: unknown, projectPath?: string | null): SessionLocation {
-    const existing = this.resolve(rawName);
+    const existing = this.resolveForWrite(rawName);
     if (existing !== null) return existing;
     const name = canonicalSessionName(rawName);
     if (name === null) throw new Error(`invalid session name: ${String(rawName)}`);
@@ -363,15 +431,20 @@ export class SessionLayout {
   /**
    * Materialize a new session under an already-computed project key (used by
    * fork/migration, which preserve the source's project). Falls back to the
-   * flat layout while the store is still unmigrated.
+   * flat layout while the store is still unmigrated. The key must be a single
+   * safe path segment even though callers derive it from `projectKeyFor`.
    */
   materializeIn(rawName: unknown, projectKey: string): SessionLocation {
-    const existing = this.resolve(rawName);
+    const existing = this.resolveForWrite(rawName);
     if (existing !== null) return existing;
     const name = canonicalSessionName(rawName);
     if (name === null) throw new Error(`invalid session name: ${String(rawName)}`);
     if (this.mode() === "flat") return flatLocation(this.root, name);
-    const location = dirLocation(this.root, projectKey || GLOBAL_PROJECT_KEY, name);
+    const key = projectKey.trim();
+    if (!/^[A-Za-z0-9._-]+$/.test(key) || key === "." || key === "..") {
+      throw new Error(`invalid project key: ${projectKey}`);
+    }
+    const location = dirLocation(this.root, key, name);
     ensureDir(location.dir as string);
     return location;
   }
@@ -384,6 +457,91 @@ export class SessionLayout {
   /** Runtime-event path for an existing session; `null` when it does not exist. */
   eventsPath(rawName: unknown): string | null {
     return this.resolve(rawName)?.eventsPath ?? null;
+  }
+
+  /** Public session name for an arbitrary file path (directory or flat). */
+  nameForPath(filePath: string): string {
+    const resolved = path.resolve(filePath);
+    const relative = path.relative(this.root, resolved);
+    if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) {
+      const parts = relative.split(/[\\/]/).filter(Boolean);
+      if (parts.length === 3 && parts[2] === "session.jsonl") {
+        return `${parts[1]}.jsonl`;
+      }
+    }
+    return path.basename(resolved);
+  }
+
+  /**
+   * The current writer lock, or `null` when absent/malformed. A stale lock
+   * whose pid is dead is treated as absent by `acquireWriterLock` but still
+   * reported here for diagnostics.
+   */
+  writerLock(): SessionWriterLock | null {
+    const file = path.join(this.root, SESSION_LOCK_FILE);
+    try {
+      const raw: unknown = JSON.parse(fs.readFileSync(file, "utf-8"));
+      if (!isRecord(raw)) return null;
+      const owner = typeof raw.owner === "string" ? raw.owner.trim() : "";
+      const pid = typeof raw.pid === "number" ? raw.pid : Number.NaN;
+      const created = typeof raw.created === "string" ? raw.created : "";
+      if (!owner || !Number.isInteger(pid) || pid <= 0 || !created) return null;
+      return { owner, pid, created };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Take the single-writer lock for this store. `serve`/TUI callers hold it
+   * for their lifetime; `sessions migrate` refuses to run while a live lock
+   * exists. A lock whose pid is dead is removed and retried once.
+   */
+  acquireWriterLock(owner: string): () => void {
+    ensureDir(this.root);
+    const label = owner.trim() || "two-brothers";
+    const file = path.join(this.root, SESSION_LOCK_FILE);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const fd = fs.openSync(file, "wx");
+        try {
+          fs.writeFileSync(
+            fd,
+            JSON.stringify(
+              { owner: label, pid: process.pid, created: new Date().toISOString() },
+              null,
+              2,
+            ) + "\n",
+          );
+          fs.fsyncSync(fd);
+        } finally {
+          fs.closeSync(fd);
+        }
+        return () => {
+          const current = this.writerLock();
+          if (current !== null && current.pid === process.pid && current.owner === label) {
+            try {
+              fs.unlinkSync(file);
+            } catch {
+              // already gone
+            }
+          }
+        };
+      } catch (exc) {
+        if ((exc as NodeJS.ErrnoException).code !== "EEXIST") throw exc;
+        const holder = this.writerLock();
+        if (holder !== null && !pidAlive(holder.pid)) {
+          try {
+            fs.unlinkSync(file);
+          } catch {
+            // retry the exclusive create; a concurrent owner will win honestly
+          }
+          continue;
+        }
+        throw new SessionLayoutLockedError(holder);
+      }
+    }
+    throw new SessionLayoutLockedError(this.writerLock());
   }
 }
 
@@ -398,6 +556,63 @@ export function migrateFlatSessions(
   options: SessionMigrationOptions = {},
 ): SessionMigrationResult {
   const layout = new SessionLayout(root);
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(layout.root);
+  } catch {
+    throw new Error(`sessions directory not found: ${layout.root}`);
+  }
+  if (!stat.isDirectory()) {
+    throw new Error(`sessions path is not a directory: ${layout.root}`);
+  }
+  // Migration is a writer: hold the same single-writer lock as serve/TUI so a
+  // live process cannot keep appending to a file that is being moved. An
+  // explicit force is the operator's escape hatch (documented as unsafe).
+  if (options.force === true) return migrateLocked(layout, options);
+  const release = layout.acquireWriterLock("sessions migrate");
+  try {
+    return migrateLocked(layout, options);
+  } finally {
+    release();
+  }
+}
+
+/** Remove hidden temp files left by a crashed previous migration. */
+function cleanupStaleTemps(layout: SessionLayout): void {
+  try {
+    for (const entry of fs.readdirSync(layout.root, { withFileTypes: true })) {
+      if (entry.isFile() && entry.name.startsWith(`${SESSION_LAYOUT_FILE}.tmp-`)) {
+        try {
+          fs.unlinkSync(path.join(layout.root, entry.name));
+        } catch {
+          // best effort
+        }
+        continue;
+      }
+      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+      if (RESERVED_DIRS.has(entry.name)) continue;
+      const projectDir = path.join(layout.root, entry.name);
+      for (const child of fs.readdirSync(projectDir, { withFileTypes: true })) {
+        if (!child.isDirectory() || !child.name.startsWith(".tmp-")) continue;
+        try {
+          fs.rmSync(path.join(projectDir, child.name), { recursive: true, force: true });
+        } catch {
+          // best effort
+        }
+      }
+    }
+  } catch {
+    // best effort; never fail the migration over cleanup
+  }
+}
+
+function migrateLocked(
+  layout: SessionLayout,
+  options: SessionMigrationOptions,
+): SessionMigrationResult {
+  // The migration lock is held: every hidden temp directory is a crashed
+  // previous copy, so reclaiming them is safe.
+  cleanupStaleTemps(layout);
   const dryRun = options.dryRun === true;
   const entries: SessionMigrationEntry[] = [];
   const names = readdir(layout.root, { withFileTypes: true })
@@ -430,6 +645,16 @@ export function migrateFlatSessions(
         ? options.workspacePathFor(workspaceId)
         : null;
     const target = dirLocation(layout.root, projectKeyFor(workspacePath), name);
+    if (metaRaw === null && fs.existsSync(metaPath)) {
+      entries.push({
+        name,
+        sourcePath,
+        targetPath: target.sessionPath,
+        status: "error",
+        detail: "cannot read the flat meta.json; refusing to delete it",
+      });
+      continue;
+    }
 
     if (fs.existsSync(target.sessionPath)) {
       try {
@@ -445,14 +670,46 @@ export function migrateFlatSessions(
           });
           continue;
         }
+        const sourceEvents = fs.existsSync(eventsPath)
+          ? fs.readFileSync(eventsPath)
+          : null;
+        const targetMetaRaw = fs.existsSync(target.metaPath)
+          ? fs.readFileSync(target.metaPath, "utf-8")
+          : null;
+        const targetEvents = fs.existsSync(target.eventsPath)
+          ? fs.readFileSync(target.eventsPath)
+          : null;
+        // Never delete a divergent flat sidecar. An interrupted migration
+        // followed by an update on either side is a conflict until the
+        // operator chooses which copy to keep.
+        if (metaRaw !== null && targetMetaRaw !== null && metaRaw !== targetMetaRaw) {
+          entries.push({
+            name,
+            sourcePath,
+            targetPath: target.metaPath,
+            status: "conflict",
+            detail: "target meta.json already exists with different bytes",
+          });
+          continue;
+        }
+        if (sourceEvents !== null && targetEvents !== null && !sourceEvents.equals(targetEvents)) {
+          entries.push({
+            name,
+            sourcePath,
+            targetPath: target.eventsPath,
+            status: "conflict",
+            detail: "target events.jsonl already exists with different bytes",
+          });
+          continue;
+        }
         if (!dryRun) {
-          // Adopt an interrupted previous migration: fill missing sidecars,
-          // then remove the flat source files.
-          if (metaRaw !== null && !fs.existsSync(target.metaPath)) {
+          // Adopt an interrupted previous migration: fill missing identical
+          // sidecars, then remove the flat source files.
+          if (metaRaw !== null && targetMetaRaw === null) {
             writeDurable(target.metaPath, metaRaw);
           }
-          if (fs.existsSync(eventsPath) && !fs.existsSync(target.eventsPath)) {
-            writeDurable(target.eventsPath, fs.readFileSync(eventsPath));
+          if (sourceEvents !== null && targetEvents === null) {
+            writeDurable(target.eventsPath, sourceEvents);
           }
           fs.unlinkSync(sourcePath);
           if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
@@ -478,19 +735,38 @@ export function migrateFlatSessions(
 
     // An empty session directory left by an interrupted previous attempt does
     // not block the migration; a non-empty one does (never delete content we
-    // did not create). A dry run must not touch it.
-    if (!dryRun && fs.existsSync(target.dir as string)) {
+    // did not create). A dry run must not touch it but must report the same
+    // conflict the real pass would.
+    if (fs.existsSync(target.dir as string)) {
+      let nonEmpty = false;
       try {
-        fs.rmdirSync(target.dir as string);
-      } catch (exc) {
+        nonEmpty = fs.readdirSync(target.dir as string).length > 0;
+      } catch {
+        nonEmpty = true;
+      }
+      if (nonEmpty) {
         entries.push({
           name,
           sourcePath,
           targetPath: target.sessionPath,
           status: "conflict",
-          detail: `target directory is not empty: ${exc instanceof Error ? exc.message : String(exc)}`,
+          detail: "target directory is not empty",
         });
         continue;
+      }
+      if (!dryRun) {
+        try {
+          fs.rmdirSync(target.dir as string);
+        } catch (exc) {
+          entries.push({
+            name,
+            sourcePath,
+            targetPath: target.sessionPath,
+            status: "conflict",
+            detail: `target directory could not be removed: ${exc instanceof Error ? exc.message : String(exc)}`,
+          });
+          continue;
+        }
       }
     }
 

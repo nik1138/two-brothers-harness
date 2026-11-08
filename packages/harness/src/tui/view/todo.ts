@@ -17,6 +17,7 @@
 import * as path from "node:path";
 
 import { TODO_MAX_ITEMS, sanitizeTodos, summarizeTodos, type TodoItem, type TodoStatus } from "../../todos.ts";
+import { SessionLayout } from "../../sessionlayout.ts";
 import { boxContentWidth, clipDisplay, renderBox } from "../screen.ts";
 import { plainTheme, type Theme, type ThemeToken } from "../theme.ts";
 
@@ -28,7 +29,10 @@ import { plainTheme, type Theme, type ThemeToken } from "../theme.ts";
  * `2026-11-07-1-abc.jsonl` -> `sessions/runtime/2026-11-07-1-abc.jsonl.events.jsonl`.
  * Both a serve backend and a TUI turn's plan-snapshot writes use it.
  */
-export function sessionSidecarKey(sessionFile: string): string {
+export function sessionSidecarKey(sessionFile: string, sessionsDir?: string): string {
+  if (typeof sessionsDir === "string" && sessionsDir.trim() !== "") {
+    return new SessionLayout(sessionsDir).nameForPath(sessionFile);
+  }
   return path.basename(sessionFile);
 }
 

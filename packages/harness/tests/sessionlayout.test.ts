@@ -17,6 +17,7 @@ import { SessionMetadataStore } from "../src/metadata.ts";
 import { RuntimeEventStore } from "../src/runevents.ts";
 import { loadSessionDocs } from "../src/sessionsearch.ts";
 import { forkSession } from "../src/sessionfork.ts";
+import { sessionSidecarKey } from "../src/tui/view/todo.ts";
 import {
   GLOBAL_PROJECT_KEY,
   SESSION_LAYOUT_FILE,
@@ -276,6 +277,102 @@ test("migration refuses a conflicting target and keeps the source", () => {
   }
 });
 
+test("materializeIn rejects an unsafe project key", () => {
+  const root = tmpdir();
+  try {
+    const layout = new SessionLayout(root);
+    layout.setMode("dirs");
+    assert.throws(() => layout.materializeIn("x.jsonl", "../escape"), /invalid project key/);
+    assert.throws(() => layout.materializeIn("x.jsonl", "a/b"), /invalid project key/);
+    assert.throws(() => layout.materializeIn("x.jsonl", ".."), /invalid project key/);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test("duplicate names across projects resolve deterministically (first sorted)", () => {
+  const root = tmpdir();
+  try {
+    for (const project of ["b-project", "a-project"]) {
+      const dir = path.join(root, project, "same");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "session.jsonl"), RAW, "utf-8");
+    }
+    const layout = new SessionLayout(root);
+    assert.equal(layout.list().find((item) => item.name === "same.jsonl")?.projectKey, "a-project");
+    assert.equal(layout.resolve("same")?.projectKey, "a-project");
+  } finally {
+    cleanup(root);
+  }
+});
+
+test("migration refuses a live writer lock", () => {
+  const root = tmpdir();
+  try {
+    writeFlat(root, "locked.jsonl");
+    const layout = new SessionLayout(root);
+    const release = layout.acquireWriterLock("test");
+    assert.throws(
+      () => migrateFlatSessions(root),
+      /in use by test|locked by an unknown writer/,
+    );
+    release();
+    const result = migrateFlatSessions(root);
+    assert.equal(result.entries[0]!.status, "migrated");
+  } finally {
+    cleanup(root);
+  }
+});
+
+test("migration refuses divergent flat sidecars on an adopted target", () => {
+  const root = tmpdir();
+  try {
+    writeFlat(root, "divergent.jsonl");
+    writeMeta(root, "divergent.jsonl", { title: "flat" });
+    const dir = path.join(root, GLOBAL_PROJECT_KEY, "divergent");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "session.jsonl"), RAW, "utf-8");
+    fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify({ title: "target" }), "utf-8");
+
+    const result = migrateFlatSessions(root);
+    assert.equal(result.entries[0]!.status, "conflict");
+    assert.match(result.entries[0]!.detail ?? "", /meta\.json/);
+    assert.equal(fs.existsSync(path.join(root, "divergent.jsonl")), true);
+    assert.equal(new SessionLayout(root).mode(), "flat");
+  } finally {
+    cleanup(root);
+  }
+});
+
+test("dry-run reports a non-empty target directory as a conflict", () => {
+  const root = tmpdir();
+  try {
+    writeFlat(root, "blocked.jsonl");
+    const dir = path.join(root, GLOBAL_PROJECT_KEY, "blocked");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "events.jsonl"), '{"run_id":"x"}\n', "utf-8");
+
+    const dry = migrateFlatSessions(root, { dryRun: true });
+    assert.equal(dry.entries[0]!.status, "conflict");
+    const real = migrateFlatSessions(root);
+    assert.equal(real.entries[0]!.status, "conflict");
+    assert.equal(fs.existsSync(path.join(root, "blocked.jsonl")), true);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test("migration refuses a missing sessions directory", () => {
+  const root = tmpdir();
+  const missing = path.join(root, "no-such-store");
+  try {
+    assert.throws(() => migrateFlatSessions(missing), /not found/);
+    assert.equal(fs.existsSync(missing), false);
+  } finally {
+    cleanup(root);
+  }
+});
+
 test("fork in dirs mode stays in the source project directory", () => {
   const root = tmpdir();
   try {
@@ -333,6 +430,14 @@ test("event-only session directories are recoverable by findRun", () => {
   } finally {
     cleanup(root);
   }
+});
+
+test("sessionSidecarKey uses the directory stem only with a sessions root", () => {
+  const dirsPath = path.join("root", "project", "alpha", "session.jsonl");
+  assert.equal(sessionSidecarKey(dirsPath), "session.jsonl");
+  assert.equal(sessionSidecarKey(dirsPath, "root"), "alpha.jsonl");
+  assert.equal(sessionSidecarKey(path.join("root", "flat.jsonl"), "root"), "flat.jsonl");
+  assert.equal(sessionSidecarKey(""), "");
 });
 
 test("the root-level spill directory is never treated as a project", () => {

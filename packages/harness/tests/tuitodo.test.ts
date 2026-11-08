@@ -16,6 +16,7 @@ import { createTuiModel } from "../src/tui/model.ts";
 import { styledWidth, stripAnsi } from "../src/tui/screen.ts";
 import { createTheme, plainTheme, resolveTheme } from "../src/tui/theme.ts";
 import { RuntimeEventStore } from "../src/runevents.ts";
+import { SessionLayout } from "../src/sessionlayout.ts";
 import type { TodoItem } from "../src/todos.ts";
 import { renderScreen, screenView } from "../src/tui/view/screen.ts";
 import {
@@ -289,6 +290,45 @@ test("a TUI plan snapshot round-trips through a real runtime sidecar", () => {
     assert.deepEqual(todosFromRuntimeEvents(events), plan);
   } finally {
     dir.cleanup();
+  }
+});
+
+test("directory sessions keep distinct plan sidecars", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-tui-todo-dirs-"));
+  try {
+    const layout = new SessionLayout(root);
+    layout.setMode("dirs");
+    const project = path.join(root, "workspace");
+    const alpha = layout.materialize("alpha.jsonl", project);
+    const beta = layout.materialize("beta.jsonl", project);
+    fs.writeFileSync(alpha.sessionPath, "", "utf-8");
+    fs.writeFileSync(beta.sessionPath, "", "utf-8");
+    const store = new RuntimeEventStore(path.join(root, "runtime"), layout);
+
+    persistTodoSnapshot(store, alpha.sessionPath, [{ content: "alpha", status: "pending" }], {
+      runId: "a",
+      at: 1,
+      sessionsDir: root,
+    });
+    persistTodoSnapshot(store, beta.sessionPath, [{ content: "beta", status: "completed" }], {
+      runId: "b",
+      at: 2,
+      sessionsDir: root,
+    });
+
+    assert.equal(fs.existsSync(alpha.eventsPath), true);
+    assert.equal(fs.existsSync(beta.eventsPath), true);
+    assert.equal(fs.existsSync(path.join(root, "runtime")), false);
+    assert.deepEqual(
+      todosFromRuntimeEvents(store.load(sessionSidecarKey(alpha.sessionPath, root))),
+      [{ content: "alpha", status: "pending" }],
+    );
+    assert.deepEqual(
+      todosFromRuntimeEvents(store.load(sessionSidecarKey(beta.sessionPath, root))),
+      [{ content: "beta", status: "completed" }],
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 

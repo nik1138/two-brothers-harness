@@ -9,13 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Windows shell selection and stdio drain:** `probeBash()` now rejects the
-  Windows WSL launcher (`C:\Windows\System32\bash.exe`, WindowsApps) instead of
-  auto-selecting it; WSL bash passed the spawn probe but ran commands in a Linux
-  filesystem, breaking ordinary Windows paths. Git Bash/MSYS2/Cygwin still
-  qualify, and an explicit `bash` option can still select WSL. The post-exit
-  stdio `close` grace is now 2 s (was 250 ms): a loaded machine can deliver the
-  last stdout chunks after `exit`, and the old bound dropped real output.
+- **Session store hardening (review follow-up):** `serve`/TUI take a
+  single-writer lock (`<sessions-dir>/.writer.json`) and `sessions migrate`
+  refuses while a live writer holds it (`--force` is the explicit unsafe
+  override), so migration can no longer split a transcript a live run is still
+  appending to. Read-only routes no longer materialize empty session
+  directories (a 404 GET leaves the store untouched), and a later run lands in
+  the requested workspace project. Directory sessions keep their public name
+  in TUI plan/reasoning sidecars and export instead of collapsing to
+  `session.jsonl`. Migration adoption compares metadata/runtime sidecars and
+  refuses divergent copies instead of deleting them, and dry-run mirrors the
+  non-empty-target conflict. Explicit project keys are validated as one safe
+  path segment.
+- **Windows shell selection and stdio drain:** `probeBash()` now skips the
+  Windows WSL launcher and continues scanning PATH for a native bash (Git
+  Bash/MSYS2/Cygwin); an explicit `bash` option can still select any path
+  (including WSL) or `null` forces the platform shell. The post-exit stdio
+  `close` grace is now 2 s (was 250 ms): a loaded machine can deliver the last
+  stdout chunks after `exit`, and the old bound dropped real output.
 - **Node 22 compatibility for the wave-26 shell/clipboard paths:**
   `ShellRunner` now waits for the child's stdio `close` (bounded to 250 ms
   after `exit`) before assembling output, so a fast exit cannot return empty

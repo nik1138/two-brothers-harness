@@ -1028,6 +1028,9 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   });
 
   const layout = new SessionLayout(sessionsDir);
+  // One writer per store: serve and the migration command share this lock, so
+  // a live run can never keep appending to a file that is being moved.
+  const releaseWriterLock = layout.acquireWriterLock("serve");
   const runtimeEvents = new RuntimeEventStore(path.join(sessionsDir, "runtime"), layout);
   // Run-scoped workspace edit undo (wave 23): one persisted, content-addressed
   // store for every workspace-bound run. It is a session side artifact (never
@@ -1111,10 +1114,24 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     return compactionSettingsView(cfg, persisted, undefined, presetWindow);
   }
 
-  function storeFor(name: string, projectPath?: string | null): SessionStore {
+  function materializeStore(name: string, projectPath?: string | null): SessionStore {
     // `path.basename` flattening: never allow path traversal out of the root.
     const target = layout.materialize(path.basename(name), projectPath);
     return new SessionStore(target.sessionPath);
+  }
+
+  /**
+   * Read-only store handle. Never creates a session directory: an unknown name
+   * yields a handle whose path does not exist, so the caller's `exists()`/404
+   * path stays side-effect free.
+   */
+  function storeFor(name: string): SessionStore {
+    const location = layout.resolve(path.basename(name));
+    return new SessionStore(
+      location === null
+        ? path.join(sessionsDir, path.basename(name))
+        : location.sessionPath,
+    );
   }
 
   function sessionName(raw: string | null | undefined): string {
@@ -1577,7 +1594,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     runIdOf?: () => string | null,
     projectPath?: string | null,
   ): Promise<HarnessResult> {
-    const store = storeFor(name, projectPath ?? workspace?.root ?? null);
+    const store = materializeStore(name, projectPath ?? workspace?.root ?? null);
     const context = store.exists() ? restoreContext(store) : new SharedContext(store);
     // Tool-output spill lives beside the session files; files persist until the
     // operator removes this directory (no automatic retention, documented).
@@ -2268,6 +2285,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       const session = ctx.query.get("session");
       if (!session) throw new HttpError(400, "invalid request body");
       const store = storeFor(sessionFileName(session));
+      if (!store.exists()) throw new HttpError(404, "not found");
       ctx.res.writeHead(200, SSE_HEADERS);
       let sent = 0;
       let closed = false;
@@ -2405,7 +2423,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       const projectPath = workspaceId
         ? (state.workspaces.get(workspaceId)?.path ?? null)
         : null;
-      const store = storeFor(name, projectPath);
+      const store = materializeStore(name, projectPath);
       fs.writeFileSync(store.path, "");
       const meta = state.metadata.save(name, {
         title,
@@ -2674,8 +2692,9 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       state.metadata.delete(safe);
       state.runtimeEvents.delete(safe);
       // A directory-layout session owns its directory; remove it when empty so
-      // the name is fully released.
-      const location = layout.resolve(safe);
+      // the name is fully released. `resolveForWrite` also finds the now-empty
+      // directory after the artifacts were unlinked.
+      const location = layout.resolveForWrite(safe);
       if (location?.dir) {
         try {
           fs.rmdirSync(location.dir);
@@ -3204,7 +3223,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       broker.seedSessionAllows(state.settingsStore.readSessionApprovals(name));
       // Materialize the session's directory before the run manager persists its
       // first runtime event, so every sidecar lands inside the project dir.
-      storeFor(
+      materializeStore(
         name,
         baseReq.workspace_id
           ? (state.workspaces.get(baseReq.workspace_id)?.path ?? null)
@@ -3821,6 +3840,11 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
             }),
         ),
       );
+      try {
+        releaseWriterLock();
+      } catch {
+        // release is best-effort; a stale lock is reclaimed by pid liveness
+      }
     },
   };
 }

@@ -383,8 +383,9 @@ display-only — no key answers it and the composer keeps its normal keys.
 
 The plan is durable for a run whose session has a file: a TUI turn writes each
 plan snapshot as one `todo_updated` event to the session's runtime sidecar,
-`sessions/runtime/<session-file>.events.jsonl` (same store, directory and key
-convention as `serve` — the session file name unchanged, extension included).
+`sessions/runtime/<session-file>.events.jsonl` (flat layout; a migrated store
+uses `<project>/<stem>/events.jsonl`) — the same store and key convention as
+`serve`, with the session file name unchanged, extension included.
 Restarting the TUI with the same `--session-file` replays the last snapshot and
 a cleared plan stays cleared; only plan snapshots are persisted (tool, approval
 and envelope events are still not), and an in-memory session — no
@@ -666,7 +667,8 @@ summary covers is kept and the cut reports `stopped_at_compaction` /
 original `[[TASK]]` head rather than "replacing" the first task. The kept
 prefix is rewritten atomically (temp file + rename) with its dense `seq`
 intact, so `--resume` keeps working. A successful rewrite also clears the
-session's runtime-event sidecar (`sessions/runtime/<name>.jsonl.events.jsonl`):
+session's runtime-event sidecar (`sessions/runtime/<name>.jsonl.events.jsonl`
+in the flat layout, `<project>/<stem>/events.jsonl` after migration):
 tool and approval history for the removed runs is gone, while the kept
 transcript remains. A cut that removes nothing is a success that reports the
 honest reason. A missing or corrupt session exits 1; a bad `--turns` is a
@@ -717,20 +719,27 @@ workspace link or a record from another workspace exits 1, and a per-file
 result). A missing name, an unexpected argument, `--apply` combined with
 `--discard` or a malformed `--run` is a usage error (exit 2).
 
-#### `sessions migrate [--dry-run] [--json]`
+#### `sessions migrate [--dry-run] [--force] [--json]`
 
 Move flat `<sessions-dir>/<name>.jsonl` sessions into the project/session
 directory layout (`<project>/<stem>/session.jsonl` plus `meta.json` and
 `events.jsonl`) and write `.layout.json` so new sessions follow it. The move is
-copy-first and idempotent: an identical target is adopted, a different target is
-a conflict that keeps the flat source and exits 1; the marker is written only
-when the pass has no conflicts or errors. `workspace_id` metadata groups a
-session under its registered workspace path, and unlinked sessions use
-`_global`.
+copy-first and idempotent: an identical target is adopted, a different target
+(session bytes or either sidecar) is a conflict that keeps the flat source and
+exits 1; the marker is written only when the pass has no conflicts or errors.
+`workspace_id` metadata groups a session under its registered workspace path,
+and unlinked sessions use `_global`.
+
+Migration takes the store's **single-writer lock**. Stop `serve` and the TUI
+first: while either holds the lock the command refuses, because a live process
+could keep appending to a transcript that is being moved. `--force` bypasses
+the lock (unsafe; only for a known-stale store). A missing `--sessions-dir`
+is an error, not an empty store.
 
 ```powershell
 node dist/cli.js sessions migrate --sessions-dir sessions --dry-run
 node dist/cli.js sessions migrate --sessions-dir sessions --json
+node dist/cli.js sessions migrate --sessions-dir sessions --force
 ```
 
 `--dry-run` prints the plan without touching disk. `--json` prints
