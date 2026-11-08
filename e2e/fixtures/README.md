@@ -1,14 +1,14 @@
 # E2E fixtures
 
 The `approval-*`, `stop`, `folding`, `plan-dock`, `approval-reason`,
-`reasoning-replay` and `cooperation-surfaces` scenarios in `../run.mjs` need
-scripted, deterministic model responses. Every scenario runs against the
-TypeScript server (`packages/harness/dist/cli.js serve`). That server has no
-responder-monkeypatching hook, so the fixture is a scripted
+`reasoning-replay`, `cooperation-surfaces` and `tab-title` scenarios in
+`../run.mjs` need scripted, deterministic model responses. Every scenario runs
+against the TypeScript server (`packages/harness/dist/cli.js serve`). That
+server has no responder-monkeypatching hook, so the fixture is a scripted
 **OpenAI-compatible model server**:
 
 ```
-node scripted-server.mjs --port P --scenario approval|slow|plan|folding|delete|reasoning|cooperation \
+node scripted-server.mjs --port P --scenario approval|slow|plan|folding|delete|reasoning|cooperation|title \
   [--senior-model e2e-senior] [--junior-model e2e-junior] [--linger-ms 30000]
 ```
 
@@ -68,6 +68,13 @@ run's decision starts the next run):
   task without the marker gets the historical JSON reply and therefore persists
   no reasoning record — the browser scenario uses both sessions in one fixture
   process to prove the "no events, no replayed row" case.
+- `title` — the same write-then-deliver flow as `approval` (one
+  `workspace_write_file` approval, then the deliverable; no repair seed), except
+  that a task whose text carries the `e2e-title` marker gets an abortable slow
+  senior opening `--linger-ms`. That gives the browser a deterministic window
+  to observe the running tab title (`▶ …`) before the run parks on the real
+  approval broker (`! …`) and completes; the linger delay is dropped when the
+  harness stops the run, exactly like `slow`.
 
 `../run.mjs` starts it automatically next to the server, which is
 spawned as:

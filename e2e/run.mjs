@@ -73,6 +73,20 @@
 //                  the source byte-identical, the fork's second turn is rewound
 //                  away, and a mid-run steer proves rejected drafts survive
 //                  while an accepted Alt+Enter POST clears the composer
+//   tab-title      scripted fixture: the selected session's document title is
+//                  "<session> — Two Brothers", gains the documented `▶ ` marker
+//                  while the run is live and `! ` while it waits for an
+//                  approval, and returns to the plain title when it completes;
+//                  the unread `(N) Two Brothers` count appears only with no
+//                  session selected (opening the unread session consumes it)
+//   settings-advanced mock provider: Settings → Advanced shows the
+//                  Auto-compaction card with its four labelled budgets; a
+//                  negative value is refused by the input's native floor
+//                  (no PUT), a native-valid but non-whole value is an inline
+//                  `role=alert` that blocks the save before any PUT, and a
+//                  valid save persists the `compaction` section through the
+//                  real /api/settings route (and sessions/settings.json) and
+//                  survives a reload
 //   real           opt-in (TWO_BROTHERS_REAL_E2E=1): real models via LM Studio
 //
 // Backend: every scenario runs against the TypeScript server
@@ -381,18 +395,12 @@ async function waitForModelServer(port, timeoutMs = 15000) {
   throw new Error(`scripted model server on :${port} did not become ready (${lastErr?.message ?? 'timeout'})`)
 }
 
-/** Ambient TWO_BROTHERS_* provider env must never leak into a TS run:
- *  every scenario pins exactly the provider connection it needs. */
+/** Ambient TWO_BROTHERS_* env must never leak into a TS run: every scenario
+ *  pins exactly the provider/compaction/approval settings it needs. */
 function tsEnv(overrides = {}) {
   const env = { ...process.env }
-  for (const key of [
-    'TWO_BROTHERS_PROVIDER',
-    'TWO_BROTHERS_BASE_URL',
-    'TWO_BROTHERS_API_KEY',
-    'TWO_BROTHERS_SENIOR_MODEL',
-    'TWO_BROTHERS_JUNIOR_MODEL',
-  ]) {
-    delete env[key]
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('TWO_BROTHERS_')) delete env[key]
   }
   return { ...env, ...overrides }
 }
@@ -3751,6 +3759,337 @@ async function scenarioCooperationSurfaces(runner) {
   }
 }
 
+// -- scenario: session-aware tab title (wave 25) ----------------------------------
+//
+// `web/src/tabTitle.ts` formats `document.title` from the selected session's
+// title and live run state; the shell writes it. The scripted `title` fixture
+// holds its first senior opening for `--linger-ms`, so the running marker is
+// observable deterministically (no sleep), then parks on the real approval
+// broker for the waiting marker, and completes for the plain title. The second
+// session is left parked on its approval while the operator switches to A, so
+// it completes in the background and becomes unread; the selected session keeps
+// the plain title, and deleting the open session leaves no selection, which is
+// the only state that shows `(N) Two Brothers`.
+
+async function scenarioTabTitle(runner) {
+  const SESSION_A = 'E2E tab title'
+  const SESSION_B = 'E2E tab unread'
+  const be = await startBackend({ kind: 'fixture', scenario: 'title', lingerMs: 1500 })
+  const wsDir = tmpDir('tb-e2e-ws-title')
+  const wsName = path.basename(wsDir)
+  const { context, page, consoleGuard } = await newScenarioPage()
+
+  const documentTitle = async () => (await page.title()).trim()
+  const plainTitle = (name) => `${name} — Two Brothers`
+  const waitTitle = (expected, desc) =>
+    waitFor(async () => (await documentTitle()) === expected, { timeout: 20000, desc })
+  const waitTitlePrefix = (prefix, desc) =>
+    waitFor(async () => (await documentTitle()).startsWith(prefix), { timeout: 20000, desc })
+  const rowWithTitle = (name) =>
+    page.locator('.session-row').filter({
+      has: page.locator(`.session-title:text-is("${name}")`),
+    })
+
+  /** One scripted run: plain → ▶ running → ! waiting → plain after the decision. */
+  const observeTitleCycle = async (name) => {
+    await waitTitle(plainTitle(name), `the plain title of "${name}" before its run`)
+    await sendTask(page, `${TASK_TEXT} e2e-title`, { mode: 'work' })
+    await waitTitlePrefix(`▶ ${name} — Two Brothers`, `the running title of "${name}"`)
+    const approvalDock = page.locator('.approval-dock')
+    await approvalDock.waitFor({ state: 'visible', timeout: 30000 })
+    await waitTitle(`! ${name} — Two Brothers`, `the waiting title of "${name}"`)
+    await approvalDock.locator('button.approval-btn', { hasText: 'Allow once' }).click()
+    await waitForRunEnd(page)
+    await waitTitle(plainTitle(name), `the plain title after "${name}" completes`)
+  }
+
+  try {
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await ensureWorkspace(page, wsDir, wsName)
+    await selectWorkspaceFilter(page, wsName)
+
+    await createSession(page, SESSION_A)
+    await observeTitleCycle(SESSION_A)
+
+    // B runs while it is selected (so its own markers are observable), but the
+    // operator leaves it parked on the approval and opens A. The run then
+    // finishes in the background — the only way a completed run becomes unread.
+    await createSession(page, SESSION_B)
+    const nameB = await sessionNameByTitle(be.base, SESSION_B)
+    await waitTitle(plainTitle(SESSION_B), 'the plain title of B before its run')
+    await sendTask(page, `${TASK_TEXT} e2e-title`, { mode: 'work' })
+    await waitTitlePrefix(`▶ ${SESSION_B} — Two Brothers`, 'the running title of B')
+    const dockB = page.locator('.approval-dock')
+    await dockB.waitFor({ state: 'visible', timeout: 30000 })
+    await waitTitle(`! ${SESSION_B} — Two Brothers`, 'the waiting title of B')
+
+    await rowWithTitle(SESSION_A).locator('.session-item').click()
+    await waitTitle(plainTitle(SESSION_A), 'the plain title of the selected session A')
+
+    // Answer B's parked approval through the backend API (the UI allow path is
+    // exercised by A's cycle above) so B can complete while A is on screen.
+    const waitingRun = (await (await fetch(`${be.base}/api/runs`)).json()).find(
+      (run) => run.session === nameB && run.status === 'waiting',
+    )
+    assert.ok(waitingRun, `session B has no waiting run (got ${nameB})`)
+    const pendingRes = await fetch(`${be.base}/api/runs/${waitingRun.run_id}/approvals`)
+    assert.equal(pendingRes.status, 200, `GET approvals -> HTTP ${pendingRes.status}`)
+    const pending = (await pendingRes.json()).pending
+    assert.equal(pending.length, 1, 'B must have exactly one pending approval')
+    const answered = await fetch(
+      `${be.base}/api/runs/${waitingRun.run_id}/approvals/${pending[0].approval_id}`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ allow: true, scope: 'once' }),
+      },
+    )
+    assert.equal(answered.status, 200, `POST approval -> HTTP ${answered.status}`)
+    await waitFor(
+      async () =>
+        (await (await fetch(`${be.base}/api/runs/${waitingRun.run_id}`)).json()).status ===
+        'completed',
+      { timeout: 30000, desc: 'the background B run to complete' },
+    )
+
+    // B is now unread, but the selected session's plain title wins over the count.
+    await waitFor(
+      async () =>
+        (await rowWithTitle(SESSION_B)
+          .locator('.session-status[aria-label="Unread run result in this session"]')
+          .count()) === 1,
+      { timeout: 20000, desc: 'session B to report its unread run' },
+    )
+    assert.equal(
+      await documentTitle(),
+      plainTitle(SESSION_A),
+      'a selected session title must never carry the unread count',
+    )
+
+    // Deleting the open session leaves no selection: only then may the count
+    // appear in the document title.
+    const trigger = rowWithTitle(SESSION_A).locator('.row-menu-trigger')
+    await trigger.focus()
+    await page.keyboard.press('ArrowDown')
+    const rowMenu = page.locator('.row-menu')
+    await rowMenu.waitFor({ state: 'visible' })
+    await rowMenu.locator('button[data-menu-action="delete"]').click()
+    await rowMenu.locator('button[aria-label="Confirm delete session"]').click()
+    await waitFor(async () => (await rowWithTitle(SESSION_A).count()) === 0, {
+      desc: 'session A to be deleted',
+    })
+    await waitTitle('(1) Two Brothers', 'the unread count with no session selected')
+    assert.equal(
+      (await page.locator('.chat-title').innerText()).trim(),
+      'Two Brothers',
+      'the shell header falls back to the product name with no session selected',
+    )
+
+    // Opening the unread session consumes it and the plain session title returns.
+    await rowWithTitle(SESSION_B).locator('.session-item').click()
+    await waitTitle(plainTitle(SESSION_B), 'the plain title of the reopened session B')
+    await waitFor(
+      async () =>
+        (await rowWithTitle(SESSION_B)
+          .locator('.session-status[aria-label="Unread run result in this session"]')
+          .count()) === 0,
+      { desc: 'opening session B to consume its unread state' },
+    )
+
+    consoleGuard.assertClean()
+    runner.pass('tab-title')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(wsDir)
+    rmTree(be.dir)
+  }
+}
+
+// -- scenario: Settings -> Advanced auto-compaction (wave 25) ---------------------
+//
+// The card edits the server's persisted run-level context budgets (the
+// `compaction` section of sessions/settings.json). The backend here is the real
+// TypeScript server, so /api/settings persistence is real and offline: strict
+// validation blocks a bad value before any PUT, a valid save persists the
+// section, and the values plus their honest effective/source lines survive a
+// page reload.
+
+async function scenarioSettingsAdvanced(runner) {
+  const be = await startBackend({ kind: 'mock' })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  const COMPACTION_KEYS = [
+    'threshold_chars',
+    'threshold_tokens',
+    'keep_recent_chars',
+    'context_window',
+  ]
+  const puts = []
+  page.on('request', (request) => {
+    if (request.method() === 'PUT' && new URL(request.url()).pathname === '/api/settings') {
+      puts.push(request.postData() ?? '')
+    }
+  })
+  const getSettings = async () => {
+    const res = await fetch(`${be.base}/api/settings`)
+    assert.equal(res.status, 200, `GET /api/settings -> HTTP ${res.status}`)
+    return res.json()
+  }
+  const openAdvanced = async () => {
+    await page.locator('.sidebar-footer .footer-action').click()
+    const dialog = page.locator('[role="dialog"][aria-labelledby="settings-dialog-title"]')
+    await dialog.waitFor({ state: 'visible' })
+    await dialog.getByRole('button', { name: 'Advanced', exact: true }).click()
+    const pane = dialog.locator('[role="region"][aria-label="Advanced"]')
+    await pane.waitFor({ state: 'visible' })
+    await pane.locator('#advanced-compaction-heading').waitFor({ state: 'visible' })
+    return { dialog, pane }
+  }
+  const saveButton = (dialog) =>
+    dialog.locator('.settings-footer-actions button.n-button--primary-type').first()
+
+  try {
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+
+    const { dialog, pane } = await openAdvanced()
+    assert.equal(
+      (await pane.locator('#advanced-compaction-heading').innerText()).trim(),
+      'Auto-compaction',
+    )
+    // The card renders its heading before GET /api/settings resolves; wait for
+    // the first real input so allInnerTexts() cannot race the async load.
+    await pane.locator('#compaction-threshold_chars').waitFor({ state: 'visible' })
+    const labels = (await pane.locator('.compaction-field label').allInnerTexts()).map((text) =>
+      text.trim(),
+    )
+    assert.deepEqual(labels, [
+      'Threshold (chars)',
+      'Threshold (tokens)',
+      'Keep recent (chars)',
+      'Context window (tokens)',
+    ])
+    for (const key of COMPACTION_KEYS) {
+      const input = pane.locator(`#compaction-${key}`)
+      assert.equal(await input.getAttribute('type'), 'number', `${key} is a number input`)
+      assert.equal(await input.getAttribute('min'), '0', `${key} rejects negatives by its floor`)
+      assert.equal(
+        await input.getAttribute('aria-describedby'),
+        `compaction-${key}-effective`,
+        `${key} is described by its effective-value line`,
+      )
+      assert.match(
+        await pane.locator(`#compaction-${key}-effective`).innerText(),
+        /^Effective: /,
+        `${key} shows its effective value and source`,
+      )
+    }
+    assert.equal(
+      (await pane.locator('#compaction-threshold_chars-effective').innerText()).trim(),
+      'Effective: not configured',
+      'nothing is persisted yet, so the first budget is honestly not configured',
+    )
+
+    // Native constraint validation already refuses a negative budget: the
+    // number input's floor makes the form invalid, so the browser blocks the
+    // submit before the app's own handler runs and nothing is PUT. The app's
+    // strict parser must still catch values the browser accepts, so the next
+    // step uses `1e3` (native-valid, not a plain whole number).
+    const threshold = pane.locator('#compaction-threshold_chars')
+    await threshold.fill('-5')
+    assert.equal(
+      await threshold.evaluate((el) => el.checkValidity()),
+      false,
+      'the number input natively rejects a negative budget',
+    )
+    await saveButton(dialog).click()
+    assert.equal(puts.length, 0, 'the native negative rejection must not send a PUT')
+    assert.equal(await dialog.isVisible(), true, 'the blocked save leaves Settings open')
+
+    // Strict app validation: a native-valid but non-whole value is an inline
+    // `role=alert` on the field plus the footer alert, and blocks the save
+    // before any PUT reaches the backend.
+    await threshold.fill('1e3')
+    await saveButton(dialog).click()
+    const fieldError = pane.locator('.compaction-error[role="alert"]')
+    await fieldError.waitFor({ state: 'visible' })
+    assert.equal(
+      (await fieldError.innerText()).trim(),
+      'Enter a whole number of 0 or more (0 = off/unknown).',
+    )
+    assert.equal(
+      await pane.locator('#compaction-threshold_chars').getAttribute('aria-invalid'),
+      'true',
+      'the rejected input is marked invalid for assistive tech',
+    )
+    const footerError = dialog.locator('.settings-footer-error[role="alert"]')
+    await footerError.waitFor({ state: 'visible' })
+    assert.equal(
+      (await footerError.innerText()).trim(),
+      'Fix the highlighted auto-compaction values before saving.',
+    )
+    assert.equal(puts.length, 0, 'the invalid form must not send PUT /api/settings')
+
+    // A corrected form saves through the dialog's single Save action.
+    await pane.locator('#compaction-threshold_chars').fill('64000')
+    await pane.locator('#compaction-keep_recent_chars').fill('8000')
+    assert.equal(
+      await pane.locator('.compaction-error').count(),
+      0,
+      'editing the field clears its inline error',
+    )
+    await saveButton(dialog).click()
+    await dialog.waitFor({ state: 'hidden', timeout: 15000 })
+    const saved = await getSettings()
+    assert.equal(puts.length, 1, 'only the valid save may reach PUT /api/settings')
+    assert.match(puts[0], /"compaction"/, 'the save carries the compaction section')
+    assert.equal(saved.compaction.threshold_chars.persisted, 64000)
+    assert.equal(saved.compaction.threshold_chars.effective, 64000)
+    assert.equal(saved.compaction.threshold_chars.source, 'persisted')
+    assert.equal(saved.compaction.keep_recent_chars.persisted, 8000)
+    assert.equal(saved.compaction.threshold_tokens.persisted, 0)
+    assert.equal(saved.compaction.context_window.persisted, 0)
+    const onDisk = JSON.parse(fs.readFileSync(path.join(be.dir, 'settings.json'), 'utf-8'))
+    assert.deepEqual(
+      onDisk.compaction,
+      { threshold_chars: 64000, threshold_tokens: 0, keep_recent_chars: 8000, context_window: 0 },
+      'sessions/settings.json persists the four budgets (zeros stay 0)',
+    )
+
+    // Reload: the persisted budgets seed the form and their effective lines.
+    await page.reload()
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    const reopened = await openAdvanced()
+    assert.equal(await reopened.pane.locator('#compaction-threshold_chars').inputValue(), '64000')
+    assert.equal(await reopened.pane.locator('#compaction-keep_recent_chars').inputValue(), '8000')
+    assert.equal(
+      (await reopened.pane.locator('#compaction-threshold_chars-effective').innerText()).trim(),
+      'Effective: 64000',
+    )
+    assert.equal(
+      (await reopened.pane.locator('#compaction-keep_recent_chars-effective').innerText()).trim(),
+      'Effective: 8000',
+    )
+    for (const key of ['threshold_tokens', 'context_window']) {
+      assert.equal(
+        (await reopened.pane.locator(`#compaction-${key}-effective`).innerText()).trim(),
+        'Effective: not configured',
+        `${key} keeps its honest not-configured line`,
+      )
+    }
+    await reopened.dialog.getByRole('button', { name: 'Close settings' }).click()
+    await reopened.dialog.waitFor({ state: 'hidden' })
+
+    consoleGuard.assertClean()
+    runner.pass('settings-advanced')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(be.dir)
+  }
+}
+
 // -- scenario: real models (opt-in) ---------------------------------------------------
 
 async function scenarioReal(runner) {
@@ -4034,6 +4373,20 @@ async function main() {
           scenarioCooperationSurfaces(currentRunner)
         ),
       },
+      {
+        label: 'tab-title',
+        run: () => (
+          (currentRunner = makeRunner('tab-title')),
+          scenarioTabTitle(currentRunner)
+        ),
+      },
+      {
+        label: 'settings-advanced',
+        run: () => (
+          (currentRunner = makeRunner('settings-advanced')),
+          scenarioSettingsAdvanced(currentRunner)
+        ),
+      },
     ]
     blocks.push(...hermetic.filter((block) => scenarioSelected(block.label)))
     if (realEnabled && scenarioSelected('real')) {
@@ -4069,6 +4422,8 @@ async function main() {
       'workspace-drag',
       'reasoning-replay',
       'cooperation-surfaces',
+      'tab-title',
+      'settings-advanced',
       'real',
     ].filter(scenarioSelected)) {
       results.push({
