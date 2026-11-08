@@ -246,11 +246,14 @@ the same hero appears inside a selected session that has no transcript yet.
    Senior/Junior/Operator identity colours. Settings → **Keyboard**
    rebinds the palette, find and shortcut-reference chords on this device
    (Ctrl and ⌘ count as the same modifier; every other shortcut stays fixed).
-3. **Send a task** in `work` mode. The run proceeds in the background; the
-   chat updates live over SSE — a folded **Thinking** row (reasoning) and the
-   **Response** block stream in as the models generate, then resolve into the
-   normal conversation bubbles. The Thinking row starts folded — click it to
-   read the reasoning; the reply never pops it open. Runs that stream reasoning
+3. **Send a task** in `work` mode. The run uses the session's linked
+   workspace (even when the sidebar filter is **All**), so the brothers get
+   its confined file tools and `@` file attachments resolve there; an explicit
+   workspace override on the API still wins. The run proceeds in the
+   background; the chat updates live over SSE — a folded **Thinking** row
+   (reasoning) and the **Response** block stream in as the models generate,
+   then resolve into the normal conversation bubbles. The Thinking row starts
+   folded — click it to read the reasoning; the reply never pops it open. Runs that stream reasoning
    also persist a bounded record, so after a reload the same folded
    **Thinking · replayed** row comes back for each provider call (older
    backends and non-streaming runs simply show none). Submitting while the

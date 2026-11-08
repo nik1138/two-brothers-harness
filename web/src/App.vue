@@ -107,6 +107,7 @@ import { buildPaletteItems, PALETTE_SESSION_PREFIX, PALETTE_WORKSPACE_PREFIX } f
 import type { PaletteItem } from './palette'
 import { contentItemSession } from './search'
 import { isSameOrder, moveWorkspaceId } from './workspaceOrder'
+import { runWorkspaceId } from './workspaceContext'
 import {
   STREAMING_MAX_CHARS,
   applyRuntimeEvent,
@@ -696,11 +697,10 @@ const visibleSessions = computed(() =>
  */
 const composerWorkspaceId = computed<string | null>(() => {
   const name = selected.value
-  if (name) {
-    const session = sessions.value.find((item) => item.name === name)
-    if (session?.workspace_id) return session.workspace_id
-  }
-  return workspaceFilter.value === 'all' ? null : workspaceFilter.value
+  const session = name
+    ? sessions.value.find((item) => item.name === name)
+    : undefined
+  return runWorkspaceId(session?.workspace_id, workspaceFilter.value)
 })
 
 /** Recent workspaces that still exist, newest first (the finder/dialog quick picks). */
@@ -1837,7 +1837,9 @@ async function startNewRun(payload: {
     mode: payload.mode,
     provider: payload.provider,
     session: selected.value,
-    workspace_id: workspaceFilter.value === 'all' ? null : workspaceFilter.value,
+    // Same workspace the composer file picker and status seats use: the
+    // session's link wins, the sidebar filter is the unlinked-session fallback.
+    workspace_id: composerWorkspaceId.value,
   }
   let accepted = false
   try {

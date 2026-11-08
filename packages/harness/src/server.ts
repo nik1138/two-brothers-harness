@@ -1809,6 +1809,27 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     }
   }
 
+  /**
+   * The workspace a session is linked to through its metadata sidecar.
+   *
+   * A session created under a workspace keeps that link, and the web composer
+   * treats it as the session's context (file picker, status seats). Run
+   * submissions used to rely solely on the request's `workspace_id`, so a
+   * later run on a linked session that omitted it (the composer sends `null`
+   * when the sidebar filter is "all") silently lost the workspace tools and
+   * refused `@file` mentions. `POST /api/runs` now falls back to this link;
+   * an explicit request value still wins. Returns null for an unlinked or
+   * unreadable sidecar.
+   */
+  function linkedSessionWorkspace(name: string): string | null {
+    const meta = state.metadata.get(name);
+    if (meta === null) return null;
+    const value = meta.workspace_id;
+    if (typeof value !== "string") return null;
+    const id = value.trim();
+    return id === "" ? null : id;
+  }
+
   function userMessageEvent(text: string): Array<Record<string, unknown>> {
     return [{ from: "user", kind: "message", payload: { text } }];
   }
@@ -3103,14 +3124,24 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   routes.push(
     compileRoute("POST", "/api/runs", async (ctx) => {
       const req = parseRunRequestStrict(await ctx.json());
-      ensureWorkspace(req.workspace_id);
+      // A session created under a workspace keeps that link for its runs: the
+      // request may omit `workspace_id` (the web composer sends null when its
+      // sidebar filter is "all"), and without this fallback the run receives
+      // no workspace tools and refuses `@file` mentions. An explicit value
+      // still wins; either way the id must name a registered workspace.
+      const name = sessionName(req.session);
+      const linked = req.workspace_id === undefined ? linkedSessionWorkspace(name) : null;
+      const baseReq: RunRequestData =
+        linked === null ? req : { ...req, workspace_id: linked };
+      ensureWorkspace(baseReq.workspace_id);
       // Prepare before creating anything: a slash/mention error must leave no
       // session and no run behind. A command `mode` overrides the request mode
       // for this run only (the persisted metadata title keeps the raw text).
-      const prepared = await prepareSubmission(req);
+      const prepared = await prepareSubmission(baseReq);
       const runReq: RunRequestData =
-        prepared.modeOverride === undefined ? req : { ...req, mode: prepared.modeOverride };
-      const name = sessionName(req.session);
+        prepared.modeOverride === undefined
+          ? baseReq
+          : { ...baseReq, mode: prepared.modeOverride };
       // The final, synchronous admission gate: a manual compaction must never
       // overlap a run submission (its JSONL rewrite would drop this run's
       // envelopes). Checked right before the run record exists — nothing has
@@ -3144,7 +3175,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       );
       record.approvals = broker;
       state.metadata.ensure(name, {
-        workspaceId: req.workspace_id,
+        workspaceId: baseReq.workspace_id,
         events: userMessageEvent(req.task),
       });
       return new Respond(202, { run_id: record.runId, session: name, status: record.status });
