@@ -46,14 +46,20 @@ order:
    `node dist/selftest.js`, and the mock CLI run;
 3. `packages/harness`: the hermetic CLI E2E — `node e2e/cli.ts` (sources)
    and then `node e2e/cli.ts --dist` (the built CLI);
-4. `packages/harness`: `node e2e/run.ts` with
+4. `packages/harness`: the real-socket fault-injection runner
+   (`node e2e/faults.ts` — loopback only, seven retry/timeout/overflow/quota
+   scenarios over real TCP);
+5. `packages/harness`: `node e2e/run.ts` with
    `TWO_BROTHERS_E2E_BASE_URL=http://127.0.0.1:9/v1`. The closed port makes
    the endpoint probe fail immediately: the runner logs one `E2E SKIP:` line
    (and records a synthetic `connection` SKIP entry), omits the live-model
    suites, then runs the hermetic server-status and prompt-audit suites and
    exits 0;
-5. `web/`: `npm ci`, `npm test`, `npm run build`;
-6. Node 22 only, after the web build: `node scripts/tarball-smoke.mjs` at
+6. `web/`: `npm ci`, `npm test`, `npm run build`;
+7. at the repo root: the browser-E2E packaged-web freshness unit tests
+   (`node --test e2e/web-freshness.test.mjs` — plain `node:test`, no deps and
+   no browser);
+8. Node 22 only, after the web build: `node scripts/tarball-smoke.mjs` at
    the repo root and `npm run pack:check` in `packages/harness`. Both trigger
    the package `prepack` (build + `sync-web`), which is why they need
    `web/dist`; the packed artifact is identical on both matrix legs, so the
@@ -62,7 +68,10 @@ order:
 npm caching covers the root and `web/` lockfiles (`setup-node`); the
 reference tree needs none. Network use is limited to npm (`npm ci` and the
 tarball smoke's dependency install) — no CI step talks to a live model
-endpoint.
+endpoint. Browser E2E (Playwright + system Edge) and the live-endpoint /
+LM Studio / real-network-load layers are intentionally not in CI; they stay
+opt-in and manual (`scripts/e2e-test.ps1`, `npm run test:e2e`,
+`npm run test:e2e:load`).
 
 ## TypeScript package (primary)
 
@@ -77,7 +86,7 @@ npm run test:spawn      # node --test tests/ (child processes allowed)
 ```
 
 On the canonical integrated run for this round the in-process suite is
-**1 514 tests: 1 512 pass, 0 fail, 2 skipped** (exit 0); the two skips are
+**1 518 tests: 1 516 pass, 0 fail, 2 skipped** (exit 0); the two skips are
 environment-gated and never failures — the workspace symlink-parity test and
 the MCP stdio spawn are unavailable in this environment. `npm run typecheck`
 and `npm run build` pass, the hermetic CLI E2E is 17/17 on sources and 17/17
@@ -328,6 +337,20 @@ and stays bounded, and the console guard is clean). The browser suite is now
 reference tree 33/33 (the wave-10 lanes touched the package core + e2e
 fixtures/docs only).
 
+Wave 11 hardens the gates and closes the last reliability-coverage item: CI
+now also runs the real-socket fault-injection runner and the packaged-web
+freshness unit tests on both Node matrix legs (browser E2E and
+live/real-network layers stay opt-in/manual); the `thinkingpassback` suite
+grew from 13 to 17 tests (a `<redacted_thinking>` block is asserted to be
+echoed verbatim on the next tool-loop request, and mixed per-role wire kinds
+prove only the Anthropic role's body carries `thinking` while the other
+role's raw request bytes stay identical). The opt-in manual real-network load
+runner `packages/harness/e2e/load.ts` (`npm run test:e2e:load`) was added and
+recorded against the owner's LM Studio endpoint (concurrency 2 / runs 3:
+3/3 PASS, 78.7–93.7 s per run, 157.6 s wall) — it is never part of
+`npm test`, the smoke gate or CI. Package suite: **1 518 tests
+(1 516 pass, 2 environment skips)**; web/reference unchanged.
+
 ### Real-socket fault injection (in the smoke gate)
 
 `cd packages/harness && npm run test:e2e:faults` (`node e2e/faults.ts`) is a
@@ -335,7 +358,7 @@ fully offline, deterministic runner that starts a scripted `node:http` server
 on a loopback ephemeral port and drives the real retry/timeout/overflow paths
 over actual TCP (`fetch`) — no fetch stubs and no external network. Seven
 scenarios assert attempt counts and classification: 429 + `Retry-After` then
-success; transient 500/503 then success; a 150 ms per-attempt timeout then
+success; transient 500/503 then success; a 400 ms per-attempt timeout then
 success with the documented warning; context-overflow fail-fast
 (`ProviderContextOverflowError`, one attempt); a real compact-and-retry
 recovery over a seeded ~92 KB session (the cycle completes, one summary
@@ -346,7 +369,27 @@ bounded to 3 requests then the documented error; and fatal quota/billing
 provider's injectable sleeper seam), prints PASS/FAIL per scenario, exits 1 on
 failure, and writes evidence to the gitignored `e2e/runs/`. The full offline
 smoke gate runs it, and `docs/design-review.md` §9 distinguishes this loopback
-fault layer from real external-network load/fault injection (still open).
+fault layer from real external-network behaviour.
+
+### Real-network load (opt-in, manual)
+
+`cd packages/harness && npm run test:e2e:load` (`node e2e/load.ts`) is an
+opt-in load runner for an operator-provided OpenAI-compatible endpoint. It
+requires `--base-url` and `--model` (with `TWO_BROTHERS_E2E_BASE_URL` /
+`TWO_BROTHERS_E2E_MODEL` fallbacks), supports `--concurrency` (≤16, default 3),
+`--runs` (≤100, default = concurrency), `--mode consult|work`, `--timeout`,
+`--retries` and `--task`, and spawns that many real `dist/cli.js run`
+subprocesses through a bounded-concurrency pool against the endpoint (a build
+is required; it warns and falls back to `src/cli.ts` if `dist/` is missing).
+It prints PASS/FAIL per run with wall times, then an honest summary (observed
+max concurrency, successes/failures + exit codes, latency min/median/max,
+total wall); exit 0 iff every run exits 0, 1 otherwise, 2 on misuse; children
+are killed on SIGINT/SIGTERM and stragglers are swept on exit. It sends real
+model calls and is **never** run by `npm test`, the smoke gate or CI — the
+hermetic counterpart for fault behaviour is `e2e/faults.ts` above. Recorded
+run against the owner's LM Studio (`lfm3-1.7b`, 2026-11-08): concurrency 2 /
+runs 3 → 3/3 PASS, 78.7–93.7 s per run, 157.6 s wall. A `serve`
+RunManager/worker-pool soak remains a deliberate manual-only gap.
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a

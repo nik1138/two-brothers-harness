@@ -119,14 +119,18 @@ production — env vars / a secret store only.
 
 ### 9. Tests
 
-No integration tests with a real external network; no wall-clock/throughput
-load tests (the hermetic scale suite covers large sessions and transcripts,
-200-session listings, concurrent runs and repeated compaction). Timeout,
-retry/backoff, context-overflow recovery and quota classification ARE driven
-over real loopback TCP by the fault-injection runner
-(`packages/harness/e2e/faults.ts`, part of the offline smoke gate) — it is
-hermetic and fast, but deliberately not a WAN or load test. Real
-external-network load and fault injection remain open.
+No automated integration tests against a real external network; no
+wall-clock/throughput load tests in the gates (the hermetic scale suite covers
+large sessions and transcripts, 200-session listings, concurrent runs and
+repeated compaction). Timeout, retry/backoff, context-overflow recovery and
+quota classification ARE driven over real loopback TCP by the fault-injection
+runner (`packages/harness/e2e/faults.ts`, part of the offline smoke gate and
+CI) — it is hermetic and fast, but deliberately not a WAN or load test.
+Real-network load is available as an opt-in manual runner
+(`packages/harness/e2e/load.ts`, `npm run test:e2e:load`) with recorded
+LM Studio evidence (concurrency 2 / runs 3: 3/3 PASS, 78.7–93.7 s per run);
+WAN fault injection, a `serve` RunManager/worker-pool load and long soaks
+remain deliberately manual/out of the offline gates.
 
 ### 10. The web workspace is single-user, single-process
 

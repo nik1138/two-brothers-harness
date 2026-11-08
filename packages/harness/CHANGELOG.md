@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Opt-in real-network load runner** (wave 11): new
+  `packages/harness/e2e/load.ts` (`npm run test:e2e:load`) drives a bounded
+  concurrency pool of real `dist/cli.js run` subprocesses against an
+  operator-provided OpenAI-compatible endpoint (`--base-url`/`--model` with
+  env fallbacks, `--concurrency` ≤16, `--runs` ≤100, `--mode`, `--timeout`,
+  `--retries`, `--task`), printing per-run PASS/FAIL with wall times and an
+  honest summary (observed max concurrency, successes/failures + exit codes,
+  measured latency min/median/max, total wall). Exit 0/1/2, kills children on
+  SIGINT/SIGTERM, sweeps stragglers, prefers the built CLI (warns and falls
+  back to sources), and is deliberately never part of `npm test`, the smoke
+  gate or CI. Recorded against the owner's LM Studio `lfm3-1.7b` (2026-11-08,
+  concurrency 2 / runs 3): 3/3 PASS, 78.7–93.7 s per run, 157.6 s wall. The
+  hermetic fault counterpart is `e2e/faults.ts`; a `serve` RunManager soak
+  remains manual-only.
 - **Anthropic extended thinking + signed passback** (wave 10): new
   `--thinking-budget <n>` / `TWO_BROTHERS_THINKING_BUDGET` (pinned, never
   persisted; min 1024, other providers ignore it) makes Anthropic Messages
@@ -695,6 +709,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **CI runs the new hermetic gates; Anthropic thinking coverage extended**
+  (wave 11): `.github/workflows/ci.yml` now also executes the real-socket
+  fault-injection runner (`node e2e/faults.ts`) and the packaged-web
+  freshness unit tests (`node --test e2e/web-freshness.test.mjs`) on both
+  Node 22/24 matrix legs; browser E2E and live/real-network layers remain
+  deliberately opt-in/manual. `tests/thinkingpassback.test.ts` grew from 13
+  to 17 tests: a streamed `redacted_thinking` block is asserted to be echoed
+  verbatim (opaque payload unchanged) as the first content block of the next
+  tool-loop request, and mixed per-role wire kinds prove the run-level
+  budget reaches both role providers while only the Anthropic role's body
+  carries the `thinking` field (the other role's raw request bytes stay
+  identical).
 - **`vue-tsc` bumped to 3.3.x** (wave 9): the web workspace devDependency moves
   from the 2026-11-04 advisory pin `~3.0.2` (resolved 3.0.11) to `~3.3.0`
   (resolved 3.3.14), pulling `@vue/language-core` 3.3.14 and

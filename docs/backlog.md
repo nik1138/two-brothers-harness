@@ -915,11 +915,39 @@ Design anchors that already exist:
   16 offline scenarios + the opt-in `real` skip. Files: `e2e/run.mjs`,
   `e2e/fixtures/scripted-server.mjs` (+ README).
 
+## Shipped 2026-11-08 (wave 11: CI hardening, thinking coverage, real-network load runner)
+
+- **CI workflow brought in line with the hermetic gates** — `.github/workflows/ci.yml`
+  now runs the real-socket fault-injection runner (`node e2e/faults.ts`) and
+  the packaged-web freshness unit tests (`node --test e2e/web-freshness.test.mjs`)
+  on both Node 22/24 matrix legs (validated locally on both versions; browser
+  E2E and live/real-network layers remain opt-in/manual), so a future push
+  exercises the wave-5/7 additions.
+- **Anthropic thinking coverage polish** — `tests/thinkingpassback.test.ts`
+  13 → 17 tests: a streamed `redacted_thinking` block is asserted to be
+  echoed verbatim (opaque payload byte-identical) as the first content block
+  of the next tool-loop request without leaking into envelopes, and mixed
+  per-role wire kinds (senior-Anthropic/junior-OpenAI and the inverse) prove
+  the run-level budget reaches both role providers while only the Anthropic
+  role's request body carries `thinking` (the other role's raw request bytes
+  are identical to the no-budget control).
+- **Opt-in real-network load runner** — new `packages/harness/e2e/load.ts`
+  (`npm run test:e2e:load`): bounded-concurrency pool of real CLI runs against
+  an operator-provided OpenAI-compatible endpoint, per-run PASS/FAIL + wall
+  times, honest summary (observed concurrency, failures/exit codes, latency
+  min/median/max), exit 0/1/2, child cleanup, never in `npm test`/smoke/CI.
+  Recorded against the owner's LM Studio `lfm3-1.7b` (2026-11-08, concurrency
+  2 / runs 3): 3/3 PASS, 78.7–93.7 s per run, 157.6 s wall. The hermetic fault
+  counterpart remains `e2e/faults.ts`; a `serve` RunManager/worker-pool soak
+  is deliberately manual-only.
+
 ## Open items (deferred)
 
-- **Real external-network load/fault injection** — the hermetic scale suite
-  and the loopback fault runner cover bounded behavior; WAN latency/load and
-  real-provider fault injection are not covered by the offline gates.
+- **Deliberate manual-only soak / WAN fault coverage** — a `serve`
+  RunManager/worker-pool load and long-running soak are not in the offline
+  gates (the opt-in load runner above covers CLI cooperation cycles), and WAN
+  latency/load + real-provider fault injection are not covered by the offline
+  gates; keep those manual (they need a real endpoint and real time budget).
 - **Approval repeat cap at the broker** — **shipped 2026-11-06**:
   `RunApprovalBroker` counts operator denials per identical
   `(action, normalized target)` pair and auto-denies the next identical
