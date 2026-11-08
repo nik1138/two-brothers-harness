@@ -54,6 +54,11 @@
 //                  preview toggle expands the diff as plain text (aria-expanded,
 //                  no HTML injection) and collapses again; the allow path still
 //                  removes the file
+//   tool-preview  scripted fixture: a workspace_list_dir result's additive
+//                  bounded `preview` makes the completed tool card expandable;
+//                  its toggle is keyboard-operable (aria-expanded), the plain-
+//                  text <pre> lists entry types/names, and collapsing hides it
+//                  again
 //   workspace-drag mock provider: three registered workspaces (API) show group
 //                  headers; dragging a group by its dedicated handle reorders
 //                  the sidebar optimistically and persists through
@@ -2816,6 +2821,95 @@ async function scenarioComposerRecall(runner) {
   }
 }
 
+// -- scenario: workspace tool-card preview --------------------------------------------
+//
+// A `workspace_list_dir` result is a JSON object the historical compact
+// projection dropped entirely, so the web card showed only the tool name and
+// status. The backend now emits an additive bounded `preview`; this scenario
+// proves the card turns it into a keyboard-operable disclosure with plain-text
+// rows (file/dir + name).
+
+async function scenarioToolPreview(runner) {
+  const FILE = 'e2e-preview-a.txt'
+  const DIR = 'e2e-preview-dir'
+  const wsDir = tmpDir('tb-e2e-ws-preview')
+  const wsName = path.basename(wsDir)
+  const be = await startBackend({ kind: 'fixture', scenario: 'list' })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  try {
+    fs.writeFileSync(path.join(wsDir, FILE), 'preview scenario file\n')
+    fs.mkdirSync(path.join(wsDir, DIR))
+    fs.writeFileSync(path.join(wsDir, DIR, 'nested.txt'), 'nested\n')
+
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await ensureWorkspace(page, wsDir, wsName)
+    await selectWorkspaceFilter(page, wsName)
+    await createSession(page, 'E2E tool preview session')
+    await sendTask(page, 'List the workspace root', { mode: 'work' })
+    await waitForRunEnd(page)
+
+    // A completed run may fold its rows; expand the summary first when present.
+    const fold = page.locator('.fold-toggle')
+    if ((await fold.count()) > 0) await fold.first().click()
+
+    const card = page.locator('.tool-activity', { hasText: 'workspace_list_dir' })
+    await card.first().waitFor({ state: 'visible', timeout: 10000 })
+    const target = card.first().locator('.tool-target')
+    assert.equal((await target.innerText()).trim(), '.', 'the card still shows its target path')
+    const toggle = card.first().locator('button.tool-toggle')
+    await toggle.waitFor({ state: 'visible' })
+    assert.equal(
+      await toggle.getAttribute('aria-expanded'),
+      'false',
+      'the preview starts collapsed behind the details toggle',
+    )
+    const preview = card.first().locator('pre.tool-preview')
+    await preview.waitFor({ state: 'attached' })
+    assert.equal(await preview.isVisible(), false, 'a collapsed preview body is hidden')
+
+    // A real button: click opens; Enter on the focused toggle reopens it.
+    await toggle.click()
+    assert.equal(await toggle.getAttribute('aria-expanded'), 'true')
+    await preview.waitFor({ state: 'visible' })
+    const rows = await preview.innerText()
+    assert.match(rows, new RegExp(`^file ${FILE}$`, 'm'), `missing file row: ${rows}`)
+    assert.match(rows, new RegExp(`^dir ${DIR}$`, 'm'), `missing dir row: ${rows}`)
+    await toggle.click()
+    assert.equal(await toggle.getAttribute('aria-expanded'), 'false')
+    await toggle.focus()
+    await page.keyboard.press('Enter')
+    assert.equal(
+      await toggle.getAttribute('aria-expanded'),
+      'true',
+      'the toggle must be keyboard-operable',
+    )
+    await preview.waitFor({ state: 'visible' })
+
+    // Vue interpolation only: the preview element has no child markup.
+    assert.equal(await preview.locator('*').count(), 0, 'preview rows are plain text')
+
+    // The preview never carries the whole listing beyond its backend cap and
+    // the card summary counts its characters (non-zero size chip).
+    assert.ok(rows.length <= 500, `preview must stay bounded (${rows.length} chars)`)
+    const summary = card.first().locator('.tool-summary')
+    assert.ok((await summary.count()) === 1, 'the preview size chip is present')
+
+    // No raw protocol JSON leaks into the transcript.
+    const transcript = await page.locator('.chat-scroll').innerText()
+    assert.ok(!transcript.includes('{"v":1'), 'raw protocol JSON visible in chat')
+    assert.ok(!transcript.includes('[[TASK]]'), 'raw [[TASK]] marker visible in chat')
+
+    consoleGuard.assertClean()
+    runner.pass('tool-preview')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(wsDir)
+    rmTree(be.dir)
+  }
+}
+
 // -- scenario: approval reason + preview ------------------------------------------------
 //
 // A delete approval carries the product's documented DELETE_APPROVAL_REASON:
@@ -4431,6 +4525,13 @@ async function main() {
         ),
       },
       {
+        label: 'tool-preview',
+        run: () => (
+          (currentRunner = makeRunner('tool-preview')),
+          scenarioToolPreview(currentRunner)
+        ),
+      },
+      {
         label: 'workspace-drag',
         run: () => (
           (currentRunner = makeRunner('workspace-drag')),
@@ -4497,6 +4598,7 @@ async function main() {
       'hero-starters',
       'composer-recall',
       'approval-reason',
+      'tool-preview',
       'workspace-drag',
       'reasoning-replay',
       'cooperation-surfaces',

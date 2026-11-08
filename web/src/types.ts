@@ -307,6 +307,12 @@ export interface ToolResultCompact {
   stdout?: string
   stderr?: string
   diff?: ToolDiffSummary
+  /**
+   * Additive bounded plain-text display preview for workspace read/list/search
+   * results (file-content head, directory entries, match paths). Older
+   * backends omit it; the card then keeps its historical collapsed shape.
+   */
+  preview?: string
   [key: string]: unknown
 }
 

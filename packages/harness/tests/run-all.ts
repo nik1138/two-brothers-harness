@@ -28,6 +28,7 @@ import "./shell.test.ts";
 import "./spill.test.ts";
 import "./settings.test.ts";
 import "./runtime.test.ts";
+import "./runevents.test.ts";
 import "./server.test.ts";
 import "./cli.test.ts";
 import "./printmode.test.ts";

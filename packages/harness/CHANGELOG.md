@@ -22,6 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or partial stdout on Node 22; the clipboard writer's per-writer deadline is
   referenced, so a stuck writer always resolves as a timeout instead of
   leaving a pending promise when the event loop empties.
+- **Workspace tool results are visible in the web tool cards:**
+  `compactToolResult` now adds one additive, bounded `preview` string for
+  `workspace_list_dir` (`type name` rows), `workspace_read_file` (sanitized
+  content head) and `workspace_search_text` (`path:line` rows). The preview is
+  capped at 500 characters / 20 rows, ANSI- and control-sanitized, and never
+  includes a whole file; unsupported and empty results keep their previous
+  compact shape. `ToolActivity.vue` makes a preview-bearing card expandable
+  through the existing keyboard-operable toggle and renders the preview as
+  interpolated plain text in a `<pre>`. Files: `src/runevents.ts`,
+  `src/index.ts`, `tests/runevents.test.ts`; web `src/types.ts`,
+  `src/toolPreview.ts`, `src/components/ToolActivity.vue`,
+  `tests/toolPreview.test.ts`; E2E `tool-preview` scenario.
 
 ### Added
 
