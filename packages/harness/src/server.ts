@@ -1057,11 +1057,22 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
    * writes. A custom config factory is invoked exactly like a run would.
    */
   function compactionView() {
-    return compactionSettingsView(
-      state.configFactory(),
-      state.settingsStore.readCompaction(),
-      options.compaction,
-    );
+    const persisted = state.settingsStore.readCompaction();
+    // An explicit ServerOptions pin is wholesale: the config factory cannot
+    // change it, so do not invoke a possibly-wrong factory at all.
+    if (options.compaction !== undefined) {
+      return compactionSettingsView({} as Config, persisted, options.compaction);
+    }
+    let cfg: Config;
+    try {
+      cfg = state.configFactory();
+    } catch {
+      // A throwing custom config factory must never turn a settings read into
+      // a 500 (and must never hide an already-persisted PUT). Fall back to the
+      // persisted layer only; no field then claims a flag/env pin.
+      return compactionSettingsView({} as Config, persisted);
+    }
+    return compactionSettingsView(cfg, persisted);
   }
 
   function storeFor(name: string): SessionStore {

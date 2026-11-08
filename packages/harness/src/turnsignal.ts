@@ -32,7 +32,12 @@ export const TURN_SIGNAL_EXIT_CODES: Readonly<Record<TurnSignalName, number>> = 
   SIGHUP: 129,
 });
 
-/** The signals handled on `platform` — SIGHUP only on POSIX. */
+/**
+ * The signals handled on `platform` — SIGHUP only on POSIX. Windows can emit
+ * SIGHUP when the console closes, but force-terminates the process about 10 s
+ * later; it is deliberately omitted rather than claiming a cleanup window we
+ * cannot guarantee.
+ */
 export function turnSignalsForPlatform(platform: string = process.platform): TurnSignalName[] {
   return platform === "win32" ? ["SIGINT", "SIGTERM"] : ["SIGINT", "SIGTERM", "SIGHUP"];
 }

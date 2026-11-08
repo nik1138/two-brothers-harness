@@ -1226,3 +1226,30 @@ test("compact: the manual route merges config > persisted", async () => {
     for (const server of servers) await server.close();
   }
 });
+
+test("settings: a throwing config factory never turns a settings read into a 500", async () => {
+  const server = await startServer({
+    configFactory: () => {
+      throw new Error("boom");
+    },
+  });
+  try {
+    // A broken embed factory must not fail a settings read, and must not mask
+    // the persisted layer (no field claims a flag/env pin).
+    const initial = await get<Record<string, any>>(server.base, "/api/settings");
+    assert.equal(initial.status, 200, JSON.stringify(initial.body));
+    assert.equal(initial.body.compaction.pinned, false);
+    assert.equal(initial.body.compaction.threshold_chars.source, "absent");
+
+    // A write still persists and the response reports the stored value.
+    const saved = await putCompaction(server, { threshold_chars: 1234 });
+    assert.equal(saved.compaction.threshold_chars.persisted, 1234);
+    assert.equal(saved.compaction.threshold_chars.source, "persisted");
+
+    const reread = await get<Record<string, any>>(server.base, "/api/settings");
+    assert.equal(reread.status, 200);
+    assert.equal(reread.body.compaction.threshold_chars.persisted, 1234);
+  } finally {
+    await server.close();
+  }
+});

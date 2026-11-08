@@ -3490,8 +3490,9 @@ async function doServe(
     const onSighup = (): void => beginShutdown("SIGHUP");
     process.on("SIGINT", onSigint);
     process.on("SIGTERM", onSigterm);
-    // SIGHUP has no meaning on Windows (Node cannot deliver it there); the
-    // POSIX handler rides the same idempotent beginShutdown path.
+    // SIGHUP rides the same idempotent beginShutdown path on POSIX. Windows
+    // can emit it on console close but force-terminates ~10 s later; the
+    // deliberate omission avoids claiming a cleanup window we cannot keep.
     if (posixSignals) process.on("SIGHUP", onSighup);
     server.on("close", () => beginShutdown(null));
   });
