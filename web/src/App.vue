@@ -58,7 +58,14 @@ import {
 import type { QueuedRunRow, SessionQueueView } from './queueState'
 import { isBaseCommandAction } from './basecommands'
 import type { ComposerCommandRequest } from './basecommands'
-import { canUseStopGesture, isShortcutHelpChord, isStopGesture } from './composerKeys'
+import { canUseStopGesture, isStopGesture } from './composerKeys'
+import {
+  bindingLabel,
+  detectBindingPlatform,
+  matchesBinding,
+  readKeybindings,
+} from './keybindings'
+import type { Keybindings } from './keybindings'
 import { projectEnvelopes, sessionTitle, taskOf } from './chat'
 import { downloadSessionExport } from './download'
 import { buildPaletteItems, PALETTE_SESSION_PREFIX, PALETTE_WORKSPACE_PREFIX } from './palette'
@@ -215,7 +222,7 @@ const runStartedAt = ref<number | null>(null)
 /** Provider override actually used for sessions started from this app (only known truth). */
 const providerBySession = ref<Record<string, RunProvider>>({})
 const settingsOpen = ref(false)
-/** `/help` overlay (also `?` / Ctrl+⌘+/): commands + keyboard shortcuts. */
+/** `/help` overlay (also `?` or the rebindable shortcut-reference chord). */
 const helpOpen = ref(false)
 /** `/status` overlay. */
 const statusOpen = ref(false)
@@ -489,7 +496,7 @@ const showOnboardingHint = computed(
   () => settingsState.value === 'ready' && !modelsUsable.value && !onboardingDismissed.value,
 )
 
-// -- command palette (Ctrl+K / Cmd+K) ------------------------------------------
+// -- command palette (default Ctrl/⌘+K, rebindable in Settings → Keyboard) ------
 // Keyboard-first navigation: sessions, workspaces and app actions in one
 // scored list. Items are rebuilt reactively from the current lists;
 // CommandPalette.vue owns filtering, highlighting and the aria wiring.
@@ -562,8 +569,17 @@ const PALETTE_ACTIONS: PaletteItem[] = [
 ]
 
 const paletteOpen = ref(false)
-/** Shortcut label for the header affordance; the chord itself always works. */
-const paletteShortcut = /Mac|iPhone|iPad|iPod/i.test(navigator.platform) ? '⌘ K' : 'Ctrl K'
+/** Device-local rebindable global chords (Settings → Keyboard); live per change. */
+const keybindings = ref<Keybindings>(readKeybindings())
+const bindingPlatform = detectBindingPlatform()
+/** Shortcut label for the header affordance; follows the current binding. */
+const paletteShortcut = computed(() => bindingLabel(keybindings.value.palette, bindingPlatform))
+
+/** Settings → Keyboard reported a new (already validated and persisted) set. */
+function onKeybindingsChange(next: Keybindings): void {
+  keybindings.value = next
+}
+
 /** Persisted spacing preference (Comfortable by default); applied as data-density. */
 const density = ref<Density>(readDensity())
 
@@ -630,8 +646,7 @@ const paletteItems = computed(() =>
 /** Global shortcut: toggle the palette, but never from inside it (double-toggle). */
 function onPaletteShortcut(e: KeyboardEvent) {
   if (e.defaultPrevented || e.isComposing || e.repeat) return
-  if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return
-  if (e.key.toLowerCase() !== 'k') return
+  if (!matchesBinding(e, keybindings.value.palette)) return
   const target = e.target instanceof Element ? e.target : null
   if (target?.closest('[data-command-palette]')) return
   e.preventDefault()
@@ -1797,23 +1812,18 @@ function onComposerCommand(request: ComposerCommandRequest): void {
   }
 }
 
-/** `?` or Ctrl/⌘+/ opens the shortcut + command reference. */
+/** `?` (fixed alias) or the current shortcut-reference chord opens the reference. */
 function onHelpShortcut(e: KeyboardEvent): void {
   if (e.defaultPrevented || e.isComposing || e.keyCode === 229 || e.repeat) return
-  const chord = {
-    key: e.key,
-    shiftKey: e.shiftKey,
-    ctrlKey: e.ctrlKey,
-    metaKey: e.metaKey,
-    altKey: e.altKey,
-    isComposing: e.isComposing,
-    keyCode: e.keyCode,
-    repeat: e.repeat,
-  }
-  if (!isShortcutHelpChord(chord)) return
+  // The plain `?` alias is deliberately fixed; only the modifier chord is
+  // rebindable (Settings → Keyboard).
+  const questionMarkAlias =
+    e.key === '?' && e.ctrlKey !== true && e.metaKey !== true && e.altKey !== true
+  const boundChord = matchesBinding(e, keybindings.value['shortcut-help'])
+  if (!questionMarkAlias && !boundChord) return
   const target = e.target instanceof Element ? e.target : null
   const editable = !!target?.closest('input, textarea, [contenteditable="true"]')
-  // `?` typed inside a text field is just a question mark; the chord is safe
+  // `?` typed inside a text field is just a question mark; a modifier chord is safe
   if (editable && !e.ctrlKey && !e.metaKey) return
   // a dialog already owns the screen (help itself included)
   if (document.querySelector('[role="dialog"]')) return
@@ -2195,6 +2205,7 @@ onUnmounted(() => {
         :activity="activity"
         :streaming="streamingView"
         :show-prompt-audits="showPromptAudits"
+        :find-binding="keybindings.find"
         :live-run-id="activeRun?.run_id ?? null"
         :resolve-approval="resolveApproval"
         :docked-approval-id="pendingApproval?.approvalId ?? null"
@@ -2216,6 +2227,7 @@ onUnmounted(() => {
             @add-workspace="workspaceDialogOpen = true"
             @open-help="openShortcutHelp()"
             @open-settings="settingsOpen = true"
+            :palette-label="paletteShortcut"
           />
         </template>
       </ChatView>
@@ -2231,6 +2243,7 @@ onUnmounted(() => {
           @add-workspace="workspaceDialogOpen = true"
           @open-help="openShortcutHelp()"
           @open-settings="settingsOpen = true"
+          :palette-label="paletteShortcut"
         />
       </div>
 
@@ -2317,12 +2330,14 @@ onUnmounted(() => {
       :density="density"
       :accent="accent"
       :show-prompt-audits="showPromptAudits"
+      :keybindings="keybindings"
       @close="settingsOpen = false"
       @saved="onSettingsSaved"
       @theme-change="onThemeChange"
       @density-change="setDensity"
       @accent-change="setAccent"
       @show-prompt-audits-change="setShowPromptAudits"
+      @keybindings-change="onKeybindingsChange"
     />
     <WorkspaceDialog v-if="workspaceDialogOpen" @close="onWorkspaceDialogClose" />
     <WorkspaceRenameDialog
@@ -2352,6 +2367,7 @@ onUnmounted(() => {
       :base-commands="helpCatalog.baseCommands"
       :commands="helpCatalog.commands"
       :catalog-state="helpCatalogState"
+      :keybindings="keybindings"
       @close="helpOpen = false"
     />
     <SessionStatusDialog
@@ -2486,7 +2502,8 @@ onUnmounted(() => {
   }
 }
 
-/* Header affordance for the keyboard-first palette (Ctrl+K / Cmd+K). It is a
+/* Header affordance for the keyboard-first palette (default Ctrl/⌘+K; the
+   label follows the rebindable binding). It is a
    button as well, so the palette is discoverable without knowing the chord. */
 .palette-chip {
   display: inline-flex;

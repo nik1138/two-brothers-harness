@@ -83,20 +83,6 @@ export function classifyComposerKey(
   return input.ctrlKey || input.metaKey ? 'submit-accelerated' : 'submit'
 }
 
-/**
- * `?` or `Ctrl`/`Cmd`+`/` opens the shortcut reference. `?` is only usable
- * outside text fields (the caller checks the target); the modified chord is
- * safe anywhere.
- */
-export function isShortcutHelpChord(input: ComposerKeyInput | null | undefined): boolean {
-  if (!input || typeof input.key !== 'string') return false
-  if (isImeComposing(input) || input.repeat) return false
-  if (input.altKey) return false
-  if (input.key === '/') return input.ctrlKey === true || input.metaKey === true
-  if (input.key === '?') return input.ctrlKey !== true && input.metaKey !== true
-  return false
-}
-
 /** What an Up/Down press means for composer recall, or null for "leave it". */
 export type ComposerRecallAction = 'recall-previous' | 'recall-next' | null
 

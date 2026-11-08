@@ -36,6 +36,8 @@ const props = defineProps<{
   /** Role routes are usable; false shows the "Set up models" action. */
   modelsReady?: boolean
   starters?: readonly HeroStarter[]
+  /** Current command-palette chord label (follows Settings → Keyboard). */
+  paletteLabel?: string
 }>()
 
 const emit = defineEmits<{
@@ -129,7 +131,8 @@ const contextLabel = computed(() => {
     </div>
 
     <p class="welcome-hero-hint">
-      Send with Enter · Shift+Enter for a new line · Ctrl+K searches
+      Send with Enter · Shift+Enter for a new line ·
+      {{ paletteLabel ?? 'Ctrl/⌘ K' }} searches
     </p>
   </section>
 </template>

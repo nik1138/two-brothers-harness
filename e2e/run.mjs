@@ -14,6 +14,12 @@
 //                  changes the root `data-accent` attribute and the effective
 //                  accent token (keyboard-selected Violet), survives a reload,
 //                  and restores the default blue palette
+//   keybindings   mock provider: Settings -> Keyboard rebinds the palette chord
+//                  from a real Ctrl+Shift+P capture (applied immediately, old
+//                  Ctrl+K dead, header + /help follow); a duplicate is rejected
+//                  inline and Escape cancels capture without closing Settings;
+//                  the custom chord survives a reload and "Reset all to
+//                  defaults" restores Ctrl+K
 //   provider-reset mock provider: a built-in seed customized through the API is
 //                  reset in Settings -> Providers; pristine flags and both role
 //                  assignments survive (offline, no model run)
@@ -1268,6 +1274,203 @@ async function scenarioAppearanceAccent(runner) {
 
     consoleGuard.assertClean()
     runner.pass('appearance-accent')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(be.dir)
+  }
+}
+
+// -- scenario: configurable global key bindings -----------------------------------------
+//
+// First slice of the configurable-key-bindings epic: the palette, find and
+// shortcut-reference chords are rebindable in Settings → Keyboard via a real
+// keyboard capture, validated with inline conflict messages, persisted per
+// device in the versioned localStorage store, applied immediately (header label
+// and matcher), reflected in the /help table, and restored by "Reset all to
+// defaults". Every other shortcut stays fixed. Hermetic: mock backend, no model
+// run is needed.
+
+async function scenarioKeybindings(runner) {
+  const STORAGE_KEY = 'two-brothers.keybindings.v1'
+  const be = await startBackend({ kind: 'mock' })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  const paletteShown = async () => {
+    const target = page.locator('.command-palette')
+    return (await target.count()) > 0 && (await target.first().isVisible())
+  }
+  const waitPalette = (shown, desc) =>
+    waitFor(async () => (await paletteShown()) === shown, { desc, timeout: 8000 })
+  /** Open Settings → Keyboard and return the dialog + its visible pane. */
+  const openKeyboardSettings = async () => {
+    await page.locator('.sidebar-footer .footer-action').click()
+    const dialog = page.locator('[role="dialog"][aria-labelledby="settings-dialog-title"]')
+    await dialog.waitFor({ state: 'visible' })
+    await dialog.getByRole('button', { name: 'Keyboard', exact: true }).click()
+    const pane = dialog.locator('[role="region"][aria-label="Keyboard"]')
+    await pane.waitFor({ state: 'visible' })
+    return { dialog, pane }
+  }
+  const rowIn = (pane, action) => pane.locator(`.keyboard-row[data-action="${action}"]`)
+  const keysIn = async (row) => row.locator('.keyboard-key').allInnerTexts()
+  const storedBindings = async () => {
+    const raw = await page.evaluate((key) => window.localStorage.getItem(key), STORAGE_KEY)
+    return raw === null ? null : JSON.parse(raw)
+  }
+  try {
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+
+    // -- baseline: the default chord opens the palette, the header says so
+    assert.equal((await page.locator('.palette-chip-keys').innerText()).trim(), 'Ctrl+K')
+    assert.equal(await paletteShown(), false)
+    await page.keyboard.press('Control+K')
+    await waitPalette(true, 'the default Ctrl+K to open the palette')
+    await page.keyboard.press('Escape')
+    await waitPalette(false, 'Escape to close the palette')
+
+    // -- Settings → Keyboard lists the three rebindable chords
+    const { dialog, pane } = await openKeyboardSettings()
+    const paletteRow = rowIn(pane, 'palette')
+    const findRow = rowIn(pane, 'find')
+    assert.deepEqual(await keysIn(paletteRow), ['Ctrl', 'K'])
+    assert.deepEqual(await keysIn(findRow), ['Ctrl', 'F'])
+    assert.deepEqual(await keysIn(rowIn(pane, 'shortcut-help')), ['Ctrl', '/'])
+    const status = pane.locator('.keyboard-status')
+    assert.equal(await status.getAttribute('role'), 'status')
+    assert.equal(await status.getAttribute('aria-live'), 'polite')
+
+    // -- capture a new palette chord from a real keydown
+    await paletteRow.locator('button.keyboard-change').click()
+    await waitFor(
+      async () =>
+        (await paletteRow.locator('button.keyboard-change').innerText()).includes('Press keys'),
+      { desc: 'the capture button to announce "Press keys…"' },
+    )
+    assert.match((await status.innerText()).trim(), /Press the new key combination/)
+    await page.keyboard.press('Control+Shift+P')
+    await waitFor(
+      async () =>
+        JSON.stringify(await keysIn(paletteRow)) === JSON.stringify(['Ctrl', 'Shift', 'P']),
+      { desc: 'the captured Ctrl+Shift+P chord to render' },
+    )
+    assert.match((await status.innerText()).trim(), /Command palette is now Ctrl\+Shift\+P/)
+    // persisted immediately in the versioned device store
+    const saved = await storedBindings()
+    assert.equal(saved.version, 1)
+    assert.deepEqual(saved.bindings.palette, { key: 'p', mod: true, shift: true, alt: false })
+    // the header label follows the binding without a reload
+    assert.equal((await page.locator('.palette-chip-keys').innerText()).trim(), 'Ctrl+Shift+P')
+
+    // -- a duplicate chord is rejected inline (not saved), and Escape cancels
+    //    the capture WITHOUT closing the Settings dialog (capture precedence)
+    await findRow.locator('button.keyboard-change').click()
+    await page.keyboard.press('Control+Shift+P')
+    const inlineError = pane.locator('.keyboard-error')
+    await inlineError.waitFor({ state: 'visible' })
+    assert.equal(await inlineError.getAttribute('role'), 'alert')
+    assert.match((await inlineError.innerText()).trim(), /already used by Command palette/)
+    assert.deepEqual(await keysIn(findRow), ['Ctrl', 'F'], 'the conflicting chord was not applied')
+    assert.deepEqual((await storedBindings()).bindings.find, {
+      key: 'f',
+      mod: true,
+      shift: false,
+      alt: false,
+    })
+    await page.keyboard.press('Escape')
+    await waitFor(async () => (await dialog.isVisible()) && (await inlineError.count()) === 0, {
+      desc: 'Escape to cancel capture while the Settings dialog stays open',
+    })
+    assert.match((await status.innerText()).trim(), /cancelled/)
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+    await dialog.waitFor({ state: 'hidden' })
+
+    // -- the new chord works immediately; the old one no longer does
+    await page.keyboard.press('Control+Shift+P')
+    await waitPalette(true, 'the rebound Ctrl+Shift+P to open the palette')
+    await page.keyboard.press('Escape')
+    await waitPalette(false, 'Escape to close the palette')
+    await page.keyboard.press('Control+K')
+    await sleep(300)
+    assert.equal(
+      await paletteShown(),
+      false,
+      'the old Ctrl+K must not open the palette after rebinding',
+    )
+
+    // -- /help renders the current bindings; only the rebindable rows are marked
+    //    (press the printable `?` directly: Playwright maps it to key '?', the
+    //    same key a real keyboard reports for Shift+/)
+    await page.keyboard.press('?')
+    const helpDialog = page.locator('[role="dialog"]', { hasText: 'Keyboard shortcuts' }).first()
+    await helpDialog.waitFor({ state: 'visible' })
+    const helpPaletteRow = helpDialog.locator('.help-shortcut-row', {
+      hasText: 'Open the command palette / search',
+    })
+    assert.deepEqual(await helpPaletteRow.locator('.help-key').allInnerTexts(), [
+      'Ctrl',
+      'Shift',
+      'P',
+    ])
+    assert.equal(await helpPaletteRow.locator('.help-rebindable').count(), 1)
+    assert.match(
+      await helpDialog.locator('.help-hint').innerText(),
+      /rebindable in Settings → Keyboard/,
+    )
+    const helpStopRow = helpDialog.locator('.help-shortcut-row', {
+      hasText: 'Stop the running run',
+    })
+    assert.deepEqual(await helpStopRow.locator('.help-key').allInnerTexts(), ['Esc', 'Esc'])
+    assert.equal(await helpStopRow.locator('.help-rebindable').count(), 0)
+    await page.keyboard.press('Escape')
+    await helpDialog.waitFor({ state: 'hidden' })
+
+    // -- the custom chord survives a page reload and is still live
+    await page.reload()
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    assert.equal((await page.locator('.palette-chip-keys').innerText()).trim(), 'Ctrl+Shift+P')
+    await page.keyboard.press('Control+Shift+P')
+    await waitPalette(true, 'the persisted Ctrl+Shift+P to open the palette after a reload')
+    await page.keyboard.press('Escape')
+    await waitPalette(false, 'Escape to close the palette')
+    await page.keyboard.press('Control+K')
+    await sleep(300)
+    assert.equal(await paletteShown(), false, 'the old chord stays dead after a reload')
+
+    // -- reset all restores the defaults immediately and persistently
+    const reopened = await openKeyboardSettings()
+    assert.deepEqual(await keysIn(rowIn(reopened.pane, 'palette')), ['Ctrl', 'Shift', 'P'])
+    await reopened.pane.locator('button.keyboard-reset-all').click()
+    await waitFor(
+      async () =>
+        JSON.stringify(await keysIn(rowIn(reopened.pane, 'palette'))) ===
+        JSON.stringify(['Ctrl', 'K']),
+      { desc: 'Reset all to restore the default Ctrl+K label' },
+    )
+    assert.deepEqual(await keysIn(rowIn(reopened.pane, 'find')), ['Ctrl', 'F'])
+    assert.deepEqual(await keysIn(rowIn(reopened.pane, 'shortcut-help')), ['Ctrl', '/'])
+    assert.deepEqual((await storedBindings()).bindings.palette, {
+      key: 'k',
+      mod: true,
+      shift: false,
+      alt: false,
+    })
+    await reopened.dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+    await reopened.dialog.waitFor({ state: 'hidden' })
+    await page.keyboard.press('Control+K')
+    await waitPalette(true, 'Ctrl+K to open the palette again after the reset')
+    await page.keyboard.press('Escape')
+    await waitPalette(false, 'Escape to close the palette')
+    await page.keyboard.press('Control+Shift+P')
+    await sleep(300)
+    assert.equal(
+      await paletteShown(),
+      false,
+      'the custom chord must not open the palette after the reset',
+    )
+
+    consoleGuard.assertClean()
+    runner.pass('keybindings')
   } finally {
     await context.close().catch(() => {})
     await killBackend(be)
@@ -3056,6 +3259,13 @@ async function main() {
         ),
       },
       {
+        label: 'keybindings',
+        run: () => (
+          (currentRunner = makeRunner('keybindings')),
+          scenarioKeybindings(currentRunner)
+        ),
+      },
+      {
         label: 'provider-reset',
         run: () => (
           (currentRunner = makeRunner('provider-reset')),
@@ -3141,6 +3351,7 @@ async function main() {
       'mobile',
       'appearance-density',
       'appearance-accent',
+      'keybindings',
       'provider-reset',
       'folding',
       'plan-dock',

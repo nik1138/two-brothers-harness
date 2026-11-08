@@ -14,7 +14,6 @@ import {
   classifyComposerRecall,
   composerLockReason,
   isImeComposing,
-  isShortcutHelpChord,
   isStopGesture,
 } from '../src/composerKeys.ts'
 import type { ComposerKeyInput } from '../src/composerKeys.ts'
@@ -201,23 +200,6 @@ test('composer recall bridge: the multiline absolute-edge rule is unchanged', ()
     classifyComposerRecall(key({ key: 'ArrowUp' }), SINGLE_START, IDLE_RECALL),
     'recall-previous',
   )
-})
-
-// -- shortcut help chord ------------------------------------------------------
-
-test('isShortcutHelpChord: ? and Ctrl/Cmd+/ (never inside other modifiers)', () => {
-  assert.equal(isShortcutHelpChord(key({ key: '?' })), true)
-  assert.equal(isShortcutHelpChord(key({ key: '?', shiftKey: true })), true)
-  assert.equal(isShortcutHelpChord(key({ key: '/', ctrlKey: true })), true)
-  assert.equal(isShortcutHelpChord(key({ key: '/', metaKey: true })), true)
-  assert.equal(isShortcutHelpChord(key({ key: '/', altKey: true })), false)
-  assert.equal(isShortcutHelpChord(key({ key: '/', ctrlKey: true, altKey: true })), false)
-  assert.equal(isShortcutHelpChord(key({ key: '/' })), false)
-  assert.equal(isShortcutHelpChord(key({ key: '?', ctrlKey: true })), false)
-  assert.equal(isShortcutHelpChord(key({ key: '?', repeat: true })), false)
-  assert.equal(isShortcutHelpChord(key({ key: '?', isComposing: true })), false)
-  assert.equal(isShortcutHelpChord(key({ key: 'k', ctrlKey: true })), false)
-  assert.equal(isShortcutHelpChord(null), false)
 })
 
 // -- compose lock -------------------------------------------------------------

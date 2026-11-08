@@ -1,8 +1,22 @@
 /**
  * Single source of truth for the web workspace's keyboard shortcuts and the
- * `/help` reference overlay. The table is static (no rebinding UI): it lists
- * the gestures the web app actually implements, grouped for the overlay.
+ * `/help` reference overlay.
+ *
+ * {@link SHORTCUTS} is the static default table: it lists the gestures the web
+ * app implements, grouped for the overlay, and is what an untouched install
+ * shows. First-slice rebinding covers exactly three modifier chords — the
+ * command palette, find in the conversation and this shortcut reference — so
+ * {@link shortcutEntries} renders the *current* bindings into those rows (and
+ * into the palette-derived rows, whose actions run from the palette) while
+ * every other shortcut stays fixed.
  */
+
+import {
+  DEFAULT_KEYBINDINGS,
+  bindingKeyCaps,
+  detectBindingPlatform,
+} from './keybindings'
+import type { BindingPlatform, Keybindings } from './keybindings'
 
 export type ShortcutGroup =
   | 'Composer'
@@ -29,6 +43,8 @@ export interface ShortcutEntry {
   keys: string[]
   label: string
   description?: string
+  /** True for the three chords the operator can rebind (Settings → Keyboard). */
+  rebindable?: boolean
 }
 
 /**
@@ -156,6 +172,51 @@ export const SHORTCUTS: readonly ShortcutEntry[] = [
     description: 'Picker → dialog → mobile drawer; Escape never submits the draft',
   },
 ]
+
+/** Inputs for the, current-bindings-aware shortcut table. */
+export interface ShortcutRenderOptions {
+  /** Current bindings (defaults when omitted, e.g. a standalone mount). */
+  bindings?: Keybindings
+  /** Label platform (`Ctrl` vs `⌘`); defaults to this browser's platform. */
+  platform?: BindingPlatform
+}
+
+/**
+ * The shortcut table rendered for the current bindings: the three rebindable
+ * chords and every palette-derived row show the operator's current chords,
+ * while the fixed entries stay exactly as declared. `?` remains a fixed alias
+ * for the shortcut reference next to its rebindable modifier chord.
+ */
+export function shortcutEntries(options: ShortcutRenderOptions = {}): ShortcutEntry[] {
+  const bindings = options.bindings ?? DEFAULT_KEYBINDINGS
+  const platform = options.platform ?? detectBindingPlatform()
+  const paletteKeys = bindingKeyCaps(bindings.palette, platform)
+  const findKeys = bindingKeyCaps(bindings.find, platform)
+  const helpKeys = bindingKeyCaps(bindings['shortcut-help'], platform)
+  return SHORTCUTS.map((entry) => {
+    switch (entry.id) {
+      case 'palette':
+        return { ...entry, keys: paletteKeys, rebindable: true }
+      case 'find':
+        return { ...entry, keys: findKeys, rebindable: true }
+      case 'shortcut-help':
+        return {
+          ...entry,
+          keys: ['?', ...helpKeys],
+          rebindable: true,
+          description: '? is a fixed alias; the modifier chord is rebindable in Settings → Keyboard',
+        }
+      case 'new-session':
+      case 'search-sessions':
+      case 'theme':
+      case 'settings':
+        // These actions run from the palette, so their chord follows it.
+        return { ...entry, keys: paletteKeys }
+      default:
+        return entry
+    }
+  })
+}
 
 export interface ShortcutGroupView {
   group: ShortcutGroup

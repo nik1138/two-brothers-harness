@@ -24,7 +24,9 @@ import ProvidersSection from './settings/ProvidersSection.vue'
 import PluginsSection from './settings/PluginsSection.vue'
 import ApprovalPolicySection from './settings/ApprovalPolicySection.vue'
 import AppearanceSection from './settings/AppearanceSection.vue'
+import KeyboardSection from './settings/KeyboardSection.vue'
 import AdvancedSection from './settings/AdvancedSection.vue'
+import type { Keybindings } from '../keybindings'
 import {
   DEFAULT_APPROVAL_MODE,
   approvalPolicyOf,
@@ -41,6 +43,8 @@ const props = defineProps<{
   density?: Density
   accent?: AccentTheme
   showPromptAudits?: boolean
+  /** Current rebindable key bindings; omitted = the panel reads the device store. */
+  keybindings?: Keybindings
 }>()
 
 const emit = defineEmits<{
@@ -50,6 +54,7 @@ const emit = defineEmits<{
   'density-change': [Density]
   'accent-change': [AccentTheme]
   'show-prompt-audits-change': [boolean]
+  'keybindings-change': [Keybindings]
 }>()
 
 function onMaskClick(e: MouseEvent) {
@@ -123,7 +128,14 @@ const connectionOptions = computed(() => [
 
 // -- section navigation -------------------------------------------------------
 
-type SectionId = 'models' | 'providers' | 'plugins' | 'approvals' | 'appearance' | 'advanced'
+type SectionId =
+  | 'models'
+  | 'providers'
+  | 'plugins'
+  | 'approvals'
+  | 'appearance'
+  | 'keyboard'
+  | 'advanced'
 
 const sections: {
   id: SectionId
@@ -154,6 +166,11 @@ const sections: {
     id: 'appearance',
     label: 'Appearance',
     description: 'Choose how the workspace looks on this device.',
+  },
+  {
+    id: 'keyboard',
+    label: 'Keyboard',
+    description: 'Rebind the three global modifier chords on this device.',
   },
   {
     id: 'advanced',
@@ -486,6 +503,22 @@ async function save() {
               />
             </svg>
             <svg
+              v-else-if="section.id === 'keyboard'"
+              class="settings-nav-icon"
+              viewBox="0 0 16 16"
+              width="16"
+              height="16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.3"
+              stroke-linecap="round"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <rect x="2" y="4" width="12" height="8" rx="1.6" />
+              <path d="M4.4 7h.01M6.8 7h.01M9.2 7h.01M11.6 7h.01M4.4 9.4h.01M6.8 9.4h4.8" />
+            </svg>
+            <svg
               v-else
               class="settings-nav-icon"
               viewBox="0 0 16 16"
@@ -618,6 +651,18 @@ async function save() {
             </div>
 
             <div
+              v-show="activeId === 'keyboard'"
+              class="settings-pane"
+              role="region"
+              aria-label="Keyboard"
+            >
+              <KeyboardSection
+                :bindings="keybindings"
+                @keybindings-change="emit('keybindings-change', $event)"
+              />
+            </div>
+
+            <div
               v-show="activeId === 'advanced'"
               class="settings-pane"
               role="region"
@@ -634,8 +679,8 @@ async function save() {
         <footer class="settings-footer">
           <p v-if="error" class="settings-footer-error" role="alert">{{ error }}</p>
           <p v-else class="settings-footer-hint">
-            Role, plugin and approval changes save together. Provider and theme changes apply
-            immediately.
+            Role, plugin and approval changes save together. Provider, theme, density, accent and
+            keyboard-binding changes apply immediately.
           </p>
           <div class="settings-footer-actions">
             <n-button attr-type="button" @click="emit('close')">Cancel</n-button>

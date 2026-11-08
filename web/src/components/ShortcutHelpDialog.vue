@@ -2,26 +2,32 @@
 import { computed } from 'vue'
 import { NButton } from 'naive-ui'
 import { BASE_COMMAND_GROUP_LABEL, commandUsageLine } from '../basecommands'
-import { SHORTCUT_GROUPS, shortcutGroupViews } from '../shortcuts'
+import type { Keybindings } from '../keybindings'
+import { SHORTCUT_GROUPS, shortcutEntries, shortcutGroupViews } from '../shortcuts'
 import type { BaseCommand, CommandInfo } from '../types'
 import AppDialog from './AppDialog.vue'
 
 /**
- * `/help` (and `?` / Ctrl+⌘+/) reference overlay: the built-in slash commands
- * plus the keyboard shortcut table from the single-source `shortcuts.ts`.
+ * `/help` (and `?` / the shortcut-reference chord) reference overlay: the
+ * built-in slash commands plus the keyboard shortcut table from the single
+ * source `shortcuts.ts`, rendered against the operator's current bindings.
  */
 
 const props = defineProps<{
   baseCommands: BaseCommand[]
   commands: CommandInfo[]
   catalogState: 'idle' | 'loading' | 'ready' | 'error'
+  /** Current key bindings; omitted = the canonical defaults (standalone mount). */
+  keybindings?: Keybindings
 }>()
 
 const emit = defineEmits<{
   close: []
 }>()
 
-const groups = computed(() => shortcutGroupViews())
+const groups = computed(() =>
+  shortcutGroupViews(shortcutEntries({ bindings: props.keybindings })),
+)
 const hasCommands = computed(
   () => props.baseCommands.length > 0 || props.commands.length > 0,
 )
@@ -85,10 +91,15 @@ const hasCommands = computed(
               {{ entry.label }}
               <span v-if="entry.description" class="help-shortcut-desc">{{ entry.description }}</span>
             </span>
+            <span v-if="entry.rebindable" class="help-rebindable">rebindable</span>
           </li>
         </ul>
       </div>
-      <p class="help-hint">Open this reference anytime with ? or Ctrl/⌘+/. No shortcuts are rebound from this dialog.</p>
+      <p class="help-hint">
+        Open this reference anytime with ? (fixed) or its rebindable modifier chord. The command
+        palette, find and shortcut-reference chords are rebindable in Settings → Keyboard; every
+        other shortcut above is fixed.
+      </p>
       <p class="visually-hidden">{{ SHORTCUT_GROUPS.length }} shortcut groups listed.</p>
     </section>
 
@@ -212,6 +223,18 @@ const hasCommands = computed(
   display: block;
   font-size: 0.74rem;
   color: var(--text-secondary);
+}
+
+.help-rebindable {
+  flex: none;
+  padding: 0.02rem 0.35rem;
+  font-size: 0.62rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  background: var(--surface-hover);
+  border-radius: 999px;
 }
 
 .help-empty {

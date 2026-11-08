@@ -10,6 +10,8 @@ import { buildFoldRows } from '../folding'
 import type { FoldRenderRow } from '../folding'
 import { nextActorLabel, timestampOf } from '../runtime'
 import type { ReasoningItem, TimelineEntry } from '../runtime'
+import { DEFAULT_KEYBINDINGS, matchesBinding } from '../keybindings'
+import type { KeyBinding } from '../keybindings'
 import { parseMarkdown } from '../markdown'
 import type { MarkdownBlock, MarkdownInline } from '../markdown'
 import type { StreamingBlocks } from '../streaming'
@@ -51,9 +53,16 @@ const props = defineProps<{
    * completed-run activity folds.
    */
   liveRunId?: string | null
+  /**
+   * Current find chord (default Mod+F, rebindable in Settings → Keyboard). The
+   * shell passes the single reactive binding set; omitted = the default chord.
+   */
+  findBinding?: KeyBinding
 }>()
 
 const scrollEl = ref<HTMLElement | null>(null)
+/** The chord that opens find; the shell owns the reactive, rebindable value. */
+const findBinding = computed(() => props.findBinding ?? DEFAULT_KEYBINDINGS.find)
 /** Pin-to-bottom only while the user is already near the bottom; reading
  * history must not be interrupted by incoming messages. */
 const nearBottom = ref(true)
@@ -344,7 +353,7 @@ function toggleReasoning(id: string): void {
   void nextTick(keepPinnedToBottom)
 }
 
-// -- find in transcript (Ctrl+F / Cmd+F) --------------------------------------
+// -- find in transcript (default Ctrl/⌘+F; rebindable in Settings → Keyboard) --
 // Search covers the rendered conversation only: blocks are collected from the
 // transcript DOM when the bar opens (or when the rendered window changes), so
 // sidebar/composer text can never match and the matcher sees exactly the text
@@ -357,10 +366,10 @@ function toggleReasoning(id: string): void {
 // Escape layering, topmost first: command palette → dialogs → mobile drawer →
 // this find bar. The palette and every dialog are modal AppDialogs with
 // role="dialog"; the drawer marks the chat shell inert. A keydown while any of
-// those is above the bar is deliberately left to that layer, so Ctrl+F cannot
-// open a second search surface behind a modal and Escape cannot dismiss the bar
-// through a dialog. `Esc` otherwise closes the bar and clears its highlights.
-// The palette shortcut (Ctrl+K) and the composer's Enter/Shift+Enter are never
+// those is above the bar is deliberately left to that layer, so the find chord
+// cannot open a second search surface behind a modal and Escape cannot dismiss
+// the bar through a dialog. `Esc` otherwise closes the bar and clears its
+// highlights. The palette chord and the composer's Enter/Shift+Enter are never
 // touched: Enter is claimed only while the find input has focus.
 //
 // Highlighting uses the CSS Custom Highlight API (Range objects registered by
@@ -629,9 +638,10 @@ function onFindEnter(event: KeyboardEvent) {
 }
 
 /**
- * Window capture phase: Ctrl+F must be claimed before the browser opens its
- * own find UI, and Escape must reach this layer before the shell's drawer
- * handler. Both are gated on `findLayerAbove()` so the documented order holds.
+ * Window capture phase: the (rebindable) find chord must be claimed before the
+ * browser opens its own find UI, and Escape must reach this layer before the
+ * shell's drawer handler. Both are gated on `findLayerAbove()` so the documented
+ * order holds.
  */
 function onFindKeydown(event: KeyboardEvent) {
   if (event.defaultPrevented || event.isComposing) return
@@ -642,8 +652,7 @@ function onFindKeydown(event: KeyboardEvent) {
     return
   }
   if (event.repeat) return
-  if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return
-  if (event.key.toLowerCase() !== 'f') return
+  if (!matchesBinding(event, findBinding.value)) return
   if (findLayerAbove()) return
   event.preventDefault()
   openFind()
