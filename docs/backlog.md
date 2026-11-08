@@ -1451,7 +1451,8 @@ public session name and envelope bytes are unchanged. Tests:
 Deferred follow-ups: settings schema versioning and a backend choice
 (JSON now, optional `node:sqlite`), session-format version headers plus frozen
 adjacent migrations, optional compression, projection caches for large
-corpora, and a migration backup/rollback helper.
+corpora, optional per-cwd grouping for unlinked sessions (the current
+directory layout uses `_global`), and a migration backup/rollback helper.
 
 ## Open items (deferred)
 

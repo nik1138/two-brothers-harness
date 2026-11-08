@@ -178,10 +178,12 @@ node dist/cli.js run "Plan a migration from Redis to Valkey" --provider mock
   feature must not be the only one to sign off its E2E evidence.
 - Session persistence: `--session-file` writes every envelope as JSONL
   (flushed immediately); `--resume` rebuilds the context with dense `seq`
-  numbering. Covered by `tests/session.test.ts`. The web workspace adds
-  sidecars: `*.meta.json` (title, workspace link) and
-  `sessions/runtime/*.events.jsonl` (tool/approval events). Run records and
-  pending approvals are in-memory only; role settings persist to
+  numbering. Covered by `tests/session.test.ts`. The store has two layouts:
+  flat (`<name>.jsonl` + `<stem>.meta.json` + `runtime/<name>.events.jsonl`)
+  and, after `sessions migrate`, project/session directories
+  (`<project>/<stem>/session.jsonl` + `meta.json` + `events.jsonl`); readers
+  accept both (`src/sessionlayout.ts`, `docs/session-storage.md`). Run records
+  and pending approvals are in-memory only; role settings persist to
   `sessions/settings.json` (keys encrypted at rest).
 - Known gaps (see `docs/design-review.md`): WAN fault injection and long soaks
   are deliberately manual/not in the offline gates (a hermetic scale suite

@@ -13,8 +13,9 @@ Local map for the package sources. Project rules live in
   payload repair, skills/steering wiring.
 - `provider.ts` — OpenAI/Anthropic/Gemini adapters, retry/error registry,
   token/cache usage; `compaction.ts` — context compaction.
-- `server.ts`, `runtime.ts`, `runevents.ts`, `metadata.ts` — plain
-  `node:http` + SSE, worker-pool runs, approvals, event sidecars.
+- `server.ts`, `runtime.ts`, `runevents.ts`, `metadata.ts`,
+  `sessionlayout.ts` — plain `node:http` + SSE, worker-pool runs, approvals,
+  event sidecars, and the flat/directory session store.
 - `cli.ts`, `clihelp.ts`, `clilayout.ts`, `clistyle.ts`, `output.ts`,
   `completions.ts`, `doctor.ts` — CLI surface.
 - Tool-facing modules: `workspace*.ts`, `shell.ts`, `mcp.ts`, `plugins.ts`,
@@ -42,6 +43,12 @@ Local map for the package sources. Project rules live in
 - Validation is tolerant at the boundary: `parseModelOutput` → strict check →
   `sanitizePayload`; never throw on model output. Session `seq` stays dense;
   resume never re-appends. Permissions fail closed.
+- Session storage has two layouts: legacy flat (`<name>.jsonl`,
+  `<stem>.meta.json`, `runtime/<name>.events.jsonl`) and directory
+  (`<project>/<stem>/session.jsonl` + `meta.json` + `events.jsonl`). Readers
+  must accept both (`SessionLayout`); writers follow `.layout.json`. Never
+  assume the flat path when resolving a session name. See
+  `docs/session-storage.md`.
 - Runtime dependencies are curated and exact-pinned (`zod`,
   `@earendil-works/pi-mcp`). A new runtime import needs a ledger entry in
   `docs/history/ts-rewrite-plan.md` and an owner decision.
