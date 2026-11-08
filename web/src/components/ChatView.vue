@@ -12,6 +12,7 @@ import { nextActorLabel, timestampOf } from '../runtime'
 import type { ReasoningItem, TimelineEntry } from '../runtime'
 import { DEFAULT_KEYBINDINGS, matchesBinding } from '../keybindings'
 import type { KeyBinding } from '../keybindings'
+import type { RewindAction } from '../sessionRewind'
 import { parseMarkdown } from '../markdown'
 import type { MarkdownBlock, MarkdownInline } from '../markdown'
 import type { StreamingBlocks } from '../streaming'
@@ -58,6 +59,15 @@ const props = defineProps<{
    * shell passes the single reactive binding set; omitted = the default chord.
    */
   findBinding?: KeyBinding
+  /**
+   * Rewind affordance resolver for one operator message (by envelope `seq`).
+   * The shell owns event order and session state; null = no action is rendered
+   * for that message, and a result with `removable: false` renders a disabled
+   * control that says why (e.g. a live run or an in-flight compaction).
+   */
+  rewindFor?: (seq: number) => RewindAction | null
+  /** Run the rewind confirmation for one operator message (`seq`). */
+  onRewind?: (seq: number) => void
 }>()
 
 const scrollEl = ref<HTMLElement | null>(null)
@@ -730,6 +740,34 @@ async function copyMessage(m: ChatMessage) {
   }
 }
 
+// -- operator rewind affordance -----------------------------------------------
+// Session rewind is offered on REAL operator tasks only (the shell's resolver
+// mirrors the backend boundary rule); the confirmation itself runs in the
+// shell. A blocked boundary keeps the control visible but disabled with the
+// truthful reason, so "why can't I?" never needs a guess.
+
+/** The rewind action for one bubble, or null when no control is rendered. */
+function rewindAction(m: ChatMessage): RewindAction | null {
+  if (!props.rewindFor || m.kind !== 'message') return null
+  return props.rewindFor(m.seq)
+}
+
+/** Title/copy for the control: the confirmation hint or the block reason. */
+function rewindTitle(m: ChatMessage): string {
+  const action = rewindAction(m)
+  if (!action) return ''
+  return action.removable
+    ? 'Rewind to this task — removes it and everything after it'
+    : action.reason ?? 'Rewind is unavailable here.'
+}
+
+/** Confirmed requests only: a blocked control never calls the shell. */
+function requestRewind(m: ChatMessage): void {
+  const action = rewindAction(m)
+  if (!action || !action.removable) return
+  props.onRewind?.(m.seq)
+}
+
 // -- live "who is acting" status line ------------------------------------------
 // One line, not two: the shell's `activity` text (stopping / queued / working)
 // and the derived actor label share a single row so the stream never shows
@@ -1097,6 +1135,16 @@ watch(
                 aria-label="Copy message"
                 @click="copyMessage(m)"
               >{{ copiedId === m.id ? 'copied' : 'copy' }}</button>
+
+              <button
+                v-if="row.entry.group.author === 'operator' && rewindAction(m)"
+                type="button"
+                class="bubble-copy bubble-rewind"
+                :disabled="!rewindAction(m)!.removable"
+                :title="rewindTitle(m)"
+                :aria-label="rewindTitle(m)"
+                @click="requestRewind(m)"
+              >rewind</button>
             </div>
           </div>
         </section>
@@ -1344,6 +1392,23 @@ watch(
 .bubble-wrap:hover .bubble-copy,
 .bubble-wrap:focus-within .bubble-copy {
   opacity: 1;
+}
+
+/* Rewind sits on the operator bubble's leading edge so it never overlaps the
+   copy control; a blocked action stays visible (disabled) with its reason. */
+.bubble-rewind {
+  right: auto;
+  left: 0.4rem;
+}
+
+.bubble-rewind:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.bubble-wrap:hover .bubble-rewind:disabled,
+.bubble-wrap:focus-within .bubble-rewind:disabled {
+  opacity: 0.55;
 }
 
 .show-earlier {

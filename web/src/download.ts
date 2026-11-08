@@ -12,6 +12,7 @@ import type { SessionExportFormat } from './types'
 export const EXPORT_FORMATS: Record<SessionExportFormat, { label: string; mime: string }> = {
   markdown: { label: 'Export as Markdown', mime: 'text/markdown; charset=utf-8' },
   json: { label: 'Export as JSON', mime: 'application/json' },
+  html: { label: 'Export as HTML', mime: 'text/html; charset=utf-8' },
 }
 
 /** Save already-fetched text through a Blob + object URL download. */

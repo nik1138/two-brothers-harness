@@ -40,10 +40,41 @@ test('closed picker: Enter submits, Ctrl/Cmd+Enter is the accelerated gesture', 
   assert.equal(classifyComposerKey(key(), false), 'submit')
   assert.equal(classifyComposerKey(key({ ctrlKey: true }), false), 'submit-accelerated')
   assert.equal(classifyComposerKey(key({ metaKey: true }), false), 'submit-accelerated')
-  // modifiers that are not the submit chord / newline stay untouched
-  assert.equal(classifyComposerKey(key({ altKey: true }), false), 'ignore')
+  // Alt+Enter is the dedicated steer gesture (wave 23)
+  assert.equal(classifyComposerKey(key({ altKey: true }), false), 'steer')
+  // Shift still wins the newline, and the submit chords are unchanged
   assert.equal(classifyComposerKey(key({ shiftKey: true }), false), 'newline')
   assert.equal(classifyComposerKey(key({ ctrlKey: true, shiftKey: true }), false), 'newline')
+})
+
+test('Alt+Enter is a steer intent: exact modifiers, IME/repeat safe', () => {
+  assert.equal(classifyComposerKey(key({ altKey: true }), false), 'steer')
+  // Shift takes precedence (newline), exactly as before the gesture existed.
+  assert.equal(classifyComposerKey(key({ altKey: true, shiftKey: true }), false), 'newline')
+  // IME composition and held repeats never steer (nor submit).
+  assert.equal(classifyComposerKey(key({ altKey: true, isComposing: true }), false), 'ignore')
+  assert.equal(classifyComposerKey(key({ altKey: true, keyCode: 229 }), false), 'ignore')
+  assert.equal(classifyComposerKey(key({ altKey: true, repeat: true }), false), 'ignore')
+  // Only Alt+Enter: a second modifier keeps the pre-gesture no-op meaning.
+  assert.equal(classifyComposerKey(key({ altKey: true, ctrlKey: true }), false), 'ignore')
+  assert.equal(classifyComposerKey(key({ altKey: true, metaKey: true }), false), 'ignore')
+  // Other Alt-modified keys are ordinary typing, not the steer chord.
+  assert.equal(classifyComposerKey(key({ key: 'a', altKey: true }), false), 'ignore')
+  assert.equal(classifyComposerKey(key({ key: 'Tab', altKey: true }), false), 'ignore')
+  // An open picker owns Enter: Alt+Enter accepts the highlighted row, exactly
+  // like Enter did before the steer intent existed.
+  assert.equal(classifyComposerKey(key({ altKey: true }), true), 'picker-accept')
+})
+
+test('the steer intent agrees with the /help shortcut table', () => {
+  const row = SHORTCUTS.find((entry) => entry.id === 'steer')
+  assert.ok(row !== undefined, 'the Alt+Enter steer gesture is listed in /help')
+  assert.deepEqual(row!.keys, ['Alt', 'Enter'])
+  assert.match(row!.description ?? '', /next step/)
+  // The documented chord is exactly the one the pure classifier emits, so the
+  // help copy can never describe a different key.
+  assert.equal(classifyComposerKey(key({ altKey: true }), false), 'steer')
+  assert.equal(classifyComposerKey(key(), false), 'submit')
 })
 
 test('a held or IME-composing Enter never submits', () => {
@@ -172,6 +203,9 @@ test('composer recall bridge: picker, IME, modifiers and selection still defer',
     )
   }
   assert.equal(classifyComposerRecall(key({ key: 'Enter' }), SINGLE_END, IDLE_RECALL), null)
+  // Enter is not a recall key, so the steer chord is never claimed by recall:
+  // the composer handles Alt+Enter through `classifyComposerKey` instead.
+  assert.equal(classifyComposerRecall(key({ altKey: true }), SINGLE_END, IDLE_RECALL), null)
   const selection = { text: 'draft', selectionStart: 0, selectionEnd: 2 }
   assert.equal(classifyComposerRecall(key({ key: 'ArrowUp' }), selection, IDLE_RECALL), null)
   assert.equal(classifyComposerRecall(null, SINGLE_END, IDLE_RECALL), null)

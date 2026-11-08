@@ -1,9 +1,17 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, useId } from 'vue'
 import { useMessage } from 'naive-ui'
-import { ApiError, deleteSession, renameSession } from '../api'
+import { ApiError, deleteSession, forkSession, renameSession } from '../api'
 import { relativeTime, sessionTitle } from '../chat'
-import { downloadSessionExport } from '../download'
+import { EXPORT_FORMATS, downloadSessionExport } from '../download'
+import {
+  FORK_MENU_HINT,
+  FORK_MENU_LABEL,
+  forkAvailability,
+  forkFailureNotice,
+  forkRequestBody,
+  forkSuccessNotice,
+} from '../sessionFork'
 import { deriveSessionStatus } from '../sessionStatus'
 import type { SessionStatusView } from '../sessionStatus'
 import type { SessionExportFormat, SessionInfo } from '../types'
@@ -25,6 +33,8 @@ const emit = defineEmits<{
   refresh: []
   /** The session was deleted; the parent clears its selection if it was open. */
   deleted: [name: string]
+  /** A fork was created under this name; the parent refreshes and opens it. */
+  forked: [name: string]
 }>()
 
 const message = useMessage()
@@ -58,13 +68,27 @@ const confirmDelete = ref(false)
 const busy = ref(false)
 /** An export request is in flight; keeps the row focusable and prevents repeats. */
 const exporting = ref(false)
+/** A fork request is in flight (one row action at a time). */
+const forking = ref(false)
 let confirmTimer: ReturnType<typeof setTimeout> | null = null
 
 const menuId = `session-menu-${useId()}`
 
-const MENU_WIDTH = 184
-/** Enough for four 30px items plus gaps/padding, used only to pick placement. */
-const MENU_HEIGHT = 140
+const MENU_WIDTH = 196
+/**
+ * Enough for the growing action list (rename, three export rows, fork with its
+ * hint line, delete) plus gaps/padding; used only to pick above/below placement.
+ */
+const MENU_HEIGHT = 268
+
+/**
+ * Whether forking is available for this row (never while a run is active or
+ * another row action is in flight), and the one-line explanation to show.
+ */
+const forkState = computed(() =>
+  forkAvailability({ live: props.live, busy: busy.value || forking.value || exporting.value }),
+)
+const forkHint = computed(() => forkState.value.reason ?? FORK_MENU_HINT)
 
 function errText(e: unknown): string {
   return e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e)
@@ -226,19 +250,46 @@ async function commitRename() {
  * Failures stay non-blocking (the row's toast), exactly like rename/delete.
  */
 async function exportFormat(format: SessionExportFormat): Promise<void> {
-  if (busy.value || exporting.value) return
+  if (busy.value || exporting.value || forking.value) return
   exporting.value = true
   // close first: focus goes back to the trigger, which stays enabled
   closeMenu(true)
   try {
     await downloadSessionExport(props.session.name, format)
-    message.success(
-      `${format === 'json' ? 'JSON' : 'Markdown'} export downloaded`,
-    )
+    message.success(`${EXPORT_FORMATS[format].label.replace(/^Export as /, '')} export downloaded`)
   } catch (e) {
     message.error(`Export failed: ${errText(e)}`)
   } finally {
     exporting.value = false
+  }
+}
+
+// -- fork ---------------------------------------------------------------------
+
+/**
+ * Copy this conversation into a new session (`POST /api/sessions/{name}/fork`,
+ * whole conversation — the row action never forks a prefix). The source is
+ * never modified; the parent re-lists sessions and opens the fork. A live run
+ * blocks the action with the honest reason shown in the menu (and in the
+ * backend's 409 if it races).
+ */
+async function doFork(): Promise<void> {
+  if (busy.value || forking.value) return
+  if (!forkState.value.available) {
+    message.warning(forkState.value.reason ?? 'Forking is unavailable right now.')
+    return
+  }
+  forking.value = true
+  closeMenu(false)
+  try {
+    const result = await forkSession(props.session.name, forkRequestBody())
+    message.success(forkSuccessNotice(result, props.session.name))
+    emit('forked', result.name)
+  } catch (e) {
+    const status = e instanceof ApiError ? e.status : undefined
+    message.error(`Fork failed: ${forkFailureNotice({ status, detail: errText(e) })}`)
+  } finally {
+    forking.value = false
   }
 }
 
@@ -400,6 +451,34 @@ onUnmounted(() => {
           >
             <AppIcon name="download" class="icon" />
             <span>Export as JSON</span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            class="row-menu-item"
+            aria-label="Export as HTML"
+            data-menu-action="export-html"
+            :disabled="busy"
+            @click="exportFormat('html')"
+          >
+            <AppIcon name="download" class="icon" />
+            <span>Export as HTML</span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            class="row-menu-item row-menu-stacked"
+            aria-label="Fork session"
+            data-menu-action="fork"
+            :disabled="busy || !forkState.available"
+            :title="forkHint"
+            @click="doFork"
+          >
+            <AppIcon name="refresh" class="icon" />
+            <span class="row-menu-item-text">
+              <span>{{ forking ? 'Forking…' : FORK_MENU_LABEL }}</span>
+              <span class="row-menu-item-hint">{{ forkHint }}</span>
+            </span>
           </button>
           <button
             v-if="!confirmDelete"
@@ -643,6 +722,42 @@ onUnmounted(() => {
 .row-menu-item:disabled {
   cursor: progress;
   opacity: 0.55;
+}
+
+/* Fork carries its one-line explanation inline (visible even while disabled,
+   where a title tooltip would never show). */
+.row-menu-stacked {
+  height: auto;
+  min-height: 30px;
+  align-items: flex-start;
+  padding: 5px 8px;
+}
+
+.row-menu-stacked .icon {
+  margin-top: 2px;
+}
+
+.row-menu-item-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.row-menu-item-hint {
+  color: var(--text-secondary);
+  font-size: 0.6875rem;
+  line-height: 1.3;
+  white-space: normal;
+}
+
+.row-menu-stacked:disabled .row-menu-item-hint {
+  color: var(--warning);
+}
+
+/* A live-run block is a state, not an in-flight action: say so with the cursor. */
+.row-menu-stacked:disabled {
+  cursor: not-allowed;
 }
 
 .row-menu-danger {

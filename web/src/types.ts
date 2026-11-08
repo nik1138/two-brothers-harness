@@ -71,7 +71,53 @@ export interface SearchResult {
 }
 
 /** Download format of `GET /api/sessions/{name}/export?format=…`. */
-export type SessionExportFormat = 'markdown' | 'json'
+/** Download formats the session export endpoint renders (wave 23 adds HTML). */
+export type SessionExportFormat = 'markdown' | 'json' | 'html'
+
+/**
+ * `POST /api/sessions/{name}/fork` result (wave 23, fork-by-copy): the new
+ * session file name, its sidecar title, the number of envelopes copied and the
+ * local lineage link recorded in the new session's `.meta.json`.
+ */
+export interface SessionForkResult {
+  /** New session file name, including `.jsonl`. */
+  name: string
+  /** Sidecar title actually saved (`<source title> (fork)` by default). */
+  title: string
+  /** Number of envelopes copied (the source prefix length). */
+  events: number
+  forked_from: { name: string; seq: number }
+}
+
+/**
+ * `POST /api/sessions/{name}/rewind` result (wave 23 session rewind): the
+ * applied cut. `seq` stays dense because only a suffix of the JSONL is dropped;
+ * `stopped_at_compaction`/`reason` carry the backend's honest clamp wording.
+ */
+export interface SessionRewindResult {
+  /** The session name the rewrite targeted (canonical `.jsonl` file name). */
+  name: string
+  /** True when the session file was rewritten; false for a no-op cut. */
+  rewritten: boolean
+  /** Envelopes kept by the rewrite. */
+  kept: number
+  /** Envelopes removed by the rewrite. */
+  removed: number
+  /** Operator turns actually removed (the clamped depth). */
+  turns: number
+  /** The depth the client asked for, before clamping. */
+  requested_turns: number
+  /** True when the compaction floor, not the requested depth, limited the cut. */
+  stopped_at_compaction: boolean
+  /** Which boundary determined the cut. */
+  stops_before: 'operator-turn' | 'compaction-summary' | 'session-start' | string
+  /** One honest, bounded human sentence describing the outcome. */
+  reason: string
+  /** Whether the runtime-event sidecar for the session was cleared too. */
+  runtime_events_cleared?: boolean
+  /** Why the sidecar clear failed, when it did (disclosed, never hidden). */
+  runtime_events_clear_error?: string | null
+}
 
 export interface Workspace {
   id: string
@@ -119,6 +165,20 @@ export interface RunStart {
   run_id: string
   session: string
   status: RunStatus
+}
+
+/**
+ * `POST /api/runs/{run_id}/steer` acceptance (wave 23): the run id, the
+ * status the steer was accepted against (`running`, or `waiting` for a run
+ * parked on an approval) and how many steering texts are now waiting for the
+ * run's next step. The transcript entry itself arrives later over the run SSE
+ * stream — this response never fakes it.
+ */
+export interface RunSteerResult {
+  run_id: string
+  status: RunStatus
+  /** Steering texts pending for the next step (1..8 on acceptance). */
+  pending: number
 }
 
 export interface RunRecord {

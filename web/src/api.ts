@@ -13,12 +13,15 @@ import type {
   RunRecord,
   RunRequest,
   RunStart,
+  RunSteerResult,
   SearchResult,
   SessionCreateRequest,
   SessionCompactResult,
   SessionDetail,
   SessionExportFormat,
+  SessionForkResult,
   SessionInfo,
+  SessionRewindResult,
   SessionRuntimeEvents,
   SettingsView,
   SkillInfo,
@@ -32,6 +35,12 @@ import type {
 import { clampSearchLimit } from './search'
 import { clampFileQueryLimit } from './mentions'
 import { isTokenEvent } from './streaming'
+import { normalizeUndoApplyResult, normalizeUndoPreview } from './runUndo'
+import type {
+  RunUndoApplyResult,
+  RunUndoDiscardResult,
+  RunUndoPreview,
+} from './runUndo'
 
 export class ApiError extends Error {
   status: number
@@ -117,6 +126,48 @@ export async function deleteSession(name: string): Promise<{ deleted: string }> 
   return request<{ deleted: string }>(`/api/sessions/${encodeURIComponent(name)}`, {
     method: 'DELETE',
   })
+}
+
+/**
+ * Optional body of `POST /api/sessions/{name}/fork` (wave 23, fork-by-copy):
+ * both fields are optional — omit both to copy the whole session under a
+ * generated `<stem>-fork-<k>` name. `seq` is the last source envelope to copy;
+ * `name` is the explicit new session name.
+ */
+export interface SessionForkOptions {
+  seq?: number
+  name?: string
+}
+
+/**
+ * Fork a session by copy (`POST /api/sessions/{name}/fork`). The source file and
+ * its sidecar are left byte-identical; the response names the new session, its
+ * title, the copied envelope count and the recorded lineage link.
+ */
+export async function forkSession(
+  name: string,
+  options: SessionForkOptions = {},
+): Promise<SessionForkResult> {
+  return request<SessionForkResult>(
+    `/api/sessions/${encodeURIComponent(name)}/fork`,
+    json('POST', options),
+  )
+}
+
+/**
+ * Rewind a session in place (`POST /api/sessions/{name}/rewind`): remove the
+ * last `turns` operator tasks and everything after them from the JSONL. The
+ * backend validates the depth (1..100), refuses while the session has an
+ * active run, and returns the applied cut with an honest clamp reason.
+ */
+export async function rewindSession(
+  name: string,
+  turns: number,
+): Promise<SessionRewindResult> {
+  return request<SessionRewindResult>(
+    `/api/sessions/${encodeURIComponent(name)}/rewind`,
+    json('POST', { turns }),
+  )
 }
 
 // -- session content search & export -------------------------------------------
@@ -400,6 +451,84 @@ export async function stopRun(runId: string): Promise<{ run_id: string; status: 
     `/api/runs/${encodeURIComponent(runId)}/stop`,
     { method: 'POST' },
   )
+}
+
+/**
+ * Queue one operator steering text on an ACTIVE run (wave 23,
+ * `POST /api/runs/{run_id}/steer`).
+ *
+ * Resolves when the backend accepted the text into the run's bounded pending
+ * queue — it is applied at the run's next step, not immediately, and the
+ * transcript entry arrives later over the run SSE stream. An empty/oversized
+ * text is a 400, an unknown run a 404 and a queued/terminal run or a full
+ * pending queue a 409; those reject with an `ApiError` whose `status` and
+ * `message` (the backend's detail) are honest.
+ */
+export async function steerRun(runId: string, text: string): Promise<RunSteerResult> {
+  return request<RunSteerResult>(
+    `/api/runs/${encodeURIComponent(runId)}/steer`,
+    json('POST', { text }),
+  )
+}
+
+/**
+ * Preview the run-scoped workspace undo (wave 23, session-scoped contract:
+ * `GET /api/sessions/{name}/undo/{run_id}`): how each file the run mutated
+ * would fare if undone now. Read-only — nothing in the workspace changes.
+ *
+ * A 404 means the session/run has no undo record (or an older backend has no
+ * such route at all): the caller hides the action with an honest reason, it
+ * never pretends the feature exists. 409 = the record's workspace is not
+ * registered / the record is corrupt / an in-memory run owns it; 422 = store
+ * error.
+ */
+export async function previewRunUndo(
+  session: string,
+  runId: string,
+): Promise<RunUndoPreview> {
+  const body = await request<unknown>(
+    `/api/sessions/${encodeURIComponent(session)}/undo/${encodeURIComponent(runId)}`,
+  )
+  return normalizeUndoPreview(body) ?? { statuses: [] }
+}
+
+/**
+ * Apply the run-scoped workspace undo (`POST /api/sessions/{name}/undo/{run_id}`):
+ * restores write/edit pre-images, deletes files the run created, and refuses any
+ * file whose live content changed since the run. The returned rows carry every
+ * file's applied / refused / failed outcome — refused files are never reported
+ * as undone (see `runUndo.ts::undoApplyNotice`).
+ */
+export async function applyRunUndo(
+  session: string,
+  runId: string,
+): Promise<RunUndoApplyResult> {
+  const body = await request<unknown>(
+    `/api/sessions/${encodeURIComponent(session)}/undo/${encodeURIComponent(runId)}`,
+    { method: 'POST' },
+  )
+  return normalizeUndoApplyResult(body) ?? { applied: 0, refused: 0, failed: 0, files: [] }
+}
+
+/**
+ * Discard a run's undo record (`DELETE /api/sessions/{name}/undo/{run_id}`):
+ * the explicit cleanup step after an apply (or when the operator does not want
+ * the recorded history kept). Content-addressed blobs stay for sharing across
+ * runs; garbage collection is a later phase.
+ */
+export async function discardRunUndo(
+  session: string,
+  runId: string,
+): Promise<RunUndoDiscardResult> {
+  const body = await request<Partial<RunUndoDiscardResult> | null>(
+    `/api/sessions/${encodeURIComponent(session)}/undo/${encodeURIComponent(runId)}`,
+    { method: 'DELETE' },
+  )
+  return {
+    discarded: body?.discarded === true,
+    session,
+    run_id: runId,
+  }
 }
 
 /** Result of the legacy synchronous `POST /api/run` (replays the whole run). */

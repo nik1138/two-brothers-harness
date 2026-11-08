@@ -28,8 +28,10 @@ import {
   listRuns,
   listSessions,
   listWorkspaces,
+  previewRunUndo,
   reorderWorkspaces,
   startRun,
+  steerRun,
   stopRun,
 } from './api'
 import type { AppliedApprovalScope, ApprovalScope } from './api'
@@ -45,6 +47,7 @@ import type {
   RunStatus,
   RunUsage,
   SessionInfo,
+  SessionRewindResult,
   SettingsView,
   TokenEvent,
   Workspace,
@@ -59,6 +62,27 @@ import type { QueuedRunRow, SessionQueueView } from './queueState'
 import { isBaseCommandAction } from './basecommands'
 import type { ComposerCommandRequest } from './basecommands'
 import { canUseStopGesture, isStopGesture } from './composerKeys'
+import {
+  steeredNotice,
+  steerAvailability,
+  steerFailureNotice,
+  steerTextError,
+} from './steering'
+import {
+  operatorTurnIndexes,
+  rewindActionFor,
+  rewindOutcomeNotice,
+  rewindPreview,
+} from './sessionRewind'
+import type { RewindAction, RewindPreview } from './sessionRewind'
+import {
+  UNDO_ACTION_LABEL,
+  undoActionHint,
+  undoApplyNotice,
+  undoFailureNotice,
+  undoUnavailableNotice,
+} from './runUndo'
+import type { RunUndoApplyResult, RunUndoPreview } from './runUndo'
 import {
   bindingLabel,
   detectBindingPlatform,
@@ -116,6 +140,8 @@ import NewSessionDialog from './components/NewSessionDialog.vue'
 import DiffReview from './components/DiffReview.vue'
 import ApprovalCard from './components/ApprovalCard.vue'
 import QueueDock from './components/QueueDock.vue'
+import RewindDialog from './components/RewindDialog.vue'
+import RunUndoDialog from './components/RunUndoDialog.vue'
 import TodoPanel from './components/TodoPanel.vue'
 import UsageFooter from './components/UsageFooter.vue'
 import CommandPalette from './components/CommandPalette.vue'
@@ -180,6 +206,14 @@ const queueAnnouncement = computed(() => {
 })
 /** Outcome of the last composer submission; the draft clears only on `accepted`. */
 const submitResult = ref<{ token: number; accepted: boolean } | null>(null)
+/**
+ * Outcome of the last steer request (wave 23). Like `submitResult`, the
+ * composer clears its draft only when the backend accepted the steer; a
+ * rejection keeps the text so the operator can fix and retry.
+ */
+const steerResult = ref<{ token: number; accepted: boolean } | null>(null)
+/** Pending steer count echoed by the last accepted steer (honest composer copy). */
+const steerPending = ref(0)
 const stopping = ref(false)
 const errors = ref<string[]>([])
 /** One submitted run request, retained so a failure can be retried verbatim. */
@@ -213,6 +247,30 @@ interface LastRunInfo {
   error?: string
 }
 const lastRunBySession = ref<Record<string, LastRunInfo>>({})
+/**
+ * Newest COMPLETED run per session — the session-scoped undo preview target
+ * (`/api/sessions/{name}/undo/{run_id}`). `workspace_id` is only known for runs
+ * started from this browser tab; null means "unknown", and the action then
+ * says so honestly instead of claiming the run touched a workspace.
+ */
+interface CompletedRunInfo {
+  run_id: string
+  finished: number
+  workspace_id: string | null
+}
+const latestCompletedRunBySession = ref<Record<string, CompletedRunInfo>>({})
+/** Sessions/run ids whose undo preview answered 404: action stays hidden there. */
+const undoUnavailableRun = ref<Record<string, string>>({})
+/** Open undo preview (dialog state): the run and its normalized preview. */
+const undoPreview = ref<{ runId: string; preview: RunUndoPreview } | null>(null)
+const undoLoading = ref(false)
+/**
+ * Workspace link captured when this tab submitted a run, keyed by run id. The
+ * run record itself does not carry it; consuming it when the completed record
+ * arrives lets the undo action name a known workspace link honestly (absent =
+ * unknown, which the action copy says). Bounded by the tab's own submissions.
+ */
+const workspaceByRunId = new Map<string, string | null>()
 /** Operator's last-open stamps, persisted so unread dots survive a reload. */
 const lastSeen = ref<LastSeenMap>(loadLastSeen())
 /** MRU workspace ids (persisted); `recentWorkspaces` resolves them against the live list. */
@@ -336,6 +394,155 @@ const runActive = computed(
 )
 /** The followed run is parked on an operator approval (G-1). */
 const waiting = computed(() => activeRun.value?.status === 'waiting')
+/**
+ * Availability of the composer's mid-run steering action (wave 23): only a
+ * running run or one parked on an approval is steerable — the backend answers
+ * 409 for queued/terminal runs, so no control is offered there. The help copy
+ * says where the draft lands (the run's next step).
+ */
+const steerView = computed(() => steerAvailability(activeRun.value))
+/** True when the composer must offer the explicit "Steer run" action. */
+const steerable = computed(() => steerView.value.visible)
+/**
+ * The pending steer count belongs to ONE run: clear it whenever the followed
+ * run changes (new run, terminal, session switch) so the composer title can
+ * never quote a stale queue from a previous run.
+ */
+watch(
+  () => activeRun.value?.run_id ?? null,
+  () => {
+    steerPending.value = 0
+  },
+)
+
+// -- session rewind (wave 23) -------------------------------------------------
+/** The operator message whose rewind the confirmation dialog would apply. */
+const rewindTarget = ref<RewindPreview | null>(null)
+/**
+ * What rewind is blocked by right now (the transcript action disables while a
+ * run is live or a manual compaction is in flight; the backend also 409s).
+ */
+const rewindContext = computed(() => ({
+  live: runActive.value,
+  compacting: compactBusy.value,
+}))
+/**
+ * Rewind affordances for the loaded transcript, keyed by envelope `seq` and
+ * derived once per events/context change (an operator transcript can hold
+ * hundreds of bubbles — the resolver must stay O(1)). The pure helper mirrors
+ * the backend's operator-turn rule; a turn already folded into a compaction
+ * summary is normal history, so no control is offered for it. A live run or an
+ * in-flight compaction keeps the control visible but disabled with the honest
+ * reason (`rewindTitle` in ChatView).
+ */
+const rewindActions = computed<Map<number, RewindAction>>(() => {
+  const actions = new Map<number, RewindAction>()
+  for (const index of operatorTurnIndexes(events.value)) {
+    const action = rewindActionFor(events.value, index, rewindContext.value)
+    if (action === null) continue
+    if (!action.removable && action.blockedBy === 'compaction-floor') continue
+    const seq = events.value[index]?.seq
+    if (typeof seq === 'number') actions.set(seq, action)
+  }
+  return actions
+})
+/** Resolver prop for ChatView: the action for one operator message, if any. */
+function rewindForSeq(seq: number): RewindAction | null {
+  return rewindActions.value.get(seq) ?? null
+}
+/** Open the destructive rewind confirmation for one operator message. */
+function requestRewind(seq: number): void {
+  const action = rewindActions.value.get(seq)
+  if (!action || !action.removable) return
+  const preview = rewindPreview(events.value, action.index, rewindContext.value)
+  if (preview !== null) rewindTarget.value = preview
+}
+/**
+ * The rewind dialog applied a cut: report the applied counts (and any clamp
+ * reason) and reload the rewritten session so the transcript matches the file.
+ */
+async function onSessionRewound(result: SessionRewindResult): Promise<void> {
+  rewindTarget.value = null
+  const name = result.name || selected.value
+  if (!name) return
+  showNotice(rewindOutcomeNotice(result))
+  await refreshSessions(false)
+  await loadSession(name)
+}
+/**
+ * A session row forked its conversation: refresh the list, then open the new
+ * session. The row already showed the backend-named success notice.
+ */
+async function onSessionForked(name: string): Promise<void> {
+  await refreshSessions(false)
+  if (sessions.value.some((session) => session.name === name)) {
+    await loadSession(name)
+  }
+}
+
+// -- run-scoped file undo (wave 23) -------------------------------------------
+/**
+ * The newest completed run of the followed session, when its file changes can
+ * be reviewed: no live run on that session and no compaction in flight. The
+ * action is a plain enabled control while the preview is unknown; a 404 from
+ * the preview (older backend without the route, or no undo record) hides it for
+ * that run with an honest notice — never a permanently dead disabled button.
+ */
+const undoTarget = computed<CompletedRunInfo | null>(() => {
+  const session = selected.value
+  if (!session || compactBusy.value) return null
+  if (liveRuns.value[session]) return null
+  const run = latestCompletedRunBySession.value[session]
+  if (!run) return null
+  if (undoUnavailableRun.value[session] === run.run_id) return null
+  return run
+})
+/** Action hint: names a known workspace link, or says the link is unknown. */
+const undoHint = computed(() =>
+  undoTarget.value ? undoActionHint(undoTarget.value.workspace_id !== null) : '',
+)
+/**
+ * Fetch the session-scoped undo preview for the latest completed run and open
+ * the review dialog. A 404 is the honest "no undo record for this run / older
+ * backend" answer: hide the action for that run and say so once.
+ */
+async function openUndoPreview(): Promise<void> {
+  const session = selected.value
+  const target = undoTarget.value
+  if (!session || !target || undoLoading.value) return
+  undoLoading.value = true
+  try {
+    const preview = await previewRunUndo(session, target.run_id)
+    undoPreview.value = { runId: target.run_id, preview }
+  } catch (e) {
+    const status = e instanceof ApiError ? e.status : undefined
+    if (status === 404) {
+      undoUnavailableRun.value = { ...undoUnavailableRun.value, [session]: target.run_id }
+      showNotice(undoUnavailableNotice())
+    } else {
+      reportError(
+        undoFailureNotice({ status, detail: errText(e) }),
+      )
+    }
+  } finally {
+    undoLoading.value = false
+  }
+}
+/** Files were restored/deleted: report honestly and refresh the session list. */
+function onUndoApplied(result: RunUndoApplyResult): void {
+  showNotice(undoApplyNotice(result))
+  refreshSessions(false)
+}
+/** The undo record was discarded (workspace files unchanged): refresh metadata. */
+function onUndoDiscarded(): void {
+  showNotice('Undo record discarded for this run; workspace files are unchanged.')
+  refreshSessions(false)
+}
+
+/** The undo preview/dialog is session-scoped: a session switch closes it. */
+watch(selected, () => {
+  undoPreview.value = null
+})
 /** True while the followed run is working on the session currently on screen. */
 const liveHere = computed(
   () => live.value && activeRun.value !== null && activeRun.value.session === selected.value,
@@ -902,6 +1109,10 @@ async function refreshUsageForSession(session: string) {
       .sort((a, b) => (b.finished || b.created || 0) - (a.finished || a.created || 0))
     const latest = completed[0]
     if (!latest) return
+    // The newest completed record is also the session-scoped undo target. It is
+    // discovered via the pool poll, so it cannot carry a workspace link; the
+    // action copy says the link is unknown rather than pretending.
+    recordLastRun(latest)
     runUsageBySession.value = { ...runUsageBySession.value, [session]: latest.usage ?? null }
   } catch {
     // usage stats are best-effort; never block session loading on them
@@ -1332,6 +1543,22 @@ function recordLastRun(run: RunRecord) {
       error: run.error,
     },
   }
+  if (run.status === 'completed') {
+    const prior = latestCompletedRunBySession.value[run.session]
+    const captured = workspaceByRunId.get(run.run_id)
+    if (captured !== undefined) workspaceByRunId.delete(run.run_id)
+    latestCompletedRunBySession.value = {
+      ...latestCompletedRunBySession.value,
+      [run.session]: {
+        run_id: run.run_id,
+        finished: stamp,
+        // A record discovered by the pool poll cannot know the workspace link;
+        // keep what this tab captured, else a same-run prior value, else unknown.
+        workspace_id:
+          captured ?? (prior?.run_id === run.run_id ? prior.workspace_id : null),
+      },
+    }
+  }
 }
 
 /** Drop cached run outcomes for sessions that no longer exist. */
@@ -1344,6 +1571,16 @@ function pruneLastRuns(validNames: string[]) {
     if (valid.has(key)) next[key] = lastRunBySession.value[key]
   }
   lastRunBySession.value = next
+  const completed: Record<string, CompletedRunInfo> = {}
+  for (const [key, info] of Object.entries(latestCompletedRunBySession.value)) {
+    if (valid.has(key)) completed[key] = info
+  }
+  latestCompletedRunBySession.value = completed
+  const unavailable: Record<string, string> = {}
+  for (const [key, runId] of Object.entries(undoUnavailableRun.value)) {
+    if (valid.has(key)) unavailable[key] = runId
+  }
+  undoUnavailableRun.value = unavailable
 }
 
 /** Record a workspace selection in the persisted MRU list (memory survives blocked storage). */
@@ -1459,6 +1696,7 @@ async function startNewRun(payload: {
     })
     accepted = true
     requestByRun.value = { ...requestByRun.value, [res.run_id]: request }
+    workspaceByRunId.set(res.run_id, request.workspace_id)
     setLastEventId(res.run_id, 0)
     setReconnectAttempts(res.run_id, 0)
     // A session without a followed run gets this one; a submission behind a
@@ -1578,6 +1816,36 @@ async function requestStop() {
   } catch (e) {
     stopping.value = false
     reportError(errText(e))
+  }
+}
+
+/**
+ * Queue one explicit operator steer on the followed run (wave 23): the text is
+ * applied at the run's NEXT step — it never starts or queues a task. The
+ * backend's 200 is the only acceptance; the composer clears its draft from
+ * `steerResult`, and the confirmation says plainly that the text is queued for
+ * the next step (the transcript entry arrives over the run SSE stream later).
+ */
+async function steerActiveRun(payload: { text: string; token: number }) {
+  const run = activeRun.value
+  const text = payload.text.trim()
+  if (!run || !steerAvailability(run).visible || steerTextError(text) !== null) {
+    steerResult.value = { token: payload.token, accepted: false }
+    return
+  }
+  try {
+    const result = await steerRun(run.run_id, text)
+    steerPending.value = result.pending
+    steerResult.value = { token: payload.token, accepted: true }
+    showNotice(steeredNotice(result))
+  } catch (e) {
+    steerResult.value = { token: payload.token, accepted: false }
+    reportError(
+      steerFailureNotice({
+        status: e instanceof ApiError ? e.status : undefined,
+        detail: errText(e),
+      }),
+    )
   }
 }
 
@@ -2132,6 +2400,7 @@ onUnmounted(() => {
       @new-session="newSessionOpen = true"
       @filter-workspace="onFilterWorkspace"
       @deleted="onSessionDeleted"
+      @forked="onSessionForked"
       @rename-workspace="openWorkspaceRename"
       @move-workspace="onMoveWorkspace"
       :theme-mode="themeMode"
@@ -2227,6 +2496,8 @@ onUnmounted(() => {
         :streaming="streamingView"
         :show-prompt-audits="showPromptAudits"
         :find-binding="keybindings.find"
+        :rewind-for="rewindForSeq"
+        :on-rewind="requestRewind"
         :live-run-id="activeRun?.run_id ?? null"
         :resolve-approval="resolveApproval"
         :docked-approval-id="pendingApproval?.approvalId ?? null"
@@ -2277,6 +2548,27 @@ onUnmounted(() => {
 
       <DiffReview v-if="selected && changedFiles.length" :files="changedFiles" />
 
+      <!-- Run-scoped file undo for the newest completed run: only offered when
+           no run is live and no compaction is in flight, and hidden for a run
+           whose preview answered 404 (older backend / no record) — never a
+           permanently dead disabled control. -->
+      <div
+        v-if="selected && undoTarget"
+        class="run-undo-bar"
+        role="group"
+        aria-label="Undo this run's file changes"
+      >
+        <span class="run-undo-bar-text">{{ undoHint }}</span>
+        <button
+          type="button"
+          class="run-undo-open"
+          :disabled="undoLoading"
+          @click="openUndoPreview"
+        >
+          {{ undoLoading ? 'Loading file changes…' : UNDO_ACTION_LABEL }}
+        </button>
+      </div>
+
       <!-- The model's plan: display-only and per session (the runtime sidecar
            replays it on reload). An older backend never emits it → no dock. -->
       <TodoPanel
@@ -2320,9 +2612,14 @@ onUnmounted(() => {
         :stopping="stopping"
         :settings-version="settingsVersion"
         :submit-result="submitResult"
+        :steerable="steerable"
+        :steer-help="steerView.help"
+        :steer-pending="steerPending"
+        :steer-result="steerResult"
         :latest-audit="latestPromptAudit"
         :prefill="composerPrefill"
         @submit="startNewRun"
+        @steer="steerActiveRun"
         @stop="requestStop"
         @open-settings="settingsOpen = true"
         @command="onComposerCommand"
@@ -2363,6 +2660,24 @@ onUnmounted(() => {
       @keybindings-change="onKeybindingsChange"
     />
     <WorkspaceDialog v-if="workspaceDialogOpen" @close="onWorkspaceDialogClose" />
+    <RewindDialog
+      v-if="rewindTarget && selected"
+      :session="selected"
+      :preview="rewindTarget"
+      @close="rewindTarget = null"
+      @rewound="onSessionRewound"
+      @error="reportError"
+    />
+    <RunUndoDialog
+      v-if="undoPreview && selected"
+      :session="selected"
+      :run-id="undoPreview.runId"
+      :preview="undoPreview.preview"
+      @close="undoPreview = null"
+      @applied="onUndoApplied"
+      @discarded="onUndoDiscarded"
+      @error="reportError"
+    />
     <WorkspaceRenameDialog
       v-if="renameWorkspaceTarget"
       :workspace="renameWorkspaceTarget"
@@ -2568,5 +2883,51 @@ onUnmounted(() => {
   .palette-chip-label {
     display: none;
   }
+}
+
+/* Run-scoped file undo bar: a quiet row above the composer, present only when
+   the newest completed run's changes can be reviewed (never during a run). */
+.run-undo-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem 0.6rem;
+  margin: 0 auto;
+  width: 100%;
+  max-width: var(--composer-max-width, 880px);
+  padding: 0.4rem var(--space-3);
+  color: var(--text-secondary);
+  background: var(--surface-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.run-undo-bar-text {
+  flex: 1 1 16rem;
+  min-width: 0;
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.run-undo-open {
+  flex: none;
+  padding: 0.2rem 0.7rem;
+  font: inherit;
+  font-size: 0.76rem;
+  color: var(--text-primary);
+  background: var(--surface-canvas);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.run-undo-open:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.run-undo-open:disabled {
+  cursor: progress;
+  opacity: 0.6;
 }
 </style>

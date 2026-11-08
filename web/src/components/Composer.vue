@@ -23,6 +23,10 @@ import {
 import type { ComposerCommandRequest } from '../basecommands'
 import { canSubmitComposer, classifyComposerKey, classifyComposerRecall, composerLockReason } from '../composerKeys'
 import type { ComposerKeyInput, ComposerSendContext } from '../composerKeys'
+import {
+  canSteerText,
+  clampSteerPending,
+} from '../steering'
 import { composerSeats } from '../composerStatus'
 import { clearDraft, getDraft, setDraft } from '../drafts'
 import { createRecallState, loadRecall, recordRecall, saveRecall, stepRecall } from '../recall'
@@ -103,6 +107,22 @@ const props = defineProps<{
    * provider text in the composer DOM.
    */
   devProvider?: RunProvider | null
+  /**
+   * The followed run can take an operator steer right now (running, or parked
+   * on an approval): the explicit "Steer run" action renders next to
+   * Stop/Send. No steerable run = no control (the existing send/queue
+   * behaviour is byte-identical).
+   */
+  steerable?: boolean
+  /** Honest help text from `steerAvailability`: where the steer lands. */
+  steerHelp?: string | null
+  /** Steering texts already waiting for the run's next step (honest copy). */
+  steerPending?: number
+  /**
+   * Outcome of the last steer request. The draft clears only when the backend
+   * accepted the steer; a rejected one keeps the text exactly as typed.
+   */
+  steerResult?: { token: number; accepted: boolean } | null
 }>()
 
 const emit = defineEmits<{
@@ -115,6 +135,12 @@ const emit = defineEmits<{
   command: [request: ComposerCommandRequest]
   /** Neutral, composer-local notice for the shell to surface (usage errors…). */
   notice: [message: string]
+  /**
+   * Steer the followed run with this text (wave 23). The shell calls
+   * `POST /api/runs/{run_id}/steer` and reports the outcome through
+   * `steerResult`; the draft clears only on acceptance.
+   */
+  steer: [payload: { text: string; token: number }]
 }>()
 
 interface ModeOption {
@@ -284,6 +310,32 @@ const canSend = computed(() => !submitting.value && canSubmitComposer(sendContex
 
 const lockReason = computed(() => composerLockReason(sendContext.value))
 
+// -- mid-run operator steering (wave 23) -------------------------------------
+// A steer is explicitly NOT a queued task: Enter/Send keep their exact
+// queue-behind-the-run behaviour, while this separate action applies the draft
+// to the followed run at its next step. The control only exists while the
+// followed run is steerable, so a no-run composer is byte-identical.
+const steerPendingRequest = ref<{
+  token: number
+  text: string
+  sessionId: string | null
+} | null>(null)
+/** One steer request is in flight until the shell reports its outcome. */
+const steering = computed(() => steerPendingRequest.value !== null)
+let steerToken = 0
+/** Steer availability: a steerable run, text present, no request in flight. */
+const canSteer = computed(
+  () => props.steerable === true && !steering.value && canSteerText(task.value),
+)
+/** Honest help text: where the steer lands, plus the backend's pending count. */
+const steerTitle = computed(() => {
+  const base =
+    props.steerHelp?.trim() ||
+    'Applies to the running run at its next step — it does not start a new task.'
+  const pending = clampSteerPending(props.steerPending)
+  return pending > 0 ? `${base} (${pending} pending)` : base
+})
+
 const placeholder = computed(() => {
   if (lockReason.value === 'compacting') return 'Compacting context — sending unlocks when it finishes…'
   if (lockReason.value === 'waiting') return 'Draft the next task…'
@@ -297,13 +349,15 @@ const statusHint = computed(() => {
     return 'Compacting context… sending unlocks when it finishes.'
   }
   if (lockReason.value === 'waiting') {
-    return 'Drafting only — sending unlocks when the run continues.'
+    const steer = props.steerable ? ' Alt+Enter steers this run at its next step.' : ''
+    return `Drafting only — sending unlocks when the run continues.${steer}`
   }
   if (submitting.value) return props.busy ? 'Queueing the task…' : 'Sending the task…'
   if (props.busy) {
     const queued = Math.max(0, props.queuedCount ?? 0)
     const suffix = queued > 0 ? ` ${queued} already queued.` : ''
-    return `New tasks queue — they start after the current run finishes.${suffix}`
+    const steer = props.steerable ? ' Alt+Enter steers this run at its next step.' : ''
+    return `New tasks queue — they start after the current run finishes.${suffix}${steer}`
   }
   return 'Enter to send · Shift+Enter new line · Ctrl/⌘+Enter send now'
 })
@@ -446,6 +500,23 @@ function submit() {
 }
 
 /**
+ * Steer the followed run with the current draft (the explicit action/gesture).
+ * Never falls back to sending or queueing: without a steerable run this is a
+ * no-op, and the text is consumed only when the shell reports the backend
+ * accepted it. A rejected steer leaves the draft exactly where it was.
+ */
+function steer() {
+  if (props.steerable !== true || steering.value) return
+  const text = task.value.trim()
+  if (!canSteerText(text)) return
+  // the steer owns the current text, so the mention picker has served its turn
+  closePicker()
+  const token = ++steerToken
+  steerPendingRequest.value = { token, text, sessionId: props.sessionId ?? null }
+  emit('steer', { text, token })
+}
+
+/**
  * App reports each submission's outcome. On acceptance the accepted text is
  * consumed — unless the operator already typed something new, which stays.
  * On rejection nothing is cleared: the draft is exactly where it was.
@@ -467,6 +538,30 @@ watch(
     }
     // the selection moved on while the request was in flight; the accepted
     // task's saved draft (under its old session) must not reappear later
+    if (pending.sessionId) clearDraft(pending.sessionId)
+    else unsessionedDraft = ''
+  },
+)
+
+/**
+ * The shell reports each steer's outcome. On acceptance the steered text is
+ * consumed exactly like an accepted submission (never a newer draft); a
+ * rejection changes nothing, so the operator can fix the text and retry. A
+ * steer does NOT join the prompt-history recall list: it was not a task.
+ */
+watch(
+  () => props.steerResult,
+  (result) => {
+    const pending = steerPendingRequest.value
+    if (!result || !pending || result.token !== pending.token) return
+    steerPendingRequest.value = null
+    if (!result.accepted) return
+    if (props.sessionId === pending.sessionId) {
+      if (task.value.trim() === pending.text) consumeComposerText()
+      return
+    }
+    // the selection moved on while the request was in flight; the consumed
+    // text's saved draft (under its old session) must not reappear later
     if (pending.sessionId) clearDraft(pending.sessionId)
     else unsessionedDraft = ''
   },
@@ -1220,17 +1315,24 @@ function onKeydown(e: KeyboardEvent) {
     applyRecallStep(recallAction)
     return
   }
+  const intent = classifyComposerKey(keyInput(e), false)
+  // Alt+Enter is the explicit "steer the running run" gesture from the pure
+  // key contract. It is claimed only when a steerable run exists, so without
+  // one the browser's default for the chord is untouched (exactly as before
+  // the gesture existed); it never falls back to sending/queueing a task.
+  if (intent === 'steer') {
+    if (props.steerable === true) {
+      e.preventDefault()
+      steer()
+    }
+    return
+  }
   // a run parked on an approval owns the turn: Enter stays a newline, the
   // text is a draft. A working run does not block — Enter queues a submission.
   if (props.waiting) return
-  switch (classifyComposerKey(keyInput(e), false)) {
-    case 'submit':
-    case 'submit-accelerated':
-      e.preventDefault()
-      submit()
-      break
-    default:
-      break
+  if (intent === 'submit' || intent === 'submit-accelerated') {
+    e.preventDefault()
+    submit()
   }
 }
 
@@ -1687,6 +1789,21 @@ onBeforeUnmount(() => {
         >
           {{ stopping ? 'Stopping…' : 'Stop' }}
         </n-button>
+        <!-- Explicit mid-run steering (wave 23): applies the draft to the
+             followed run at its next step. It never queues a new task, and it
+             is hidden without a steerable run — the normal composer chrome is
+             unchanged. -->
+        <n-button
+          v-if="steerable"
+          attr-type="button"
+          class="composer-steer"
+          :disabled="!canSteer"
+          :title="steerTitle"
+          :aria-label="steerTitle"
+          @click="steer"
+        >
+          {{ steering ? 'Steering…' : 'Steer run' }}
+        </n-button>
         <!-- Sending stays available while a run works: the submission queues
              behind it. A parked run (`waiting`) is the only chrome state that
              hides the send control, as before. -->
@@ -1986,6 +2103,12 @@ onBeforeUnmount(() => {
 .composer-stop {
   flex: none;
   min-width: 4.8rem;
+}
+
+/* The explicit steer action sits next to Stop/Send; a neutral button keeps it
+   visually subordinate to the primary send/queue action. */
+.composer-steer {
+  flex: none;
 }
 
 .composer-foot {

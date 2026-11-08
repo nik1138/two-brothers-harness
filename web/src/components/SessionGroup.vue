@@ -51,6 +51,8 @@ const emit = defineEmits<{
   select: [name: string]
   refresh: []
   deleted: [name: string]
+  /** A row forked its conversation; the parent refreshes and opens the fork. */
+  forked: [name: string]
   /** Header actions menu: rename this workspace. */
   renameWorkspace: [id: string]
   /** Header actions menu: move this workspace by `delta` slots (-1/+1). */
@@ -419,6 +421,7 @@ onUnmounted(removeMenuListeners)
         @select="emit('select', s.name)"
         @refresh="emit('refresh')"
         @deleted="emit('deleted', $event)"
+        @forked="emit('forked', $event)"
       />
     </ul>
 

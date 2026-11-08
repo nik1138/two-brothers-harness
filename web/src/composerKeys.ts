@@ -1,8 +1,9 @@
 /**
- * Composer key contract (pure): IME-safe submit, accelerated submit, picker
- * accept/dismiss keys, Up/Down prompt-history recall (including when it must
- * fall through to the textarea), the `?`/`Ctrl+/` shortcut-reference chord and
- * the double-Escape stop gesture.
+ * Composer key contract (pure): IME-safe submit, accelerated submit, the
+ * Alt+Enter mid-run steering gesture, picker accept/dismiss keys, Up/Down
+ * prompt-history recall (including when it must fall through to the
+ * textarea), the `?`/`Ctrl+/` shortcut-reference chord and the double-Escape
+ * stop gesture.
  *
  * `Composer.vue`/`App.vue` only act on what this module classifies, so the
  * contract is documented in one place and unit-tested without a DOM.
@@ -28,6 +29,7 @@ export interface ComposerKeyInput {
 export type ComposerKeyAction =
   | 'submit'
   | 'submit-accelerated'
+  | 'steer'
   | 'newline'
   | 'picker-accept'
   | 'picker-close'
@@ -46,10 +48,14 @@ export function isImeComposing(input: ComposerKeyInput | null | undefined): bool
  *
  * - IME-composing keystrokes are ignored entirely.
  * - With a picker open: Enter/Tab accept, Shift+Enter keeps the newline,
- *   Escape/Shift+Tab close, ↑/↓ navigate — Enter can never submit.
+ *   Escape/Shift+Tab close, ↑/↓ navigate — Enter can never submit, and
+ *   Alt+Enter keeps its picker meaning (the picker owns the key while open).
  * - Otherwise: Enter submits (`Ctrl`/`Cmd`+Enter is the explicit accelerated
- *   gesture), Shift+Enter inserts a newline, and a repeated (held) Enter is
- *   ignored so it cannot machine-gun sends.
+ *   gesture), Shift+Enter inserts a newline, Alt+Enter is the explicit
+ *   mid-run steering gesture (`steer`; the caller decides whether a steerable
+ *   run exists — the key contract is availability-free), a repeated (held)
+ *   Enter is ignored so it cannot machine-gun sends, and a multi-modifier
+ *   Ctrl/⌘+Alt+Enter stays `ignore` (it was never a submit or a steer chord).
  */
 export function classifyComposerKey(
   input: ComposerKeyInput | null | undefined,
@@ -79,7 +85,11 @@ export function classifyComposerKey(
   if (input.key !== 'Enter') return 'ignore'
   if (input.shiftKey) return 'newline'
   if (input.repeat) return 'ignore'
-  if (input.altKey) return 'ignore'
+  if (input.altKey) {
+    // Alt+Enter is the dedicated steer gesture; Ctrl/⌘+Alt+Enter carries two
+    // modifiers and keeps the pre-gesture "do nothing" meaning.
+    return input.ctrlKey || input.metaKey ? 'ignore' : 'steer'
+  }
   return input.ctrlKey || input.metaKey ? 'submit-accelerated' : 'submit'
 }
 

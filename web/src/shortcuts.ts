@@ -66,6 +66,14 @@ export const SHORTCUTS: readonly ShortcutEntry[] = [
     description: 'Explicit accelerated submit gesture',
   },
   {
+    id: 'steer',
+    group: 'Composer',
+    keys: ['Alt', 'Enter'],
+    label: 'Steer the running run',
+    description:
+      "Applies the draft at the run's next step; only while a run is working or waiting on an approval",
+  },
+  {
     id: 'newline',
     group: 'Composer',
     keys: ['Shift', 'Enter'],

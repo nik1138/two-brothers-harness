@@ -215,7 +215,9 @@ export function exportDownloadName(
   session: unknown,
   format: SessionExportFormat | string,
 ): string {
-  const extension = format === 'json' ? 'json' : 'md'
+  // Markdown stays the fallback for an unknown/legacy format (byte-identical
+  // pre-wave-23 behaviour); HTML is a real format now, not the markdown alias.
+  const extension = format === 'json' ? 'json' : format === 'html' ? 'html' : 'md'
   const name = sessionFileNameFromHit(session)
   const stem = name
     .replace(/\.(jsonl|json)$/i, '')

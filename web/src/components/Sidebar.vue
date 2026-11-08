@@ -35,6 +35,8 @@ const emit = defineEmits<{
   filterWorkspace: [value: string]
   /** A session was deleted; the parent clears its selection if it was active. */
   deleted: [name: string]
+  /** A session was forked; the parent refreshes the list and opens the new one. */
+  forked: [name: string]
   /** Footer: open the settings dialog. */
   openSettings: []
   /** Footer: the user picked a theme preference. */
@@ -525,6 +527,7 @@ onUnmounted(() => {
             @select="emit('select', $event)"
             @refresh="emit('refresh')"
             @deleted="onRowDeleted"
+            @forked="emit('forked', $event)"
             @rename-workspace="onGroupRename"
             @move-workspace="onGroupMove"
             @drag-start="startWorkspaceDrag"
