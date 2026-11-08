@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Node 22 compatibility for the wave-26 shell/clipboard paths:**
+  `ShellRunner` now waits for the child's stdio `close` (bounded to 250 ms
+  after `exit`) before assembling output, so a fast exit cannot return empty
+  or partial stdout on Node 22; the clipboard writer's per-writer deadline is
+  referenced, so a stuck writer always resolves as a timeout instead of
+  leaving a pending promise when the event loop empties.
+
 ### Added
 
 - **Wave 26: browser coverage for the wave-25 web surfaces, TUI clipboard and

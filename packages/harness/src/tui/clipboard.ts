@@ -277,7 +277,9 @@ async function runWriter(
         }
         finish({ ok: false, error: `timed out after ${timeout} ms` });
       }, timeout);
-      timer.unref?.();
+      // Keep the deadline referenced: an unref'd timer lets an otherwise idle
+      // event loop (a test harness, or a TUI exiting) resolve the pending
+      // promise as "still pending" instead of enforcing the timeout.
       child.once("error", (error) => {
         finish({ ok: false, error: errorText(error) });
       });

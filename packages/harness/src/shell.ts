@@ -47,6 +47,12 @@ export const KILL_GRACE_S = 2.0;
 export const SHELL_DRAIN_BUDGET_MS = (KILL_GRACE_S + 5) * 1000;
 /** Bounded wait for the async Windows tree-kill (much shorter than the old 10 s). */
 export const TASKKILL_TIMEOUT_MS = 5_000;
+/**
+ * After the child exits, wait this long for stdio `close` before returning.
+ * Normal commands close the pipes immediately; a background grandchild that
+ * inherited them cannot pin the tool call forever.
+ */
+export const EXIT_CLOSE_GRACE_MS = 250;
 
 export const STATUS_OK = "ok";
 export const STATUS_ERROR = "error";
@@ -491,7 +497,17 @@ export class ShellRunner {
       timeoutHandle = setTimeout(() => resolve("timeout"), timeout * 1000);
     });
     const exited = new Promise<"exit" | { error: Error }>((resolve) => {
-      child.once("exit", () => resolve("exit"));
+      // `close` (not `exit`) is what guarantees every stdio chunk was
+      // delivered; but a background grandchild can keep the pipe open after
+      // the shell exits. Wait for `close`, with a short bounded fallback so a
+      // no-timeout command cannot hang forever on an inherited pipe.
+      child.once("exit", () => {
+        const fallback = setTimeout(() => resolve("exit"), EXIT_CLOSE_GRACE_MS);
+        child.once("close", () => {
+          clearTimeout(fallback);
+          resolve("exit");
+        });
+      });
       child.once("error", (err) => resolve({ error: err }));
     });
 
