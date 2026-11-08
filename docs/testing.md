@@ -114,7 +114,7 @@ npm run test:spawn      # node --test tests/ (child processes allowed)
 ```
 
 On the canonical integrated run for this round the in-process suite is
-**1 553 tests: 1 551 pass, 0 fail, 2 skipped** (exit 0); the two skips are
+**1 555 tests: 1 553 pass, 0 fail, 2 skipped** (exit 0); the two skips are
 environment-gated and never failures — the workspace symlink-parity test and
 the MCP stdio spawn are unavailable in this environment. `npm run typecheck`
 and `npm run build` pass, the hermetic CLI E2E is 17/17 on sources and 17/17
@@ -542,8 +542,14 @@ resolver (`src/tui/keyoverrides.ts`) validates the allowlist, chord grammar,
 reserved/typing/duplicate/fixed-conflict rules fail-softly (one `[tui keys]`
 diagnostic and defaults) and threads the resolved command table through
 matching, palette/help listings, status hints and `tui --help`
-(`tests/tuikeys.test.ts` 25 + 2 `tuiintegration` cases). Package suite:
-**1 553 tests (1 551 pass, 2 environment skips)**; web suite 350 and browser
+(`tests/tuikeys.test.ts` 25 + 2 `tuiintegration` cases). Wave 20 closed the
+TUI-key residuals and converged the docs: `help tui` now resolves the same
+env/default keys file as `tui --help` (identical effective key rows; one
+stdout note points at `tui --help --keys-file` for a flag-selected file; an
+invalid file prints one `[tui keys]` diagnostic and falls back to defaults),
+and the printable-rebound-help typing rule has integration coverage (opens
+help on an empty composer, types into a non-empty draft). Package suite:
+**1 555 tests (1 553 pass, 2 environment skips)**; web suite 350 and browser
 18 offline scenarios are unchanged.
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /

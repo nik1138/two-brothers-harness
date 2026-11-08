@@ -210,6 +210,21 @@ Runs use the configured models — the UI has no separate
   event — sidecar-persisted, SSE-streamed and replayed — that feeds the TUI
   plan panel and the web Plan dock; `HarnessResult.todos` carries the final
   snapshot.
+- **Reasoning capture and replay**: with `--stream-tokens`, provider reasoning
+  is buffered/sanitized/bounded, emitted as additive `reasoning` runtime
+  events and persisted in the session runtime sidecar; the TUI replays bounded
+  `THINKING (replayed)` rows (the web transcript replays collapsed
+  **Thinking · replayed** rows). No protocol or session-JSONL change.
+- **Anthropic extended thinking**: `--thinking-budget` /
+  `TWO_BROTHERS_THINKING_BUDGET` requests thinking for Anthropic Messages
+  roles and captures signed/redacted thinking blocks, echoing them verbatim
+  on tool-loop assistant turns; other adapters ignore it and unset requests
+  stay byte-identical.
+- **File-configured TUI key rebinding**: `tui --keys-file` /
+  `TWO_BROTHERS_TUI_KEYS_FILE` reads a versioned JSON document that rebinds
+  only the global palette/help/stash chords; the effective chords drive
+  matching, the palette/help listings, status hints and `tui --help`, while
+  invalid/conflicting files print one diagnostic and keep the defaults.
 - **Server**: HTTP + SSE on plain `node:http`; worker pool, approval broker
   (one-shot or session-scope allows persisted in the settings store),
   settings/secret stores (DPAPI/`plain1:`).

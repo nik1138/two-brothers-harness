@@ -810,6 +810,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/thinkingstream.test.ts`, `tests/servertokens.test.ts`,
   `tests/tuithinking.test.ts`, `web/tests/streaming.test.ts`.
 
+### Fixed
+
+- **`help tui` keys parity** (wave 20): `two-brothers help tui` now resolves
+  the effective TUI key commands from `TWO_BROTHERS_TUI_KEYS_FILE` or the
+  default `~/.two-brothers/tui-keys.json` like `tui --help` does (the `help`
+  command has no `--keys-file` flag; a one-line note points at
+  `tui --help --keys-file <path>` for a flag-selected file), so an invalid
+  file prints the same one-line `[tui keys]` diagnostic and falls back to the
+  defaults while `tui --help` behavior is unchanged. A printable rebound help
+  chord now has integration coverage: it opens the help overlay on an empty
+  composer and types into a non-empty draft instead. Tests:
+  `tests/tuikeys.test.ts` (+2) and `tests/tuiintegration.test.ts` (+1).
+
 ### Changed
 
 - **Test-enforced WCAG AA floors for accent text and native primary states**

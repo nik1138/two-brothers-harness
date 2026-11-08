@@ -158,8 +158,13 @@ and draft stash — can be rebound from a versioned JSON file with
 `~/.two-brothers/tui-keys.json`; a missing file means the defaults; an
 invalid file prints one diagnostic line and keeps the defaults); the effective
 chords appear in `tui --help`, the `?` overlay, the palette and the status
-hints, and the file is read at startup only. `Ctrl+F` (or `/find [query]`)
-opens find-in-transcript: a live
+hints, and the file is read at startup only. `two-brothers help tui` shows the
+same generated key guide, resolved from `TWO_BROTHERS_TUI_KEYS_FILE` or the
+default `~/.two-brothers/tui-keys.json` (the `help` command has no
+`--keys-file` flag; use `two-brothers tui --help --keys-file <path>` for a
+flag-selected file). An invalid file prints one `[tui keys]` diagnostic and
+falls back to the defaults; a missing default file is silent. `Ctrl+F` (or
+`/find [query]`) opens find-in-transcript: a live
 case-insensitive filter over the whole transcript with `current/total`,
 `Enter`/`Down` next, `Shift+Enter`/`Up` previous (wrap), the active match
 marked and scrolled into view, and `Esc` restoring the draft and scroll

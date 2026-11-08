@@ -1099,13 +1099,15 @@ Design anchors that already exist:
 
 ## Open items (deferred)
 
-- **Remaining key-binding surfaces** — wave 16 shipped the three modifier
-  global chords (palette/find/shortcut-reference) plus the Settings capture UI.
-  Still fixed by design/authored elsewhere: composer keys (send/newline/recall,
-  which are also IME- and picker-sensitive), picker navigation, dual-Escape
-  stop, `?`, and the whole TUI keymap; extending rebinding there needs a
-  per-surface conflict model and (for the TUI) an on-disk binding profile.
-  Treat as the next slice of the same epic.
+- **Remaining key-binding surfaces** — wave 16 shipped the web's three
+  modifier global chords (command palette, find, shortcut reference) with the
+  Settings → Keyboard capture UI, and wave 19 shipped the TUI's three global
+  chords (command palette, shortcut reference, draft stash) via
+  `tui --keys-file`/`TWO_BROTHERS_TUI_KEYS_FILE`. Still fixed by design:
+  composer/typing keys (IME- and picker-sensitive), picker/overlay
+  navigation, dual-Escape stop, `?`/search/scroll keys, approval-panel keys
+  and the find bar; the TUI has no in-app editor or hot reload yet.
+  Extending rebinding there needs a per-surface conflict model.
 - **WAN fault / long-soak coverage (manual)** — WAN latency/load and
   real-provider fault injection are not covered by the offline gates, and long
   soaks are an operator choice; keep those manual (they need a real endpoint
@@ -1114,34 +1116,6 @@ Design anchors that already exist:
   exercises the real RunManager/worker pool/queue over HTTP in mock or real
   modes; recorded 2026-11-08 against the owner's LM Studio (workers 1,
   runs 2): 2/2 completed in 230.8 s, run 2 queued 117.7 s behind run 1.
-- **Approval repeat cap at the broker** — **shipped 2026-11-06**:
-  `RunApprovalBroker` counts operator denials per identical
-  `(action, normalized target)` pair and auto-denies the next identical
-  request after `APPROVAL_DENY_LIMIT` (default 2), emitting one additive
-  `approval_auto_denied` runtime event instead of parking the run. The
-  harness-level workspace-tool cap is unchanged and preempts the broker for
-  the built-in tools, so the two layers cannot double-count; the broker cap
-  covers plugin/MCP approval consumers. See
-  `tests/approvalbrokerdeny.test.ts` and `packages/harness/CHANGELOG.md`.
-- **Relaxed strict parse** — **shipped** (payload fix 2, 2026-11-04):
-  bare/fenced JSON that validates against the zod schema is accepted without
-  the byte-stable markers (`relaxedStrictPayload`,
-  `tests/relaxedparse.test.ts`); markers stay for transcript rendering. See
-  the strict-parse item above.
-- **Streaming responses** — S3 lane, **shipped**: run-level
-  events (envelopes, repairs, tools, status) ship as NDJSON /
-  `onStreamEvent` (see the S3a shipped section above), and
-  `run --stream --stream-tokens` adds one `token` record per provider text
-  delta (the TUI renders those deltas in place). Additive only — protocol
-  envelopes are unchanged.
-- **Plugin-contributed MCP servers** — **shipped**: `ctx.add_mcp_server`
-  plus an exported `mcpServers` object feed `PluginBindings.mcpServers`,
-  merged under the `--mcp-config` base (see `docs/plugins.md`).
-- **Slash commands** — **shipped**: flat `<root>/<name>.md` prompt
-  templates in the chat REPL and the TUI (`--commands-dir`), metadata at
-  `GET /api/commands` (see `docs/cli-reference.md`).
-- **TUI** — **shipped**: `two-brothers tui` is a zero-dependency
-  full-screen chat in the terminal over the same runtime events.
 - **Subagents** — spawning nested cooperation runs (and likely child
   sessions) beyond the two-brother senior/junior pair. The context and
   approval machinery are the prerequisites; not started.

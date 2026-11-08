@@ -286,7 +286,9 @@ the structural keys (Return/Escape/Tab/arrows/page/navigation/space) and
 with a fixed binding. An invalid, oversized, wrong-version, unknown,
 non-rebindable or conflicting file prints one `[tui keys]` diagnostic on
 stderr and keeps the defaults (the TUI still starts). The effective chords
-appear in `tui --help`, the `?` overlay, the palette and the status hints;
+appear in both `tui --help` (honors `--keys-file`) and `help tui` (the
+env/default file only — the `help` command has no `--keys-file` flag), as well
+as in the `?` overlay, the palette and the status hints;
 typing keys, Escape/quit layering, the composer, pickers/overlays, the
 approval panel and the find bar stay fixed.
 

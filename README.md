@@ -124,6 +124,29 @@ server then serves (the npm tarball ships its own copy of that build).
   (status, envelopes, repairs, tool calls, terminal result);
   `run --stream --stream-tokens` adds a `token` record per provider text delta,
   and the TUI renders those deltas in place.
+- **Reasoning capture and replay.** With token streaming active, each provider
+  call's reasoning is buffered, sanitized and bounded, emitted as one additive
+  `reasoning` runtime event and persisted to the session runtime sidecar. The
+  web transcript shows collapsed-by-default **Thinking · replayed** rows after
+  a reload and the TUI replays bounded dim `THINKING (replayed)` rows on
+  load/resume/session switch; the protocol transcript and session JSONL are
+  unchanged (web always opts into streaming, CLI/TUI use `--stream-tokens`).
+- **Anthropic extended thinking.** `--thinking-budget` /
+  `TWO_BROTHERS_THINKING_BUDGET` requests `thinking:{type:"enabled",
+  budget_tokens:n}` for Anthropic roles, captures signed/redacted thinking
+  blocks from the stream and echoes them **verbatim** on tool-loop assistant
+  turns so multi-round tool use is accepted; other adapters ignore the option
+  and unset requests stay byte-identical. A cap that does not exceed the
+  budget is raised with one honest warning and `temperature` is omitted while
+  thinking is on.
+- **Configurable keys and accent themes.** Settings → **Appearance** picks a
+  web accent (Blue/Violet/Teal/Amber, light and dark, with WCAG-AA text and
+  native naive-ui controls) and Settings → **Keyboard** rebinds the
+  palette/find/shortcut-reference chords with conflict-checked capture;
+  workspace groups reorder by drag-and-drop (the group menu stays the keyboard
+  path). The TUI rebinds its three global chords (palette/help/stash) from a
+  versioned `tui --keys-file` JSON document with fail-soft diagnostics; every
+  effective chord drives the palette, help overlay, hints and `tui --help`.
 - **Live terminal transcript.** On an interactive stdout `run`/`chat` stream
   each envelope block as it is produced, with dim `· …` activity rows between
   blocks; the ruled decision and compact footer still print exactly once.
