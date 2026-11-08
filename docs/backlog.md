@@ -1071,6 +1071,32 @@ Design anchors that already exist:
   the hermetic browser scenario `keybindings` (offline suite 18). All other
   shortcuts stay fixed in this slice.
 
+## Shipped 2026-11-08 (wave 19: file-configured TUI key rebinding, global slice)
+
+- **TUI rebinding for the three global chords** — `tui --keys-file <path>` /
+  `TWO_BROTHERS_TUI_KEYS_FILE` (pinned, never persisted; default
+  `~/.two-brothers/tui-keys.json`, missing = defaults) reads a versioned JSON
+  document (`{"version":1,"bindings":{…}}`) that rebinds only the command
+  palette (`palette`), shortcut reference (`help`) and draft stash (`stash`).
+  `src/tui/keyoverrides.ts` parses the chord grammar
+  (`[ctrl+][shift+][alt+]key`, one named terminal key or one printable
+  character), validates against the allowlist and the fixed registry
+  (unmodified letters/digits, structural keys, `Ctrl+C/Z/Q/S`, duplicates and
+  fixed-chord collisions refused), bounds the file (16 KiB) and resolves a
+  fresh command table; every read/parse/validation problem prints one
+  `[tui keys]` stderr diagnostic and keeps the defaults (the TUI starts).
+  `TuiAppOptions.commands` threads the resolved table through matching,
+  palette/help listings and handlers, status hints, composer/welcome/status
+  bar, find bar, mention picker, approval panel, provider connect, history
+  search, side panel, input guard, slash resolution and `tui --help`; lane
+  hint builders gained optional `commands` parameters (defaults keep the
+  previous frames byte-identical). CLI/`clihelp.ts` catalogue the flag/env so
+  the docs↔CLI drift guard stays green. Tests: `tests/tuikeys.test.ts` (25) +
+  2 injected-override `tests/tuiintegration.test.ts` cases. Remaining
+  surfaces stay fixed by design: typing/composer keys, Escape/quit layering,
+  picker/overlay navigation, approval keys, the find bar, an in-TUI editor
+  and hot reload.
+
 ## Open items (deferred)
 
 - **Remaining key-binding surfaces** — wave 16 shipped the three modifier

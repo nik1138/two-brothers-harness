@@ -261,6 +261,35 @@ from the registry at runtime. The TUI is Ctrl-based: terminals do not deliver
 | `Ctrl+P` | Command palette: search every command, key binding and slash template. |
 | `?` or `F1` | Keyboard help: a filterable list of every command and key. `?` opens it only while the composer is empty — with text there it types a literal question mark; `F1` always opens it. |
 
+### Rebinding the three global chords
+
+The three global chords — the command palette (default `Ctrl+P`), the shortcut
+reference (`?`/`F1`) and the draft stash (`Ctrl+O`) — can be rebound from a
+versioned JSON file:
+
+```json
+{"version": 1, "bindings": {"palette": ["ctrl+g"], "help": ["f2"], "stash": ["ctrl+u"]}}
+```
+
+Point the TUI at it with `tui --keys-file <path>` or
+`TWO_BROTHERS_TUI_KEYS_FILE` (flag > env > default
+`~/.two-brothers/tui-keys.json`; a missing file means the defaults, and the
+file is read at startup only, never persisted). Chord specs are
+`[ctrl+][shift+][alt+]key` in any modifier order and case-insensitive
+(`control`, `meta` and `opt` are accepted aliases for the three modifiers),
+where `key` is one named terminal key (`return`, `escape`, `tab`, `pageup`,
+arrows, `f1`…`f12`, …) or exactly one printable character; because `+` is the
+spec separator, a literal `+` cannot be the final key. Each command accepts at
+most four chords. Unmodified letters/digits,
+the structural keys (Return/Escape/Tab/arrows/page/navigation/space) and
+`Ctrl+C/Z/Q/S` are refused, as are duplicates and chords that would collide
+with a fixed binding. An invalid, oversized, wrong-version, unknown,
+non-rebindable or conflicting file prints one `[tui keys]` diagnostic on
+stderr and keeps the defaults (the TUI still starts). The effective chords
+appear in `tui --help`, the `?` overlay, the palette and the status hints;
+typing keys, Escape/quit layering, the composer, pickers/overlays, the
+approval panel and the find bar stay fixed.
+
 ### Compose and send
 
 | Keys | Action |

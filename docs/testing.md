@@ -114,7 +114,7 @@ npm run test:spawn      # node --test tests/ (child processes allowed)
 ```
 
 On the canonical integrated run for this round the in-process suite is
-**1 526 tests: 1 524 pass, 0 fail, 2 skipped** (exit 0); the two skips are
+**1 553 tests: 1 551 pass, 0 fail, 2 skipped** (exit 0); the two skips are
 environment-gated and never failures — the workspace symlink-parity test and
 the MCP stdio spawn are unavailable in this environment. `npm run typecheck`
 and `npm run build` pass, the hermetic CLI E2E is 17/17 on sources and 17/17
@@ -524,6 +524,27 @@ without closing the dialog. All other shortcuts stay fixed. Web suite 350
 (keybindings 13 new); browser suite 18 offline scenarios. The remaining
 key-binding surfaces (composer/picker/fixed keys, TUI rebinding) stay open in
 `docs/backlog.md`.
+
+Waves 17–19 were release-readiness work plus the TUI half of that epic. Wave 17
+ran three independent read-only audits (docs consistency, hygiene/security,
+live re-validation on HEAD; no P1), fixed the tarball smoke for a repo-local
+`TEMP`, widened the publish gate (CLI E2E + faults + web tests) and added a
+tag↔version guard. Wave 18 added the one-command
+`scripts/release-rehearsal.ps1` (7 timed fail-soft steps: clean tree → build +
+`npm run check` → smoke → tarball smoke → `pack:check` → browser E2E →
+clean-tree check; PASS/FAIL + timings, `-SkipBrowser`/`-SkipTarball` for fast
+iterations; validated full **PASS (7/7)**), with publish dry-run evidence on
+HEAD. Wave 19 made the three global TUI chords — command palette, shortcut
+reference and draft stash — rebindable from a versioned JSON file via
+`tui --keys-file <path>` / `TWO_BROTHERS_TUI_KEYS_FILE` (default
+`~/.two-brothers/tui-keys.json`; startup-only, never persisted): a pure
+resolver (`src/tui/keyoverrides.ts`) validates the allowlist, chord grammar,
+reserved/typing/duplicate/fixed-conflict rules fail-softly (one `[tui keys]`
+diagnostic and defaults) and threads the resolved command table through
+matching, palette/help listings, status hints and `tui --help`
+(`tests/tuikeys.test.ts` 25 + 2 `tuiintegration` cases). Package suite:
+**1 553 tests (1 551 pass, 2 environment skips)**; web suite 350 and browser
+18 offline scenarios are unchanged.
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a

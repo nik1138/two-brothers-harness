@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **TUI key rebinding (global slice)** (wave 19): `tui --keys-file <path>` /
+  `TWO_BROTHERS_TUI_KEYS_FILE` (pinned, never persisted; default
+  `~/.two-brothers/tui-keys.json`, missing = defaults) reads a versioned JSON
+  document (`{"version":1,"bindings":{…}}`) that rebinds only the three
+  global chords — command palette (`palette`), shortcut reference (`help`) and
+  draft stash (`stash`). A new pure `src/tui/keyoverrides.ts` parses the
+  chord grammar (`[ctrl+][shift+][alt+]key`, one named terminal key or one
+  printable character), validates against the allowlist and the fixed
+  registry (unmodified letters/digits, structural keys, `Ctrl+C/Z/Q/S`,
+  duplicates and fixed-chord collisions are refused), bounds the file
+  (16 KiB) and resolves a fresh command table; invalid/oversized/wrong-version/
+  unreadable/unknown/duplicate/conflicting files print one `[tui keys]`
+  diagnostic on stderr and keep the defaults (the TUI still starts).
+  `TuiAppOptions.commands` threads the resolved table through matching, the
+  palette/help listings and handlers, the status hints, composer/welcome/
+  status-bar, find bar, mention picker, approval panel, provider connect,
+  history search, side panel, input guard, slash resolution and
+  `tui --help`; lane hint builders gained optional `commands` parameters
+  (defaults keep the previous behavior byte-identical). `clihelp.ts`
+  catalogues the flag/env so the docs↔CLI drift guard stays green. Tests:
+  `tests/tuikeys.test.ts` (25) plus two injected-override
+  `tests/tuiintegration.test.ts` cases (a rebound palette chord opens while
+  the default stops working; the help overlay lists the effective chords).
+  Files: `src/tui/keyoverrides.ts` (new), `src/tui/app.ts`,
+  `src/tui/view/*`, `src/cli.ts`, `src/clihelp.ts`, `tests/run-all.ts`.
+  Remaining surfaces (composer/typing keys, Escape/quit layering,
+  picker/overlay navigation, approval keys, an in-TUI editor and hot reload)
+  stay fixed by design.
 - **Configurable web key bindings (first slice)** (wave 16): the three
   modifier-based global chords — command palette (default Ctrl/⌘+K), find in
   the conversation (default Ctrl/⌘+F) and the shortcut reference (default

@@ -475,6 +475,22 @@ the protocol reference and is not modified by work here either.
    manual real-network load runners (`e2e/load.ts`, `e2e/serve-load.ts`);
    two-platform CI (ubuntu Node 22/24 + Windows Node 24). No new runtime
    deps.
+   **File-configured TUI key rebinding (wave 19, first slice):**
+   `src/tui/keyoverrides.ts` parses/validates a versioned keys document
+   (`{"version":1,"bindings":{…}}`) and resolves a fresh command table
+   threaded through `TuiAppOptions.commands` everywhere (matching, palette/help
+   listings and handlers, status hints, composer/welcome/status bar, find bar,
+   mention picker, approval panel, provider connect, history search, side
+   panel, input guard, slash resolution, `tui --help`). Only the three global
+   chords are rebindable — command palette (`palette`), shortcut reference
+   (`help`) and draft stash (`stash`); typing keys, structural/Escape/quit
+   layering, pickers/overlays and approval keys stay fixed. CLI
+   `--keys-file` / `TWO_BROTHERS_TUI_KEYS_FILE` (pinned; default
+   `~/.two-brothers/tui-keys.json`; startup-only, never persisted) with
+   fail-soft one-line `[tui keys]` diagnostics on invalid/oversized/
+   wrong-version/unreadable/unknown/duplicate/fixed-conflict files. Tests:
+   `tests/tuikeys.test.ts` (25) + 2 `tuiintegration` cases; `clihelp.ts`
+   catalogues the flag/env (docs↔CLI drift guard green).
 
 ## Commands
 

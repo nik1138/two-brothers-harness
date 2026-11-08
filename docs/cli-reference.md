@@ -152,7 +152,14 @@ blocking input; Escape/Ctrl+C under a safe precedence (overlay close → cancel
 the running turn → clear the composer → confirm quit). `Ctrl+P` opens the
 command palette, `?` a scrollable help overlay (only while the composer is
 empty; `F1` always opens it), both generated from the same keymap registry as
-`tui --help`. `Ctrl+F` (or `/find [query]`) opens find-in-transcript: a live
+`tui --help`. The three global chords — command palette, shortcut reference
+and draft stash — can be rebound from a versioned JSON file with
+`--keys-file <path>` or `TWO_BROTHERS_TUI_KEYS_FILE` (default
+`~/.two-brothers/tui-keys.json`; a missing file means the defaults; an
+invalid file prints one diagnostic line and keeps the defaults); the effective
+chords appear in `tui --help`, the `?` overlay, the palette and the status
+hints, and the file is read at startup only. `Ctrl+F` (or `/find [query]`)
+opens find-in-transcript: a live
 case-insensitive filter over the whole transcript with `current/total`,
 `Enter`/`Down` next, `Shift+Enter`/`Up` previous (wrap), the active match
 marked and scrolled into view, and `Esc` restoring the draft and scroll
@@ -853,6 +860,7 @@ per-role connection without leaving the terminal.
 | `--task-file` | path | — | (TS package, `run` only) read the task from a file — missing/unreadable/blank exits 2; mutually exclusive with a positional task. `run -` reads the task from stdin instead (bounded to 1 MiB, blank exits 2) |
 | `--commands-dir` | path | — (repeatable) | (TS package) extra slash-command root for the chat REPL and `tui`; defaults are `TWO_BROTHERS_COMMANDS_DIR` (OS path list), then `<cwd>/commands` and `~/.two-brothers/commands` |
 | `--workspace` | dir | — | (TS package, `tui` only) bind every turn to one confined workspace root: `workspace_*` tools for the junior, the read-only verify slice for the senior, the operator approval panel for mutations/shell, and `@path` file mentions. An invalid root exits 2 before the screen opens |
+| `--keys-file` | path | `~/.two-brothers/tui-keys.json` | (TS package, `tui` only) user-authored JSON with TUI chord overrides for the rebindable global commands (command palette, shortcut reference, draft stash); a missing file means the defaults, an invalid file prints one diagnostic and falls back to the defaults without touching the screen; env `TWO_BROTHERS_TUI_KEYS_FILE`; never persisted, reloaded at startup only |
 | `--approval-mode` | `ask`, `readonly`, `edits`, `allow-all` | `ask` | (TS package) operator [approval mode](#approval-modes) for workspace actions (env `TWO_BROTHERS_APPROVAL_MODE`). `serve` pins it for its web runs and `tui` for the TUI process (in-memory only, never persisted; the saved `approval_policy` setting applies without a pin); `run`/`chat` accept it but bind no workspace. An unknown value is a usage error (exit 2); `allow-all` prints one visible warning |
 
 ## Environment variables
@@ -899,6 +907,7 @@ per-role connection without leaving the terminal.
 | `TWO_BROTHERS_WORKERS` | `--workers` (serve) |
 | `TWO_BROTHERS_PLUGINS_SENIOR` / `TWO_BROTHERS_PLUGINS_JUNIOR` | — (comma-separated plugin names; see `docs/plugins.md`) |
 | `TWO_BROTHERS_SHELL_PATH_EXTRA` | — (path-separated dirs prepended to the confined workspace-shell `PATH`, e.g. the directory holding the binaries your tool proofs call) |
+| `TWO_BROTHERS_TUI_KEYS_FILE` | `--keys-file` (TS package, `tui` only; pinned, never persisted) |
 
 **Precedence:** CLI flags > environment variables > defaults. Persisted
 settings from `onboard` / the web Settings sit between env vars and defaults,
