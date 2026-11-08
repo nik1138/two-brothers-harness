@@ -148,7 +148,32 @@ unpacked (30.9%)** — a small packed cost because maps compress well. That is
 the deliberate trade: an npm-installed user, or a crash report from their
 machine, gets a stack trace that resolves back to the TypeScript sources.
 
-## Promote to `latest` and drop the pre-release notes
+## After publishing 0.0.1 (docs, immediately)
+
+The workflow publishes to **`next`**; the `0.0.0` placeholder still owns
+`latest` until the promotion step below. Do not tell readers to install the
+untagged package during that window.
+
+1. Verify the registry:
+   ```bash
+   npm view @two-brothers/harness@next version
+   npm view @two-brothers/harness dist-tags
+   ```
+2. Update the pre-release notes in the same docs commit:
+   - root `README.md`: replace the "package is not on npm yet" paragraph and
+     delete the `> **Pre-release:**` block in **Install**; use
+     `npm install -g @two-brothers/harness@next` for now.
+   - `packages/harness/README.md`: replace/remove the
+     `> **Pre-release:**` block; use the same `@next` command.
+   - `docs/quickstart.md`: change "once the package is published" to the
+     actual `@next` install, or keep the source build as the first path and
+     link the npm install as the packaged alternative.
+   - `docs/release.md`: change **Status** from placeholder/ready to
+     0.0.1 published on `next`.
+3. Open the npm package page and confirm the README/license/repository and the
+   `next` tag.
+
+## Promote to `latest` and drop the `@next` suffix
 
 When `@next` has soaked and you are ready to make it the default install:
 
@@ -157,7 +182,7 @@ npm dist-tag add @two-brothers/harness@0.0.1 latest
 npm install -g @two-brothers/harness   # no tag = latest
 ```
 
-Then remove the stale "not on npm yet" notes: the `> **Pre-release:**` block
-in `packages/harness/README.md` and the matching note in the root `README.md`
-(in the Install section). Do this **after** the package is actually
-installable, so the docs never claim availability early.
+Then switch the README/quickstart install commands from
+`@two-brothers/harness@next` to the untagged package, and keep
+`docs/release.md`'s **Status** line in sync. Do the README edits **after** the
+tag is actually `latest`, so the docs never claim availability early.
