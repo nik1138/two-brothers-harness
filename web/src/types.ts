@@ -354,6 +354,27 @@ export interface TokenEvent {
   at: number
 }
 
+/**
+ * Additive runtime event: one provider call's bounded, sanitized reasoning
+ * (thinking) text, persisted in the session's runtime sidecar. Capture is
+ * streaming-only (the backend only receives reasoning through its token
+ * stream), so non-streaming runs simply have none, exactly like an older
+ * backend. `text` is already ANSI/control-sanitized and bounded by the
+ * backend; `truncated` marks a clipped record. Never a protocol envelope.
+ */
+export interface ReasoningEvent {
+  type: 'reasoning'
+  role: 'senior' | 'junior'
+  /** Node kind the call answered (consult / proposal / review / decision / …). */
+  kind: string
+  /** Sanitized, bounded reasoning text (plain text — never markup). */
+  text: string
+  /** True when the backend clipped the stream to its size cap. */
+  truncated?: boolean
+  run_id: string
+  at: number
+}
+
 /** Typed runtime events streamed from GET /api/runs/{id}/events. */
 export type RunEvent =
   | { type: 'run_status'; status: 'queued' | 'running' | 'waiting'; run_id: string; at: number }
@@ -376,6 +397,7 @@ export type RunEvent =
   | ApprovalAutoAllowedEvent
   | TodoUpdatedEvent
   | PromptAuditEvent
+  | ReasoningEvent
 
 /** Response of GET /api/sessions/{name}/events — the runtime sidecar. */
 export interface SessionRuntimeEvents {

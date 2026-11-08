@@ -81,6 +81,19 @@
  *   deliverable loop, the senior's approval-brokered verify slice
  *   (including its documented `workspace_run_shell` carve-out) and the
  *   review/decision calls keep their exact behavior.
+ * - Reasoning (thinking) persistence is STREAMING-ONLY: when token streaming
+ *   is active (`streamTokens` + a stream consumer) the harness wraps its
+ *   per-call `onThinkingDelta` sink, buffers the deltas, and after the call
+ *   emits ONE bounded, sanitized, ANSI-stripped `reasoning` runtime event
+ *   (`{role, kind, text, truncated}`, capped at `REASONING_EVENT_MAX_CHARS` =
+ *   10k with the shared head+tail truncation marker) through `emitRuntime`.
+ *   `RunManager`'s sidecar persister then writes it to
+ *   `sessions/runtime/*.events.jsonl` automatically, so the web app can
+ *   replay it as a collapsed "Thinking · replayed" row on reload. No protocol
+ *   envelope or session-JSONL change: the event is purely additive and
+ *   consumers that do not know it ignore it. Without streaming the provider
+ *   contract returns no reasoning text at all, so non-streaming runs emit
+ *   nothing — the TUI keeps its live-only thinking (no replay).
  * - Structured-payload discipline (BACKLOG, fixes 1 + 2 + 3): every structured
  *   node reply is checked against the strict zod schema and gets exactly ONE
  *   repair re-ask when it fails. Before the repair runs, the relaxed strict
@@ -131,6 +144,7 @@ import {
   STRUCTURED_PAYLOAD_KINDS,
   type PayloadIssueLike,
 } from "./payloads.ts";
+import { boundOutput, sanitizeOutput } from "./output.ts";
 import { loadPrompts } from "./prompts.ts";
 import {
   dispatchHook,
@@ -168,6 +182,7 @@ import {
   toolEvidenceLine,
   MAX_EVIDENCE_ENTRIES,
   CLIP_EVIDENCE_CHARS,
+  REASONING_EVENT_MAX_CHARS,
   type RuntimeEvent,
 } from "./runevents.ts";
 import {
@@ -946,6 +961,20 @@ function providerFromEndpoint(
   throw new Error(`unknown provider: ${provider}`);
 }
 
+/**
+ * Per-provider-call reasoning capture (streaming-only). `options` is exactly
+ * the pre-capture `ChatOptions` when token streaming is off (undefined), so the
+ * wire call is byte-identical; `finish()` then never emits. With streaming on,
+ * `options` wraps the live thinking sink with a buffer and `finish()` emits the
+ * call's ONE bounded, sanitized `reasoning` runtime event when any thinking
+ * text arrived. `finish()` is called in the call site's `finally`, so a failed
+ * or cancelled call still records the partial reasoning it streamed.
+ */
+interface ReasoningCapture {
+  options: ChatOptions | undefined;
+  finish(): void;
+}
+
 export class TwoBrothersHarness {
   readonly cfg: Config;
   readonly providers: Record<"senior" | "junior", Provider>;
@@ -1044,6 +1073,50 @@ export class TwoBrothersHarness {
     };
   }
 
+  /**
+   * Wrap one provider call's thinking sink with a bounded capture (see
+   * {@link ReasoningCapture}). The capture is active only on the same
+   * streaming path as `streamOptions()`: a run without token streaming gets
+   * `options: undefined`, so the call is byte-identical and no reasoning is
+   * requested (the provider contract returns none there). `finish()` emits at
+   * most ONE additive `reasoning` runtime event per call — sanitized with the
+   * shared output sanitizer, bounded head+tail at
+   * `REASONING_EVENT_MAX_CHARS`, and never a throw (persistence is not allowed
+   * to break a run).
+   */
+  private reasoningCapture(role: "senior" | "junior", kind: string): ReasoningCapture {
+    const options = this.streamOptions(role);
+    if (options === undefined) return { options: undefined, finish: () => undefined };
+    const chunks: string[] = [];
+    const liveThinking = options.onThinkingDelta;
+    return {
+      options: {
+        ...options,
+        onThinkingDelta: (delta: string) => {
+          chunks.push(delta);
+          liveThinking?.(delta);
+        },
+      },
+      finish: () => {
+        try {
+          if (chunks.length === 0) return;
+          const text = sanitizeOutput(chunks.join(""));
+          if (text.trim() === "") return;
+          const bounded = boundOutput(text, REASONING_EVENT_MAX_CHARS);
+          this.emitRuntime({
+            type: "reasoning",
+            role,
+            kind,
+            text: bounded.text,
+            truncated: bounded.truncated,
+          });
+        } catch {
+          // reasoning persistence is additive: a broken consumer never breaks a run
+        }
+      },
+    };
+  }
+
   /** The terminal `result` record's payload: a JSON-safe HarnessResult projection. */
   private streamSummary(result: HarnessResult, ctx: SharedContext): HarnessResultSummary {
     return {
@@ -1137,18 +1210,24 @@ export class TwoBrothersHarness {
   ): Promise<Record<string, unknown>> {
     this.checkCancel();
     let text: string;
-    const options = this.streamOptions(role);
-    this.auditPrompt(state, role, responseKind, messages, []);
+    // One reasoning record for this node call (streaming-only; a no-op when
+    // token streaming is off or the call produced no thinking deltas).
+    const capture = this.reasoningCapture(role, responseKind);
     try {
-      text = await this.providers[role].chat(messages, responseKind, this.options.signal, options);
-    } catch (err) {
-      if (!(err instanceof ProviderContextOverflowError)) throw err;
-      // pi's overflow recovery: compact once and retry the same node against
-      // the compacted context. A second overflow surfaces to the caller.
-      if (!(await this.compactAfterOverflow(state))) throw err;
-      const retry = rebuild === undefined ? messages : rebuild();
-      this.auditPrompt(state, role, responseKind, retry, []);
-      text = await this.providers[role].chat(retry, responseKind, this.options.signal, options);
+      this.auditPrompt(state, role, responseKind, messages, []);
+      try {
+        text = await this.providers[role].chat(messages, responseKind, this.options.signal, capture.options);
+      } catch (err) {
+        if (!(err instanceof ProviderContextOverflowError)) throw err;
+        // pi's overflow recovery: compact once and retry the same node against
+        // the compacted context. A second overflow surfaces to the caller.
+        if (!(await this.compactAfterOverflow(state))) throw err;
+        const retry = rebuild === undefined ? messages : rebuild();
+        this.auditPrompt(state, role, responseKind, retry, []);
+        text = await this.providers[role].chat(retry, responseKind, this.options.signal, capture.options);
+      }
+    } finally {
+      capture.finish();
     }
     const reply = await this.structuredReply(
       state,
@@ -1294,18 +1373,22 @@ export class TwoBrothersHarness {
       { role: "user", content: request },
     ];
     // The repair re-ask streams too: token events are additive to `repair`
-    // and to the repair envelope.
-    const options = this.streamOptions(role);
-    this.auditPrompt(state, role, kind, repaired, []);
+    // and to the repair envelope, and its thinking gets its own reasoning record.
+    const capture = this.reasoningCapture(role, kind);
     try {
-      return await this.providers[role].chat(repaired, kind, this.options.signal, options);
-    } catch (err) {
-      if (!(err instanceof ProviderContextOverflowError)) throw err;
-      if (!(await this.compactAfterOverflow(state))) return null;
-      // the repair turn already rides in the shared context; rebuild from it
-      const retry = rebuild === undefined ? repaired : rebuild();
-      this.auditPrompt(state, role, kind, retry, []);
-      return await this.providers[role].chat(retry, kind, this.options.signal, options);
+      this.auditPrompt(state, role, kind, repaired, []);
+      try {
+        return await this.providers[role].chat(repaired, kind, this.options.signal, capture.options);
+      } catch (err) {
+        if (!(err instanceof ProviderContextOverflowError)) throw err;
+        if (!(await this.compactAfterOverflow(state))) return null;
+        // the repair turn already rides in the shared context; rebuild from it
+        const retry = rebuild === undefined ? repaired : rebuild();
+        this.auditPrompt(state, role, kind, retry, []);
+        return await this.providers[role].chat(retry, kind, this.options.signal, capture.options);
+      }
+    } finally {
+      capture.finish();
     }
   }
 
@@ -1692,27 +1775,29 @@ export class TwoBrothersHarness {
     }
     const toolMap = new Map(tools.map((tool) => [tool.name, tool]));
     const evidence: string[] = [];
-    // The same streaming seam as the plain path: a tool-loop call streams its
-    // text deltas too (tool-call deltas are not text and never reach the sink).
-    const streamOptions = this.streamOptions(role);
-    const options = {
-      responseKind: wireKind,
-      signal: this.options.signal,
-      ...streamOptions,
-    };
+    // The streaming seam as the plain path: each loop round is one provider
+    // call, so it gets its own token sinks AND its own reasoning capture.
+    const baseOptions = { responseKind: wireKind, signal: this.options.signal };
     let text = "";
     for (let i = 0; i < maxIterations; i++) {
       this.checkCancel();
       let response: ToolChatResponse;
-      this.auditPrompt(state, role, auditKind, messages, tools);
+      const capture = this.reasoningCapture(role, auditKind);
+      const callOptions =
+        capture.options === undefined ? baseOptions : { ...baseOptions, ...capture.options };
       try {
-        response = await chatWithTools(messages, tools, options);
-      } catch (err) {
-        if (!(err instanceof ProviderContextOverflowError)) throw err;
-        if (!(await this.compactAfterOverflow(state))) throw err;
-        messages = rebuild();
         this.auditPrompt(state, role, auditKind, messages, tools);
-        response = await chatWithTools(messages, tools, options);
+        try {
+          response = await chatWithTools(messages, tools, callOptions);
+        } catch (err) {
+          if (!(err instanceof ProviderContextOverflowError)) throw err;
+          if (!(await this.compactAfterOverflow(state))) throw err;
+          messages = rebuild();
+          this.auditPrompt(state, role, auditKind, messages, tools);
+          response = await chatWithTools(messages, tools, callOptions);
+        }
+      } finally {
+        capture.finish();
       }
       if (response.toolCalls.length === 0) {
         text = response.content;

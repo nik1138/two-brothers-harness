@@ -113,6 +113,8 @@ export {
   type ApprovalAutoAllowedEvent,
   type TodoUpdatedEvent,
   type PromptAuditEvent,
+  type ReasoningEvent,
+  REASONING_EVENT_MAX_CHARS,
   type RunApprovalBrokerOptions,
   type RunErrorEvent,
   type RunEndEvent,

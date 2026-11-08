@@ -88,6 +88,7 @@ export function foldEntryId(entry: Entry): string {
   if (entry.type === 'divider') return `divider-${entry.seq}`
   if (entry.type === 'system') return entry.activity.id
   if (entry.type === 'tool' || entry.type === 'prompt_audit') return entry.id
+  if (entry.type === 'reasoning') return entry.id
   return `approval-${entry.approvalId}`
 }
 

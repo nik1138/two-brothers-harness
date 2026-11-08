@@ -2,9 +2,10 @@ import { chatProjectionGeneration } from './chat'
 import type { ChatItem } from './chat'
 import type { ApprovalDetail, RunEvent, TodoItem, TodoStatus, ToolResultCompact } from './types'
 
-// Projection of typed runtime events (tool calls, approvals, prompt audits)
-// into group-chat items. Components consume RuntimeItem / TimelineEntry and
-// never touch raw runtime events. Envelope handling stays in chat.ts.
+// Projection of typed runtime events (tool calls, approvals, prompt audits,
+// replayed reasoning) into group-chat items. Components consume RuntimeItem /
+// TimelineEntry and never touch raw runtime events. Envelope handling stays in
+// chat.ts.
 
 export interface ToolActivityItem {
   type: 'tool'
@@ -58,7 +59,27 @@ export interface PromptAuditItem {
   runId: string
 }
 
-export type RuntimeItem = ToolActivityItem | ApprovalItem | PromptAuditItem
+/**
+ * One replayed reasoning (thinking) record from the runtime sidecar: the
+ * bounded, sanitized reasoning one provider call produced. Display-only and
+ * collapsed by default in the transcript; it never enters the shared context
+ * (the backend deliberately keeps it out of the protocol envelopes).
+ */
+export interface ReasoningItem {
+  type: 'reasoning'
+  id: string
+  role: 'senior' | 'junior'
+  /** Node kind the call answered (consult / proposal / review / decision / …). */
+  kind: string
+  /** Sanitized, bounded plain reasoning text — rendered as text, never markup. */
+  text: string
+  /** True when the backend (or this projection) clipped the stream. */
+  truncated: boolean
+  at: number
+  runId: string
+}
+
+export type RuntimeItem = ToolActivityItem | ApprovalItem | PromptAuditItem | ReasoningItem
 
 export interface TimelineEntry {
   time: number
@@ -82,6 +103,45 @@ export interface ChangedFile {
  */
 export function runtimeDedupeKey(ev: RunEvent): string {
   return JSON.stringify(ev)
+}
+
+// -- replayed reasoning (additive, tolerant) ---------------------------------
+
+/**
+ * Bound on one replayed reasoning text kept in the DOM, in characters. Mirrors
+ * the backend's `REASONING_EVENT_MAX_CHARS` (10k); a value from an old or
+ * hand-written sidecar is clipped here too, so the browser never holds an
+ * unbounded reasoning blob. Head+tail with the shared truncation marker.
+ */
+export const REASONING_REPLAY_MAX_CHARS = 10_000
+
+/** Whole ANSI escape sequences (mirrors the backend output sanitizer). */
+const REASONING_ESCAPE =
+  /\x1b[\]PX^_][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]|\x1b[\x20-\x2f]*[\x30-\x7e]/g
+/** Control bytes that break display; newlines and tabs are kept. */
+const REASONING_CONTROL = /[\x00-\x08\x0b-\x1f\x7f]/g
+
+/**
+ * Tolerant display copy of one replayed reasoning payload. Returns null when
+ * there is no usable text (missing, non-string, blank after sanitizing);
+ * otherwise the ANSI/control-sanitized text bounded head+tail at
+ * {@link REASONING_REPLAY_MAX_CHARS}. Never throws, so a malformed or
+ * hand-written sidecar row can never break the transcript.
+ */
+export function reasoningTextOf(value: unknown): { text: string; truncated: boolean } | null {
+  if (typeof value !== 'string' || value === '') return null
+  const cleaned = value.replace(REASONING_ESCAPE, '').replace(REASONING_CONTROL, '')
+  if (cleaned.trim() === '') return null
+  if (cleaned.length <= REASONING_REPLAY_MAX_CHARS) return { text: cleaned, truncated: false }
+  const head = Math.ceil(REASONING_REPLAY_MAX_CHARS / 2)
+  const tail = Math.floor(REASONING_REPLAY_MAX_CHARS / 2)
+  return {
+    text:
+      cleaned.slice(0, head) +
+      `\n...[truncated ${cleaned.length - REASONING_REPLAY_MAX_CHARS} chars]...\n` +
+      cleaned.slice(cleaned.length - tail),
+    truncated: true,
+  }
 }
 
 // Incremental projection state: runtime events only ever append, and pairing is
@@ -234,6 +294,23 @@ function appendToRuntimeProjection(state: RuntimeProjectionState, ev: RunEvent) 
       })
       break
     }
+    case 'reasoning': {
+      // Streaming-only records; an old backend simply never sends them, and a
+      // malformed row (no usable text) is dropped instead of rendering a lie.
+      const text = reasoningTextOf(ev.text)
+      if (text === null) break
+      state.items.push({
+        type: 'reasoning',
+        id: `${ev.run_id}:reasoning:${state.n++}`,
+        role: ev.role === 'senior' ? 'senior' : 'junior',
+        kind: typeof ev.kind === 'string' ? ev.kind : '',
+        text: text.text,
+        truncated: ev.truncated === true || text.truncated,
+        at: ev.at,
+        runId: ev.run_id,
+      })
+      break
+    }
   }
 }
 
@@ -347,7 +424,10 @@ let mergeState: MergeState | null = null
 
 /** 0 = chat projection row, 1 = runtime row (the old tie-break order). */
 function entrySource(entry: TimelineEntry['entry']): 0 | 1 {
-  return entry.type === 'tool' || entry.type === 'approval' || entry.type === 'prompt_audit'
+  return entry.type === 'tool' ||
+    entry.type === 'approval' ||
+    entry.type === 'prompt_audit' ||
+    entry.type === 'reasoning'
     ? 1
     : 0
 }
@@ -600,7 +680,12 @@ export function timestampOf(entry: TimelineEntry['entry'] | undefined): number |
     const t = Date.parse(entry.activity.ts)
     return Number.isNaN(t) ? null : t
   }
-  if (entry.type === 'tool' || entry.type === 'approval' || entry.type === 'prompt_audit') {
+  if (
+    entry.type === 'tool' ||
+    entry.type === 'approval' ||
+    entry.type === 'prompt_audit' ||
+    entry.type === 'reasoning'
+  ) {
     return Number.isFinite(entry.at) ? entry.at * 1000 : null
   }
   return null

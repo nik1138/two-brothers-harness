@@ -13,7 +13,7 @@
  * envelope log. Events are the typed runtime events (run_status / envelope /
  * tool_started / tool_completed / approval_requested / approval_resolved /
  * approval_auto_denied / approval_auto_allowed / todo_updated / prompt_audit /
- * run_error / run_end) plus `run_id`
+ * reasoning / run_error / run_end) plus `run_id`
  * and `at` (epoch seconds). Event JSON keeps the Python field names
  * (`run_id`, `approval_id`) so sidecar files stay interchangeable with the
  * Python implementation; `prompt_audit` keeps its camelCase payload
@@ -157,6 +157,37 @@ export interface PromptAuditEvent extends RuntimeEventMeta, PromptAuditEntry {
   type: "prompt_audit";
 }
 
+/** Hard cap on one persisted reasoning record's text (chars, head+tail kept). */
+export const REASONING_EVENT_MAX_CHARS = 10_000;
+
+/**
+ * Additive event: the bounded, sanitized reasoning (thinking) the model
+ * streamed during ONE provider call, persisted by the run sidecar so a web
+ * reload can replay it as a collapsed "Thinking · replayed" row. The record
+ * covers one node call seam: an internal overflow-recovery retry inside that
+ * seam merges both attempts' deltas into the single record, and a
+ * failed/cancelled call keeps the reasoning it streamed so far.
+ *
+ * Capture is streaming-only: the harness receives reasoning text solely
+ * through `ChatOptions.onThinkingDelta`, which it only builds when
+ * `streamTokens` is on AND a stream consumer exists. A non-streaming call
+ * therefore emits none (the provider contract returns no reasoning text there).
+ * Unlike the live `token` stream events this event is bounded
+ * ({@link REASONING_EVENT_MAX_CHARS}, head+tail with the shared truncation
+ * marker), ANSI/control-sanitized, and never carries prompt bodies, usage or
+ * secrets. Consumers that do not know the type can ignore it safely.
+ */
+export interface ReasoningEvent extends RuntimeEventMeta {
+  type: "reasoning";
+  role: "senior" | "junior";
+  /** Node kind the call answered (consult / delegation / proposal / deliverable / verify / review / decision). */
+  kind: string;
+  /** Sanitized reasoning text the live thinking stream carried, bounded. */
+  text: string;
+  /** True when the bound clipped the stream (the text then ends with the marker form). */
+  truncated: boolean;
+}
+
 /** The job raised; surfaced to the operator before run_end. */
 export interface RunErrorEvent extends RuntimeEventMeta {
   type: "run_error";
@@ -183,6 +214,7 @@ export type RuntimeEvent =
   | ApprovalAutoAllowedEvent
   | TodoUpdatedEvent
   | PromptAuditEvent
+  | ReasoningEvent
   | RunErrorEvent
   | RunEndEvent;
 

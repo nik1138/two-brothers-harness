@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, defineComponent, h, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import type { PropType, VNode } from 'vue'
 import { NButton } from 'naive-ui'
@@ -9,7 +9,7 @@ import type { FindMatch } from '../find'
 import { buildFoldRows } from '../folding'
 import type { FoldRenderRow } from '../folding'
 import { nextActorLabel, timestampOf } from '../runtime'
-import type { TimelineEntry } from '../runtime'
+import type { ReasoningItem, TimelineEntry } from '../runtime'
 import { parseMarkdown } from '../markdown'
 import type { MarkdownBlock, MarkdownInline } from '../markdown'
 import type { StreamingBlocks } from '../streaming'
@@ -41,7 +41,7 @@ const props = defineProps<{
   streaming?: StreamingBlocks | null
   /**
    * Render per-model-call prompt-audit annotations. Off by default: the
-   * Settings → Advanced preference owns this, so a normal transcript reads
+   * Settings в†’ Advanced preference owns this, so a normal transcript reads
    * cleanly. Rows are absent from the DOM (find/scroll cannot reach them).
    */
   showPromptAudits?: boolean
@@ -286,7 +286,7 @@ async function showEarlier() {
 // every conversation row stay open; a collapsed group's rows leave the DOM
 // entirely, so the find cache is invalidated on each toggle (see below).
 
-/** Fold-group keys the operator expanded — per mount, i.e. per session. */
+/** Fold-group keys the operator expanded вЂ” per mount, i.e. per session. */
 const expandedFolds = ref<ReadonlySet<string>>(new Set())
 
 function toggleFold(key: string): void {
@@ -311,6 +311,39 @@ const foldRows = computed<FoldRenderRow[]>(() =>
   ),
 )
 
+// -- replayed reasoning rows --------------------------------------------------
+// The runtime sidecar persists one bounded, sanitized reasoning record per
+// streaming provider call (backend capture is streaming-only, so a
+// non-streaming run has none вЂ” exactly like an older backend). Replay renders
+// them as quiet, collapsed-by-default disclosure rows, visually the same shape
+// as the live thinking block but static and labelled "replayed". The body is
+// plain text from the projection (Vue text interpolation), so reasoning can
+// never become markup; it is also excluded from the shared-context meter.
+
+/** Replayed reasoning rows the reader expanded вЂ” per mount (per session). */
+const expandedReasoning = ref<ReadonlySet<string>>(new Set())
+
+const REASONING_ROLE_LABEL: Readonly<Record<'senior' | 'junior', string>> = {
+  senior: 'Senior',
+  junior: 'Junior',
+}
+
+function reasoningBodyId(item: ReasoningItem): string {
+  return `reasoning-body-${item.id.replace(/[^A-Za-z0-9_-]/g, '')}`
+}
+
+function isReasoningExpanded(id: string): boolean {
+  return expandedReasoning.value.has(id)
+}
+
+function toggleReasoning(id: string): void {
+  const next = new Set(expandedReasoning.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  expandedReasoning.value = next
+  void nextTick(keepPinnedToBottom)
+}
+
 // -- find in transcript (Ctrl+F / Cmd+F) --------------------------------------
 // Search covers the rendered conversation only: blocks are collected from the
 // transcript DOM when the bar opens (or when the rendered window changes), so
@@ -321,7 +354,7 @@ const foldRows = computed<FoldRenderRow[]>(() =>
 // collapsed drill-down drawers are left out so the counter never points at
 // text that cannot be painted.
 //
-// Escape layering, topmost first: command palette → dialogs → mobile drawer →
+// Escape layering, topmost first: command palette в†’ dialogs в†’ mobile drawer в†’
 // this find bar. The palette and every dialog are modal AppDialogs with
 // role="dialog"; the drawer marks the chat shell inert. A keydown while any of
 // those is above the bar is deliberately left to that layer, so Ctrl+F cannot
@@ -334,7 +367,7 @@ const foldRows = computed<FoldRenderRow[]>(() =>
 // name), so no <mark> wrappers are inserted: Vue's text nodes, copy behavior
 // and the transcript structure stay untouched. Browsers without the API still
 // get the counter and scroll-to-match. App.vue keys ChatView by session, so a
-// session switch remounts this component — the bar, its focus and its highlight
+// session switch remounts this component вЂ” the bar, its focus and its highlight
 // registry entries therefore cannot leak across sessions (unmount clears the
 // global registry explicitly as well).
 
@@ -691,7 +724,7 @@ async function copyMessage(m: ChatMessage) {
 // -- live "who is acting" status line ------------------------------------------
 // One line, not two: the shell's `activity` text (stopping / queued / working)
 // and the derived actor label share a single row so the stream never shows
-// duplicate "working…" banners.
+// duplicate "workingвЂ¦" banners.
 
 /** A run is live when the shell says so; `loading` also covers session loads. */
 const runLive = computed(() => props.loading || props.activity !== null)
@@ -733,7 +766,7 @@ const statusLine = computed(() => {
   const tail = props.timeline[props.timeline.length - 1]?.entry
   const at = timestampOf(tail)
   const secs = at === null ? null : Math.max(0, Math.floor((now.value - at) / 1000))
-  // shell status wins (Stopping… / Run queued…); a live working run also gets
+  // shell status wins (StoppingвЂ¦ / Run queuedвЂ¦); a live working run also gets
   // the elapsed clock
   if (props.activity) {
     if (
@@ -741,12 +774,12 @@ const statusLine = computed(() => {
       !props.activity.startsWith('Run queued') &&
       !props.activity.startsWith('Stopping')
     ) {
-      return `${props.activity} · ${secs}s`
+      return `${props.activity} В· ${secs}s`
     }
     return props.activity
   }
-  const label = nextActorLabel(tail) ?? 'Working…'
-  return secs !== null ? `${label} · ${secs}s` : label
+  const label = nextActorLabel(tail) ?? 'WorkingвЂ¦'
+  return secs !== null ? `${label} В· ${secs}s` : label
 })
 
 // -- live streaming draft (ephemeral SSE `token` frames) ----------------------
@@ -847,7 +880,7 @@ watch(
           aria-label="Previous match"
           :disabled="findTotal === 0"
           @click="moveFind(-1)"
-        >↑</button>
+        >в†‘</button>
         <button
           type="button"
           class="find-btn"
@@ -855,7 +888,7 @@ watch(
           aria-label="Next match"
           :disabled="findTotal === 0"
           @click="moveFind(1)"
-        >↓</button>
+        >в†“</button>
         <button
           type="button"
           class="find-btn find-close"
@@ -874,7 +907,7 @@ watch(
       aria-label="Conversation"
       @scroll.passive="onScroll"
     >
-    <p v-if="loading" class="empty-hint">Loading…</p>
+    <p v-if="loading" class="empty-hint">LoadingвЂ¦</p>
     <template v-else>
       <button
         v-if="hiddenCount > 0"
@@ -900,7 +933,7 @@ watch(
               :name="row.expanded ? 'chevron-down' : 'chevron-right'"
               :size="12"
             />
-            <span class="fold-ellipsis" aria-hidden="true">…</span>
+            <span class="fold-ellipsis" aria-hidden="true">вЂ¦</span>
             <span class="fold-label">{{ row.summary.label }}</span>
             <span class="fold-hint" aria-hidden="true">{{
               row.expanded ? 'collapse' : 'expand'
@@ -947,6 +980,44 @@ watch(
           :item="row.entry"
           :resolve="resolveApproval"
         />
+
+        <!-- Replayed reasoning: a collapsed, honest "Thinking В· replayed" row
+             from the runtime sidecar (bounded/sanitized by the backend). Mirrors
+             the live thinking block's disclosure chrome; plain text only. -->
+        <section
+          v-else-if="row.entry.type === 'reasoning'"
+          class="stream-thinking reasoning-row"
+          :class="{ 'is-collapsed': !isReasoningExpanded(row.entry.id) }"
+          role="note"
+        >
+          <button
+            type="button"
+            class="stream-thinking-head"
+            :aria-expanded="isReasoningExpanded(row.entry.id)"
+            :aria-controls="reasoningBodyId(row.entry)"
+            :aria-label="`Replayed ${REASONING_ROLE_LABEL[row.entry.role]} reasoning вЂ” ${isReasoningExpanded(row.entry.id) ? 'collapse' : 'expand'}`"
+            @click="toggleReasoning(row.entry.id)"
+          >
+            <span class="stream-thinking-dot" aria-hidden="true"></span>
+            <span class="stream-thinking-label">
+              Thinking В· replayed
+              <span class="reasoning-who">В· {{ REASONING_ROLE_LABEL[row.entry.role] }}</span>
+            </span>
+            <AppIcon
+              :name="isReasoningExpanded(row.entry.id) ? 'chevron-down' : 'chevron-right'"
+              :size="12"
+              class="stream-thinking-chevron"
+            />
+          </button>
+          <div
+            v-show="isReasoningExpanded(row.entry.id)"
+            :id="reasoningBodyId(row.entry)"
+            class="stream-thinking-body"
+          >{{ row.entry.text }}</div>
+          <p v-if="row.entry.truncated" class="stream-clipped">
+            This reasoning was clipped for length.
+          </p>
+        </section>
 
         <section v-else-if="row.entry.type === 'group'" class="chat-group" :class="[`side-${row.entry.group.author}`]">
           <div class="avatar" :class="`avatar-${row.entry.group.author}`" aria-hidden="true">
@@ -1048,7 +1119,7 @@ watch(
           >
             <span class="stream-thinking-dot" aria-hidden="true"></span>
             <span class="stream-thinking-label">
-              {{ streamingThinking.streaming ? 'Thinking…' : 'Thought for a moment' }}
+              {{ streamingThinking.streaming ? 'ThinkingвЂ¦' : 'Thought for a moment' }}
             </span>
             <AppIcon
               :name="thinkingExpanded ? 'chevron-down' : 'chevron-right'"
@@ -1062,7 +1133,7 @@ watch(
             class="stream-thinking-body"
           >{{ streamingThinking.text }}</div>
           <p v-if="streamingThinking.truncated" class="stream-clipped">
-            Earlier reasoning was clipped for length.
+            This reasoning was clipped for length.
           </p>
         </section>
 
@@ -1078,7 +1149,7 @@ watch(
             <header class="group-header">
               <span class="speaker-name">{{ SPEAKER_LABEL[streamingSpeaker] }}</span>
               <span class="stream-state">
-                {{ streamingText.streaming ? 'responding…' : 'complete' }}
+                {{ streamingText.streaming ? 'respondingвЂ¦' : 'complete' }}
               </span>
             </header>
             <article class="bubble stream-bubble">
@@ -1284,7 +1355,7 @@ watch(
 }
 
 /* Fold row: one muted disclosure line for a completed run's tool/audit rows.
-   Width-safe — the label ellipsizes instead of wrapping the transcript. */
+   Width-safe вЂ” the label ellipsizes instead of wrapping the transcript. */
 .fold-row {
   display: flex;
   justify-content: flex-start;
@@ -1502,6 +1573,13 @@ watch(
 
 .stream-thinking.is-collapsed.is-live {
   border-color: transparent;
+}
+
+/* Replayed reasoning rows reuse the live thinking block's collapse chrome; the
+   only extra bit is the muted speaker name after the honest "replayed" label. */
+.reasoning-who {
+  color: var(--text-tertiary);
+  font-weight: 500;
 }
 </style>
 
