@@ -161,12 +161,10 @@ interface PendingGroup {
   rendered: Entry[]
   /** Absolute timeline index of the first member (stable per-row keying). */
   start: number
-  /** Stable key derived from the first member. */
-  key: string
 }
 
 function freshGroup(first: Entry, start: number): PendingGroup {
-  return { members: [first], rendered: [], start, key: `fold:${foldEntryId(first)}` }
+  return { members: [first], rendered: [], start }
 }
 
 function entryKey(entry: Entry, index: number): string {
@@ -195,10 +193,16 @@ function flushGroup(
     pushEntries(rows, group.rendered, group.start)
     return
   }
-  const isExpanded = expanded.has(group.key)
+  // Key on the LAST rendered member: a completed run does not grow, so its
+  // final row stays put when an earlier chunk is prepended and the window
+  // starts mid-run. Keying on the first member would silently collapse an
+  // expanded group every time the slice boundary moved into that run.
+  const last = group.rendered[group.rendered.length - 1] as Entry
+  const key = `fold:${foldEntryId(last)}`
+  const isExpanded = expanded.has(key)
   rows.push({
     type: 'fold',
-    key: group.key,
+    key,
     expanded: isExpanded,
     summary: summarizeFold(group.rendered),
   })

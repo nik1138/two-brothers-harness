@@ -294,4 +294,63 @@ test('windowed slices keep the absolute fold/run keys of the full render', () =>
     fullRows.slice(view.start).map((row) => row.key),
     'prepending a chunk cannot re-key the rows that stayed rendered',
   )
+
+  // Foldable rows: nine tools from one completed run, then non-foldable
+  // separators. A window that starts in the middle of the run must key the
+  // fold by the run's last member, exactly like the full render does.
+  const toolRow = (n: number): TimelineEntry => ({
+    time: n,
+    order: n,
+    entry: {
+      type: 'tool',
+      id: `old:tool:${n}`,
+      actor: 'junior',
+      tool: 'read_file',
+      args: {},
+      at: n,
+      runId: 'old',
+      status: 'ok',
+      result: null,
+    },
+  })
+  const foldTimeline: TimelineEntry[] = [
+    ...Array.from({ length: 9 }, (_, i) => toolRow(i)),
+    ...Array.from({ length: 3 }, (_, i) => ({
+      time: 9 + i,
+      order: 9 + i,
+      entry: {
+        type: 'system' as const,
+        activity: {
+          id: `s${9 + i}`,
+          seq: 9 + i,
+          ts: '2026-11-04T00:00:00Z',
+          label: `note ${9 + i}`,
+        },
+      },
+    })),
+  ]
+
+  const midState = initialTranscriptWindow(foldTimeline.length, { pageSize: 5 })
+  const midView = transcriptWindow(foldTimeline.length, midState, { pageSize: 5 })
+  assert.equal(midView.start, 7)
+  const foldMemo = createTranscriptSliceMemo<TimelineEntry>()
+  const midRows = buildFoldRows(foldMemo(foldTimeline, midView.start), {}, midView.start)
+  const midFold = midRows.find((row) => row.type === 'fold')
+  if (!midFold || midFold.type !== 'fold') assert.fail('expected a fold row starting mid-run')
+
+  const fullFoldRows = buildFoldRows(foldTimeline)
+  const fullFold = fullFoldRows.find((row) => row.type === 'fold')
+  if (!fullFold || fullFold.type !== 'fold') assert.fail('expected a fold row in the full render')
+  assert.equal(midFold.key, 'fold:old:tool:8')
+  assert.equal(midFold.key, fullFold.key, 'a mid-run window keeps the full render fold key')
+
+  // Expanding that key survives prepending an earlier chunk (start moves from
+  // 7 back to 4, still inside the same run).
+  const prependedRows = buildFoldRows(foldMemo(foldTimeline, 4), {
+    expanded: new Set([midFold.key]),
+  }, 4)
+  const prependedFold = prependedRows.find((row) => row.type === 'fold')
+  if (!prependedFold || prependedFold.type !== 'fold') assert.fail('expected the fold row after a prepend')
+  assert.equal(prependedFold.key, midFold.key)
+  assert.equal(prependedFold.expanded, true, 'expansion state keyed by the fold key survives the prepend')
 })

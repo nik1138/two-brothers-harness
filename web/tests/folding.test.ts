@@ -232,7 +232,7 @@ test('hidden prompt audits neither split a group nor pad the summary', () => {
 test('shown prompt audits join the group and expansion restores their rows', () => {
   const shown = buildFoldRows(
     [tool('old', 1), audit('old', 1), tool('old', 2)],
-    { showPromptAudits: true, expanded: new Set(['fold:old:tool:1']) },
+    { showPromptAudits: true, expanded: new Set(['fold:old:tool:2']) },
   )
   assert.equal(shown[0].type, 'fold')
   const fold = shown[0]
@@ -278,7 +278,7 @@ test('expanding a fold emits the summary row followed by the rows in order', () 
   assert.deepEqual(collapsed.map((row) => row.type), ['fold', 'entry'])
 
   const expanded = buildFoldRows(timeline, {
-    expanded: new Set(['fold:old:tool:1']),
+    expanded: new Set(['fold:old:tool:2']),
   })
   assert.deepEqual(expanded.map((row) => row.type), ['fold', 'entry', 'entry', 'entry'])
   const fold = expanded[0]
@@ -295,7 +295,26 @@ test('entry keys are stable, unique and offset-aware', () => {
   const rows = buildFoldRows([group('g-1'), tool('old', 1), tool('old', 2)], {}, 40)
   const keys = rows.map((row) => row.key)
   assert.equal(new Set(keys).size, keys.length)
-  assert.deepEqual(keys, ['g-1#40', 'fold:old:tool:1'])
+  assert.deepEqual(keys, ['g-1#40', 'fold:old:tool:2'])
+})
+
+test('the fold key is anchored to the last rendered member', () => {
+  const onlyFold = (rows: ReturnType<typeof buildFoldRows>) => {
+    const row = rows.find((candidate) => candidate.type === 'fold')
+    if (!row || row.type !== 'fold') assert.fail('expected a fold row')
+    return row
+  }
+  const full = onlyFold(buildFoldRows([tool('old', 1), tool('old', 2), tool('old', 3)]))
+  assert.equal(full.key, 'fold:old:tool:3')
+
+  // A window that starts one member later keeps the same key, so expansion
+  // state recorded against the full render still applies after a prepend.
+  const later = onlyFold(buildFoldRows([tool('old', 2), tool('old', 3)]))
+  assert.equal(later.key, full.key, 'dropping the first member must not re-key the group')
+  const expanded = onlyFold(
+    buildFoldRows([tool('old', 2), tool('old', 3)], { expanded: new Set([full.key]) }),
+  )
+  assert.equal(expanded.expanded, true, 'the expanded key survives the earlier window')
 })
 
 // -- summary ------------------------------------------------------------------

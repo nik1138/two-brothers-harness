@@ -1,14 +1,14 @@
 # E2E fixtures
 
-The `approval-*`, `stop`, `folding`, `plan-dock`, `approval-reason` and
-`reasoning-replay` scenarios in `../run.mjs` need scripted, deterministic model
-responses. Every scenario runs against the TypeScript server
-(`packages/harness/dist/cli.js serve`). That server has no
+The `approval-*`, `stop`, `folding`, `plan-dock`, `approval-reason`,
+`reasoning-replay` and `cooperation-surfaces` scenarios in `../run.mjs` need
+scripted, deterministic model responses. Every scenario runs against the
+TypeScript server (`packages/harness/dist/cli.js serve`). That server has no
 responder-monkeypatching hook, so the fixture is a scripted
 **OpenAI-compatible model server**:
 
 ```
-node scripted-server.mjs --port P --scenario approval|slow|plan|folding|delete|reasoning \
+node scripted-server.mjs --port P --scenario approval|slow|plan|folding|delete|reasoning|cooperation \
   [--senior-model e2e-senior] [--junior-model e2e-junior] [--linger-ms 30000]
 ```
 
@@ -50,6 +50,15 @@ run's decision starts the next run):
   `approval-reason` scenario creates the target file before the run), then the
   deliverable after the operator decision; the request carries the product's
   documented `DELETE_APPROVAL_REASON`, which the approval card renders.
+- `cooperation` — run 1 writes `e2e-undo-marker.txt` exactly once (the
+  workspace-bound undo record the browser previews, then applies so the file
+  is deleted), and every later run only delivers, so one session can collect
+  the second operator turn the fork/rewind assertions need without parking on
+  another approval. A task whose text carries the `e2e-steer` marker instead
+  gets the same abortable slow senior opening as `slow`, giving a
+  deterministic window in which the browser can POST a mid-run steer; stopping
+  that run unwinds immediately because the fixture drops the lingering reply
+  when the harness aborts.
 - `reasoning` — a task whose text carries the `e2e-reasoning` marker is
   answered with SSE `delta.reasoning_content` thinking chunks before the reply
   content: the senior consult call streams thinking with an ANSI escape, a BEL
@@ -71,9 +80,10 @@ with `TWO_BROTHERS_PROVIDER=openai`, `TWO_BROTHERS_BASE_URL=http://127.0.0.1:<mo
 `TWO_BROTHERS_SENIOR_MODEL=e2e-senior`, `TWO_BROTHERS_JUNIOR_MODEL=e2e-junior`
 (ambient `TWO_BROTHERS_*` provider env is stripped so runs stay
 deterministic). The workspace is registered through the UI as usual for the
-approval scenarios, so the write goes through the real permission/approval
-broker; `plan`/`folding` runs need no workspace (the plan tool never touches
-one) and therefore never park on an approval.
+approval and `cooperation` scenarios, so the write goes through the real
+permission/approval broker; `plan`/`folding` runs need no workspace (the plan
+tool never touches one) and therefore never park on an approval, and the
+`cooperation` steering task runs without a workspace until it is stopped.
 
 The scripted scenarios assert user-visible outcomes: allow → `e2e-hello.txt`
 exists + "Changed files" shows the diff; deny → file absent + rejected
@@ -86,7 +96,13 @@ runtime sidecar (via `GET /api/sessions/<name>/events`) carries bounded
 `reasoning` events, and after a reload the web replays them as collapsed
 "Thinking · replayed" rows whose expanded body is escaped plain text, with the
 documented clipping marker on the over-long record and no row at all for a
-session without reasoning events.
+session without reasoning events; cooperation-surfaces → the run-created
+`e2e-undo-marker.txt` is previewed as "will be deleted (created by the run)"
+and is gone after applying the undo, "Fork session…" opens a copied session
+while the source session file stays byte-identical, rewinding the fork's second
+turn removes it (and everything after it) from the transcript and the session
+file, and a rejected mid-run steer keeps the draft while an accepted Alt+Enter
+steer clears it and reports the queued notice.
 
 While `packages/harness/dist/cli.js` does not exist (build it with
 `cd packages/harness && npm run build`), every scenario is reported as

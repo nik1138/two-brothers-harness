@@ -1269,6 +1269,10 @@ function finalizeRun(runId: string, status: RunStatus, error: string | null) {
   else if (status === 'cancelled') reportError('Run stopped')
   // pick up the persisted usage counters and the run record's error when the
   // stream did not deliver them (reconnect fallback, stop) — best-effort
+  // Clear the previous run's estimate before the fetch: run_end has already
+  // installed the new run's usage, so a slow or failed getRun must never pair
+  // that usage with the old cost. The record's cost (or null) overwrites it.
+  runCostBySession.value = { ...runCostBySession.value, [entry.session]: null }
   getRun(runId)
     .then((rec) => {
       // the record carries the authoritative finished timestamp for unread
@@ -1277,7 +1281,7 @@ function finalizeRun(runId: string, status: RunStatus, error: string | null) {
         runUsageBySession.value = { ...runUsageBySession.value, [entry.session]: rec.usage }
       }
       // Cost is computed by the backend at run completion (not in run_end), so
-      // the terminal record is its only source; null clears a stale estimate.
+      // the terminal record is its only source.
       runCostBySession.value = { ...runCostBySession.value, [entry.session]: rec.cost ?? null }
       if (rec.status === 'failed' && rec.error && !runErrorBySession.value[entry.session]) {
         setRunError(entry.session, rec.error)
@@ -2193,6 +2197,10 @@ function onSessionDeleted(name: string) {
   const rest = { ...runUsageBySession.value }
   delete rest[name]
   runUsageBySession.value = rest
+  // the estimate belongs to the deleted session too; never resurrect it
+  const costs = { ...runCostBySession.value }
+  delete costs[name]
+  runCostBySession.value = costs
   if (lastSeen.value[name] !== undefined) {
     const seen = { ...lastSeen.value }
     delete seen[name]

@@ -9,7 +9,9 @@
  * Run with: node --import ./tests/register-ts.mjs --test tests/usageFooter.test.ts
  */
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import { costLabel, costTitle } from '../src/usageCost.ts'
 import type { RunCost } from '../src/types.ts'
@@ -40,6 +42,32 @@ test('null/undefined cost omits the segment entirely', () => {
   assert.equal(costLabel(undefined), null)
   assert.equal(costTitle(null), null)
   assert.equal(costTitle(undefined), null)
+})
+
+test('App clears the stale estimate before refetching and prunes it on delete', () => {
+  // App.vue owns the session-scoped cost state and has no DOM test harness;
+  // pin the two lifecycle calls the stale-estimate bug needed.
+  const source = readFileSync(fileURLToPath(new URL('../src/App.vue', import.meta.url)), 'utf8')
+  const clear = source.indexOf(
+    'runCostBySession.value = { ...runCostBySession.value, [entry.session]: null }',
+  )
+  assert.ok(clear >= 0, 'a finished run must clear the previous cost estimate before refetching')
+  // run_end has already installed the new run's usage by this point, so the
+  // asynchronous getRun must not be the first thing to touch the old estimate.
+  assert.ok(
+    source.indexOf('getRun(runId)', clear) > clear,
+    'the null clear must precede the getRun(runId) refetch',
+  )
+
+  const start = source.indexOf('function onSessionDeleted')
+  const end = source.indexOf('async function onCreateSession', start)
+  assert.ok(start >= 0 && end > start, 'onSessionDeleted must stay in App.vue')
+  const deletion = source.slice(start, end)
+  assert.match(
+    deletion,
+    /const costs = \{ \.\.\.runCostBySession\.value \}\s*delete costs\[name\]\s*runCostBySession\.value = costs/,
+    'session deletion must prune runCostBySession alongside the usage counters',
+  )
 })
 
 test('malformed estimates are withheld instead of rendered as a number', () => {

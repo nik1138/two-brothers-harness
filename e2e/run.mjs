@@ -68,6 +68,11 @@
 //                  expandable plain text (literal HTML stays escaped text), the
 //                  over-long record clipped with the honest marker, and a plain
 //                  reply (no reasoning events) shows no row at all
+//   cooperation-surfaces scripted fixture: a run-created file is previewed and
+//                  undone, "Fork session…" opens a copied session and leaves
+//                  the source byte-identical, the fork's second turn is rewound
+//                  away, and a mid-run steer proves rejected drafts survive
+//                  while an accepted Alt+Enter POST clears the composer
 //   real           opt-in (TWO_BROTHERS_REAL_E2E=1): real models via LM Studio
 //
 // Backend: every scenario runs against the TypeScript server
@@ -100,12 +105,20 @@ import { ensurePackagedWebFresh } from './web-freshness.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.dirname(HERE)
-const TS_CLI = path.join(ROOT, 'packages', 'harness', 'dist', 'cli.js')
+/**
+ * The built CLI. `TWO_BROTHERS_E2E_CLI` is an optional iteration seam that
+ * points at a different built package layout (the default is the repo's
+ * `packages/harness/dist`); the packaged web copy is then resolved next to
+ * that layout, exactly like `resolveDefaultWebDist` does for the server.
+ */
+const TS_CLI = process.env.TWO_BROTHERS_E2E_CLI
+  ? path.resolve(process.env.TWO_BROTHERS_E2E_CLI)
+  : path.join(ROOT, 'packages', 'harness', 'dist', 'cli.js')
 const NODE_SCRIPTED = path.join(HERE, 'fixtures', 'scripted-server.mjs')
 const WEB_DIST_INDEX = path.join(ROOT, 'web', 'dist', 'index.html')
 const WEB_DIST_DIR = path.join(ROOT, 'web', 'dist')
 /** The copy the TS server serves first in a checkout (see server.ts). */
-const PACKAGED_WEB_DIR = path.join(ROOT, 'packages', 'harness', 'web')
+const PACKAGED_WEB_DIR = path.resolve(path.dirname(TS_CLI), '..', 'web')
 const TASK_TEXT = 'Plan a migration from Redis to Valkey'
 const HELLO_FILE = 'e2e-hello.txt'
 
@@ -140,7 +153,11 @@ let browserLabel = ''
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 // All E2E temp dirs live under <repo>/.e2e-tmp (gitignored), not os.tmpdir().
-const TMP_ROOT = path.join(ROOT, '.e2e-tmp')
+// `TWO_BROTHERS_E2E_TMP_ROOT` is an optional iteration seam for a sealed
+// workspace where the default root is not writable; it never leaves the repo.
+const TMP_ROOT = process.env.TWO_BROTHERS_E2E_TMP_ROOT
+  ? path.resolve(process.env.TWO_BROTHERS_E2E_TMP_ROOT)
+  : path.join(ROOT, '.e2e-tmp')
 function tmpDir(prefix) {
   fs.mkdirSync(TMP_ROOT, { recursive: true })
   return fs.mkdtempSync(path.join(TMP_ROOT, `${prefix}-`))
@@ -190,10 +207,17 @@ function attachConsoleGuard(page) {
     errors.push(`pageerror: ${e.message ?? String(e)}`)
   })
   return {
-    assertClean() {
+    /**
+     * Assert no console/page errors, optionally allowing explicitly expected
+     * diagnostics. Use `allow` only for a deliberate synthetic response the
+     * scenario itself injects (Chromium logs one "Failed to load resource"
+     * console error per 4xx/5xx fetch); never for an app-side TypeError.
+     */
+    assertClean(allow = []) {
+      const unexpected = errors.filter((error) => !allow.some((re) => re.test(error)))
       assert.ok(
-        errors.length === 0,
-        `browser console must stay clean — got ${errors.length} error(s):\n${errors.join('\n')}`,
+        unexpected.length === 0,
+        `browser console must stay clean — got ${unexpected.length} error(s):\n${unexpected.join('\n')}`,
       )
     },
   }
@@ -382,9 +406,10 @@ function tsEnv(overrides = {}) {
  *                          OpenAI-compatible model server the backend talks to
  *                          (provider=openai)
  *   scenario fixture scenario name (approval | slow | plan | folding | delete |
- *            reasoning)
+ *            reasoning | cooperation)
  *   lingerMs optional --linger-ms forwarded to the fixture (slow's first
- *            answer delay; folding's second-run deliverable delay)
+ *            answer delay; folding's second-run deliverable delay; cooperation's
+ *            `e2e-steer` opening delay)
  * The returned handle may carry a `modelServer` (fixture runs) that
  * killBackend() tears down with the backend itself.
  */
@@ -3311,6 +3336,421 @@ async function scenarioReasoningReplay(runner) {
   }
 }
 
+// -- scenario: cooperation surfaces (fork / rewind / undo / steering) -----------------
+//
+// One scripted fixture process covers the wave-23 operator surfaces that have
+// server and web-unit coverage but no browser scenario:
+//
+//   undo       run 1 writes `e2e-undo-marker.txt` through the real approval
+//              broker; "Undo file changes…" previews it as a file the run
+//              created and applying the preview deletes it;
+//   fork       the session row's "Fork session…" copies the whole two-turn
+//              conversation into a new row, opens it, and leaves the source
+//              session file byte-identical;
+//   rewind     the fork's second operator bubble opens the destructive
+//              confirmation; applying it drops that turn (and everything
+//              after it) from both the visible transcript and the session file;
+//   steering   a slow, still-running work run exposes "Steer run"; a rejected
+//              POST keeps the draft intact, an accepted Alt+Enter POST clears
+//              it and reports the honest "queued for the next step" notice.
+//
+// Every applied surface is asserted through both the UI and the persisted API
+// state, and the steer acceptance is the backend's real 200 (the one synthetic
+// response is the deliberate 409 that proves a rejected draft is preserved).
+async function scenarioCooperationSurfaces(runner) {
+  const SESSION = 'E2E cooperation surfaces'
+  const FORK_TITLE = `${SESSION} (fork)`
+  const FIRST_TASK = 'Write the cooperation undo marker'
+  const SECOND_TASK = 'Second cooperation turn for the rewind'
+  const STEER_SESSION = 'E2E cooperation steering'
+  const STEER_TASK = 'Slow cooperation task e2e-steer'
+  const STEER_TEXT = 'Steer toward the safer migration path'
+  const STEER_REJECT_DETAIL =
+    "steering queue is full (8 pending); retry after the run's next step"
+  const MARKER_FILE = 'e2e-undo-marker.txt'
+  const be = await startBackend({ kind: 'fixture', scenario: 'cooperation', lingerMs: 30000 })
+  const wsDir = tmpDir('tb-e2e-ws-coop')
+  const wsName = path.basename(wsDir)
+  const markerPath = path.join(wsDir, MARKER_FILE)
+  const { context, page, consoleGuard } = await newScenarioPage()
+
+  const getJson = async (pathname) => {
+    const res = await fetch(`${be.base}${pathname}`)
+    assert.equal(res.status, 200, `GET ${pathname} -> HTTP ${res.status}`)
+    return res.json()
+  }
+  const sessionDetail = (name) => getJson(`/api/sessions/${encodeURIComponent(name)}`)
+  /** The session's real operator tasks (the backend's rewind boundary rule). */
+  const operatorTurns = (events) =>
+    (Array.isArray(events) ? events : []).filter(
+      (event) =>
+        event?.from === 'user' &&
+        event?.to === 'senior' &&
+        event?.kind === 'message' &&
+        typeof event.payload?.text === 'string' &&
+        event.payload.text.trim() !== '',
+    )
+  const rowWithTitle = (title) =>
+    page.locator('.session-row').filter({
+      has: page.locator(`.session-title:text-is("${title}")`),
+    })
+  /** The one open AppDialog, asserted by its visible title. */
+  const openDialog = async (title) => {
+    const dialog = page.locator('.app-dialog')
+    await dialog.waitFor({ state: 'visible', timeout: 10000 })
+    assert.equal(
+      (await dialog.locator('.app-dialog__title').innerText()).trim(),
+      title,
+      'unexpected dialog title',
+    )
+    return dialog
+  }
+
+  try {
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await ensureWorkspace(page, wsDir, wsName)
+    await selectWorkspaceFilter(page, wsName)
+    await createSession(page, SESSION)
+    await waitFor(
+      async () => (await page.locator('.chat-title').innerText()).trim() === SESSION,
+      { desc: 'the cooperation session to be selected' },
+    )
+
+    const sourceName = await sessionNameByTitle(be.base, SESSION)
+
+    // -- run 1: a real approval, then the run-created file --------------------
+    await sendTask(page, FIRST_TASK, { mode: 'work' })
+    const approvalDock = page.locator('.approval-dock')
+    await approvalDock.waitFor({ state: 'visible', timeout: 30000 })
+    await approvalDock.locator('button.approval-btn', { hasText: 'Allow once' }).click()
+    await waitForRunEnd(page)
+    await waitFor(() => fs.existsSync(markerPath), {
+      desc: 'the scripted run to write the marker file',
+    })
+
+    // -- run-scoped undo: preview the created file, apply, file is gone ------
+    // Wait for the real preview route before clicking: the run's undo capture
+    // closes in the run's finally, so the UI bar and the persisted record can
+    // settle a moment apart. The UI must then show exactly that preview.
+    const completedRunId = await waitFor(
+      async () => {
+        const runs = await getJson(`/api/runs?session=${encodeURIComponent(sourceName)}`)
+        const completed = runs.find((run) => run.status === 'completed')
+        if (!completed) return null
+        const res = await fetch(
+          `${be.base}/api/sessions/${encodeURIComponent(sourceName)}/undo/${encodeURIComponent(completed.run_id)}`,
+        )
+        return res.ok ? completed.run_id : null
+      },
+      { desc: 'the completed write run and its undo preview' },
+    )
+
+    const undoBar = page.locator('.run-undo-bar')
+    await undoBar.waitFor({ state: 'visible', timeout: 15000 })
+    assert.equal(await undoBar.getAttribute('aria-label'), "Undo this run's file changes")
+    assert.equal(
+      (await undoBar.locator('button.run-undo-open').innerText()).trim(),
+      'Undo file changes…',
+    )
+    await undoBar.locator('button.run-undo-open').click()
+
+    const undoDialog = await openDialog("Undo this run's file changes")
+    const undoDescription = (await undoDialog.locator('.app-dialog__description').innerText()).trim()
+    assert.ok(
+      undoDescription.includes(`Run ${completedRunId}`) && undoDescription.includes(sourceName),
+      `the undo dialog must name its run and session (got "${undoDescription}")`,
+    )
+    assert.equal(
+      (await undoDialog.locator('.run-undo-head').innerText()).trim(),
+      '1 of 1 recorded file can be undone now.',
+    )
+    const previewRows = undoDialog.locator('.run-undo-row')
+    assert.equal(await previewRows.count(), 1, 'the preview must list only the run-created file')
+    assert.equal(
+      (await previewRows.locator('.run-undo-path').innerText()).trim(),
+      MARKER_FILE,
+    )
+    assert.equal(
+      (await previewRows.locator('.run-undo-what').innerText()).trim(),
+      'Delete the file the run created',
+    )
+
+    const applyUndo = undoDialog.locator('button.undo-apply')
+    assert.equal(await applyUndo.isDisabled(), false, 'the created file must be undoable')
+    assert.equal((await applyUndo.innerText()).trim(), 'Undo 1 file')
+    await applyUndo.click()
+    await waitFor(() => !fs.existsSync(markerPath), {
+      desc: 'applying the undo to delete the file the run created',
+    })
+    await waitFor(
+      async () =>
+        (await undoDialog.locator('.run-undo-head[role="status"]').innerText()).trim() ===
+        'Undo applied: 1 file restored.',
+      { desc: 'the honest undo apply summary' },
+    )
+    const appliedRows = undoDialog.locator(
+      'section[aria-label="Restored or deleted"] .run-undo-row',
+    )
+    assert.equal(await appliedRows.count(), 1)
+    assert.equal((await appliedRows.locator('.run-undo-what').innerText()).trim(), 'deleted')
+    await page
+      .locator('.command-notice', { hasText: 'Undo applied: 1 file restored.' })
+      .waitFor({ timeout: 10000 })
+    await undoDialog.locator('button.undo-cancel').click()
+    await undoDialog.waitFor({ state: 'hidden' })
+
+    // -- run 2: a second operator turn (no file mutation, no approval) --------
+    await sendTask(page, SECOND_TASK, { mode: 'work' })
+    await waitForRunEnd(page)
+    await waitFor(
+      async () => (await page.locator('.chat-group.side-operator').count()) === 2,
+      { desc: 'the second operator turn in the transcript' },
+    )
+    const transcriptBeforeFork = await page.locator('.chat-scroll').innerText()
+    assert.ok(transcriptBeforeFork.includes(FIRST_TASK))
+    assert.ok(transcriptBeforeFork.includes(SECOND_TASK))
+    const sourceDetail = await waitFor(
+      async () => {
+        const detail = await sessionDetail(sourceName)
+        return operatorTurns(detail.events).length === 2 ? detail : null
+      },
+      { desc: 'two persisted operator turns before forking' },
+    )
+    const sourceBytesBefore = fs.readFileSync(path.join(be.dir, sourceName), 'utf-8')
+
+    // The fork has no workspace link (copied lineage only), so clear the
+    // filter first or the refreshed sidebar would hide the new row. Select by
+    // value: the option's visible label is "All workspaces".
+    const workspaceFilter = page.locator('select[title="Filter sessions by workspace"]')
+    await workspaceFilter.selectOption('all')
+    await waitFor(async () => (await workspaceFilter.inputValue()) === 'all', {
+      desc: 'the unfiltered session list',
+    })
+    await waitFor(
+      async () => (await page.locator('.chat-title').innerText()).trim() === SESSION,
+      { desc: 'the source session to stay selected while clearing the filter' },
+    )
+
+    // -- fork: a new row, opened, both turns copied, source byte-identical ----
+    // Open through the keyboard path: the trigger is revealed on row hover and
+    // the full-width select button wins the pointer hit-test in headless Edge,
+    // so a pointer click is not a reliable way to reach it (the real keyboard
+    // path is ArrowDown on the focused trigger).
+    const sourceMenuTrigger = rowWithTitle(SESSION).locator('.row-menu-trigger')
+    await sourceMenuTrigger.focus()
+    await page.keyboard.press('ArrowDown')
+    const rowMenu = page.locator('.row-menu')
+    await rowMenu.waitFor({ state: 'visible' })
+    const forkItem = rowMenu.locator('button[data-menu-action="fork"]')
+    await waitFor(async () => !(await forkItem.isDisabled()), {
+      desc: 'forking to be offered on the quiescent session row',
+    })
+    await forkItem.click()
+    // The session row reports through the app's naive-ui message provider
+    // (`.n-message`), unlike the shell's own `.command-notice` notices.
+    const forkMessage = page.locator('.n-message', { hasText: 'Forked from' })
+    await forkMessage.waitFor({ timeout: 10000 })
+    const forkNotice = (await forkMessage.innerText()).trim()
+    assert.ok(
+      forkNotice.includes('the original session is untouched'),
+      `the fork notice must state the source is untouched (got "${forkNotice}")`,
+    )
+    await waitFor(
+      async () => (await page.locator('.chat-title').innerText()).trim() === FORK_TITLE,
+      { desc: 'the fork to open in the conversation view' },
+    )
+    await waitFor(async () => (await rowWithTitle(FORK_TITLE).count()) === 1, {
+      desc: 'the fork session row in the sidebar',
+    })
+    const forkName = await sessionNameByTitle(be.base, FORK_TITLE)
+    const forkDetail = await sessionDetail(forkName)
+    assert.equal(operatorTurns(forkDetail.events).length, 2, 'the fork must copy both turns')
+    assert.equal(
+      forkDetail.events.length,
+      sourceDetail.events.length,
+      'the whole-conversation fork must copy every envelope',
+    )
+    const forkTranscript = await page.locator('.chat-scroll').innerText()
+    assert.ok(forkTranscript.includes(FIRST_TASK) && forkTranscript.includes(SECOND_TASK))
+
+    const sourceBytesAfter = fs.readFileSync(path.join(be.dir, sourceName), 'utf-8')
+    assert.equal(
+      sourceBytesAfter,
+      sourceBytesBefore,
+      'forking must leave the source session file byte-identical',
+    )
+    assert.deepEqual(
+      (await sessionDetail(sourceName)).events,
+      sourceDetail.events,
+      'forking must not change the source conversation API view',
+    )
+
+    // The source itself still renders both turns; the fork is independent.
+    await rowWithTitle(SESSION).locator('.session-item').click()
+    await waitFor(
+      async () => (await page.locator('.chat-title').innerText()).trim() === SESSION,
+      { desc: 'the source session to reopen' },
+    )
+    await waitFor(
+      async () => (await page.locator('.chat-group.side-operator').count()) === 2,
+      { desc: 'the source conversation to keep both turns' },
+    )
+    await rowWithTitle(FORK_TITLE).locator('.session-item').click()
+    await waitFor(
+      async () => (await page.locator('.chat-title').innerText()).trim() === FORK_TITLE,
+      { desc: 'the fork to be selected again' },
+    )
+    await waitFor(
+      async () => (await page.locator('.chat-group.side-operator').count()) === 2,
+      { desc: 'the fork conversation to render both turns' },
+    )
+
+    // -- rewind: the second turn and everything after it disappear -----------
+    const secondTurn = page
+      .locator('.chat-group.side-operator')
+      .filter({ hasText: SECOND_TASK })
+    await secondTurn.waitFor({ state: 'visible' })
+    await secondTurn.hover()
+    const rewindButton = secondTurn.locator('button.bubble-rewind')
+    await rewindButton.waitFor({ state: 'visible' })
+    await waitFor(async () => !(await rewindButton.isDisabled()), {
+      desc: 'the completed turn to become rewindable',
+    })
+    await rewindButton.click()
+    const rewindDialog = await openDialog('Rewind conversation to here?')
+    const rewindCopy = (await rewindDialog.locator('.rewind-copy').innerText()).trim()
+    assert.match(rewindCopy, /Remove this task and everything after it:/)
+    assert.match(rewindCopy, /1 operator task/)
+    assert.ok(rewindCopy.includes('cannot be undone'))
+    assert.ok(
+      (await rewindDialog.locator('.rewind-selected').innerText()).includes(SECOND_TASK),
+      'the confirmation must quote the selected task',
+    )
+    await rewindDialog.locator('button.rewind-confirm').click()
+    const rewindNotice = page.locator('.command-notice', { hasText: 'Rewound:' })
+    await rewindNotice.waitFor({ timeout: 10000 })
+    assert.match(
+      (await rewindNotice.innerText()).trim(),
+      /Rewound: \d+ messages? removed \(1 task\), \d+ kept\./,
+      'the rewind notice must report the applied cut honestly',
+    )
+    await waitFor(
+      async () => {
+        const text = await page.locator('.chat-scroll').innerText()
+        return text.includes(FIRST_TASK) && !text.includes(SECOND_TASK)
+      },
+      { desc: 'the removed turn to disappear while the kept turn stays visible' },
+    )
+    await waitFor(
+      async () => (await page.locator('.chat-group.side-operator').count()) === 1,
+      { desc: 'one operator turn in the rewritten transcript' },
+    )
+    const forkAfterRewind = await waitFor(
+      async () => {
+        const detail = await sessionDetail(forkName)
+        return operatorTurns(detail.events).length === 1 ? detail : null
+      },
+      { desc: 'one persisted operator turn after the rewind' },
+    )
+    assert.ok(
+      forkAfterRewind.events.length < forkDetail.events.length,
+      'rewind must shorten the persisted session',
+    )
+
+    // -- steering: rejection keeps the draft, acceptance clears it -----------
+    await createSession(page, STEER_SESSION)
+    await waitFor(
+      async () => (await page.locator('.chat-title').innerText()).trim() === STEER_SESSION,
+      { desc: 'the steering session to be selected' },
+    )
+    await sendTask(page, STEER_TASK, { mode: 'work' })
+    const steerButton = page.locator('button.composer-steer')
+    await steerButton.waitFor({ state: 'visible', timeout: 30000 })
+    assert.match(
+      (await steerButton.getAttribute('title')) ?? '',
+      /next step/,
+      'the steer control must say where the text lands',
+    )
+    const composerInput = page.locator('textarea.composer-input')
+    await composerInput.fill(STEER_TEXT)
+    await waitFor(async () => !(await steerButton.isDisabled()), {
+      desc: 'the steer action to enable for a non-empty draft',
+    })
+
+    let steerPosts = 0
+    let rejectNextSteer = true
+    await page.route('**/api/runs/*/steer', async (route) => {
+      steerPosts += 1
+      if (rejectNextSteer) {
+        rejectNextSteer = false
+        await route.fulfill({
+          status: 409,
+          contentType: 'application/json',
+          body: JSON.stringify({ detail: STEER_REJECT_DETAIL }),
+        })
+        return
+      }
+      await route.continue()
+    })
+
+    // A rejected POST is a real request that the UI must not treat as accepted.
+    await steerButton.click()
+    await page
+      .locator('.toast', { hasText: STEER_REJECT_DETAIL })
+      .first()
+      .waitFor({ timeout: 10000 })
+    assert.equal(steerPosts, 1, 'the rejected steer must have been POSTed')
+    assert.equal(
+      await composerInput.inputValue(),
+      STEER_TEXT,
+      'a rejected steer must keep the operator draft exactly as typed',
+    )
+    await waitFor(async () => !(await steerButton.isDisabled()), {
+      desc: 'the steer action to re-enable after a rejected request',
+    })
+
+    // Alt+Enter is the explicit steer gesture; this time the real backend
+    // answers 200, so only now may the draft be consumed.
+    await composerInput.focus()
+    await composerInput.press('Alt+Enter')
+    await page
+      .locator('.command-notice', { hasText: 'Steer queued' })
+      .waitFor({ timeout: 10000 })
+    assert.equal(steerPosts, 2, 'the accepted steer must have been POSTed')
+    await waitFor(async () => (await composerInput.inputValue()) === '', {
+      desc: 'the accepted steer to clear the draft',
+    })
+    const steerNotice = (await page.locator('.command-notice').innerText()).trim()
+    assert.ok(
+      steerNotice.includes("applied at the run's next step"),
+      `the steer notice must say it is queued, not delivered (got "${steerNotice}")`,
+    )
+
+    // Stop the still-lingering run so the process leaves no live work behind.
+    await page.locator('form[aria-label="New task"] button:has-text("Stop")').click()
+    await page.locator('.toast', { hasText: 'Run stopped' }).first().waitFor({ timeout: 20000 })
+    await waitForRunEnd(page)
+    const runs = await getJson('/api/runs')
+    assert.ok(
+      runs.every((run) => !['running', 'queued', 'waiting'].includes(run.status)),
+      `backend still reports an active run: ${JSON.stringify(runs.map((run) => run.status))}`,
+    )
+    await page.unroute('**/api/runs/*/steer')
+
+    // The one synthetic 409 above is deliberate; Chromium logs every rejected
+    // fetch as a console error before the app handles it, so allow exactly that
+    // resource error and keep every other console/page error fatal.
+    consoleGuard.assertClean([/Failed to load resource: the server responded with a status of 409 \(Conflict\)/])
+    runner.pass('cooperation-surfaces')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(wsDir)
+    rmTree(be.dir)
+  }
+}
+
 // -- scenario: real models (opt-in) ---------------------------------------------------
 
 async function scenarioReal(runner) {
@@ -3587,6 +4027,13 @@ async function main() {
           scenarioReasoningReplay(currentRunner)
         ),
       },
+      {
+        label: 'cooperation-surfaces',
+        run: () => (
+          (currentRunner = makeRunner('cooperation-surfaces')),
+          scenarioCooperationSurfaces(currentRunner)
+        ),
+      },
     ]
     blocks.push(...hermetic.filter((block) => scenarioSelected(block.label)))
     if (realEnabled && scenarioSelected('real')) {
@@ -3621,6 +4068,7 @@ async function main() {
       'approval-reason',
       'workspace-drag',
       'reasoning-replay',
+      'cooperation-surfaces',
       'real',
     ].filter(scenarioSelected)) {
       results.push({

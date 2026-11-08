@@ -26,8 +26,8 @@
 // Scenarios (CLI contract relied on by ../run.mjs):
 //
 //   --port PORT            (required) TCP port to listen on
-//   --scenario NAME        approval | slow | plan | folding | delete
-//                          (default: approval)
+//   --scenario NAME        approval | slow | plan | folding | delete | reasoning
+//                          | cooperation (default: approval)
 //                          approval: one workspace_write_file call, then the
 //                                    deliverable after the tool result; the first
 //                                    senior opening reply is deliberately
@@ -60,12 +60,21 @@
 //                                    runtime events; a task without the marker
 //                                    keeps the historical non-streaming JSON
 //                                    reply (and persists no reasoning record)
+//                          cooperation: run 1 writes `e2e-undo-marker.txt` once
+//                                    and then delivers; later runs only deliver,
+//                                    so a session can collect a second operator
+//                                    turn for fork/rewind. A task whose text
+//                                    carries the `e2e-steer` marker gets an
+//                                    abortable slow senior opening instead, so
+//                                    the browser can steer a still-running run
+//                                    without waiting for a model reply.
 //   --senior-model NAME    default: e2e-senior
 //   --junior-model NAME    default: e2e-junior
 //   --linger-ms MS         slow: how long the senior's first answer takes
 //                          (default 30000); folding: the second run's
-//                          deliverable delay (the request aborts the moment the
-//                          harness stops the run)
+//                          deliverable delay; cooperation: the senior's
+//                          opening delay for an `e2e-steer` task (every
+//                          request aborts the moment the harness stops the run)
 //
 // Every run a scenario drives is inferred from the transcript as a whole: a
 // request with no envelope events starts a run, and a run appended after the
@@ -84,6 +93,11 @@ const HELLO_FILE = 'e2e-hello.txt'
 const HELLO_CONTENT = 'Hello from the Two Brothers E2E harness.\n'
 /** The file the `delete` scenario asks the junior to remove. */
 const DELETE_TARGET_FILE = 'e2e-approval-reason.txt'
+/** The created-then-undone file of the `cooperation` scenario. */
+const COOPERATION_FILE = 'e2e-undo-marker.txt'
+const COOPERATION_CONTENT = 'Created by the scripted cooperation run.\n'
+/** Marker in a `cooperation` task that asks for the abortable slow opening. */
+const STEER_MARKER = 'e2e-steer'
 
 function parseArgs(argv) {
   const opts = {
@@ -117,7 +131,7 @@ const OPTS = parseArgs(process.argv.slice(2))
 
 // -- deterministic payloads (strict-valid shapes for every protocol kind) --
 
-function payloadFor(kind) {
+function payloadFor(kind, deliverableFile = HELLO_FILE) {
   const task = 'the scripted E2E task'
   switch (kind) {
     case 'consult':
@@ -159,8 +173,8 @@ function payloadFor(kind) {
       }
     case 'deliverable':
       return {
-        result: `Wrote ${HELLO_FILE} with the scripted greeting.`,
-        artifacts: [HELLO_FILE],
+        result: `Wrote ${deliverableFile} with the scripted greeting.`,
+        artifacts: [deliverableFile],
         notes: 'The write went through the operator approval flow.',
         confidence: 0.99,
       }
@@ -198,7 +212,7 @@ function parseEvents(messages) {
 let callCounter = 0
 
 /** Scenarios whose runs are started in work mode (the senior delegates). */
-const WORK_SCENARIOS = new Set(['approval', 'plan', 'folding', 'delete'])
+const WORK_SCENARIOS = new Set(['approval', 'plan', 'folding', 'delete', 'cooperation'])
 
 /**
  * Plan snapshots the `plan` scenario writes, one whole-list snapshot per run:
@@ -343,13 +357,18 @@ function reasoningForKind(kind) {
   return undefined
 }
 
-/** True when the rendered transcript carries an operator task with the marker. */
-function transcriptHasReasoning(messages) {
+/** True when the rendered transcript carries an operator message with `marker`. */
+function transcriptHasMarker(messages, marker) {
   for (const message of messages) {
     if (message.role !== 'user' || typeof message.content !== 'string') continue
-    if (message.content.includes(REASONING_MARKER)) return true
+    if (message.content.includes(marker)) return true
   }
   return false
+}
+
+/** True when the rendered transcript carries an operator task with the marker. */
+function transcriptHasReasoning(messages) {
+  return transcriptHasMarker(messages, REASONING_MARKER)
 }
 
 /** One assistant reply carrying a single tool call. */
@@ -368,8 +387,8 @@ function toolCall(name, args) {
 }
 
 /** Final tool-loop reply: the structured deliverable, optionally lingered. */
-function deliverableReply(linger = 0) {
-  const reply = { content: JSON.stringify(payloadFor('deliverable')), toolCalls: [] }
+function deliverableReply(linger = 0, file = HELLO_FILE) {
+  const reply = { content: JSON.stringify(payloadFor('deliverable', file)), toolCalls: [] }
   if (linger > 0) reply.linger = linger
   return reply
 }
@@ -417,6 +436,18 @@ function decide(body) {
         if (toolResults > 0) return deliverableReply()
         return toolCall('workspace_delete_file', { path: DELETE_TARGET_FILE })
       }
+      if (OPTS.scenario === 'cooperation') {
+        // run 1 writes the marker file once (the undo record to apply); later
+        // runs only deliver, so the session can grow a second operator turn
+        // without parking on another approval
+        if (completedRuns === 0 && toolResults === 0) {
+          return toolCall('workspace_write_file', {
+            path: COOPERATION_FILE,
+            content: COOPERATION_CONTENT,
+          })
+        }
+        return deliverableReply(0, COOPERATION_FILE)
+      }
       // approval scenario (unchanged): one workspace write, then the deliverable
       // once its tool result (approval outcome included) is in the conversation
       if (toolResults > 0) return deliverableReply()
@@ -424,9 +455,10 @@ function decide(body) {
     }
     // senior verify slice: claim verification in plain text, call nothing,
     // so the harness' tool loop ends and the review step begins
+    const verifiedFile = OPTS.scenario === 'cooperation' ? COOPERATION_FILE : HELLO_FILE
     return {
       content:
-        `Verification: read ${HELLO_FILE} back from the workspace and it ` +
+        `Verification: read ${verifiedFile} back from the workspace and it ` +
         'matches the requested content. No further checks needed.',
       toolCalls: [],
     }
@@ -436,11 +468,22 @@ function decide(body) {
   const last = events[events.length - 1] ?? null
 
   // slow scenario: only the senior's opening answer lingers; the abortable
-  // delay (not a truthy flag) is what makes a run stop unwind in ~1 s
-  const linger =
+  // delay (not a truthy flag) is what makes a run stop unwind in ~1 s.
+  // cooperation: a task carrying the `e2e-steer` marker gets the same
+  // abortable slow opening, so the browser has a deterministic steering
+  // window on a genuinely running run.
+  const slowLinger =
     OPTS.scenario === 'slow' && role === 'senior' && !events.some((e) => e.from === 'senior')
       ? OPTS.lingerMs
       : 0
+  const steerLinger =
+    OPTS.scenario === 'cooperation' &&
+    role === 'senior' &&
+    !events.some((e) => e.from === 'senior') &&
+    transcriptHasMarker(messages, STEER_MARKER)
+      ? OPTS.lingerMs
+      : 0
+  const linger = Math.max(slowLinger, steerLinger)
 
   const newTask = isNewTask(last)
   let kind
