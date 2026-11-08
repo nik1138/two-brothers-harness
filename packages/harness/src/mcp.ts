@@ -53,7 +53,10 @@
  *
  * Model-facing text of one result is capped at 20 KiB (`MCP_OUTPUT_MAX_CHARS`,
  * pi's `MCP_OUTPUT_MAX_BYTES`): `output.ts` keeps the head and tail with the
- * shell runner's `...[truncated N chars]...` marker. Each tool call gets a
+ * shell runner's `...[truncated N chars]...` marker. A run with spill enabled
+ * passes `deferOutputBounds: true` instead, so the full sanitized text reaches
+ * the harness's spill layer (which saves it and applies its own bounded
+ * preview); without spill the clip is unchanged. Each tool call gets a
  * per-call `timeoutMs` (default 60 s, overridable per server entry) so a
  * hung server cannot stall the run; a timeout comes back as an
  * `MCP tool error: timed out after …` tool result, never a crash. A caller
@@ -281,6 +284,14 @@ export interface McpLoadOptions {
   /** Build the transport for a server (defaults to stdio / streamable-HTTP
    *  from the spec). Hermetic tests return pi-mcp's `InMemoryTransport`. */
   transportFor?(serverName: string, spec: McpServerSpec): McpTransport;
+  /**
+   * Keep sanitized MCP text unbounded (no 20 KiB clip) so the calling
+   * harness's spill layer can save the full output and show a bounded
+   * preview. Enable only when the run also passes `HarnessOptions.spill`;
+   * without spill the default 20 KiB clip and its truncation marker stay
+   * exactly as before.
+   */
+  deferOutputBounds?: boolean;
 }
 
 /**
@@ -398,15 +409,20 @@ function isTimeoutError(exc: unknown): boolean {
   return exc instanceof McpTimeoutError || (exc instanceof Error && exc.name === "McpTimeoutError");
 }
 
-/** Render a CallToolResult as the tool-result string our Tool interface returns. */
-function callToolResultToString(result: CallToolResult): string {
+/**
+ * Render a CallToolResult as the tool-result string our Tool interface
+ * returns. `maxChars` undefined keeps the sanitized full text for the harness
+ * spill layer; otherwise the historical 20 KiB head+tail clip applies.
+ */
+function callToolResultToString(result: CallToolResult, maxChars?: number): string {
   const blocks = toLlmContent(result);
   const parts = blocks.map((block) =>
     "text" in block && typeof block.text === "string"
       ? block.text
       : `[${block.type} content]`,
   );
-  const text = boundOutput(sanitizeOutput(parts.join("\n").trim()), MCP_OUTPUT_MAX_CHARS).text;
+  const raw = sanitizeOutput(parts.join("\n").trim());
+  const text = maxChars === undefined ? raw : boundOutput(raw, maxChars).text;
   if (result.isError) return `MCP tool error: ${text || "unknown error"}`;
   return text || "(empty result)";
 }
@@ -418,6 +434,7 @@ function mcpToolToTool(
   client: McpClient,
   timeoutMs: number,
   isTaken: (name: string) => boolean,
+  deferOutputBounds: boolean,
 ): McpToolEntry {
   const displayName = mcpToolDisplayName(serverName, tool.name);
   return {
@@ -435,6 +452,7 @@ function mcpToolToTool(
       try {
         return callToolResultToString(
           await client.callTool(tool.name, args ?? {}, { signal, timeoutMs }),
+          deferOutputBounds ? undefined : MCP_OUTPUT_MAX_CHARS,
         );
       } catch (exc) {
         // a hung tool call is a tool error for the model, not a crashed run;
@@ -527,8 +545,13 @@ export async function loadMcpTools(
       await client.connect(transport);
       const listed = await client.listTools();
       const converted = listed.map((tool) => {
-        const entry = mcpToolToTool(name, tool, client, timeoutMs, (candidate) =>
-          usedNames.has(candidate),
+        const entry = mcpToolToTool(
+          name,
+          tool,
+          client,
+          timeoutMs,
+          (candidate) => usedNames.has(candidate),
+          options.deferOutputBounds === true,
         );
         usedNames.add(entry.name);
         displayNames[entry.name] = entry.displayName;

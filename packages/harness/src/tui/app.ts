@@ -1097,6 +1097,12 @@ interface TurnSetup {
   endpoints: RoleEndpoints;
   resources: TuiResources;
   mcpConfig?: string;
+  /**
+   * Private spill directory for oversized tool results (`<sessionsDir>/spill`).
+   * The app always passes it; an embedded caller that omits it keeps the
+   * historical clipping path.
+   */
+  spillRoot?: string;
   streamTokens?: boolean;
   signal?: AbortSignal;
   /**
@@ -1170,7 +1176,9 @@ async function buildTurnHarness(setup: TurnSetup): Promise<TurnHarness> {
     const merged = mergeMcpConfig(base, pluginServers);
     for (const line of merged.diagnostics) setup.onWarning(line);
     try {
-      mcp = await loadMcpTools(merged.config);
+      mcp = await loadMcpTools(merged.config, {
+        deferOutputBounds: setup.spillRoot !== undefined,
+      });
       toolScopes = {
         shared: mcp.sharedTools,
         senior: mcp.seniorTools,
@@ -1188,6 +1196,7 @@ async function buildTurnHarness(setup: TurnSetup): Promise<TurnHarness> {
     ...(hasScopes ? { toolScopes } : {}),
     endpoints,
     ...(compaction ? { compaction } : {}),
+    ...(setup.spillRoot !== undefined ? { spill: { root: setup.spillRoot } } : {}),
     ...(bindings !== null ? { hooks: bindings.hooks } : {}),
     ...(setup.resources.skills.skills.length > 0 ? { skills: setup.resources.skills } : {}),
     ...(setup.onRuntimeEvent !== undefined ? { onEvent: setup.onRuntimeEvent } : {}),
@@ -2747,6 +2756,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
           endpoints: turnProviders.endpoints,
           resources,
           ...(options.mcpConfig !== undefined ? { mcpConfig: options.mcpConfig } : {}),
+          spillRoot: path.join(sessionsDir, "spill"),
           ...(options.streamTokens === true ? { streamTokens: true } : {}),
           ...(turnWorkspace !== undefined ? { workspace: turnWorkspace } : {}),
           ...(options.providerOverrides !== undefined

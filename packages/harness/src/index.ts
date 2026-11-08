@@ -88,6 +88,31 @@ export {
 } from "./mcp.ts";
 export * from "./commands.ts";
 export {
+  SpillStore,
+  SPILL_DEFAULT_MAX_INLINE_CHARS,
+  SPILL_ID_PATTERN,
+  SPILL_MARKER_PREFIX,
+  SPILL_READ_MAX_CHARS,
+  SPILL_READ_TOOL_DESCRIPTION,
+  SPILL_READ_TOOL_NAME,
+  SPILL_READ_TOOL_PARAMETERS,
+  assertSpillId,
+  formatSpillRead,
+  isSpilledText,
+  spillInlineBudget,
+  spillInstruction,
+  spillMarker,
+  spillPreview,
+  spillReadBudget,
+  type SavedSpill,
+  type SpillChunk,
+  type SpillContext,
+  type SpillOptions,
+  type SpillPreview,
+  type SpillPreviewOptions,
+  type SpillReadOptions,
+} from "./spill.ts";
+export {
   clipText,
   clipBlock,
   clipArgs,

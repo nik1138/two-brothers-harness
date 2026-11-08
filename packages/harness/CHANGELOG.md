@@ -18,6 +18,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Bounded tool-output spill:** oversized plain-text tool results are saved in
+  full under a private spill root and the model receives a bounded head/tail
+  preview plus a `[[SPILL id=... chars=...]]` marker and one `spill_read`
+  instruction line. The new `spill_read` tool (`{id, offset?, max_chars?}`)
+  returns at most 16 KiB per call, validates random-hex ids before touching the
+  filesystem, and can never read an arbitrary path. `HarnessOptions.spill`
+  (`{root, maxInlineChars?, maxReadChars?}`, default budget 20,000 chars)
+  enables it; `serve` uses `<sessionsDir>/spill`, while the CLI and TUI use the
+  session-file directory when one is configured (a run without a session file
+  keeps the historical clipping). MCP results are handed to the spill layer
+  unbounded when spill is on and keep the existing 20 KiB clip when it is not.
+  Storage failure is fail-soft: the result falls back to the existing
+  `...[truncated N chars]...` marker and the run records one warning. Spill
+  files persist until the operator removes the directory; no new runtime
+  dependency.
+
 - **Wave 26: browser coverage for the wave-25 web surfaces, TUI clipboard and
   attention, an external editor, the undo lifecycle, fork-from-here, session
   hardening, a doctor MCP check and per-preset context windows:**

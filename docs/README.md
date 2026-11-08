@@ -12,6 +12,7 @@ One flat set of documents, grouped by what you are trying to do.
 ## Extend
 
 - [Plugins](plugins.md) — ES-module plugins: tools, scopes, hooks, MCP servers, per-plugin options.
+- [Tool-output spill](spill.md) — oversized tool results: bounded preview, `spill_read`, storage and retention.
 - [Testing](testing.md) — the gates, suites, and end-to-end layers in each tree.
 
 ## Project

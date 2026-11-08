@@ -209,6 +209,18 @@ import {
   type RuntimeEvent,
 } from "./runevents.ts";
 import {
+  formatSpillRead,
+  isSpilledText,
+  SPILL_READ_TOOL_DESCRIPTION,
+  SPILL_READ_TOOL_NAME,
+  SPILL_READ_TOOL_PARAMETERS,
+  SpillStore,
+  spillInlineBudget,
+  spillPreview,
+  spillReadBudget,
+  type SpillOptions,
+} from "./spill.ts";
+import {
   sanitizeTodos,
   summarizeTodos,
   todoResultText,
@@ -714,6 +726,18 @@ export interface HarnessOptions {
    * continues with the full context.
    */
   compaction?: CompactionSettings;
+  /**
+   * Bounded tool-output spill: when set, a plain-text tool result longer than
+   * `maxInlineChars` (default 20,000) is saved in full under `root` and the
+   * model receives a bounded head/tail preview plus a
+   * `[[SPILL id=… chars=…]]` marker and one `spill_read` instruction line.
+   * `spill_read` joins both role belts and reads only validated spill ids,
+   * never a path. A storage failure is
+   * fail-soft: the result falls back to the existing clipping marker and the
+   * run records one warning. Files persist until the operator removes `root`;
+   * the harness does not delete them.
+   */
+  spill?: SpillOptions;
   /** Overrides `cfg.maxRounds` for this harness instance. */
   maxRounds?: number;
   /**
@@ -1046,6 +1070,10 @@ export class TwoBrothersHarness {
   /** Set once a compaction attempt failed this run: never hammer a failing summarizer. */
   private compactionFailed = false;
   private compactionWarnings: string[] = [];
+  /** Fail-soft tool-output spill warnings (folded into `result.warnings`). */
+  private spillWarnings: string[] = [];
+  /** Spill storage, or null when `options.spill` is unset (current clipping). */
+  private readonly spillStore: SpillStore | null;
   /** Fail-soft operator-steering warnings (folded into `result.warnings`). */
   private steeringWarnings: string[] = [];
   /** Set once a steering callback failed this run: never call it again. */
@@ -1056,6 +1084,7 @@ export class TwoBrothersHarness {
   constructor(cfg: Config, options: HarnessOptions = {}) {
     this.cfg = cfg;
     this.options = options;
+    this.spillStore = options.spill === undefined ? null : new SpillStore(options.spill.root);
     const warn = options.onProviderWarning;
     this.providers = {
       senior:
@@ -1643,6 +1672,57 @@ export class TwoBrothersHarness {
 
   // -- tool helpers ------------------------------------------------------------
 
+  /** True when this harness is configured with spill storage. */
+  private spillReadOffered(): boolean {
+    return this.spillStore !== null;
+  }
+
+  /**
+   * Whether a belt carries a tool that can do real work (not the display-only
+   * plan tool or the output-retrieval helper). Consult nodes use this to keep
+   * their exact pre-tools request path when spill_read/todo_write are the only
+   * entries; a real tool still opens the bounded loop.
+   */
+  private hasTaskTools(tools: readonly Tool[]): boolean {
+    return tools.some(
+      (tool) => tool.name !== TODO_TOOL_NAME && tool.name !== SPILL_READ_TOOL_NAME,
+    );
+  }
+
+  /**
+   * The built-in retrieval tool. It reads only the configured spill store:
+   * the model supplies an id (validated against random hex by `SpillStore`),
+   * never a path. Invalid/missing ids come back as a normal tool-error string,
+   * never an exception into the loop.
+   */
+  private spillReadTool(): Tool {
+    return {
+      name: SPILL_READ_TOOL_NAME,
+      description: SPILL_READ_TOOL_DESCRIPTION,
+      parameters: SPILL_READ_TOOL_PARAMETERS,
+      execute: async (args) => {
+        const store = this.spillStore;
+        if (store === null) return "spill_read error: spill storage is not configured";
+        const id = typeof args.id === "string" ? args.id : String(args.id ?? "");
+        const offset = Number(args.offset ?? 0);
+        const rawMax = args.max_chars ?? args.maxChars;
+        const maxChars = rawMax === undefined ? undefined : Number(rawMax);
+        try {
+          const chunk = await store.read(id, {
+            offset: Number.isFinite(offset) ? offset : 0,
+            ...(maxChars !== undefined && Number.isFinite(maxChars) ? { maxChars } : {}),
+          });
+          return formatSpillRead(
+            chunk,
+            spillReadBudget({ maxReadChars: this.options.spill?.maxReadChars }),
+          );
+        } catch (exc) {
+          return `spill_read error: ${exc instanceof Error ? exc.message : String(exc)}`;
+        }
+      },
+    };
+  }
+
   /**
    * The junior's belt: the workspace's tool belt (when configured), plus the
    * `shared` and `junior` scopes of the role-scoped registry. The legacy
@@ -1657,6 +1737,7 @@ export class TwoBrothersHarness {
       ...(scopes?.shared ?? []),
       ...(scopes?.junior ?? []),
       ...(this.options.tools ?? []),
+      ...(this.spillReadOffered() ? [this.spillReadTool()] : []),
       this.todoWriteTool(state),
     ];
   }
@@ -1678,6 +1759,7 @@ export class TwoBrothersHarness {
       ...(scopes?.senior ?? []),
       ...(this.options.tools ?? []).filter(verifyName),
       ...(this.options.seniorTools ?? []),
+      ...(this.spillReadOffered() ? [this.spillReadTool()] : []),
       this.todoWriteTool(state),
     ];
   }
@@ -1689,7 +1771,7 @@ export class TwoBrothersHarness {
    * while still joining the belt whenever the pass runs for real tools.
    */
   private hasVerifyTools(tools: readonly Tool[]): boolean {
-    return tools.some((tool) => tool.name !== TODO_TOOL_NAME);
+    return this.hasTaskTools(tools);
   }
 
   /**
@@ -1751,6 +1833,52 @@ export class TwoBrothersHarness {
         return todoResultText(todos);
       },
     };
+  }
+
+  /**
+   * Bound one model-facing tool result through the optional spill store.
+   * Small results pass through untouched. Over-budget plain text is saved in
+   * full and replaced by a bounded preview + marker. Storage failure is
+   * fail-soft: the existing clipping marker is used instead, and one warning
+   * is recorded for `result.warnings`. `spill_read` output is never re-spilled
+   * (it is already bounded), and an existing marker is not double-wrapped.
+   */
+  private async spillToolResult(
+    state: CooperationState,
+    toolName: string,
+    callId: string | undefined,
+    result: string,
+  ): Promise<string> {
+    const store = this.spillStore;
+    const settings = this.options.spill;
+    if (store === null || settings === undefined) return result;
+    if (toolName === SPILL_READ_TOOL_NAME || isSpilledText(result)) return result;
+    if (result.length <= spillInlineBudget(settings)) return result;
+    try {
+      const preview = await spillPreview(
+        result,
+        store,
+        {
+          session: this.sessionId(state.ctx),
+          tool: toolName,
+          ...(callId !== undefined ? { callId } : {}),
+          label: "result",
+        },
+        {
+          ...(settings.maxInlineChars !== undefined
+            ? { maxInlineChars: settings.maxInlineChars }
+            : {}),
+          ...(settings.maxReadChars !== undefined ? { maxReadChars: settings.maxReadChars } : {}),
+        },
+      );
+      return preview.text;
+    } catch (exc) {
+      const detail = exc instanceof Error ? exc.message : String(exc);
+      this.spillWarnings.push(
+        `tool output spill failed for ${toolName}: ${detail}; using the clipped output`,
+      );
+      return boundOutput(result, spillInlineBudget(settings)).text;
+    }
   }
 
   /**
@@ -1851,7 +1979,17 @@ export class TwoBrothersHarness {
     if (pair !== null && status === "denied") {
       state.approvalDenials.set(pair.key, (state.approvalDenials.get(pair.key) ?? 0) + 1);
     }
-    this.emitRuntime({ type: "tool_completed", tool: call.name, status, result: compact, actor });
+    // The model-facing result is the bounded spill preview (or the original
+    // text when small / spill disabled). The compact event copy stays small.
+    const modelResult = await this.spillToolResult(state, call.name, callId, result);
+    const compactModel = compactToolResult(modelResult);
+    this.emitRuntime({
+      type: "tool_completed",
+      tool: call.name,
+      status,
+      result: compactModel,
+      actor,
+    });
     this.emitStream({
       type: "tool_result",
       role,
@@ -1859,9 +1997,10 @@ export class TwoBrothersHarness {
       status: streamToolStatus(status),
       at: nowIso(),
       callId,
-      result: typeof compact === "string" ? compact : JSON.stringify(compact),
+      result:
+        typeof compactModel === "string" ? compactModel : JSON.stringify(compactModel),
     });
-    return result;
+    return modelResult;
   }
 
   /**
@@ -1967,7 +2106,11 @@ export class TwoBrothersHarness {
           : {}),
       });
       for (const call of response.toolCalls) {
-        const tool = toolMap.get(call.name);
+        const tool =
+          toolMap.get(call.name) ??
+          (call.name === SPILL_READ_TOOL_NAME && this.spillStore !== null
+            ? this.spillReadTool()
+            : undefined);
         let result: string;
         if (!tool) {
           result = `unknown tool: ${call.name}`;
@@ -2002,7 +2145,11 @@ export class TwoBrothersHarness {
     kind: string,
   ): Promise<Record<string, unknown>> {
     const tools = this.consultToolSet(state, role);
-    if (!this.offersTools(role, tools)) return this.ask(state, role, kind);
+    // spill_read (and the display-only plan tool) alone do not justify a tool
+    // loop: a tool-less consult run keeps its exact plain request path.
+    if (!this.hasTaskTools(tools) || !this.offersTools(role, tools)) {
+      return this.ask(state, role, kind);
+    }
     return (await this.consultWithTools(state, role, kind, tools)).payload;
   }
 
@@ -2175,7 +2322,7 @@ export class TwoBrothersHarness {
       payload = await this.askWithMessages(state, "senior", "review", build(), build);
     } else if (state.mode !== "work") {
       const tools = this.consultToolSet(state, "senior");
-      if (this.offersTools("senior", tools)) {
+      if (this.hasTaskTools(tools) && this.offersTools("senior", tools)) {
         const grounded = await this.consultWithTools(state, "senior", "review", tools);
         payload = grounded.payload;
         consultedEvidence = grounded.evidence;
@@ -2284,6 +2431,7 @@ export class TwoBrothersHarness {
     this.checkCancel(); // stopped before the start: raise, write nothing
     this.compactionFailed = false;
     this.compactionWarnings = [];
+    this.spillWarnings = [];
     this.steeringWarnings = [];
     this.steeringFailed = false;
     this.steeringCount = 0;
@@ -2343,7 +2491,7 @@ export class TwoBrothersHarness {
         rounds: state.rounds,
         context: ctx,
         errors: [...state.errors, ...this.lastErrors],
-        warnings: [...this.compactionWarnings, ...this.steeringWarnings],
+        warnings: [...this.compactionWarnings, ...this.steeringWarnings, ...this.spillWarnings],
         cancelled: false,
         usage: this.usageSnapshot(),
         promptAudits: state.promptAudits,
@@ -2367,7 +2515,7 @@ export class TwoBrothersHarness {
           rounds: 0,
           context: ctx,
           errors: [...state.errors, "stopped by operator"],
-          warnings: [...this.compactionWarnings, ...this.steeringWarnings],
+          warnings: [...this.compactionWarnings, ...this.steeringWarnings, ...this.spillWarnings],
           cancelled: true,
           usage: this.usageSnapshot(),
           promptAudits: state.promptAudits,
