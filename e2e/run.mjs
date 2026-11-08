@@ -737,6 +737,74 @@ async function scenarioChat(runner) {
       'raw [[REPAIR_REQUEST]] marker visible in chat',
     )
 
+    // -- per-message actions never cover the bubble (visual regression) ------
+    // A one-word operator turn reproduces the tightest layout: the fork,
+    // rewind and copy controls must sit beside the bubble, never over "OK".
+    await sendTask(page, 'OK')
+    await waitForRunEnd(page)
+    await waitFor(
+      async () => (await page.locator('.chat-group.side-operator').count()) === 2,
+      { desc: 'the second operator turn after the short task' },
+    )
+    const shortTurn = page.locator('.chat-group.side-operator').last()
+    await shortTurn.scrollIntoViewIfNeeded()
+    const shortWrap = shortTurn.locator('.bubble-wrap')
+    await shortWrap.hover()
+    const toolbar = shortTurn.locator('.bubble-actions')
+    await toolbar.waitFor({ state: 'visible' })
+    await waitFor(
+      async () => (await toolbar.evaluate((el) => getComputedStyle(el).opacity)) === '1',
+      { desc: 'the per-message toolbar to appear on hover' },
+    )
+    const actionLayout = await shortTurn.evaluate((group) => {
+      const bubble = group.querySelector('.bubble')
+      const body = bubble.querySelector('.bubble-body') ?? bubble
+      const actions = group.querySelector('.bubble-actions')
+      const textRange = document.createRange()
+      textRange.selectNodeContents(body)
+      const rect = (el) => el.getBoundingClientRect().toJSON()
+      return {
+        text: body.textContent.trim(),
+        bubble: rect(bubble),
+        textRect: textRange.getBoundingClientRect().toJSON(),
+        actions: rect(actions),
+        buttons: [...actions.querySelectorAll('button')].map((button) => ({
+          label: button.textContent.trim(),
+          ...rect(button),
+        })),
+      }
+    })
+    assert.equal(actionLayout.text, 'OK', 'the short operator turn must stay a one-word bubble')
+    assert.ok(
+      actionLayout.actions.right <= actionLayout.bubble.left + 0.5,
+      `the action row must sit outside the bubble (row=${JSON.stringify(actionLayout.actions)}, bubble=${JSON.stringify(actionLayout.bubble)})`,
+    )
+    for (const button of actionLayout.buttons) {
+      assert.ok(
+        !rectsOverlap(button, actionLayout.textRect),
+        `the ${button.label} action overlaps the message text (button=${JSON.stringify(button)}, text=${JSON.stringify(actionLayout.textRect)})`,
+      )
+    }
+    for (let i = 0; i < actionLayout.buttons.length; i++) {
+      for (let j = i + 1; j < actionLayout.buttons.length; j++) {
+        assert.ok(
+          !rectsOverlap(actionLayout.buttons[i], actionLayout.buttons[j]),
+          `per-message actions overlap each other: ${actionLayout.buttons[i].label}/${actionLayout.buttons[j].label}`,
+        )
+      }
+    }
+    // Keyboard focus reveals the same toolbar (no hover required).
+    await page.mouse.move(0, 0)
+    await waitFor(
+      async () => (await toolbar.evaluate((el) => getComputedStyle(el).opacity)) === '0',
+      { desc: 'the toolbar to hide when the pointer leaves' },
+    )
+    await toolbar.locator('button').first().focus()
+    await waitFor(
+      async () => (await toolbar.evaluate((el) => getComputedStyle(el).opacity)) === '1',
+      { desc: 'the toolbar to appear for keyboard focus' },
+    )
+
     consoleGuard.assertClean()
     runner.pass('chat')
 
@@ -771,6 +839,16 @@ async function assertFullyVisible(page, locator, label) {
   assert.ok(
     box.y >= 0 && box.y + box.height <= vp.height && box.x >= 0 && box.x + box.width <= vp.width,
     `${label} not fully visible in viewport (box=${JSON.stringify(box)}, viewport=${vp.width}x${vp.height})`,
+  )
+}
+
+/** True when two DOMRects overlap by more than a sub-pixel seam. */
+function rectsOverlap(a, b, tolerance = 0.5) {
+  return (
+    a.left < b.right - tolerance &&
+    b.left < a.right - tolerance &&
+    a.top < b.bottom - tolerance &&
+    b.top < a.bottom - tolerance
   )
 }
 
