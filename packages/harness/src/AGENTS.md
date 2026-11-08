@@ -19,7 +19,7 @@ Local map for the package sources. Project rules live in
 - `cli.ts`, `clihelp.ts`, `clilayout.ts`, `clistyle.ts`, `output.ts`,
   `completions.ts`, `doctor.ts` — CLI surface.
 - Tool-facing modules: `workspace*.ts`, `shell.ts`, `mcp.ts`, `plugins.ts`,
-  `skills.ts`, `commands.ts`, `toolschema.ts`, `permissions.ts`.
+  `skills.ts`, `commands.ts`, `toolschema.ts`, `permissions.ts`, `spill.ts`.
 - `tui/` — the full-screen TUI modules.
 - `config.ts`, `presets.ts`, `settings_store.ts`, `secretbox.ts` — settings,
   presets, encrypted secrets; `prompts.ts` loads `../shared/prompts.json`.
@@ -49,6 +49,13 @@ Local map for the package sources. Project rules live in
   must accept both (`SessionLayout`); writers follow `.layout.json`. Never
   assume the flat path when resolving a session name. See
   `docs/session-storage.md`.
+- `serve`/TUI hold the store's single-writer lock (`.writer.json`); `sessions
+  migrate` refuses while a live writer owns it (`--force` is unsafe/explicit).
+  Read routes must use strict resolution and never materialize a directory for
+  an unknown name.
+- Oversized plain-text tool results spill under a private root; `spill_read`
+  validates random-hex ids and must never gain arbitrary-path access. Storage
+  failure falls back to clipped output with a warning.
 - Runtime dependencies are curated and exact-pinned (`zod`,
   `@earendil-works/pi-mcp`). A new runtime import needs a ledger entry in
   `docs/history/ts-rewrite-plan.md` and an owner decision.

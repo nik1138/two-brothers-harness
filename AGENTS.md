@@ -182,9 +182,14 @@ node dist/cli.js run "Plan a migration from Redis to Valkey" --provider mock
   flat (`<name>.jsonl` + `<stem>.meta.json` + `runtime/<name>.events.jsonl`)
   and, after `sessions migrate`, project/session directories
   (`<project>/<stem>/session.jsonl` + `meta.json` + `events.jsonl`); readers
-  accept both (`src/sessionlayout.ts`, `docs/session-storage.md`). Run records
+  accept both (`src/sessionlayout.ts`, `docs/session-storage.md`). `serve`/TUI
+  hold the store's single-writer lock (`.writer.json`) and `sessions migrate`
+  refuses while a live writer owns it. Run records
   and pending approvals are in-memory only; role settings persist to
   `sessions/settings.json` (keys encrypted at rest).
+- Oversized plain-text tool results spill under a private root (`<sessions-dir>/spill`
+  on the server) and are retrieved by the `spill_read` tool; storage failure
+  falls back to the existing clipped marker.
 - Known gaps (see `docs/design-review.md`): WAN fault injection and long soaks
   are deliberately manual/not in the offline gates (a hermetic scale suite
   covers large sessions and transcripts, 200-session listings, concurrent
