@@ -1190,6 +1190,13 @@ async function runOnce(
   // fast instead of opening stdio connections first
   const endpoints = cliEndpoints(cfg);
   validateRunConfig(cfg, endpoints);
+  // Overflow spill is enabled only when a session file is in play: the files
+  // live beside it and persist until the operator removes them. Without
+  // `--session-file` the historical clipping stays byte-identical.
+  const sessionFilePath = context?.store?.path ?? (cfg.sessionFile || "");
+  const spillRoot = sessionFilePath
+    ? path.join(path.dirname(path.resolve(sessionFilePath)), "spill")
+    : undefined;
   // `run --stream`: one NDJSON line per run event, printed as it happens. The
   // human summary and cost line are suppressed below — the terminal `result`
   // event carries usage, and consumers compute cost via `estimateCost`.
@@ -1259,7 +1266,9 @@ async function runOnce(
       io.error(paintWarningPrefix(textStyle, `[warn] ${line}`));
     }
     try {
-      mcp = await loadMcpTools(merged.config);
+      mcp = await loadMcpTools(merged.config, {
+        deferOutputBounds: spillRoot !== undefined,
+      });
       toolScopes.shared = mcp.sharedTools;
       toolScopes.senior = mcp.seniorTools;
       toolScopes.junior = mcp.juniorTools;
@@ -1317,6 +1326,7 @@ async function runOnce(
       ...(endpoints ? { endpoints } : {}),
       ...native,
       ...(compaction ? { compaction } : {}),
+      ...(spillRoot ? { spill: { root: spillRoot } } : {}),
       ...(bindings ? { hooks: bindings.hooks } : {}),
       ...(resources?.skills ? { skills: resources.skills } : {}),
       ...(onStreamEvent ? { onStreamEvent } : {}),

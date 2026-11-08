@@ -644,6 +644,24 @@ test("MCP tool results are clipped to 20 KiB with a truncation marker", async ()
   }
 });
 
+test("deferOutputBounds keeps full MCP text for the harness spill layer", async () => {
+  const big = "H".repeat(100) + "M".repeat(30_000) + "T".repeat(100);
+  const fake = startFakeServer([
+    { name: "big", description: "big", inputSchema: { type: "object" }, run: () => big },
+  ]);
+  const mcp = await loadMcpTools(configOf({ srv: { command: "x" } }), {
+    transportFor: () => fake.client,
+    deferOutputBounds: true,
+  });
+  try {
+    // The clip is deliberately skipped here: the run's harness must receive
+    // the full text so its spill layer can save it and bound the preview.
+    assert.equal(await toolOf(mcp, "srv", "big").execute({}), big);
+  } finally {
+    await mcp.client.close();
+  }
+});
+
 test("a hung tool call times out as a tool error result (default 60 s, config override)", async () => {
   assert.equal(MCP_DEFAULT_TIMEOUT_MS, 60_000);
   const fake = startFakeServer([

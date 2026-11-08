@@ -335,6 +335,21 @@ test("event-only session directories are recoverable by findRun", () => {
   }
 });
 
+test("the root-level spill directory is never treated as a project", () => {
+  const root = tmpdir();
+  try {
+    const spill = path.join(root, "spill");
+    fs.mkdirSync(spill, { recursive: true });
+    fs.writeFileSync(path.join(spill, "abc.txt"), "tool output", "utf-8");
+    const layout = new SessionLayout(root);
+    assert.deepEqual(layout.list(), []);
+    assert.equal(layout.resolve("abc"), null);
+    assert.deepEqual(layout.listEventSessions(), []);
+  } finally {
+    cleanup(root);
+  }
+});
+
 test("loadSessionDocs with an empty sessions dir is empty, not cwd", () => {
   assert.deepEqual(loadSessionDocs(""), { docs: [], skipped: 0, truncated: false });
 });

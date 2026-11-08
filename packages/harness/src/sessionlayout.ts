@@ -97,9 +97,10 @@ const RUNTIME_DIR = "runtime";
 const UNDO_DIR = "undo";
 /**
  * Direct children that are application data, never project directories:
- * runtime sidecars (flat layout), undo images, and hidden temp/marker files.
+ * runtime sidecars (flat layout), undo images, spill files, and hidden
+ * temp/marker files.
  */
-const RESERVED_DIRS = new Set([RUNTIME_DIR, UNDO_DIR]);
+const RESERVED_DIRS = new Set([RUNTIME_DIR, UNDO_DIR, "spill"]);
 
 /** True when `value` is a plain object. */
 function isRecord(value: unknown): value is Record<string, unknown> {

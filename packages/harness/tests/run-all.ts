@@ -25,6 +25,7 @@ import "./workspace.test.ts";
 import "./editqueue.test.ts";
 import "./output.test.ts";
 import "./shell.test.ts";
+import "./spill.test.ts";
 import "./settings.test.ts";
 import "./runtime.test.ts";
 import "./server.test.ts";

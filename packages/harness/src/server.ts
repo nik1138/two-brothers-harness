@@ -1579,6 +1579,9 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   ): Promise<HarnessResult> {
     const store = storeFor(name, projectPath ?? workspace?.root ?? null);
     const context = store.exists() ? restoreContext(store) : new SharedContext(store);
+    // Tool-output spill lives beside the session files; files persist until the
+    // operator removes this directory (no automatic retention, documented).
+    const spillRoot = path.join(sessionsDir, "spill");
     // Fail fast on an unusable model config before touching the network;
     // with per-role endpoints each role is checked against its own
     // effective settings and the message names the misconfigured role.
@@ -1622,7 +1625,9 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       const merged = mergeMcpConfig(base, pluginServers);
       for (const line of merged.diagnostics) console.warn(`[two-brothers] ${line}`);
       try {
-        mcp = await loadMcpTools(merged.config);
+        // The harness always has a spill store on the server, so MCP hands it
+        // the full sanitized text; the harness saves/spills above its budget.
+        mcp = await loadMcpTools(merged.config, { deferOutputBounds: true });
         for (const err of mcp.errors) console.warn(`[two-brothers] ${err}`);
         toolScopes = mergeScopeBuckets(toolScopes, {
           shared: mcp.sharedTools,
@@ -1686,6 +1691,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       endpoints,
       skills: skillCatalog(),
       ...(compaction ? { compaction } : {}),
+      spill: { root: spillRoot },
       ...(toolScopes ? { toolScopes } : {}),
       ...(hooks ? { hooks } : {}),
       // Mid-run operator steering (wave 23): the run job hands the record's
