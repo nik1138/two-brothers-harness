@@ -593,7 +593,10 @@ test("unknown command yields a nonzero exit code", async () => {
     const runner = new ShellRunner({ cwd: root });
     const result = await runner.run("definitely-not-a-real-command-tb-123");
     assert.equal(result.status, "ok");
-    assert.equal(result.exit_code, 127); // bash: command not found
+    // POSIX shells report 127; cmd.exe reports 1/9009. Only "nonzero" is
+    // portable, and Windows now uses the native shell (WSL bash is rejected).
+    assert.notEqual(result.exit_code, 0);
+    if (process.platform !== "win32") assert.equal(result.exit_code, 127);
   } finally {
     cleanup();
   }

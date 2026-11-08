@@ -50,9 +50,11 @@ export const TASKKILL_TIMEOUT_MS = 5_000;
 /**
  * After the child exits, wait this long for stdio `close` before returning.
  * Normal commands close the pipes immediately; a background grandchild that
- * inherited them cannot pin the tool call forever.
+ * inherited them cannot pin the tool call forever. Two seconds is generous
+ * enough for a loaded machine (a 250 ms bound dropped real output under
+ * concurrent test load) while still bounding an inherited pipe.
  */
-export const EXIT_CLOSE_GRACE_MS = 250;
+export const EXIT_CLOSE_GRACE_MS = 2000;
 
 export const STATUS_OK = "ok";
 export const STATUS_ERROR = "error";
@@ -232,16 +234,33 @@ function findOnPath(name: string): string | null {
 }
 
 /**
+ * True when a resolved `bash` is the Windows WSL launcher rather than a
+ * native POSIX shell (Git Bash / MSYS2 / Cygwin). WSL bash runs commands in a
+ * different filesystem with Linux path rules, so auto-selecting it breaks
+ * ordinary Windows commands (`"C:\Program Files\..."`); callers that really
+ * want WSL can pass an explicit `bash` path.
+ */
+export function isWslBashPath(bashPath: string): boolean {
+  const normalized = path.resolve(bashPath).toLowerCase();
+  return (
+    /[\\/]windows[\\/]system32[\\/]bash\.exe$/.test(normalized) ||
+    /[\\/]windowsapps[\\/]bash\.exe$/.test(normalized)
+  );
+}
+
+/**
  * Return the bash path if it can actually spawn, else null.
  *
  * Some sandboxed parents deny MSYS2 its shared-memory object and every
  * `bash -c` dies instantly (exit 0xC0000142 shows up as a nonzero spawnSync
  * status); in that case we silently fall back to the platform shell, exactly
- * like Python's `_probe_bash`.
+ * like Python's `_probe_bash`. On Windows the WSL launcher is rejected: it
+ * passes the probe but runs commands in another filesystem.
  */
 function probeBash(): string | null {
   const bash = findOnPath("bash");
   if (!bash) return null;
+  if (process.platform === "win32" && isWslBashPath(bash)) return null;
   try {
     const probe = spawnSync(bash, ["-c", "exit 0"], {
       stdio: "ignore",
@@ -499,14 +518,20 @@ export class ShellRunner {
     const exited = new Promise<"exit" | { error: Error }>((resolve) => {
       // `close` (not `exit`) is what guarantees every stdio chunk was
       // delivered; but a background grandchild can keep the pipe open after
-      // the shell exits. Wait for `close`, with a short bounded fallback so a
+      // the shell exits. Wait for `close`, with a bounded fallback so a
       // no-timeout command cannot hang forever on an inherited pipe.
+      let settled = false;
+      let fallback: NodeJS.Timeout | undefined;
+      const finish = () => {
+        if (fallback) clearTimeout(fallback);
+        if (settled) return;
+        settled = true;
+        resolve("exit");
+      };
+      child.once("close", finish);
       child.once("exit", () => {
-        const fallback = setTimeout(() => resolve("exit"), EXIT_CLOSE_GRACE_MS);
-        child.once("close", () => {
-          clearTimeout(fallback);
-          resolve("exit");
-        });
+        if (settled) return;
+        fallback = setTimeout(finish, EXIT_CLOSE_GRACE_MS);
       });
       child.once("error", (err) => resolve({ error: err }));
     });
