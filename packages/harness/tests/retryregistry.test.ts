@@ -1,7 +1,7 @@
 /**
  * Provider retry-registry tests (Wave-2 Lane B): pi-ai's error classification,
- * Retry-After honoring and context-overflow detection ported onto the owned
- * OpenAI-compatible retry loop.
+ * retry-after-ms/Retry-After honoring and context-overflow detection ported
+ * onto the owned OpenAI-compatible retry loop.
  *
  * Responses come from a real `node:http` stub on an ephemeral port; waits are
  * recorded through the injectable sleeper, so only the one deliberate
@@ -20,11 +20,13 @@ import {
   isContextOverflowError,
   isContextOverflowMessage,
   OpenAICompatibleProvider,
+  parseRetryAfterMs,
   parseRetryAfterSeconds,
   ProviderAbortError,
   ProviderContextOverflowError,
   ProviderHttpError,
   RETRY_AFTER_CAP_SECONDS,
+  retryAfterSecondsFromHeaders,
   type Sleeper,
 } from "../src/provider.ts";
 
@@ -95,7 +97,12 @@ function recordingSleeper(): {
 
 function providerFor(
   baseUrl: string,
-  overrides: { retries?: number; sleeper?: Sleeper; signal?: AbortSignal } = {},
+  overrides: {
+    retries?: number;
+    sleeper?: Sleeper;
+    signal?: AbortSignal;
+    rng?: () => number;
+  } = {},
 ): OpenAICompatibleProvider {
   return new OpenAICompatibleProvider({
     provider: "openai",
@@ -109,6 +116,7 @@ function providerFor(
     model: "m",
     sleeper: overrides.sleeper,
     signal: overrides.signal,
+    rng: overrides.rng,
   });
 }
 
@@ -248,6 +256,40 @@ test("Retry-After parses seconds and HTTP-dates, clamps and caps", () => {
   assert.equal(parseRetryAfterSeconds(undefined), undefined);
 });
 
+test("retry-after-ms parses milliseconds, wins over Retry-After and falls through when malformed", () => {
+  assert.equal(parseRetryAfterMs("250"), 0.25);
+  assert.equal(parseRetryAfterMs("0"), 0);
+  assert.equal(parseRetryAfterMs("150000"), RETRY_AFTER_CAP_SECONDS);
+  assert.equal(parseRetryAfterMs("-250"), 0);
+  for (const bad of ["soon", "250ms", "", " ", null, undefined]) {
+    assert.equal(parseRetryAfterMs(bad), undefined, `value ${JSON.stringify(bad)}`);
+  }
+
+  const now = Date.parse("2026-11-02T10:00:00Z");
+  const headers = (values: Record<string, string>): Headers => new Headers(values);
+  assert.equal(
+    retryAfterSecondsFromHeaders(headers({ "retry-after-ms": "250", "retry-after": "10" })),
+    0.25,
+  );
+  assert.equal(
+    retryAfterSecondsFromHeaders(headers({ "retry-after-ms": "soon", "retry-after": "2" })),
+    2,
+  );
+  assert.equal(
+    retryAfterSecondsFromHeaders(
+      headers({ "retry-after-ms": "soon", "retry-after": "Mon, 02 Nov 2026 10:00:05 GMT" }),
+      now,
+    ),
+    5,
+  );
+  assert.equal(
+    retryAfterSecondsFromHeaders(headers({ "retry-after-ms": "150000" })),
+    RETRY_AFTER_CAP_SECONDS,
+  );
+  assert.equal(retryAfterSecondsFromHeaders(headers({})), undefined);
+  assert.equal(retryAfterSecondsFromHeaders(undefined), undefined);
+});
+
 // ---------------------------------------------------------------------------
 // retry loop over a real stub endpoint
 // ---------------------------------------------------------------------------
@@ -333,6 +375,67 @@ test("5xx Retry-After is honored too", async () => {
   }
 });
 
+test("retry-after-ms wins over Retry-After", async () => {
+  const stub = await startStub([
+    {
+      status: 429,
+      body: { error: "slow down" },
+      headers: { "retry-after-ms": "25", "Retry-After": "9" },
+    },
+    { status: 200, body: okBody() },
+  ]);
+  const sleep = recordingSleeper();
+  try {
+    const provider = providerFor(stub.baseUrl, { sleeper: sleep.sleeper });
+    assert.equal(await provider.chat(USER, "message"), "ok");
+    assert.equal(stub.calls(), 2);
+    assert.ok(Math.abs(sleep.total() - 0.025) < 1e-9, `slept ${sleep.total()}s, not 0.025s`);
+  } finally {
+    await stub.close();
+  }
+});
+
+test("malformed retry-after-ms falls through to Retry-After", async () => {
+  const stub = await startStub([
+    {
+      status: 429,
+      body: { error: "slow down" },
+      headers: { "retry-after-ms": "soon", "Retry-After": "0.1" },
+    },
+    { status: 200, body: okBody() },
+  ]);
+  const sleep = recordingSleeper();
+  try {
+    const provider = providerFor(stub.baseUrl, { sleeper: sleep.sleeper });
+    assert.equal(await provider.chat(USER, "message"), "ok");
+    assert.equal(stub.calls(), 2);
+    assert.ok(Math.abs(sleep.total() - 0.1) < 1e-9, `slept ${sleep.total()}s, not 0.1s`);
+  } finally {
+    await stub.close();
+  }
+});
+
+test("malformed or absent retry headers fall back to the scheduled backoff", async () => {
+  const stub = await startStub([
+    {
+      status: 503,
+      body: { error: "busy" },
+      headers: { "retry-after-ms": "soon" },
+    },
+    { status: 200, body: okBody() },
+  ]);
+  const sleep = recordingSleeper();
+  try {
+    // rng 0 pins the jitter to no reduction, so the scheduled 2 s is exact.
+    const provider = providerFor(stub.baseUrl, { sleeper: sleep.sleeper, rng: () => 0 });
+    assert.equal(await provider.chat(USER, "message"), "ok");
+    assert.equal(stub.calls(), 2);
+    assert.ok(Math.abs(sleep.total() - 2) < 1e-9, `slept ${sleep.total()}s, not 2s`);
+  } finally {
+    await stub.close();
+  }
+});
+
 test("5xx without Retry-After keeps the exponential backoff", async () => {
   const stub = await startStub([
     { status: 500, body: { error: "busy" } },
@@ -341,7 +444,8 @@ test("5xx without Retry-After keeps the exponential backoff", async () => {
   ]);
   const sleep = recordingSleeper();
   try {
-    const provider = providerFor(stub.baseUrl, { sleeper: sleep.sleeper });
+    // rng 0 pins the jitter to no reduction, so the schedule is exact.
+    const provider = providerFor(stub.baseUrl, { sleeper: sleep.sleeper, rng: () => 0 });
     assert.equal(await provider.chat(USER, "message"), "ok");
     assert.equal(stub.calls(), 3);
     assert.ok(Math.abs(sleep.total() - (2 + 4)) < 1e-9, `slept ${sleep.total()}s, not 6s`);

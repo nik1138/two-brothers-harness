@@ -18,6 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Provider retries: `retry-after-ms` and bounded backoff jitter** (port of
+  pi-ai's `utils/provider-retry.ts`, MIT): a retryable response's
+  `retry-after-ms` header (finite milliseconds) now wins over `Retry-After`
+  (seconds or HTTP-date), with both capped at the existing 120 s; malformed
+  values fall through to the next source and then to the scheduled backoff.
+  Exponential waits now carry a bounded 0–25% reduction (never an increase,
+  injectable RNG for tests), while provider-supplied delays are honored
+  exactly. The public retry contract is unchanged: default 6 retries, base
+  2 s, cap 30 s, abortable waits and per-attempt timeout. Files:
+  `src/provider.ts`, `src/index.ts`; tests `tests/retryregistry.test.ts` and
+  new `tests/retryjitter.test.ts`.
 - **Wave 26: browser coverage for the wave-25 web surfaces, TUI clipboard and
   attention, an external editor, the undo lifecycle, fork-from-here, session
   hardening, a doctor MCP check and per-preset context windows:**

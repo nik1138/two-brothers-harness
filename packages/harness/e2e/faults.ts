@@ -375,6 +375,8 @@ interface FaultProviderOptions {
   backoffCap?: number;
   /** Documented injection seam: lets a scenario record the backoff contract. */
   sleeper?: Sleeper;
+  /** RNG for backoff jitter; defaults to no reduction so waits are exact. */
+  rng?: () => number;
   onWarning?: (line: string) => void;
 }
 
@@ -392,6 +394,9 @@ function faultProvider(baseUrl: string, options: FaultProviderOptions = {}): Ope
     retries: options.retries ?? 2,
     backoffBase: options.backoffBase ?? 0.05,
     backoffCap: options.backoffCap ?? 0.5,
+    // Pin the 0–25% backoff jitter to "no reduction": these scenarios assert
+    // the documented schedule as an exact upper bound.
+    rng: options.rng ?? (() => 0),
     ...(options.sleeper !== undefined ? { sleeper: options.sleeper } : {}),
     ...(options.onWarning !== undefined ? { onWarning: options.onWarning } : {}),
   };

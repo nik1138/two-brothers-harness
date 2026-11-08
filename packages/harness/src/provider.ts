@@ -13,20 +13,25 @@
  * `BaseHttpProvider.complete` runs an explicit loop — at most
  * `retries + 1` attempts, exponential backoff between them
  * (`backoffDelays`: base 2 s, factor 2, capped at 30 s), each attempt bounded
- * by `Config.timeout` on the client. A run-level `AbortSignal` aborts the loop
- * between attempts and the in-flight fetch, so a stopped run never sleeps
- * through a full backoff.
+ * by `Config.timeout` on the client. The scheduled backoff carries bounded
+ * jitter (a random 0–25% reduction, never an increase; `jitterBackoffSeconds`
+ * with an injectable RNG) so retries from concurrent clients spread out; a
+ * provider-supplied delay is honored exactly, without jitter. A run-level
+ * `AbortSignal` aborts the loop between attempts and the in-flight fetch, so a
+ * stopped run never sleeps through a full backoff.
  *
  * Failures are classified by an ordered registry ported from pi-ai's
  * `utils/{retry,provider-retry,overflow}.ts` (MIT): 408/409/429/5xx,
  * transport failures and provider-requested retries are retried, while other
  * 4xx, quota/billing exhaustion, provider-specific rejection types
  * (Anthropic `authentication_error`, Google `PERMISSION_DENIED`, …) and
- * context overflow fail fast instead of burning the retry budget. A
- * `Retry-After` header on a retryable response replaces that attempt's fixed
- * backoff (seconds or HTTP-date, capped at 120 s), and context-overflow
- * payloads raise `ProviderContextOverflowError` so callers can compact the
- * context rather than retry the same request.
+ * context overflow fail fast instead of burning the retry budget. A retryable
+ * response's `retry-after-ms` header (finite milliseconds) or `Retry-After`
+ * header (seconds or HTTP-date) replaces that attempt's backoff, capped at
+ * 120 s; `retry-after-ms` wins when both are present, and a malformed value
+ * falls through to the next source. Context-overflow payloads raise
+ * `ProviderContextOverflowError` so callers can compact the context rather
+ * than retry the same request.
  *
  * Every provider carries a `UsageTracker` recording per-call token usage; the
  * cooperation state machine (`harness.ts`) aggregates the roles' snapshots
@@ -463,8 +468,8 @@ export const BACKOFF_CAP_SECONDS = 30.0;
  * Waits before retry attempts 1..N: base, base*2, ... capped at `cap`.
  *
  * `backoffDelays(6)` → `[2, 4, 8, 16, 30, 30]` (7 attempts total);
- * `backoffDelays(0)` → `[]` (a single attempt, no waiting). Pure
- * function — the retry loop's only timing input, so tests stay fast.
+ * `backoffDelays(0)` → `[]` (a single attempt, no waiting). Pure and
+ * unjittered: the retry loop applies `jitterBackoffSeconds` on top.
  */
 export function backoffDelays(
   retries: number,
@@ -472,6 +477,29 @@ export function backoffDelays(
   cap = BACKOFF_CAP_SECONDS,
 ): number[] {
   return Array.from({ length: Math.max(0, retries) }, (_, i) => Math.min(base * 2 ** i, cap));
+}
+
+/** Largest fraction of a scheduled backoff that jitter may remove (25%). */
+export const BACKOFF_JITTER_FRACTION = 0.25;
+
+/**
+ * Apply bounded jitter to one scheduled backoff delay: a random 0–25%
+ * reduction, never an increase. `random` is injectable (default `Math.random`)
+ * so tests can pin both endpoints; values outside `[0, 1]` (including a
+ * non-finite sample) are clamped rather than trusted. Non-finite or
+ * non-positive delays are returned unchanged.
+ *
+ * Only the exponential schedule is jittered — a provider-supplied
+ * `Retry-After`/`retry-after-ms` delay is honored exactly.
+ */
+export function jitterBackoffSeconds(
+  delay: number,
+  random: () => number = Math.random,
+): number {
+  if (!Number.isFinite(delay) || delay <= 0) return delay;
+  const sample = random();
+  const unit = Number.isFinite(sample) ? Math.min(Math.max(sample, 0), 1) : 0;
+  return delay * (1 - unit * BACKOFF_JITTER_FRACTION);
 }
 
 // ---------------------------------------------------------------------------
@@ -499,6 +527,37 @@ export function parseRetryAfterSeconds(
   const delay = Number.isFinite(seconds) ? seconds : (Date.parse(text) - now) / 1000;
   if (!Number.isFinite(delay)) return undefined;
   return Math.min(Math.max(delay, 0), RETRY_AFTER_CAP_SECONDS);
+}
+
+/**
+ * Parse a `retry-after-ms` header (milliseconds) into seconds, clamped to
+ * `[0, RETRY_AFTER_CAP_SECONDS]`. `undefined` for absent, empty or non-finite
+ * values, so the caller can fall through to `Retry-After` and then to its own
+ * backoff.
+ */
+export function parseRetryAfterMs(value: string | null | undefined): number | undefined {
+  if (value === null || value === undefined) return undefined;
+  const text = value.trim();
+  if (text === "") return undefined;
+  const milliseconds = Number(text);
+  if (!Number.isFinite(milliseconds)) return undefined;
+  return Math.min(Math.max(milliseconds / 1000, 0), RETRY_AFTER_CAP_SECONDS);
+}
+
+/**
+ * The provider-requested retry delay from a response's headers, already capped
+ * at `RETRY_AFTER_CAP_SECONDS`: `retry-after-ms` (finite milliseconds) wins,
+ * then `Retry-After` (delta-seconds or HTTP-date). `undefined` when neither
+ * carries a finite value, so the retry loop keeps its jittered backoff.
+ */
+export function retryAfterSecondsFromHeaders(
+  headers: Headers | undefined,
+  now = Date.now(),
+): number | undefined {
+  if (headers === undefined) return undefined;
+  const milliseconds = parseRetryAfterMs(headers.get("retry-after-ms"));
+  if (milliseconds !== undefined) return milliseconds;
+  return parseRetryAfterSeconds(headers.get("retry-after"), now);
 }
 
 /**
@@ -692,7 +751,10 @@ export class ProviderHttpError extends Error {
   readonly retryable: boolean;
   /** Stable label from `PROVIDER_ERROR_REGISTRY` (e.g. "client-error"). */
   readonly reason: string;
-  /** Provider-requested delay from `Retry-After`, already capped; else undefined. */
+  /**
+   * Provider-requested delay from `retry-after-ms`/`Retry-After`, already
+   * capped; else undefined. Never jittered by the retry loop.
+   */
   readonly retryAfterSeconds?: number;
 
   constructor(
@@ -980,6 +1042,11 @@ export interface ModelProviderConfig extends ProviderConfig {
   signal?: AbortSignal;
   fetchImpl?: FetchLike;
   sleeper?: Sleeper;
+  /**
+   * Random source for backoff jitter, expected in `[0, 1]` (default
+   * `Math.random`). Tests inject a constant to pin the 0–25% reduction.
+   */
+  rng?: () => number;
 }
 
 /** One provider error body normalized for the retry registry. */
@@ -1096,6 +1163,7 @@ export abstract class BaseHttpProvider implements Provider {
   private readonly runSignal?: AbortSignal;
   private readonly fetchImpl: FetchLike;
   private readonly sleeper: Sleeper;
+  private readonly random: () => number;
   /** Per-instance diagnostics sink (subclasses may use it for their own warns). */
   protected readonly onWarning: (line: string) => void;
   private timeoutWarnings = 0;
@@ -1116,6 +1184,7 @@ export abstract class BaseHttpProvider implements Provider {
     this.runSignal = cfg.signal;
     this.fetchImpl = cfg.fetchImpl ?? ((url, init) => fetch(url, init));
     this.sleeper = cfg.sleeper ?? defaultSleeper;
+    this.random = cfg.rng ?? Math.random;
     this.onWarning = cfg.onWarning ?? ((line) => console.error(line));
   }
 
@@ -1223,11 +1292,12 @@ export abstract class BaseHttpProvider implements Provider {
    * The owned retry loop shared by `chat` and `chatWithTools`: at most
    * `retries + 1` attempts, exponential backoff between them, abortable
    * between attempts and inside the in-flight request. Fatal failures throw
-   * immediately; a retryable `ProviderHttpError` carrying a `Retry-After`
-   * delay waits that long instead of the scheduled backoff. Either streaming
-   * sink (`onDelta` text / `onThinkingDelta` reasoning) opts the attempt into
-   * streaming; each attempt re-sends the full request, so no streaming state
-   * survives a retry.
+   * immediately; a retryable `ProviderHttpError` carrying a `retry-after-ms`
+   * or `Retry-After` delay waits exactly that long instead of the scheduled
+   * backoff, while the scheduled backoff itself gets the bounded jitter from
+   * `jitterBackoffSeconds`. Either streaming sink (`onDelta` text /
+   * `onThinkingDelta` reasoning) opts the attempt into streaming; each attempt
+   * re-sends the full request, so no streaming state survives a retry.
    */
   protected async complete(
     messages: ChatMessage[],
@@ -1249,7 +1319,11 @@ export abstract class BaseHttpProvider implements Provider {
         if (attempt >= delays.length) throw err;
         if (err instanceof ProviderTimeoutError) this.warnTimeout(attempt);
         const retryAfter = err instanceof ProviderHttpError ? err.retryAfterSeconds : undefined;
-        await this.wait(retryAfter ?? delays[attempt], signal);
+        // Provider-supplied delays are honored exactly; only the scheduled
+        // exponential backoff is jittered.
+        const delay =
+          retryAfter ?? jitterBackoffSeconds(delays[attempt], this.random);
+        await this.wait(delay, signal);
         attempt += 1;
       }
     }
@@ -1447,7 +1521,7 @@ export abstract class BaseHttpProvider implements Provider {
           message,
           retryable,
           reason,
-          retryable ? parseRetryAfterSeconds(response.headers.get("retry-after")) : undefined,
+          retryable ? retryAfterSecondsFromHeaders(response.headers) : undefined,
         );
       }
       if (!streaming) return (await response.json()) as unknown;
@@ -1493,7 +1567,8 @@ interface OpenAIStreamState extends StreamState {
  * other 4xx, quota/billing exhaustion and context overflow fail fast (mirrors
  * `build_responder`'s fail-fast validation spirit — retrying a 401 seven times
  * would only hammer a misconfigured endpoint). A retryable response's
- * `Retry-After` header replaces that attempt's fixed backoff.
+ * `retry-after-ms` (`Retry-After` when absent) header replaces that attempt's
+ * fixed backoff; the fallback exponential schedule carries 0–25% jitter.
  *
  * Streaming: `stream: true` plus `stream_options.include_usage: true`;
  * `choices[0].delta.content` is emitted as visible text,
