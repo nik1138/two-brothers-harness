@@ -20,6 +20,12 @@ import type { ReasoningItem, TimelineEntry } from '../runtime'
 import { DEFAULT_KEYBINDINGS, matchesBinding } from '../keybindings'
 import type { KeyBinding } from '../keybindings'
 import type { RewindAction } from '../sessionRewind'
+import {
+  FORK_FROM_HERE_HINT,
+  FORK_FROM_HERE_LABEL,
+  forkFromHerePoint,
+} from '../sessionFork'
+import type { ForkAvailability } from '../sessionFork'
 import { parseMarkdown } from '../markdown'
 import type { MarkdownBlock, MarkdownInline } from '../markdown'
 import type { StreamingBlocks } from '../streaming'
@@ -81,6 +87,15 @@ const props = defineProps<{
   rewindFor?: (seq: number) => RewindAction | null
   /** Run the rewind confirmation for one operator message (`seq`). */
   onRewind?: (seq: number) => void
+  /**
+   * Fork-from-here resolver for one operator message (by envelope `seq`).
+   * Null hides the action; otherwise the shell reports availability, so a live
+   * run or an in-flight action keeps the control visible but disabled with the
+   * honest reason (the backend also refuses with a 409).
+   */
+  forkFromHereFor?: (seq: number) => ForkAvailability | null
+  /** Open the fork-from-here confirmation for one operator message (`seq`). */
+  onForkFromHere?: (seq: number) => void
 }>()
 
 const scrollEl = ref<HTMLElement | null>(null)
@@ -836,6 +851,41 @@ function requestRewind(m: ChatMessage): void {
   props.onRewind?.(m.seq)
 }
 
+// -- fork-from-here affordance -------------------------------------------------
+// Branching the conversation at one operator message is a prefix copy, not a
+// second whole-session fork: the shell always sends this bubble's envelope
+// `seq`. The source file is untouched; a live run or an in-flight fork keeps
+// the control visible but disabled with the truthful reason.
+
+/** The fork action for one bubble, or null when no control is rendered. */
+function forkAction(m: ChatMessage): ForkAvailability | null {
+  if (!props.forkFromHereFor) return null
+  const point = forkFromHerePoint(m)
+  if (!point) return null
+  return props.forkFromHereFor(point.seq)
+}
+
+/** Title/copy for the control: the hint, or the honest block reason. */
+function forkTitle(m: ChatMessage): string {
+  const action = forkAction(m)
+  if (!action) return FORK_FROM_HERE_LABEL
+  return action.available ? FORK_FROM_HERE_HINT : action.reason ?? 'Forking is unavailable here.'
+}
+
+/** Accessible name: the action label, plus the block reason when disabled. */
+function forkLabel(m: ChatMessage): string {
+  const action = forkAction(m)
+  if (!action || action.available) return FORK_FROM_HERE_LABEL
+  return `${FORK_FROM_HERE_LABEL} ${action.reason ?? 'Forking is unavailable here.'}`
+}
+
+/** Confirmed requests only: a blocked control never calls the shell. */
+function requestForkFromHere(m: ChatMessage): void {
+  const action = forkAction(m)
+  if (!action || !action.available) return
+  props.onForkFromHere?.(m.seq)
+}
+
 // -- live "who is acting" status line ------------------------------------------
 // One line, not two: the shell's `activity` text (stopping / queued / working)
 // and the derived actor label share a single row so the stream never shows
@@ -1210,6 +1260,16 @@ watch(
               >{{ copiedId === m.id ? 'copied' : 'copy' }}</button>
 
               <button
+                v-if="row.entry.group.author === 'operator' && forkAction(m)"
+                type="button"
+                class="bubble-copy bubble-fork"
+                :disabled="!forkAction(m)!.available"
+                :title="forkTitle(m)"
+                :aria-label="forkLabel(m)"
+                @click="requestForkFromHere(m)"
+              >fork</button>
+
+              <button
                 v-if="row.entry.group.author === 'operator' && rewindAction(m)"
                 type="button"
                 class="bubble-copy bubble-rewind"
@@ -1492,6 +1552,22 @@ watch(
 
 .bubble-wrap:hover .bubble-rewind:disabled,
 .bubble-wrap:focus-within .bubble-rewind:disabled {
+  opacity: 0.55;
+}
+
+/* Fork-from-here rides beside copy on the bubble's trailing edge, so it never
+   collides with the rewind control on real operator tasks. */
+.bubble-fork {
+  right: 4.2rem;
+}
+
+.bubble-fork:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.bubble-wrap:hover .bubble-fork:disabled,
+.bubble-wrap:focus-within .bubble-fork:disabled {
   opacity: 0.55;
 }
 

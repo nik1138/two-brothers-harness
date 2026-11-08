@@ -36,7 +36,10 @@ import {
   WorkspaceUndoError,
   applyUndo,
   beginUndoCapture,
+  collectOrphanBlobs,
+  collectUndoStore,
   discardUndo,
+  listUndoRecords,
   loadUndoRecord,
   previewUndo,
   type WorkspaceUndoCapture,
@@ -104,8 +107,8 @@ interface RawRecord {
   entries: Array<{
     path: string;
     action: string;
-    pre: { exists: boolean; sha256?: string; size?: number };
-    post: { exists: boolean; sha256?: string; size?: number };
+    pre: { exists: boolean; sha256?: string; size?: number; mode?: number };
+    post: { exists: boolean; sha256?: string; size?: number; mode?: number };
     skipped?: string;
   }>;
   omitted?: { entries: number; reason: string };
@@ -138,6 +141,45 @@ function throwsCode(fn: () => unknown): WorkspaceUndoErrorCode | null {
 
 function blobPath(store: string, hash: string): string {
   return path.join(store, "blobs", hash.slice(0, 2), hash);
+}
+
+/** Write one content-addressed blob by hand and return its sha256 name. */
+function writeBlobFile(store: string, content: string): string {
+  const hash = sha256(content);
+  const file = blobPath(store, hash);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, content, "utf-8");
+  return hash;
+}
+
+/** A minimal parseable record: one post-image entry when `blob` is set. */
+function syntheticRecord(options: {
+  store: string;
+  workspaceRoot: string;
+  createdAt: string;
+  session?: string;
+  blob?: string;
+  preBlob?: string;
+}): RawRecord {
+  const image = (hash: string): { exists: boolean; sha256: string; size: number } => ({
+    exists: true,
+    sha256: hash,
+    size: fs.statSync(blobPath(options.store, hash)).size,
+  });
+  return {
+    version: WORKSPACE_UNDO_VERSION,
+    workspace_root: options.workspaceRoot,
+    ...(options.session !== undefined ? { session: options.session } : {}),
+    created_at: options.createdAt,
+    entries: [
+      {
+        path: "file.txt",
+        action: options.preBlob === undefined ? "write" : "edit",
+        pre: options.preBlob === undefined ? { exists: false } : image(options.preBlob),
+        post: options.blob === undefined ? { exists: false } : image(options.blob),
+      },
+    ],
+  };
 }
 
 /** Every regular file under `dir` (recursive), sorted. */
@@ -859,4 +901,559 @@ test("MAX_MUTATION_CAPTURE_BYTES and MAX_UNDO_FILE_BYTES agree", () => {
   // The seam's read bound and the store's accept bound are one policy: a file
   // the seam declines to read can never trip a different limit later.
   assert.equal(MAX_UNDO_FILE_BYTES, MAX_MUTATION_CAPTURE_BYTES);
+});
+
+// ---------------------------------------------------------------------------
+// retention / garbage collection (wave 26)
+// ---------------------------------------------------------------------------
+
+test("collectUndoStore keeps the newest N records per session and collects orphan blobs", () => {
+  const fx = fixture("tb-undo-retention-");
+  try {
+    const hashes: string[] = [];
+    for (let i = 0; i < 8; i++) {
+      const hash = writeBlobFile(fx.store, `blob-${i}\n`);
+      hashes.push(hash);
+      writeStoredRecord(
+        fx.store,
+        `run-${i}`,
+        syntheticRecord({
+          store: fx.store,
+          workspaceRoot: fs.realpathSync(fx.root),
+          session: "chat.jsonl",
+          createdAt: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString(),
+          blob: hash,
+        }),
+      );
+    }
+    const otherHash = writeBlobFile(fx.store, "other session\n");
+    writeStoredRecord(
+      fx.store,
+      "run-other",
+      syntheticRecord({
+        store: fx.store,
+        workspaceRoot: fs.realpathSync(fx.root),
+        session: "other.jsonl",
+        createdAt: new Date(Date.UTC(2026, 0, 1, 0, 30)).toISOString(),
+        blob: otherHash,
+      }),
+    );
+
+    // Cap is per session: chat keeps 5..7, the other session's one record survives.
+    const result = collectUndoStore(fx.store, { maxRecordsPerSession: 3, maxAgeDays: 0 });
+    assert.equal(result.records_scanned, 9);
+    assert.equal(result.records_kept, 4);
+    assert.deepEqual(
+      [...result.records_removed].sort(),
+      ["run-0", "run-1", "run-2", "run-3", "run-4"],
+    );
+    for (const i of [0, 1, 2, 3, 4]) {
+      assert.equal(fs.existsSync(path.join(fx.store, "runs", `run-${i}.json`)), false);
+      assert.equal(fs.existsSync(blobPath(fx.store, hashes[i])), false, `blob ${i} was collected`);
+    }
+    for (const i of [5, 6, 7]) {
+      assert.equal(fs.existsSync(path.join(fx.store, "runs", `run-${i}.json`)), true);
+      assert.equal(fs.existsSync(blobPath(fx.store, hashes[i])), true);
+    }
+    assert.equal(fs.existsSync(path.join(fx.store, "runs", "run-other.json")), true);
+    assert.equal(fs.existsSync(blobPath(fx.store, otherHash)), true);
+    assert.deepEqual(result.diagnostics, []);
+    assert.equal(result.blobs_removed.length, 5);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("collectUndoStore prunes records older than the max age only when the pass runs", () => {
+  const fx = fixture("tb-undo-age-");
+  try {
+    const oldHash = writeBlobFile(fx.store, "old\n");
+    const freshHash = writeBlobFile(fx.store, "fresh\n");
+    writeStoredRecord(
+      fx.store,
+      "run-old",
+      syntheticRecord({
+        store: fx.store,
+        workspaceRoot: fs.realpathSync(fx.root),
+        session: "chat.jsonl",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        blob: oldHash,
+      }),
+    );
+    writeStoredRecord(
+      fx.store,
+      "run-fresh",
+      syntheticRecord({
+        store: fx.store,
+        workspaceRoot: fs.realpathSync(fx.root),
+        session: "chat.jsonl",
+        createdAt: "2026-02-20T00:00:00.000Z",
+        blob: freshHash,
+      }),
+    );
+
+    // No pass: both records are still present (nothing runs implicitly).
+    assert.equal(listUndoRecords(fx.store).length, 2);
+
+    const result = collectUndoStore(fx.store, {
+      maxRecordsPerSession: 100,
+      maxAgeDays: 30,
+      now: new Date("2026-03-01T00:00:00.000Z"),
+    });
+    assert.deepEqual(result.records_removed, ["run-old"]);
+    assert.equal(result.records_kept, 1);
+    assert.equal(fs.existsSync(path.join(fx.store, "runs", "run-old.json")), false);
+    assert.equal(fs.existsSync(blobPath(fx.store, oldHash)), false);
+    assert.equal(fs.existsSync(blobPath(fx.store, freshHash)), true);
+
+    // 0 disables age pruning: an old record survives a cap-only pass.
+    writeStoredRecord(
+      fx.store,
+      "run-old-2",
+      syntheticRecord({
+        store: fx.store,
+        workspaceRoot: fs.realpathSync(fx.root),
+        session: "chat.jsonl",
+        createdAt: "2020-01-01T00:00:00.000Z",
+        blob: writeBlobFile(fx.store, "ancient\n"),
+      }),
+    );
+    const capOnly = collectUndoStore(fx.store, {
+      maxRecordsPerSession: 100,
+      maxAgeDays: 0,
+      now: new Date("2026-03-01T00:00:00.000Z"),
+    });
+    assert.deepEqual(capOnly.records_removed, []);
+    assert.equal(fs.existsSync(path.join(fx.store, "runs", "run-old-2.json")), true);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("active runs are never retention candidates, even when over the cap or too old", () => {
+  const fx = fixture("tb-undo-active-");
+  try {
+    for (let i = 0; i < 4; i++) {
+      writeStoredRecord(
+        fx.store,
+        `run-${i}`,
+        syntheticRecord({
+          store: fx.store,
+          workspaceRoot: fs.realpathSync(fx.root),
+          session: "chat.jsonl",
+          createdAt:
+            i === 0 ? "2020-01-01T00:00:00.000Z" : `2026-02-2${5 + i}T00:00:00.000Z`,
+          blob: writeBlobFile(fx.store, `active-${i}\n`),
+        }),
+      );
+    }
+    const result = collectUndoStore(fx.store, {
+      maxRecordsPerSession: 1,
+      maxAgeDays: 30,
+      now: new Date("2026-03-01T00:00:00.000Z"),
+      activeRuns: ["run-0", "run-2"],
+    });
+    // Cap keeps only run-3; run-0 is far too old but active and must survive,
+    // and run-2 is over the cap but active.
+    assert.deepEqual([...result.records_removed].sort(), ["run-1"]);
+    for (const runId of ["run-0", "run-2", "run-3"]) {
+      assert.equal(fs.existsSync(path.join(fx.store, "runs", `${runId}.json`)), true, runId);
+    }
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("a shared blob survives while any retained record references it, then is collected", () => {
+  const fx = fixture("tb-undo-shared-");
+  try {
+    const shared = writeBlobFile(fx.store, "shared bytes\n");
+    const unique = writeBlobFile(fx.store, "unique bytes\n");
+    writeStoredRecord(
+      fx.store,
+      "run-a",
+      syntheticRecord({
+        store: fx.store,
+        workspaceRoot: fs.realpathSync(fx.root),
+        session: "chat.jsonl",
+        createdAt: "2026-02-01T00:00:00.000Z",
+        preBlob: shared,
+        blob: unique,
+      }),
+    );
+    writeStoredRecord(
+      fx.store,
+      "run-b",
+      syntheticRecord({
+        store: fx.store,
+        workspaceRoot: fs.realpathSync(fx.root),
+        session: "chat.jsonl",
+        createdAt: "2026-02-02T00:00:00.000Z",
+        preBlob: shared,
+        blob: shared,
+      }),
+    );
+
+    assert.equal(discardUndo(fx.store, "run-a"), true);
+    const first = collectOrphanBlobs(fx.store);
+    assert.deepEqual(first.removed, [unique]);
+    assert.equal(fs.existsSync(blobPath(fx.store, shared)), true, "run-b still references it");
+
+    assert.equal(discardUndo(fx.store, "run-b"), true);
+    const second = collectOrphanBlobs(fx.store);
+    assert.deepEqual(second.removed, [shared]);
+    assert.equal(fs.existsSync(blobPath(fx.store, shared)), false);
+    assert.deepEqual(filesUnder(path.join(fx.store, "blobs")), []);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("a record that cannot be unlinked keeps its blobs (never collects a surviving record's bytes)", () => {
+  const fx = fixture("tb-undo-unlinkfail-");
+  try {
+    const unique = writeBlobFile(fx.store, "only run-a needs these bytes\n");
+    writeStoredRecord(
+      fx.store,
+      "run-a",
+      syntheticRecord({
+        store: fx.store,
+        workspaceRoot: fs.realpathSync(fx.root),
+        session: "chat.jsonl",
+        createdAt: "2026-02-01T00:00:00.000Z",
+        preBlob: unique,
+        blob: unique,
+      }),
+    );
+    writeStoredRecord(
+      fx.store,
+      "run-b",
+      syntheticRecord({
+        store: fx.store,
+        workspaceRoot: fs.realpathSync(fx.root),
+        session: "chat.jsonl",
+        createdAt: "2026-02-02T00:00:00.000Z",
+        blob: writeBlobFile(fx.store, "newer\n"),
+      }),
+    );
+
+    const result = collectUndoStore(fx.store, {
+      maxRecordsPerSession: 1,
+      maxAgeDays: 0,
+      beforeUnlink: (_recordPath, runId) => {
+        if (runId === "run-a") {
+          const error = new Error("busy") as NodeJS.ErrnoException;
+          error.code = "EPERM";
+          throw error;
+        }
+      },
+    });
+    assert.deepEqual(result.records_removed, []);
+    assert.equal(result.records_kept, 2);
+    assert.equal(fs.existsSync(path.join(fx.store, "runs", "run-a.json")), true);
+    assert.equal(
+      fs.existsSync(blobPath(fx.store, unique)),
+      true,
+      "a failed unlink must not make its pre-image collectable",
+    );
+    assert.ok(result.diagnostics.some((line) => line.includes("cannot remove undo record run-a")));
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("orphan collection refuses a corrupt record (never deletes bytes it cannot prove unreferenced)", () => {
+  const fx = fixture("tb-undo-corrupt-gc-");
+  try {
+    const hash = writeBlobFile(fx.store, "referenced by a readable record\n");
+    writeStoredRecord(
+      fx.store,
+      "run-ok",
+      syntheticRecord({
+        store: fx.store,
+        workspaceRoot: fs.realpathSync(fx.root),
+        session: "chat.jsonl",
+        createdAt: "2026-02-01T00:00:00.000Z",
+        blob: hash,
+      }),
+    );
+    fs.writeFileSync(path.join(fx.store, "runs", "run-corrupt.json"), "{not json", "utf-8");
+
+    const gc = collectOrphanBlobs(fx.store);
+    assert.deepEqual(gc.removed, []);
+    assert.match(String(gc.skipped), /could not be parsed/);
+    assert.equal(fs.existsSync(blobPath(fx.store, hash)), true);
+
+    // Retention itself is fail-soft: one diagnostic, no throw.
+    const result = collectUndoStore(fx.store, { maxRecordsPerSession: 20, maxAgeDays: 0 });
+    assert.ok(result.diagnostics.length >= 1);
+    assert.equal(fs.existsSync(blobPath(fx.store, hash)), true);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("retention is fail-soft on an unusable store root (one diagnostic, no crash)", () => {
+  const fx = fixture("tb-undo-broken-gc-");
+  try {
+    const blocker = path.join(fx.base, "blocked");
+    fs.writeFileSync(blocker, "not a directory", "utf-8");
+
+    const result = collectUndoStore(blocker, { maxRecordsPerSession: 5, maxAgeDays: 30 });
+    assert.deepEqual(result.records_removed, []);
+    assert.ok(result.diagnostics.length >= 1);
+    assert.match(result.diagnostics[0], /undo store root is not a directory/);
+
+    const gc = collectOrphanBlobs(blocker);
+    assert.deepEqual(gc.removed, []);
+    assert.ok(gc.diagnostics.length >= 1);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("capture close runs the bounded retention pass and keeps its own record", async () => {
+  const fx = fixture("tb-undo-close-gc-");
+  try {
+    for (let i = 0; i < 5; i++) {
+      writeStoredRecord(
+        fx.store,
+        `run-${i}`,
+        syntheticRecord({
+          store: fx.store,
+          workspaceRoot: fs.realpathSync(fx.root),
+          session: "chat.jsonl",
+          createdAt: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString(),
+          blob: writeBlobFile(fx.store, `close-${i}\n`),
+        }),
+      );
+    }
+    const capture = beginUndoCapture(fx.store, "run-new", fx.root, {
+      session: "chat.jsonl",
+      maxRecordsPerSession: 3,
+      maxAgeDays: 0,
+      activeRuns: () => ["run-0"],
+    });
+    const ws = new Workspace(fx.root, allow(), null, { mutationRecorder: capture.recorder });
+    await ws.write_file("fresh.txt", "fresh\n");
+    capture.close();
+
+    const retention = capture.lastRetention;
+    assert.ok(retention);
+    assert.deepEqual([...retention.records_removed].sort(), ["run-1", "run-2"]);
+    assert.equal(retention.records_kept, 4);
+    assert.equal(fs.existsSync(path.join(fx.store, "runs", "run-new.json")), true);
+    assert.equal(fs.existsSync(path.join(fx.store, "runs", "run-0.json")), true);
+    assert.equal(fs.existsSync(path.join(fx.store, "runs", "run-2.json")), false);
+    assert.equal(capture.diagnostics.length, 0);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// file mode / ownership restoration (wave 26)
+// ---------------------------------------------------------------------------
+
+test(
+  "undo restores the recorded POSIX mode of an edited script",
+  { skip: process.platform === "win32" ? "POSIX mode bits only" : false },
+  async () => {
+    const fx = runFixture();
+    try {
+      const script = path.join(fx.root, "run.sh");
+      fs.writeFileSync(script, "#!/bin/sh\necho old\n", "utf-8");
+      fs.chmodSync(script, 0o755);
+
+      assert.equal((await fx.ws.edit_file("run.sh", "echo old", "echo new")).status, "ok");
+      assert.equal(fs.statSync(script).mode & 0o7777, 0o755);
+      const record = readStoredRecord(fx.store, fx.runId);
+      assert.equal(record.entries[0].pre.mode, 0o755);
+
+      const result = applyUndo(fx.store, fx.runId, fx.root);
+      assert.equal(result.applied, 1);
+      assert.equal(result.entries[0].mode_restored, true);
+      assert.equal(fs.readFileSync(script, "utf-8"), "#!/bin/sh\necho old\n");
+      assert.equal(fs.statSync(script).mode & 0o7777, 0o755);
+    } finally {
+      fx.cleanup();
+    }
+  },
+);
+
+test(
+  "a delete-only run records and restores the POSIX mode from the live file",
+  { skip: process.platform === "win32" ? "POSIX mode bits only" : false },
+  async () => {
+    const fx = runFixture();
+    try {
+      const script = path.join(fx.root, "cleanup.sh");
+      fs.writeFileSync(script, "#!/bin/sh\necho cleanup\n", "utf-8");
+      fs.chmodSync(script, 0o755);
+
+      // The run's FIRST and only mutation of this path is a delete, so the
+      // mode can only come from the mutation seam's pre-image stat.
+      assert.equal((await fx.ws.delete_file("cleanup.sh")).status, "ok");
+      const entry = readStoredRecord(fx.store, fx.runId).entries[0];
+      assert.equal(entry.action, "delete");
+      assert.equal(entry.pre.mode, 0o755);
+
+      const result = applyUndo(fx.store, fx.runId, fx.root);
+      assert.equal(result.applied, 1);
+      assert.equal(result.entries[0].mode_restored, true);
+      assert.equal(fs.readFileSync(script, "utf-8"), "#!/bin/sh\necho cleanup\n");
+      assert.equal(fs.statSync(script).mode & 0o7777, 0o755);
+    } finally {
+      fx.cleanup();
+    }
+  },
+);
+
+test(
+  "undo restores the recorded POSIX mode after delete + undo",
+  { skip: process.platform === "win32" ? "POSIX mode bits only" : false },
+  async () => {
+    const fx = runFixture();
+    try {
+      const script = path.join(fx.root, "deploy.sh");
+      fs.writeFileSync(script, "#!/bin/sh\necho deploy\n", "utf-8");
+      fs.chmodSync(script, 0o750);
+
+      // Edit (captures the mode) then delete: the net effect is a delete whose
+      // pre-image must restore both bytes and executable bits.
+      assert.equal((await fx.ws.edit_file("deploy.sh", "echo deploy", "echo deploy2")).status, "ok");
+      assert.equal((await fx.ws.delete_file("deploy.sh")).status, "ok");
+      const entry = readStoredRecord(fx.store, fx.runId).entries[0];
+      assert.equal(entry.action, "delete");
+      assert.equal(entry.pre.mode, 0o750);
+
+      const result = applyUndo(fx.store, fx.runId, fx.root);
+      assert.equal(result.applied, 1);
+      assert.equal(fs.readFileSync(script, "utf-8"), "#!/bin/sh\necho deploy\n");
+      assert.equal(fs.statSync(script).mode & 0o7777, 0o750);
+    } finally {
+      fx.cleanup();
+    }
+  },
+);
+
+test("old records without mode fields still load and apply (additive record fields)", async () => {
+  const fx = fixture("tb-undo-oldmode-");
+  try {
+    fs.writeFileSync(path.join(fx.root, "legacy.txt"), "old\n", "utf-8");
+    const hash = writeBlobFile(fx.store, "old\n");
+    writeStoredRecord(fx.store, "run-legacy", {
+      version: WORKSPACE_UNDO_VERSION,
+      workspace_root: fs.realpathSync(fx.root),
+      created_at: new Date().toISOString(),
+      entries: [
+        {
+          path: "legacy.txt",
+          action: "edit",
+          pre: { exists: true, sha256: hash, size: 4 },
+          post: { exists: true, sha256: sha256("new\n"), size: 4 },
+        },
+      ],
+    });
+    fs.writeFileSync(path.join(fx.root, "legacy.txt"), "new\n", "utf-8");
+
+    const preview = previewUndo(fx.store, "run-legacy", fx.root);
+    assert.equal(statuses(preview)["legacy.txt"], "applicable");
+    const result = applyUndo(fx.store, "run-legacy", fx.root);
+    assert.equal(result.applied, 1);
+    assert.equal(result.entries[0].mode_restored, undefined);
+    assert.equal(fs.readFileSync(path.join(fx.root, "legacy.txt"), "utf-8"), "old\n");
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test(
+  "a failed mode restore is disclosed but never fatal (bytes still restored)",
+  { skip: process.platform === "win32" ? "POSIX mode bits only" : false },
+  async () => {
+    const fx = fixture("tb-undo-modefail-");
+    try {
+      fs.writeFileSync(path.join(fx.root, "a.txt"), "a-before\n", "utf-8");
+      fs.writeFileSync(path.join(fx.root, "b.txt"), "b-before\n", "utf-8");
+      const preA = writeBlobFile(fx.store, "a-before\n");
+      const preB = writeBlobFile(fx.store, "b-before\n");
+      writeStoredRecord(fx.store, "run-modefail", {
+        version: WORKSPACE_UNDO_VERSION,
+        workspace_root: fs.realpathSync(fx.root),
+        created_at: new Date().toISOString(),
+        entries: [
+          {
+            path: "a.txt",
+            action: "edit",
+            pre: { exists: true, sha256: preA, size: 9, mode: 0o100000000 },
+            post: { exists: true, sha256: writeBlobFile(fx.store, "a-after\n"), size: 8 },
+          },
+          {
+            path: "b.txt",
+            action: "edit",
+            pre: { exists: true, sha256: preB, size: 9, mode: 0o644 },
+            post: { exists: true, sha256: writeBlobFile(fx.store, "b-after\n"), size: 8 },
+          },
+        ],
+      });
+      fs.writeFileSync(path.join(fx.root, "a.txt"), "a-after\n", "utf-8");
+      fs.writeFileSync(path.join(fx.root, "b.txt"), "b-after\n", "utf-8");
+
+      const result = applyUndo(fx.store, "run-modefail", fx.root);
+      assert.equal(result.applied, 2);
+      assert.equal(result.failed, 0);
+      const a = result.entries.find((entry) => entry.path === "a.txt")!;
+      assert.equal(a.status, "applied");
+      assert.equal(a.mode_restored, false);
+      assert.match(String(a.mode_error), /could not restore the file mode/);
+      const b = result.entries.find((entry) => entry.path === "b.txt")!;
+      assert.equal(b.status, "applied");
+      assert.equal(b.mode_restored, true);
+      assert.equal(fs.readFileSync(path.join(fx.root, "a.txt"), "utf-8"), "a-before\n");
+      assert.equal(fs.readFileSync(path.join(fx.root, "b.txt"), "utf-8"), "b-before\n");
+    } finally {
+      fx.cleanup();
+    }
+  },
+);
+
+test("listUndoRecords lists newest first with session metadata only", async () => {
+  const fx = fixture("tb-undo-list-");
+  try {
+    writeStoredRecord(
+      fx.store,
+      "run-older",
+      syntheticRecord({
+        store: fx.store,
+        workspaceRoot: fs.realpathSync(fx.root),
+        session: "chat.jsonl",
+        createdAt: "2026-02-01T00:00:00.000Z",
+        blob: writeBlobFile(fx.store, "older\n"),
+      }),
+    );
+    writeStoredRecord(
+      fx.store,
+      "run-newer",
+      syntheticRecord({
+        store: fx.store,
+        workspaceRoot: fs.realpathSync(fx.root),
+        session: "chat.jsonl",
+        createdAt: "2026-02-02T00:00:00.000Z",
+        blob: writeBlobFile(fx.store, "newer\n"),
+      }),
+    );
+    fs.writeFileSync(path.join(fx.store, "runs", "bad name.json"), "{}", "utf-8");
+
+    const listed = listUndoRecords(fx.store);
+    assert.deepEqual(
+      listed.map((entry) => entry.run_id),
+      ["run-newer", "run-older"],
+    );
+    assert.equal(listed[0].session, "chat.jsonl");
+    assert.equal(listed[0].created_at, "2026-02-02T00:00:00.000Z");
+    assert.equal(typeof listed[0].record_path, "string");
+  } finally {
+    fx.cleanup();
+  }
 });

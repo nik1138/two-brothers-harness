@@ -335,6 +335,7 @@ import {
   STEERABLE_STATES,
   STEER_TEXT_MAX_CHARS,
   TERMINAL_STATES,
+  presetContextWindow,
   resolveRoleEndpoints,
   RunManager,
   RuntimeSettings,
@@ -355,6 +356,7 @@ import {
 import {
   applyUndo,
   beginUndoCapture,
+  collectOrphanBlobs,
   discardUndo,
   loadUndoRecord,
   previewUndo,
@@ -691,12 +693,14 @@ function publicProvider(preset: {
   api_key: string;
   kind: string;
   models: string[];
+  context_window?: number;
 }): {
   name: string;
   base_url: string;
   api_key_set: boolean;
   kind: string;
   models: string[];
+  context_window?: number;
 } {
   return {
     name: preset.name,
@@ -704,6 +708,13 @@ function publicProvider(preset: {
     api_key_set: Boolean(preset.api_key),
     kind: preset.kind || PROVIDER_KIND_DEFAULT,
     models: [...preset.models],
+    // Additive: omitted when unknown (0/absent), so presets that never set a
+    // window stay byte-compatible with the pre-wave-26 response.
+    ...(typeof preset.context_window === "number" &&
+    Number.isSafeInteger(preset.context_window) &&
+    preset.context_window > 0
+      ? { context_window: preset.context_window }
+      : {}),
   };
 }
 
@@ -719,6 +730,7 @@ function publicPreset(preset: Preset): ReturnType<typeof publicProvider> {
     api_key: presetApiKey(preset),
     kind: preset.kind,
     models: preset.models,
+    context_window: preset.context_window,
   });
 }
 
@@ -778,6 +790,26 @@ function cleanModelList(value: unknown): string[] {
     if (name && !out.includes(name)) out.push(name);
   }
   return out;
+}
+
+/**
+ * Strict provider-preset `context_window` from a request body.
+ *
+ * Returns `undefined` when the field is absent/null (leave the stored value
+ * unchanged), `0` when it is present as 0 (explicitly clear -> unknown), and
+ * the positive value otherwise. A negative, float, string, boolean or
+ * non-safe-integer value is a 400 — the preset window is operator data, never
+ * model output, so unlike the settings-file reader this path never silently
+ * coerces. `0` and absent are equivalent downstream (unknown).
+ */
+function providerContextWindowPatch(body: Record<string, unknown>): number | undefined {
+  if (!("context_window" in body)) return undefined;
+  const value = body.context_window;
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new HttpError(400, "context_window must be an integer >= 0 (0 = unknown)");
+  }
+  return value;
 }
 
 // ---------------------------------------------------------------------------
@@ -1063,16 +1095,18 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     if (options.compaction !== undefined) {
       return compactionSettingsView({} as Config, persisted, options.compaction);
     }
+    const presetWindow = presetWindowForRun();
     let cfg: Config;
     try {
       cfg = state.configFactory();
     } catch {
       // A throwing custom config factory must never turn a settings read into
       // a 500 (and must never hide an already-persisted PUT). Fall back to the
-      // persisted layer only; no field then claims a flag/env pin.
-      return compactionSettingsView({} as Config, persisted);
+      // persisted layer plus the preset fallback; no field then claims a
+      // flag/env pin.
+      return compactionSettingsView({} as Config, persisted, undefined, presetWindow);
     }
-    return compactionSettingsView(cfg, persisted);
+    return compactionSettingsView(cfg, persisted, undefined, presetWindow);
   }
 
   function storeFor(name: string): SessionStore {
@@ -1196,17 +1230,18 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
    * context window filling in when the options do not set one — flag/env first,
    * then the persisted section); otherwise the merged flag/env > persisted
    * fields apply (`compactionFieldsForServe`, so `serve` flags and the saved
-   * section are both honoured); only `force` is dropped, because the request
+   * section are both honoured, with the resolved preset window as the last
+   * context-window fallback); only `force` is dropped, because the request
    * always asks for exactly one compaction. With nothing configured the derived
    * settings equal the honest `compaction.ts` defaults, so an explicit
    * `/compact` on a long session stays meaningful even when auto compaction is
    * off.
    */
-  function manualCompactionSettings(cfg: Config): CompactionSettings {
+  function manualCompactionSettings(cfg: Config, presetWindow = 0): CompactionSettings {
     const persisted = persistedCompaction();
     const configured = options.compaction;
     if (configured === undefined) {
-      const settings = { ...compactionFieldsForServe(cfg, persisted) };
+      const settings = { ...compactionFieldsForServe(cfg, persisted, undefined, presetWindow) };
       delete settings.force;
       return settings;
     }
@@ -1214,7 +1249,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     const window =
       configuredWindow > 0
         ? configuredWindow
-        : (compactionFieldsForServe(cfg, persisted).contextWindow ?? 0);
+        : (compactionFieldsForServe(cfg, persisted, undefined, presetWindow).contextWindow ?? 0);
     if (configuredWindow > 0 || window <= 0) return configured;
     return { ...configured, contextWindow: window };
   }
@@ -1424,13 +1459,36 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     base_url: string;
     api_key: string;
     kind: string;
+    context_window?: number;
   }> {
     return mergedPresets().map((preset) => ({
       name: preset.name,
       base_url: preset.base_url,
       api_key: presetApiKey(preset),
       kind: preset.kind,
+      ...(typeof preset.context_window === "number" &&
+      Number.isSafeInteger(preset.context_window) &&
+      preset.context_window > 0
+        ? { context_window: preset.context_window }
+        : {}),
     }));
+  }
+
+  /**
+   * The preset-derived context window a run would inherit: resolved from each
+   * role's named preset (`provider_ref`), smaller of the two when both declare
+   * one. This mirrors the run path exactly — same snapshot, same merged
+   * presets, same env — so the settings view can report the `preset` source
+   * honestly. Env/manual-field connections never contribute a window.
+   */
+  function presetWindowForRun(): number {
+    try {
+      return presetContextWindow(
+        resolveRoleEndpoints(state.settings.snapshot(), resolvablePresets(), process.env, {}),
+      );
+    } catch {
+      return 0;
+    }
   }
 
   /**
@@ -1587,7 +1645,16 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     let undoCapture: WorkspaceUndoCapture | null = null;
     if (workspace !== undefined && undoRunId !== null) {
       try {
-        undoCapture = beginUndoCapture(undoRoot, undoRunId, workspace.root, { session: name });
+        undoCapture = beginUndoCapture(undoRoot, undoRunId, workspace.root, {
+          session: name,
+          // Close-time retention must never remove a record another live run
+          // still owns (queued/running/waiting): the callback is read at close.
+          activeRuns: () =>
+            state.runs
+              .list()
+              .filter((run) => ACTIVE_STATES.has(String(run.status)))
+              .map((run) => String(run.run_id)),
+        });
         workspace.setMutationRecorder(undoCapture.recorder, (line) =>
           console.warn(`[two-brothers] ${line}`),
         );
@@ -1596,14 +1663,21 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         undoCapture = null;
       }
     }
-    // Config-derived and persisted auto-compaction (wave 25): `serve` accepts
-    // the same `--compact*` / `--context-window` flags and env vars as
-    // `run`/`chat`, and Settings → Advanced persists the remaining budgets in
-    // the `compaction` section. Per field the explicit flag/env config wins,
-    // then the saved value; an explicit `ServerOptions.compaction` still wins
-    // wholesale (the operator/programmatic pin overrides the factory), and
-    // zero config everywhere keeps the options object byte-identical.
-    const compaction = serveCompactionSettings(cfg, persistedCompaction(), options.compaction);
+    // Config-derived, persisted and preset-derived auto-compaction (waves
+    // 25/26): `serve` accepts the same `--compact*` / `--context-window` flags
+    // and env vars as `run`/`chat`, Settings → Advanced persists the remaining
+    // budgets in the `compaction` section, and the roles' named presets supply
+    // a fallback context window. Per field the explicit flag/env config wins,
+    // then the saved value, then (context window only) the smaller resolved
+    // preset window; an explicit `ServerOptions.compaction` still wins
+    // wholesale, and zero config everywhere keeps the options object
+    // byte-identical.
+    const compaction = serveCompactionSettings(
+      cfg,
+      persistedCompaction(),
+      options.compaction,
+      presetContextWindow(endpoints),
+    );
     const harness = new TwoBrothersHarness(cfg, {
       workspace,
       signal,
@@ -2375,7 +2449,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         let provider: Provider;
         try {
           const { cfg, endpoints } = buildCfg({ task: "compact" });
-          settings = manualCompactionSettings(cfg);
+          settings = manualCompactionSettings(cfg, presetContextWindow(endpoints));
           provider = summarizerProvider(cfg, endpoints, settings.summarizerRole ?? "senior");
         } catch (exc) {
           if (exc instanceof HttpError) throw exc;
@@ -2762,13 +2836,21 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       const apiKey = optionalString(body, "api_key");
       const kind = optionalString(body, "kind") ?? PROVIDER_KIND_DEFAULT;
       const models = cleanModelList(body.models);
+      const contextWindow = providerContextWindowPatch(body);
       const presets = state.settingsStore.readProviders();
       // Duplicates against the merged view: a seeded name is customized with
       // PUT (which materializes a stored override), not created twice.
       if (mergedPresets().some((p) => p.name.toLowerCase() === name.toLowerCase())) {
         throw new HttpError(409, `provider already exists: ${name}`);
       }
-      presets.push({ name, base_url: baseUrl, api_key: apiKey ?? "", kind, models });
+      presets.push({
+        name,
+        base_url: baseUrl,
+        api_key: apiKey ?? "",
+        kind,
+        models,
+        ...(contextWindow !== undefined && contextWindow > 0 ? { context_window: contextWindow } : {}),
+      });
       state.settingsStore.write(state.settings.snapshot(), undefined, presets);
       return new Respond(201, { provider: publicProvider(presets[presets.length - 1]) });
     }),
@@ -2797,6 +2879,9 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
           api_key: seed.api_key,
           kind: seed.kind,
           models: [...seed.models],
+          ...(typeof seed.context_window === "number" && seed.context_window > 0
+            ? { context_window: seed.context_window }
+            : {}),
         });
         index = presets.length - 1;
       }
@@ -2818,6 +2903,12 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       }
       if ("models" in body && body.models !== undefined && body.models !== null) {
         presets[index].models = cleanModelList(body.models);
+      }
+      const contextWindow = providerContextWindowPatch(body);
+      if (contextWindow !== undefined) {
+        // 0 clears the preset window (unknown); a positive value overrides it.
+        if (contextWindow > 0) presets[index].context_window = contextWindow;
+        else delete presets[index].context_window;
       }
       state.settingsStore.write(state.settings.snapshot(), undefined, presets);
       // The response mirrors GET's merged view: a seed override keeps its
@@ -3221,6 +3312,16 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       if (record.session !== undefined && record.session !== name) {
         throw new HttpError(404, "not found");
       }
+      // Same active-run guard as preview/apply: a live run will keep mutating
+      // files, and its capture still references the blobs this discard would
+      // collect. Refuse instead of destroying undo state mid-run.
+      const live = state.runs.get(ctx.params.run_id);
+      if (live !== null && ACTIVE_STATES.has(live.status)) {
+        throw new HttpError(
+          409,
+          `the run is still ${live.status}; stop it before discarding undo`,
+        );
+      }
       let removed: boolean;
       try {
         removed = discardUndo(undoRoot, ctx.params.run_id);
@@ -3228,7 +3329,17 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         throw undoHttpError(exc);
       }
       if (!removed) throw new HttpError(404, "not found");
-      return { discarded: true, session: name, run_id: ctx.params.run_id };
+      // Content-addressed blobs are shared store state: after the last record
+      // reference is gone, collect the ones nothing retained points at. A
+      // collection failure is disclosed additively and never fails the discard.
+      const gc = collectOrphanBlobs(undoRoot);
+      return {
+        discarded: true,
+        session: name,
+        run_id: ctx.params.run_id,
+        ...(gc.removed.length > 0 ? { blobs_removed: gc.removed.length } : {}),
+        ...(gc.diagnostics.length > 0 ? { gc_diagnostics: gc.diagnostics } : {}),
+      };
     }),
   );
 

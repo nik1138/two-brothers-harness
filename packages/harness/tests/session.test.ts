@@ -200,6 +200,93 @@ test("resume repairs a torn tail atomically and the next append stays dense", ()
   }
 });
 
+test("repair refuses a file that changed before the rename (retryable CAS)", () => {
+  const dir = tmpdir();
+  try {
+    const file = path.join(dir, "torn.jsonl");
+    const first = createMessage(1, "user", "senior", "message", { text: "task" });
+    const torn = '{"v":1,"id":"msg-torn","seq":2';
+    const original = JSON.stringify(first) + "\n" + torn;
+    fs.writeFileSync(file, original, "utf-8");
+
+    // Simulate another process appending in the window between the scan and
+    // the rename. The append keeps the tail unterminated, so a retry is still
+    // a recoverable repair.
+    const concurrent = ',"late":true';
+    const store = new SessionStore(file, {
+      beforeRename: () => {
+        fs.appendFileSync(file, concurrent, "utf-8");
+      },
+    });
+
+    let error: unknown;
+    try {
+      restoreContextResult(store);
+    } catch (exc) {
+      error = exc;
+    }
+    assert.ok(error instanceof SessionError, `expected SessionError, got ${String(error)}`);
+    assert.equal(error.retryable, true, "a lost CAS race must be retryable");
+    assert.match(error.message, /changed while repairing the torn tail/);
+    assert.match(error.message, /retry/);
+
+    // The original file is untouched - including the concurrent append that
+    // caused the abort - and no temp file survives.
+    assert.equal(fs.readFileSync(file, "utf-8"), original + concurrent);
+    assert.deepEqual(
+      fs.readdirSync(dir).filter((name) => name.includes(".tmp-")),
+      [],
+      "the aborted repair must clean up its temp file",
+    );
+
+    // Once nobody races, the same repair succeeds on the current bytes.
+    const retried = restoreContextResult(new SessionStore(file));
+    assert.equal(retried.recovered, true);
+    assert.deepEqual(
+      retried.context.events.map((event) => event.seq),
+      [1],
+    );
+    assert.equal(fs.readFileSync(file, "utf-8"), JSON.stringify(first) + "\n");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("repair CAS also refuses an in-place same-size rewrite before the rename", () => {
+  const dir = tmpdir();
+  try {
+    const file = path.join(dir, "torn.jsonl");
+    const first = createMessage(1, "user", "senior", "message", { text: "task" });
+    const torn = '{"v":1,"id":"msg-torn","seq":2';
+    const original = JSON.stringify(first) + "\n" + torn;
+    fs.writeFileSync(file, original, "utf-8");
+    const sameSize = original.replace("task", "TASK");
+    assert.equal(sameSize.length, original.length);
+    assert.notEqual(sameSize, original);
+
+    const store = new SessionStore(file, {
+      beforeRename: () => {
+        fs.writeFileSync(file, sameSize, "utf-8");
+        // Guarantee a visible mtime change even on coarse filesystems.
+        const future = new Date(Date.now() + 60_000);
+        fs.utimesSync(file, future, future);
+      },
+    });
+
+    assert.throws(
+      () => restoreContextResult(store),
+      (exc: unknown) => exc instanceof SessionError && exc.retryable,
+    );
+    assert.equal(fs.readFileSync(file, "utf-8"), sameSize);
+    assert.deepEqual(
+      fs.readdirSync(dir).filter((name) => name.includes(".tmp-")),
+      [],
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a valid final envelope without a trailing newline is not corruption", () => {
   const dir = tmpdir();
   try {

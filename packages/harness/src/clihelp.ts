@@ -366,6 +366,21 @@ export const FLAGS: Record<string, FlagHelp> = {
     value: "<n>",
     description: "number of operator turns to rewind (1-100)",
   },
+  run: {
+    name: "run",
+    value: "<id>",
+    description:
+      "undo: run id whose captured file mutations are previewed/applied (default: the newest " +
+      "record of that session)",
+  },
+  apply: {
+    name: "apply",
+    description: "undo: apply the reversible files (without it the command only previews)",
+  },
+  discard: {
+    name: "discard",
+    description: "undo: drop the run's undo record and collect now-unreferenced blobs",
+  },
   preset: {
     name: "preset",
     value: "<id>",
@@ -799,7 +814,7 @@ defineCommand({
 
 defineCommand({
   name: "sessions",
-  summary: "list, read, search, export, fork and rewind stored sessions",
+  summary: "list, read, search, export, fork, rewind and undo stored sessions",
   commandLine: "two-brothers sessions [--sessions-dir <dir>] [--json] [--limit <n>]",
   usage: [
     "sessions [--sessions-dir <dir>] [--json] [--limit <n>]",
@@ -808,6 +823,7 @@ defineCommand({
     "sessions export <name> [--format markdown|json|html] [--output <path>]",
     "sessions fork <name> [--at <seq>] [--name <new>] [--json]",
     "sessions rewind <name> --turns <n> [--json]",
+    "sessions undo <name> [--run <id>] [--apply] [--discard] [--json]",
   ],
   description:
     "List the JSONL session files of a sessions directory with readable titles " +
@@ -822,7 +838,9 @@ defineCommand({
     "<name>` renders one session as a Markdown, JSON or self-contained HTML " +
     "document, `sessions fork <name>` copies a session (or a prefix) into a " +
     "new session file with a local lineage link, and `sessions rewind <name> " +
-    "--turns <n>` drops the last n operator turns from a session. Session " +
+    "--turns <n>` drops the last n operator turns from a session. " +
+    "`sessions undo <name>` previews/apply/discards a workspace-bound run's " +
+    "captured file mutations through the session's linked workspace. Session " +
     "names resolve with or without the .jsonl suffix.",
   flags: [
     "sessions-dir",
@@ -833,10 +851,13 @@ defineCommand({
     "at",
     "name",
     "turns",
+    "run",
+    "apply",
+    "discard",
     "help",
   ],
   flagNotes: {
-    json: "print JSON instead of human text: a list array, a show object, or the search/fork/rewind result",
+    json: "print JSON instead of human text: a list array, a show object, or the search/fork/rewind/undo result",
     limit:
       "list: cap the rows; show: cap the envelopes printed; search: cap the hits (1-100)",
     format: "export format: markdown (default), json, or a self-contained html page",
@@ -845,6 +866,9 @@ defineCommand({
     at: "fork: last envelope seq to copy (1..last; default the whole session)",
     name: "fork: explicit new session name (default <source>-fork-<k>; never overwrites)",
     turns: "rewind: number of operator turns to remove (strict integer 1-100)",
+    run: "undo: run id (default: the session's newest undo record)",
+    apply: "undo: restore/delete the reversible files instead of previewing",
+    discard: "undo: drop the record and collect unreferenced blobs (cannot combine with --apply)",
   },
   details: [
     "Subcommands:",
@@ -854,6 +878,7 @@ defineCommand({
     "  export <name>   download one session (markdown, json or html)",
     "  fork <name>     copy a session/prefix into a new session file",
     "  rewind <name>   drop the last operator turns from a session",
+    "  undo <name>     preview/apply/discard a run's captured file changes",
   ],
   examples: [
     "two-brothers sessions",
@@ -867,6 +892,10 @@ defineCommand({
     "two-brothers sessions export s --format html --output session.html",
     "two-brothers sessions fork s --at 4 --name branch-a",
     "two-brothers sessions rewind s --turns 1",
+    "two-brothers sessions undo s",
+    "two-brothers sessions undo s --run run-1 --json",
+    "two-brothers sessions undo s --run run-1 --apply",
+    "two-brothers sessions undo s --run run-1 --discard",
   ],
 });
 
@@ -933,8 +962,10 @@ defineCommand({
   description:
     "Run a fixed, local diagnostic pass in a stable order: Node engine, settings " +
     "file, sessions-directory writability, per-role provider configuration, the " +
-    "provider endpoint (skipped for mock), built web assets, and the plugins " +
-    "directory. Every check prints one [pass]/[warn]/[fail]/[skip] line; the " +
+    "provider endpoint (skipped for mock), built web assets, the plugins " +
+    "directory, the TUI keys and prompt-history files, and the MCP config file " +
+    "named by TWO_BROTHERS_MCP_CONFIG (read only — no MCP server is started). " +
+    "Every check prints one [pass]/[warn]/[fail]/[skip] line; the " +
     "command exits 0 when no check failed and 1 otherwise (warnings never fail). " +
     "The endpoint probe is bounded by --timeout.",
   flags: [

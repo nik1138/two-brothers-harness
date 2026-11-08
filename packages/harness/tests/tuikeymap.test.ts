@@ -152,6 +152,46 @@ test("steer is one composer chord, documented once and unavailable in exclusive 
   }
 });
 
+test("external-edit is Ctrl+G in the composer scope, documented once and idle-only", () => {
+  const command = findCommand(TUI_COMMANDS, "external-edit");
+  assert.ok(command, "the registry has an external-edit command");
+  assert.equal(command.group, "Composer");
+  assert.equal(command.when, "composer");
+  assert.equal(command.idleOnly, true);
+  assert.equal(formatKeys(command), "Ctrl+G");
+  assert.equal(
+    TUI_COMMANDS.filter((entry) => formatKeys(entry) === "Ctrl+G").length,
+    1,
+    "the chord is registered exactly once",
+  );
+
+  assert.equal(
+    resolveKey(TUI_COMMANDS, key("g", "\u0007", { ctrl: true }))?.command.id,
+    "external-edit",
+  );
+  for (const context of ["overlay", "find", "mention", "approval"] as const) {
+    assert.equal(
+      resolveKey(TUI_COMMANDS, key("g", "\u0007", { ctrl: true }), context),
+      null,
+      `external-edit is not offered in the ${context} scope`,
+    );
+  }
+
+  const paletteRows = entries().filter((entry) => entry.id === "external-edit");
+  const helpRows = documented().filter((entry) => entry.id === "external-edit");
+  assert.equal(paletteRows.length, 1, "the palette lists external-edit once");
+  assert.equal(helpRows.length, 1, "help lists external-edit once");
+  assert.equal(paletteRows[0]?.keys, "Ctrl+G");
+  assert.equal(paletteRows[0]?.disabled, false);
+  assert.equal(
+    entries(true).find((entry) => entry.id === "external-edit")?.disabled,
+    true,
+    "the palette disables it while a turn runs",
+  );
+  const helpText = tuiHelpLines(TUI_COMMANDS, { commands: templates }).join("\n");
+  assert.equal(helpText.match(/Ctrl\+G/g)?.length, 1, "the CLI key guide spells it once");
+});
+
 test("command lookup, slash aliases and running guards use registry metadata", () => {
   assert.equal(findCommand(TUI_COMMANDS, "help")?.title, "Keyboard help");
   assert.equal(findCommand(TUI_COMMANDS, "missing"), undefined);

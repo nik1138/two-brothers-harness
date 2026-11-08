@@ -235,10 +235,12 @@ server then serves (the npm tarball ships its own copy of that build).
   changes…** for the newest completed run, with a per-file preview
   (`applicable`/`created`/`deleted`/`changed-since`/`skipped`/`missing`) and
   per-file apply results. Files changed after the run are refused, never
-  overwritten; shell-made changes, untracked files and file mode/ownership are
-  out of scope. The same operation is exposed as
-  `GET/POST/DELETE /api/sessions/{name}/undo/{run_id}` (restart-resilient;
-  blob garbage collection is a follow-up).
+  overwritten; shell-made changes and untracked files are out of scope. The
+  store is bounded (newest 20 records per session and 30-day retention, with
+  unreferenced-blob GC), a POSIX restore keeps the captured permission bits,
+  and `sessions undo <name> [--run <id>] [--apply|--discard] [--json]` previews
+  or applies the same record from the CLI. The same operation is exposed as
+  `GET/POST/DELETE /api/sessions/{name}/undo/{run_id}` (restart-resilient).
 - **Web workspace.** A Vue 3 + Vite group chat (Operator / Senior / Junior)
   with registered workspaces, workspace-grouped sessions, background runs
   over SSE, docked approval cards (a mobile drawer below the breakpoint) that
@@ -260,7 +262,9 @@ server then serves (the npm tarball ships its own copy of that build).
   the composer recall earlier accepted tasks (multiline drafts only at their
   edges, the live draft restored exactly), and Settings → **Approvals** picks
   the workspace approval mode with honest copy and an inline warning for
-  `allow-all`.
+  `allow-all`. An operator message bubble's **Fork from here…** branches the
+  conversation at that message through the existing fork route (`{seq}`) and
+  opens the copy; the source stays untouched.
 - **TUI.** A bare interactive `two-brothers` (or `tui [task]`) is a
   zero-dependency full-screen chat in the terminal's alternate screen, over
   the same harness and the same flags: block transcript with textual role
@@ -288,7 +292,10 @@ server then serves (the npm tarball ships its own copy of that build).
   bar, a dim `⋯` marks a transcript window that starts mid-block, and the
   status bar rotates one registry-derived tip per turn with brief transient
   hints (a stopped turn's exit copy, the quit path while an approval is
-  parked). Piped no-arg
+  parked). `Ctrl+X` copies the last completed reply (native clipboard, OSC 52
+  fallback), `Ctrl+G` edits the draft in `$VISUAL`/`$EDITOR`, and the terminal
+  title shows `Two Brothers — <session> · working|approval|done|failed` with
+  one OSC 9/BEL notification on a parked approval. Piped no-arg
   invocations print the usage screen instead.
 - **Protocol reference.** [`typescript/`](typescript/) is a zero-dependency
   implementation of `PROTOCOL.md` (no npm packages, no build step) that

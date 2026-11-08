@@ -275,6 +275,64 @@ test("partial update preserves plugins and providers sections", () => {
   }
 });
 
+test("provider context_window round-trips and survives unrelated saves", () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const file = path.join(root, "settings.json");
+    const store = new SettingsStore(file);
+    const preset = { ...ACME, context_window: 8192 };
+    store.write({}, ["notes"], [preset]);
+    assert.equal(new SettingsStore(file).readProviders()[0].context_window, 8192);
+
+    // an unrelated role/plugins save preserves the provider section verbatim
+    store.write({ senior: { model: "m" } });
+    const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, any>;
+    assert.equal(raw.providers[0].context_window, 8192);
+    assert.equal(new SettingsStore(file).readProviders()[0].context_window, 8192);
+
+    // re-saving providers without the field clears it (0/absent == unknown)
+    store.write({}, ["notes"], [{ ...ACME }]);
+    assert.equal(new SettingsStore(file).readProviders()[0].context_window, undefined);
+    const cleared = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, any>;
+    assert.ok(!("context_window" in cleared.providers[0]), "unknown is absent, not 0");
+  } finally {
+    cleanup();
+  }
+});
+
+test("a corrupt provider context_window is dropped fail-soft", () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const file = path.join(root, "settings.json");
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        providers: [
+          { name: "neg", base_url: "https://n.example/v1", api_key: "", context_window: -1 },
+          { name: "float", base_url: "https://f.example/v1", api_key: "", context_window: 1.5 },
+          { name: "text", base_url: "https://t.example/v1", api_key: "", context_window: "8192" },
+          { name: "ok", base_url: "https://o.example/v1", api_key: "", context_window: 8192 },
+          { name: "zero", base_url: "https://z.example/v1", api_key: "", context_window: 0 },
+        ],
+      }),
+      "utf-8",
+    );
+    const loaded = new SettingsStore(file).readProviders();
+    assert.equal(loaded.find((preset) => preset.name === "neg")?.context_window, undefined);
+    assert.equal(loaded.find((preset) => preset.name === "float")?.context_window, undefined);
+    assert.equal(loaded.find((preset) => preset.name === "text")?.context_window, undefined);
+    assert.equal(loaded.find((preset) => preset.name === "ok")?.context_window, 8192);
+    assert.equal(loaded.find((preset) => preset.name === "zero")?.context_window, undefined);
+    // writing the sanitized list back never invents or coerces a window
+    new SettingsStore(file).write({}, undefined, loaded);
+    const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, any>;
+    assert.equal(raw.providers.find((p: any) => p.name === "ok").context_window, 8192);
+    assert.ok(!("context_window" in raw.providers.find((p: any) => p.name === "neg")));
+  } finally {
+    cleanup();
+  }
+});
+
 test("explicit plugins/providers sections overwrite and sanitize", () => {
   const { root, cleanup } = tmpdir();
   try {

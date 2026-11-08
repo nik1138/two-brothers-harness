@@ -185,6 +185,13 @@ export interface RoleEndpoint {
    * speaks its own wire format.
    */
   kind?: string;
+  /**
+   * Additive context window (tokens) when the connection came from a named
+   * preset that declares one. Unset for env/manual-field sources and for
+   * presets without a window; `0` is never carried (unknown == absent). This
+   * only feeds compaction — provider wire requests are unchanged.
+   */
+  contextWindow?: number;
 }
 
 /** Named provider preset shape the resolver needs (SettingsStore presets qualify). */
@@ -194,6 +201,8 @@ export interface EndpointPreset {
   api_key: string;
   /** Preset wire flavor (anthropic/google/openai-compatible); additive. */
   kind?: string;
+  /** Preset context window in tokens (positive; absent = unknown). Additive. */
+  context_window?: number;
 }
 
 /** Run-level fallbacks for the resolver (flags/env config, before role overlays). */
@@ -236,7 +245,7 @@ function resolvePair(
   presets: ReadonlyArray<EndpointPreset>,
   env: NodeJS.ProcessEnv,
   warnings: string[],
-): [string, string, string?] {
+): [string, string, string?, number?] {
   const roleEnv = roleEnvPair(role);
   const roleEnvBase = env[roleEnv[0]] ?? "";
   const roleEnvKey = env[roleEnv[1]] ?? "";
@@ -248,7 +257,15 @@ function resolvePair(
   const ref = roleData.provider_ref ?? "";
   if (ref) {
     const preset = presets.find((p) => p.name === ref);
-    if (preset) return [preset.base_url, preset.api_key, preset.kind];
+    if (preset) {
+      const window =
+        typeof preset.context_window === "number" &&
+        Number.isSafeInteger(preset.context_window) &&
+        preset.context_window > 0
+          ? preset.context_window
+          : undefined;
+      return [preset.base_url, preset.api_key, preset.kind, window];
+    }
     warnings.push(
       `provider_ref "${ref}" for the ${role} role has no matching preset; ` +
         "falling back to the role's manual fields",
@@ -282,10 +299,23 @@ export function resolveRoleEndpoints(
   const warnings: string[] = [];
   const endpointFor = (role: "senior" | "junior"): RoleEndpoint => {
     const roleData = snapshot[role] ?? ({} as RuntimeRoleSettings);
-    const [baseUrl, apiKey, kind] = resolvePair(role, snapshot, presets, env, warnings);
+    const [baseUrl, apiKey, kind, contextWindow] = resolvePair(
+      role,
+      snapshot,
+      presets,
+      env,
+      warnings,
+    );
     const provider = (roleProviders ? roleData.provider : "") || defaults.provider || "";
     const model = roleData.model || (role === "senior" ? defaults.seniorModel : defaults.juniorModel) || "";
-    return { provider, baseUrl, apiKey, model, ...(kind ? { kind } : {}) };
+    return {
+      provider,
+      baseUrl,
+      apiKey,
+      model,
+      ...(kind ? { kind } : {}),
+      ...(contextWindow !== undefined ? { contextWindow } : {}),
+    };
   };
   const senior = endpointFor("senior");
   const junior = endpointFor("junior");
@@ -304,6 +334,34 @@ export function resolveRoleEndpoints(
   if (!senior.apiKey) senior.apiKey = junior.apiKey;
   if (!junior.apiKey) junior.apiKey = senior.apiKey;
   return { senior, junior, warnings };
+}
+
+/**
+ * The run-level context window implied by the resolved per-role presets, in
+ * tokens.
+ *
+ * The smaller of the two non-zero preset windows (compacting at the smaller
+ * model's limit is the safe choice: a summary sized for the larger window can
+ * overflow the smaller one). When only one role's preset declares a window,
+ * that window is used; when neither does (or the connection came from env or
+ * manual fields), the result is 0 = unknown. This is a fallback only — an
+ * explicit run-level flag/env or a persisted `compaction.context_window`
+ * always wins (see `config.ts::mergeCompactionFields`).
+ */
+export function presetContextWindow(
+  endpoints:
+    | {
+        senior?: { contextWindow?: number };
+        junior?: { contextWindow?: number };
+      }
+    | null
+    | undefined,
+): number {
+  const windows = [endpoints?.senior?.contextWindow, endpoints?.junior?.contextWindow].filter(
+    (value): value is number =>
+      typeof value === "number" && Number.isSafeInteger(value) && value > 0,
+  );
+  return windows.length > 0 ? Math.min(...windows) : 0;
 }
 
 /**

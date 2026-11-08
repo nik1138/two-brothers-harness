@@ -18,6 +18,12 @@
  */
 import * as readline from "node:readline";
 
+import {
+  PRODUCT_NAME,
+  terminalNotification,
+  terminalTitleSequence,
+  type NotificationInput,
+} from "./attention.ts";
 import { ANSI } from "./render.ts";
 import {
   createInputParser,
@@ -94,6 +100,19 @@ export class Terminal {
   private entered = false;
   private restored = false;
   private resizeAttached = false;
+  /**
+   * True between {@link suspend} and {@link resume}: the alternate screen,
+   * bracketed paste and raw mode are released for a child process that owns
+   * the terminal. `render()` is a no-op in this state so a spinner tick or a
+   * late stream event cannot repaint over the editor.
+   */
+  private suspended = false;
+  /**
+   * True once this driver changed the terminal title. `restore()` then resets
+   * it to the product name; a driver that never set a title (an injected
+   * attention sink, a plain terminal) writes no extra bytes.
+   */
+  private titleChanged = false;
 
   constructor(input: NodeJS.ReadStream, output: NodeJS.WriteStream) {
     if (!isTtyOk(input)) {
@@ -162,6 +181,43 @@ export class Terminal {
     this.output.write(BRACKETED_PASTE_OFF);
   }
 
+  /**
+   * Set the terminal title with one OSC 0 sequence. Guarded like every other
+   * write: no-op after restore, on a non-TTY output, or on a plain
+   * (`TERM=dumb`) terminal — a redirected or dumb stream never receives an
+   * escape byte from the title path.
+   */
+  setTitle(title: string): void {
+    if (this.restored || !this.attentionEnabled()) return;
+    this.titleChanged = true;
+    this.writeSafely(terminalTitleSequence(title));
+  }
+
+  /**
+   * Write one guarded terminal sequence that is not part of a frame (the
+   * clipboard's OSC 52 fallback). No-op after restore, while the external
+   * editor owns the screen, on a non-TTY output or on `TERM=dumb`.
+   */
+  writeAttention(sequence: string): void {
+    if (this.restored || this.suspended || !this.attentionEnabled()) return;
+    this.writeSafely(sequence);
+  }
+
+  /**
+   * Emit one attention notification (OSC 9, a tmux DCS passthrough, or one
+   * BEL — see `attention.ts`). Same guards as {@link setTitle}: attention is
+   * an interactive-terminal affordance only.
+   */
+  notify(input: NotificationInput): void {
+    if (this.restored || !this.attentionEnabled()) return;
+    this.writeSafely(terminalNotification(input));
+  }
+
+  /** Title/notification writes require a TTY output that is not `TERM=dumb`. */
+  private attentionEnabled(): boolean {
+    return isTtyOk(this.output) && process.env.TERM !== "dumb";
+  }
+
   /** Enter the alternate screen, hide the cursor, enable paste and raw keys. */
   enter(): void {
     if (this.entered) return;
@@ -177,10 +233,76 @@ export class Terminal {
 
   /** Write one full frame, homing the cursor and clearing stale rows below.
    *  Never writes once restore has begun — a late stream event after the
-   *  turnDone race (or any other straggler) must not touch the terminal. */
+   *  turnDone race (or any other straggler) must not touch the terminal. A
+   *  suspended driver (an external editor owns the screen) is quiet too. */
   render(frame: string): void {
-    if (this.restored) return;
+    if (this.restored || this.suspended) return;
     this.output.write(ANSI.cursorHome + frame + ANSI.clearBelow);
+  }
+
+  /** True while an external process owns the terminal (see {@link suspend}). */
+  get isSuspended(): boolean {
+    return this.suspended;
+  }
+
+  /**
+   * Hand the terminal to a child process: leave the alternate screen, turn
+   * bracketed paste off, show the cursor, leave raw mode and pause stdin.
+   * Idempotent, never throws mid-way and never writes after {@link restore};
+   * a driver that was never entered is left alone (there is nothing to give
+   * away). Rendering is a no-op until {@link resume}.
+   */
+  suspend(): void {
+    if (!this.entered || this.restored || this.suspended) return;
+    this.suspended = true;
+    this.writeSafely(BRACKETED_PASTE_OFF);
+    this.writeSafely(ANSI.showCursor);
+    this.writeSafely(ANSI.altScreenOff);
+    try {
+      if (typeof this.input.setRawMode === "function") this.input.setRawMode(false);
+    } catch {
+      // a closed/gone stdin still lets the child use the screen
+    }
+    try {
+      this.input.pause();
+    } catch {
+      // pausing keeps the suspended driver from consuming the editor's keys
+    }
+  }
+
+  /**
+   * Take the terminal back after {@link suspend}: re-enter the alternate
+   * screen (a fresh, cleared buffer), restore bracketed paste, hide the cursor,
+   * restore raw mode and resume stdin. The caller renders the first frame;
+   * this method writes no frame of its own. Idempotent and guarded like
+   * `suspend`; `restore()` after a suspend is still the final authority.
+   */
+  resume(): void {
+    if (!this.entered || this.restored || !this.suspended) return;
+    this.suspended = false;
+    this.writeSafely(ANSI.altScreenOn + ANSI.clearScreen);
+    this.writeSafely(BRACKETED_PASTE_ON);
+    this.writeSafely(ANSI.hideCursor);
+    try {
+      if (typeof this.input.setRawMode === "function") this.input.setRawMode(true);
+    } catch {
+      // the caller's next read still works on a fake or closing stream
+    }
+    try {
+      this.input.resume();
+      this.input.setEncoding?.("utf8");
+    } catch {
+      // resume is best-effort on a closing stream
+    }
+  }
+
+  /** One guarded escape write: a closing output never breaks suspend/resume. */
+  private writeSafely(sequence: string): void {
+    try {
+      this.output.write(sequence);
+    } catch {
+      // the output may already be closed; the remaining steps still run
+    }
   }
 
   /** Resolve with the next normalized input event (events that arrived early are queued). */
@@ -233,6 +355,7 @@ export class Terminal {
   restore(): void {
     if (this.restored) return;
     this.restored = true;
+    this.suspended = false;
     this.resizeListeners.clear();
     this.detachResize();
     this.parser.flush();
@@ -258,6 +381,16 @@ export class Terminal {
       this.output.write(ANSI.altScreenOff);
     } catch {
       // the output may already be closed
+    }
+    // Reset the title we changed, so the shell prompt does not inherit a
+    // stale run status. Only when a title was actually set (an injected sink
+    // or a plain terminal writes nothing here).
+    if (this.titleChanged && this.attentionEnabled()) {
+      try {
+        this.output.write(terminalTitleSequence(PRODUCT_NAME));
+      } catch {
+        // the output may already be closed
+      }
     }
     try {
       this.input.pause();

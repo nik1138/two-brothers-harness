@@ -500,6 +500,59 @@ test("Ctrl+N steers the running turn at the next boundary and never starts a tas
   assert.equal(code, 0);
 });
 
+test("Ctrl+X copies the newest reply through the injected writer; the title tracks the run", async () => {
+  const copied: string[] = [];
+  const titles: string[] = [];
+  const notifications: Array<{ title: string; body?: string }> = [];
+  const { app, input, output } = startApp({
+    clipboard: async (text) => {
+      copied.push(text);
+      return { ok: true, method: "osc52", chars: text.length };
+    },
+    attention: {
+      setTitle: (title) => titles.push(title),
+      notify: (event) => notifications.push(event),
+    },
+  });
+  assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+  assert.equal(titles[0], "Two Brothers", "session start sets the idle title");
+
+  // Nothing committed yet: the honest empty state, and no writer call.
+  input.key("x", { ctrl: true, raw: "\u0018" });
+  assert.ok(await waitFor(() => textOf(output).includes("nothing to copy yet")));
+  assert.equal(copied.length, 0);
+
+  input.type("copy this");
+  input.enter();
+  assert.ok(
+    await waitFor(() => titles.includes("Two Brothers · working")),
+    "a run start sets the working title",
+  );
+  assert.ok(await waitFor(() => textOf(output).includes("decision:"), 30_000));
+  assert.ok(
+    await waitFor(() => titles.includes("Two Brothers · done")),
+    "completion sets the done title",
+  );
+  assert.ok(
+    titles.indexOf("Two Brothers · working") < titles.indexOf("Two Brothers · done"),
+    "the title transitions in run order",
+  );
+
+  input.key("x", { ctrl: true, raw: "\u0018" });
+  assert.ok(await waitFor(() => textOf(output).includes("copied last reply (")));
+  assert.equal(copied.length, 1, "exactly one copy");
+  assert.match(copied[0] ?? "", /Final decision on «copy this»/);
+  assert.match(
+    textOf(output),
+    /copied last reply \(\d+ chars\) via OSC 52/,
+    "the toast reports the real method",
+  );
+  assert.equal(notifications.length, 0, "completion is title-only, never a notification");
+
+  const code = await quit(input, app);
+  assert.equal(code, 0);
+});
+
 test("/models senior <name> refuses when a TWO_BROTHERS_* env var pins the model", async () => {
   const previous = process.env.TWO_BROTHERS_SENIOR_MODEL;
   process.env.TWO_BROTHERS_SENIOR_MODEL = "env-pinned-model";
@@ -703,7 +756,7 @@ test("a discovered provider.md can never shadow the native /provider connect sur
 });
 
 test("injected key overrides: a rebound palette chord opens it and the default chord is dead", async () => {
-  const resolved = resolveTuiCommands({ palette: [{ name: "g", ctrl: true }] });
+  const resolved = resolveTuiCommands({ palette: [{ name: "y", ctrl: true }] });
   assert.deepEqual(resolved.diagnostics, []);
   const { app, input, output } = startApp({ commands: resolved.commands });
   assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
@@ -713,8 +766,8 @@ test("injected key overrides: a rebound palette chord opens it and the default c
     false,
     "Ctrl+P no longer opens the palette",
   );
-  input.key("g", { ctrl: true });
-  assert.ok(await waitFor(() => textOf(output).includes("COMMANDS")), "Ctrl+G opens the palette");
+  input.key("y", { ctrl: true });
+  assert.ok(await waitFor(() => textOf(output).includes("COMMANDS")), "Ctrl+Y opens the palette");
   assert.match(textOf(output), /Command palette/);
   input.key("escape");
   assert.ok(await waitFor(() => !lastFrameText(output).includes("COMMANDS")));
@@ -724,7 +777,7 @@ test("injected key overrides: a rebound palette chord opens it and the default c
 test("injected key overrides: help moves chords and the overlay lists the effective ones", async () => {
   const resolved = resolveTuiCommands({
     help: [{ name: "f2" }],
-    palette: [{ name: "g", ctrl: true }],
+    palette: [{ name: "y", ctrl: true }],
   });
   assert.deepEqual(resolved.diagnostics, []);
   const { app, input, output } = startApp({ commands: resolved.commands });
@@ -778,7 +831,7 @@ test("/keys show and /keys reload reflect and live-apply keys-file edits", async
   const source: TuiKeysSource = { path: keysFile, origin: "env" };
   fs.writeFileSync(
     keysFile,
-    `${JSON.stringify({ version: 1, bindings: { palette: ["ctrl+g"] } }, null, 2)}\n`,
+    `${JSON.stringify({ version: 1, bindings: { palette: ["ctrl+y"] } }, null, 2)}\n`,
     "utf8",
   );
   const initial = loadTuiKeyCommands(source);
@@ -795,7 +848,7 @@ test("/keys show and /keys reload reflect and live-apply keys-file edits", async
     // `/keys show` reports the captured source and the effective chords.
     input.type("/keys show");
     input.enter();
-    assert.ok(await waitFor(() => textOf(output).includes("keys: palette Ctrl+G")));
+    assert.ok(await waitFor(() => textOf(output).includes("keys: palette Ctrl+Y")));
     assert.ok(
       await waitFor(() => /keys file:[\s\S]{0,400}\(env\)[\s\S]{0,60}loaded/.test(textOf(output))),
       "the source is reported honestly",
@@ -810,7 +863,7 @@ test("/keys show and /keys reload reflect and live-apply keys-file edits", async
     );
 
     // The startup override works and the default palette chord is dead.
-    input.key("g", { ctrl: true });
+    input.key("y", { ctrl: true });
     assert.ok(await waitFor(() => lastFrameText(output).includes("COMMANDS")));
     input.key("escape");
     assert.ok(await waitFor(() => !lastFrameText(output).includes("COMMANDS")));
@@ -825,7 +878,7 @@ test("/keys show and /keys reload reflect and live-apply keys-file edits", async
     fs.writeFileSync(
       keysFile,
       `${JSON.stringify(
-        { version: 1, bindings: { palette: ["ctrl+g"], help: ["f2"] } },
+        { version: 1, bindings: { palette: ["ctrl+y"], help: ["f2"] } },
         null,
         2,
       )}\n`,
@@ -850,7 +903,7 @@ test("/keys show and /keys reload reflect and live-apply keys-file edits", async
     );
 
     // The palette listing uses the effective help chord too.
-    input.key("g", { ctrl: true });
+    input.key("y", { ctrl: true });
     assert.ok(await waitFor(() => lastFrameText(output).includes("COMMANDS")));
     assert.ok(await waitFor(() => lastFrameText(output).includes("F2")), "palette lists F2");
     input.key("escape");
@@ -886,7 +939,7 @@ test("--keys-watch: valid edits live-reload; invalid and absent changes keep the
   const source: TuiKeysSource = { path: keysFile, origin: "env" };
   fs.writeFileSync(
     keysFile,
-    `${JSON.stringify({ version: 1, bindings: { palette: ["ctrl+g"] } }, null, 2)}\n`,
+    `${JSON.stringify({ version: 1, bindings: { palette: ["ctrl+y"] } }, null, 2)}\n`,
     "utf8",
   );
   const initial = loadTuiKeyCommands(source);
@@ -902,7 +955,7 @@ test("--keys-watch: valid edits live-reload; invalid and absent changes keep the
     assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
 
     // The startup override is active and /keys show reports the watcher state.
-    input.key("g", { ctrl: true });
+    input.key("y", { ctrl: true });
     assert.ok(await waitFor(() => lastFrameText(output).includes("COMMANDS")));
     input.key("escape");
     assert.ok(await waitFor(() => !lastFrameText(output).includes("COMMANDS")));
@@ -934,11 +987,11 @@ test("--keys-watch: valid edits live-reload; invalid and absent changes keep the
     assert.match(lastFrameText(output), /F2/, "the palette lists the effective help chord");
     input.key("escape");
     assert.ok(await waitFor(() => !lastFrameText(output).includes("COMMANDS")));
-    input.key("g", { ctrl: true });
+    input.key("y", { ctrl: true });
     assert.equal(
       await waitFor(() => lastFrameText(output).includes("COMMANDS"), 300),
       false,
-      "Ctrl+G is dead after the auto-reload",
+      "Ctrl+Y is dead after the auto-reload",
     );
     input.key("f2");
     assert.ok(await waitFor(() => lastFrameText(output).includes("HELP")), "F2 opens help");
@@ -1105,4 +1158,109 @@ test("/sessions picker: sidecar and derived titles with human ages, resume uncha
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("Ctrl+G edits the draft in an external editor, restores the screen and cleans up", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-editor-script-"));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "tb-editor-tmp-"));
+  const script = path.join(root, "fake-editor.mjs");
+  fs.writeFileSync(
+    script,
+    [
+      'import * as fs from "node:fs";',
+      "const file = process.argv[2];",
+      'const text = fs.readFileSync(file, "utf8");',
+      'fs.writeFileSync(file, `edited: ${text.trim()}\\n`);',
+      "",
+    ].join("\n"),
+  );
+  const { app, input, output } = startApp({
+    externalEditor: {
+      // A real child process (Node itself) rewrites the temp file, so the whole
+      // suspend -> spawn -> read-back -> resume path runs end to end.
+      configured: `"${process.execPath}" "${script}"`,
+      tmpdir: tempRoot,
+    },
+  });
+  try {
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+    input.type("draft words");
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("draft words")),
+      "the draft is in the composer before the editor opens",
+    );
+    const before = output.data.length;
+    input.key("g", { ctrl: true, raw: "\u0007" });
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("edited: draft words")),
+      "the editor's saved text is read back into the composer",
+    );
+    const handoff = output.data.slice(before);
+    assert.ok(handoff.includes(ANSI.altScreenOff), "the alternate screen is released");
+    assert.ok(handoff.includes(ANSI.altScreenOn), "the alternate screen is restored");
+    assert.ok(
+      textOf(output).includes("external editor: draft updated"),
+      "success is reported as a real update",
+    );
+    assert.ok(!textOf(output).includes("external editor: failed"), "no fabricated failure");
+    assert.deepEqual(fs.readdirSync(tempRoot), [], "the temp edit directory is removed");
+    assert.equal(await quit(input, app), 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("Ctrl+G refuses while a turn runs and while an overlay owns the keyboard", async () => {
+  let held = false;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const mock = new MockProvider();
+  const gatedSenior: Provider = {
+    async chat(messages, responseKind, signal, options) {
+      if (!held) {
+        held = true;
+        await gate;
+      }
+      return mock.chat(messages, responseKind, signal, options);
+    },
+  };
+  const spawns: string[] = [];
+  const { app, input, output } = startApp({
+    providerOverrides: { senior: gatedSenior, junior: mock },
+    externalEditor: {
+      configured: process.execPath,
+      spawn: (file) => {
+        spawns.push(file);
+        const emitter = new EventEmitter();
+        setImmediate(() => emitter.emit("close", 0, null));
+        return emitter as never;
+      },
+    },
+  });
+  assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+  input.type("first task");
+  input.enter();
+  assert.ok(await waitFor(() => held), "the first senior call is held");
+
+  input.type("draft kept");
+  input.key("g", { ctrl: true, raw: "\u0007" });
+  assert.ok(
+    await waitFor(() => textOf(output).includes("a turn is running")),
+    "the refusal names the real reason",
+  );
+  assert.equal(spawns.length, 0, "no editor is launched while a turn runs");
+  assert.ok(lastFrameText(output).includes("draft kept"), "the draft is untouched");
+
+  release();
+  assert.ok(await waitFor(() => textOf(output).includes("decision:"), 30_000));
+
+  input.key("p", { ctrl: true });
+  assert.ok(await waitFor(() => textOf(output).includes("Command palette")));
+  input.key("g", { ctrl: true, raw: "\u0007" });
+  assert.equal(spawns.length, 0, "an open overlay never hands the terminal away");
+  input.key("escape");
+  assert.equal(await quit(input, app), 0);
 });

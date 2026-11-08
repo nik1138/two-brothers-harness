@@ -32,6 +32,8 @@ export interface ProviderView {
   api_key_set: boolean
   kind: string
   models: string[]
+  /** Declared context window in tokens; 0 = unknown (older backends omit it). */
+  context_window: number
   /** Built-in seed preset (additive server flag, false when absent). */
   seed: boolean
   /** A stored entry exists for this name (true when the flag is absent). */
@@ -44,6 +46,8 @@ export interface ProviderDraft {
   apiKey: string
   models: string[]
   kind: string
+  /** Context window as typed text; validated strictly on save (0 = unknown). */
+  contextWindow: string
 }
 
 export interface ProviderRoleRefs {
@@ -87,6 +91,37 @@ export function cleanModelList(value: unknown): string[] {
   return out
 }
 
+/** A usable preset context window: a positive safe integer, else 0 (unknown). */
+export function providerContextWindowOf(value: unknown): number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : 0
+}
+
+/** One parsed context-window input: a value, or an inline error. */
+export interface ProviderContextWindowResult {
+  /** Whole tokens; 0 means unknown. */
+  value: number
+  error: string | null
+}
+
+/**
+ * Strict context-window input parsing (mirrors the server's PUT validation):
+ * empty means 0/unknown, otherwise only a non-negative whole number is
+ * accepted. Floats, negatives, signs, exponents and text are errors — never
+ * silently coerced.
+ */
+export function parseProviderContextWindow(value: unknown): ProviderContextWindowResult {
+  const raw = text(value)
+  if (raw === '') return { value: 0, error: null }
+  if (!/^\d+$/.test(raw)) {
+    return { value: 0, error: 'Enter a whole number of tokens (0 = unknown).' }
+  }
+  const parsed = Number(raw)
+  if (!Number.isSafeInteger(parsed)) {
+    return { value: 0, error: 'This number is too large; use a smaller whole number.' }
+  }
+  return { value: parsed, error: null }
+}
+
 /** Order-sensitive comparison of two model lists after cleaning. */
 export function sameModelList(a: unknown, b: unknown): boolean {
   const left = cleanModelList(a)
@@ -125,6 +160,7 @@ export function normalizeProviders(raw: unknown): ProviderView[] {
       api_key_set: item.api_key_set === true,
       kind: text(item.kind) || PROVIDER_KIND_DEFAULT,
       models: cleanModelList(item.models),
+      context_window: providerContextWindowOf(item.context_window),
       seed: typeof item.seed === 'boolean' ? item.seed : false,
       customized: typeof item.customized === 'boolean' ? item.customized : true,
     })
@@ -186,19 +222,20 @@ export function providerUsageBadges(
 
 /** Initial edit draft for one provider (the key always starts empty). */
 export function providerDraftOf(
-  provider: Pick<ProviderView, 'base_url' | 'models' | 'kind'> | null | undefined,
+  provider: Pick<ProviderView, 'base_url' | 'models' | 'kind' | 'context_window'> | null | undefined,
 ): ProviderDraft {
   return {
     baseUrl: provider?.base_url ?? '',
     apiKey: '',
     models: [...(provider?.models ?? [])],
     kind: text(provider?.kind) || PROVIDER_KIND_DEFAULT,
+    contextWindow: String(providerContextWindowOf(provider?.context_window)),
   }
 }
 
 /** True when the draft would change something. */
 export function isProviderDraftDirty(
-  provider: Pick<ProviderView, 'base_url' | 'models' | 'kind'>,
+  provider: Pick<ProviderView, 'base_url' | 'models' | 'kind' | 'context_window'>,
   draft: ProviderDraft | null | undefined,
 ): boolean {
   if (!draft) return false
@@ -208,6 +245,11 @@ export function isProviderDraftDirty(
   if ((text(draft.kind) || PROVIDER_KIND_DEFAULT) !== (text(provider.kind) || PROVIDER_KIND_DEFAULT)) {
     return true
   }
+  // An unparsable window counts as dirty so the unsaved note never hides a
+  // broken field; equivalent text (spaces, leading zeros) is not dirty.
+  const window = parseProviderContextWindow(draft.contextWindow)
+  if (window.error !== null) return true
+  if (window.value !== providerContextWindowOf(provider.context_window)) return true
   return false
 }
 
@@ -344,6 +386,7 @@ export function applyProviderUpdate(
       api_key_set: saved.api_key_set,
       kind: saved.kind,
       models: cleanModelList(saved.models),
+      context_window: providerContextWindowOf(saved.context_window),
     }
   })
 }
@@ -363,6 +406,7 @@ export function applyProviderReset(
       api_key_set: restored.api_key_set,
       kind: restored.kind,
       models: cleanModelList(restored.models),
+      context_window: providerContextWindowOf(restored.context_window),
       seed: restored.seed === true,
       customized: restored.customized === true,
     }

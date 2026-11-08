@@ -16,6 +16,14 @@
  * around that read refuses a source replaced between the stat and the read
  * (including same-length replacements a size-only check would miss).
  *
+ * Crash-torn sources are tolerated exactly like `SessionStore.load()`: an
+ * UNTERMINATED final fragment with no parseable JSON object is a crash
+ * mid-append, so it is dropped and the fork copies only the complete envelope
+ * prefix (byte-exactly, source never rewritten). Interior corruption and a
+ * newline-terminated bad record still fail as `source-unreadable`. A valid
+ * final envelope without its trailing newline is not corruption and is copied
+ * as-is.
+ *
  * A full fork of an empty session is allowed (a valid empty session file and
  * `parent.seq: 0`); an explicit `atSeq` must name an existing envelope.
  *
@@ -274,7 +282,11 @@ function sameFileVersion(before: fs.Stats, after: fs.Stats): boolean {
  * (including its terminator), so slicing `text` at the cut end copies the
  * source's raw bytes exactly — CRLF terminators, spacing and blank lines
  * included. Parsing matches `SessionStore.load()` (trim, skip blank lines,
- * JSON objects only), so the copied envelopes are the ones `load()` sees.
+ * JSON objects only), INCLUDING its torn-tail rule: an unterminated final
+ * fragment whose text is not parseable JSON is a crash mid-append and is
+ * dropped (no event, no packet end), so only the complete prefix is copied.
+ * A newline-terminated bad line, interior corruption, or a parseable
+ * non-object still fail `source-unreadable`.
  */
 function parseSourceSnapshot(
   text: string,
@@ -293,10 +305,14 @@ function parseSourceSnapshot(
     lineNumber += 1;
     const line = content.trim();
     if (!line) continue;
+    // Only the last split element can be missing its terminator: an
+    // unterminated final fragment (a crash mid-append) is recoverable.
+    const isTornTail = terminator === "" && index === parts.length - 1;
     let parsed: unknown;
     try {
       parsed = JSON.parse(line);
     } catch (exc) {
+      if (isTornTail) continue;
       throw new SessionForkError(
         "source-unreadable",
         `cannot read session ${sourceName}: corrupt session file ${sourcePath}, ` +

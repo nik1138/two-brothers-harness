@@ -160,6 +160,25 @@ import {
   steeredToast,
 } from "./steering.ts";
 import {
+  PRODUCT_NAME,
+  terminalTitle,
+  type AttentionSink,
+  type AttentionStatus,
+} from "./attention.ts";
+import {
+  clipboardMethodLabel,
+  copyToClipboard,
+  type ClipboardResult,
+  type ClipboardWriter,
+} from "./clipboard.ts";
+import { lastReplyText } from "./copytext.ts";
+import {
+  editTextInExternalEditor,
+  resolveEditorCommand,
+  type ExternalEditResult,
+  type ExternalEditorOptions,
+} from "./externaleditor.ts";
+import {
   composeStatusHints,
   findSlashCommand,
   hintSegments,
@@ -397,6 +416,25 @@ export interface TuiAppOptions {
   /** Injection seams for tests/embedding; default to the process streams. */
   input?: NodeJS.ReadStream;
   output?: NodeJS.WriteStream;
+  /**
+   * Test/embedding seam: the clipboard writer behind Ctrl+X. Defaults to the
+   * platform writers in `clipboard.ts`; tests inject a recorder so no real
+   * clipboard (and no child process) is touched.
+   */
+  clipboard?: ClipboardWriter;
+  /**
+   * Test/embedding seam: the terminal title/notification sink. Defaults to
+   * `terminal.setTitle` / `terminal.notify`; an injected sink receives the
+   * plain title text and the notification body, so a test can assert the
+   * attention contract without reading escape bytes from the frame stream.
+   */
+  attention?: AttentionSink;
+  /**
+   * Test/embedding seam: the external-editor bridge behind Ctrl+G. Defaults
+   * to the real filesystem, spawn and `$VISUAL`/`$EDITOR` resolution; tests
+   * inject a command and/or spawn/fs/env so no real editor is launched.
+   */
+  externalEditor?: Omit<ExternalEditorOptions, "text">;
 }
 
 // --------------------------------------------------------------------------- //
@@ -1431,6 +1469,19 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     }
     throw exc;
   }
+  /** Attention writes go through the driver unless a test injected a sink. */
+  const attention: AttentionSink = options.attention ?? {
+    setTitle: (title) => {
+      terminal.setTitle(title);
+    },
+    notify: (input) => {
+      terminal.notify(input);
+    },
+  };
+  /** The clipboard writer behind Ctrl+X (injectable so tests stay real-clean). */
+  const clipboardWriter: ClipboardWriter =
+    options.clipboard ??
+    ((text) => copyToClipboard(text, { write: (sequence) => terminal.writeAttention(sequence) }));
 
   const cwd = options.cwd ?? process.cwd();
   const sessionsDir = options.sessionsDir ?? path.join(cwd, "sessions");
@@ -1648,6 +1699,17 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   // a modal overlay is up.
   let mention: MentionPickerState | null = null;
   let running = false;
+  /** One clipboard write at a time; Ctrl+X is ignored while one is in flight. */
+  let copying = false;
+  /** True while the external editor owns the terminal (Ctrl+G). */
+  let externalEditing = false;
+  /**
+   * The in-flight external-editor round trip. `handleKey` is synchronous, so
+   * the handler parks its promise here and the main loop awaits it before
+   * reading another key — stdin is paused meanwhile, and a queued event must
+   * never be dispatched into the suspended screen.
+   */
+  let pendingExternalEdit: Promise<void> | null = null;
   /** `/compact` is an in-process background pass: turns wait for it. */
   let compacting = false;
   let turnAbort: AbortController | null = null;
@@ -1705,6 +1767,15 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
    * identical request does not park again, and never persisted to settings.
    */
   const sessionAllows = new Map<string, { action: string; target: string }>();
+  /**
+   * Approval ids already announced by a terminal notification. One attention
+   * event per approval, never a second for the same request; bounded so a long
+   * process cannot grow the set forever.
+   */
+  const notifiedApprovals = new Set<string>();
+  const NOTIFIED_APPROVALS_MAX = 256;
+  /** Last title written, so a redundant status transition writes no bytes. */
+  let lastAttentionTitle = "";
 
   /**
    * The workspace file index for the composer `@path` picker. Re-indexed when
@@ -1749,6 +1820,176 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       render();
     }, 4000);
     timer.unref?.();
+  };
+
+  /**
+   * Publish the terminal title for the current session and run status. Called
+   * on session start/switch and on every run status transition; the write is
+   * skipped when nothing changed, so frames and streams stay quiet.
+   */
+  const updateAttentionTitle = (status?: AttentionStatus): void => {
+    const session = sessionCfg.sessionFile
+      ? path.basename(sessionCfg.sessionFile)
+      : undefined;
+    const title = terminalTitle({
+      ...(session !== undefined ? { session } : {}),
+      ...(status !== undefined ? { status } : {}),
+    });
+    if (title === lastAttentionTitle) return;
+    lastAttentionTitle = title;
+    attention.setTitle(title);
+  };
+
+  /**
+   * One notification per approval request (never one for a completion — a
+   * short run is title-only). The id set keeps a retry/replay from beeping
+   * twice; the body names the action and target exactly as the panel does.
+   */
+  const notifyApproval = (
+    approvalId: string,
+    action: string,
+    target?: string,
+  ): void => {
+    if (notifiedApprovals.has(approvalId)) return;
+    if (notifiedApprovals.size >= NOTIFIED_APPROVALS_MAX) notifiedApprovals.clear();
+    notifiedApprovals.add(approvalId);
+    attention.notify({
+      title: `${PRODUCT_NAME} — approval needed`,
+      body: target === undefined || target === "" ? action : `${action}: ${target}`,
+    });
+  };
+
+  /**
+   * Ctrl+X: copy the newest committed reply through the platform clipboard
+   * writer. Refused while a modal/find surface owns the keyboard and while a
+   * previous copy is still in flight; the toast names the real method and an
+   * honest failure, never a fabricated success.
+   */
+  const copyLastReply = (): void => {
+    if (copying) {
+      pushToast("info", "a clipboard copy is already in progress");
+      render();
+      return;
+    }
+    if (overlay !== null || find !== null) {
+      pushToast("info", "close the overlay or find bar before copying");
+      render();
+      return;
+    }
+    const text = lastReplyText(model);
+    if (text === null) {
+      pushToast("info", "nothing to copy yet");
+      render();
+      return;
+    }
+    copying = true;
+    const chars = text.length;
+    void Promise.resolve()
+      .then(() => clipboardWriter(text))
+      .then((result: ClipboardResult) => {
+        if (result.ok) {
+          const via =
+            result.method === null
+              ? ""
+              : ` via ${clipboardMethodLabel(result.method)}`;
+          pushToast("success", `copied last reply (${chars} chars)${via}`);
+        } else {
+          pushToast(
+            "warn",
+            `copy failed: ${result.error ?? "no clipboard writer available"}`,
+          );
+        }
+      })
+      .catch((exc: unknown) => {
+        pushToast("warn", `copy failed: ${messageOf(exc)}`);
+      })
+      .finally(() => {
+        copying = false;
+        render();
+      });
+  };
+
+  /** One bounded, single-line report for an external-editor failure toast. */
+  const boundedEditorMessage = (message: string): string => {
+    const line = message.replace(/\s+/gu, " ").trim();
+    return line.length <= 160 ? line : `${line.slice(0, 157)}...`;
+  };
+
+  /**
+   * Ctrl+G: edit the composer draft in the operator's `$VISUAL`/`$EDITOR` (or
+   * the configured command). The handler refuses while a turn/compaction runs
+   * or a modal/find/approval surface owns the keyboard, hands the terminal to
+   * the child via `suspend()` and ALWAYS takes it back in `finally`. A clean
+   * exit replaces the draft and says exactly that; any failure (unset editor,
+   * spawn error, nonzero exit, oversized read) leaves the draft untouched and
+   * reports one bounded line — never a fabricated save.
+   */
+  const runExternalEdit = async (): Promise<void> => {
+    if (running || compacting) {
+      pushToast("info", "a turn is running - the external editor opens only between turns");
+      render();
+      return;
+    }
+    if (overlay !== null || find !== null || approval !== null) {
+      pushToast("info", "close the overlay, find bar or approval before opening the editor");
+      render();
+      return;
+    }
+    externalEditing = true;
+    const editorOptions: ExternalEditorOptions = {
+      ...(options.externalEditor ?? {}),
+      text: editor.text,
+      // The model-writable tree is the TUI workspace, not the process cwd;
+      // refuse an editor planted there even when tui --workspace points away.
+      cwd: options.externalEditor?.cwd ?? workspaceRoot ?? cwd,
+    };
+    // Resolve before suspending: a missing/misconfigured editor is one toast,
+    // not an alt-screen flicker.
+    const resolved = resolveEditorCommand({
+      ...(editorOptions.configured !== undefined
+        ? { configured: editorOptions.configured }
+        : {}),
+      ...(editorOptions.platform !== undefined ? { platform: editorOptions.platform } : {}),
+      ...(editorOptions.env !== undefined ? { env: editorOptions.env } : {}),
+      cwd: editorOptions.cwd,
+      ...(editorOptions.fs !== undefined ? { fs: editorOptions.fs } : {}),
+    });
+    if (!resolved.ok) {
+      externalEditing = false;
+      pushToast("warn", `external editor: ${boundedEditorMessage(resolved.message)}`);
+      render();
+      return;
+    }
+    terminal.suspend();
+    let result: ExternalEditResult;
+    try {
+      result = await editTextInExternalEditor(editorOptions);
+    } catch (exc) {
+      result = { kind: "error", message: messageOf(exc) };
+    } finally {
+      terminal.resume();
+      externalEditing = false;
+    }
+    if (result.kind === "edited") {
+      editor = setEditorText(editor, result.text);
+      pushToast(
+        "success",
+        result.changed
+          ? `external editor: draft updated (${result.text.length} chars)`
+          : "external editor closed - the draft is unchanged",
+      );
+    } else {
+      pushToast("warn", `external editor: ${boundedEditorMessage(result.message)}`);
+    }
+    render();
+  };
+
+  const startExternalEdit = (): void => {
+    if (externalEditing) {
+      pushToast("info", "the external editor is already open");
+      return;
+    }
+    pendingExternalEdit = runExternalEdit();
   };
 
   /**
@@ -2122,6 +2363,17 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     const reduced = reduceModelEvent(model, event);
     model = reduced.model;
     if (reduced.status !== undefined) activity = reduced.status;
+    // Run status transitions drive the title only; the single approval
+    // notification is emitted by the broker callback (completion is silent).
+    if (event.type === "run_status") {
+      updateAttentionTitle(
+        event.status === "started"
+          ? "working"
+          : event.status === "failed"
+            ? "failed"
+            : "done",
+      );
+    }
     const now = Date.now();
     // A new reasoning buffer (first thinking delta, or a new call after the
     // previous one's text) must paint immediately even when provider deltas
@@ -2336,6 +2588,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     model = addUserBlock(model, task);
     scroll = latestTranscriptScroll();
     running = true;
+    updateAttentionTitle("working");
     // A new turn starts with an empty steer queue: the previous turn cleared
     // its leftovers at end (with an honest toast), so this is defensive only.
     steerQueue.clear();
@@ -2440,6 +2693,12 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
               activity = `waiting for approval: ${event.action}${
                 event.target !== undefined && event.target !== "" ? ` ${event.target}` : ""
               }`;
+              updateAttentionTitle("approval");
+              notifyApproval(
+                event.approval_id,
+                String(event.action ?? "approval"),
+                event.target,
+              );
               render();
             } else if (event.type === "approval_resolved") {
               const resolvedAction = approval?.item.action ?? "request";
@@ -2448,6 +2707,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
                 event.reason === "cancelled"
                   ? "approval cancelled — the turn is stopping"
                   : `approval ${String(event.decision ?? "denied")}: ${resolvedAction}`;
+              updateAttentionTitle(running ? "working" : undefined);
               render();
             } else if (event.type === "approval_auto_allowed") {
               pushToast(
@@ -2555,6 +2815,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
           if (result.errors.length > 0) {
             lastFailedTask = { task, turnMode };
             activity = "turn completed with errors — /retry re-sends it";
+            updateAttentionTitle("failed");
+          } else {
+            updateAttentionTitle("done");
           }
           if (sessionCfg.verbose) {
             for (const audit of result.promptAudits) {
@@ -2574,6 +2837,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         if (controller.signal.aborted) {
           model = addNotice(model, "info", "turn cancelled");
           activity = "turn cancelled — the session is still open";
+          updateAttentionTitle("done");
           // A stopped turn is exactly when the exit path needs restating: the
           // status hint slot counts down a few renders and then the rotating
           // tip returns (copy only; the chords themselves are unchanged).
@@ -2591,6 +2855,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
           activity = hint !== null
             ? "provider connection failed — run /provider to connect a provider"
             : "turn failed — the session is still open";
+          updateAttentionTitle("failed");
           if (overlay === null) {
             overlay = {
               kind: "dialog",
@@ -3061,6 +3326,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
               cost = null;
               measureContext();
               pushToast("success", `resumed ${item.label}`);
+              updateAttentionTitle(running ? "working" : undefined);
             } catch (exc) {
               model = addNotice(model, "error", messageOf(exc));
             }
@@ -3532,6 +3798,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     contextTokens = null;
     lastFailedTask = null;
     activity = "ready — new in-memory session";
+    updateAttentionTitle();
     baseNotice("success", "new in-memory session started");
   };
 
@@ -3659,6 +3926,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       case "stash":
         toggleStash();
         break;
+      case "external-edit":
+        startExternalEdit();
+        break;
       case "steer":
         steerRunningTurn();
         break;
@@ -3670,6 +3940,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         break;
       case "find":
         openFindBar();
+        break;
+      case "copy":
+        copyLastReply();
         break;
       case "mode":
         openModePicker();
@@ -4135,6 +4408,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       case "stash":
         toggleStash();
         return true;
+      case "external-edit":
+        startExternalEdit();
+        return true;
       case "steer":
         steerRunningTurn();
         return true;
@@ -4146,6 +4422,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         return true;
       case "find":
         openFindBar();
+        return true;
+      case "copy":
+        copyLastReply();
         return true;
       case "panel":
         toggleSidePanel();
@@ -4274,6 +4553,8 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     // Start the opt-in watcher only once the screen owns the terminal; every
     // exit path below stops and unwatches it in the `finally`.
     if (options.keysWatch === true) startKeysWatch();
+    // Session start: the title reflects the opened session (idle, no status).
+    updateAttentionTitle();
     render();
     if (options.initialTask !== undefined && options.initialTask.trim() !== "") {
       executeTurn(options.initialTask.trim(), mode, options.initialTask.trim());
@@ -4330,6 +4611,14 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         if (decision.suppress) continue;
       }
       handleKey(event.key);
+      // An external editor parked its round trip in the handler: await it
+      // before reading another key. Stdin is paused while suspended, so the
+      // editor owns the terminal and no queued event reaches the screen.
+      if (pendingExternalEdit !== null) {
+        const pending = pendingExternalEdit;
+        pendingExternalEdit = null;
+        await pending;
+      }
     }
     return 0;
   } catch (exc) {

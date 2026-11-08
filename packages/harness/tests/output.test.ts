@@ -24,9 +24,27 @@ import {
   StaticBroker,
 } from "../src/permissions.ts";
 
+function removeTempDirSync(root: string): void {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    try {
+      fs.rmSync(root, { recursive: true, force: true });
+      return;
+    } catch (exc) {
+      const code = (exc as NodeJS.ErrnoException).code;
+      if (
+        attempt === 49 ||
+        (code !== "EPERM" && code !== "EBUSY" && code !== "ENOTEMPTY")
+      ) {
+        throw exc;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    }
+  }
+}
+
 function tmpdir(): { root: string; cleanup: () => void } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-out-"));
-  return { root, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
+  return { root, cleanup: () => removeTempDirSync(root) };
 }
 
 const approved = (root: string): Workspace =>

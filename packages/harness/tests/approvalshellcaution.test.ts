@@ -51,13 +51,34 @@ function makeBroker(options: { denyLimit?: number } = {}): Fixture {
   return { broker, events };
 }
 
+function removeTempDirSync(root: string): void {
+  // Windows can keep a short-lived handle on the directory after a spawned
+  // shell exits; Node's rmSync maxRetries does not reliably retry EPERM here,
+  // so retry explicitly. Atomics.wait gives a synchronous backoff.
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    try {
+      fs.rmSync(root, { recursive: true, force: true });
+      return;
+    } catch (exc) {
+      const code = (exc as NodeJS.ErrnoException).code;
+      if (
+        attempt === 49 ||
+        (code !== "EPERM" && code !== "EBUSY" && code !== "ENOTEMPTY")
+      ) {
+        throw exc;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    }
+  }
+}
+
 function tmpdir(): { root: string; cleanup: () => void } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-shell-caution-"));
   // Retrying cleanup keeps the shell end-to-end case from inheriting the
   // repo's Git-Bash-on-PATH cleanup requirement (same pattern as load.test.ts).
   return {
     root,
-    cleanup: () => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }),
+    cleanup: () => removeTempDirSync(root),
   };
 }
 

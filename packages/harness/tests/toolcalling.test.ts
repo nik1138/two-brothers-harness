@@ -22,6 +22,24 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 
+function removeTempDirSync(root: string): void {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    try {
+      fs.rmSync(root, { recursive: true, force: true });
+      return;
+    } catch (exc) {
+      const code = (exc as NodeJS.ErrnoException).code;
+      if (
+        attempt === 49 ||
+        (code !== "EPERM" && code !== "EBUSY" && code !== "ENOTEMPTY")
+      ) {
+        throw exc;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    }
+  }
+}
+
 import { resolveConfig } from "../src/config.ts";
 import type { ChatMessage, ToolCall } from "../src/context.ts";
 import {
@@ -496,7 +514,7 @@ test("consult belts exclude workspace mutations; work mode keeps its documented 
     }
     assert.ok(deliverableBelt.includes(TODO_TOOL_NAME));
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    removeTempDirSync(root);
   }
 });
 

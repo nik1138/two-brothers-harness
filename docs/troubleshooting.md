@@ -18,7 +18,8 @@ a usage error. Warnings never fail the report. In `--json`, each check carries
 `id`, `label`, `status` and an optional `detail`; the ids are `engine` (Node
 engine), `settings` (Settings file), `sessions-dir` (Sessions directory),
 `roles` (Role configuration), `endpoint` (Provider endpoint), `web-assets` (Web
-assets) and `plugins` (Plugins directory).
+assets), `plugins` (Plugins directory), `tui-keys` (TUI keys file),
+`tui-history` (TUI prompt history) and `mcp-config` (MCP configuration).
 
 ## No provider or model configured
 
@@ -58,6 +59,22 @@ adding ids is explicit (**Add N to draft**, then **Save changes**).
 | HTTP 400 `a typed API key is required when probing a different base URL` | The draft Base URL differs from the preset's saved endpoint while the preset has a saved/env-backed key — sending that secret to a different host is refused before any request. | Type the key for the target endpoint in the API key field; it is used for this one probe and never stored (a blank field still uses the saved key when the URL is the preset's own). |
 | `Model discovery is not supported by this backend. Nothing was changed.` (404) | The browser is talking to an older backend without the discovery route. | Rebuild and restart the backend from this checkout (`npm run build`, then `serve`). The draft and the saved provider are untouched. |
 | `The endpoint reported no models. Your saved model list is unchanged.` | The endpoint answered but served an empty list (no model loaded, or an API that does not list models). | Load a model in the local server, or add model ids by hand. An empty answer is valid and must not erase the saved catalog. |
+
+## MCP configuration
+
+`--mcp-config <path>` and `TWO_BROTHERS_MCP_CONFIG` point at the same
+Claude-Desktop-style JSON (`{"mcpServers": {...}}`). A non-blank flag wins over
+the env; a blank flag falls back to it; blank/whitespace on both means no MCP
+servers. The `doctor` row `mcp-config` validates the env-named file read-only.
+
+| Symptom | `doctor` check | Fix |
+|---|---|---|
+| MCP tools are missing although the env names a file | `mcp-config` passes, but a `run` used a different `--mcp-config` | The flag wins over the env. Remove the flag or point both at the same file. |
+| `mcp-config` warns `not found — fix or unset TWO_BROTHERS_MCP_CONFIG` | The env is set to a path that does not exist (resolved against the current directory) | Fix the path or unset the variable; an unset variable is a skip, not a failure. |
+| `mcp-config` warns `is not valid JSON` | The file cannot be parsed; the parser message is deliberately discarded because it can quote file bytes | Validate the file with a JSON linter; it must contain a top-level `mcpServers` object. |
+| `mcp-config` warns `is larger than 1048576 bytes` | The env points at a data file rather than a small MCP config | Point `TWO_BROTHERS_MCP_CONFIG` at the MCP JSON; doctor deliberately caps the read at 1 MiB. |
+| `mcp-config` warns `"mcpServers" must be an object of server entries` | Wrong top-level shape (array/string root, missing or non-object `mcpServers`) | Wrap the server definitions in `{"mcpServers": { ... }}`. |
+| A valid config still fails at run time | `doctor` validates the file shape only — it never starts a server or makes a network call, so it cannot prove that a command exists or a URL is reachable | Run `doctor` for the shape, then check the server's own diagnostics under `--verbose`; the run fails softly and continues text-only. |
 
 ## Web queue and session-scope approvals
 

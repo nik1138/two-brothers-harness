@@ -16,6 +16,10 @@ import { DEFAULTS, type Config } from "../src/config.ts";
 import {
   DEFAULT_DOCTOR_TIMEOUT_MS,
   formatDoctorReport,
+  MCP_CONFIG_DETAIL_MAX_CHARS,
+  MCP_CONFIG_ENV,
+  MCP_CONFIG_MAX_BYTES,
+  MCP_CONFIG_SERVER_NAME_LIMIT,
   NODE_ENGINE_FLOOR,
   nodeEngineProblem,
   runDoctor,
@@ -190,6 +194,7 @@ test("report lists every check in deterministic order and is stable across runs"
         "plugins",
         "tui-keys",
         "tui-history",
+        "mcp-config",
       ],
     );
     for (const check of first.checks) {
@@ -670,7 +675,7 @@ test("web assets default to the packaged/repo candidates without throwing", asyn
     });
     const web = requireCheck(report, "web-assets");
     assert.ok(["pass", "warn"].includes(web.status));
-    assert.equal(report.checks.length, 9);
+    assert.equal(report.checks.length, 10);
   });
 });
 
@@ -735,7 +740,7 @@ test("tui-keys: a valid file passes with the effective chord summary", async () 
       keysPath,
       JSON.stringify({
         version: 1,
-        bindings: { palette: ["ctrl+g"], help: ["f2"], stash: ["ctrl+u"] },
+        bindings: { palette: ["ctrl+y"], help: ["f2"], stash: ["ctrl+u"] },
       }),
     );
     const report = await runDoctor(
@@ -744,11 +749,11 @@ test("tui-keys: a valid file passes with the effective chord summary", async () 
     const check = requireCheck(report, "tui-keys");
     assert.equal(check.status, "pass");
     assert.ok((check.detail ?? "").includes(keysPath));
-    assert.match(check.detail ?? "", /palette Ctrl\+G/);
+    assert.match(check.detail ?? "", /palette Ctrl\+Y/);
     assert.match(check.detail ?? "", /help F2/);
     assert.match(check.detail ?? "", /stash Ctrl\+U/);
     const line = formatDoctorReport(report).find((text) => text.startsWith("[pass] TUI keys file"));
-    assert.match(line ?? "", / — .*palette Ctrl\+G/);
+    assert.match(line ?? "", / — .*palette Ctrl\+Y/);
   });
 });
 
@@ -890,6 +895,216 @@ test("tui-history: corrupt, wrong-version and unreadable files warn without cont
 });
 
 // ---------------------------------------------------------------------------
+// MCP config file
+// ---------------------------------------------------------------------------
+
+/** Options whose MCP config env var points at `value` (relative to the temp cwd). */
+function mcpOptions(
+  dir: string,
+  value: string | undefined,
+  overrides: Partial<DoctorOptions> = {},
+): DoctorOptions {
+  const env = envFor(dir, value === undefined ? {} : { [MCP_CONFIG_ENV]: value });
+  return baseOptions(dir, { env, ...overrides });
+}
+
+test("mcp-config: unset or blank passes informationally with 'not configured' wording", async () => {
+  await withTempDir(async (dir) => {
+    for (const value of [undefined, "", "   "]) {
+      const report = await runDoctor(mcpOptions(dir, value));
+      const check = requireCheck(report, "mcp-config");
+      assert.equal(check.label, "MCP config");
+      assert.equal(check.status, "skip", `env value ${JSON.stringify(value)}`);
+      assert.match(check.detail ?? "", /not set/);
+      assert.match(check.detail ?? "", /no MCP servers configured/);
+      assert.equal(report.ok, true, "an unconfigured MCP setup is not a failure");
+      const line = formatDoctorReport(report).find((text) => text.startsWith("[skip] MCP config"));
+      assert.ok(line, "the human report keeps the one-line shape");
+      assert.match(line ?? "", /— .*no MCP servers configured/);
+    }
+  });
+});
+
+test("mcp-config: a valid file with zero or two servers passes with a sorted summary", async () => {
+  await withTempDir(async (dir) => {
+    const emptyPath = path.join(dir, "empty.json");
+    writeFileAt(emptyPath, JSON.stringify({ mcpServers: {} }));
+    const empty = requireCheck(await runDoctor(mcpOptions(dir, emptyPath)), "mcp-config");
+    assert.equal(empty.status, "pass");
+    assert.ok((empty.detail ?? "").includes(emptyPath));
+    assert.match(empty.detail ?? "", /no servers configured/);
+
+    // A relative env value resolves against the injected cwd; names stay sorted.
+    writeFileAt(
+      path.join(dir, "mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          zeta: { url: "https://example.com/mcp" },
+          alpha: { command: "npx", args: ["-y", "server"] },
+        },
+      }),
+    );
+    const report = await runDoctor(mcpOptions(dir, "mcp.json"));
+    const check = requireCheck(report, "mcp-config");
+    assert.equal(check.status, "pass");
+    assert.ok((check.detail ?? "").includes(path.resolve(dir, "mcp.json")));
+    assert.match(check.detail ?? "", /2 servers: alpha, zeta/);
+    assert.ok((check.detail ?? "").length <= MCP_CONFIG_DETAIL_MAX_CHARS);
+    const line = formatDoctorReport(report).find((text) => text.startsWith("[pass] MCP config"));
+    assert.match(line ?? "", /— .*2 servers: alpha, zeta/);
+    assert.equal(report.ok, true);
+  });
+});
+
+test("mcp-config: a long server list is bounded with a +N more tail", async () => {
+  await withTempDir(async (dir) => {
+    const servers: Record<string, unknown> = {};
+    for (let index = 0; index < 12; index += 1) {
+      servers[`server${String(index).padStart(2, "0")}`] = { command: "run" };
+    }
+    writeFileAt(path.join(dir, "many.json"), JSON.stringify({ mcpServers: servers }));
+    const check = requireCheck(await runDoctor(mcpOptions(dir, "many.json")), "mcp-config");
+    assert.equal(check.status, "pass");
+    assert.match(check.detail ?? "", /12 servers: /);
+    assert.match(check.detail ?? "", new RegExp(`\\+${12 - MCP_CONFIG_SERVER_NAME_LIMIT} more`));
+    assert.ok(
+      (check.detail ?? "").length <= MCP_CONFIG_DETAIL_MAX_CHARS,
+      `detail is bounded (${(check.detail ?? "").length} chars)`,
+    );
+  });
+});
+
+test("mcp-config: a missing explicitly named file warns, names the path and does not fail", async () => {
+  await withTempDir(async (dir) => {
+    const report = await runDoctor(mcpOptions(dir, "missing-mcp.json"));
+    const check = requireCheck(report, "mcp-config");
+    assert.equal(check.status, "warn");
+    assert.ok((check.detail ?? "").includes(path.resolve(dir, "missing-mcp.json")));
+    assert.match(check.detail ?? "", /not found/);
+    assert.match(check.detail ?? "", new RegExp(MCP_CONFIG_ENV));
+    assert.ok((check.detail ?? "").length <= MCP_CONFIG_DETAIL_MAX_CHARS);
+    assert.equal(report.ok, true, "a warn never fails the report");
+  });
+});
+
+test("mcp-config: an unreadable path (a directory) warns without failing", async () => {
+  await withTempDir(async (dir) => {
+    const dirPath = path.join(dir, "mcp-dir");
+    fs.mkdirSync(dirPath, { recursive: true });
+    const check = requireCheck(await runDoctor(mcpOptions(dir, dirPath)), "mcp-config");
+    assert.equal(check.status, "warn");
+    assert.match(check.detail ?? "", /is not a file/);
+    assert.ok((check.detail ?? "").includes(dirPath));
+    assert.equal((await runDoctor(mcpOptions(dir, dirPath))).ok, true);
+  });
+});
+
+test("mcp-config: a file over the read cap warns without reading it", async () => {
+  await withTempDir(async (dir) => {
+    const configPath = path.join(dir, "huge.json");
+    fs.writeFileSync(configPath, Buffer.alloc(MCP_CONFIG_MAX_BYTES + 1, 0x20));
+    const check = requireCheck(await runDoctor(mcpOptions(dir, configPath)), "mcp-config");
+    assert.equal(check.status, "warn");
+    assert.match(check.detail ?? "", /is larger than \d+ bytes/);
+    assert.equal((await runDoctor(mcpOptions(dir, configPath))).ok, true);
+  });
+});
+
+test("mcp-config: invalid JSON warns without echoing the file or parser message", async () => {
+  await withTempDir(async (dir) => {
+    const configPath = path.join(dir, "broken.json");
+    const secret = "sk-mcp-never-render";
+    writeFileAt(
+      configPath,
+      `{"mcpServers":{"filesystem":{"command":"npx","headers":{"Authorization":"Bearer ${secret}"}}}`,
+    );
+    const report = await runDoctor(mcpOptions(dir, configPath));
+    const check = requireCheck(report, "mcp-config");
+    assert.equal(check.status, "warn");
+    assert.match(check.detail ?? "", /not valid JSON/);
+    assert.ok(!(check.detail ?? "").includes(secret), "file bytes are never echoed");
+    assert.ok(!(check.detail ?? "").includes("Unexpected"), "the parser message is not echoed");
+    assert.ok((check.detail ?? "").length <= MCP_CONFIG_DETAIL_MAX_CHARS);
+    const rendered = JSON.stringify(report) + "\n" + formatDoctorReport(report).join("\n");
+    assert.ok(!rendered.includes(secret));
+    assert.equal(report.ok, true);
+  });
+});
+
+test("mcp-config: a wrong top-level shape warns (array root, missing or non-object mcpServers)", async () => {
+  await withTempDir(async (dir) => {
+    const cases: Array<[string, string, RegExp]> = [
+      ["array-root.json", "[1, 2, 3]", /must contain a JSON object/],
+      ["string-root.json", '"nope"', /must contain a JSON object/],
+      ["no-servers.json", '{"servers": {}}', /"mcpServers" must be an object/],
+      ["array-servers.json", '{"mcpServers": []}', /"mcpServers" must be an object/],
+      ["null-servers.json", '{"mcpServers": null}', /"mcpServers" must be an object/],
+    ];
+    for (const [name, body, expected] of cases) {
+      writeFileAt(path.join(dir, name), body);
+      const report = await runDoctor(mcpOptions(dir, name));
+      const check = requireCheck(report, "mcp-config");
+      assert.equal(check.status, "warn", name);
+      assert.match(check.detail ?? "", expected, name);
+      assert.equal(report.ok, true, `${name}: a warn never fails`);
+    }
+  });
+});
+
+test("mcp-config: secret-looking spec fields are never rendered", async () => {
+  await withTempDir(async (dir) => {
+    const secret = "sk-mcp-config-secret";
+    const password = "hunter2-in-url";
+    writeFileAt(
+      path.join(dir, "mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          filesystem: {
+            command: "npx",
+            env: { OPENAI_API_KEY: secret },
+            headers: { Authorization: `Bearer ${secret}` },
+            url: `https://user:${password}@example.com/mcp`,
+            timeoutMs: 1000,
+          },
+        },
+      }),
+    );
+    const report = await runDoctor(mcpOptions(dir, "mcp.json"));
+    const check = requireCheck(report, "mcp-config");
+    assert.equal(check.status, "pass");
+    assert.match(check.detail ?? "", /1 server: filesystem/);
+    const rendered = JSON.stringify(report) + "\n" + formatDoctorReport(report).join("\n");
+    assert.ok(!rendered.includes(secret), "keys/headers are never rendered");
+    assert.ok(!rendered.includes(password), "URL credentials are never rendered");
+    assert.ok(!rendered.includes("Bearer"), "header values are never rendered");
+  });
+});
+
+test("mcp-config: --json carries the check additively and stays warn-tolerant", async () => {
+  await withTempDir(async (dir) => {
+    const valid = await runDoctor(mcpOptions(dir, undefined));
+    const body = JSON.parse(JSON.stringify(valid)) as DoctorReport;
+    assert.equal(typeof body.ok, "boolean");
+    assert.ok(Array.isArray(body.checks));
+    const mcp = body.checks.find((check) => check.id === "mcp-config");
+    assert.ok(mcp, "the machine report gains the check without changing the shape");
+    assert.deepEqual(Object.keys(mcp).sort(), ["detail", "id", "label", "status"]);
+    assert.equal(mcp.label, "MCP config");
+    // The check sits last, after every pre-existing check, deterministically.
+    assert.deepEqual(
+      body.checks.slice(-2).map((check) => check.id),
+      ["tui-history", "mcp-config"],
+    );
+    assert.equal(body.checks.filter((check) => check.id === "mcp-config").length, 1);
+
+    writeFileAt(path.join(dir, "broken.json"), "not json");
+    const warned = await runDoctor(mcpOptions(dir, "broken.json"));
+    assert.equal(requireCheck(warned, "mcp-config").status, "warn");
+    assert.equal(warned.ok, true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // formatting and never-throw guarantees
 // ---------------------------------------------------------------------------
 
@@ -922,13 +1137,13 @@ test("runDoctor never throws on partial or hostile input and still reports every
       settingsPath: path.join(dir, "settings.json"),
       webRoots: [],
     } as DoctorOptions);
-    assert.equal(partial.checks.length, 9);
+    assert.equal(partial.checks.length, 10);
     assert.equal(partial.ok, false, "openai roles without a base URL fail");
     assert.match(requireCheck(partial, "roles").detail ?? "", /no senior base URL/);
 
     const noOptions = await runDoctor({ cwd: dir } as unknown as DoctorOptions);
     assert.equal(typeof noOptions.ok, "boolean");
-    assert.equal(noOptions.checks.length, 9);
+    assert.equal(noOptions.checks.length, 10);
 
     const hostile = await runDoctor({
       config: makeConfig({ provider: "mock" }),
@@ -938,7 +1153,7 @@ test("runDoctor never throws on partial or hostile input and still reports every
       webRoots: ["", 42 as unknown as string, path.join(dir, "web")],
       timeoutMs: Number.NaN,
     } as unknown as DoctorOptions);
-    assert.equal(hostile.checks.length, 9);
+    assert.equal(hostile.checks.length, 10);
     assert.ok(hostile.checks.every((check) => typeof check.label === "string"));
   });
 });

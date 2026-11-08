@@ -289,6 +289,58 @@ test("POST fork: seq cuts a prefix; explicit name (with or without .jsonl) is ho
   }
 });
 
+test("POST fork: a crash-torn tail forks its complete prefix; valid final no-newline forks too", async () => {
+  const srv = await startServer();
+  try {
+    const events = [...turn(1, "first task"), ...turn(3, "second task")];
+    const complete = events.map((event) => JSON.stringify(event)).join("\n") + "\n";
+    fs.mkdirSync(srv.sessionsDir, { recursive: true });
+    const tornSource = path.join(srv.sessionsDir, "torn.jsonl");
+    fs.writeFileSync(tornSource, complete + '{"v":1,"id":"msg-5","seq":5', "utf-8");
+    const tornHash = sha256(tornSource);
+
+    const torn = await request(srv.base, "/api/sessions/torn.jsonl/fork", { method: "POST" });
+    assert.equal(torn.status, 201, torn.text);
+    const tornBody = torn.body as Record<string, unknown>;
+    assert.equal(tornBody.events, 4);
+    assert.deepEqual(tornBody.forked_from, { name: "torn.jsonl", seq: 4 });
+    const tornFork = path.join(srv.sessionsDir, String(tornBody.name));
+    assert.equal(fs.readFileSync(tornFork, "utf-8"), complete);
+    assert.deepEqual(seqsOf(tornFork), [1, 2, 3, 4]);
+    assert.equal(sha256(tornSource), tornHash, "the torn source must never be rewritten");
+
+    // A complete final envelope without its newline is not a tear.
+    const nonlText = [...turn(1, "alpha")].map((event) => JSON.stringify(event)).join("\n");
+    const nonlSource = path.join(srv.sessionsDir, "nonl.jsonl");
+    fs.writeFileSync(nonlSource, nonlText, "utf-8");
+    const nonl = await request(srv.base, "/api/sessions/nonl.jsonl/fork", { method: "POST" });
+    assert.equal(nonl.status, 201, nonl.text);
+    assert.equal((nonl.body as Record<string, unknown>).events, 2);
+    assert.equal(
+      fs.readFileSync(path.join(srv.sessionsDir, String((nonl.body as Record<string, unknown>).name)), "utf-8"),
+      nonlText,
+    );
+
+    // Interior / newline-terminated corruption stays 422 even next to a torn tail.
+    fs.writeFileSync(
+      path.join(srv.sessionsDir, "interior.jsonl"),
+      JSON.stringify(events[0]) + "\nnot json\n" + '{"v":1,"id":"msg-6","seq":6',
+      "utf-8",
+    );
+    const interior = await request(srv.base, "/api/sessions/interior.jsonl/fork", {
+      method: "POST",
+    });
+    assert.equal(interior.status, 422, interior.text);
+    assert.match(interior.text, /line 2/);
+    assert.deepEqual(
+      listNames(srv.sessionsDir).filter((name) => name.includes("interior-fork")),
+      [],
+    );
+  } finally {
+    await srv.close();
+  }
+});
+
 test("POST fork: error statuses are honest and write nothing", async () => {
   const srv = await startServer();
   try {

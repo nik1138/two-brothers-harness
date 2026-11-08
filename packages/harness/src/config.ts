@@ -562,8 +562,21 @@ export function compactionSettingsFromConfig(cfg: Config): CompactionSettings | 
 // persisted compaction merge (serve runs + manual compaction)
 // ---------------------------------------------------------------------------
 
-/** Where one effective compaction budget came from. */
-export type CompactionFieldSource = "options" | "flag" | "persisted" | "absent";
+/**
+ * Where one effective compaction budget came from.
+ *
+ * `preset` is the additive run-level fallback (wave 26): the context window
+ * declared by the roles' named provider presets (the smaller of the two). It
+ * only ever applies to `context_window` when no explicit flag/env/config value
+ * and no persisted `compaction.context_window` is set, and an explicit
+ * `ServerOptions.compaction` still owns every field wholesale.
+ */
+export type CompactionFieldSource =
+  | "options"
+  | "flag"
+  | "persisted"
+  | "preset"
+  | "absent";
 
 /**
  * One compaction field as the settings API reports it: the stored section
@@ -641,14 +654,17 @@ interface MergedCompactionFields {
  * or test pin, unchanged behavior); otherwise each field independently takes
  * the non-zero CLI-flag/env config value (through
  * {@link compactionFieldsFromConfig}, so the zero/unset mapping exists once),
- * then the persisted `compaction` section value, then nothing. `--compact`'s
- * `force` rides along from the config layer only — a persisted force is
- * deliberately out of scope.
+ * then the persisted `compaction` section value, then — for `context_window`
+ * only — the resolved preset window (`presetWindow`, the smaller of the two
+ * roles' named-preset windows), then nothing. `--compact`'s `force` rides
+ * along from the config layer only — a persisted force is deliberately out of
+ * scope.
  */
 function mergeCompactionFields(
   cfg: Config,
   persisted: PersistedCompactionSettings | undefined,
   explicit: CompactionSettings | undefined,
+  presetWindow = 0,
 ): MergedCompactionFields {
   if (explicit !== undefined) {
     const settings = { ...explicit };
@@ -676,7 +692,14 @@ function mergeCompactionFields(
       return { value: flag, source: "flag" };
     }
     const saved = persistedBudget(storedValue);
-    return saved > 0 ? { value: saved, source: "persisted" } : { value: 0, source: "absent" };
+    if (saved > 0) return { value: saved, source: "persisted" };
+    // The preset window is the last resort, and only for the window itself:
+    // it is derived from the roles' named presets, not a stored run-level
+    // value, so it must never shadow a flag/env or persisted choice.
+    if (key === "contextWindow" && presetWindow > 0) {
+      return { value: presetWindow, source: "preset" };
+    }
+    return { value: 0, source: "absent" };
   };
   const thresholdChars = pick("thresholdChars", fromConfig.thresholdChars, stored.threshold_chars);
   const keepRecentChars = pick(
@@ -718,8 +741,9 @@ export function compactionFieldsForServe(
   cfg: Config,
   persisted: PersistedCompactionSettings | undefined,
   explicit?: CompactionSettings,
+  presetWindow = 0,
 ): CompactionSettings {
-  return mergeCompactionFields(cfg, persisted, explicit).settings;
+  return mergeCompactionFields(cfg, persisted, explicit, presetWindow).settings;
 }
 
 /**
@@ -733,9 +757,10 @@ export function serveCompactionSettings(
   cfg: Config,
   persisted: PersistedCompactionSettings | undefined,
   explicit?: CompactionSettings,
+  presetWindow = 0,
 ): CompactionSettings | undefined {
   if (explicit !== undefined) return { ...explicit };
-  const fields = compactionFieldsForServe(cfg, persisted);
+  const fields = compactionFieldsForServe(cfg, persisted, undefined, presetWindow);
   if (
     !fields.force &&
     (fields.thresholdChars ?? 0) <= 0 &&
@@ -756,8 +781,9 @@ export function compactionSettingsView(
   cfg: Config,
   persisted: PersistedCompactionSettings | undefined,
   explicit?: CompactionSettings,
+  presetWindow = 0,
 ): CompactionSettingsView {
-  const { settings, sources } = mergeCompactionFields(cfg, persisted, explicit);
+  const { settings, sources } = mergeCompactionFields(cfg, persisted, explicit, presetWindow);
   const stored = persisted ?? {};
   const field = (
     key: keyof CompactionExplicitFields,

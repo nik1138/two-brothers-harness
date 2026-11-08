@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { costLine, estimateRunCost, main, OPTIONS, type CliIO } from "../src/cli.ts";
+import { costLine, estimateRunCost, main, mcpConfigFromValues, OPTIONS, type CliIO } from "../src/cli.ts";
 import { commandHelp, COMMAND_ORDER, FLAGS } from "../src/clihelp.ts";
 import { maxTokensForRole, resolveConfig, type Config } from "../src/config.ts";
 import {
@@ -1059,6 +1059,31 @@ test("sessions show: unknown session and missing name exit 2 with a clear messag
   });
 });
 
+test("sessions undo is advertised by help/completions and its flags are catalogued", async () => {
+  const help = makeIO();
+  assert.equal(await main(["sessions", "--help"], help), 0);
+  const text = help.out.join("\n");
+  assert.match(text, /sessions undo <name> \[--run <id>\] \[--apply\] \[--discard\]/);
+  assert.match(text, /undo: run id/i);
+  assert.match(text, /--apply/);
+  assert.match(text, /--discard/);
+  for (const flag of ["run", "apply", "discard"]) {
+    assert.ok(flag in FLAGS, `clihelp FLAGS is missing --${flag}`);
+  }
+  const spec = commandHelp("sessions");
+  assert.ok(spec);
+  for (const flag of ["run", "apply", "discard"]) {
+    assert.ok((spec.flags ?? []).includes(flag), `sessions help spec lacks --${flag}`);
+  }
+
+  const completion = makeIO();
+  assert.equal(await main(["completions", "bash"], completion), 0);
+  const script = completion.out.join("\n");
+  assert.match(script, /--run/);
+  assert.match(script, /--apply/);
+  assert.match(script, /--discard/);
+});
+
 // ---------------------------------------------------------------------------
 // config: provenance, key masking, `config --json`
 // ---------------------------------------------------------------------------
@@ -1415,6 +1440,137 @@ test("run --dry-run: prints the plan, writes no session, calls no provider", asy
       );
     });
   });
+});
+
+// ---------------------------------------------------------------------------
+// MCP config: `--mcp-config` > TWO_BROTHERS_MCP_CONFIG
+// (clihelp.ts + docs/cli-reference.md map the two to each other)
+// ---------------------------------------------------------------------------
+
+test("mcpConfigFromValues: flag wins over env, blank layers mean unconfigured", () => {
+  const env = (value: string | undefined): NodeJS.ProcessEnv =>
+    value === undefined ? {} : { TWO_BROTHERS_MCP_CONFIG: value };
+
+  assert.equal(
+    mcpConfigFromValues({ "mcp-config": "flag.json" }, env("env.json")),
+    "flag.json",
+    "the flag wins over the env",
+  );
+  assert.equal(mcpConfigFromValues({}, env("env.json")), "env.json", "env-only");
+  assert.equal(
+    mcpConfigFromValues({ "mcp-config": "   " }, env("env.json")),
+    "env.json",
+    "a blank flag falls back to the env",
+  );
+  assert.equal(
+    mcpConfigFromValues({ "mcp-config": "" }, env("env.json")),
+    "env.json",
+    "an empty flag falls back to the env",
+  );
+  assert.equal(
+    mcpConfigFromValues({ "mcp-config": "  flag.json  " }, env("env.json")),
+    "flag.json",
+    "both layers are trimmed",
+  );
+  assert.equal(mcpConfigFromValues({}, env("  env.json  ")), "env.json");
+  assert.equal(mcpConfigFromValues({}, env("   ")), undefined, "blank env is unconfigured");
+  assert.equal(mcpConfigFromValues({ "mcp-config": "  " }, {}), undefined);
+  assert.equal(mcpConfigFromValues({}, {}), undefined, "nothing configured");
+  assert.equal(
+    mcpConfigFromValues({ "mcp-config": true }, env("  ")),
+    undefined,
+    "a non-string flag value is ignored",
+  );
+  assert.equal(
+    mcpConfigFromValues({ "mcp-config": "tests/fixtures/mcp-config.stdio.json" }, {}),
+    "tests/fixtures/mcp-config.stdio.json",
+    "the path is kept as given (the MCP loader resolves relative paths)",
+  );
+});
+
+test("run --dry-run honours TWO_BROTHERS_MCP_CONFIG; --mcp-config wins", async () => {
+  await withTempDir(async (dir) => {
+    await withCleanCliEnv(async () => {
+      const fixture = fileURLToPath(
+        new URL("./fixtures/mcp-config.stdio.json", import.meta.url),
+      );
+      const envConfig = path.join(dir, "env-mcp.json");
+      const flagConfig = path.join(dir, "flag-mcp.json");
+      fs.copyFileSync(fixture, envConfig);
+      fs.copyFileSync(fixture, flagConfig);
+
+      interface McpPlan {
+        configured: boolean;
+        file: string | null;
+        present: boolean;
+        servers: number;
+        error: string | null;
+      }
+      const dryRunPlan = async (extra: string[]): Promise<McpPlan> => {
+        const io = makeIO();
+        assert.equal(
+          await main(
+            ["run", "mcp task", "--provider", "mock", "--dry-run", "--json", ...extra],
+            io,
+          ),
+          0,
+          io.err.join("\n"),
+        );
+        assert.equal(io.out.length, 1, "dry-run --json is one JSON document");
+        return (JSON.parse(io.out[0]) as { tools: { mcp: McpPlan } }).tools.mcp;
+      };
+
+      // Nothing configured: the env must not conjure a config out of nowhere.
+      const bare = await dryRunPlan([]);
+      assert.equal(bare.configured, false);
+      assert.equal(bare.file, null);
+
+      process.env.TWO_BROTHERS_MCP_CONFIG = envConfig;
+      try {
+        // The env is honored exactly like the flag (no MCP server is started).
+        const fromEnv = await dryRunPlan([]);
+        assert.equal(fromEnv.configured, true);
+        assert.equal(fromEnv.file, envConfig, "the env path is used as given");
+        assert.equal(fromEnv.present, true);
+        assert.equal(fromEnv.servers, 1);
+        assert.equal(fromEnv.error, null);
+
+        // An explicit flag wins over the env.
+        const flagged = await dryRunPlan(["--mcp-config", flagConfig]);
+        assert.equal(flagged.file, flagConfig);
+
+        // A blank flag falls back to the env instead of meaning "none".
+        const blankFlag = await dryRunPlan(["--mcp-config", "   "]);
+        assert.equal(blankFlag.file, envConfig);
+      } finally {
+        delete process.env.TWO_BROTHERS_MCP_CONFIG;
+      }
+    });
+  });
+});
+
+test("cli source: values[\"mcp-config\"] is read only by mcpConfigFromValues", () => {
+  // run/chat/serve/tui/dry-run each forward the resolved path through the
+  // helper; this guards against a new call site reading the raw flag and
+  // silently ignoring TWO_BROTHERS_MCP_CONFIG (the dry-run test above only
+  // exercises the plan path; serve/chat/tui are not spawned here).
+  const source = fs.readFileSync(
+    fileURLToPath(new URL("../src/cli.ts", import.meta.url)),
+    "utf-8",
+  );
+  const rawReads = source
+    .split("\n")
+    .filter((line) => line.includes('values["mcp-config"]'));
+  assert.equal(
+    rawReads.length,
+    1,
+    `only the helper may read values["mcp-config"]:\n${rawReads.join("\n")}`,
+  );
+  const helperCalls = source.match(/mcpConfigFromValues\(/g) ?? [];
+  assert.ok(
+    helperCalls.length >= 6,
+    `expected the helper to be wired through run/chat/serve/tui/dry-run, found ${helperCalls.length} uses`,
+  );
 });
 
 test("run --task-file: reads the task; missing/blank/ambiguous files exit 2", async () => {

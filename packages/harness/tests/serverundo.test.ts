@@ -355,7 +355,15 @@ test("GET previews a workspace run's mutations, POST applies them, DELETE discar
       `/api/sessions/${encodeURIComponent(sessionName)}/undo/${runId}`,
     );
     assert.equal(discarded.status, 200);
-    assert.deepEqual(discarded.body, { discarded: true, session: sessionName, run_id: runId });
+    assert.equal(discarded.body.discarded, true);
+    assert.equal(discarded.body.session, sessionName);
+    assert.equal(discarded.body.run_id, runId);
+    // The record's unique blobs are now unreferenced and collected; the field
+    // is additive and only present when something was removed.
+    assert.ok(
+      typeof discarded.body.blobs_removed === "number" && discarded.body.blobs_removed > 0,
+      JSON.stringify(discarded.body),
+    );
     const missing = await get(srv.base, `/api/sessions/${encodeURIComponent(sessionName)}/undo/${runId}`);
     assert.equal(missing.status, 404);
     const missingDiscard = await del(
@@ -363,6 +371,54 @@ test("GET previews a workspace run's mutations, POST applies them, DELETE discar
       `/api/sessions/${encodeURIComponent(sessionName)}/undo/${runId}`,
     );
     assert.equal(missingDiscard.status, 404);
+  } finally {
+    await srv.close();
+    tmp.cleanup();
+  }
+});
+
+test("DELETE removes unreferenced blobs but keeps blobs a retained record still shares", async () => {
+  const tmp = tmpdir("tb-serverundo-");
+  const sessionsDir = path.join(tmp.root, "sessions");
+  const srv = await startServer(sessionsDir, { providerOverrides: mutationProviders() });
+  const blobFiles = (): string[] => {
+    const root = path.join(sessionsDir, "undo", "blobs");
+    if (!fs.existsSync(root)) return [];
+    const out: string[] = [];
+    for (const shard of fs.readdirSync(root, { withFileTypes: true })) {
+      if (!shard.isDirectory()) continue;
+      for (const file of fs.readdirSync(path.join(root, shard.name), { withFileTypes: true })) {
+        if (file.isFile()) out.push(path.join(root, shard.name, file.name));
+      }
+    }
+    return out.sort();
+  };
+  try {
+    const workspace = await seedWorkspace(srv.base, tmp.root);
+    const { runId, sessionName } = await submitWorkspaceRun(srv.base, workspace.id);
+    await waitTerminal(srv.base, runId);
+    const undoUrl = (id: string): string =>
+      `/api/sessions/${encodeURIComponent(sessionName)}/undo/${id}`;
+    const blobs = blobFiles();
+    assert.ok(blobs.length >= 3, `expected captured blobs, found ${blobs.length}`);
+
+    // A second record (a copy under another run id, same session) references
+    // the exact same content-addressed blobs: discarding the first must not
+    // delete bytes the copy still needs.
+    const runsDir = path.join(sessionsDir, "undo", "runs");
+    const record = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), "utf-8"));
+    fs.writeFileSync(path.join(runsDir, "run-copy-1.json"), JSON.stringify(record), "utf-8");
+
+    const first = await del<Record<string, any>>(srv.base, undoUrl(runId));
+    assert.equal(first.status, 200);
+    assert.equal(first.body.discarded, true);
+    assert.equal(first.body.blobs_removed, undefined, "shared blobs stay");
+    assert.deepEqual(blobFiles(), blobs);
+
+    const second = await del<Record<string, any>>(srv.base, undoUrl("run-copy-1"));
+    assert.equal(second.status, 200);
+    assert.equal(second.body.blobs_removed, blobs.length);
+    assert.deepEqual(blobFiles(), []);
   } finally {
     await srv.close();
     tmp.cleanup();
@@ -536,7 +592,7 @@ test("409 for an unregistered workspace, a corrupt record and an unsupported ver
   }
 });
 
-test("409 while the run is still active in memory — for preview and apply", async () => {
+test("409 while the run is still active in memory — for preview, apply and discard", async () => {
   const tmp = tmpdir("tb-serverundo-");
   const sessionsDir = path.join(tmp.root, "sessions");
   const junior = mutationProviders().junior;
@@ -566,6 +622,13 @@ test("409 while the run is still active in memory — for preview and apply", as
       `/api/sessions/${encodeURIComponent(sessionName)}/undo/${runId}`,
     );
     assert.equal(applied.status, 409);
+
+    const discarded = await del<Record<string, any>>(
+      srv.base,
+      `/api/sessions/${encodeURIComponent(sessionName)}/undo/${runId}`,
+    );
+    assert.equal(discarded.status, 409);
+    assert.match(String(discarded.body.detail), /still running/);
 
     gated.release();
     const terminal = await waitTerminal(srv.base, runId);

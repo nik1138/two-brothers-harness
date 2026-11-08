@@ -27,12 +27,18 @@
 //
 //   --port PORT            (required) TCP port to listen on
 //   --scenario NAME        approval | slow | plan | folding | delete | reasoning
-//                          | cooperation (default: approval)
+//                          | cooperation | title (default: approval)
 //                          approval: one workspace_write_file call, then the
 //                                    deliverable after the tool result; the first
 //                                    senior opening reply is deliberately
 //                                    malformed once so the harness' real
 //                                    [[REPAIR_REQUEST]] retry path runs
+//                          title:    same write-then-deliver flow as approval
+//                                    (no repair seed); a task carrying the
+//                                    `e2e-title` marker gets an abortable slow
+//                                    senior opening, so the browser can observe
+//                                    the running tab title before the run parks
+//                                    on the real approval broker
 //                          slow:     the senior's first answer lingers
 //                          plan:     work-mode runs whose junior writes one
 //                                    whole `todo_write` plan per run and then
@@ -73,8 +79,10 @@
 //   --linger-ms MS         slow: how long the senior's first answer takes
 //                          (default 30000); folding: the second run's
 //                          deliverable delay; cooperation: the senior's
-//                          opening delay for an `e2e-steer` task (every
-//                          request aborts the moment the harness stops the run)
+//                          opening delay for an `e2e-steer` task; title: the
+//                          senior's opening delay for an `e2e-title` task
+//                          (every request aborts the moment the harness stops
+//                          the run)
 //
 // Every run a scenario drives is inferred from the transcript as a whole: a
 // request with no envelope events starts a run, and a run appended after the
@@ -98,6 +106,8 @@ const COOPERATION_FILE = 'e2e-undo-marker.txt'
 const COOPERATION_CONTENT = 'Created by the scripted cooperation run.\n'
 /** Marker in a `cooperation` task that asks for the abortable slow opening. */
 const STEER_MARKER = 'e2e-steer'
+/** Marker in a `title` task that asks for the same abortable slow opening. */
+const TITLE_MARKER = 'e2e-title'
 
 function parseArgs(argv) {
   const opts = {
@@ -212,7 +222,7 @@ function parseEvents(messages) {
 let callCounter = 0
 
 /** Scenarios whose runs are started in work mode (the senior delegates). */
-const WORK_SCENARIOS = new Set(['approval', 'plan', 'folding', 'delete', 'cooperation'])
+const WORK_SCENARIOS = new Set(['approval', 'plan', 'folding', 'delete', 'cooperation', 'title'])
 
 /**
  * Plan snapshots the `plan` scenario writes, one whole-list snapshot per run:
@@ -483,7 +493,17 @@ function decide(body) {
     transcriptHasMarker(messages, STEER_MARKER)
       ? OPTS.lingerMs
       : 0
-  const linger = Math.max(slowLinger, steerLinger)
+  // title scenario: the first senior opening of an `e2e-title` task lingers so
+  // the browser can observe the running tab title (`▶ …`) before the run moves
+  // on to the real approval broker (`! …`).
+  const titleLinger =
+    OPTS.scenario === 'title' &&
+    role === 'senior' &&
+    !events.some((e) => e.from === 'senior') &&
+    transcriptHasMarker(messages, TITLE_MARKER)
+      ? OPTS.lingerMs
+      : 0
+  const linger = Math.max(slowLinger, steerLinger, titleLinger)
 
   const newTask = isNewTask(last)
   let kind

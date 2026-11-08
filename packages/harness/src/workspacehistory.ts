@@ -29,6 +29,15 @@
  *   result; whole-store problems (invalid run id, missing/corrupt record,
  *   workspace-root mismatch) refuse the operation with a
  *   {@link WorkspaceUndoError}.
+ * - Retention is explicit and bounded: a capture close runs one pass that
+ *   keeps the newest N records per session, prunes records past the max age
+ *   (default 20 / 30 days) and never removes an active run's record; a
+ *   discard then collects blobs no retained record references. Shared blobs
+ *   survive, and an unreadable record refuses blob collection rather than
+ *   guessing.
+ * - POSIX file mode/ownership is captured additively and restored best-effort
+ *   after a write (a failed chmod/chown is disclosed on the apply row, never
+ *   fatal, and never turns a restored file into `failed`). Windows is a no-op.
  *
  * The store is a session side artifact: it never enters protocol envelopes or
  * session JSONL.
@@ -64,6 +73,22 @@ export const MAX_UNDO_RECORD_BYTES = 1024 * 1024;
 
 /** Diagnostic lines kept per capture session (further failures are counted, not stored). */
 export const MAX_UNDO_DIAGNOSTICS = 16;
+
+/**
+ * Default retention: keep the newest N records per session. Retention only
+ * ever runs when explicitly triggered (a capture close, an explicit GC call);
+ * a record for a run that is still active is never removed.
+ */
+export const DEFAULT_UNDO_MAX_RECORDS_PER_SESSION = 20;
+
+/** Default retention: delete records older than this many days (0 disables age pruning). */
+export const DEFAULT_UNDO_MAX_AGE_DAYS = 30;
+
+/** One bounded retention pass never scans more record files than this. */
+export const MAX_UNDO_GC_RECORDS = 500;
+
+/** One bounded blob pass never scans more blob files than this. */
+export const MAX_UNDO_GC_BLOBS = 10000;
 
 /** Run ids are opaque caller tokens; traversal and separators are refused. */
 const RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -103,6 +128,17 @@ export interface WorkspaceUndoImage {
   sha256?: string;
   /** Byte size when the target existed. */
   size?: number;
+  /**
+   * POSIX permission/special bits (`stat.mode & 0o7777`) when captured. The
+   * seam may supply it; the store also stats the live target after a
+   * write/edit, where the old mode is preserved, so a 0755 script keeps its
+   * executable bits across undo. Absent on Windows and for old records.
+   */
+  mode?: number;
+  /** POSIX owner id when captured (best-effort restore, never fatal). */
+  uid?: number;
+  /** POSIX group id when captured (best-effort restore, never fatal). */
+  gid?: number;
 }
 
 /** One undo entry: the net effect of a run on one file. */
@@ -181,6 +217,16 @@ export interface WorkspaceUndoApplyEntry {
   /** The live classification that drove the decision. */
   preview_status: WorkspaceUndoStatus;
   reason?: string;
+  /**
+   * Mode/ownership restoration is best-effort and never changes `status`:
+   * a file whose bytes were restored successfully stays `applied` even when
+   * its recorded mode could not be re-applied, and the failure is disclosed
+   * here instead of being hidden.
+   */
+  mode_restored?: boolean;
+  mode_error?: string;
+  ownership_restored?: boolean;
+  ownership_error?: string;
 }
 
 /** Summary of one apply pass (no partial silent corruption: every file is counted). */
@@ -213,12 +259,75 @@ export interface WorkspaceUndoCapture {
   /** Absolute run-record path; null until the first capture is written. */
   readonly recordPath: string | null;
   /**
+   * Outcome of the bounded retention pass run by {@link close} (null when
+   * retention was disabled or has not run yet). Fail-soft: a retention
+   * failure is one diagnostic, never an exception.
+   */
+  readonly lastRetention: UndoRetentionResult | null;
+  /**
    * Finish the capture (the run's `finally`): idempotent, never throws, stops
    * accepting further mutation records and makes one final persist attempt so
    * a record whose last write failed is salvaged. No record is written when the
-   * run mutated nothing.
+   * run mutated nothing. A bounded retention pass then trims the newest-N /
+   * max-age window (unless disabled) and collects unreferenced blobs.
    */
   close(): void;
+}
+
+/** Newest-N / max-age window applied by an explicit retention pass. */
+export interface UndoRetentionPolicy {
+  /** Keep the newest N records per session (default 20, minimum 1). */
+  maxRecordsPerSession?: number;
+  /** Remove records older than this many days (default 30; 0 disables). */
+  maxAgeDays?: number;
+}
+
+/** Options for the close-time (and explicit) retention pass. */
+export interface UndoRetentionOptions extends UndoRetentionPolicy {
+  /** Clock override for tests; defaults to `Date.now()`. */
+  now?: number | Date;
+  /** Run ids that must never be removed (in-flight runs). */
+  activeRuns?: Iterable<string>;
+  /** Set false to skip orphan blob collection (record pruning still runs). */
+  collectBlobs?: boolean;
+  /**
+   * Test seam: called immediately before a record unlink, so tests can
+   * simulate a transient EPERM/EBUSY without platform-specific file locks.
+   * Production never sets it.
+   */
+  beforeUnlink?: (recordPath: string, runId: string) => void;
+}
+
+/** Honest summary of one bounded retention pass. */
+export interface UndoRetentionResult {
+  records_scanned: number;
+  records_kept: number;
+  /** Run ids whose record file was removed. */
+  records_removed: string[];
+  /** Blob sha256 names whose bytes were removed as unreferenced. */
+  blobs_removed: string[];
+  /** Bounded fail-soft notes (a pass never throws). */
+  diagnostics: string[];
+}
+
+/** Honest summary of one orphan blob collection. */
+export interface UndoBlobGcResult {
+  removed: string[];
+  diagnostics: string[];
+  /** Set when the pass refused to delete anything (with the reason). */
+  skipped?: string;
+}
+
+/** Options for {@link beginUndoCapture}. */
+export interface BeginUndoCaptureOptions extends UndoRetentionPolicy {
+  /** Owning session name (the server passes it); persisted additively. */
+  session?: string;
+  /** Set false to disable the close-time retention pass. */
+  retention?: boolean;
+  /** Lazily read every run id that must never be removed at close time. */
+  activeRuns?: () => Iterable<string>;
+  /** Receives the close-time retention result (a throwing sink is ignored). */
+  onRetention?: (result: UndoRetentionResult) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -253,6 +362,20 @@ function assertStoreRoot(storeRoot: string): string {
     throw new WorkspaceUndoError("io_error", "an undo store root is required");
   }
   return path.resolve(storeRoot);
+}
+
+/** Clamp the newest-N policy to a positive integer (bad input falls back). */
+function normalizeRetentionCount(value: number | undefined, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  const rounded = Math.trunc(value);
+  return rounded >= 1 ? rounded : 1;
+}
+
+/** Clamp the max-age policy to a non-negative integer (0 disables age pruning). */
+function normalizeRetentionAge(value: number | undefined, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  const rounded = Math.trunc(value);
+  return rounded >= 0 ? rounded : fallback;
 }
 
 function resolveWorkspaceRoot(workspaceRoot: string): string {
@@ -401,6 +524,55 @@ function hashFileSync(target: string): string {
   return hash.digest("hex");
 }
 
+/**
+ * Restore the recorded POSIX mode/ownership after the bytes were written.
+ * Best-effort by contract: a failure is disclosed on the apply row and never
+ * turns a successful byte restore into a `failed` one. Windows is a no-op.
+ */
+function applyModeAttributes(
+  target: string,
+  image: WorkspaceUndoImage,
+): Pick<
+  WorkspaceUndoApplyEntry,
+  "mode_restored" | "mode_error" | "ownership_restored" | "ownership_error"
+> {
+  const out: Pick<
+    WorkspaceUndoApplyEntry,
+    "mode_restored" | "mode_error" | "ownership_restored" | "ownership_error"
+  > = {};
+  if (process.platform === "win32") return out;
+  // Ownership first: a successful chown clears setuid/setgid on Linux, so
+  // restoring the mode afterwards is what makes special bits stick.
+  if (image.uid !== undefined && image.gid !== undefined) {
+    try {
+      fs.chownSync(target, image.uid, image.gid);
+      out.ownership_restored = true;
+    } catch (exc) {
+      out.ownership_restored = false;
+      out.ownership_error = `could not restore file ownership: ${message(exc)}`;
+    }
+  }
+  if (image.mode !== undefined) {
+    // A recorded mode is a POSIX permission word (permission bits plus
+    // setuid/setgid/sticky), so an out-of-range or non-integer value is a
+    // corrupt record. Refuse it explicitly instead of handing it to chmod,
+    // where a large value may be silently truncated and "succeed".
+    if (!Number.isInteger(image.mode) || image.mode < 0 || image.mode > 0o7777) {
+      out.mode_restored = false;
+      out.mode_error = `could not restore the file mode: invalid recorded mode ${String(image.mode)}`;
+    } else {
+      try {
+        fs.chmodSync(target, image.mode);
+        out.mode_restored = true;
+      } catch (exc) {
+        out.mode_restored = false;
+        out.mode_error = `could not restore the file mode: ${message(exc)}`;
+      }
+    }
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // capture
 // ---------------------------------------------------------------------------
@@ -426,16 +598,39 @@ class UndoCapture implements WorkspaceUndoCapture {
   private readonly createdAt = new Date().toISOString();
   private readonly entries: WorkspaceUndoEntry[] = [];
   private readonly index = new Map<string, number>();
+  private readonly retentionEnabled: boolean;
+  private readonly retentionPolicy: Required<UndoRetentionPolicy>;
+  private readonly activeRuns?: () => Iterable<string>;
+  private readonly onRetention?: (result: UndoRetentionResult) => void;
+  private retentionResult: UndoRetentionResult | null = null;
   private storedBytes = 0;
   private omitted = 0;
   private wroteRecord = false;
   private closed = false;
 
-  constructor(storeRoot: string, runId: string, workspaceRoot: string, session?: string) {
+  constructor(
+    storeRoot: string,
+    runId: string,
+    workspaceRoot: string,
+    options: BeginUndoCaptureOptions = {},
+  ) {
     this.run_id = runId;
     this.store_root = storeRoot;
     this.workspace_root = workspaceRoot;
-    if (session !== undefined) this.session = session;
+    const rawSession = options.session;
+    if (typeof rawSession === "string" && rawSession.trim() !== "") {
+      this.session = rawSession.trim();
+    }
+    this.retentionEnabled = options.retention !== false;
+    this.retentionPolicy = {
+      maxRecordsPerSession: normalizeRetentionCount(
+        options.maxRecordsPerSession,
+        DEFAULT_UNDO_MAX_RECORDS_PER_SESSION,
+      ),
+      maxAgeDays: normalizeRetentionAge(options.maxAgeDays, DEFAULT_UNDO_MAX_AGE_DAYS),
+    };
+    if (options.activeRuns !== undefined) this.activeRuns = options.activeRuns;
+    if (options.onRetention !== undefined) this.onRetention = options.onRetention;
     this.recorder = (record) => {
       try {
         this.capture(record);
@@ -457,19 +652,57 @@ class UndoCapture implements WorkspaceUndoCapture {
     return this.wroteRecord ? undoRecordPath(this.store_root, this.run_id) : null;
   }
 
+  get lastRetention(): UndoRetentionResult | null {
+    return this.retentionResult;
+  }
+
   /**
    * Finish the capture: idempotent, never throws. One final persist salvages a
    * record whose per-mutation write failed; further mutation records are
    * ignored (the run is over, nothing may change the undo state afterwards).
+   * The bounded retention pass runs even when the run mutated nothing — it is
+   * housekeeping, not a property of this one record.
    */
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    if (this.entries.length === 0) return;
+    if (this.entries.length > 0) {
+      try {
+        this.persist();
+      } catch (exc) {
+        this.diagnostic(`undo capture close: final record write failed: ${message(exc)}`);
+      }
+    }
+    this.runRetention();
+  }
+
+  /** One bounded, fail-soft retention pass. Never throws, one diagnostic per failure. */
+  private runRetention(): void {
+    if (!this.retentionEnabled) return;
     try {
-      this.persist();
+      const active = new Set<string>([this.run_id]);
+      try {
+        for (const runId of this.activeRuns?.() ?? []) {
+          if (typeof runId === "string" && runId.length > 0) active.add(runId);
+        }
+      } catch (exc) {
+        this.diagnostic(`undo retention: active-run lookup failed: ${message(exc)}`);
+      }
+      const result = collectUndoStore(this.store_root, {
+        maxRecordsPerSession: this.retentionPolicy.maxRecordsPerSession,
+        maxAgeDays: this.retentionPolicy.maxAgeDays,
+        activeRuns: active,
+        now: Date.now(),
+      });
+      this.retentionResult = result;
+      for (const line of result.diagnostics) this.diagnostic(`undo retention: ${line}`);
+      try {
+        this.onRetention?.(result);
+      } catch {
+        // a broken retention sink must never break a run's finalizer
+      }
     } catch (exc) {
-      this.diagnostic(`undo capture close: final record write failed: ${message(exc)}`);
+      this.diagnostic(`undo retention failed: ${message(exc)}`);
     }
   }
 
@@ -514,6 +747,9 @@ class UndoCapture implements WorkspaceUndoCapture {
 
     const pre = this.planImage(record.pre);
     const post = this.planImage(record.post);
+    if (process.platform !== "win32") {
+      this.enrichMode(rel, action, existing, pre.image, post.image);
+    }
     const skipReason = pre.skipped ?? post.skipped;
     if (skipReason !== undefined) {
       this.recordEntry(existing, {
@@ -582,19 +818,66 @@ class UndoCapture implements WorkspaceUndoCapture {
     const content = raw.content;
     const size = content.byteLength;
     if (size > MAX_UNDO_FILE_BYTES) {
+      const image: WorkspaceUndoImage = { exists: true, size };
+      copyModeFields(raw, image);
       return {
-        image: { exists: true, size },
+        image,
         newBytes: 0,
         skipped: `image is ${size} bytes; the capture limit is ${MAX_UNDO_FILE_BYTES} bytes`,
       };
     }
     const hash = sha256Hex(content);
+    const image: WorkspaceUndoImage = { exists: true, sha256: hash, size };
+    copyModeFields(raw, image);
     return {
-      image: { exists: true, sha256: hash, size },
+      image,
       content,
       hash,
       newBytes: blobExists(this.store_root, hash) ? 0 : size,
     };
+  }
+
+  /**
+   * Attach the live POSIX mode/ownership to the images when it can be trusted.
+   * A write/edit preserves the existing file's mode, so the live stat after
+   * the mutation is the pre-run mode; a delete has no live target, so the mode
+   * recorded by an earlier mutation of the same path (if any) is kept.
+   * Windows never records or restores modes (a no-op by contract).
+   */
+  private enrichMode(
+    rel: string,
+    action: WorkspaceMutationRecord["action"],
+    existing: WorkspaceUndoEntry | undefined,
+    pre: WorkspaceUndoImage,
+    post: WorkspaceUndoImage,
+  ): void {
+    if (process.platform === "win32") return;
+    const live = this.liveMode(rel);
+    if (live !== null) {
+      post.mode = live.mode;
+      post.uid = live.uid;
+      post.gid = live.gid;
+    }
+    if (!pre.exists || pre.mode !== undefined) return;
+    const source = existing !== undefined ? existing.pre : action === "delete" ? null : live;
+    if (source === null) return;
+    if (source.mode !== undefined) pre.mode = source.mode;
+    if (source.uid !== undefined) pre.uid = source.uid;
+    if (source.gid !== undefined) pre.gid = source.gid;
+  }
+
+  /** Stat the live target's POSIX mode/ownership, or null when unavailable. */
+  private liveMode(rel: string): { mode: number; uid: number; gid: number } | null {
+    if (process.platform === "win32") return null;
+    const resolved = resolveEntryTarget(this.workspace_root, rel);
+    if (!resolved.ok) return null;
+    try {
+      const stat = fs.statSync(resolved.target);
+      if (!stat.isFile()) return null;
+      return { mode: stat.mode & 0o7777, uid: stat.uid, gid: stat.gid };
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -669,7 +952,20 @@ function describeImage(raw: WorkspaceMutationImage): WorkspaceUndoImage {
   if (raw !== null && typeof raw === "object" && typeof raw.size === "number" && Number.isFinite(raw.size)) {
     image.size = raw.size;
   }
+  if (raw !== null && typeof raw === "object") copyModeFields(raw, image);
   return image;
+}
+
+/** Copy optional mode/uid/gid from a raw image when they are usable integers. */
+function copyModeFields(raw: unknown, image: WorkspaceUndoImage): void {
+  if (raw === null || typeof raw !== "object") return;
+  const source = raw as Record<string, unknown>;
+  const mode = source.mode;
+  if (typeof mode === "number" && Number.isInteger(mode) && mode >= 0) image.mode = mode;
+  const uid = source.uid;
+  if (typeof uid === "number" && Number.isInteger(uid) && uid >= 0) image.uid = uid;
+  const gid = source.gid;
+  if (typeof gid === "number" && Number.isInteger(gid) && gid >= 0) image.gid = gid;
 }
 
 /**
@@ -685,15 +981,12 @@ export function beginUndoCapture(
   storeRoot: string,
   runId: string,
   workspaceRoot: string,
-  options: { session?: string } = {},
+  options: BeginUndoCaptureOptions = {},
 ): WorkspaceUndoCapture {
   const store = assertStoreRoot(storeRoot);
   assertRunId(runId);
   const workspace = resolveWorkspaceRoot(workspaceRoot);
-  const rawSession = options.session;
-  const session =
-    typeof rawSession === "string" && rawSession.trim() !== "" ? rawSession.trim() : undefined;
-  return new UndoCapture(store, runId, workspace, session);
+  return new UndoCapture(store, runId, workspace, options);
 }
 
 // ---------------------------------------------------------------------------
@@ -712,6 +1005,7 @@ function sanitizeImage(raw: unknown): WorkspaceUndoImage {
   const image: WorkspaceUndoImage = { exists: source.exists === true };
   if (typeof source.sha256 === "string") image.sha256 = source.sha256;
   if (typeof source.size === "number" && Number.isFinite(source.size)) image.size = source.size;
+  copyModeFields(source, image);
   return image;
 }
 
@@ -1134,6 +1428,7 @@ export function applyUndo(
         try {
           const bytes = readBlobVerified(opened.store_root, entry.pre);
           writeAtomic(classified.target!, bytes);
+          Object.assign(row, applyModeAttributes(classified.target!, entry.pre));
           row.status = "applied";
         } catch (exc) {
           row.status = "failed";
@@ -1169,9 +1464,10 @@ export function applyUndo(
 }
 
 /**
- * Drop one run's undo record. Blobs are content-addressed and shared, so they
- * are intentionally left in place (the store's garbage collection is a later
- * phase); the record is what makes a run undoable.
+ * Drop one run's undo record. The record is what makes a run undoable; the
+ * content-addressed blobs are shared store state, so this function leaves them
+ * in place. Call {@link collectOrphanBlobs} after the last reference is gone
+ * (the HTTP DELETE route and `sessions undo --discard` both do).
  */
 export function discardUndo(storeRoot: string, runId: string): boolean {
   const store = assertStoreRoot(storeRoot);
@@ -1187,4 +1483,344 @@ export function discardUndo(storeRoot: string, runId: string): boolean {
       `cannot discard undo record for run ${runId}: ${message(exc)}`,
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// retention, record listing and orphan blob collection
+// ---------------------------------------------------------------------------
+
+/** One record file as the retention/listing pass sees it (metadata only). */
+export interface UndoRecordSummary {
+  run_id: string;
+  record_path: string;
+  session?: string;
+  created_at: string;
+  mtime_ms: number;
+}
+
+interface ScannedUndoRecord {
+  run_id: string;
+  record_path: string;
+  record: WorkspaceUndoRecord | null;
+  mtime_ms: number;
+}
+
+function pushBoundedDiagnostic(list: string[], line: string): void {
+  if (list.length < MAX_UNDO_DIAGNOSTICS) list.push(line.slice(0, 500));
+}
+
+function recordRunId(fileName: string): string | null {
+  if (!fileName.endsWith(".json")) return null;
+  const runId = fileName.slice(0, -".json".length);
+  return RUN_ID_PATTERN.test(runId) ? runId : null;
+}
+
+function recordCreatedMs(record: ScannedUndoRecord): number | null {
+  if (record.record !== null && record.record.created_at !== "") {
+    const parsed = Date.parse(record.record.created_at);
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+  return Number.isFinite(record.mtime_ms) ? record.mtime_ms : null;
+}
+
+/**
+ * Read every record file once, bounded and fail-soft. A corrupt/oversized
+ * record is returned with `record: null` (and one diagnostic) so retention can
+ * refuse to delete blobs it cannot prove unreferenced.
+ */
+function scanUndoStore(
+  storeRoot: string,
+  diagnostics: string[],
+): { records: ScannedUndoRecord[]; truncated: boolean } {
+  const runsDir = path.join(storeRoot, "runs");
+  let names: string[];
+  try {
+    names = fs.readdirSync(runsDir).sort();
+  } catch (exc) {
+    const code = (exc as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "ENOTDIR") {
+      pushBoundedDiagnostic(diagnostics, `cannot read undo record directory: ${message(exc)}`);
+    } else {
+      // A missing runs dir is normal (empty store); a store ROOT that is a
+      // regular file/unreadable is not — report it once instead of pretending.
+      // POSIX reports ENOTDIR for `<file>/runs`; Windows often reports ENOENT,
+      // so both codes take this same root check.
+      try {
+        if (!fs.statSync(storeRoot).isDirectory()) {
+          pushBoundedDiagnostic(diagnostics, `undo store root is not a directory: ${storeRoot}`);
+        }
+      } catch {
+        // genuinely absent: an empty store, nothing to report
+      }
+    }
+    return { records: [], truncated: false };
+  }
+  const candidates: string[] = [];
+  for (const name of names) {
+    const runId = recordRunId(name);
+    if (runId !== null) candidates.push(runId);
+  }
+  const truncated = candidates.length > MAX_UNDO_GC_RECORDS;
+  const records: ScannedUndoRecord[] = [];
+  for (const runId of candidates.slice(0, MAX_UNDO_GC_RECORDS)) {
+    const recordPath = path.join(runsDir, `${runId}.json`);
+    let mtimeMs = 0;
+    let record: WorkspaceUndoRecord | null = null;
+    try {
+      const stat = fs.statSync(recordPath);
+      mtimeMs = stat.mtimeMs;
+      if (!stat.isFile()) {
+        pushBoundedDiagnostic(diagnostics, `undo record ${runId} is not a file`);
+      } else if (stat.size > MAX_UNDO_RECORD_BYTES) {
+        pushBoundedDiagnostic(diagnostics, `undo record ${runId} is oversized; left untouched`);
+      } else {
+        record = parseUndoRecord(fs.readFileSync(recordPath, "utf-8"), runId);
+      }
+    } catch (exc) {
+      const code = (exc as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") {
+        pushBoundedDiagnostic(diagnostics, `cannot read undo record ${runId}: ${message(exc)}`);
+      }
+    }
+    records.push({ run_id: runId, record_path: recordPath, record, mtime_ms: mtimeMs });
+  }
+  // Newest first; a record with no usable timestamp falls back to its mtime.
+  records.sort((a, b) => (recordCreatedMs(b) ?? 0) - (recordCreatedMs(a) ?? 0));
+  return { records, truncated };
+}
+
+/**
+ * List every undo record in a store, newest first (metadata only, bounded,
+ * fail-soft: a corrupt record is simply not listed). Used by the CLI to pick
+ * the newest record of a session and by retention.
+ */
+export function listUndoRecords(storeRoot: string): UndoRecordSummary[] {
+  const store = assertStoreRoot(storeRoot);
+  const diagnostics: string[] = [];
+  return scanUndoStore(store, diagnostics).records
+    .filter((entry) => entry.record !== null)
+    .map((entry) => ({
+      run_id: entry.run_id,
+      record_path: entry.record_path,
+      ...(entry.record?.session !== undefined ? { session: entry.record.session } : {}),
+      created_at: entry.record?.created_at ?? "",
+      mtime_ms: entry.mtime_ms,
+    }));
+}
+
+/** Every sha256 referenced by one block of records (pre/post images). */
+function referencedBlobNames(records: readonly ScannedUndoRecord[]): Set<string> {
+  const referenced = new Set<string>();
+  for (const entry of records) {
+    if (entry.record === null) continue;
+    for (const file of entry.record.entries) {
+      for (const image of [file.pre, file.post]) {
+        if (typeof image.sha256 === "string" && SHA256_PATTERN.test(image.sha256)) {
+          referenced.add(image.sha256);
+        }
+      }
+    }
+  }
+  return referenced;
+}
+
+/**
+ * Delete blob files no given record references. Bounded (never scans more than
+ * {@link MAX_UNDO_GC_BLOBS} files), atomic per file and fail-soft; a record
+ * that could not be parsed refuses the whole pass so a referenced byte can
+ * never be deleted.
+ */
+function collectBlobsForRecords(
+  storeRoot: string,
+  records: readonly ScannedUndoRecord[],
+  diagnostics: string[],
+): { removed: string[]; skipped?: string } {
+  if (records.some((entry) => entry.record === null)) {
+    return { removed: [], skipped: "an undo record could not be parsed; blob collection skipped" };
+  }
+  const referenced = referencedBlobNames(records);
+  const blobsDir = path.join(storeRoot, "blobs");
+  let dirs: fs.Dirent[];
+  try {
+    dirs = fs.readdirSync(blobsDir, { withFileTypes: true });
+  } catch (exc) {
+    const code = (exc as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") {
+      pushBoundedDiagnostic(diagnostics, `cannot read the blob directory: ${message(exc)}`);
+      return { removed: [], skipped: "the blob directory is unreadable" };
+    }
+    return { removed: [] };
+  }
+  const removed: string[] = [];
+  let scanned = 0;
+  for (const dirent of dirs) {
+    if (!dirent.isDirectory()) continue;
+    const dir = path.join(blobsDir, dirent.name);
+    let files: fs.Dirent[];
+    try {
+      files = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (exc) {
+      pushBoundedDiagnostic(diagnostics, `cannot read blob directory ${dirent.name}: ${message(exc)}`);
+      continue;
+    }
+    for (const file of files) {
+      if (!file.isFile()) continue;
+      scanned += 1;
+      if (scanned > MAX_UNDO_GC_BLOBS) {
+        pushBoundedDiagnostic(
+          diagnostics,
+          `blob scan capped at ${MAX_UNDO_GC_BLOBS} files; remaining orphans were left in place`,
+        );
+        return { removed, skipped: "blob scan capped" };
+      }
+      if (!SHA256_PATTERN.test(file.name) || referenced.has(file.name)) continue;
+      try {
+        fs.unlinkSync(path.join(dir, file.name));
+        removed.push(file.name);
+      } catch (exc) {
+        pushBoundedDiagnostic(diagnostics, `cannot remove unreferenced blob ${file.name}: ${message(exc)}`);
+      }
+    }
+    try {
+      // Remove the now-empty two-character shard; a non-empty one stays.
+      fs.rmdirSync(dir);
+    } catch {
+      // not empty (a shared/leftover blob) or already gone — both fine
+    }
+  }
+  return { removed };
+}
+
+/**
+ * Collect content-addressed blobs no retained record references. Never throws:
+ * store IO problems come back as diagnostics with nothing (or only proven
+ * orphans) removed, and an unreadable/corrupt record refuses the pass.
+ */
+export function collectOrphanBlobs(storeRoot: string): UndoBlobGcResult {
+  const result: UndoBlobGcResult = { removed: [], diagnostics: [] };
+  let store: string;
+  try {
+    store = assertStoreRoot(storeRoot);
+  } catch (exc) {
+    pushBoundedDiagnostic(result.diagnostics, message(exc));
+    result.skipped = "invalid undo store root";
+    return result;
+  }
+  const scanned = scanUndoStore(store, result.diagnostics);
+  if (scanned.truncated) {
+    result.skipped = `record scan capped at ${MAX_UNDO_GC_RECORDS} files`;
+    return result;
+  }
+  const gc = collectBlobsForRecords(store, scanned.records, result.diagnostics);
+  result.removed = gc.removed;
+  if (gc.skipped !== undefined) result.skipped = gc.skipped;
+  return result;
+}
+
+/**
+ * One bounded, explicit retention pass: keep the newest N records per session
+ * (default {@link DEFAULT_UNDO_MAX_RECORDS_PER_SESSION}), delete records older
+ * than the max age (default {@link DEFAULT_UNDO_MAX_AGE_DAYS} days, 0 disables),
+ * never touch a record whose run id is active, then collect unreferenced blobs.
+ * Never throws; every failure is one bounded diagnostic.
+ */
+export function collectUndoStore(
+  storeRoot: string,
+  options: UndoRetentionOptions = {},
+): UndoRetentionResult {
+  const result: UndoRetentionResult = {
+    records_scanned: 0,
+    records_kept: 0,
+    records_removed: [],
+    blobs_removed: [],
+    diagnostics: [],
+  };
+  let store: string;
+  try {
+    store = assertStoreRoot(storeRoot);
+  } catch (exc) {
+    pushBoundedDiagnostic(result.diagnostics, message(exc));
+    return result;
+  }
+  const scanned = scanUndoStore(store, result.diagnostics);
+  result.records_scanned = scanned.records.length;
+  const active = new Set<string>();
+  for (const runId of options.activeRuns ?? []) {
+    if (typeof runId === "string" && runId.length > 0) active.add(runId);
+  }
+  const maxPerSession = normalizeRetentionCount(
+    options.maxRecordsPerSession,
+    DEFAULT_UNDO_MAX_RECORDS_PER_SESSION,
+  );
+  const maxAgeDays = normalizeRetentionAge(options.maxAgeDays, DEFAULT_UNDO_MAX_AGE_DAYS);
+  const rawNow = options.now ?? Date.now();
+  const nowMs = rawNow instanceof Date ? rawNow.getTime() : rawNow;
+  const cutoff = maxAgeDays > 0 ? nowMs - maxAgeDays * 24 * 60 * 60 * 1000 : null;
+
+  const removal = new Set<string>();
+  // `scanned.records` is newest first, so one pass per session group keeps the
+  // newest N and marks the rest.
+  const bySession = new Map<string, ScannedUndoRecord[]>();
+  for (const entry of scanned.records) {
+    const key = entry.record?.session ?? "";
+    const group = bySession.get(key);
+    if (group === undefined) bySession.set(key, [entry]);
+    else group.push(entry);
+  }
+  for (const group of bySession.values()) {
+    group.forEach((entry, index) => {
+      if (index >= maxPerSession) removal.add(entry.run_id);
+    });
+  }
+  if (cutoff !== null) {
+    for (const entry of scanned.records) {
+      const created = recordCreatedMs(entry);
+      if (created !== null && created < cutoff) removal.add(entry.run_id);
+    }
+  }
+  for (const runId of active) removal.delete(runId);
+
+  let removedCount = 0;
+  const deleted = new Set<string>();
+  for (const entry of scanned.records) {
+    if (!removal.has(entry.run_id)) continue;
+    try {
+      options.beforeUnlink?.(entry.record_path, entry.run_id);
+      fs.unlinkSync(entry.record_path);
+      removedCount += 1;
+      deleted.add(entry.run_id);
+      result.records_removed.push(entry.run_id);
+    } catch (exc) {
+      const code = (exc as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") {
+        removedCount += 1;
+        deleted.add(entry.run_id);
+        result.records_removed.push(entry.run_id);
+      } else {
+        pushBoundedDiagnostic(
+          result.diagnostics,
+          `cannot remove undo record ${entry.run_id}: ${message(exc)}`,
+        );
+      }
+    }
+  }
+  result.records_kept = Math.max(0, scanned.records.length - removedCount);
+
+  if (scanned.truncated) {
+    pushBoundedDiagnostic(
+      result.diagnostics,
+      `record scan capped at ${MAX_UNDO_GC_RECORDS} files; blob collection skipped`,
+    );
+  } else if (options.collectBlobs !== false) {
+    // Only records whose file actually disappeared are unreferenced. A record
+    // whose unlink failed still owns its blobs; collecting them would leave a
+    // listed but permanently un-undoable run (missing pre-images).
+    const kept = scanned.records.filter((entry) => !deleted.has(entry.run_id));
+    const gc = collectBlobsForRecords(store, kept, result.diagnostics);
+    result.blobs_removed = gc.removed;
+    if (gc.skipped !== undefined) {
+      pushBoundedDiagnostic(result.diagnostics, gc.skipped);
+    }
+  }
+  return result;
 }

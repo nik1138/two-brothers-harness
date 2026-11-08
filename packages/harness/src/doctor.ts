@@ -43,6 +43,14 @@
  *                set, else `~/.two-brothers/tui-history.json`. Missing passes
  *                (history is optional); a corrupt or unreadable file warns; a
  *                readable file passes with its effective entry count.
+ *   mcp-config   MCP config file named by `TWO_BROTHERS_MCP_CONFIG` (the env
+ *                counterpart of `--mcp-config`). Unset/blank passes with a
+ *                "not configured" detail; an explicitly named file that is
+ *                missing, unreadable, not JSON, or lacks an `mcpServers`
+ *                object warns with a bounded diagnostic. A valid file passes
+ *                with the sorted server names. Only the path, the count and
+ *                the names are rendered — never file contents, headers, env
+ *                values or keys — and no MCP server is started.
  *
  * API keys are never rendered: role details say "key set"/"key not set" and
  * the endpoint detail never includes request headers or response bodies.
@@ -789,6 +797,138 @@ function checkTuiHistory(filePath: string): DoctorCheck {
 }
 
 // ---------------------------------------------------------------------------
+// MCP config file
+// ---------------------------------------------------------------------------
+
+/** Environment override naming the MCP config file (the `--mcp-config` env). */
+export const MCP_CONFIG_ENV = "TWO_BROTHERS_MCP_CONFIG";
+
+/** Bound for one rendered `mcp-config` detail line (single, readable line). */
+export const MCP_CONFIG_DETAIL_MAX_CHARS = 240;
+
+/** Server names listed in a pass detail before a `+N more` tail. */
+export const MCP_CONFIG_SERVER_NAME_LIMIT = 8;
+/** Refuse to read an MCP config larger than this (bounded doctor IO). */
+export const MCP_CONFIG_MAX_BYTES = 1024 * 1024;
+
+/** The MCP config path named by the env override, or "" when unset/blank. */
+function mcpConfigFile(env: NodeJS.ProcessEnv, cwd: string): string {
+  const raw = env[MCP_CONFIG_ENV];
+  const override = typeof raw === "string" ? raw.trim() : "";
+  return override === "" ? "" : path.resolve(cwd, override);
+}
+
+/** Clip one MCP diagnostic to the display bound; the text never carries a body. */
+function boundMcpDetail(text: string): string {
+  return text.length > MCP_CONFIG_DETAIL_MAX_CHARS
+    ? `${text.slice(0, MCP_CONFIG_DETAIL_MAX_CHARS - 1)}…`
+    : text;
+}
+
+/** `2 servers: a, b` / `1 server: a` / `no servers configured`, bounded. */
+function mcpServerSummary(names: readonly string[]): string {
+  if (names.length === 0) return "no servers configured";
+  const shown = names.slice(0, MCP_CONFIG_SERVER_NAME_LIMIT);
+  const hidden = names.length - shown.length;
+  const list = shown.join(", ") + (hidden > 0 ? `, +${hidden} more` : "");
+  return `${names.length} ${names.length === 1 ? "server" : "servers"}: ${list}`;
+}
+
+/**
+ * The `mcp-config` check: read the file named by `TWO_BROTHERS_MCP_CONFIG`
+ * (relative to the injected cwd) and classify its top-level shape. Unset
+ * passes informationally; every explicitly named bad file warns (never fails)
+ * with a bounded diagnostic that carries the path only. The file's contents
+ * are never echoed — a `JSON.parse` message can quote bytes including keys —
+ * and no MCP server is started or contacted.
+ */
+function checkMcpConfig(filePath: string): DoctorCheck {
+  const id = "mcp-config";
+  const label = "MCP config";
+  if (filePath === "") {
+    return makeCheck(id, label, "skip", `${MCP_CONFIG_ENV} not set — no MCP servers configured`);
+  }
+  let stats: fs.Stats;
+  try {
+    stats = fs.statSync(filePath);
+  } catch (exc) {
+    if (isMissingPath(exc)) {
+      return makeCheck(
+        id,
+        label,
+        "warn",
+        boundMcpDetail(`${filePath} not found — fix or unset ${MCP_CONFIG_ENV}`),
+      );
+    }
+    return makeCheck(
+      id,
+      label,
+      "warn",
+      boundMcpDetail(`cannot read ${filePath} — check file permissions`),
+    );
+  }
+  if (!stats.isFile()) {
+    return makeCheck(
+      id,
+      label,
+      "warn",
+      boundMcpDetail(`${filePath} is not a file — point ${MCP_CONFIG_ENV} at an MCP config JSON file`),
+    );
+  }
+  if (stats.size > MCP_CONFIG_MAX_BYTES) {
+    return makeCheck(
+      id,
+      label,
+      "warn",
+      boundMcpDetail(
+        `${filePath} is larger than ${MCP_CONFIG_MAX_BYTES} bytes — point ${MCP_CONFIG_ENV} at the MCP config file, not a data file`,
+      ),
+    );
+  }
+  let text: string;
+  try {
+    text = fs.readFileSync(filePath, "utf-8");
+  } catch {
+    return makeCheck(
+      id,
+      label,
+      "warn",
+      boundMcpDetail(`cannot read ${filePath} — check file permissions`),
+    );
+  }
+  let document: unknown;
+  try {
+    document = JSON.parse(text);
+  } catch {
+    // Never surface the parser message: it can quote the file's bytes.
+    return makeCheck(
+      id,
+      label,
+      "warn",
+      boundMcpDetail(`${filePath} is not valid JSON — fix it or unset ${MCP_CONFIG_ENV}`),
+    );
+  }
+  if (!isRecord(document)) {
+    return makeCheck(
+      id,
+      label,
+      "warn",
+      boundMcpDetail(`${filePath} must contain a JSON object with an "mcpServers" object`),
+    );
+  }
+  if (!isRecord(document.mcpServers)) {
+    return makeCheck(
+      id,
+      label,
+      "warn",
+      boundMcpDetail(`${filePath}: "mcpServers" must be an object of server entries`),
+    );
+  }
+  const names = Object.keys(document.mcpServers).sort();
+  return makeCheck(id, label, "pass", boundMcpDetail(`${filePath} — ${mcpServerSummary(names)}`));
+}
+
+// ---------------------------------------------------------------------------
 // report
 // ---------------------------------------------------------------------------
 
@@ -841,6 +981,9 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     );
     await runCheck("tui-history", "TUI history file", () =>
       checkTuiHistory(tuiHistoryFile(env, home, cwd)),
+    );
+    await runCheck("mcp-config", "MCP config", () =>
+      checkMcpConfig(mcpConfigFile(env, cwd)),
     );
   } catch (exc) {
     checks.push(makeCheck("doctor", "Doctor", "fail", `unexpected failure: ${shortError(exc)}`));

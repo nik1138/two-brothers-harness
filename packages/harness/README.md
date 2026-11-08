@@ -112,6 +112,16 @@ warning), the bound-root policy and this process's session allows; without a
 says so and offers only Close, and `/permission <mode>` applies one directly.
 An invalid root exits 2 before the screen opens.
 
+`Ctrl+X` copies the last completed reply (the newest decision, or the newest
+completed senior reply) as plain text: the platform clipboard is tried first,
+OSC 52 is the fallback where no OS clipboard is reachable, and the notice names
+the route honestly. `Ctrl+G` opens the draft in `$VISUAL`/`$EDITOR`
+(Windows falls back to `notepad.exe`; a nonzero exit leaves the draft
+untouched). While the TUI runs, the terminal title carries
+`Two Brothers — <session> · working|approval|done|failed`, every exit path
+restores it, and a parked approval raises one OSC 9/BEL notification (tmux gets
+a DCS passthrough). A non-TTY or `TERM=dumb` session writes nothing.
+
 The human `run`/`chat` text mode renders each envelope as a separated block,
 model prose as width-safe Markdown (sanitized first), the decision behind a
 ruled `── decision ──` line, and, when usage exists, a compact footer such as
@@ -164,7 +174,12 @@ Runs use the configured models — the UI has no separate
 selected), so a background tab shows when the brothers need you. Settings →
 **Advanced** saves the persisted auto-compaction budgets (`compaction` in
 `sessions/settings.json`); a pinned server flag/env wins and is shown as
-pinned.
+pinned, and a provider preset's **Context window (tokens)** is the last
+fallback (the smaller of the two roles' windows). Settings → **Providers**
+edits that preset field with strict whole-number validation (0 = unknown). An
+operator message bubble offers **Fork from here…**, which copies the
+conversation up to that message into a new session (`{seq}`) and opens it while
+the original and its sidecar stay byte-identical.
 
 ## Features
 
@@ -222,11 +237,14 @@ pinned.
   (`--context-window`, `--compact-threshold-tokens`).
 - **Run-scoped file undo**: a workspace-bound run captures the pre/post bytes
   of every `workspace_write_file`/`workspace_edit_file`/`workspace_delete_file`
-  mutation under `<sessions>/undo` (a persisted session side artifact), and
+  mutation under `<sessions>/undo` (a persisted session side artifact, bounded
+  to the newest 20 records per session and 30 days, with orphan-blob GC), and
   `GET/POST/DELETE /api/sessions/{name}/undo/{run_id}` preview, apply or
   discard the revert — per file, refusing files changed since the run and
-  never overwriting them; the web workspace exposes **Undo file changes…** for
-  the newest completed run.
+  never overwriting them, restoring POSIX mode where captured. The web
+  workspace exposes **Undo file changes…** for the newest completed run, and
+  `sessions undo <name>` previews/applies/discards the same record from the
+  CLI.
 - **Plugins**: drop ES-module files in `plugins/` exposing
   `register(ctx)` — tools are shared by both brothers.
 - **Skills**: `<root>/<name>/SKILL.md` files become a role-scoped
