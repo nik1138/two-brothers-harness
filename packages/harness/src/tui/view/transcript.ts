@@ -8,6 +8,11 @@ import {
   type TranscriptOptions,
 } from "../transcript.ts";
 import { plainTheme } from "../theme.ts";
+import {
+  REPLAYED_REASONING_BLOCK_ID,
+  renderReplayedReasoning,
+  type ReplayedReasoningBlock,
+} from "./reasoning.ts";
 
 /** Stable pseudo block id of the live reasoning rows (never a document block). */
 export const LIVE_THINKING_BLOCK_ID = "live-thinking";
@@ -23,6 +28,14 @@ export interface TranscriptScroll {
 export interface TranscriptViewOptions extends TranscriptOptions {
   height: number;
   scroll?: TranscriptScroll;
+  /**
+   * Read-only replayed reasoning records (session runtime sidecar), rendered as
+   * a dim `THINKING (replayed)` section above the transcript blocks in sidecar
+   * order. Omitted or empty renders the exact pre-replay frame.
+   */
+  replayedReasoning?: readonly ReplayedReasoningBlock[];
+  /** Records the bounded loader left out (one honest leading marker row). */
+  hiddenReplayedReasoning?: number;
 }
 
 export interface TranscriptView {
@@ -47,11 +60,35 @@ interface PositionedRow {
  * response has not started yet). Thinking is live-only, so it never changes
  * the block document: it is an extra row group anchored by
  * {@link LIVE_THINKING_BLOCK_ID}, separated by the usual blank row.
+ *
+ * Replayed reasoning (the session sidecar's persisted records) is a read-only
+ * prefix section anchored by {@link REPLAYED_REASONING_BLOCK_ID}: those rows
+ * come from the view option, never from the model, so an omitted/empty option
+ * produces the exact pre-replay rows.
  */
-function positionedRows(model: TuiModel, options: TranscriptOptions): PositionedRow[] {
+function positionedRows(model: TuiModel, options: TranscriptViewOptions): PositionedRow[] {
   const rows: PositionedRow[] = [];
   const blocks = model.blocks;
   const thinking = model.liveThinking;
+  const replayed = options.replayedReasoning ?? [];
+  if (replayed.length > 0) {
+    const rendered = renderReplayedReasoning(replayed, {
+      width: options.width,
+      ...(options.theme !== undefined ? { theme: options.theme } : {}),
+      ...(options.hiddenReplayedReasoning !== undefined
+        ? { hiddenRecords: options.hiddenReplayedReasoning }
+        : {}),
+    });
+    for (const text of rendered) {
+      // Blank rows between replayed records are separators, not content: the
+      // top-slice marker must never treat one as a hidden continuation row.
+      rows.push({
+        blockId: REPLAYED_REASONING_BLOCK_ID,
+        text,
+        ...(text === "" ? { separator: true } : {}),
+      });
+    }
+  }
   const last = blocks[blocks.length - 1];
   const streamingLastIndex =
     last !== undefined && thinking !== undefined && isStreamingBlock(last) ? blocks.length - 1 : -1;
@@ -112,7 +149,14 @@ export function scrollToBlock(blockId: string): TranscriptScroll {
   return { followLatest: false, anchorId: blockId, offset: 0 };
 }
 
-export function homeTranscriptScroll(model: TuiModel): TranscriptScroll {
+export function homeTranscriptScroll(
+  model: TuiModel,
+  replayedReasoning?: readonly ReplayedReasoningBlock[],
+): TranscriptScroll {
+  // A replayed-reasoning section is the document's first content when present.
+  if (replayedReasoning !== undefined && replayedReasoning.length > 0) {
+    return { followLatest: false, anchorId: REPLAYED_REASONING_BLOCK_ID, offset: 0 };
+  }
   const first = model.blocks[0];
   return first === undefined
     ? { followLatest: true }
@@ -146,9 +190,15 @@ export function transcriptView(model: TuiModel, options: TranscriptViewOptions):
   // A window that starts inside a block marks the hidden label row in the
   // gutter, so the top row is not mistaken for the start of the block. Compact
   // rows have no gutter, so the marker only exists in the inline layout.
+  // Replayed reasoning rows do not use the transcript gutter (their header is
+  // a full-width dim row), so a window starting inside that section is left
+  // alone instead of replacing its content prefix.
+  const topRow = rows[start];
   if (
     lines.length > 0 &&
     width > TRANSCRIPT_LABEL_WIDTH + 8 &&
+    topRow !== undefined &&
+    topRow.blockId !== REPLAYED_REASONING_BLOCK_ID &&
     startsMidBlock(rows, start)
   ) {
     lines[0] = markTopSliceRow(lines[0] ?? "", width, options.theme ?? plainTheme);

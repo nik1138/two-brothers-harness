@@ -218,6 +218,7 @@ import {
 } from "./view/approval.ts";
 import { sessionSidecarKey, todosFromRuntimeEvents, todoPanelView } from "./view/todo.ts";
 import { persistTodoSnapshot } from "./todoPersist.ts";
+import { loadSessionReasoning, type ReplayedReasoning } from "./reasoningPersist.ts";
 import {
   historySearchView,
   openHistorySearch,
@@ -1388,6 +1389,22 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   }
 
   /**
+   * Read-only replay of the displayed session's persisted reasoning records
+   * (the wave-7 `reasoning` runtime events a STREAMING serve/CLI run wrote to
+   * the same runtime sidecar). The TUI shows them as dim `THINKING (replayed)`
+   * blocks above the transcript blocks; it never writes a reasoning event and
+   * live thinking is untouched. Fail-soft and bounded (the loader keeps the
+   * newest records only, with an honest hidden count).
+   */
+  let replayedReasoning: readonly ReplayedReasoning[] = [];
+  let hiddenReplayedReasoning = 0;
+  function loadSessionReasoningFor(sessionFile: string): void {
+    const loaded = loadSessionReasoning(runtimeStore, sessionFile);
+    replayedReasoning = loaded.blocks;
+    hiddenReplayedReasoning = loaded.hidden;
+  }
+
+  /**
    * This process's live plan snapshots, keyed by the resolved session file.
    * The sidecar is durable, but the cache keeps session switching instant and
    * covers in-memory sessions (no file, nothing to persist).
@@ -1466,6 +1483,10 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   // by this TUI's own turns); live writes replace it, persist it and are
   // remembered across session switches.
   let todos: TodoItem[] = planForSession(sessionCfg.sessionFile);
+  // Persisted reasoning of the session being opened: a read-only sidecar
+  // replay shown as bounded `THINKING (replayed)` blocks (streaming-only
+  // records; a non-streaming run simply has none).
+  loadSessionReasoningFor(sessionCfg.sessionFile);
   // Tool-result expansion is per row and keyed by call id (or block id), so
   // it survives streaming updates and never depends on the row's position.
   let toolExpansion: ToolExpansionKeys = new Set<string>();
@@ -1928,6 +1949,14 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       ...(mentionRows !== undefined ? { mentionPicker: mentionRows } : {}),
       ...(findBar !== undefined ? { findBar } : {}),
       ...(findBlockId !== undefined ? { findBlockId } : {}),
+      // Read-only sidecar replay: an empty set adds no option, so the frame is
+      // byte-identical to the pre-replay layout.
+      ...(replayedReasoning.length > 0
+        ? {
+            replayedReasoning,
+            ...(hiddenReplayedReasoning > 0 ? { hiddenReplayedReasoning } : {}),
+          }
+        : {}),
       toasts,
       spinnerTick,
       reducedMotion: process.env.NO_COLOR !== undefined && process.env.NO_COLOR !== "",
@@ -2795,6 +2824,8 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
               // snapshot when there is one, else replay the session sidecar
               // (serve-written or TUI-written plan snapshots).
               todos = planForSession(sessionFile);
+              // Read-only replay of the session's persisted reasoning records.
+              loadSessionReasoningFor(sessionFile);
               toolExpansion = new Set<string>();
               // A session switch resets the draft but not durable prompt
               // history or the in-memory stash slot.
@@ -3264,6 +3295,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     sessionCfg = { ...sessionCfg, resume: false };
     model = createTuiModel();
     todos = [];
+    // A fresh in-memory session has no sidecar, so no reasoning replay either.
+    replayedReasoning = [];
+    hiddenReplayedReasoning = 0;
     toolExpansion = new Set<string>();
     scroll = latestTranscriptScroll();
     usage = null;
@@ -3824,6 +3858,15 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
           width: transcriptWidth(),
           height: transcriptBodyHeight(),
           theme,
+          // The replayed section is part of the row document the scroll math
+          // counts; the hidden-record marker row must be passed too or the
+          // document is one row shorter than the rendered frame.
+          ...(replayedReasoning.length > 0
+            ? {
+                replayedReasoning,
+                ...(hiddenReplayedReasoning > 0 ? { hiddenReplayedReasoning } : {}),
+              }
+            : {}),
         });
         break;
       case "scroll-next":
@@ -3831,6 +3874,12 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
           width: transcriptWidth(),
           height: transcriptBodyHeight(),
           theme,
+          ...(replayedReasoning.length > 0
+            ? {
+                replayedReasoning,
+                ...(hiddenReplayedReasoning > 0 ? { hiddenReplayedReasoning } : {}),
+              }
+            : {}),
         });
         break;
       case "cancel":

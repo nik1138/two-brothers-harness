@@ -91,3 +91,4 @@ import "./tuiapprovalmodes.test.ts";
 import "./load.test.ts";
 import "./approvalshellcaution.test.ts";
 import "./thinkingpersist.test.ts";
+import "./tuireasoningreplay.test.ts";

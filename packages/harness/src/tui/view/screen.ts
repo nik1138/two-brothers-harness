@@ -12,11 +12,8 @@ import {
 import { spinnerFrame } from "./spinner.ts";
 import { renderStatusBar, type StatusBarState } from "./statusbar.ts";
 import { renderToasts, type Toast } from "./toast.ts";
-import {
-  transcriptView,
-  type TranscriptScroll,
-  type TranscriptView,
-} from "./transcript.ts";
+import { transcriptView, type TranscriptScroll, type TranscriptView } from "./transcript.ts";
+import type { ReplayedReasoningBlock } from "./reasoning.ts";
 import { renderWelcome } from "./welcome.ts";
 
 export interface ScreenOptions {
@@ -55,6 +52,16 @@ export interface ScreenOptions {
   findBar?: readonly string[];
   /** Block id of the active find match, marked in the transcript gutter. */
   findBlockId?: string;
+  /**
+   * Read-only replayed reasoning records (session runtime sidecar), rendered as
+   * a dim `THINKING (replayed)` section above the transcript blocks. Omitted or
+   * empty keeps the frame byte-identical to the pre-replay layout; when present
+   * it also makes a session with no block content render the transcript instead
+   * of the welcome screen.
+   */
+  replayedReasoning?: readonly ReplayedReasoningBlock[];
+  /** Records the bounded loader left out (one honest leading marker row). */
+  hiddenReplayedReasoning?: number;
   toasts?: readonly Toast[];
   spinnerTick?: number;
   reducedMotion?: boolean;
@@ -156,7 +163,11 @@ export function screenView(options: ScreenOptions): ScreenView {
   const panelOpen = layout !== null && layout.visible && panelState !== undefined;
   const transcriptWidth = layout !== null && panelOpen ? layout.transcriptWidth : width;
 
-  const empty = options.model.blocks.length === 0 && options.model.liveThinking === undefined;
+  const replayedReasoning = options.replayedReasoning ?? [];
+  const empty =
+    options.model.blocks.length === 0 &&
+    options.model.liveThinking === undefined &&
+    replayedReasoning.length === 0;
   const transcript = empty ? null : transcriptView(options.model, {
     width: transcriptWidth,
     height: bodyHeight,
@@ -164,6 +175,10 @@ export function screenView(options: ScreenOptions): ScreenView {
     scroll: options.scroll,
     expandedTools: options.expandedTools,
     ...(options.findBlockId !== undefined ? { activeBlockId: options.findBlockId } : {}),
+    ...(replayedReasoning.length > 0 ? { replayedReasoning } : {}),
+    ...(options.hiddenReplayedReasoning !== undefined
+      ? { hiddenReplayedReasoning: options.hiddenReplayedReasoning }
+      : {}),
   });
   let body = transcript?.lines ?? renderWelcome({
     width: transcriptWidth,
