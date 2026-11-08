@@ -545,6 +545,65 @@ test("a file mention on a linked session reads through its workspace", async () 
   }
 });
 
+test("legacy /api/run inherits the linked workspace for tools and file mentions", async () => {
+  const srv = await startServer({
+    providerOverrides: {
+      junior: new MockProvider([
+        { tool: "workspace_list_dir", args: { path: "." } },
+        {
+          text: JSON.stringify({
+            result: "listed the linked workspace",
+            artifacts: [],
+            notes: "",
+            confidence: 0.8,
+          }),
+        },
+      ]),
+    },
+  });
+  const ws = tmpdir("tb-sync-linked-");
+  try {
+    fs.writeFileSync(path.join(ws.root, "notes.txt"), "hello from the linked workspace");
+    const registered = await post<Record<string, any>>(srv.base, "/api/workspaces", {
+      path: ws.root,
+      name: "sync-linked",
+    });
+    const session = await post<Record<string, any>>(srv.base, "/api/sessions", {
+      title: "sync linked",
+      workspace_id: registered.body.id,
+    });
+
+    const res = await post<Record<string, any>>(srv.base, "/api/run", {
+      task: "Use @./notes.txt then list the files",
+      mode: "work",
+      provider: "mock",
+      session: session.body.name,
+      workspace_id: null,
+    });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+
+    const events = res.body.events as Array<Record<string, any>>;
+    const detail = await get<Record<string, any>>(
+      srv.base,
+      `/api/sessions/${encodeURIComponent(session.body.name)}`,
+    );
+    assert.match(
+      String((detail.body.events[0] as Record<string, any>)?.payload?.text),
+      /^<file path="notes.txt">\nhello from the linked workspace\n<\/file>$/,
+    );
+    const deliverable = events.find((event) => event.kind === "deliverable");
+    assert.ok(deliverable, JSON.stringify(events.map((event) => event.kind)));
+    const artifacts = deliverable.payload.artifacts as string[];
+    assert.ok(
+      artifacts.some((line) => line.startsWith("tool: workspace_list_dir")),
+      JSON.stringify(artifacts),
+    );
+  } finally {
+    await srv.close();
+    ws.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Session metadata (create / rename / listing titles)
 // ---------------------------------------------------------------------------

@@ -2186,15 +2186,41 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       const req = parseRunRequest(await ctx.json());
       const rawTask = req.task.trim();
       if (!rawTask) throw new HttpError(400, "task must not be empty");
+      const name = sessionName(req.session);
+      // Same linked-workspace rule as POST /api/runs: an omitted workspace_id
+      // inherits the session's metadata link, while an explicit value wins.
+      // The effective request stays in scope for preparation, execution, the
+      // metadata write and the session store/materialization path (which reads
+      // the workspace link after the session-dirs layout merge).
+      const linked = req.workspace_id === undefined ? linkedSessionWorkspace(name) : null;
+      const baseReq: RunRequestData = {
+        ...req,
+        task: rawTask,
+        ...(linked === null ? {} : { workspace_id: linked }),
+      };
+      ensureWorkspace(baseReq.workspace_id);
       // Same preparation as POST /api/runs (slash expansion + mention
       // injection); the sync route runs the expanded task while the metadata
       // title keeps the operator's raw text.
-      const raw: RunRequestData = { ...req, task: rawTask };
-      const prepared = await prepareSubmission(raw);
+      const prepared = await prepareSubmission(baseReq);
       const runReq: RunRequestData =
-        prepared.modeOverride === undefined ? raw : { ...raw, mode: prepared.modeOverride };
+        prepared.modeOverride === undefined
+          ? baseReq
+          : { ...baseReq, mode: prepared.modeOverride };
       const cfg = buildCfg(runReq);
-      const name = sessionName(req.session);
+      // The sync route has no approval channel, so a workspace is built from
+      // the effective id and the effective approval policy (reads auto-allow;
+      // modes that still ask have no broker and fail closed). This is the
+      // workspace the harness offers as its read/write tool belt.
+      let workspace: Workspace | undefined;
+      if (runReq.workspace_id) {
+        const registered = state.workspaces.get(runReq.workspace_id);
+        if (registered === null) throw new HttpError(400, "unknown workspace_id");
+        workspace = new Workspace(
+          registered.path,
+          new PermissionManager(new PermissionPolicy(effectiveApprovalPolicy())),
+        );
+      }
       // A manual compaction owns this session right now: refuse before the run
       // context is opened or any envelope is appended.
       assertNotCompacting(name);
@@ -2206,7 +2232,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
           cfg.cfg,
           undefined,
           undefined,
-          undefined,
+          workspace,
           cfg.endpoints,
           prepared.injections,
         );
@@ -2215,7 +2241,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         throw exc;
       }
       state.metadata.ensure(name, {
-        workspaceId: req.workspace_id,
+        workspaceId: runReq.workspace_id,
         events: userMessageEvent(rawTask),
       });
       return {

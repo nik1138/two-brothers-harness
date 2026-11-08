@@ -899,7 +899,7 @@ The backend is a **local single-user workspace server**. API overview:
 | `GET /api/skills` | discovered skills metadata (`name`, `description`, `scope`, `tools`, `file`) — never bodies |
 | `GET /api/commands` | discovered slash-command metadata (`name`, `description`, `argumentHint`, `mode?`, `file`) plus the additive first-party `baseCommands` list (`name`, `aliases`, `description`, `argumentHint`, `kind: "prompt"\|"action"`, `action?`, `requiresArguments`, `priority`) — never bodies |
 | `GET /api/fs/browse` | browse the filesystem for workspace registration (UI helper) |
-| `POST /api/run` | legacy synchronous run (body `{"task", "mode"?, "session"?, "provider"?}` → `{"session", "events", "decision"}`); slash commands and mentions are expanded the same way, but there is no token streaming |
+| `POST /api/run` | legacy synchronous run (body `{"task", "mode"?, "session"?, "provider"?, "workspace_id"?}` → `{"session", "events", "decision"}`); an omitted `workspace_id` inherits the session's linked workspace exactly like `POST /api/runs` (an explicit value wins and must be registered), and the effective workspace supplies the tool belt; slash commands and mentions are expanded the same way, but there is no token streaming or approval channel, so a mode that still asks fails closed for mutating tools |
 | `GET /api/stream?session=<name>` | legacy SSE tail of a session file |
 
 **Mid-run steering.** A steering text is not a queued task: it is appended to
