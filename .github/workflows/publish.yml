@@ -141,7 +141,9 @@ jobs:
         run: npm install --global npm@11
 
       # Trusted Publisher OIDC: no NODE_AUTH_TOKEN / npm token needed.
-      # --provenance is automatic (npm >= 11, id-token present), kept explicit.
+      # Provenance is automatic for a public repository under trusted
+      # publishing; npm skips it for private source repositories, so do not
+      # pass --provenance or the private case can fail the publish.
       - name: Publish to npm (dist-tag "next")
-        run: npm publish --tag next --provenance
+        run: npm publish --tag next
         working-directory: packages/harness

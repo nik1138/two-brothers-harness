@@ -10,10 +10,12 @@ first; it documents the same one-time setup inline. Pushing a `v*` tag (or
 running the workflow by hand) executes the release gate — typecheck, build,
 in-process + spawned tests, hermetic CLI E2E, real-socket fault injection, web
 unit tests + build, selftest, `pack:check`, and a tag↔version check — and then
-publishes with `npm publish --tag next --provenance`. A `v*` tag whose version
-does not match `packages/harness/package.json` fails before publishing.
-Releases land on the **`next`** dist-tag, never `latest`, until explicitly
-promoted below.
+publishes with `npm publish --tag next`. Provenance is automatic under trusted
+publishing when the GitHub repository is public; npm does not generate it for
+private source repositories, so the workflow does not pass `--provenance`
+explicitly. A `v*` tag whose version does not match
+`packages/harness/package.json` fails before publishing. Releases land on the
+**`next`** dist-tag, never `latest`, until explicitly promoted below.
 
 ## Pre-push release-candidate rehearsal
 
@@ -37,7 +39,7 @@ workaround).
    captured output tail and exit 1: clean tree → candidate build +
    `npm run check` → `scripts/smoke-test.ps1` (`SMOKE TEST: PASS`) →
    `node scripts/tarball-smoke.mjs` (`TARBALL SMOKE: PASS (7/7)`) and
-   `npm run pack:check` → `scripts/e2e-test.ps1` (18 PASS / 0 FAIL / 1 SKIP;
+   `npm run pack:check` → `scripts/e2e-test.ps1` (20 PASS / 0 FAIL / 1 SKIP;
    needs system Edge, not run in CI) → final clean-tree check.
 
    Fast iterations: `-SkipBrowser` (skip the system-Edge pass) and
@@ -58,21 +60,45 @@ workaround).
    availability in the org-creation form; if it is taken, rename the package
    scope in `packages/harness/package.json` first (a manifest change that
    needs a matching lockfile refresh).
-2. **Link Trusted Publisher.** The package's first publish cannot go through
-   OIDC, so create the package entry first: in the org view on npmjs.com use
-   **"Create a package" / Provenance (Trusted Publisher) UI** and add a
+2. **Make the package exist.** npm requires a package to exist before its
+   Trusted Publisher settings can be edited. Choose one:
+   - **Placeholder (keeps the first real publish in CI):** check the org page
+     for a **Create a package** action; if it is available, reserve
+     `@two-brothers/harness` there. Otherwise publish a minimal placeholder
+     (for example `npx setup-npm-trusted-publish @two-brothers/harness`, a
+     third-party MIT helper, or any empty `0.0.0` package) with a `npm login`
+     scope-member account.
+   - **Manual first publish:** `npm login`, then from `packages/harness`
+     `npm publish --tag next --access public`. This publishes `0.0.1` once
+     with a token; configure Trusted Publishing immediately afterwards for
+     every later release.
+3. **Link the Trusted Publisher.** Open the package's
+   **Settings → Trusted publishing** on npmjs.com (or
+   <https://www.npmjs.com/package/@two-brothers/harness/access>) and add a
    GitHub Actions trusted publisher with:
-   - Organization: `nik1138` (the GitHub user owning the repo)
+   - Organization or user: `nik1138` (the GitHub owner, not the npm org)
    - Repository: `two-brothers-harness`
-   - Workflow filename: `publish.yml`
-   - Environment: *(leave blank — the workflow uses no GitHub environment)*
+   - Workflow filename: `publish.yml` (filename only, case-sensitive)
+   - Environment: *(leave blank — the workflow uses no GitHub environment;
+     if you later add one to the workflow, enter its name in both places)*
+   - Allowed actions: **npm publish** must be enabled. Configurations created
+     after Sep 03 2026 default to stage-only (`npm stage publish`); this
+     workflow runs direct `npm publish`, so stage-only is not enough.
+     Optionally enable **npm dist-tag** if the workflow should promote tags.
+     The package `repository.url` must match this GitHub repository exactly
+     (it does today).
 
-   This both creates the empty package placeholder and wires the OIDC link, so
-   the workflow can take over from the very first real publish. Alternative:
-   publish once manually from a machine with a scope-member token
-   (`npm login`, then `npm publish --tag next` in `packages/harness/`), then
-   attach the Trusted Publisher on the package's Settings page — but the
-   placeholder route keeps everything in CI.
+   Alternatively, with npm CLI ≥ 11.15 and account-level 2FA:
+   `npm trust github @two-brothers/harness --file publish.yml --repo
+   nik1138/two-brothers-harness --allow-publish` (omit `--environment` for a
+   blank environment). A new trusted-publisher configuration must complete a
+   successful publish within **2 days**, or it expires.
+
+   **Private repository caveat:** npm does not generate provenance for
+   packages built from private source repositories, even with trusted
+   publishing. The workflow therefore does not pass `--provenance`; the
+   package publishes without an attestation while the repo stays private.
+   Make the repository public if you want the provenance badge.
 
 ## Publishing 0.0.1 (this first release)
 
