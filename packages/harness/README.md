@@ -14,10 +14,10 @@ MCP). MIT.
 
 ## Install
 
-v0.0.1 is published on the `next` dist-tag:
+v0.0.1 is the latest published release:
 
 ```bash
-npm install -g @two-brothers/harness@next
+npm install -g @two-brothers/harness
 ```
 
 Source build (any version): clone

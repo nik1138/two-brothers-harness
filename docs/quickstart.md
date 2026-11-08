@@ -21,11 +21,10 @@ npm install
 npm run build                          # tsc → dist/
 ```
 
-Or install the published package — v0.0.1 is on the `next` dist-tag (the
-untagged install starts working after promotion to `latest`):
+Or install the published package (v0.0.1 is the latest release):
 
 ```powershell
-npm install -g @two-brothers/harness@next
+npm install -g @two-brothers/harness
 two-brothers --version
 ```
 

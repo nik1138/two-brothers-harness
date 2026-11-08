@@ -15,20 +15,19 @@ within a single context.
 
 The implementation is the TypeScript package in
 [`packages/harness/`](packages/harness/) (`@two-brothers/harness`, written in
-the style of pi / deepseek-harness). **v0.0.1 is published on npm** under the
-`next` dist-tag; `npm install -g @two-brothers/harness@next` gives the global
-`two-brothers` command (see [Install](#install)). You can also build from a
-checkout with the [Quickstart](docs/quickstart.md) — offline in a couple of
-minutes, no API key. The full flag, environment-variable, and endpoint
-reference is [docs/cli-reference.md](docs/cli-reference.md).
+the style of pi / deepseek-harness). **v0.0.1 is published on npm**;
+`npm install -g @two-brothers/harness` gives the global `two-brothers`
+command (see [Install](#install)). You can also build from a checkout with
+the [Quickstart](docs/quickstart.md) — offline in a couple of minutes, no API
+key. The full flag, environment-variable, and endpoint reference is
+[docs/cli-reference.md](docs/cli-reference.md).
 
 ## Install
 
-v0.0.1 is published on the `next` dist-tag; `latest` still points at the
-`0.0.0` placeholder until promotion:
+v0.0.1 is the latest published release:
 
 ```powershell
-npm install -g @two-brothers/harness@next
+npm install -g @two-brothers/harness
 two-brothers --help
 ```
 

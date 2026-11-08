@@ -1,9 +1,9 @@
 # Release runbook — `@two-brothers/harness`
 
-How the package ships to npm. **Status: 0.0.1 published on the `next`
-dist-tag; `latest` still points at the 0.0.0 placeholder.** The publish
-workflow ran on `main` with the full gate and signed provenance. Promoting
-`0.0.1` to `latest` is the remaining step — see "Promote to `latest`" below.
+How the package ships to npm. **Status: 0.0.1 published on `latest` (and
+`next`), with the `v0.0.1` GitHub release at `b871b5a`.** The publish
+workflow ran on `main` with the full gate and signed provenance; promotion
+and the GitHub release followed on 2026-11-09.
 
 Mechanics live in `.github/workflows/publish.yml` — read its header comment
 first; it documents the same one-time setup inline. Pushing a `v*` tag (or
@@ -102,14 +102,9 @@ workaround).
 **Use Actions → publish → Run workflow on final `main`** — the `workflow_dispatch`
 path runs the identical gate + publish without any tag involvement.
 
-Do **not** reuse the existing `v0.0.1` tag blindly: it points at `157c952` and
-predates the redesign (`28883fc`) and the CLI diagnostics and ergonomics
-milestone on top of it, so a tag-triggered run would publish stale sources.
-Deliberately moving the tag
-(`git tag -f v0.0.1 <current-main> && git push -f origin v0.0.1`, with the
-commit you intend to publish) so future tag pushes line up with the released
-commit is a separate owner decision — only after the npm setup above is
-complete, and only if you accept rewriting the remote tag.
+The old local `v0.0.1` tag pointed at `157c952` (pre-redesign), so it was not
+reused. The published `v0.0.1` tag was created with the GitHub release and
+points at `b871b5a`, the commit the publish workflow built and attested.
 
 For releases after 0.0.1 the generic flow is: bump `version` in
 `packages/harness/package.json`, merge to `main`, then
@@ -124,7 +119,7 @@ Whatever the trigger:
 ## Verify the published package (any machine, Node ≥ 22.19)
 
 ```bash
-npm install -g @two-brothers/harness@next
+npm install -g @two-brothers/harness
 two-brothers --version
 two-brothers run "Plan a migration from Redis to Valkey" --provider mock
 two-brothers serve --port 8600   # http://127.0.0.1:8600 serves the packaged web UI
@@ -148,30 +143,27 @@ machine, gets a stack trace that resolves back to the TypeScript sources.
 
 ## After publishing 0.0.1 (docs, immediately)
 
-The workflow publishes to **`next`**; the `0.0.0` placeholder still owns
-`latest` until the promotion step below. Do not tell readers to install the
-untagged package during that window.
+**Done on 2026-11-09:** the workflow published to `next`, `0.0.1` was
+promoted to `latest`, the README/quickstart install commands are untagged,
+and the `v0.0.1` GitHub release is live. The steps below are the checklist
+the next release repeats.
 
 1. Verify the registry:
    ```bash
-   npm view @two-brothers/harness@next version
+   npm view @two-brothers/harness version
    npm view @two-brothers/harness dist-tags
    ```
-2. Update the pre-release notes in the same docs commit:
-   - root `README.md`: replace the "package is not on npm yet" paragraph and
-     delete the `> **Pre-release:**` block in **Install**; use
-     `npm install -g @two-brothers/harness@next` for now.
-   - `packages/harness/README.md`: replace/remove the
-     `> **Pre-release:**` block; use the same `@next` command.
-   - `docs/quickstart.md`: change "once the package is published" to the
-     actual `@next` install, or keep the source build as the first path and
-     link the npm install as the packaged alternative.
-   - `docs/release.md`: change **Status** from placeholder/ready to
-     0.0.1 published on `next`.
-3. Open the npm package page and confirm the README/license/repository and the
-   `next` tag.
+2. Update the release notes in the same docs commit: replace the
+   pre-release wording in the root `README.md`,
+   `packages/harness/README.md` and `docs/quickstart.md` with the real
+   install command, and keep this file's **Status** line in sync.
+3. Open the npm package page and confirm the README/license/repository and
+   the dist-tags.
 
 ## Promote to `latest` and drop the `@next` suffix
+
+**Done on 2026-11-09:** `latest` points at `0.0.1`, and the docs use the
+untagged install command. The steps remain for future pre-releases.
 
 When `@next` has soaked and you are ready to make it the default install:
 
