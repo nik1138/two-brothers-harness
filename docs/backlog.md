@@ -814,7 +814,7 @@ Design anchors that already exist:
   persists it to the session runtime sidecar automatically (no protocol or
   session-JSONL change), and the web replays a collapsed-by-default
   **Thinking · replayed** row after a reload (tolerant of malformed/oversized/
-  old-backend rows; TUI replay is not implemented). Honest limitation:
+  old-backend rows; TUI replay shipped in wave 8). Honest limitation:
   capture requires streaming (web always opts in; CLI/TUI need
   `--stream-tokens`) because the plain provider contract returns no reasoning
   text. Files: `src/harness.ts`, `src/runevents.ts`, `src/index.ts`; web
@@ -890,13 +890,33 @@ Design anchors that already exist:
   workspace). Closes the follow-up; future web dependency bumps must run npm
   inside `web/`.
 
+## Shipped 2026-11-08 (wave 10: Anthropic extended thinking, reasoning-replay browser coverage)
+
+- **Anthropic extended thinking (reasoning passback part 2)** —
+  `--thinking-budget <n>` / `TWO_BROTHERS_THINKING_BUDGET` (pinned, never
+  persisted; min 1024; other providers ignore it) makes Anthropic Messages
+  roles request `thinking: {type:"enabled", budget_tokens:n}` (plain,
+  streaming, tool loops); `temperature` is omitted while enabled and a cap
+  that does not exceed the budget is raised to budget + 1024 with one honest
+  warning. Signed thinking blocks (streamed `thinking_delta`/`signature_delta`
+  or non-streamed; `redacted_thinking` payloads included) are captured and
+  echoed verbatim as the first blocks of tool-loop assistant turns, so
+  Anthropic accepts multi-round tool loops; they never enter the protocol
+  transcript, session JSONL or other adapters, and unset keeps requests
+  byte-identical. Tests: `tests/thinkingpassback.test.ts` (13).
+- **Browser coverage for persisted reasoning replay** — new hermetic
+  `reasoning-replay` scenario: the e2e scripted fixture streams real
+  `delta.reasoning_content` chunks, the run sidecar must hold four bounded
+  `reasoning` runtime events (while a plain session holds none), and after a
+  page reload the collapsed `Thinking · replayed` rows expand to sanitized
+  plain text (injected HTML-looking payload stays escaped text, no handler
+  runs), the over-long record is head+tail bounded with the clipping marker,
+  and the plain session shows no replay rows. The browser suite is now
+  16 offline scenarios + the opt-in `real` skip. Files: `e2e/run.mjs`,
+  `e2e/fixtures/scripted-server.mjs` (+ README).
+
 ## Open items (deferred)
 
-- **Reasoning passback (part 2)** — Anthropic extended thinking with tool use
-  expects signed thinking blocks passed back on assistant turns: capture and
-  replay them in the Anthropic adapter if thinking-enabled tool loops become a
-  supported configuration. (Part 1 persistence/replay — web and TUI — shipped
-  in waves 7–8.)
 - **Real external-network load/fault injection** — the hermetic scale suite
   and the loopback fault runner cover bounded behavior; WAN latency/load and
   real-provider fault injection are not covered by the offline gates.

@@ -831,6 +831,7 @@ per-role connection without leaving the terminal.
 | `--timeout` | int | `120` | per-request HTTP timeout, seconds; bounds every attempt of the retry loop (see [Local models and timeouts](#local-models-lm-studio-and-timeouts)) |
 | `--retries` | int | `6` | retries after a failed model call (`0` = single attempt); backoff 2 s, 4 s, 8 s, … capped at 30 s (7 attempts total by default); a stopped run aborts the loop between attempts |
 | `--max-tokens` | int | — | (TS package) output-token cap for both roles (env `TWO_BROTHERS_MAX_TOKENS`; per-role `TWO_BROTHERS_SENIOR_MAX_TOKENS` / `TWO_BROTHERS_JUNIOR_MAX_TOKENS` override it); Anthropic's default stays 4096, OpenAI/Gemini omit the cap when unset |
+| `--thinking-budget` | int | — | (TS package) Anthropic extended-thinking budget in tokens, run-level for both roles (min 1024; only Anthropic Messages roles use it, other providers ignore it; env `TWO_BROTHERS_THINKING_BUDGET`; never persisted). When an Anthropic provider's effective `--max-tokens` does not exceed the budget, that provider's request cap is raised to budget + 1024 with one honest warning per provider instance (up to two when both roles are Anthropic); `temperature` is omitted while thinking is enabled (see [Anthropic extended thinking](#anthropic-extended-thinking-ts-package)) |
 | `--mode` | `consult`, `work`, `auto` | `consult` | cooperation mode |
 | `--mode` | `print`, `json` | — | (TS package, `run` and each `chat` REPL turn) non-interactive automation output — see [Automation output](#automation-output-ts-package); `--mode work --json-events` stays possible because `print`/`json` are output modes, not cooperation modes |
 | `--json-events` | flag | off | (TS package, `run` and each `chat` REPL turn) alias for `--mode json` |
@@ -888,6 +889,7 @@ per-role connection without leaving the terminal.
 | `TWO_BROTHERS_COMPACT_KEEP_RECENT` | `--compact-keep-recent` (TS package) |
 | `TWO_BROTHERS_MAX_TOKENS` | `--max-tokens` (TS package) |
 | `TWO_BROTHERS_SENIOR_MAX_TOKENS` / `TWO_BROTHERS_JUNIOR_MAX_TOKENS` | per-role `--max-tokens` overrides (TS package) |
+| `TWO_BROTHERS_THINKING_BUDGET` | `--thinking-budget` (TS package; pinned, never persisted) |
 | `TWO_BROTHERS_MCP_CONFIG` | `--mcp-config` |
 | `TWO_BROTHERS_PLUGINS_DIR` | `--plugins-dir` (TS package) |
 | `TWO_BROTHERS_SKILLS_DIR` | `--skills-dir` (OS path list; TS package) |
@@ -1221,6 +1223,23 @@ them):
   (other 4xx, quota/billing, context overflow); a retryable response's
   `Retry-After` replaces that attempt's fixed backoff, and a context-overflow
   payload triggers compact-and-retry instead of burning the retry budget.
+- **Anthropic extended thinking** (TS package) — `--thinking-budget <n>`
+  (`TWO_BROTHERS_THINKING_BUDGET`, run-level for both roles) makes every
+  Anthropic Messages request carry
+  `thinking: {type:"enabled", budget_tokens:n}` (plain, streaming and
+  tool-loop calls). The API requires `n >= 1024` and `max_tokens > n`; when a
+  provider's effective `--max-tokens` leaves no room, that provider raises its
+  request cap to `n + 1024` and warns once (an explicit `--max-tokens` is
+  otherwise sent untouched; with both roles on Anthropic there can be one
+  warning per provider). `temperature` is omitted while thinking is enabled
+  because the API rejects it there (its default applies).
+  The signed thinking blocks (including `redacted_thinking` payloads) are
+  captured from the response and echoed verbatim as the first content blocks
+  of subsequent tool-loop assistant turns; they stay internal and never enter
+  the protocol transcript, session JSONL or the other adapters, which ignore
+  the option and keep byte-identical requests. Unset keeps every request
+  byte-identical to before. See
+  [Anthropic extended thinking](#anthropic-extended-thinking-ts-package).
 - **Plugins** — see `docs/plugins.md`.
 - **Skills** — role-scoped `SKILL.md` catalogs (see [Skills](#skills-ts-package)).
 - **Provider presets, onboarding, cost** — seeded presets (openai, deepseek,

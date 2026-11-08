@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Anthropic extended thinking + signed passback** (wave 10): new
+  `--thinking-budget <n>` / `TWO_BROTHERS_THINKING_BUDGET` (pinned, never
+  persisted; min 1024, other providers ignore it) makes Anthropic Messages
+  roles request `thinking: {type:"enabled", budget_tokens:n}` on plain,
+  streaming and tool-loop calls. When an Anthropic provider's effective
+  `--max-tokens` does not exceed the budget, that provider's request cap is
+  raised to budget + 1024 with one honest warning per provider instance (an
+  explicit `--max-tokens` is otherwise untouched), and
+  `temperature` is omitted while thinking is enabled (API incompatibility).
+  Signed thinking blocks — streamed (`thinking_delta` + `signature_delta`) or
+  non-streamed, `redacted_thinking` payloads included — are captured and
+  echoed verbatim as the first content blocks of subsequent tool-loop
+  assistant turns, so Anthropic accepts multi-round tool loops; they never
+  enter the protocol transcript, session JSONL or other adapters. Unset keeps
+  every request byte-identical. Files: `src/provider.ts`, `src/context.ts`
+  (internal additive `ChatMessage.thinkingBlocks`), `src/harness.ts`,
+  `src/config.ts`, `src/cli.ts`, `src/clihelp.ts`, `src/index.ts`; tests
+  `tests/thinkingpassback.test.ts` (13).
 - **Drag-and-drop workspace reordering (web)** (wave 9): each sidebar workspace
   group now has a dedicated pointer-only grip handle; dragging a group and
   dropping it on another header shows an honest insert indicator (accent line

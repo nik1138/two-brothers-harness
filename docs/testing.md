@@ -77,7 +77,7 @@ npm run test:spawn      # node --test tests/ (child processes allowed)
 ```
 
 On the canonical integrated run for this round the in-process suite is
-**1 501 tests: 1 499 pass, 0 fail, 2 skipped** (exit 0); the two skips are
+**1 514 tests: 1 512 pass, 0 fail, 2 skipped** (exit 0); the two skips are
 environment-gated and never failures — the workspace symlink-parity test and
 the MCP stdio spawn are unavailable in this environment. `npm run typecheck`
 and `npm run build` pass, the hermetic CLI E2E is 17/17 on sources and 17/17
@@ -308,6 +308,26 @@ tests → 21) with the new hermetic browser scenario above. The web suite is now
 329 tests; the package suite and reference tree are unchanged (the wave-9
 lanes touched web/e2e/docs/tooling only).
 
+Wave 10 adds `tests/thinkingpassback.test.ts` (13 tests: Anthropic
+extended-thinking requests are byte-identical when unset and carry
+`thinking: {type:"enabled", budget_tokens:n}` (with `temperature` omitted)
+when enabled; a scripted two-round SSE tool loop captures signed
+`thinking`/`signature` blocks (and `redacted_thinking` payloads) and echoes
+them verbatim as the first assistant content blocks of the next request;
+non-Anthropic adapters ignore the option and keep byte-identical requests;
+budget validation/usage errors; no reasoning text enters the protocol
+envelopes) and the new hermetic browser scenario above. It also closes the
+wave-7/8 replay-coverage gap with `reasoning-replay` (fixture streams real
+`delta.reasoning_content` SSE chunks; the sidecar holds four bounded
+`reasoning` records, a plain session holds none; after reload the collapsed
+`Thinking · replayed` rows expand to sanitized plain text with the injected
+HTML-looking payload escaped, the over-long record shows the clipping marker
+and stays bounded, and the console guard is clean). The browser suite is now
+16 offline scenarios + the opt-in `real` skip. The package suite is now
+1 514 tests (1 512 pass, 2 environment skips); web stays 329 and the
+reference tree 33/33 (the wave-10 lanes touched the package core + e2e
+fixtures/docs only).
+
 ### Real-socket fault injection (in the smoke gate)
 
 `cd packages/harness && npm run test:e2e:faults` (`node e2e/faults.ts`) is a
@@ -522,8 +542,16 @@ the sidebar optimistically, persists the new order through
 `PUT /api/workspaces/order`, clears the indicators, leaves session
 selection/filtering and header collapse untouched, hides the handles while
 filtering, and the group menu Move up/Move down fallback still reorders and
-persists). On the canonical run that is
-**15 PASS, 0 FAIL, 1 SKIP** (the opt-in `real` scenario). The queue dock and the session-scope approval decisions
+And another wave-10 browser addition: `reasoning-replay` (a fixture-backed
+streaming run whose scripted server emits `delta.reasoning_content`; the
+session sidecar must hold bounded `reasoning` runtime events and a plain
+session must hold none; after a page reload the collapsed
+`Thinking · replayed` rows match the sidecar, expanding shows escaped plain
+text — an injected `<img onerror=…>` payload stays text and runs no handler —
+the over-long record keeps its head+tail plus the clipping marker and stays
+bounded, and switching to the plain session shows no replay rows).
+On the canonical run that is
+**16 PASS, 0 FAIL, 1 SKIP** (the opt-in `real` scenario). The queue dock and the session-scope approval decisions
 remain covered by the web unit suites, not by separate browser scenarios. The
 default suite is fully offline; the
 opt-in `real` scenario (below) reports `SKIP` unless an endpoint is configured.
