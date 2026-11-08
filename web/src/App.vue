@@ -123,7 +123,9 @@ import {
   pruneLastSeen,
   saveLastSeen,
 } from './sessionStatus'
-import type { LastSeenMap, SessionStatusView } from './sessionStatus'
+import type { LastSeenMap, SessionStatusKind, SessionStatusView } from './sessionStatus'
+import { tabTitle } from './tabTitle'
+import type { TabTitleStatus } from './tabTitle'
 import {
   pruneRecentWorkspaces,
   pushRecentWorkspace,
@@ -695,6 +697,54 @@ const sessionStatuses = computed<Record<string, SessionStatusView>>(() => {
   }
   return out
 })
+
+// -- tab title (background attention) -----------------------------------------
+// The document title is the only surface that survives a backgrounded tab, so
+// it mirrors what the sidebar already says: the selected session's name plus a
+// marker for a live/waiting/failed run, an unread count when nothing is on
+// screen, or the bare product name. `tabTitle.ts` owns the decision (markers,
+// sanitizing, 120-char cap); this shell only feeds it state it already has.
+
+/** The selected session's row state, reused so title and sidebar cannot disagree. */
+const selectedStatusKind = computed<SessionStatusKind | null>(() =>
+  selected.value ? (sessionStatuses.value[selected.value]?.kind ?? null) : null,
+)
+
+/** Row state -> run status the title formatter understands. */
+const titleStatus = computed<TabTitleStatus>(() => {
+  switch (selectedStatusKind.value) {
+    case 'live':
+      return 'running'
+    case 'waiting':
+      return 'waiting'
+    case 'failed':
+      return 'failed'
+    default:
+      return null
+  }
+})
+
+/** Sessions with an unopened finished run; only used when nothing is selected. */
+const unreadSessionCount = computed(
+  () => Object.values(sessionStatuses.value).filter((status) => status.kind === 'unread').length,
+)
+
+const documentTitle = computed(() =>
+  tabTitle({
+    sessionTitle: title.value,
+    status: titleStatus.value,
+    unreadCount: unreadSessionCount.value,
+  }),
+)
+
+// Guarded for non-DOM callers (the module is inert without a document).
+watch(
+  documentTitle,
+  (next) => {
+    if (typeof document !== 'undefined') document.title = next
+  },
+  { immediate: true },
+)
 
 /** A saved role route that can actually start a run — the Composer's rule. */
 function roleConfigured(view: RoleSettingsView | undefined): boolean {
@@ -2394,6 +2444,8 @@ onUnmounted(() => {
   settingsRequest++
   resetStreamingDraft()
   es?.close()
+  // leave the tab with the product name, never a stale session/status marker
+  if (typeof document !== 'undefined') document.title = tabTitle()
 })
 </script>
 

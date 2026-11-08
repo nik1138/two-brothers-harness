@@ -27,7 +27,13 @@ import {
   normalizeApprovalMode,
   ApprovalMode,
 } from "../src/permissions.ts";
-import { MAX_APPROVAL_PAIR_KEY_CHARS, MAX_SESSION_APPROVALS, SettingsStore } from "../src/settings_store.ts";
+import {
+  COMPACTION_SECTION,
+  MAX_APPROVAL_PAIR_KEY_CHARS,
+  MAX_SESSION_APPROVALS,
+  SettingsStore,
+  strictCompactionSettings,
+} from "../src/settings_store.ts";
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -759,6 +765,219 @@ test("a role-settings save normalizes a corrupt approval policy to the fail-clos
     store.write({ senior: { model: "only" } });
     const raw2 = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, unknown>;
     assert.equal(Object.hasOwn(raw2, "approval_policy"), false);
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Persisted compaction budgets (`compaction` section, wave 25)
+// ---------------------------------------------------------------------------
+
+test("compaction: missing/corrupt/unknown budgets read as absent (fail closed)", () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const file = path.join(root, "settings.json");
+    // A read-only probe never creates the file.
+    assert.deepEqual(new SettingsStore(file).readCompaction(), {});
+    assert.equal(fs.existsSync(file), false, "a read-only probe writes nothing");
+
+    // Valid integer budgets survive, 0 included; every unusable value and
+    // every unknown key is dropped rather than coerced.
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        compaction: {
+          threshold_chars: 12000,
+          threshold_tokens: 0,
+          keep_recent_chars: -5,
+          context_window: 1.5,
+          force: true,
+          mystery: 7,
+        },
+      }),
+      "utf-8",
+    );
+    assert.deepEqual(new SettingsStore(file).readCompaction(), {
+      threshold_chars: 12000,
+      threshold_tokens: 0,
+    });
+
+    for (const section of [
+      "readonly", // bare string (wrong shape)
+      ["threshold_chars"],
+      null,
+      {},
+      { threshold_chars: "12000" },
+      { threshold_chars: 12.5 },
+      { threshold_chars: -1 },
+      { threshold_chars: Number.NaN },
+      { threshold_chars: Number.POSITIVE_INFINITY },
+      { threshold_chars: null },
+      { threshold_chars: true },
+      { keep_recent_chars: Number.MAX_SAFE_INTEGER + 2 },
+    ]) {
+      fs.writeFileSync(file, JSON.stringify({ compaction: section }), "utf-8");
+      assert.deepEqual(
+        new SettingsStore(file).readCompaction(),
+        {},
+        `fail closed for ${JSON.stringify(section)}`,
+      );
+    }
+
+    // Corrupt JSON reads as absent too (and never throws).
+    fs.writeFileSync(file, "{not json", "utf-8");
+    assert.deepEqual(new SettingsStore(file).readCompaction(), {});
+  } finally {
+    cleanup();
+  }
+});
+
+test("compaction: strict write validation rejects a bad section before touching the file", () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const file = path.join(root, "settings.json");
+    const store = new SettingsStore(file);
+    store.writeCompaction({ threshold_chars: 12000, context_window: 8000 });
+    const before = fs.readFileSync(file, "utf-8");
+
+    for (const bad of [
+      null,
+      "12000",
+      ["threshold_chars"],
+      { threshold_chars: -1 },
+      { threshold_chars: 1.5 },
+      { threshold_chars: "12000" },
+      { threshold_chars: Number.NaN },
+      { threshold_chars: Number.POSITIVE_INFINITY },
+      { threshold_chars: Number.MAX_SAFE_INTEGER + 2 },
+      { threshold_chars: true },
+      { force: true },
+      { threshold_chars: 100, future_knob: 1 },
+    ]) {
+      assert.throws(
+        () => store.writeCompaction(bad as never),
+        /compaction/,
+        `expected a rejection for ${JSON.stringify(bad)}`,
+      );
+    }
+    assert.equal(fs.readFileSync(file, "utf-8"), before, "a rejected write changes nothing");
+    assert.equal(strictCompactionSettings({ threshold_tokens: 0 }).threshold_tokens, 0);
+
+    // An empty section removes the key entirely instead of storing `{}`.
+    store.writeCompaction({});
+    const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, unknown>;
+    assert.equal(Object.hasOwn(raw, COMPACTION_SECTION), false);
+    assert.deepEqual(store.readCompaction(), {});
+  } finally {
+    cleanup();
+  }
+});
+
+test("compaction: roundtrip, wholesale replace, atomic and secret-free storage", () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const file = path.join(root, "settings.json");
+    const store = new SettingsStore(file);
+
+    store.writeCompaction({
+      threshold_chars: 12000,
+      threshold_tokens: 4000,
+      keep_recent_chars: 300,
+      context_window: 8000,
+    });
+    assert.deepEqual(store.readCompaction(), {
+      threshold_chars: 12000,
+      threshold_tokens: 4000,
+      keep_recent_chars: 300,
+      context_window: 8000,
+    });
+    assert.deepEqual(new SettingsStore(file).readCompaction(), store.readCompaction());
+    const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, unknown>;
+    assert.deepEqual(raw.compaction, {
+      threshold_chars: 12000,
+      threshold_tokens: 4000,
+      keep_recent_chars: 300,
+      context_window: 8000,
+    });
+    assert.deepEqual(Object.keys(raw), [COMPACTION_SECTION], "exactly the documented section");
+    assert.ok(!fs.existsSync(file + ".tmp"), "atomic temp-file write leaves no artifact");
+
+    // A later write replaces the whole section (a dropped field is gone, not
+    // merged from the previous value).
+    store.writeCompaction({ keep_recent_chars: 500 });
+    assert.deepEqual(store.readCompaction(), { keep_recent_chars: 500 });
+  } finally {
+    cleanup();
+  }
+});
+
+test("compaction: every unrelated settings write preserves the section", () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const file = path.join(root, "settings.json");
+    const store = new SettingsStore(file);
+    store.write(ROLE_SETTINGS, ["notes"], [ACME]);
+    store.writeCompaction({ threshold_chars: 12000, context_window: 8000 });
+
+    // Role + plugin save.
+    store.write(ROLE_SETTINGS, ["notes"], [ACME]);
+    assert.deepEqual(store.readCompaction(), {
+      threshold_chars: 12000,
+      context_window: 8000,
+    });
+
+    // Approval policy save and session approvals.
+    store.writeApprovalPolicy(ApprovalMode.READONLY);
+    store.addSessionApproval("s1.jsonl", WRITE_PAIR);
+    assert.equal(store.readApprovalPolicy(), "readonly");
+    assert.deepEqual(store.readSessionApprovals("s1.jsonl"), [WRITE_PAIR]);
+    assert.deepEqual(store.readCompaction(), {
+      threshold_chars: 12000,
+      context_window: 8000,
+    });
+
+    // And a compaction save never wipes the other sections.
+    store.writeCompaction({ threshold_tokens: 4000 });
+    assert.equal(new SettingsStore(file).read().senior?.model, ROLE_SETTINGS.senior.model);
+    assert.deepEqual(new SettingsStore(file).readPlugins(), ["notes"]);
+    assert.equal(new SettingsStore(file).readApprovalPolicy(), "readonly");
+    assert.deepEqual(new SettingsStore(file).readSessionApprovals("s1.jsonl"), [WRITE_PAIR]);
+    assert.deepEqual(new SettingsStore(file).readCompaction(), { threshold_tokens: 4000 });
+  } finally {
+    cleanup();
+  }
+});
+
+test("compaction: a role-settings save normalizes a corrupt section to absent fields", () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const file = path.join(root, "settings.json");
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        compaction: { threshold_chars: "12000", keep_recent_chars: 300 },
+        senior: { model: "kept" },
+      }),
+      "utf-8",
+    );
+    const store = new SettingsStore(file);
+    assert.deepEqual(store.readCompaction(), { keep_recent_chars: 300 });
+    store.write({ senior: { model: "kept", base_url: "http://127.0.0.1:1234/v1" } });
+    const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, unknown>;
+    // The corrupt field is dropped; the valid one survives untouched.
+    assert.deepEqual(raw.compaction, { keep_recent_chars: 300 });
+    assert.equal((raw.senior as Record<string, string>).model, "kept");
+
+    // A file whose section has no valid field loses the key on the next save.
+    fs.writeFileSync(
+      file,
+      JSON.stringify({ compaction: { threshold_chars: -1 }, senior: { model: "only" } }),
+      "utf-8",
+    );
+    store.write({ senior: { model: "only" } });
+    const raw2 = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, unknown>;
+    assert.equal(Object.hasOwn(raw2, COMPACTION_SECTION), false);
   } finally {
     cleanup();
   }

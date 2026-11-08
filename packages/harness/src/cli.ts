@@ -122,7 +122,12 @@ import {
 import type { RoleEndpoint } from "./runtime.ts";
 import { selftest } from "./selftest.ts";
 import { createServer } from "./server.ts";
-import { restoreContext, SessionError, SessionStore } from "./session.ts";
+import {
+  restoreContextResult,
+  sessionRecoveryWarning,
+  SessionError,
+  SessionStore,
+} from "./session.ts";
 import { forkSession, SessionForkError } from "./sessionfork.ts";
 import {
   SEARCH_MIN_QUERY_CHARS,
@@ -145,6 +150,14 @@ import {
   type TuiKeysSource,
 } from "./tui/keyoverrides.ts";
 import { tuiHelpLines, TUI_COMMANDS, type TuiCommand } from "./tui/keymap.ts";
+import {
+  installTurnSignalHandlers,
+  turnSignalExitCode,
+  TURN_CANCEL_BUDGET_MS,
+  waitForTurnOutcome,
+  type TurnSignalEmitter,
+  type TurnSignalName,
+} from "./turnsignal.ts";
 
 /**
  * The shared `run` / `chat` / `tui` / `serve` flag table. Exported so the
@@ -665,7 +678,15 @@ function openSession(cfg: Config, io: CliIO): SharedContext {
     );
   }
   if (cfg.resume) {
-    if (store.exists()) return restoreContext(store);
+    if (store.exists()) {
+      const restored = restoreContextResult(store);
+      // A torn final line (crash mid-append) is repaired by the resume path;
+      // surface it once on stderr, never on machine stdout.
+      if (restored.recovered) {
+        io.error(`[warn] ${sessionRecoveryWarning(cfg.sessionFile, restored)}`);
+      }
+      return restored.context;
+    }
     io.error(`[warn] no session to resume at ${cfg.sessionFile}; starting a new session`);
     return new SharedContext(store);
   }
@@ -1103,6 +1124,13 @@ export interface RunOnceOptions {
    * output modes and for a non-TTY sink, so piped bytes never change.
    */
   live?: boolean;
+  /**
+   * An extra SIGINT-only cancellation source for this turn (the chat REPL
+   * passes its readline interface: while a turn is active readline consumes a
+   * terminal Ctrl+C itself, so the process signal would never fire). Removed
+   * when the turn settles.
+   */
+  cancelEmitter?: TurnSignalEmitter;
 }
 
 async function runOnce(
@@ -1223,12 +1251,36 @@ async function runOnce(
   if (workWarning !== null) {
     io.error(paintWarningPrefix(textStyle, `[warn] ${workWarning}`));
   }
+  // One AbortController per turn. The signal handlers below exist only while
+  // this turn is active, so an idle REPL keeps its prior Ctrl+C behavior.
+  // The first SIGINT/SIGTERM (and SIGHUP on POSIX) aborts cooperatively — the
+  // harness forwards the signal to provider calls and tools, and `run_shell`
+  // kills+drains its child tree — then the turn is awaited with a budget
+  // sized from SHELL_DRAIN_BUDGET_MS, so the process never exits mid-cleanup.
+  const controller = new AbortController();
+  let cancelTurn: (signal: TurnSignalName) => void = () => {};
+  const cancellation = new Promise<TurnSignalName>((resolve) => {
+    cancelTurn = resolve;
+  });
+  const turnSignals = installTurnSignalHandlers({
+    ...(options.cancelEmitter ? { sigintEmitters: [options.cancelEmitter] } : {}),
+    onCancel: (signal) => {
+      controller.abort(signal);
+      cancelTurn(signal);
+    },
+    onForceExit: (code, signal) => {
+      io.error(`[two-brothers] ${signal} received again — exiting immediately`);
+      process.exit(code);
+    },
+    onNotice: (line) => io.error(line),
+  });
   try {
     const hasScopes = Object.values(toolScopes).some((list) => list !== undefined);
     const compaction = compactionSettingsFromConfig(cfg);
     const providerWarnings = providerWarningSink(io, 3, textStyle);
     const native = nativeProviders(cfg, endpoints, providerWarnings);
     const harness = new TwoBrothersHarness(cfg, {
+      signal: controller.signal,
       onProviderWarning: providerWarnings,
       ...(hasScopes ? { toolScopes } : {}),
       ...(endpoints ? { endpoints } : {}),
@@ -1251,7 +1303,36 @@ async function runOnce(
           }
         : {}),
     });
-    const result = await harness.run(task, context);
+    const outcome = await waitForTurnOutcome(
+      harness.run(task, context),
+      cancellation,
+      TURN_CANCEL_BUDGET_MS,
+    );
+    if (turnSignals.cancelledBy !== null) {
+      // The operator interrupted this turn. Never claim success and never
+      // render the aborted result: machine stdout stays whatever complete
+      // records it already has, and the notice (first signal) / this cleanup
+      // line (only if teardown misbehaved) go to stderr.
+      const signal = turnSignals.cancelledBy;
+      if (outcome.status === "timeout") {
+        io.error(
+          `[two-brothers] ${signal} received — cleanup did not finish within ` +
+            `${TURN_CANCEL_BUDGET_MS} ms; no longer waiting for the turn`,
+        );
+      } else if (outcome.status === "rejected") {
+        io.error(
+          `[two-brothers] ${signal} received — the turn ended with an error: ` +
+            `${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}`,
+        );
+      }
+      return turnSignalExitCode(signal);
+    }
+    if (outcome.status === "rejected") throw outcome.error;
+    if (outcome.status === "timeout") {
+      // Only reachable after a cancellation, handled above.
+      throw new Error("turn wait timed out before the run settled");
+    }
+    const result = outcome.value;
     // connections stay open for the whole run; closed in the finally below
     for (const err of mcp?.errors ?? []) {
       io.error(paintWarningPrefix(textStyle, `[warn] ${err}`));
@@ -1337,6 +1418,9 @@ async function runOnce(
     }
     return failed ? 1 : 0;
   } finally {
+    // Handlers exist only while this turn is active: remove them before the
+    // MCP teardown so a later command (or an embedder) never inherits them.
+    turnSignals.dispose();
     await mcp?.client.close();
   }
 }
@@ -1778,6 +1862,22 @@ async function doRun(
 // --------------------------------------------------------------------------- //
 
 /**
+ * Map one cancelled REPL turn's exit code back to the REPL loop.
+ *
+ * A turn returns 128+signal only when a signal cancelled it. Interactive
+ * Ctrl+C (`SIGINT`) is a *cancel* in a chat session — the turn stops and the
+ * prompt comes back, matching the TUI's cancel precedence; a piped/non-TTY
+ * REPL is automation, so SIGINT ends it. SIGTERM/SIGHUP are termination
+ * requests and end the REPL after the turn unwinds. The ordinary error code 1
+ * and success 0 keep the REPL running as before.
+ */
+function replTurnStop(code: number): number | null {
+  if (code < 128) return null;
+  if (code === 130 && process.stdin.isTTY === true) return null;
+  return code;
+}
+
+/**
  * The built-in catalogue as REPL listing lines, grouped prompt then action in
  * `sortBaseCommands` order, using the same `name — description
  * (argument-hint)` shape as discovered templates; aliases are listed too so
@@ -2156,15 +2256,18 @@ async function doChat(
     if (matched !== null) {
       const discovered = commands.commands.find((cmd) => cmd.name === matched.name);
       if (discovered !== undefined) {
-        await runOnce(cfg, expandCommand(discovered, matched.args), io, context, {
+        const turnCode = await runOnce(cfg, expandCommand(discovered, matched.args), io, context, {
           ...(values["mcp-config"] ? { mcpConfig: values["mcp-config"] } : {}),
           outputMode: turnOutputMode,
           jsonDecision: turnJsonDecision,
           resources,
           style,
           live,
+          cancelEmitter: rl,
           ...(discovered.mode ? { mode: discovered.mode } : {}),
         });
+        const stop = replTurnStop(turnCode);
+        if (stop !== null) return stop;
         if (!machineOutput) io.log("");
       } else {
         const base = findBaseCommand(matched.name);
@@ -2186,15 +2289,18 @@ async function doChat(
             }
           }
           if (task !== null) {
-            await runOnce(cfg, task, io, context, {
+            const turnCode = await runOnce(cfg, task, io, context, {
               ...(values["mcp-config"] ? { mcpConfig: values["mcp-config"] } : {}),
               outputMode: turnOutputMode,
               jsonDecision: turnJsonDecision,
               resources,
               style,
               live,
+              cancelEmitter: rl,
               ...(base.mode ? { mode: base.mode } : {}),
             });
+            const stop = replTurnStop(turnCode);
+            if (stop !== null) return stop;
             if (!machineOutput) io.log("");
           }
         } else {
@@ -2204,15 +2310,18 @@ async function doChat(
       if (showPrompt) rl.prompt();
       continue;
     }
-    await runOnce(cfg, trimmed, io, context, {
+    const turnCode = await runOnce(cfg, trimmed, io, context, {
       ...(values["mcp-config"] ? { mcpConfig: values["mcp-config"] } : {}),
       outputMode: turnOutputMode,
       jsonDecision: turnJsonDecision,
       resources,
       style,
       live,
+      cancelEmitter: rl,
       mode: replMode,
     });
+    const stop = replTurnStop(turnCode);
+    if (stop !== null) return stop;
     if (!machineOutput) io.log("");
     if (showPrompt) rl.prompt();
   }
@@ -3349,16 +3458,19 @@ async function doServe(
     `Two Brothers server on http://${host}:${port} ` +
       `(sessions: ${path.resolve(values["sessions-dir"] ?? "sessions")})`,
   );
-  // Serve until interrupted. SIGINT/SIGTERM run a graceful shutdown:
-  // cooperatively cancel in-flight runs, end SSE connections, close the
-  // server — then fall through to the normal exit-code path instead of
-  // dying in the signal default. A `close` from any other source (an
-  // embedder calling app.close()) resolves the loop the same way.
+  // Serve until interrupted. SIGINT/SIGTERM (and SIGHUP on POSIX) run a
+  // graceful shutdown: cooperatively cancel in-flight runs, end SSE
+  // connections, close the server — then fall through to the normal
+  // exit-code path instead of dying in the signal default. A `close` from any
+  // other source (an embedder calling app.close()) resolves the loop the same
+  // way.
+  const posixSignals = process.platform !== "win32";
   await new Promise<void>((resolve) => {
     let shutdownStarted = false;
     const finish = (): void => {
       process.off("SIGINT", onSigint);
       process.off("SIGTERM", onSigterm);
+      if (posixSignals) process.off("SIGHUP", onSighup);
       resolve();
     };
     const beginShutdown = (signal: string | null): void => {
@@ -3375,8 +3487,12 @@ async function doServe(
     };
     const onSigint = (): void => beginShutdown("SIGINT");
     const onSigterm = (): void => beginShutdown("SIGTERM");
+    const onSighup = (): void => beginShutdown("SIGHUP");
     process.on("SIGINT", onSigint);
     process.on("SIGTERM", onSigterm);
+    // SIGHUP has no meaning on Windows (Node cannot deliver it there); the
+    // POSIX handler rides the same idempotent beginShutdown path.
+    if (posixSignals) process.on("SIGHUP", onSighup);
     server.on("close", () => beginShutdown(null));
   });
   return 0;

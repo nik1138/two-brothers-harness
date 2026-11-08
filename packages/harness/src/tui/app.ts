@@ -75,7 +75,12 @@ import {
   type WorkspaceFileEntry,
 } from "../workspacefiles.ts";
 import type { StreamEvent } from "../runstream.ts";
-import { restoreContext, SessionError, SessionStore } from "../session.ts";
+import {
+  restoreContextResult,
+  sessionRecoveryWarning,
+  SessionError,
+  SessionStore,
+} from "../session.ts";
 import { SHELL_DRAIN_BUDGET_MS } from "../shell.ts";
 import {
   exportSessionFileName,
@@ -149,6 +154,11 @@ import {
   saveHistory,
   TUI_HISTORY_FILE_ENV,
 } from "./historystore.ts";
+import {
+  abandonedSteersToast,
+  createSteerQueue,
+  steeredToast,
+} from "./steering.ts";
 import {
   composeStatusHints,
   findSlashCommand,
@@ -377,6 +387,13 @@ export interface TuiAppOptions {
    * embedded app never writes the host's home directory unasked.
    */
   historyFile?: string;
+  /**
+   * Test/embedding seam: role providers that replace the endpoint-built ones
+   * for every turn (used by the assembled-app tests to hold a provider call
+   * deterministically). The CLI never sets it, so the real product always
+   * builds each role's provider from the resolved endpoint.
+   */
+  providerOverrides?: { senior?: Provider; junior?: Provider };
   /** Injection seams for tests/embedding; default to the process streams. */
   input?: NodeJS.ReadStream;
   output?: NodeJS.WriteStream;
@@ -941,8 +958,16 @@ export async function loadTuiResources(options: {
  * Open the shared context with the chat REPL's semantics: no session file =
  * in memory; an existing file without `--resume` is an error; `--resume`
  * restores (or warns and starts fresh when the file is gone).
+ *
+ * A torn final line is repaired by `restoreContextResult`; `onNotice` lets an
+ * already-running TUI show the bounded warning as a toast. Before the screen
+ * exists (startup) the warning goes to `io.error` (stderr).
  */
-export function openTuiContext(cfg: Config, io: TuiIO): SharedContext {
+export function openTuiContext(
+  cfg: Config,
+  io: TuiIO,
+  onNotice?: (message: string) => void,
+): SharedContext {
   if (!cfg.sessionFile) return new SharedContext();
   const store = new SessionStore(cfg.sessionFile);
   if (store.exists() && !cfg.resume) {
@@ -952,7 +977,15 @@ export function openTuiContext(cfg: Config, io: TuiIO): SharedContext {
     );
   }
   if (cfg.resume) {
-    if (store.exists()) return restoreContext(store);
+    if (store.exists()) {
+      const restored = restoreContextResult(store);
+      if (restored.recovered) {
+        const message = sessionRecoveryWarning(cfg.sessionFile, restored);
+        if (onNotice) onNotice(message);
+        else io.error(`[warn] ${message}`);
+      }
+      return restored.context;
+    }
     io.error(`[warn] no session to resume at ${cfg.sessionFile}; starting a new session`);
     return new SharedContext(store);
   }
@@ -1028,6 +1061,18 @@ interface TurnSetup {
   mcpConfig?: string;
   streamTokens?: boolean;
   signal?: AbortSignal;
+  /**
+   * Mid-run operator steering (`HarnessOptions.steering`): the per-turn queue's
+   * return-and-clear drain, read by the harness at every node boundary. The
+   * app supplies it from `src/tui/steering.ts`; absent callers keep today's
+   * behavior (no steering source).
+   */
+  steering?: () => string[];
+  /**
+   * Test/embedding provider overrides. The real product leaves this undefined
+   * so the harness builds both role providers from the resolved endpoints.
+   */
+  providers?: { senior?: Provider; junior?: Provider };
   /**
    * The turn's confined workspace (`tui --workspace`). Its `workspace_*` tools
    * become the junior's belt and the senior's read-only verify slice; plugin
@@ -1111,6 +1156,9 @@ async function buildTurnHarness(setup: TurnSetup): Promise<TurnHarness> {
     onStreamEvent: setup.onStreamEvent,
     ...(setup.streamTokens === true ? { streamTokens: true } : {}),
     ...(setup.signal !== undefined ? { signal: setup.signal } : {}),
+    ...(setup.providers?.senior !== undefined ? { senior: setup.providers.senior } : {}),
+    ...(setup.providers?.junior !== undefined ? { junior: setup.providers.junior } : {}),
+    ...(setup.steering !== undefined ? { steering: setup.steering } : {}),
     onProviderWarning: setup.onWarning,
   });
   return { harness, mcp };
@@ -1604,6 +1652,13 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   let compacting = false;
   let turnAbort: AbortController | null = null;
   let turnDone: Promise<void> | null = null;
+  /**
+   * The running turn's operator-steer queue (wave 25). One queue per turn:
+   * `drain` is handed to the harness, which appends each text at the next
+   * state-machine boundary; leftovers at turn end are reported, never silently
+   * dropped.
+   */
+  const steerQueue = createSteerQueue();
   let lastFailedTask: { task: string; turnMode: Config["mode"] } | null = null;
   let usage: UsageSnapshot | null = null;
   let cost: number | null = null;
@@ -2200,6 +2255,35 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   };
 
   /**
+   * Ctrl+N: queue the composer text for the running turn. This never starts a
+   * task and never queues a run — the harness appends the text at the next
+   * state-machine node boundary. The draft is consumed only on acceptance;
+   * every rejection (empty/oversized/full/stopping) keeps it intact and says
+   * why.
+   */
+  const steerRunningTurn = (): void => {
+    if (!running) {
+      pushToast("info", "no turn is running — steering applies only to a running turn");
+      render();
+      return;
+    }
+    if (turnAbort?.signal.aborted === true) {
+      pushToast("warn", "the turn is stopping — steering was not queued");
+      render();
+      return;
+    }
+    const decision = steerQueue.enqueue(editor.text);
+    if (!decision.accepted) {
+      pushToast("warn", decision.message);
+      render();
+      return;
+    }
+    editor = clearEditor(editor);
+    pushToast("success", steeredToast(decision.pending));
+    render();
+  };
+
+  /**
    * Start one turn. `prompt` is the user-facing submission to remember in
    * history (raw composer text, a CLI task, or a palette template) and is
    * deliberately separate from the expanded `task`. Only a turn that actually
@@ -2252,6 +2336,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     model = addUserBlock(model, task);
     scroll = latestTranscriptScroll();
     running = true;
+    // A new turn starts with an empty steer queue: the previous turn cleared
+    // its leftovers at end (with an honest toast), so this is defensive only.
+    steerQueue.clear();
     // Advance the deterministic footer-tip rotation once per accepted turn.
     // The step is app state (never a clock), so the same turn sequence always
     // shows the same tips and tests can reproduce a frame exactly.
@@ -2402,7 +2489,14 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
           ...(options.mcpConfig !== undefined ? { mcpConfig: options.mcpConfig } : {}),
           ...(options.streamTokens === true ? { streamTokens: true } : {}),
           ...(turnWorkspace !== undefined ? { workspace: turnWorkspace } : {}),
+          ...(options.providerOverrides !== undefined
+            ? { providers: options.providerOverrides }
+            : {}),
           signal: controller.signal,
+          // The drain returns-and-clears in submission order; once the turn is
+          // aborted it returns nothing, so a stopped run can never append a
+          // steer after the cycle ended (the harness also guards this).
+          steering: () => steerQueue.drain(controller.signal.aborted),
           onStreamEvent,
           onRuntimeEvent: (event) => {
             // Display-only plan state: the latest snapshot replaces the panel.
@@ -2525,6 +2619,13 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         denyPendingApprovals("cancelled");
         running = false;
         turnAbort = null;
+        // Anything still queued when the turn ended was never drained (the last
+        // boundary already passed, or the turn stopped): report the loss once
+        // instead of dropping the operator's text silently.
+        const abandoned = steerQueue.clear();
+        if (abandoned.length > 0) {
+          pushToast("warn", abandonedSteersToast(abandoned.length));
+        }
         render();
       }
     })();
@@ -2936,7 +3037,11 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
             if (id !== "resume") return;
             try {
               const sessionFile = path.join(sessionsDir, item.id);
-              context = openTuiContext({ ...sessionCfg, sessionFile, resume: true }, options.io);
+              context = openTuiContext(
+                { ...sessionCfg, sessionFile, resume: true },
+                options.io,
+                (message) => pushToast("warn", message),
+              );
               sessionCfg = { ...sessionCfg, sessionFile, resume: true };
               // Seed the neutral compaction markers of the restored context;
               // the rest of the TUI transcript history is not replayed.
@@ -3554,6 +3659,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       case "stash":
         toggleStash();
         break;
+      case "steer":
+        steerRunningTurn();
+        break;
       case "keys":
         dispatchKeys("");
         break;
@@ -3844,10 +3952,14 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     // Refuse before consuming the submission: takeSubmission would clear the
     // editor, and a silent `executeTurn` return mid-run would lose the draft.
     if (running && editor.text.trim() !== "") {
+      const steerHint = hintSegments(commands, [
+        { id: "steer", label: "steers the running turn" },
+      ]);
       model = addNotice(
         model,
         "warn",
-        "a turn is still running — your draft is kept; send it when the turn finishes",
+        "a turn is still running — your draft is kept; send it when the turn finishes" +
+          (steerHint === "" ? "" : ` · ${steerHint}`),
       );
       render();
       return;
@@ -4022,6 +4134,9 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         return true;
       case "stash":
         toggleStash();
+        return true;
+      case "steer":
+        steerRunningTurn();
         return true;
       case "tool-expand":
         toggleToolExpansion();

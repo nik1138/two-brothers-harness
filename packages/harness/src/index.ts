@@ -301,13 +301,29 @@ export {
   type RunCostInput,
 } from "./cost.ts";
 export { validateArgs, type JsonSchemaSubset, type JsonSchemaType, type ValidationResult } from "./toolschema.ts";
-export { SessionError, SessionStore, restoreContext } from "./session.ts";
+export {
+  SessionError,
+  SessionStore,
+  restoreContext,
+  restoreContextResult,
+  sessionRecoveryWarning,
+  type RestoreContextResult,
+  type SessionLoadResult,
+  type SessionRecovery,
+} from "./session.ts";
 export {
   type Config,
   DEFAULTS,
   type Args,
   resolveConfig,
   compactionSettingsFromConfig,
+  compactionFieldsForServe,
+  serveCompactionSettings,
+  compactionSettingsView,
+  type CompactionExplicitFields,
+  type CompactionFieldSource,
+  type CompactionFieldView,
+  type CompactionSettingsView,
   RunConfigError,
   openaiRoleProblem,
   validateRunConfig,
@@ -424,7 +440,10 @@ export {
   SettingsStore,
   envPinnedPairs,
   APPROVAL_POLICY_SECTION,
+  COMPACTION_SECTION,
   PROVIDER_KIND_DEFAULT,
+  strictCompactionSettings,
+  type PersistedCompactionSettings,
   type RoleSettings,
   type SettingsSnapshot,
   type PluginSelection,

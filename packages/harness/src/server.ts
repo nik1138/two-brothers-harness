@@ -124,9 +124,11 @@
  *   compaction is in progress for this session; retry in a moment") BEFORE any
  *   session/run is created, so the rewrite can never drop a concurrently
  *   admitted run's envelopes. Manual budgets come from
- *   `ServerOptions.compaction` when set, else from the resolved config's
- *   compaction fields (`--compact-*` / `--context-window` through the config
- *   factory). A client disconnect aborts the summarizer; a corrupt/unreadable
+ *   `ServerOptions.compaction` when set, else the merged run-level
+ *   configuration: the resolved config's non-zero compaction fields
+ *   (`--compact-*` / `--context-window` through the config factory) per field,
+ *   then the persisted `compaction` section of `settings/settings.json`. A
+ *   client disconnect aborts the summarizer; a corrupt/unreadable
  *   JSONL is a stable 422 ("session file cannot be read; it may be corrupt",
  *   no path leaked). Statuses: 404 unknown session, 409 live run or reserved
  *   session, 200 `{compacted: true, before_events, after_events}` or — honestly,
@@ -233,10 +235,11 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import {
-  compactionFieldsFromConfig,
-  compactionSettingsFromConfig,
+  compactionFieldsForServe,
+  compactionSettingsView,
   resolveConfig,
   RunConfigError,
+  serveCompactionSettings,
   validateRunConfig,
   type Config,
 } from "./config.ts";
@@ -320,6 +323,8 @@ import { computeRewindCut, rewindSession, validateRewindTurns } from "./sessionr
 import {
   PROVIDER_KIND_DEFAULT,
   SettingsStore,
+  strictCompactionSettings,
+  type PersistedCompactionSettings,
   type PluginSelection,
   type ProviderPreset,
 } from "./settings_store.ts";
@@ -810,10 +815,12 @@ export interface ServerOptions {
   mcpConfig?: string;
   /**
    * Compaction settings for web runs (auto-compact threshold, keep-recent
-   * budget, force). When set, wins wholesale over the resolved config's
-   * compaction fields; unset = derive them from the config factory, so the
-   * serve `--compact*` flags and env vars reach every run (zero config = no
-   * auto compaction, the CLI default).
+   * budget, force). When set, wins wholesale over the resolved config and the
+   * persisted `compaction` setting; unset = merge the config factory's
+   * non-zero compaction fields per field with the persisted section, so the
+   * serve `--compact*` flags/env vars pin their fields while everything else
+   * can come from Settings → Advanced (zero config = no auto compaction, the
+   * CLI default).
    */
   compaction?: CompactionSettings;
   /** Worker-pool size (default: `TWO_BROTHERS_WORKERS` or 2). */
@@ -1042,6 +1049,21 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
 
   // -- helpers ---------------------------------------------------------------
 
+  /**
+   * Additive `compaction` view for `GET/PUT /api/settings` (wave 25): each
+   * budget reports its stored section value, the value a serve run would use
+   * after the flag/env > persisted merge, and where that value came from
+   * (`flag`, `persisted`, `options`, `absent`). Read-only — a GET never
+   * writes. A custom config factory is invoked exactly like a run would.
+   */
+  function compactionView() {
+    return compactionSettingsView(
+      state.configFactory(),
+      state.settingsStore.readCompaction(),
+      options.compaction,
+    );
+  }
+
   function storeFor(name: string): SessionStore {
     // `path.basename` flattening: never allow path traversal out of the dir.
     return new SessionStore(path.join(sessionsDir, path.basename(name)));
@@ -1147,36 +1169,41 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   }
 
   /**
-   * Compaction settings the *resolved run config* carries: the serve-level
-   * `--compact-*` / `TWO_BROTHERS_COMPACT*` / `--context-window` flags reach
-   * `Config` through the config factory, so a server started with a small
-   * keep-recent budget must honour it on a manual compaction too. Uses the
-   * ungated field mapping (a manual request can use budgets while auto
-   * compaction is off) shared with the run path; only `force` is dropped,
-   * because the request always asks for exactly one compaction.
+   * The persisted run-level compaction budgets, read on every use so a
+   * Settings → Advanced save applies to the next run or manual compaction
+   * without a server restart (same rule as the approval policy). Missing or
+   * corrupt reads as absent — the store's fail-closed direction.
    */
-  function configCompactionSettings(cfg: Config): CompactionSettings {
-    const settings = { ...compactionFieldsFromConfig(cfg) };
-    delete settings.force;
-    return settings;
+  function persistedCompaction(): PersistedCompactionSettings {
+    return state.settingsStore.readCompaction();
   }
 
   /**
    * Compaction settings for a manual `POST /api/sessions/{name}/compact`.
    *
    * Precedence: an explicit `ServerOptions.compaction` wins (with the run-level
-   * context window filling in when the options do not set one — the same
-   * precedence the harness applies to auto compaction); otherwise the resolved
-   * config's compaction fields apply (`configCompactionSettings`, so `serve`
-   * flags are no longer ignored); with nothing configured the derived settings
-   * equal the honest `compaction.ts` defaults, so an explicit `/compact` on a
-   * long session stays meaningful even when auto compaction is off.
+   * context window filling in when the options do not set one — flag/env first,
+   * then the persisted section); otherwise the merged flag/env > persisted
+   * fields apply (`compactionFieldsForServe`, so `serve` flags and the saved
+   * section are both honoured); only `force` is dropped, because the request
+   * always asks for exactly one compaction. With nothing configured the derived
+   * settings equal the honest `compaction.ts` defaults, so an explicit
+   * `/compact` on a long session stays meaningful even when auto compaction is
+   * off.
    */
   function manualCompactionSettings(cfg: Config): CompactionSettings {
+    const persisted = persistedCompaction();
     const configured = options.compaction;
-    if (configured === undefined) return configCompactionSettings(cfg);
+    if (configured === undefined) {
+      const settings = { ...compactionFieldsForServe(cfg, persisted) };
+      delete settings.force;
+      return settings;
+    }
     const configuredWindow = configured.contextWindow ?? 0;
-    const window = configuredWindow > 0 ? configuredWindow : (cfg.contextWindow ?? 0);
+    const window =
+      configuredWindow > 0
+        ? configuredWindow
+        : (compactionFieldsForServe(cfg, persisted).contextWindow ?? 0);
     if (configuredWindow > 0 || window <= 0) return configured;
     return { ...configured, contextWindow: window };
   }
@@ -1558,13 +1585,14 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         undoCapture = null;
       }
     }
-    // Config-derived auto-compaction (wave 24): `serve` accepts the same
-    // `--compact*` / `--context-window` flags and env vars as `run`/`chat`,
-    // so the resolved config feeds the harness exactly like the CLI does.
-    // An explicit `ServerOptions.compaction` still wins wholesale (the
-    // operator/programmatic pin overrides the factory), and zero config keeps
-    // the options object byte-identical.
-    const compaction = options.compaction ?? compactionSettingsFromConfig(cfg);
+    // Config-derived and persisted auto-compaction (wave 25): `serve` accepts
+    // the same `--compact*` / `--context-window` flags and env vars as
+    // `run`/`chat`, and Settings → Advanced persists the remaining budgets in
+    // the `compaction` section. Per field the explicit flag/env config wins,
+    // then the saved value; an explicit `ServerOptions.compaction` still wins
+    // wholesale (the operator/programmatic pin overrides the factory), and
+    // zero config everywhere keeps the options object byte-identical.
+    const compaction = serveCompactionSettings(cfg, persistedCompaction(), options.compaction);
     const harness = new TwoBrothersHarness(cfg, {
       workspace,
       signal,
@@ -2407,7 +2435,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         }
         let events;
         try {
-          events = store.load();
+          events = store.loadStrict();
         } catch {
           throw new HttpError(422, "session file cannot be read; it may be corrupt");
         }
@@ -2509,11 +2537,13 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     compileRoute("GET", "/api/settings", () => {
       // plugin names only — nothing secret leaves the backend. The additive
       // `approval_policy` section reports the effective mode and whether a
-      // serve flag/env pin overrides the persisted one.
+      // serve flag/env pin overrides the persisted one; `compaction` reports
+      // each budget's stored/effective value and its source.
       return {
         ...state.settings.public(),
         plugins: [...state.pluginSelection],
         approval_policy: approvalPolicyView(),
+        compaction: compactionView(),
       };
     }),
   );
@@ -2557,6 +2587,17 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         }
         approvalPatch = mode;
       }
+      // Additive run-level compaction section: strict integer budgets >= 0,
+      // validated before any mutation. An absent section leaves the stored
+      // budgets untouched; a present one replaces them wholesale.
+      let compactionPatch: PersistedCompactionSettings | null = null;
+      if (body.compaction !== undefined) {
+        try {
+          compactionPatch = strictCompactionSettings(body.compaction);
+        } catch (exc) {
+          throw new HttpError(400, errorDetail(exc));
+        }
+      }
       let updated: PublicRuntimeSettings;
       try {
         updated = state.settings.update(body);
@@ -2593,10 +2634,22 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
           throw new HttpError(500, `could not persist the approval policy: ${errorDetail(exc)}`);
         }
       }
+      if (compactionPatch !== null) {
+        // Same after-the-save rule for the compaction budgets: the store write
+        // above preserves the section and this strict write replaces it. A
+        // failed write is a 500 (the response never claims budgets the file
+        // does not carry).
+        try {
+          state.settingsStore.writeCompaction(compactionPatch);
+        } catch (exc) {
+          throw new HttpError(500, `could not persist the compaction settings: ${errorDetail(exc)}`);
+        }
+      }
       return {
         ...updated,
         plugins: [...state.pluginSelection],
         approval_policy: approvalPolicyView(),
+        compaction: compactionView(),
       };
     }),
   );

@@ -20,6 +20,15 @@ import { fileURLToPath } from "node:url";
 import { main, type CliIO } from "../src/cli.ts";
 import { BASE_COMMANDS } from "../src/basecommands.ts";
 import { COMPACTION_SUMMARY_PREFIX } from "../src/compaction.ts";
+import {
+  installTurnSignalHandlers,
+  turnCancelNotice,
+  turnSignalExitCode,
+  TURN_CANCEL_BUDGET_MS,
+  waitForTurnOutcome,
+  type TurnSignalEmitter,
+} from "../src/turnsignal.ts";
+import { SHELL_DRAIN_BUDGET_MS } from "../src/shell.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 /** The source CLI entry (Node native type stripping runs it directly). */
@@ -527,4 +536,203 @@ test("chat REPL: /help and /commands list built-ins grouped, then discovered tem
   } finally {
     dir.cleanup();
   }
+});
+
+// ---------------------------------------------------------------------------
+// (iv) per-turn process signal handling (CLI cooperative cancellation)
+// ---------------------------------------------------------------------------
+
+/** Minimal EventEmitter stand-in: no process signals reach the test runner. */
+class FakeEmitter implements TurnSignalEmitter {
+  private readonly listeners = new Map<string, Set<() => void>>();
+
+  on(event: string, listener: () => void): this {
+    const set = this.listeners.get(event) ?? new Set<() => void>();
+    set.add(listener);
+    this.listeners.set(event, set);
+    return this;
+  }
+
+  off(event: string, listener: () => void): this {
+    this.listeners.get(event)?.delete(listener);
+    return this;
+  }
+
+  emit(event: string): void {
+    for (const listener of [...(this.listeners.get(event) ?? [])]) listener();
+  }
+
+  count(event?: string): number {
+    if (event !== undefined) return this.listeners.get(event)?.size ?? 0;
+    let total = 0;
+    for (const set of this.listeners.values()) total += set.size;
+    return total;
+  }
+}
+
+test("turn signals: first SIGINT cancels, second forces the conventional exit", () => {
+  const emitter = new FakeEmitter();
+  const cancels: string[] = [];
+  const exits: Array<{ code: number; signal: string }> = [];
+  const notices: string[] = [];
+  const handlers = installTurnSignalHandlers({
+    emitter,
+    platform: "win32",
+    onCancel: (signal) => cancels.push(signal),
+    onForceExit: (code, signal) => exits.push({ code, signal }),
+    onNotice: (line) => notices.push(line),
+  });
+  try {
+    emitter.emit("SIGINT");
+    assert.deepEqual(cancels, ["SIGINT"]);
+    assert.equal(notices.length, 1, "exactly one bounded notice on the first signal");
+    assert.equal(notices[0], turnCancelNotice("SIGINT"));
+    assert.match(notices[0], /Ctrl\+C again to exit immediately/);
+    assert.equal(notices[0].includes("\u001b"), false, "notice is plain text");
+
+    emitter.emit("SIGINT");
+    assert.deepEqual(cancels, ["SIGINT"], "a repeated signal never re-cancels");
+    assert.deepEqual(exits, [{ code: 130, signal: "SIGINT" }]);
+
+    // Nothing happens after the forced exit was requested.
+    emitter.emit("SIGINT");
+    assert.equal(exits.length, 1);
+  } finally {
+    handlers.dispose();
+  }
+});
+
+test("turn signals: SIGTERM cancels then forces 143", () => {
+  const emitter = new FakeEmitter();
+  const cancels: string[] = [];
+  const exits: number[] = [];
+  const handlers = installTurnSignalHandlers({
+    emitter,
+    platform: "win32",
+    onCancel: (signal) => cancels.push(signal),
+    onForceExit: (code) => exits.push(code),
+  });
+  try {
+    emitter.emit("SIGTERM");
+    emitter.emit("SIGTERM");
+    assert.deepEqual(cancels, ["SIGTERM"]);
+    assert.deepEqual(exits, [143]);
+  } finally {
+    handlers.dispose();
+  }
+});
+
+test("turn signals: SIGHUP is POSIX-only (installed on linux, absent on win32)", () => {
+  const win = new FakeEmitter();
+  const winCancels: string[] = [];
+  const winHandlers = installTurnSignalHandlers({
+    emitter: win,
+    platform: "win32",
+    onCancel: (signal) => winCancels.push(signal),
+    onForceExit: () => {},
+  });
+  try {
+    win.emit("SIGHUP");
+    assert.deepEqual(winCancels, [], "no SIGHUP handler on Windows");
+    assert.equal(win.count("SIGHUP"), 0);
+  } finally {
+    winHandlers.dispose();
+  }
+
+  const posix = new FakeEmitter();
+  const posixCancels: string[] = [];
+  const exits: number[] = [];
+  const posixHandlers = installTurnSignalHandlers({
+    emitter: posix,
+    platform: "linux",
+    onCancel: (signal) => posixCancels.push(signal),
+    onForceExit: (code) => exits.push(code),
+  });
+  try {
+    posix.emit("SIGHUP");
+    assert.deepEqual(posixCancels, ["SIGHUP"]);
+    posix.emit("SIGHUP");
+    assert.deepEqual(exits, [129]);
+    assert.equal(turnSignalExitCode("SIGHUP"), 129);
+  } finally {
+    posixHandlers.dispose();
+  }
+});
+
+test("turn signals: dispose removes every listener and is idempotent", () => {
+  const emitter = new FakeEmitter();
+  const cancels: string[] = [];
+  const handlers = installTurnSignalHandlers({
+    emitter,
+    platform: "linux",
+    onCancel: (signal) => cancels.push(signal),
+    onForceExit: () => {},
+  });
+  assert.equal(emitter.count(), 3, "SIGINT, SIGTERM and SIGHUP on POSIX");
+  handlers.dispose();
+  handlers.dispose();
+  assert.equal(emitter.count(), 0, "no handler survives the turn");
+  emitter.emit("SIGINT");
+  emitter.emit("SIGHUP");
+  assert.deepEqual(cancels, [], "a stray signal after settle is not ours");
+});
+
+test("turn signals: a REPL emitter only carries SIGINT", () => {
+  const processEmitter = new FakeEmitter();
+  const repl = new FakeEmitter();
+  const cancels: string[] = [];
+  const handlers = installTurnSignalHandlers({
+    emitter: processEmitter,
+    platform: "win32",
+    sigintEmitters: [repl],
+    onCancel: (signal) => cancels.push(signal),
+    onForceExit: () => {},
+  });
+  try {
+    repl.emit("SIGTERM");
+    assert.deepEqual(cancels, [], "readline only rises for Ctrl+C");
+    repl.emit("SIGINT");
+    assert.deepEqual(cancels, ["SIGINT"]);
+  } finally {
+    handlers.dispose();
+  }
+  assert.equal(repl.count(), 0, "the REPL listener is removed with the turn");
+});
+
+test("turn wait: normal runs are not bounded, cancelled runs settle, stuck cleanup times out", async () => {
+  // No cancellation: a long-running turn is awaited normally.
+  const noCancel = await waitForTurnOutcome(Promise.resolve(1), new Promise(() => {}), 5);
+  assert.deepEqual(noCancel, { status: "settled", value: 1 });
+
+  // Cancelled, then the turn settles inside the budget.
+  let release: ((value: number) => void) | null = null;
+  const work = new Promise<number>((resolve) => {
+    release = resolve;
+  });
+  const pending = waitForTurnOutcome(work, Promise.resolve(), 1_000);
+  const timer = setTimeout(() => release?.(7), 5);
+  try {
+    assert.deepEqual(await pending, { status: "settled", value: 7 });
+  } finally {
+    clearTimeout(timer);
+  }
+
+  // Cancelled and never settles: the budget ends the wait instead of hanging.
+  const started = Date.now();
+  const stuck = await waitForTurnOutcome(new Promise(() => {}), Promise.resolve(), 10);
+  assert.equal(stuck.status, "timeout");
+  assert.ok(Date.now() - started < 1_000, "the bounded wait returned promptly");
+});
+
+test("turn budget covers run_shell's kill + drain", () => {
+  assert.ok(TURN_CANCEL_BUDGET_MS >= SHELL_DRAIN_BUDGET_MS + 500);
+});
+
+test("cli wiring: turns own a controller, chat forwards readline SIGINT, serve handles SIGHUP", () => {
+  const source = fs.readFileSync(CLI, "utf-8");
+  assert.match(source, /installTurnSignalHandlers\(\{/);
+  assert.match(source, /signal: controller\.signal/);
+  assert.match(source, /cancelEmitter: rl/);
+  assert.match(source, /process\.on\("SIGHUP", onSighup\)/);
+  assert.match(source, /process\.platform !== "win32"/);
 });

@@ -219,6 +219,18 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
     when: "composer",
   },
   {
+    id: "steer",
+    title: "Steer the running turn",
+    description: "Send the composer text into the running turn at its next step — not a new task.",
+    group: "Composer",
+    // Ctrl+N: free here and in the editor, one control byte, and outside the
+    // terminal's XON/XOFF pair (Ctrl+Q / Ctrl+S), so it can never pause output.
+    // Ctrl+S is the familiar vendor chord but XOFF-reserved — the registry's
+    // other composer chords document the same deliberate avoidance.
+    keys: [{ name: "n", ctrl: true }],
+    when: "composer",
+  },
+  {
     id: "scroll",
     title: "Scroll transcript",
     description: "Page through the transcript without moving the composer cursor.",

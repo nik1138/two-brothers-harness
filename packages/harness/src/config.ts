@@ -8,6 +8,7 @@
  * ever contacted by surprise. `mock` runs need nothing.
  */
 import type { CompactionSettings } from "./compaction.ts";
+import type { PersistedCompactionSettings } from "./settings_store.ts";
 import {
   ANTHROPIC_MIN_THINKING_BUDGET,
   DEFAULT_PROVIDER_KIND,
@@ -20,6 +21,17 @@ import {
   isApprovalMode,
   type ApprovalMode,
 } from "./permissions.ts";
+
+/**
+ * Which compaction knobs an explicit source (CLI flag or `TWO_BROTHERS_*` env
+ * var) set. Recorded by `resolveConfig`; see `Config.compactionExplicit`.
+ */
+export interface CompactionExplicitFields {
+  thresholdChars: boolean;
+  keepRecentChars: boolean;
+  thresholdTokens: boolean;
+  contextWindow: boolean;
+}
 
 export interface Config {
   provider: string;
@@ -79,6 +91,16 @@ export interface Config {
    * tokens. 0 = unknown (char mode unless `compactThresholdTokens` is set).
    */
   contextWindow: number;
+  /**
+   * Provenance for the compaction knobs: true when an explicit `--compact-*` /
+   * `--context-window` flag or its `TWO_BROTHERS_*` env var set the field,
+   * even when it repeats the built-in default. The server's persisted
+   * `compaction` merge uses it so an *unset* flag never shadows a saved
+   * value (`keepRecentChars` has a non-zero default, so "non-zero" alone is
+   * not proof of an explicit choice). A hand-built `Config` may omit it: the
+   * merge then falls back to "differs from the built-in default".
+   */
+  compactionExplicit?: CompactionExplicitFields;
   /**
    * Output-token cap (`--max-tokens`, env `TWO_BROTHERS_MAX_TOKENS`). Sent as
    * `max_tokens` / Anthropic `max_tokens` / Gemini `maxOutputTokens` when
@@ -200,6 +222,18 @@ const INT_FIELDS = [
   "thinkingBudget",
 ] as const;
 const FLOAT_FIELDS = ["temperature"] as const;
+
+/**
+ * `Config` field -> the compaction budget it feeds. `resolveConfig` uses it to
+ * record which knobs an explicit flag/env var set (see
+ * `Config.compactionExplicit`).
+ */
+const COMPACTION_EXPLICIT_FIELDS: Record<string, keyof CompactionExplicitFields> = {
+  compactThreshold: "thresholdChars",
+  compactKeepRecent: "keepRecentChars",
+  compactThresholdTokens: "thresholdTokens",
+  contextWindow: "contextWindow",
+};
 
 function coerce(field: string, value: unknown): unknown {
   if ((BOOL_FIELDS as readonly string[]).includes(field)) {
@@ -391,15 +425,28 @@ export function resolveConfig(args: Args = {}): Config {
     (process.env.TWO_BROTHERS_PROVIDER !== undefined &&
       process.env.TWO_BROTHERS_PROVIDER !== "");
 
+  // Same provenance for the compaction knobs: the server's persisted-section
+  // merge must tell "the operator pinned 40000" from "40000 is the default".
+  const compactionExplicit: CompactionExplicitFields = {
+    thresholdChars: false,
+    keepRecentChars: false,
+    thresholdTokens: false,
+    contextWindow: false,
+  };
+
   for (const [field, envName] of Object.entries(ENV_KEYS)) {
     const raw = process.env[envName];
     if (raw === undefined || raw === "") continue;
     values[field] = coerce(field, raw);
+    const compactKey = COMPACTION_EXPLICIT_FIELDS[field];
+    if (compactKey !== undefined) compactionExplicit[compactKey] = true;
   }
 
   for (const field of Object.keys(DEFAULTS)) {
     if (field in args && args[field] !== undefined && args[field] !== null) {
       values[field] = coerce(field, args[field]);
+      const compactKey = COMPACTION_EXPLICIT_FIELDS[field];
+      if (compactKey !== undefined) compactionExplicit[compactKey] = true;
     }
   }
   if ("seniorSystem" in args && args.seniorSystem) values.seniorSystem = args.seniorSystem;
@@ -407,6 +454,7 @@ export function resolveConfig(args: Args = {}): Config {
 
   const cfg = values as unknown as Config;
   cfg.providerExplicit = providerExplicit;
+  cfg.compactionExplicit = compactionExplicit;
   if (!["consult", "work", "auto"].includes(cfg.mode)) {
     throw new Error(`invalid mode: ${cfg.mode} (use consult|work|auto)`);
   }
@@ -508,6 +556,225 @@ export function compactionSettingsFromConfig(cfg: Config): CompactionSettings | 
     return undefined;
   }
   return compactionFieldsFromConfig(cfg);
+}
+
+// ---------------------------------------------------------------------------
+// persisted compaction merge (serve runs + manual compaction)
+// ---------------------------------------------------------------------------
+
+/** Where one effective compaction budget came from. */
+export type CompactionFieldSource = "options" | "flag" | "persisted" | "absent";
+
+/**
+ * One compaction field as the settings API reports it: the stored section
+ * value, the value a serve run would actually use, and where that value came
+ * from. `effective` is 0 when nothing configures the field; the harness then
+ * applies its own documented default (e.g. `DEFAULT_KEEP_RECENT_CHARS` for
+ * `keep_recent_chars`), so 0 means "not configured", not "a budget of zero".
+ */
+export interface CompactionFieldView {
+  /** The stored `compaction` section value (0 = not stored). */
+  persisted: number;
+  /** The merged value a run/manual compaction receives (0 = not configured). */
+  effective: number;
+  source: CompactionFieldSource;
+}
+
+/**
+ * The additive `compaction` view on `GET/PUT /api/settings`. Unrelated to the
+ * stored section shape: the API uses snake_case fields, each with its stored
+ * value, its effective value and a source, so the UI can show an honest
+ * "CLI flag wins" state without guessing.
+ */
+export interface CompactionSettingsView {
+  threshold_chars: CompactionFieldView;
+  threshold_tokens: CompactionFieldView;
+  keep_recent_chars: CompactionFieldView;
+  context_window: CompactionFieldView;
+  /** `--compact` / `TWO_BROTHERS_COMPACT`: compact once before the run starts. */
+  force: boolean;
+  /** True when a serve flag/env pin (or `ServerOptions.compaction`) owns a field. */
+  pinned: boolean;
+}
+
+/** Built-in values a hand-built `Config` may carry without explicit provenance. */
+const COMPACTION_DEFAULTS: Record<keyof CompactionExplicitFields, number> = {
+  thresholdChars: DEFAULTS.compactThreshold,
+  keepRecentChars: DEFAULTS.compactKeepRecent,
+  thresholdTokens: DEFAULTS.compactThresholdTokens,
+  contextWindow: DEFAULTS.contextWindow,
+};
+
+/** A persisted budget reduced to its merge meaning (0 = absent). */
+function persistedBudget(value: number | undefined): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 0;
+}
+
+/**
+ * True when the resolved config explicitly pins this compaction field. Zero is
+ * never a pin (it means off/unset and must not shadow a persisted value). With
+ * recorded provenance that is exact — even an explicit value equal to the
+ * built-in default counts. A hand-built `Config` without provenance falls back
+ * to "differs from the built-in default", which is why `resolveConfig` records
+ * it (the `keepRecentChars` default is non-zero).
+ */
+function configPinsCompactionField(
+  cfg: Config,
+  key: keyof CompactionExplicitFields,
+  value: number,
+): boolean {
+  if (!(Number.isFinite(value) && value > 0)) return false;
+  const explicit = cfg.compactionExplicit?.[key];
+  if (explicit !== undefined) return explicit;
+  return value !== COMPACTION_DEFAULTS[key];
+}
+
+interface MergedCompactionFields {
+  settings: CompactionSettings;
+  sources: Record<keyof CompactionExplicitFields, CompactionFieldSource>;
+}
+
+/**
+ * The one merge behind serve runs, manual compaction and the settings view.
+ *
+ * Precedence: an explicit `ServerOptions.compaction` wins wholesale (an embed
+ * or test pin, unchanged behavior); otherwise each field independently takes
+ * the non-zero CLI-flag/env config value (through
+ * {@link compactionFieldsFromConfig}, so the zero/unset mapping exists once),
+ * then the persisted `compaction` section value, then nothing. `--compact`'s
+ * `force` rides along from the config layer only — a persisted force is
+ * deliberately out of scope.
+ */
+function mergeCompactionFields(
+  cfg: Config,
+  persisted: PersistedCompactionSettings | undefined,
+  explicit: CompactionSettings | undefined,
+): MergedCompactionFields {
+  if (explicit !== undefined) {
+    const settings = { ...explicit };
+    const source = (value: number | undefined): CompactionFieldSource =>
+      (value ?? 0) > 0 ? "options" : "absent";
+    return {
+      settings,
+      sources: {
+        thresholdChars: source(settings.thresholdChars),
+        keepRecentChars: source(settings.keepRecentChars),
+        thresholdTokens: source(settings.thresholdTokens),
+        contextWindow: source(settings.contextWindow),
+      },
+    };
+  }
+  const fromConfig = compactionFieldsFromConfig(cfg);
+  const stored = persisted ?? {};
+  const pick = (
+    key: keyof CompactionExplicitFields,
+    configValue: number | undefined,
+    storedValue: number | undefined,
+  ): { value: number; source: CompactionFieldSource } => {
+    const flag = configValue ?? 0;
+    if (flag > 0 && configPinsCompactionField(cfg, key, flag)) {
+      return { value: flag, source: "flag" };
+    }
+    const saved = persistedBudget(storedValue);
+    return saved > 0 ? { value: saved, source: "persisted" } : { value: 0, source: "absent" };
+  };
+  const thresholdChars = pick("thresholdChars", fromConfig.thresholdChars, stored.threshold_chars);
+  const keepRecentChars = pick(
+    "keepRecentChars",
+    fromConfig.keepRecentChars,
+    stored.keep_recent_chars,
+  );
+  const thresholdTokens = pick(
+    "thresholdTokens",
+    fromConfig.thresholdTokens,
+    stored.threshold_tokens,
+  );
+  const contextWindow = pick("contextWindow", fromConfig.contextWindow, stored.context_window);
+  return {
+    settings: {
+      ...(fromConfig.force ? { force: true } : {}),
+      ...(thresholdChars.value > 0 ? { thresholdChars: thresholdChars.value } : {}),
+      ...(keepRecentChars.value > 0 ? { keepRecentChars: keepRecentChars.value } : {}),
+      ...(thresholdTokens.value > 0 ? { thresholdTokens: thresholdTokens.value } : {}),
+      ...(contextWindow.value > 0 ? { contextWindow: contextWindow.value } : {}),
+    },
+    sources: {
+      thresholdChars: thresholdChars.source,
+      keepRecentChars: keepRecentChars.source,
+      thresholdTokens: thresholdTokens.source,
+      contextWindow: contextWindow.source,
+    },
+  };
+}
+
+/**
+ * Merged, **ungated** compaction fields for a serve surface: explicit options
+ * wholesale, else CLI/env per field, then the persisted section. Callers that
+ * must act on an explicit manual compaction request use this (budgets are
+ * meaningful while auto compaction is off); a zero result means "nothing
+ * configured".
+ */
+export function compactionFieldsForServe(
+  cfg: Config,
+  persisted: PersistedCompactionSettings | undefined,
+  explicit?: CompactionSettings,
+): CompactionSettings {
+  return mergeCompactionFields(cfg, persisted, explicit).settings;
+}
+
+/**
+ * Auto-compaction settings for a serve run: {@link compactionFieldsForServe},
+ * gated exactly like {@link compactionSettingsFromConfig} — `undefined` when
+ * no force and no char/token/window trigger is configured, so a run with
+ * nothing configured keeps byte-identical harness options. An explicit
+ * `ServerOptions.compaction` is passed through wholesale, never gated.
+ */
+export function serveCompactionSettings(
+  cfg: Config,
+  persisted: PersistedCompactionSettings | undefined,
+  explicit?: CompactionSettings,
+): CompactionSettings | undefined {
+  if (explicit !== undefined) return { ...explicit };
+  const fields = compactionFieldsForServe(cfg, persisted);
+  if (
+    !fields.force &&
+    (fields.thresholdChars ?? 0) <= 0 &&
+    (fields.thresholdTokens ?? 0) <= 0 &&
+    (fields.contextWindow ?? 0) <= 0
+  ) {
+    return undefined;
+  }
+  return fields;
+}
+
+/**
+ * The additive settings-API view of the merged compaction configuration (see
+ * {@link CompactionSettingsView}). Read-only; it never writes or normalizes
+ * the stored section.
+ */
+export function compactionSettingsView(
+  cfg: Config,
+  persisted: PersistedCompactionSettings | undefined,
+  explicit?: CompactionSettings,
+): CompactionSettingsView {
+  const { settings, sources } = mergeCompactionFields(cfg, persisted, explicit);
+  const stored = persisted ?? {};
+  const field = (
+    key: keyof CompactionExplicitFields,
+    storedKey: keyof PersistedCompactionSettings,
+  ): CompactionFieldView => ({
+    persisted: persistedBudget(stored[storedKey]),
+    effective: settings[key] ?? 0,
+    source: sources[key],
+  });
+  return {
+    threshold_chars: field("thresholdChars", "threshold_chars"),
+    threshold_tokens: field("thresholdTokens", "threshold_tokens"),
+    keep_recent_chars: field("keepRecentChars", "keep_recent_chars"),
+    context_window: field("contextWindow", "context_window"),
+    force: settings.force === true,
+    pinned: Object.values(sources).some((source) => source === "flag" || source === "options"),
+  };
 }
 
 // ---------------------------------------------------------------------------

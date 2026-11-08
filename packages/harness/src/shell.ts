@@ -39,9 +39,10 @@ export const DEFAULT_TIMEOUT_S = 30.0;
 export const DEFAULT_MAX_OUTPUT_CHARS = 20_000;
 export const KILL_GRACE_S = 2.0;
 /**
- * Upper bound for the post-kill drain (the kill grace plus a fixed margin),
- * used by `drainAfterKill`. Shared with callers that must not restore/exit
- * before this cleanup can finish (the TUI shutdown path).
+ * Upper bound for the post-kill drain (`drainAfterKill`). Callers that must
+ * wait for a cancelled turn to unwind (the TUI shutdown, the CLI's per-turn
+ * signal handling) size their budget from this constant so they never exit /
+ * restore before `run_shell`'s kill + drain can finish.
  */
 export const SHELL_DRAIN_BUDGET_MS = (KILL_GRACE_S + 5) * 1000;
 /** Bounded wait for the async Windows tree-kill (much shorter than the old 10 s). */

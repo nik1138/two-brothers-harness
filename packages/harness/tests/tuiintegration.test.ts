@@ -17,6 +17,7 @@ import * as path from "node:path";
 import { test } from "node:test";
 
 import { resolveConfig } from "../src/config.ts";
+import { MockProvider, type Provider } from "../src/provider.ts";
 import { toNdjsonLine, type ToolCallStreamEvent } from "../src/runstream.ts";
 import { CANCELLED_TURN_HINT, awaitTurnDrain, runTuiApp, type TuiIO } from "../src/tui/app.ts";
 import {
@@ -417,6 +418,83 @@ test("Enter mid-run keeps the whole draft and shows a refuse notice", async () =
   // the turn still completes; the refused draft was never submitted
   assert.ok(await waitFor(() => textOf(output).includes("decision:"), 30_000));
   assert.ok(!textOf(output).includes("YOU queued draft stays"), "draft must not be sent");
+
+  const code = await quit(input, app);
+  assert.equal(code, 0);
+});
+
+test("Ctrl+N steers the running turn at the next boundary and never starts a task", async () => {
+  // The gated senior provider holds its first call: the steer is queued while
+  // that call is in flight, so it can only land at the NEXT node boundary.
+  let held = false;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const mock = new MockProvider();
+  const gatedSenior: Provider = {
+    async chat(messages, responseKind, signal, options) {
+      if (!held) {
+        held = true;
+        await gate;
+      }
+      return mock.chat(messages, responseKind, signal, options);
+    },
+  };
+
+  const { app, input, output } = startApp({
+    providerOverrides: { senior: gatedSenior, junior: mock },
+  });
+  assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+  // A tall viewport keeps the whole short consultation in the final frame, so
+  // the assertions below can count the steer envelope exactly.
+  output.resize(140, 60);
+  input.type("first task");
+  input.enter();
+  assert.ok(await waitFor(() => held), "the first senior call is held");
+
+  // Typing while running fills the composer as usual; Ctrl+N queues that text
+  // for the running turn (not a task), and only acceptance clears the draft.
+  input.type("steer me now");
+  input.key("n", { ctrl: true, raw: "\u000e" });
+  assert.ok(
+    await waitFor(() =>
+      textOf(output).includes("Steer queued — applied at the turn's next step"),
+    ),
+    "the acceptance toast names the next step",
+  );
+  assert.ok(
+    await waitFor(() => /1\s*pending/.test(textOf(output).replace(/[│\n]/g, " "))),
+    "the acceptance toast reports the pending count",
+  );
+  assert.ok(
+    !lastFrameText(output).includes("steer me now"),
+    "the composer is cleared only after the steer is accepted",
+  );
+  assert.ok(!textOf(output).includes("YOU steer me now"), "steering never starts a task");
+  assert.ok(
+    !textOf(output).includes("[[OPERATOR STEER]] steer me now"),
+    "the envelope appears only when the harness drains it",
+  );
+
+  release();
+  assert.ok(
+    await waitFor(() => textOf(output).includes("decision:"), 30_000),
+    "the turn completed after the gate",
+  );
+  assert.ok(
+    textOf(output).includes("[[OPERATOR STEER]] steer me now"),
+    "the steer envelope landed at the next boundary",
+  );
+  const finalFrame = lastFrameText(output);
+  assert.ok(finalFrame.includes("[[OPERATOR STEER]] steer me now"));
+  assert.equal(
+    finalFrame.match(/steer me now/g)?.length,
+    1,
+    "there is exactly one steer envelope and no second task",
+  );
+  assert.ok(!finalFrame.includes("YOU steer me now"), "steering never starts a task");
+  assert.ok(!textOf(output).includes("queued steer"), "nothing was left unapplied");
 
   const code = await quit(input, app);
   assert.equal(code, 0);

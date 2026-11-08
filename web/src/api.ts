@@ -5,6 +5,7 @@ import type {
   ApprovalPolicyView,
   CommandInfo,
   CommandListResponse,
+  CompactionSettingsView,
   Envelope,
   FsBrowseResult,
   ProviderPreset,
@@ -371,15 +372,27 @@ export interface SettingsPatch {
    * brand new, so the app only sends it when GET reported support.
    */
   approval_policy?: { mode: ApprovalMode }
+  /**
+   * Additive run-level compaction budgets (`compaction` section). Omit on an
+   * older backend: the app only sends it when GET reported support.
+   */
+  compaction?: {
+    threshold_chars?: number
+    threshold_tokens?: number
+    keep_recent_chars?: number
+    context_window?: number
+  }
 }
 
 /**
  * `GET/PUT /api/settings` response: role views, the plugin selection and the
- * additive `approval_policy` section (older backends omit the latter).
+ * additive `approval_policy` / `compaction` sections (older backends omit the
+ * latter).
  */
 export type SettingsResponse = SettingsView & {
   plugins?: PluginSelectionPayload
   approval_policy?: ApprovalPolicyView
+  compaction?: CompactionSettingsView
 }
 
 export async function getSettings(): Promise<SettingsResponse> {

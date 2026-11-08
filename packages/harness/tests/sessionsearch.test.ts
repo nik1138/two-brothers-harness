@@ -557,6 +557,43 @@ test("loadSessionDocs: a corrupt session file is skipped and counted", () => {
   }
 });
 
+test("loadSessionDocs: a torn final line keeps the session and never rewrites it", () => {
+  const dir = tmpdir();
+  try {
+    const file = writeSession(dir, "torn.jsonl", [
+      message({ seq: 1, from: "user", to: "senior", payload: { text: "redis needle one" } }),
+      message({ seq: 2, payload: { text: "redis needle two" } }),
+    ]);
+    const torn = '{"v":1,"id":"msg-torn","seq":3,"ts":"2026-';
+    fs.appendFileSync(file, torn, "utf-8");
+    const beforeBytes = fs.readFileSync(file);
+    const beforeStat = fs.statSync(file);
+
+    const loaded = loadSessionDocs(dir);
+    assert.equal(loaded.skipped, 0);
+    assert.equal(loaded.truncated, false);
+    assert.deepEqual(loaded.docs.map((item) => item.name), ["torn.jsonl"]);
+    assert.equal(loaded.docs[0].recovered, true);
+    assert.equal(loaded.docs[0].dropped_bytes, Buffer.byteLength(torn, "utf-8"));
+    assert.deepEqual(
+      loaded.docs[0].events.map((event) => event.seq),
+      [1, 2],
+    );
+    const result = searchSessions(loaded.docs, "needle");
+    assert.equal(result.hits.length, 3); // derived title + two envelopes
+    assert.deepEqual(
+      result.hits.map((hit) => hit.seq),
+      [null, 1, 2],
+    );
+
+    // Read-only listing/search must leave the file byte- and mtime-identical.
+    assert.deepEqual(fs.readFileSync(file), beforeBytes);
+    assert.equal(fs.statSync(file).mtimeMs, beforeStat.mtimeMs);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("loadSessionDocs: per-session event cap keeps the leading envelopes", () => {
   const dir = tmpdir();
   try {
