@@ -80,7 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     restored on unmount. Files: `web/src/tabTitle.ts` (new),
     `web/src/App.vue`; tests `web/tests/tabTitle.test.ts` (16).
 
-  Package suite **1 810 tests (1 808 pass, 2 environment skips)**; web suite
+  Package suite **1 811 tests (1 809 pass, 2 environment skips)**; web suite
   **451/451**; the
   browser-E2E matrix is **20 offline scenarios plus the opt-in `real` skip**.
   No protocol/session-format change; no new runtime dependency.
