@@ -19,7 +19,7 @@ One flat set of documents, grouped by what you are trying to do.
 - [Backlog](backlog.md) — deferred work, shipped items, and design requirements.
 - [Design review](design-review.md) — the v0.1 critique and what changed since.
 - [Attribution](attribution.md) — the vendored MIT references and the code and ideas adopted from them.
-- [Release runbook](release.md) — npm org setup, Trusted Publisher linkage, publishing, and promotion (pre-release).
+- [Release runbook](release.md) — npm org setup, Trusted Publisher linkage, publishing, and promotion.
 
 ## History
 

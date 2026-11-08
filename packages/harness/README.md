@@ -12,18 +12,18 @@ TypeScript, Node ≥ 22.19, zero-dependency core with two curated runtime
 dependencies (`zod` for payload validation, `@earendil-works/pi-mcp` for
 MCP). MIT.
 
-> **Pre-release:** v0.0.1 has not been published to npm yet — the install
-> command below is the intended path once the package is published. Until
-> then, build from a checkout:
-> `git clone https://github.com/nik1138/two-brothers-harness.git`,
-> `cd packages/harness`, `npm install`, `npm run build`, then use
-> `node dist/cli.js` (or `npm link` for a global `two-brothers`).
-
 ## Install
 
+v0.0.1 is published on the `next` dist-tag:
+
 ```bash
-npm install -g @two-brothers/harness
+npm install -g @two-brothers/harness@next
 ```
+
+Source build (any version): clone
+`https://github.com/nik1138/two-brothers-harness.git`, then
+`cd packages/harness`, `npm install`, `npm run build`, and use
+`node dist/cli.js` (or `npm link` for a global `two-brothers`).
 
 ## Quick start
 

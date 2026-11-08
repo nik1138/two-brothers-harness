@@ -13,14 +13,20 @@ deepseek-harness. Everything below runs against it; the zero-dependency
 |---|---|---|
 | Node.js | ≥ 22.19 | `node --version` |
 
-Set up and build the package once (from a checkout; once the package is
-published, `npm install -g @two-brothers/harness` gives you the same CLI as a
-global `two-brothers` command):
+Build the package from a checkout:
 
 ```powershell
 cd two-brothers-harness\packages\harness
 npm install
 npm run build                          # tsc → dist/
+```
+
+Or install the published package — v0.0.1 is on the `next` dist-tag (the
+untagged install starts working after promotion to `latest`):
+
+```powershell
+npm install -g @two-brothers/harness@next
+two-brothers --version
 ```
 
 ## 2. First run (offline, no API key)
@@ -29,6 +35,9 @@ npm run build                          # tsc → dist/
 cd two-brothers-harness\packages\harness
 node dist/cli.js run "Plan a migration from Redis to Valkey" --provider mock
 ```
+
+With the global install the same run is
+`two-brothers run "Plan a migration from Redis to Valkey" --provider mock`.
 
 The output is the full conversation: `[user]`, `[senior -> junior] consult`, `[junior -> senior] proposal`,
 `[senior -> junior] review`, `[senior -> user] decision`. Each envelope is its own

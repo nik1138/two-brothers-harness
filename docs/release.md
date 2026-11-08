@@ -1,11 +1,9 @@
 # Release runbook — `@two-brothers/harness`
 
-How the package ships to npm. **Status: 0.0.0 placeholder live; 0.0.1 ready
-to publish.** `@two-brothers/harness@0.0.0` exists on the public registry (it
-only reserves the name and exists for OIDC setup), and `@two-brothers` has a
-public org page. The only remaining external step is linking the Trusted
-Publisher, then running the publish workflow; the `0.0.1` source tree is on
-`main` and every release gate below has passed.
+How the package ships to npm. **Status: 0.0.1 published on the `next`
+dist-tag; `latest` still points at the 0.0.0 placeholder.** The publish
+workflow ran on `main` with the full gate and signed provenance. Promoting
+`0.0.1` to `latest` is the remaining step — see "Promote to `latest`" below.
 
 Mechanics live in `.github/workflows/publish.yml` — read its header comment
 first; it documents the same one-time setup inline. Pushing a `v*` tag (or
