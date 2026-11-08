@@ -13,9 +13,11 @@
  *     readPlugins()    -> [name, ...]                        // one shared list
  *     readProviders()  -> [{name, base_url, api_key, kind, models}, ...]   // key decrypted
  *     readApprovalPolicy() -> "ask" | "readonly" | "edits" | "allow-all"
+ *     readCompaction() -> {threshold_chars?, threshold_tokens?, ...}  // budgets
  *     write(settings, plugins?, providers?)                  // api_key in
  *         plaintext; encrypted for disk
  *     writeApprovalPolicy(mode)                              // strict enum, atomic
+ *     writeCompaction(settings)                              // strict ints, atomic
  *     readSessionApprovals(session) -> [pair key, ...]       // "always allow"
  *     addSessionApproval(session, pairKey)                   // persist one pair
  *     clearSessionApprovals(session)                         // session delete
@@ -54,6 +56,22 @@
  * secret, so the section is unencrypted. `writeApprovalPolicy()` is the only
  * write path; a per-run CLI/env choice is a server option and never reaches
  * this file.
+ *
+ * The `compaction` section (top level) is the persisted run-level
+ * auto-compaction configuration:
+ * `{"threshold_chars"?: int, "threshold_tokens"?: int,
+ * "keep_recent_chars"?: int, "context_window"?: int}` (snake_case like the
+ * rest of the file; every value an integer >= 0, where 0 means off/unknown).
+ * It is fail-closed on read: a missing/non-object section reads as absent,
+ * unknown keys are dropped, and a non-integer or negative value is dropped —
+ * `readCompaction()` never throws and never invents a budget. Every
+ * role-settings save preserves the section (a corrupt one normalizes to
+ * absent fields). `writeCompaction()` is the only write path: it validates the
+ * whole section strictly before touching disk (the server maps a rejection to
+ * a 400) and writes atomically, keeping every other section. The values only
+ * tune token/char budgets — never prompts, keys or session content — so the
+ * section is unencrypted. A serve CLI flag/env pin wins over a persisted
+ * value per field and is never written here.
  *
  * Env pinning: Python strips `TWO_BROTHERS_*`-pinned fields in
  * `server._persistence_snapshot` because the server owns RuntimeSettings.
@@ -116,6 +134,77 @@ export const MAX_SESSION_APPROVALS = 64;
 
 /** Top-level settings section carrying the operator approval mode. */
 export const APPROVAL_POLICY_SECTION = "approval_policy";
+
+/** Top-level settings section carrying the run-level compaction budgets. */
+export const COMPACTION_SECTION = "compaction";
+
+/**
+ * The persisted run-level auto-compaction budgets (snake_case, like the rest
+ * of the settings file). Every value is an integer >= 0; 0 means off/unknown
+ * (the field behaves as if it were absent). Unknown keys never survive a read.
+ */
+export interface PersistedCompactionSettings {
+  threshold_chars?: number;
+  threshold_tokens?: number;
+  keep_recent_chars?: number;
+  context_window?: number;
+}
+
+/** The known fields of the `compaction` section, in a stable order. */
+const COMPACTION_KEYS = [
+  "threshold_chars",
+  "threshold_tokens",
+  "keep_recent_chars",
+  "context_window",
+] as const;
+
+/** One usable persisted budget: a safe integer >= 0 (0 = off/unknown). */
+function isCompactionBudget(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
+ * The stored `compaction` section normalized to its four known keys.
+ * Fail-closed and never throwing: a non-object section reads as absent,
+ * unknown keys are dropped, and only safe integer budgets >= 0 survive (a
+ * string, float, negative, NaN or infinite value is dropped). A section whose
+ * every field is invalid reads back as absent.
+ */
+function compactionSection(value: unknown): PersistedCompactionSettings {
+  const out: PersistedCompactionSettings = {};
+  if (!isRecord(value)) return out;
+  for (const key of COMPACTION_KEYS) {
+    const budget = value[key];
+    if (isCompactionBudget(budget)) out[key] = budget;
+  }
+  return out;
+}
+
+/**
+ * Strict validation for a `compaction` write (a `PUT /api/settings` section):
+ * the value must be an object whose every own key is one of the four known
+ * fields and whose value is a safe integer >= 0. Anything else throws a
+ * `TypeError` naming the offending field, before the file is touched. Unlike
+ * the read path this never drops silently — a bad write is the caller's bug.
+ */
+export function strictCompactionSettings(value: unknown): PersistedCompactionSettings {
+  if (!isRecord(value)) throw new TypeError("compaction must be an object");
+  const out: PersistedCompactionSettings = {};
+  for (const key of Object.keys(value)) {
+    if (!(COMPACTION_KEYS as readonly string[]).includes(key)) {
+      throw new TypeError(`unknown compaction field: ${key}`);
+    }
+    const budget = value[key];
+    if (budget === undefined) continue;
+    if (!isCompactionBudget(budget)) {
+      throw new TypeError(
+        `invalid compaction ${key}: ${String(budget)} (use an integer >= 0; 0 = off/unknown)`,
+      );
+    }
+    out[key as keyof PersistedCompactionSettings] = budget;
+  }
+  return out;
+}
 
 /** Bound on one persisted pair key (a shell command is the longest target). */
 export const MAX_APPROVAL_PAIR_KEY_CHARS = 4096;
@@ -422,6 +511,33 @@ export class SettingsStore {
   }
 
   /**
+   * The persisted run-level compaction budgets (only valid fields; `{}` when
+   * the section is missing, corrupt, or carries no usable integer). Reading
+   * never throws and never writes: this is the fail-closed direction — a
+   * damaged section can make compaction *less* aggressive, never sneak a
+   * budget the operator did not store.
+   */
+  readCompaction(): PersistedCompactionSettings {
+    return compactionSection(this.readRaw()[COMPACTION_SECTION]);
+  }
+
+  /**
+   * Persist the run-level compaction budgets (the only write path for the
+   * section). Strict: every present key must be one of the four known fields
+   * with a safe integer value >= 0 — a bad value or unknown key is rejected
+   * before touching disk. Atomic (temp file + rename); every other section is
+   * preserved, and a corrupt `compaction` section reads back as absent. An
+   * empty section removes the key entirely rather than storing `{}`.
+   */
+  writeCompaction(settings: PersistedCompactionSettings): void {
+    const normalized = strictCompactionSettings(settings);
+    const raw = this.readRaw();
+    if (Object.keys(normalized).length > 0) raw[COMPACTION_SECTION] = normalized;
+    else delete raw[COMPACTION_SECTION];
+    this.writeRaw(raw);
+  }
+
+  /**
    * Persisted session-allowed `approvalPairKey` pairs for one session file
    * (empty when the session has none, when the section is missing/corrupt, or
    * when the file cannot be read — the fail-closed direction for approvals).
@@ -490,7 +606,9 @@ export class SettingsStore {
    * The `approvals` section (session allow lists) is always preserved here —
    * this method saves role settings, plugins and providers only. The
    * `approval_policy` section is preserved the same way when it exists on
-   * disk (a corrupt one is rewritten as the fail-closed `ask`).
+   * disk (a corrupt one is rewritten as the fail-closed `ask`), and the
+   * `compaction` section is preserved when it carries at least one valid
+   * budget (a corrupt one is dropped, never rewritten with invented values).
    *
    * Fields currently pinned by `TWO_BROTHERS_*` env vars are stripped from
    * the roles being written — env values must never reach the file (see
@@ -567,6 +685,12 @@ export class SettingsStore {
     // corrupt section is normalized to the fail-closed shape here.
     if (Object.hasOwn(raw, APPROVAL_POLICY_SECTION)) {
       payload[APPROVAL_POLICY_SECTION] = { mode: approvalPolicyOf(raw[APPROVAL_POLICY_SECTION]) };
+    }
+    // Preserve the run-level compaction budgets on every role-settings save;
+    // a corrupt section normalizes to absent fields (never invented values).
+    const storedCompaction = compactionSection(raw[COMPACTION_SECTION]);
+    if (Object.keys(storedCompaction).length > 0) {
+      payload[COMPACTION_SECTION] = storedCompaction;
     }
 
     if (pending.length > 0) {

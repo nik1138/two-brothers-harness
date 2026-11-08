@@ -33,6 +33,17 @@ import {
   approvalPolicyPatch,
 } from '../approvalPolicy'
 import type { ApprovalPolicyState } from '../approvalPolicy'
+import {
+  compactionFormOf,
+  compactionInputsOf,
+  compactionPatch,
+  compactionSettingsOf,
+} from '../compactionSettings'
+import type {
+  CompactionFieldKey,
+  CompactionInputs,
+  CompactionState,
+} from '../compactionSettings'
 import type { ApprovalMode } from '../types'
 
 /** Optional controlled theme mode, density and audit preference. When
@@ -123,6 +134,31 @@ function onApprovalModeChange(mode: ApprovalMode) {
   approvalPolicy.value = { ...approvalPolicy.value, mode }
 }
 
+// Run-level context budgets (Wave 25): an additive top-level `compaction`
+// section saved with the rest of the settings form. `null` means the settings
+// request has not finished (or the dialog has no state yet); an older backend
+// answers without the section and the card explains why it is read-only.
+const compaction = ref<CompactionState | null>(null)
+const compactionInputs = ref<CompactionInputs | null>(null)
+const compactionErrors = ref<Partial<Record<CompactionFieldKey, string>>>({})
+
+function applyCompaction(view: unknown) {
+  const state = compactionSettingsOf(view)
+  compaction.value = state
+  compactionInputs.value = compactionInputsOf(state)
+  compactionErrors.value = {}
+}
+
+function onCompactionInput(key: CompactionFieldKey, value: string) {
+  if (compactionInputs.value === null) return
+  compactionInputs.value = { ...compactionInputs.value, [key]: value }
+  if (compactionErrors.value[key] !== undefined) {
+    const next = { ...compactionErrors.value }
+    delete next[key]
+    compactionErrors.value = next
+  }
+}
+
 const connectionOptions = computed(() => [
   { label: 'Manual', value: '' },
   ...providers.value.map((p) => ({ label: `${p.name} — ${p.base_url}`, value: p.name })),
@@ -177,7 +213,7 @@ const sections: {
   {
     id: 'advanced',
     label: 'Advanced',
-    description: 'Environment pins, stored settings, and test transports.',
+    description: 'Context compaction, environment pins, stored settings and test transports.',
   },
 ]
 
@@ -337,6 +373,7 @@ onMounted(async () => {
     fill('junior', view.junior)
     plugins.value = normalizePluginSelection(view.plugins)
     approvalPolicy.value = approvalPolicyOf(view)
+    applyCompaction(view)
     pluginOptions.value = discovered.plugins.map((p) => ({
       label: p.description ? `${p.name} — ${p.description}` : p.name,
       value: p.name,
@@ -361,6 +398,15 @@ onMounted(async () => {
 
 async function save() {
   if (loading.value || saving.value || !settingsLoaded.value) return
+  // Validate the auto-compaction inputs before any request: inline errors are
+  // shown in the card and a bad budget never reaches the backend.
+  const compactionForm =
+    compactionInputs.value !== null ? compactionFormOf(compactionInputs.value) : null
+  if (compactionForm !== null && !compactionForm.ok) {
+    compactionErrors.value = compactionForm.errors
+    error.value = 'Fix the highlighted auto-compaction values before saving.'
+    return
+  }
   saving.value = true
   error.value = null
   const patch: SettingsPatch = {}
@@ -378,18 +424,24 @@ async function save() {
     patch[role] = entry
   }
   try {
-    // role settings, the shared plugin selection and the approval mode travel
-    // in one PUT; an unsupported (older) backend and a server-pinned mode get
-    // no approval field at all (a pin is never persisted by a normal save)
+    // role settings, the shared plugin selection, the approval mode and the
+    // context budgets travel in one PUT; an unsupported (older) backend and a
+    // server-pinned mode get no approval field at all (a pin is never
+    // persisted by a normal save), and an older backend gets no compaction
+    // section either.
     const view = await updateSettingsWithPlugins({
       ...patch,
       plugins: plugins.value,
       ...approvalPolicyPatch(approvalPolicy.value),
+      ...(compaction.value !== null && compactionForm !== null
+        ? compactionPatch(compaction.value, compactionForm.values)
+        : {}),
     })
     fill('senior', view.senior)
     fill('junior', view.junior)
     plugins.value = normalizePluginSelection(view.plugins)
     approvalPolicy.value = approvalPolicyOf(view)
+    applyCompaction(view)
     senior.api_key = ''
     junior.api_key = ''
     emit('saved')
@@ -690,7 +742,11 @@ async function save() {
             >
               <AdvancedSection
                 :show-prompt-audits="showPromptAudits ?? false"
+                :compaction="compaction"
+                :compaction-inputs="compactionInputs"
+                :compaction-errors="compactionErrors"
                 @update:show-prompt-audits="emit('show-prompt-audits-change', $event)"
+                @update:compaction-input="onCompactionInput"
               />
             </div>
           </template>
@@ -699,8 +755,8 @@ async function save() {
         <footer class="settings-footer">
           <p v-if="error" class="settings-footer-error" role="alert">{{ error }}</p>
           <p v-else class="settings-footer-hint">
-            Role, plugin and approval changes save together. Provider, theme, density, accent and
-            keyboard-binding changes apply immediately.
+            Role, plugin, approval and compaction changes save together. Provider, theme, density,
+            accent and keyboard-binding changes apply immediately.
           </p>
           <div class="settings-footer-actions">
             <n-button attr-type="button" @click="emit('close')">Cancel</n-button>

@@ -248,6 +248,39 @@ export interface ApprovalPolicyView {
   pinned?: boolean
 }
 
+/**
+ * Where one effective compaction budget came from (`compaction` section of
+ * `GET/PUT /api/settings`). Mirrors `CompactionFieldSource` in
+ * `packages/harness/src/config.ts`: `flag` = serve CLI flag/env pin,
+ * `options` = an explicit server option, `persisted` = the saved section,
+ * `absent` = not configured (the harness default, if any, applies).
+ */
+export type CompactionFieldSource = 'options' | 'flag' | 'persisted' | 'absent'
+
+/** One compaction budget: stored value, effective value and its source. */
+export interface CompactionFieldView {
+  /** The stored `compaction` section value (0 = not stored). */
+  persisted: number
+  /** The merged value a serve run receives (0 = not configured). */
+  effective: number
+  source: CompactionFieldSource
+}
+
+/**
+ * Additive `compaction` section on `GET/PUT /api/settings`. Older backends
+ * omit it (the web app then disables the card and never sends the section).
+ */
+export interface CompactionSettingsView {
+  threshold_chars: CompactionFieldView
+  threshold_tokens: CompactionFieldView
+  keep_recent_chars: CompactionFieldView
+  context_window: CompactionFieldView
+  /** `--compact` on the server: compact once before a run starts. */
+  force: boolean
+  /** True when a serve flag/env pin (or server option) owns a field. */
+  pinned: boolean
+}
+
 /** Compact diff summary inside a workspace tool result. */
 export interface ToolDiffSummary {
   added_lines: number

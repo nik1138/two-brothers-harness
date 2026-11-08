@@ -962,3 +962,267 @@ test("run: explicit ServerOptions.compaction wins over the resolved config", asy
     await server.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// persisted compaction settings (wave 25)
+// ---------------------------------------------------------------------------
+
+/** Persist one `compaction` section through the real settings API. */
+async function putCompaction(
+  server: RunningServer,
+  section: Record<string, number>,
+): Promise<Record<string, any>> {
+  const res = await api<Record<string, any>>(server.base, "PUT", "/api/settings", {
+    compaction: section,
+  });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  return res.body;
+}
+
+/** Count the compaction summaries one session file carries. */
+function summaryCount(server: RunningServer, name: string): number {
+  return readSession(server, name).filter((event) =>
+    isCompactionSummary(event as unknown as Message),
+  ).length;
+}
+
+test("settings: compaction reports stored/effective/source, roundtrips and drives runs", async () => {
+  const tmp = tmpdir("tb-compaction-settings-");
+  try {
+    const server = await startServer({ sessionsDir: tmp.root });
+    try {
+      const initial = await get<Record<string, any>>(server.base, "/api/settings");
+      assert.equal(initial.status, 200);
+      const absent = { persisted: 0, effective: 0, source: "absent" };
+      assert.deepEqual(initial.body.compaction, {
+        threshold_chars: absent,
+        threshold_tokens: absent,
+        keep_recent_chars: absent,
+        context_window: absent,
+        force: false,
+        pinned: false,
+      });
+      // reading never writes a settings file
+      assert.equal(fs.existsSync(path.join(tmp.root, "settings.json")), false);
+
+      const saved = await putCompaction(server, {
+        threshold_chars: 200,
+        keep_recent_chars: 100,
+      });
+      assert.deepEqual(saved.compaction, {
+        threshold_chars: { persisted: 200, effective: 200, source: "persisted" },
+        threshold_tokens: { persisted: 0, effective: 0, source: "absent" },
+        keep_recent_chars: { persisted: 100, effective: 100, source: "persisted" },
+        context_window: { persisted: 0, effective: 0, source: "absent" },
+        force: false,
+        pinned: false,
+      });
+      const onDisk = JSON.parse(
+        fs.readFileSync(path.join(tmp.root, "settings.json"), "utf-8"),
+      ) as Record<string, unknown>;
+      assert.deepEqual(onDisk.compaction, { threshold_chars: 200, keep_recent_chars: 100 });
+      assert.ok(!JSON.stringify(onDisk).includes("secret"), "the section is secret-free");
+
+      // An unrelated role save preserves the section.
+      assert.equal(
+        (await api(server.base, "PUT", "/api/settings", { senior: { model: "m-model" } })).status,
+        200,
+      );
+      const afterRoleSave = await get<Record<string, any>>(server.base, "/api/settings");
+      assert.deepEqual(afterRoleSave.body.compaction, saved.compaction);
+
+      // The persisted trigger reaches the run path (no flags configured).
+      const record = await runToEnd(server, {
+        task: AUTO_COMPACT_TASK,
+        session: "persisted-auto.jsonl",
+      });
+      assert.equal(record.status, "completed");
+      assert.equal(
+        summaryCount(server, "persisted-auto.jsonl"),
+        1,
+        "the persisted threshold/keep-recent drove exactly one compaction",
+      );
+
+      // A restart keeps the section and reports the same effective values.
+      await server.close();
+      const restarted = await startServer({ sessionsDir: tmp.root });
+      try {
+        const view = await get<Record<string, any>>(restarted.base, "/api/settings");
+        assert.deepEqual(view.body.compaction, saved.compaction);
+      } finally {
+        await restarted.close();
+      }
+    } finally {
+      await server.close();
+    }
+  } finally {
+    tmp.cleanup();
+  }
+});
+
+test("settings: invalid compaction bodies are 400s and change nothing", async () => {
+  const tmp = tmpdir("tb-compaction-settings-bad-");
+  try {
+    const server = await startServer({ sessionsDir: tmp.root });
+    try {
+      await putCompaction(server, { threshold_chars: 500 });
+      const file = path.join(tmp.root, "settings.json");
+      const before = fs.readFileSync(file, "utf-8");
+
+      for (const bad of [
+        { compaction: null },
+        { compaction: "500" },
+        { compaction: [500] },
+        { compaction: { threshold_chars: -1 } },
+        { compaction: { threshold_chars: 1.5 } },
+        { compaction: { threshold_chars: "500" } },
+        { compaction: { threshold_chars: true } },
+        { compaction: { threshold_chars: null } },
+        { compaction: { context_window: 8000, future_knob: 1 } },
+      ]) {
+        const res = await api<Record<string, any>>(server.base, "PUT", "/api/settings", bad);
+        assert.equal(res.status, 400, `expected 400 for ${JSON.stringify(bad)}`);
+      }
+      assert.equal(fs.readFileSync(file, "utf-8"), before, "no rejected body touched the file");
+
+      // Neither a bad body nor a body without the section changes the stored
+      // budgets; the last good value still reads back.
+      assert.equal(
+        (await api(server.base, "PUT", "/api/settings", { senior: { model: "m-model" } })).status,
+        200,
+      );
+      const after = await get<Record<string, any>>(server.base, "/api/settings");
+      assert.equal(after.body.compaction.threshold_chars.persisted, 500);
+      assert.equal(after.body.compaction.threshold_chars.effective, 500);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    tmp.cleanup();
+  }
+});
+
+test("run: a non-zero serve flag wins per field over the persisted section", async () => {
+  const controls: RunningServer[] = [];
+  try {
+    // Control: only the persisted section, so its trigger applies.
+    const control = await startServer();
+    controls.push(control);
+    await putCompaction(control, { threshold_chars: 200, keep_recent_chars: 100 });
+    const controlRun = await runToEnd(control, {
+      task: AUTO_COMPACT_TASK,
+      session: "persisted-control.jsonl",
+    });
+    assert.equal(controlRun.status, "completed");
+    assert.equal(summaryCount(control, "persisted-control.jsonl"), 1);
+
+    // Pinned: the resolved config's non-zero `--compact-threshold` (100k)
+    // shadows the persisted 200-char trigger, so this run never compacts.
+    // The persisted keep-recent field still merges in, but cannot trigger.
+    const pinned = await startServer({
+      configFactory: () =>
+        resolveConfig({
+          provider: "mock",
+          mode: "consult",
+          compactThreshold: 100000,
+        }),
+    });
+    controls.push(pinned);
+    await putCompaction(pinned, { threshold_chars: 200, keep_recent_chars: 100 });
+    const view = await get<Record<string, any>>(pinned.base, "/api/settings");
+    assert.deepEqual(view.body.compaction.threshold_chars, {
+      persisted: 200,
+      effective: 100000,
+      source: "flag",
+    });
+    assert.deepEqual(view.body.compaction.keep_recent_chars, {
+      persisted: 100,
+      effective: 100,
+      source: "persisted",
+    });
+    assert.equal(view.body.compaction.pinned, true);
+
+    const pinnedRun = await runToEnd(pinned, {
+      task: AUTO_COMPACT_TASK,
+      session: "persisted-pinned.jsonl",
+    });
+    assert.equal(pinnedRun.status, "completed");
+    assert.equal(summaryCount(pinned, "persisted-pinned.jsonl"), 0);
+  } finally {
+    for (const server of controls) await server.close();
+  }
+});
+
+test("run: explicit ServerOptions.compaction wins wholesale over the persisted section", async () => {
+  const server = await startServer({
+    compaction: { thresholdChars: 100000 },
+  });
+  try {
+    // The stored section says "compact early"; the explicit options say
+    // "never in this short run". Only the explicit options can act, so no
+    // summary proves they won wholesale.
+    await putCompaction(server, { threshold_chars: 200, keep_recent_chars: 100 });
+    const view = await get<Record<string, any>>(server.base, "/api/settings");
+    assert.deepEqual(view.body.compaction.threshold_chars, {
+      persisted: 200,
+      effective: 100000,
+      source: "options",
+    });
+    assert.deepEqual(view.body.compaction.keep_recent_chars, {
+      persisted: 100,
+      effective: 0,
+      source: "absent",
+    });
+    assert.equal(view.body.compaction.pinned, true);
+
+    const record = await runToEnd(server, {
+      task: AUTO_COMPACT_TASK,
+      session: "persisted-options.jsonl",
+    });
+    assert.equal(record.status, "completed");
+    assert.equal(summaryCount(server, "persisted-options.jsonl"), 0);
+  } finally {
+    await server.close();
+  }
+});
+
+test("compact: the manual route merges config > persisted", async () => {
+  const servers: RunningServer[] = [];
+  try {
+    // Persisted only: the saved 300-char keep-recent budget cuts the long
+    // fixture (the 40 000-char default would not).
+    const persisted = await startServer();
+    servers.push(persisted);
+    await putCompaction(persisted, { keep_recent_chars: 300 });
+    seedLongSession(persisted, "manual-persisted.jsonl");
+    const merged = await post<{ compacted: boolean; before_events: number; after_events: number }>(
+      persisted.base,
+      "/api/sessions/manual-persisted.jsonl/compact",
+    );
+    assert.equal(merged.status, 200, JSON.stringify(merged.body));
+    assert.equal(merged.body.compacted, true);
+    assert.ok(merged.body.after_events < merged.body.before_events);
+
+    // A pinned `--compact-keep-recent 40000` (explicit, even though it equals
+    // the built-in default) shadows the persisted 300: nothing to compact.
+    const pinned = await startServer({
+      configFactory: () =>
+        resolveConfig({
+          provider: "mock",
+          mode: "consult",
+          compactKeepRecent: 40000,
+        }),
+    });
+    servers.push(pinned);
+    await putCompaction(pinned, { keep_recent_chars: 300 });
+    seedLongSession(pinned, "manual-pinned.jsonl");
+    const unmerged = await post<Record<string, unknown>>(
+      pinned.base,
+      "/api/sessions/manual-pinned.jsonl/compact",
+    );
+    assert.equal(unmerged.status, 200);
+    assert.deepEqual(unmerged.body, { compacted: false, reason: "nothing to compact" });
+  } finally {
+    for (const server of servers) await server.close();
+  }
+});
