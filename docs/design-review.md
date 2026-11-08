@@ -119,12 +119,14 @@ production — env vars / a secret store only.
 
 ### 9. Tests
 
-No integration tests with a real network; no wall-clock/throughput load tests
-(the hermetic scale suite covers large sessions and transcripts, 200-session
-listings, concurrent runs and repeated compaction). Timeout and shutdown
-behavior is covered hermetically (provider retry/timeout registry, `run_shell`
-timeout clamp, `serve` shutdown grace); real-network fault injection remains
-open.
+No integration tests with a real external network; no wall-clock/throughput
+load tests (the hermetic scale suite covers large sessions and transcripts,
+200-session listings, concurrent runs and repeated compaction). Timeout,
+retry/backoff, context-overflow recovery and quota classification ARE driven
+over real loopback TCP by the fault-injection runner
+(`packages/harness/e2e/faults.ts`, part of the offline smoke gate) — it is
+hermetic and fast, but deliberately not a WAN or load test. Real
+external-network load and fault injection remain open.
 
 ### 10. The web workspace is single-user, single-process
 

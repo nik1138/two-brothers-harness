@@ -805,23 +805,53 @@ Design anchors that already exist:
   native fall-through in the real UI. Docs state that recall history is global
   while unsaved drafts are per-session.
 
+## Shipped 2026-11-08 (wave 7: persisted reasoning replay, token migration, fault injection)
+
+- **Persisted reasoning replay (part 1)** — when token streaming is active the
+  harness buffers the sanitized reasoning per provider call and emits one
+  additive `{type: "reasoning", role, kind, text, truncated}` runtime event
+  (bounded at 10,000 chars head+tail, ANSI/control stripped); `RunManager`
+  persists it to the session runtime sidecar automatically (no protocol or
+  session-JSONL change), and the web replays a collapsed-by-default
+  **Thinking · replayed** row after a reload (tolerant of malformed/oversized/
+  old-backend rows; TUI replay is not implemented). Honest limitation:
+  capture requires streaming (web always opts in; CLI/TUI need
+  `--stream-tokens`) because the plain provider contract returns no reasoning
+  text. Files: `src/harness.ts`, `src/runevents.ts`, `src/index.ts`; web
+  `types.ts`, `runtime.ts`, `ChatView.vue`, `folding.ts`; tests
+  `tests/thinkingpersist.test.ts` (7) + web timeline (+4).
+- **Remaining web chrome sheets on the design tokens** — nine more component
+  sheets (CommandPalette, ToolActivity, ApprovalCard, UsageFooter,
+  ContextMeter, PromptAudit, CommandResult, SidebarFooter, WorkspaceFinder)
+  migrated canonical radii and scale spacing to the existing token layer (45
+  value-for-value replacements, token inventory still 93, zero visual delta);
+  `web/tests/tokens.test.ts` now covers 14 migrated sheets and bans canonical
+  radius/scale-spacing literals there.
+- **Real-socket fault-injection E2E** — new opt-in
+  `packages/harness/e2e/faults.ts` (`npm run test:e2e:faults`) drives the real
+  retry/timeout/overflow machinery over actual loopback TCP through a
+  scripted `node:http` server: seven deterministic scenarios (429+Retry-After,
+  transient 5xx, per-attempt timeout, overflow fail-fast, genuine
+  compact-and-retry recovery, bounded always-overflow, fatal quota), ~0.3 s,
+  PASS/FAIL exit contract, evidence in the gitignored `e2e/runs/`. The full
+  offline smoke gate now runs it; real external-network load/fault injection
+  remains an open item.
+
 ## Open items (deferred)
 
-- **Web design-token follow-through** — the semantic layer and the migrated
-  chrome shipped 2026-11-08 (see the wave-4/wave-5 sections). Remaining
-  optional work: the other component sheets (App, ChatView, ApprovalCard,
-  settings sections) still carry literal one-off radii/`999px` values the
-  layer could absorb.
-
-- **Reasoning persistence and passback** — thinking/reasoning deltas are
-  currently observational and live-only: they are not persisted, not
-  replayable after a reload/reconnect, and not passed back to providers on
-  tool-loop turns. Two follow-ups: (1) persist an additive reasoning summary
-  in the runtime sidecar (or a protocol field, which would be a contract
-  change) so the thinking block survives reload; (2) Anthropic extended
-  thinking with tool use expects signed thinking blocks passed back on
-  assistant turns — capture and replay them in the Anthropic adapter if
-  thinking-enabled tool loops are offered as a supported configuration.
+- **Web design-token follow-through** — the semantic layer and most chrome
+  shipped 2026-11-08 (see the wave-4/wave-5/wave-7 sections). Remaining
+  optional work: `App.vue`, `ChatView.vue` and `Composer.vue` still carry
+  component-local literals, as do deliberately one-off values (menu-row 5px
+  radii, fractional paddings) the layer documents as staying literal.
+- **Reasoning passback (part 2)** — Anthropic extended thinking with tool use
+  expects signed thinking blocks passed back on assistant turns: capture and
+  replay them in the Anthropic adapter if thinking-enabled tool loops become a
+  supported configuration. (Part 1 — persistence/replay — shipped in wave 7;
+  TUI replay remains optional.)
+- **Real external-network load/fault injection** — the hermetic scale suite
+  and the loopback fault runner cover bounded behavior; WAN latency/load and
+  real-provider fault injection are not covered by the offline gates.
 - **`TWO_BROTHERS_JSON` vs bare `--json`** — the flag is now an output
   mode (the `--mode json` object), while the env var keeps its
   `PROTOCOL.md` contract (decision as JSON on the last line, after the

@@ -217,7 +217,10 @@ the same hero appears inside a selected session that has no transcript yet.
    chat updates live over SSE — a folded **Thinking** row (reasoning) and the
    **Response** block stream in as the models generate, then resolve into the
    normal conversation bubbles. The Thinking row starts folded — click it to
-   read the reasoning; the reply never pops it open. Submitting while the
+   read the reasoning; the reply never pops it open. Runs that stream reasoning
+   also persist a bounded record, so after a reload the same folded
+   **Thinking · replayed** row comes back for each provider call (older
+   backends and non-streaming runs simply show none). Submitting while the
    brothers work is allowed: the send control reads **Queue**, the task joins
    the server's per-session FIFO and a queue dock above the composer lists the
    waiting tasks with their `#N` position, a snippet, the queued-at time and a

@@ -21,13 +21,15 @@ The script runs:
 4. `node dist/selftest.js`
 5. a demo run through the built CLI on `mock`
 6. the hermetic CLI E2E (`node e2e/cli.ts`)
-7. the `typescript/` reference selftest
-8. the `web/` unit tests (`npm test` — chat, timeline, drafts, palette,
+7. the real-socket fault-injection runner (`node e2e/faults.ts` — loopback
+   only, seven retry/timeout/overflow/quota scenarios)
+8. the `typescript/` reference selftest
+9. the `web/` unit tests (`npm test` — chat, timeline, drafts, palette,
    session-status, recents, density, find, content-search, mentions, provider
    settings and model discovery, queue visibility, session-scope approvals,
    step folding, composer status seats, plan docks, streaming, composer prompt
    recall, the approval-policy model and the design-token layer)
-9. the `web/` build
+10. the `web/` build
 
 Expected final line: `SMOKE TEST: PASS`. It is an offline pre-flight, not the
 whole product gate — run the package gates below for that.
@@ -75,7 +77,7 @@ npm run test:spawn      # node --test tests/ (child processes allowed)
 ```
 
 On the canonical integrated run for this round the in-process suite is
-**1 474 tests: 1 472 pass, 0 fail, 2 skipped** (exit 0); the two skips are
+**1 481 tests: 1 479 pass, 0 fail, 2 skipped** (exit 0); the two skips are
 environment-gated and never failures — the workspace symlink-parity test and
 the MCP stdio spawn are unavailable in this environment. `npm run typecheck`
 and `npm run build` pass, the hermetic CLI E2E is 17/17 on sources and 17/17
@@ -86,7 +88,10 @@ Environment note (Windows): the shell-execution tests spawn the `bash` found on
 (`C:\Program Files\Git\bin`). A WSL `bash.exe` earlier on `PATH` can hold the
 temp directory handle and make cleanup-only assertions fail — the unchanged
 baseline fails the same way, so that is an environment quirk, not a product
-failure.
+failure. The smoke script itself prepends `C:\Program Files\Git\bin` to `PATH`
+when Git Bash is installed (and prints which `bash`-capable directory it
+chose), so the documented command works without manual PATH edits; the
+prerequisite still matters when running the package suites directly.
 
 Coverage: envelope and payload validation (zod), model output parsing,
 `sanitize_payload`, the consult/work/revise state machine, byte-stable
@@ -265,6 +270,39 @@ caret movement, Up is history-gated, browsing Down still steps/restores).
 The package suite is now 1 474 tests (1 472 pass, 2 environment skips) and the
 web suite 318.
 
+Wave 7 adds `tests/thinkingpersist.test.ts` (7 tests: the new additive
+`reasoning` runtime event is emitted once per streaming provider call, is
+sanitized and bounded (`REASONING_EVENT_MAX_CHARS` = 10,000, head+tail), is
+persisted to a real run sidecar via `RunManager`, never appears without
+streaming, never leaks into envelopes/decisions, and orders correctly across
+tool-loop rounds; the web timeline projection tolerates malformed/oversized/
+old-backend rows and renders replayed thinking collapsed-by-default) and
+extends the web timeline suite by four replay-projection tests. It also adds
+the design-token migration invariants: `web/tests/tokens.test.ts` now covers
+14 migrated component sheets and bans canonical radius/scale-spacing literals
+in them (9 tests). The package suite is now 1 481 tests (1 479 pass, 2
+environment skips) and the web suite 323.
+
+### Real-socket fault injection (in the smoke gate)
+
+`cd packages/harness && npm run test:e2e:faults` (`node e2e/faults.ts`) is a
+fully offline, deterministic runner that starts a scripted `node:http` server
+on a loopback ephemeral port and drives the real retry/timeout/overflow paths
+over actual TCP (`fetch`) — no fetch stubs and no external network. Seven
+scenarios assert attempt counts and classification: 429 + `Retry-After` then
+success; transient 500/503 then success; a 150 ms per-attempt timeout then
+success with the documented warning; context-overflow fail-fast
+(`ProviderContextOverflowError`, one attempt); a real compact-and-retry
+recovery over a seeded ~92 KB session (the cycle completes, one summary
+survives, the JSONL restores with dense `seq`); an always-overflow server
+bounded to 3 requests then the documented error; and fatal quota/billing
+(`provider-limit`, zero waits). It is bounded (10 s per-scenario watchdog,
+<30 s total, typically ~0.3 s — backoff waits are compressed through the
+provider's injectable sleeper seam), prints PASS/FAIL per scenario, exits 1 on
+failure, and writes evidence to the gitignored `e2e/runs/`. The full offline
+smoke gate runs it, and `docs/design-review.md` §9 distinguishes this loopback
+fault layer from real external-network load/fault injection (still open).
+
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
 subprocess against the mock provider — **17 scenarios**: consult, chat-repl,
@@ -361,12 +399,13 @@ key classifier), the Settings → Approvals model
 `GET /api/settings` section (old backend = unsupported + Ask), the save
 patch omitted for an unsupported backend and for a server-pinned mode (a
 pin is never persisted by a normal save), and the pinned/unsupported
-read-only reasons), and the design-token layer (`tests/tokens.test.ts`, 8
-tests: every `var(--x)` reference in `style.css` and the migrated components
-is defined, every core colour token exists in the light block and both dark
-blocks — which must stay identical —, the spacing scale is complete and
-ordered, no colour literal is left in the migrated sheets, and `theme.ts`
-stays mapped to the colour tokens); 318/318 web tests. The modules are
+read-only reasons), and the design-token layer (`tests/tokens.test.ts`, 9
+tests: every `var(--x)` reference in `style.css` and the 14 migrated component
+sheets is defined, every core colour token exists in the light block and both
+dark blocks — which must stay identical —, the spacing scale is complete and
+ordered, no colour literal is left in the migrated sheets, canonical
+radius/scale-spacing literals are banned there too, and `theme.ts`
+stays mapped to the colour tokens); 323/323 web tests. The modules are
 dependency-free at runtime, so plain `node --test` runs them
 via the `tests/register-ts.mjs` bootstrap (a tiny resolve hook for the
 extensionless imports); `npm test` wires that up. The full `web/` gate also

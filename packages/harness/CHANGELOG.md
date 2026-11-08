@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Persisted reasoning replay** (wave 7): thinking/reasoning deltas are no
+  longer live-only. When token streaming is active, the harness buffers the
+  sanitized reasoning per provider call and emits one additive
+  `{type: "reasoning", role, kind, text, truncated}` runtime event (bound
+  `REASONING_EVENT_MAX_CHARS` = 10,000, head+tail with the shared truncation
+  marker; ANSI/control bytes stripped); `RunManager`'s existing sidecar
+  persister writes it to `sessions/runtime/*.events.jsonl` automatically, so
+  no protocol envelope or session-JSONL change is needed. The web replays the
+  record after reload as a collapsed-by-default
+  **Thinking · replayed · Senior/Junior** disclosure row (plain text, bounded,
+  tolerant of malformed/oversized rows; older backends simply have none). The
+  record spans one node call seam: an internal overflow-recovery retry merges
+  both attempts' deltas into that record, and a failed/cancelled call keeps
+  the reasoning it streamed so far.
+  Honest limitation: capture is streaming-only (the web always opts in;
+  `run`/`chat`/TUI need `--stream-tokens`) because the plain provider contract
+  returns no reasoning text, and TUI replay is not implemented (live thinking
+  unchanged). Files: `src/harness.ts`, `src/runevents.ts`, `src/index.ts`
+  (`ReasoningEvent`, `REASONING_EVENT_MAX_CHARS`); web `src/types.ts`,
+  `src/runtime.ts`, `src/components/ChatView.vue`, `src/folding.ts`
+  (reasoning rows stay non-foldable). Tests: `tests/thinkingpersist.test.ts`
+  (7) + web `tests/timeline.test.ts` (+4).
+- **Real-socket fault-injection E2E** (wave 7): new opt-in
+  `packages/harness/e2e/faults.ts` (`npm run test:e2e:faults`) starts a
+  scripted `node:http` server on a loopback ephemeral port and drives the real
+  retry/timeout/overflow machinery over actual TCP/fetch — no fetch stubs and
+  no external network. Seven deterministic scenarios assert attempt counts and
+  classification: 429 + `Retry-After` then success; transient 500/503 then
+  success; a 150 ms per-attempt timeout then success with the documented
+  warning; context-overflow fail-fast (one attempt); a genuine compact-and-
+  retry recovery over a seeded ~92 KB session (cycle completes, one summary,
+  JSONL restores with dense seq); an always-overflow server bounded to 3
+  requests then the documented error; and fatal quota/billing
+  (`provider-limit`, zero waits). Per-scenario 10 s watchdog, <30 s total
+  (~0.3 s typical), PASS/FAIL summary, exit 1 on failure, evidence in the
+  gitignored `e2e/runs/`. The full offline smoke gate now runs it.
 - **Consult-mode tool loops for both brothers** (wave 4, lane A): the
   senior's consult opening and the consult-mode junior proposal/revision now
   ground themselves with a read-only workspace belt before emitting the
@@ -612,6 +648,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Remaining web chrome sheets use the design tokens** (wave 7): nine more
+  component sheets (`CommandPalette`, `ToolActivity`, `ApprovalCard`,
+  `UsageFooter`, `ContextMeter`, `PromptAudit`, `CommandResult`,
+  `SidebarFooter`, `WorkspaceFinder`) migrated their canonical radii and scale
+  spacing to the existing `--radius-*`/`--space-*` tokens (45 value-for-value
+  replacements; token inventory unchanged at 93 because every value already
+  had a token — no colour literals remained in scope). A new deterministic
+  token-test invariant bans canonical radius/scale-spacing literals in the now
+  14 migrated sheets; the wave-4 policy keeps genuinely one-off values literal.
 - **Shell approvals warn after a denied file change** (wave 6): the
   `RunApprovalBroker` now tracks whether the operator denied a
   write/edit/delete earlier in the same run; a subsequently parked

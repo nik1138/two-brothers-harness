@@ -141,9 +141,11 @@ node dist/cli.js run "Plan a migration from Redis to Valkey" --provider mock
   `sessions/runtime/*.events.jsonl` (tool/approval events). Run records and
   pending approvals are in-memory only; role settings persist to
   `sessions/settings.json` (keys encrypted at rest).
-- Known gaps (see `docs/design-review.md`): no real-network load/fault
-  injection (a hermetic scale suite covers large sessions and transcripts,
-  200-session listings, concurrent runs and repeated compaction). Timeout and
+- Known gaps (see `docs/design-review.md`): no real external-network
+  load/fault injection (a hermetic scale suite covers large sessions and
+  transcripts, 200-session listings, concurrent runs and repeated compaction,
+  and the smoke gate's loopback fault-injection runner drives the real
+  retry/timeout/overflow paths over real TCP). Timeout and
   shutdown behavior is covered hermetically (provider retry/timeout
   registry, `run_shell` timeout clamp, `serve` shutdown grace); real-network
   coverage exists only in the opt-in live E2E layers (`packages/harness/e2e`
