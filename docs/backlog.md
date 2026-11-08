@@ -50,31 +50,26 @@ Design anchors that already exist:
   session, cut the final line mid-object, `--resume`), then make the reader
   drop the torn trailing record instead of failing the session, keeping dense
   `seq` intact and never rewriting the file behind the operator's back.
+  **Shipped in wave 25 (2026-11-08):** a read ignores only a torn *trailing*
+  record in memory (reported once; the search document carries additive
+  `recovered`/`dropped_bytes`), `--resume` repairs the file atomically before
+  appending with dense `seq`, interior corruption stays a typed error, and
+  read-only listing/search/export never rewrite. The brief above is kept for
+  context. **The recover-vs-refuse policy question is settled:** recover the
+  torn trailing record, never guess at interior corruption, and keep read-only
+  paths read-only; destructive rewind keeps the strict reader and refuses
+  before rewriting.
 - **Detached POSIX children on TUI shutdown (vendor scout F4)** — shipped in
   wave 24 for the cooperative paths: the TUI now waits for the running turn to
   unwind `run_shell`'s kill/drain (bounded by the shared
   `SHELL_DRAIN_BUDGET_MS`) before restoring the terminal, and plugin tools
   receive the run's abort signal with `ctx.workspace_shell` forwarding it, so
-  a cancelled plugin-initiated shell is cancellable. Remaining: real POSIX
-  hardware validation of `killpg` when the leader already exited (this
-  machine is Windows; the Windows tests prove abort/drain propagation only),
-  and CLI per-turn abort/SIGINT/SIGTERM coverage is a wave-25 item.
-- **TUI steering surface** — wave 23 shipped steering end to end in the
-  runtime, HTTP API and web composer; a TUI chord that queues the compose text
-  for the running turn (and reports the pending count) is still missing.
-- **Torn trailing session record: decide recover-vs-refuse (vendor scout F3)**
-  — a crash mid-append leaves a half-written final JSONL line, and `--resume`
-  currently refuses that session: `SessionStore.load` throws `SessionError` on
-  any unparseable non-empty line, a behaviour `tests/session.test.ts` pins as
-  deliberate ("fail loudly, never guess"). The runtime-event sidecar already
-  skips a torn last line (`runevents.ts`) and the metadata sidecar is
-  fail-soft, so the strictness is session-file specific. `.tmp/wave24/f3.md`
-  records the reproduction (exit 1, file byte-identical afterwards) and a
-  minimal proposal: drop only the torn *trailing* record, report it once, keep
-  dense `seq`, never rewrite the file, and still throw on non-trailing
-  corruption. Decide the policy first; the change itself is small once the
-  answer is yes.
-
+  a cancelled plugin-initiated shell is cancellable. CLI per-turn abort and
+  SIGINT/SIGTERM/SIGHUP coverage shipped in wave 25 (`src/turnsignal.ts`, exit
+  codes 130/143/129, bounded drain wait); TUI steering shipped as `Ctrl+N`.
+  Remaining: real POSIX hardware validation of `killpg` when the leader already
+  exited (this machine is Windows; the Windows tests prove abort/drain
+  propagation only).
 - **npm publish prep** — verify `@two-brothers/harness` name availability
   (fallbacks), publishConfig + provenance (OIDC), `publint`/`attw` gates,
   and pi's supply-chain practices (exact-version pins + check script,
@@ -129,6 +124,15 @@ Design anchors that already exist:
   untouched). The original prototype had no compaction — a documented TS-first
   divergence; 14 tests, no new runtime deps (see
   `docs/history/ts-rewrite-plan.md`).
+  **Persisted compaction settings shipped in wave 25 (2026-11-08):** the
+  top-level `compaction` section of `sessions/settings.json` stores
+  `threshold_chars`, `threshold_tokens`, `keep_recent_chars` and
+  `context_window`; `GET/PUT /api/settings` carry it additively (per-field
+  `{persisted, effective, source}` plus `force`/`pinned`) and the web
+  Settings → Advanced **Auto-compaction** card edits it. Precedence:
+  explicit `ServerOptions.compaction` > an explicitly-set non-zero CLI/env
+  field (provenance-tracked, so the 40 000 keep-recent default never shadows a
+  saved value) > persisted > absent, with `0` meaning off/unknown.
 - **Print/JSON automation mode** — pi's `print-mode.ts` pattern (~170
   LOC): non-interactive `run --json` event stream for scripting/CI
   (research/harnesses/pi-product-shell.md).
@@ -1233,9 +1237,9 @@ Design anchors that already exist:
   `web/src/steering.ts`, `web/src/api.ts`, `web/src/types.ts`,
   `web/src/App.vue`, `web/src/components/Composer.vue`,
   `web/src/shortcuts.ts`; tests `tests/steering.test.ts` (20) and
-  `web/tests/steering.test.ts` (6). Remaining: TUI steering, a browser E2E
-  scenario (deferred again in wave 24 — see "Later goals / items"),
-  real-provider validation.
+  `web/tests/steering.test.ts` (6). TUI steering shipped in wave 25
+  (`Ctrl+N`); remaining: a browser E2E scenario (deferred again in wave 24 —
+  see "Later goals / items") and real-provider validation.
 - **Session fork + self-contained HTML export** — `POST
   /api/sessions/{name}/fork` and `sessions fork <name> [--at <seq>] [--name
   <new>]` copy a session prefix byte-for-byte into a NEW session file (dense
@@ -1310,6 +1314,54 @@ Design anchors that already exist:
   in `tests/adapters.test.ts`/`tests/thinkingpassback.test.ts`. Remaining:
   real-model cache-hit evidence, `ttl`/opt-out, cost-table cached-input
   discount.
+
+## Shipped 2026-11-08 (wave 25: crash-torn resume, TUI steering, persisted compaction, signals, tab title)
+
+- **Crash-torn session resume (F3)** — `SessionStore.load` ignores only a
+  malformed **final** JSONL fragment in memory and reports it once;
+  `--resume` repairs the file atomically (temp file + rename, or truncation to
+  the last complete line) before appending, keeping dense `seq`. Interior
+  corruption remains a typed `SessionError`, destructive rewind keeps the
+  strict reader, and `sessions`, `show`, `search`, export and the server's read
+  routes never rewrite. The search document carries additive
+  `recovered`/`dropped_bytes`; CLI/TUI resume prints one bounded warning. Files:
+  `src/session.ts`, `src/sessionsearch.ts`, `src/server.ts`; tests
+  `tests/session.test.ts` (12), `tests/sessionsearch.test.ts` (36) and
+  `tests/sessionapi.test.ts` (10). See `docs/cli-reference.md` → “Sessions”.
+- **TUI steering** — `Ctrl+N` (also the `Ctrl+P` palette's **Steer the running
+  turn** row) queues composer text for the running turn at its next step; at
+  most 4 000 characters and 8 pending texts; blank/oversized/full-queue inputs
+  are refused, the draft clears only on acceptance, and the copy distinguishes
+  a queued steer from still-pending leftovers (an applied steer appears in the
+  transcript). `Enter` while a turn runs keeps its
+  refusal and names the chord. Files: `src/tui/steering.ts` (new),
+  `src/tui/app.ts`, `src/tui/keymap.ts`; tests `tests/tuisteering.test.ts` (8),
+  `tests/tuikeymap.test.ts` (19) and `tests/tuiintegration.test.ts` (27). See
+  `docs/keyboard.md` → “Steering a running turn”.
+- **Persisted compaction settings** — the top-level `compaction` section of
+  `sessions/settings.json` (`threshold_chars`, `threshold_tokens`,
+  `keep_recent_chars`, `context_window`) is served additively by
+  `GET /api/settings` and accepted by `PUT`; the web Settings → Advanced
+  **Auto-compaction** card edits it. Precedence: `ServerOptions.compaction` >
+  explicitly-set non-zero CLI/env field > persisted > absent; `0` = off/unknown.
+  Files: `src/settings_store.ts`, `src/server.ts`, `src/config.ts`,
+  `src/index.ts`, `web/src/compactionSettings.ts` (new), the Advanced card;
+  tests `tests/settings.test.ts` (42), `tests/serverbase.test.ts` (15) and
+  `web/tests/compactionSettings.test.ts` (12). See `docs/cli-reference.md` →
+  `serve` and `GET/PUT /api/settings`.
+- **Cooperative CLI cancellation** — `SIGINT`/`SIGTERM` during `run`/`chat`
+  abort the turn, wait a bounded cleanup, then exit (`SIGINT` = 130,
+  `SIGTERM` = 143, POSIX `SIGHUP` = 129); a second signal force-exits.
+  `serve` joins shutdown on `SIGHUP` too (idempotent; no second-signal force
+  path). Machine stdout stays clean and an idle `chat` Ctrl+C is unchanged.
+  Files: `src/turnsignal.ts` (new), `src/cli.ts`, `src/shell.ts`; tests
+  `tests/cliwiring.test.ts` (+8) and `tests/serveshutdown.test.ts`. See
+  `docs/cli-reference.md` → “Signals”.
+- **Web tab title** — `▶` running/queued, `!` waiting, `… (failed)`, `(N)`
+  unread without a selection, plain `Two Brothers` default; sanitized and
+  capped at 120 characters. Files: `web/src/tabTitle.ts` (new),
+  `web/src/App.vue`; tests `web/tests/tabTitle.test.ts` (16). See
+  `docs/quickstart.md` → step 4.
 
 ## Open items (deferred)
 

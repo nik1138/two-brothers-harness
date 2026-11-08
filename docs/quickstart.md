@@ -108,9 +108,12 @@ node dist/cli.js run "Now plan the rollback" --provider mock --session-file sess
 ```
 
 Every protocol envelope is appended to the JSONL file and flushed immediately, so a
-crashed run leaves a valid, replayable log. `--resume` rebuilds the shared context and
-`seq` numbering continues densely. An existing file without `--resume` is an error —
-use `--resume` or delete the file. See the [CLI reference](cli-reference.md) for details.
+crashed run loses at most the final, partially written line. `--resume` drops that torn
+trailing fragment with one bounded warning, repairs the file atomically, rebuilds the
+shared context, and continues dense `seq` numbering; interior corruption still fails
+with a line-numbered error, and read-only listing/search never rewrite the file. An
+existing file without `--resume` is an error — use `--resume` or delete the file. See
+the [CLI reference](cli-reference.md) for details.
 
 ## 6. Diagnose problems
 
@@ -278,6 +281,17 @@ the same hero appears inside a selected session that has no transcript yet.
    Per-model-call prompt annotations are developer information and stay out
    of the conversation by default; Settings → **Advanced** has the
    `Show prompt audits in the conversation` toggle when you need them.
+   Settings → **Advanced** also carries the **Auto-compaction** card: Threshold
+   (chars), Threshold (tokens), Keep recent (chars) and Context window (tokens)
+   — the same numbers as `--compact-threshold`,
+   `--compact-threshold-tokens`, `--compact-keep-recent` and
+   `--context-window`. `0` means off for a threshold and unknown for the
+   context window. The card saves the persisted `compaction` section of
+   `sessions/settings.json`; each field also shows the value a run would
+   actually use and where it came from. An explicitly-set non-zero serve flag
+   or `TWO_BROTHERS_*` env value wins over the saved value and is shown as
+   pinned instead of pretending the save took effect; an older backend renders
+   an unsupported state and changes nothing.
 4. **Read the run at a glance.** Older tool/activity rows of completed runs
    fold into one muted disclosure row — `… N tool calls · expand` (the label
    adds `in M runs` when the folded group spans several runs) —
@@ -295,7 +309,12 @@ the same hero appears inside a selected session that has no transcript yet.
    it applies), and the
    latest prompt audit's exact system/context character counts plus the
    offered-tool count. A seat whose data is unknown is simply absent — no
-   token counts or other numbers are invented.
+   token counts or other numbers are invented. The browser tab title follows
+   the selected session and its run state: `▶ …` while a run works or is
+   queued, `! …` while it waits for an approval, `… (failed)` for a failed run,
+   `(N) Two Brothers` when finished runs are unread and no session is selected,
+   and plain `Two Brothers` otherwise. A background tab therefore tells you
+   when the brothers need you without switching back.
 5. **Approve mutations.** Reads inside the workspace are free, but by default
    every write/edit/delete/shell command docks an approval card in the chat —
    **Allow once** or **Deny** there to resume the run. A third decision,
@@ -389,7 +408,11 @@ search, `Ctrl+F` find-in-transcript (with `/find`), `Ctrl+O` to stash or
 restore a draft, Ctrl+P command palette and `?` help overlays, session/model
 pickers, live **THINKING** and response blocks from token streaming, live
 resize repaint, and non-blocking turns — Escape/Ctrl+C cancel a running turn
-before anything else. Typing `/` at the start of the composer opens the
+before anything else. While a turn runs, `Ctrl+N` (or the palette's **Steer
+the running turn** row) queues the composer text for that turn at its next
+step — not a new task — bounded to eight pending texts of 4 000 characters;
+the draft clears only on acceptance and leftovers are reported honestly.
+Typing `/` at the start of the composer opens the
 command menu (the TUI's own commands, then built-in prompts/actions, then
 discovered templates) and `@` opens the mention picker: shared skills are
 selectable (`@skill:name`), and in a workspace-bound run a path-like `@dir/file`
