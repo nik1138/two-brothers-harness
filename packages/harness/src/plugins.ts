@@ -184,9 +184,14 @@ type Role = (typeof ROLES)[number];
 export const TOOL_SCOPES = ["shared", "senior", "junior"] as const;
 export type ToolScope = (typeof TOOL_SCOPES)[number];
 
-/** A plugin tool handler: receives the model's arguments, returns the result. */
+/**
+ * A plugin tool handler: receives the model's arguments and the run's abort
+ * signal (the same `AbortSignal` a built-in `Tool.execute` receives; it is
+ * aborted when the operator cancels the turn). A handler that starts a shell
+ * should pass the signal on to `workspace_shell`.
+ */
 export type PluginToolHandler =
-  (args: Record<string, unknown>) => unknown;
+  (args: Record<string, unknown>, signal?: AbortSignal) => unknown;
 
 /** One entry of the `errors` list surfaced through `GET /api/plugins`. */
 export interface PluginErrorEntry {
@@ -511,7 +516,9 @@ export interface LoadedPlugin {
  * The `workspace_*` helpers are thin confined bridges over the run's
  * Workspace: reads auto-allow, writes / edits / deletes / shell pass through
  * the same PermissionManager approval broker as the built-in tools. They
- * raise PluginError when the current run has no workspace.
+ * raise PluginError when the current run has no workspace. `workspace_shell`
+ * takes the handler's abort signal as its optional third argument and forwards
+ * it to `Workspace.run_shell`, so a cancelled turn also cancels the shell.
  *
  * Method names keep the Python `snake_case` contract verbatim (same as the
  * `Workspace` tool methods), so a plugin reads identically in both ports.
@@ -713,8 +720,12 @@ export class PluginContext {
     return this._require_workspace().delete_file(rel);
   }
 
-  workspace_shell(command: string, timeout?: number): Promise<WorkspaceResult> {
-    return this._require_workspace().run_shell(command, timeout);
+  workspace_shell(
+    command: string,
+    timeout?: number,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceResult> {
+    return this._require_workspace().run_shell(command, timeout, signal);
   }
 }
 
@@ -804,12 +815,12 @@ export function asHarnessTool(tool: RegisteredTool): Tool {
     name: tool.name,
     description: tool.description || `Plugin tool ${tool.name}.`,
     parameters: toolParameters(tool.paramsSchema),
-    execute: async (args) => {
+    execute: async (args, signal) => {
       const check = validateToolArgs(tool, args);
       if (!check.ok) return `plugin tool error: ${check.error}`;
       try {
         const result = await withTimeout(
-          Promise.resolve(tool.handler(check.args)),
+          Promise.resolve(tool.handler(check.args, signal)),
           tool.timeoutMs,
         );
         if (typeof result === "string") return result;

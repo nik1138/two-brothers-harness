@@ -76,6 +76,7 @@ import {
 } from "../workspacefiles.ts";
 import type { StreamEvent } from "../runstream.ts";
 import { restoreContext, SessionError, SessionStore } from "../session.ts";
+import { SHELL_DRAIN_BUDGET_MS } from "../shell.ts";
 import {
   exportSessionFileName,
   sessionToMarkdown,
@@ -1177,6 +1178,35 @@ class TuiExit extends Error {
     super("tui exit");
     this.name = "TuiExit";
   }
+}
+
+/**
+ * Wait for a running turn to finish unwinding before the terminal is restored,
+ * but never hang: the wait is capped at one shell drain budget plus a small
+ * margin. `run_shell`'s abort path kills the child tree and then drains up to
+ * {@link SHELL_DRAIN_BUDGET_MS}, so the old fixed 1500 ms cap could restore the
+ * terminal (and exit) while that cleanup was still running.
+ *
+ * A missing/rejected turn resolves immediately (or at the cap) and the helper
+ * never throws; the caller still restores the terminal on every exit path.
+ */
+export function awaitTurnDrain(
+  turnDone: Promise<unknown> | null,
+  budgetMs: number = SHELL_DRAIN_BUDGET_MS + 500,
+): Promise<void> {
+  if (turnDone === null) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      resolve();
+    };
+    timer = setTimeout(finish, Math.max(0, budgetMs));
+    turnDone.then(finish, finish);
+  });
 }
 
 /**
@@ -4197,11 +4227,19 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     // Stop and unwatch the opt-in poll on every exit path (no leaked timer).
     stopKeysWatch();
     unsubscribeResize();
-    clearInterval(spinnerTimer);
     abortRunningTurn();
     if (turnDone !== null) {
-      await Promise.race([turnDone, new Promise((resolve) => setTimeout(resolve, 1500))]);
+      // A cancelled turn may still be unwinding `run_shell`'s kill + drain
+      // (up to SHELL_DRAIN_BUDGET_MS). Keep the spinner/status alive while we
+      // wait so the operator sees progress, and restore the terminal once the
+      // turn settles or the bounded budget expires — never hang on exit.
+      if (running) {
+        activity = "stopping — waiting for shell cleanup…";
+        render();
+      }
+      await awaitTurnDrain(turnDone);
     }
+    clearInterval(spinnerTimer);
     terminal.restore();
   }
 }

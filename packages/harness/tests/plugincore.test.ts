@@ -458,6 +458,60 @@ test("a declared timeoutMs bounds the handler fail-softly", async () => {
   assert.equal(await asHarnessTool(ctx._tools[1]).execute({}), "quick");
 });
 
+test("asHarnessTool forwards the abort signal to the handler and workspace_shell", async () => {
+  const controller = new AbortController();
+  let handlerSignal: AbortSignal | undefined;
+  let shellSignal: AbortSignal | undefined;
+  const calls: Array<{ command: string; timeout: number | undefined }> = [];
+  // Mock workspace: the regression is signal propagation, not process teardown.
+  const fakeWorkspace = {
+    run_shell: async (command: string, timeout?: number, signal?: AbortSignal) => {
+      calls.push({ command, timeout });
+      shellSignal = signal;
+      const cancelled = await new Promise<boolean>((resolve) => {
+        if (signal?.aborted === true) {
+          resolve(true);
+          return;
+        }
+        const timer = setTimeout(() => resolve(false), 2_000);
+        signal?.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(timer);
+            resolve(true);
+          },
+          { once: true },
+        );
+      });
+      return { tool: "run_shell", command, status: "cancelled", cancelled };
+    },
+  } as unknown as Workspace;
+
+  const ctx = new PluginContext("signal_plugin", fakeWorkspace);
+  ctx.add_tool(
+    "plugin_shell",
+    async (args, signal) => {
+      handlerSignal = signal;
+      return ctx.workspace_shell(String(args.command ?? ""), 7, signal);
+    },
+    { description: "Run a shell command." },
+  );
+  const pending = asHarnessTool(ctx._tools[0]).execute(
+    { command: "would-block" },
+    controller.signal,
+  );
+  // The handler runs synchronously into the shell wait; abort after it is in.
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.abort();
+  const result = await pending;
+
+  assert.equal(handlerSignal, controller.signal);
+  assert.equal(shellSignal, controller.signal);
+  assert.deepEqual(calls, [{ command: "would-block", timeout: 7 }]);
+  assert.match(result, /"status":"cancelled"/);
+  assert.match(result, /"cancelled":true/);
+});
+
 // ---------------------------------------------------------------------------
 // Settings normalization + option validation
 // ---------------------------------------------------------------------------

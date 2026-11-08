@@ -919,23 +919,24 @@ function activePluginNames(manager: PluginManager): string[] {
  * Honest work-mode notice for the CLI path, or `null` when no warning applies.
  *
  * `two-brothers run --mode work` has no workspace option, so no workspace
- * built-ins can bind; without any MCP or plugin-contributed tool the junior
- * has no way to read or write files. In that configuration a small model can
- * fabricate a deliverable that the run accepts with exit 0. The warning is one
- * bounded line on stderr (stdout and exit codes stay untouched), and it never
- * fires when at least one tool is available.
+ * built-ins can bind; without any shared or junior MCP/plugin-contributed tool
+ * the junior has no way to read or write files. Senior-only tools do not help
+ * the junior, so they never suppress the warning. In that configuration a small
+ * model can fabricate a deliverable that the run accepts with exit 0. The
+ * warning is one bounded line on stderr (stdout and exit codes stay untouched).
  */
 export function workModeWithoutToolsWarning(
   mode: Config["mode"],
   scopes: ToolScopes,
 ): string | null {
   if (mode !== "work") return null;
-  const hasAnyTool = Object.values(scopes).some((list) => (list?.length ?? 0) > 0);
-  if (hasAnyTool) return null;
+  const juniorBelt = [...(scopes.shared ?? []), ...(scopes.junior ?? [])];
+  if (juniorBelt.length > 0) return null;
   return (
     "work mode has no tools bound: CLI runs are not workspace-bound, so the junior " +
-    "cannot read or write files and a deliverable it claims may not exist. Use `serve`/TUI " +
-    "with a workspace, or bind tools with --mcp-config or a plugin's mcpServers."
+    "has no shared/junior tools and cannot read or write files; a deliverable it " +
+    "claims may not exist. Use `serve`/TUI with a workspace, or bind a shared or " +
+    "junior tool (for example an MCP server with role shared/junior, or a plugin tool)."
   );
 }
 

@@ -649,9 +649,10 @@ test("run: work mode with no tool belt emits exactly one stderr warning", async 
   assert.equal(warnings.length, 1, io.err.join("\n"));
   const warning = warnings[0] as string;
   assert.match(warning, /not workspace-bound/);
-  assert.match(warning, /junior cannot read or write files/);
+  assert.match(warning, /has no shared\/junior tools and cannot read or write files/);
   assert.match(warning, /deliverable it claims may not exist/);
-  assert.match(warning, /--mcp-config/);
+  assert.match(warning, /bind a shared or junior tool/);
+  assert.match(warning, /MCP server with role shared\/junior/);
   assert.match(warning, /`serve`\/TUI/);
 
   // stdout is untouched: the warning is a diagnostic, never a transcript block
@@ -660,7 +661,7 @@ test("run: work mode with no tool belt emits exactly one stderr warning", async 
   assert.ok(io.out.some((line) => line.includes("[senior -> user] decision")));
 });
 
-test("run: the work-mode warning never fires with a tool or a non-work mode", async () => {
+test("run: the work-mode warning fires unless the junior has a shared/junior tool", async () => {
   // No tool belt but not work mode: no warning at all.
   for (const mode of ["consult", "auto"]) {
     const io = makeIO();
@@ -672,11 +673,20 @@ test("run: the work-mode warning never fires with a tool or a non-work mode", as
     );
   }
 
-  // The predicate is the single source of truth: any non-empty scope suppresses it.
+  // The predicate is the single source of truth: only the junior's belt
+  // (shared + junior) suppresses it; a senior-only MCP/plugin tool does not.
   assert.equal(workModeWithoutToolsWarning("work", { junior: [fakeTool] }), null);
   assert.equal(workModeWithoutToolsWarning("work", { shared: [fakeTool] }), null);
-  assert.equal(workModeWithoutToolsWarning("work", { senior: [fakeTool] }), null);
+  assert.equal(
+    workModeWithoutToolsWarning("work", { shared: [fakeTool], junior: [fakeTool] }),
+    null,
+  );
   assert.equal(workModeWithoutToolsWarning("consult", {}), null);
+
+  const seniorOnly = workModeWithoutToolsWarning("work", { senior: [fakeTool] });
+  assert.ok(seniorOnly !== null, "a senior-only tool leaves the junior belt empty");
+  assert.match(seniorOnly, /work mode has no tools bound/);
+  assert.match(seniorOnly, /has no shared\/junior tools/);
 
   const missing = workModeWithoutToolsWarning("work", { junior: [] });
   assert.ok(missing !== null, "empty scope lists are still an empty belt");

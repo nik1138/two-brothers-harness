@@ -18,7 +18,7 @@ import { test } from "node:test";
 
 import { resolveConfig } from "../src/config.ts";
 import { toNdjsonLine, type ToolCallStreamEvent } from "../src/runstream.ts";
-import { CANCELLED_TURN_HINT, runTuiApp, type TuiIO } from "../src/tui/app.ts";
+import { CANCELLED_TURN_HINT, awaitTurnDrain, runTuiApp, type TuiIO } from "../src/tui/app.ts";
 import {
   loadTuiKeyCommands,
   resolveTuiCommands,
@@ -523,6 +523,51 @@ test("a stopped turn shows a bounded transient hint, then the rotation returns",
   assert.equal(lastFrameText(output).split("\n").length, 24, "the frame geometry is unchanged");
   const code = await quit(input, app);
   assert.equal(code, 0);
+});
+
+test("awaitTurnDrain keeps terminal restore behind a 2500 ms turn (old 1500 ms cap)", async () => {
+  let turnSettled = false;
+  let restored = false;
+  const turnDone = new Promise<void>((resolve) => {
+    setTimeout(() => {
+      turnSettled = true;
+      resolve();
+    }, 2_500);
+  });
+  const drained = awaitTurnDrain(turnDone).then(() => {
+    restored = true;
+  });
+
+  // The old shutdown raced the turn against a fixed 1500 ms timer; by 1700 ms
+  // that race had already restored the terminal.
+  await new Promise((resolve) => setTimeout(resolve, 1_700));
+  assert.equal(turnSettled, false, "the fake turn is still unwinding");
+  assert.equal(restored, false, "terminal.restore() must wait for the turn");
+
+  await drained;
+  assert.equal(turnSettled, true);
+  assert.equal(restored, true);
+});
+
+test("awaitTurnDrain still restores once the budget expires for a never-settling turn", async () => {
+  let restored = false;
+  const never = new Promise<void>(() => {});
+  const started = Date.now();
+  await awaitTurnDrain(never, 100).then(() => {
+    restored = true;
+  });
+  const elapsed = Date.now() - started;
+
+  assert.equal(restored, true, "the exit path must never hang");
+  assert.ok(elapsed >= 80, `drain returned too early (${elapsed}ms)`);
+  assert.ok(elapsed < 2_000, `drain did not honour the budget (${elapsed}ms)`);
+});
+
+test("awaitTurnDrain does not wait when there is no turn or the turn already failed", async () => {
+  const started = Date.now();
+  await awaitTurnDrain(null);
+  assert.ok(Date.now() - started < 200, "the no-turn shutdown fast path stays fast");
+  await assert.doesNotReject(awaitTurnDrain(Promise.reject(new Error("turn failed")), 100));
 });
 
 test("a discovered provider.md can never shadow the native /provider connect surface", async () => {
