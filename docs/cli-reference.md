@@ -530,7 +530,9 @@ and the last-modified time. Mostly read-only: listing, `show`, `search` and
 `export` never change a file; `sessions fork` creates a new session file (the
 source is never modified), `sessions undo` previews, applies or discards a
 run's workspace undo record (a preview and a discard change no session file)
-and `sessions rewind` rewrites one. A read also
+and `sessions rewind` rewrites one. The store keeps the legacy flat layout
+until `sessions migrate` switches it to project/session directories; every
+read path accepts both ([Session storage](session-storage.md)). A read also
 tolerates a crash-torn final line: `sessions search` (and the web search
 corpus, detail and export routes) load through the torn-tail-aware reader,
 which ignores only the incomplete trailing fragment, and the search document
@@ -715,6 +717,29 @@ workspace link or a record from another workspace exits 1, and a per-file
 result). A missing name, an unexpected argument, `--apply` combined with
 `--discard` or a malformed `--run` is a usage error (exit 2).
 
+#### `sessions migrate [--dry-run] [--json]`
+
+Move flat `<sessions-dir>/<name>.jsonl` sessions into the project/session
+directory layout (`<project>/<stem>/session.jsonl` plus `meta.json` and
+`events.jsonl`) and write `.layout.json` so new sessions follow it. The move is
+copy-first and idempotent: an identical target is adopted, a different target is
+a conflict that keeps the flat source and exits 1; the marker is written only
+when the pass has no conflicts or errors. `workspace_id` metadata groups a
+session under its registered workspace path, and unlinked sessions use
+`_global`.
+
+```powershell
+node dist/cli.js sessions migrate --sessions-dir sessions --dry-run
+node dist/cli.js sessions migrate --sessions-dir sessions --json
+```
+
+`--dry-run` prints the plan without touching disk. `--json` prints
+`{dryRun, layout, entries[]}` where `layout` is the resulting layout (`dirs`
+on a clean dry run) and each entry is
+`{name, sourcePath, targetPath, status, detail?}`; `status` is `migrated`,
+`already`, `conflict` or `error`. See [Session storage](session-storage.md)
+for the two layouts, compatibility rules and the backup caveat.
+
 ### `doctor`
 
 Local, read-only diagnostics: one `[pass]` / `[warn]` / `[fail]` / `[skip]`
@@ -867,7 +892,10 @@ a repeated signal is ignored rather than force-exiting, and `serve` has no
 second-signal force path. Flushed session JSONL is never rewound, so a shutdown
 loses no recorded history.
 
-The backend is a **local single-user workspace server**. API overview:
+The backend is a **local single-user workspace server**. API overview (paths
+below describe the flat layout; a migrated store keeps the same session names
+but stores `meta.json` and `events.jsonl` inside
+`<project>/<stem>/` — see [Session storage](session-storage.md)):
 
 | Endpoint | Purpose |
 |---|---|

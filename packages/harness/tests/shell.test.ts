@@ -33,6 +33,7 @@ import {
   TASKKILL_TIMEOUT_MS,
   killTree,
   resolveTaskkillPath,
+  isWslBashPath,
   type ShellChildSpawn,
   type TaskkillOptions,
   type TaskkillProcess,
@@ -74,6 +75,7 @@ class FakeChild extends EventEmitter {
   finish(code: number | null): void {
     this.exitCode = code;
     this.emit("exit", code, null);
+    this.emit("close", code, null);
   }
 
   fail(error: Error): void {
@@ -463,4 +465,16 @@ test("run_shell reports the child exit code", async () => {
 
   assert.equal(result.status, "ok");
   assert.equal(result.exit_code, 3);
+});
+
+test("isWslBashPath rejects the WSL launchers but accepts native bash", () => {
+  assert.equal(isWslBashPath("C:\\Windows\\System32\\bash.exe"), true);
+  assert.equal(isWslBashPath("c:/windows/system32/bash.exe"), true);
+  assert.equal(
+    isWslBashPath("C:\\Users\\x\\AppData\\Local\\Microsoft\\WindowsApps\\bash.exe"),
+    true,
+  );
+  assert.equal(isWslBashPath("C:\\Program Files\\Git\\bin\\bash.exe"), false);
+  assert.equal(isWslBashPath("/bin/bash"), false);
+  assert.equal(isWslBashPath("C:\\msys64\\usr\\bin\\bash.exe"), false);
 });

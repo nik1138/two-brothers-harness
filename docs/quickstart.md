@@ -414,7 +414,11 @@ Sessions are plain JSONL files under `--sessions-dir`; each has a
 `<name>.meta.json` sidecar (title, workspace link, and — for a fork — a local
 `parent` link) and a runtime sidecar in
 `sessions/runtime/<name>.events.jsonl` (tool calls, approvals, diffs, plan
-snapshots).
+snapshots). To switch a store to the project/session directory layout (one
+folder per session with `session.jsonl`, `meta.json` and `events.jsonl`), run
+`two-brothers sessions migrate --sessions-dir sessions --dry-run` first, then
+without `--dry-run`; readers accept both layouts. See
+[Session storage](session-storage.md).
 
 ## The terminal workspace
 

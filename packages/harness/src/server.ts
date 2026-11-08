@@ -263,6 +263,7 @@ import {
   type McpToolSet,
 } from "./mcp.ts";
 import { deriveTitle, SessionMetadataStore } from "./metadata.ts";
+import { SessionLayout } from "./sessionlayout.ts";
 import {
   MENTION_MAX_FILES,
   MENTION_MAX_FILE_CHARS,
@@ -1026,7 +1027,8 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     pinned: approvalPolicyOverride !== null,
   });
 
-  const runtimeEvents = new RuntimeEventStore(path.join(sessionsDir, "runtime"));
+  const layout = new SessionLayout(sessionsDir);
+  const runtimeEvents = new RuntimeEventStore(path.join(sessionsDir, "runtime"), layout);
   // Run-scoped workspace edit undo (wave 23): one persisted, content-addressed
   // store for every workspace-bound run. It is a session side artifact (never
   // a protocol/session record); the store creates its directories lazily.
@@ -1065,7 +1067,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     sessionsDir,
     configFactory: options.configFactory ?? (() => resolveConfig()),
     workspaces: new WorkspaceRegistry(path.join(sessionsDir, "workspaces.json")),
-    metadata: new SessionMetadataStore(sessionsDir),
+    metadata: new SessionMetadataStore(sessionsDir, layout),
     settings,
     settingsStore,
     runtimeEvents,
@@ -1109,9 +1111,10 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     return compactionSettingsView(cfg, persisted, undefined, presetWindow);
   }
 
-  function storeFor(name: string): SessionStore {
-    // `path.basename` flattening: never allow path traversal out of the dir.
-    return new SessionStore(path.join(sessionsDir, path.basename(name)));
+  function storeFor(name: string, projectPath?: string | null): SessionStore {
+    // `path.basename` flattening: never allow path traversal out of the root.
+    const target = layout.materialize(path.basename(name), projectPath);
+    return new SessionStore(target.sessionPath);
   }
 
   function sessionName(raw: string | null | undefined): string {
@@ -1139,22 +1142,16 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   }
 
   function listSessions(workspaceId: string | null): Array<Record<string, unknown>> {
-    let files: string[];
-    try {
-      files = fs.readdirSync(sessionsDir).filter((file) => file.endsWith(".jsonl"));
-    } catch {
-      return [];
-    }
     const items: Array<Record<string, unknown>> = [];
-    for (const file of files) {
+    for (const location of layout.list()) {
       let stat: fs.Stats;
       try {
-        stat = fs.statSync(path.join(sessionsDir, file));
+        stat = fs.statSync(location.sessionPath);
       } catch {
         continue;
       }
       if (!stat.isFile()) continue;
-      const item = state.metadata.attach(file, {
+      const item = state.metadata.attach(location.name, {
         size: stat.size,
         mtime: Math.floor(stat.mtimeMs / 1000),
       });
@@ -1578,8 +1575,9 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     onToken?: LiveTokenHook,
     steering?: () => string[],
     runIdOf?: () => string | null,
+    projectPath?: string | null,
   ): Promise<HarnessResult> {
-    const store = storeFor(name);
+    const store = storeFor(name, projectPath ?? workspace?.root ?? null);
     const context = store.exists() ? restoreContext(store) : new SharedContext(store);
     // Fail fast on an unusable model config before touching the network;
     // with per-role endpoints each role is checked against its own
@@ -2058,7 +2056,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         : null;
     let updated: number | null = null;
     try {
-      updated = Math.floor(fs.statSync(path.join(sessionsDir, name)).mtimeMs / 1000);
+      updated = Math.floor(fs.statSync(store.path).mtimeMs / 1000);
     } catch {
       updated = null;
     }
@@ -2235,6 +2233,12 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
           workspace,
           cfg.endpoints,
           prepared.injections,
+          undefined,
+          undefined,
+          undefined,
+          runReq.workspace_id
+            ? (state.workspaces.get(runReq.workspace_id)?.path ?? null)
+            : null,
         );
       } catch (exc) {
         if (exc instanceof RunConfigError) throw new HttpError(400, exc.message);
@@ -2392,7 +2396,11 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       const workspaceId = optionalString(body, "workspace_id");
       if (workspaceId) ensureWorkspace(workspaceId);
       const name = newSessionName();
-      fs.writeFileSync(storeFor(name).path, "");
+      const projectPath = workspaceId
+        ? (state.workspaces.get(workspaceId)?.path ?? null)
+        : null;
+      const store = storeFor(name, projectPath);
+      fs.writeFileSync(store.path, "");
       const meta = state.metadata.save(name, {
         title,
         workspaceId,
@@ -2659,6 +2667,16 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       fs.unlinkSync(store.path);
       state.metadata.delete(safe);
       state.runtimeEvents.delete(safe);
+      // A directory-layout session owns its directory; remove it when empty so
+      // the name is fully released.
+      const location = layout.resolve(safe);
+      if (location?.dir) {
+        try {
+          fs.rmdirSync(location.dir);
+        } catch {
+          // not empty (unexpected extra file) or already gone
+        }
+      }
       return { deleted: safe };
     }),
   );
@@ -3178,6 +3196,14 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       // can reach a workspace tool; the job re-reads at start so a queued run
       // also sees allows granted while it waited.
       broker.seedSessionAllows(state.settingsStore.readSessionApprovals(name));
+      // Materialize the session's directory before the run manager persists its
+      // first runtime event, so every sidecar lands inside the project dir.
+      storeFor(
+        name,
+        baseReq.workspace_id
+          ? (state.workspaces.get(baseReq.workspace_id)?.path ?? null)
+          : null,
+      );
       // The steering drain reads the run record that `submit` creates; the
       // back-reference is assigned synchronously before the worker can start
       // the job (dispatch resolves in a later microtask), so the closure is

@@ -27,6 +27,7 @@
  * clobbering bytes it never saw.
  */
 import * as fs from "node:fs";
+import * as path from "node:path";
 import type { Message } from "./protocol.ts";
 import { SharedContext } from "./context.ts";
 
@@ -217,6 +218,7 @@ export class SessionStore {
   append(msg: Message): void {
     const line = JSON.stringify(msg);
     try {
+      fs.mkdirSync(path.dirname(this.path), { recursive: true });
       fs.appendFileSync(this.path, line + "\n", "utf-8");
     } catch (exc) {
       throw new SessionError(`cannot write session file ${this.path}: ${exc}`);

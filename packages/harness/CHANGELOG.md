@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Windows shell selection and stdio drain:** `probeBash()` now rejects the
+  Windows WSL launcher (`C:\Windows\System32\bash.exe`, WindowsApps) instead of
+  auto-selecting it; WSL bash passed the spawn probe but ran commands in a Linux
+  filesystem, breaking ordinary Windows paths. Git Bash/MSYS2/Cygwin still
+  qualify, and an explicit `bash` option can still select WSL. The post-exit
+  stdio `close` grace is now 2 s (was 250 ms): a loaded machine can deliver the
+  last stdout chunks after `exit`, and the old bound dropped real output.
 - **Node 22 compatibility for the wave-26 shell/clipboard paths:**
   `ShellRunner` now waits for the child's stdio `close` (bounded to 250 ms
   after `exit`) before assembling output, so a fast exit cannot return empty
@@ -29,6 +36,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   2 s, cap 30 s, abortable waits and per-attempt timeout. Files:
   `src/provider.ts`, `src/index.ts`; tests `tests/retryregistry.test.ts` and
   new `tests/retryjitter.test.ts`.
+- **Session storage v2 (opt-in, wave 27):** `src/sessionlayout.ts` adds a
+  project/session directory layout alongside the legacy flat store. A migrated
+  store (`<sessions-dir>/.layout.json` with `{"version":1,"layout":"dirs"}`)
+  writes `<project>/<stem>/session.jsonl` with `meta.json` and `events.jsonl`
+  inside the session directory; project keys are a slug plus a short hash of
+  the normalised workspace path (`_global` when unlinked). Readers always
+  accept both layouts, directory sessions win a name clash, and the public
+  session name, envelope bytes and API payloads are unchanged. `sessions
+  migrate [--dry-run] [--json]` moves flat sessions copy-first, groups by the
+  metadata workspace link, adopts identical interrupted targets, reports
+  conflicts without overwriting, and writes the marker only after a clean
+  pass. Metadata and runtime-event stores take an optional `SessionLayout`;
+  the server materialises a session directory before the run manager persists
+  its first event. The CLI resolves the public session name in both layouts
+  (`show`/`export`/`fork`/`rewind`/`undo`), so a directory session never
+  surfaces as `session.jsonl`. Event-only session directories are scanned for
+  restart recovery even when a failed run never wrote a transcript. Tests:
+  `tests/sessionlayout.test.ts`, `tests/serverlayout.test.ts`,
+  `tests/sessionsmigrate.test.ts`.
 - **Wave 26: browser coverage for the wave-25 web surfaces, TUI clipboard and
   attention, an external editor, the undo lifecycle, fork-from-here, session
   hardening, a doctor MCP check and per-preset context windows:**

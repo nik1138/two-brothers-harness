@@ -814,7 +814,7 @@ defineCommand({
 
 defineCommand({
   name: "sessions",
-  summary: "list, read, search, export, fork, rewind and undo stored sessions",
+  summary: "list, read, search, export, fork, rewind, undo and migrate stored sessions",
   commandLine: "two-brothers sessions [--sessions-dir <dir>] [--json] [--limit <n>]",
   usage: [
     "sessions [--sessions-dir <dir>] [--json] [--limit <n>]",
@@ -824,6 +824,7 @@ defineCommand({
     "sessions fork <name> [--at <seq>] [--name <new>] [--json]",
     "sessions rewind <name> --turns <n> [--json]",
     "sessions undo <name> [--run <id>] [--apply] [--discard] [--json]",
+    "sessions migrate [--sessions-dir <dir>] [--dry-run] [--json]",
   ],
   description:
     "List the JSONL session files of a sessions directory with readable titles " +
@@ -840,8 +841,11 @@ defineCommand({
     "new session file with a local lineage link, and `sessions rewind <name> " +
     "--turns <n>` drops the last n operator turns from a session. " +
     "`sessions undo <name>` previews/apply/discards a workspace-bound run's " +
-    "captured file mutations through the session's linked workspace. Session " +
-    "names resolve with or without the .jsonl suffix.",
+    "captured file mutations through the session's linked workspace. " +
+    "`sessions migrate` moves flat `<sessions-dir>/<name>.jsonl` files into the " +
+    "project/session directory layout (`<project>/<name>/session.jsonl` plus " +
+    "`meta.json` and `events.jsonl`), preserving bytes and sidecars; `--dry-run` " +
+    "prints the plan. Session names resolve with or without the .jsonl suffix.",
   flags: [
     "sessions-dir",
     "json",
@@ -854,6 +858,7 @@ defineCommand({
     "run",
     "apply",
     "discard",
+    "dry-run",
     "help",
   ],
   flagNotes: {
@@ -869,6 +874,7 @@ defineCommand({
     run: "undo: run id (default: the session's newest undo record)",
     apply: "undo: restore/delete the reversible files instead of previewing",
     discard: "undo: drop the record and collect unreferenced blobs (cannot combine with --apply)",
+    "dry-run": "migrate: print the planned moves without writing",
   },
   details: [
     "Subcommands:",
@@ -879,6 +885,7 @@ defineCommand({
     "  fork <name>     copy a session/prefix into a new session file",
     "  rewind <name>   drop the last operator turns from a session",
     "  undo <name>     preview/apply/discard a run's captured file changes",
+    "  migrate         move flat sessions into the directory layout",
   ],
   examples: [
     "two-brothers sessions",
@@ -896,6 +903,8 @@ defineCommand({
     "two-brothers sessions undo s --run run-1 --json",
     "two-brothers sessions undo s --run run-1 --apply",
     "two-brothers sessions undo s --run run-1 --discard",
+    "two-brothers sessions migrate --dry-run",
+    "two-brothers sessions migrate --json",
   ],
 });
 

@@ -50,12 +50,12 @@ import {
   deriveTitle,
   isWindowsReservedDeviceName,
   SessionMetadataStore,
-  sessionMetaPath,
   SESSION_NAME_MAX_CHARS,
   type SessionParentLink,
 } from "./metadata.ts";
 import type { Message } from "./protocol.ts";
 import { SessionStore } from "./session.ts";
+import { GLOBAL_PROJECT_KEY, SessionLayout } from "./sessionlayout.ts";
 
 /** Suffix of a session file (the only file the fork writes). */
 const JSONL_SUFFIX = ".jsonl";
@@ -210,16 +210,29 @@ export function forkFileName(raw: string): string {
 
 /**
  * True when a new session with this file name would collide with anything the
- * app reads: the JSONL itself, a leftover metadata sidecar, or a leftover
- * runtime-event sidecar (otherwise a fresh fork would inherit stale tool and
- * approval evidence).
+ * app reads: an existing session in either layout, a leftover flat metadata or
+ * runtime-event sidecar, or the target directory itself (an interrupted fork
+ * can leave an empty directory that would otherwise block a later write).
  */
-function forkNameTaken(sessionsDir: string, fileName: string): boolean {
-  if (fs.existsSync(path.join(sessionsDir, fileName))) return true;
+function forkNameTaken(
+  layout: SessionLayout,
+  sessionsDir: string,
+  fileName: string,
+  targetProjectKey: string | null,
+): boolean {
+  if (layout.resolve(fileName) !== null) return true;
   if (fs.existsSync(path.join(sessionsDir, stripJsonlSuffix(fileName) + META_SUFFIX))) return true;
-  return fs.existsSync(
-    path.join(sessionsDir, "runtime", fileName + RUNTIME_EVENTS_SUFFIX),
-  );
+  if (
+    fs.existsSync(path.join(sessionsDir, "runtime", fileName + RUNTIME_EVENTS_SUFFIX))
+  ) {
+    return true;
+  }
+  if (targetProjectKey !== null) {
+    return fs.existsSync(
+      path.join(sessionsDir, targetProjectKey, stripJsonlSuffix(fileName)),
+    );
+  }
+  return false;
 }
 
 /**
@@ -368,8 +381,13 @@ function readSourceSnapshot(
 }
 
 /** Source title for the derived fork title: sidecar title, else derived. */
-function readSourceTitle(sessionsDir: string, sourceName: string, events: Message[]): string {
-  const meta = new SessionMetadataStore(sessionsDir).get(sourceName);
+function readSourceTitle(
+  sessionsDir: string,
+  layout: SessionLayout,
+  sourceName: string,
+  events: Message[],
+): string {
+  const meta = new SessionMetadataStore(sessionsDir, layout).get(sourceName);
   const metaTitle = meta !== null && typeof meta.title === "string" ? meta.title.trim() : "";
   if (metaTitle) return metaTitle;
   return deriveTitle(
@@ -416,8 +434,10 @@ function removeForRollback(target: string): string | null {
  */
 function saveForkMetadata(
   sessionsDir: string,
+  layout: SessionLayout,
   fileName: string,
   targetPath: string,
+  targetMetaPath: string,
   title: string,
   parent: SessionParentLink,
   options: ForkSessionOptions,
@@ -425,13 +445,22 @@ function saveForkMetadata(
   const writer =
     options.metadataWriter ??
     ((name: string, metadata: { title: string; parent: SessionParentLink }) =>
-      new SessionMetadataStore(sessionsDir).save(name, metadata));
+      new SessionMetadataStore(sessionsDir, layout).save(name, metadata));
   try {
     const meta = writer(fileName, { title, parent });
     return typeof meta.title === "string" && meta.title ? meta.title : title;
   } catch (exc) {
     const copyProblem = removeForRollback(targetPath);
-    const metaProblem = removeForRollback(sessionMetaPath(sessionsDir, fileName));
+    const metaProblem = removeForRollback(targetMetaPath);
+    // A directory created for this fork is removed when empty, so a failed
+    // fork never reserves the name.
+    if (targetPath !== targetMetaPath) {
+      try {
+        fs.rmdirSync(path.dirname(targetPath));
+      } catch {
+        // not empty or already gone
+      }
+    }
     let message = `cannot write session metadata for ${fileName}: ${messageOf(exc)}`;
     message +=
       copyProblem === null
@@ -464,7 +493,12 @@ export function forkSession(
   }
 
   const sourceName = sourceFileName(source);
-  const sourcePath = path.join(dir, sourceName);
+  const layout = new SessionLayout(dir);
+  const sourceLocation = layout.resolve(sourceName);
+  if (sourceLocation === null) {
+    throw new SessionForkError("source-missing", `session not found: ${sourceName}`);
+  }
+  const sourcePath = sourceLocation.sessionPath;
   const sourceStore = new SessionStore(sourcePath);
   if (!sourceStore.exists()) {
     throw new SessionForkError("source-missing", `session not found: ${sourceName}`);
@@ -486,39 +520,61 @@ export function forkSession(
 
   const explicitName =
     options.name === undefined ? null : forkFileName(options.name);
+  // A migrated store keeps new sessions in the source's project directory;
+  // an unmigrated store keeps fork targets flat.
+  const targetProjectKey =
+    layout.mode() === "dirs"
+      ? (sourceLocation.projectKey ?? GLOBAL_PROJECT_KEY)
+      : GLOBAL_PROJECT_KEY;
 
   let fileName: string;
-  let targetPath: string;
+  let target: { sessionPath: string; metaPath: string; dir: string | null };
   if (explicitName !== null) {
-    if (forkNameTaken(dir, explicitName)) {
+    if (forkNameTaken(layout, dir, explicitName, layout.mode() === "dirs" ? targetProjectKey : null)) {
       throw new SessionForkError("name-taken", `session already exists: ${explicitName}`);
     }
     fileName = explicitName;
-    targetPath = path.join(dir, fileName);
+    target = layout.materializeIn(fileName, targetProjectKey);
     try {
-      writeNewSession(targetPath, text, fileName);
+      writeNewSession(target.sessionPath, text, fileName);
     } catch (exc) {
       if (isAlreadyExists(exc)) {
         throw new SessionForkError("name-taken", `session already exists: ${fileName}`);
+      }
+      if (target.dir !== null) {
+        try {
+          fs.rmdirSync(target.dir);
+        } catch {
+          // not empty or already gone
+        }
       }
       throw exc;
     }
   } else {
     const stem = stripJsonlSuffix(sourceName);
     fileName = "";
-    targetPath = "";
+    target = { sessionPath: "", metaPath: "", dir: null };
     for (let candidateIndex = 1; candidateIndex <= MAX_FORK_NAME_ATTEMPTS; candidateIndex += 1) {
       const candidateFile = `${stem}${FORK_NAME_INFIX}${candidateIndex}${JSONL_SUFFIX}`;
-      if (forkNameTaken(dir, candidateFile)) continue;
+      if (forkNameTaken(layout, dir, candidateFile, layout.mode() === "dirs" ? targetProjectKey : null)) {
+        continue;
+      }
       try {
-        targetPath = path.join(dir, candidateFile);
-        writeNewSession(targetPath, text, candidateFile);
+        target = layout.materializeIn(candidateFile, targetProjectKey);
+        writeNewSession(target.sessionPath, text, candidateFile);
         fileName = candidateFile;
         break;
       } catch (exc) {
         // Another writer created the file between the probe and the write;
         // an exclusive create means probing the next free slot is safe.
         if (isAlreadyExists(exc)) continue;
+        if (target.dir !== null) {
+          try {
+            fs.rmdirSync(target.dir);
+          } catch {
+            // not empty or already gone
+          }
+        }
         throw exc;
       }
     }
@@ -532,11 +588,13 @@ export function forkSession(
 
   const title =
     (typeof options.title === "string" ? options.title.trim() : "") ||
-    deriveForkTitle(readSourceTitle(dir, sourceName, events));
+    deriveForkTitle(readSourceTitle(dir, layout, sourceName, events));
   const savedTitle = saveForkMetadata(
     dir,
+    layout,
     fileName,
-    targetPath,
+    target.sessionPath,
+    target.metaPath,
     title,
     { name: sourceName, seq: parentSeq },
     options,

@@ -100,6 +100,7 @@ import {
   type McpToolSet,
 } from "./mcp.ts";
 import { SessionMetadataStore } from "./metadata.ts";
+import { migrateFlatSessions, SessionLayout } from "./sessionlayout.ts";
 import { mergeSeedPresets, presetById, presetIds, seedPresets } from "./presets.ts";
 import { toNdjsonLine, type StreamEvent } from "./runstream.ts";
 import {
@@ -2592,12 +2593,9 @@ function scanSessionFile(filePath: string, name: string): SessionScan {
 }
 
 function listSessions(sessionsDir: string): SessionListing[] {
-  const names = fs
-    .readdirSync(sessionsDir)
-    .filter((name) => name.endsWith(".jsonl"))
-    .sort();
-  return names.map((name) => {
-    const scan = scanSessionFile(path.join(sessionsDir, name), name);
+  const layout = new SessionLayout(sessionsDir);
+  return layout.list().map((location) => {
+    const scan = scanSessionFile(location.sessionPath, location.name);
     return {
       name: scan.name,
       title: scan.title,
@@ -2628,6 +2626,7 @@ const SESSIONS_OPTIONS = {
   run: { type: "string" as const },
   apply: { type: "boolean" as const, default: false },
   discard: { type: "boolean" as const, default: false },
+  "dry-run": { type: "boolean" as const, default: false },
   ...HELP_OPTIONS,
 } satisfies ParseArgsOptionsConfig;
 
@@ -2644,16 +2643,46 @@ function parseLimit(raw: unknown, io: CliIO): LimitParse {
   return { ok: true, limit: Number.parseInt(text, 10) };
 }
 
-/** Resolve `sessions show <name>`: the name works with or without the
- * `.jsonl` suffix (and may be a path relative to the sessions directory). */
-function resolveSessionFile(sessionsDir: string, requested: string): string | null {
+/** A resolved session: its public name plus the on-disk envelope path. */
+interface ResolvedSessionEntry {
+  name: string;
+  path: string;
+}
+
+/** Public name for an explicit path: directory sessions keep their stem. */
+function sessionNameForPath(sessionsDir: string, filePath: string): string {
+  const root = path.resolve(sessionsDir);
+  const resolved = path.resolve(filePath);
+  const relative = path.relative(root, resolved);
+  if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) {
+    const parts = relative.split(/[\\/]/).filter(Boolean);
+    if (parts.length === 3 && parts[2] === "session.jsonl") {
+      return `${parts[1]}.jsonl`;
+    }
+  }
+  return path.basename(resolved);
+}
+
+/** Resolve a session name or path to its public name and envelope path. */
+function resolveSessionEntry(
+  sessionsDir: string,
+  requested: string,
+): ResolvedSessionEntry | null {
   const name = requested.trim();
   if (!name) return null;
+  // Explicit paths keep their historical resolution (they may point outside
+  // the sessions root); bare names resolve through either layout.
+  if (!/[\\/]/.test(name) && !path.isAbsolute(name)) {
+    const resolved = new SessionLayout(sessionsDir).resolve(name);
+    if (resolved !== null) return { name: resolved.name, path: resolved.sessionPath };
+  }
   const candidates = name.endsWith(".jsonl") ? [name] : [`${name}.jsonl`, name];
   for (const candidate of candidates) {
     const resolved = path.resolve(sessionsDir, candidate);
     try {
-      if (fs.statSync(resolved).isFile()) return resolved;
+      if (fs.statSync(resolved).isFile()) {
+        return { name: sessionNameForPath(sessionsDir, resolved), path: resolved };
+      }
     } catch {
       // try the next candidate
     }
@@ -2763,13 +2792,14 @@ function showSession(
     return 2;
   }
   const requested = names[0];
-  const filePath = resolveSessionFile(sessionsDir, requested);
-  if (filePath === null) {
+  const entry = resolveSessionEntry(sessionsDir, requested);
+  if (entry === null) {
     io.error(`Unknown session: ${requested} (in ${path.resolve(sessionsDir)})`);
     io.error("Run 'two-brothers sessions' for the session list.");
     return 2;
   }
-  const scan = scanSessionFile(filePath, path.basename(filePath));
+  const filePath = entry.path;
+  const scan = scanSessionFile(filePath, entry.name);
   if (scan.error !== null && scan.title === "(unreadable)") {
     io.error(`[error] ${scan.error}`);
     return 1;
@@ -2868,12 +2898,19 @@ function searchSessionsCommand(
  * sidecar title wins over the derived one, and the file mtime supplies
  * `updated` (Unix seconds) for the export header. `null` when unreadable.
  */
-function exportDocForCli(sessionsDir: string, filePath: string): SessionSearchDoc | null {
-  const name = path.basename(filePath);
+function exportDocForCli(
+  sessionsDir: string,
+  filePath: string,
+  sessionName?: string,
+): SessionSearchDoc | null {
+  const name = sessionName ?? path.basename(filePath);
   const scan = scanSessionFile(filePath, name);
   if (scan.title === "(unreadable)") return null;
   const stem = name.replace(/\.jsonl$/, "");
-  const meta = new SessionMetadataStore(sessionsDir).get(name);
+  const meta = new SessionMetadataStore(
+    sessionsDir,
+    new SessionLayout(sessionsDir),
+  ).get(name);
   const metaTitle = meta !== null && typeof meta.title === "string" ? meta.title.trim() : "";
   const workspaceId =
     meta !== null && typeof meta.workspace_id === "string" && meta.workspace_id
@@ -2923,12 +2960,13 @@ function exportSessionCommand(
     return sessionsUsageError(`unknown export format: ${format} (use markdown, json or html)`, io);
   }
   const requested = args[0];
-  const filePath = resolveSessionFile(sessionsDir, requested);
-  if (filePath === null) {
+  const entry = resolveSessionEntry(sessionsDir, requested);
+  if (entry === null) {
     io.error(`[error] session not found: ${requested} (in ${path.resolve(sessionsDir)})`);
     return 1;
   }
-  const doc = exportDocForCli(sessionsDir, filePath);
+  const filePath = entry.path;
+  const doc = exportDocForCli(sessionsDir, filePath, entry.name);
   if (doc === null) {
     io.error(`[error] cannot read session file: ${filePath}`);
     return 1;
@@ -2992,12 +3030,12 @@ function forkSessionCommand(
     atSeq = Number.parseInt(atText, 10);
   }
   const requested = args[0];
-  const filePath = resolveSessionFile(sessionsDir, requested);
-  if (filePath === null) {
+  const entry = resolveSessionEntry(sessionsDir, requested);
+  if (entry === null) {
     io.error(`[error] session not found: ${requested} (in ${path.resolve(sessionsDir)})`);
     return 1;
   }
-  const sourceName = path.basename(filePath);
+  const sourceName = entry.name;
   let result;
   try {
     result = forkSession(sessionsDir, sourceName, {
@@ -3052,12 +3090,13 @@ function rewindSessionCommand(
     return 2;
   }
   const requested = args[0];
-  const filePath = resolveSessionFile(sessionsDir, requested);
-  if (filePath === null) {
+  const entry = resolveSessionEntry(sessionsDir, requested);
+  if (entry === null) {
     io.error(`[error] session not found: ${requested} (in ${path.resolve(sessionsDir)})`);
     return 1;
   }
-  const name = path.basename(filePath);
+  const filePath = entry.path;
+  const name = entry.name;
   let result;
   try {
     result = rewindSession(new SessionStore(filePath), parsed.turns);
@@ -3073,7 +3112,10 @@ function rewindSessionCommand(
   let runtimeEventsClearError: string | null = null;
   if (result.rewritten) {
     try {
-      runtimeEventsCleared = new RuntimeEventStore(path.join(sessionsDir, "runtime")).delete(name);
+      runtimeEventsCleared = new RuntimeEventStore(
+        path.join(sessionsDir, "runtime"),
+        new SessionLayout(sessionsDir),
+      ).delete(name);
     } catch (exc) {
       runtimeEventsClearError = exc instanceof Error ? exc.message : String(exc);
     }
@@ -3139,12 +3181,12 @@ function undoSessionCommand(
     return sessionsUsageError("--apply and --discard are mutually exclusive", io);
   }
   const requested = args[0];
-  const filePath = resolveSessionFile(sessionsDir, requested);
-  if (filePath === null) {
+  const entry = resolveSessionEntry(sessionsDir, requested);
+  if (entry === null) {
     io.error(`[error] session not found: ${requested} (in ${path.resolve(sessionsDir)})`);
     return 1;
   }
-  const name = path.basename(filePath);
+  const name = entry.name;
   const store = path.join(sessionsDir, "undo");
 
   let runId: string;
@@ -3206,7 +3248,10 @@ function undoSessionCommand(
   // The session's workspace link is the authority (same rule the HTTP route
   // applies through the live registry); a session without a link or a record
   // from another workspace is refused instead of restoring into a guess.
-  const meta = new SessionMetadataStore(sessionsDir).get(name);
+  const meta = new SessionMetadataStore(
+    sessionsDir,
+    new SessionLayout(sessionsDir),
+  ).get(name);
   const workspaceId =
     meta !== null && typeof meta.workspace_id === "string" ? meta.workspace_id.trim() : "";
   const linked =
@@ -3322,6 +3367,51 @@ function undoCliError(exc: unknown, io: CliIO): number {
   return 1;
 }
 
+/** `sessions migrate`: move flat sessions into project/session directories. */
+function migrateSessionsCommand(
+  sessionsDir: string,
+  jsonMode: boolean,
+  dryRun: boolean,
+  io: CliIO,
+): number {
+  let result;
+  try {
+    const registry = new WorkspaceRegistry(path.join(sessionsDir, "workspaces.json"));
+    result = migrateFlatSessions(sessionsDir, {
+      dryRun,
+      workspacePathFor: (id) => registry.get(id)?.path ?? null,
+    });
+  } catch (exc) {
+    io.error(`[error] ${exc instanceof Error ? exc.message : String(exc)}`);
+    return 1;
+  }
+  if (jsonMode) {
+    io.log(JSON.stringify(result, null, 2));
+  } else {
+    if (result.entries.length === 0) io.log(`no flat sessions in ${sessionsDir}`);
+    for (const entry of result.entries) {
+      if (entry.status === "migrated") {
+        io.log(
+          `${dryRun ? "would migrate" : "migrated"} ${entry.name} -> ${entry.targetPath}`,
+        );
+      } else if (entry.status === "already") {
+        io.log(`already migrated ${entry.name}`);
+      } else {
+        io.error(
+          `[error] ${entry.name}: ${entry.status}` +
+            (entry.detail ? `: ${entry.detail}` : ""),
+        );
+      }
+    }
+    io.log(`layout: ${result.layout}${dryRun ? " (dry run; nothing written)" : ""}`);
+  }
+  return result.entries.some(
+    (entry) => entry.status === "conflict" || entry.status === "error",
+  )
+    ? 1
+    : 0;
+}
+
 function doSessions(
   argv: string[],
   io: CliIO,
@@ -3390,10 +3480,18 @@ function doSessions(
       io,
     );
   }
+  if (subcommand === "migrate") {
+    return migrateSessionsCommand(
+      sessionsDir,
+      jsonMode,
+      values["dry-run"] === true,
+      io,
+    );
+  }
   // Kept as a thrown argument error (the long-standing contract for extra
   // positionals, covered by tests/cli.test.ts).
   throw new Error(
-    `unexpected argument '${subcommand}' (sessions takes 'list', 'show', 'search', 'export', 'fork', 'rewind' or 'undo')`,
+    `unexpected argument '${subcommand}' (sessions takes 'list', 'show', 'search', 'export', 'fork', 'rewind', 'undo' or 'migrate')`,
   );
 }
 
