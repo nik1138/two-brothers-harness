@@ -45,8 +45,9 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "sync-web": "node scripts/sync-web.mjs",
-    "prepack": "npm run build && npm run sync-web",
+    "prepack": "npm run clean && npm run build && npm run sync-web",
     "typecheck": "tsc --noEmit",
     "test": "node tests/run-all.ts",
     "test:printmode": "node --test tests/printmode.test.ts",

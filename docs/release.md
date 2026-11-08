@@ -149,7 +149,7 @@ The package keeps its tsc source maps (`dist/*.js.map` and the declaration
 maps): `sourceMap`/`declarationMap` are on in
 `packages/harness/tsconfig.build.json`, and every `dist/*.js` already carries a
 `sourceMappingURL`, so dropping the maps would leave dead links and a stack
-trace that points into nowhere. Measured on the final package: **369 files,
+trace that points into nowhere. Measured on the final package: **368 files,
 1.28 MB packed / 5.17 MB unpacked**, of which **180 `.map` files are 1.60 MB
 unpacked (30.9%)** — a small packed cost because maps compress well. That is
 the deliberate trade: an npm-installed user, or a crash report from their
