@@ -990,9 +990,9 @@ Design anchors that already exist:
   `appearance-accent` covers keyboard-only selection, computed
   `--accent`/`--accent-text` in light/dark (including the dark contrast),
   reload persistence and restoring Blue (browser suite 17 offline scenarios,
-  web suite 336 tests). Documented limit: naive-ui's static theme overrides do
-  not follow the variant, so native naive-ui primary controls keep the brand
-  blue — the accent applies to the app chrome that consumes the token layer.
+  web suite 336 tests). The original limitation — native naive-ui primary
+  controls keeping the brand blue because of naive-ui's static theme
+  overrides — is closed in wave 14 (see the wave-14 shipped section).
 - **Windows CI leg** — `.github/workflows/ci.yml` now runs the hermetic gates
   on a `windows-latest` Node 24 job as well as the ubuntu Node 22/24 matrix:
   reference selftest/tests, package typecheck/build/tests/dist selftest/mock,
@@ -1009,6 +1009,31 @@ Design anchors that already exist:
   check, with sorted set-diff failures and a skip when the reference file is
   absent (bare npm tarball). Proven to bite by temporarily introducing a
   divergent row and observing the exact failure before reverting.
+
+## Shipped 2026-11-08 (wave 14: native accent controls, per-command docs guard)
+
+- **Native naive-ui controls follow the accent theme** — closes the wave-13
+  limitation. `web/src/theme.ts` carries a pure
+  `accentThemeOverrides(accent, scheme)` mapping plus the canonical
+  `ACCENT_NAIVE_PALETTES` table for blue/violet/teal/amber in light and dark
+  (naive-ui primaryColor/hover/pressed/suppl = the same hexes as the CSS
+  `--accent*` tokens); `App.vue` merges it into `NConfigProvider` reactively so
+  native primary controls follow the operator accent immediately on an accent
+  or theme switch (no reload). A drift test parses `tokens.css` and fails if
+  the JS mapping and the tokens diverge (tokens suite 13 tests); the
+  `appearance-accent` browser scenario asserts the native Settings primary
+  button's computed background through Blue → Violet (light) → Violet (dark) →
+  Blue. Non-primary intents stay static by design.
+- **Per-command docs↔CLI flag audit** — `tests/clidocs.test.ts` (6 → 8 tests)
+  now audits command-scoped flag tables: a `Flag` table under a command
+  heading may document only flags that command accepts, and every
+  run/chat/tui/serve accepted flag must be documented in the command's table
+  or the shared `## Flags` pool; failures are per-command sorted diffs
+  (`serve: documented-but-not-accepted: …; accepted-but-undocumented: …`).
+  Fence-aware parsing; the header states the intentional non-coverage
+  (prose/code-example flags, shared-table scope notes, `--help`, runtime-only
+  env rows). Proven to bite by mis-scoping a documented flag and reverting
+  byte-identically.
 
 ## Open items (deferred)
 

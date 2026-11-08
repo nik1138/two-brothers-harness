@@ -85,6 +85,22 @@ LM Studio / real-network-load layers are intentionally not in CI; they stay
 opt-in and manual (`scripts/e2e-test.ps1`, `npm run test:e2e`,
 `npm run test:e2e:load`).
 
+**Docs ↔ CLI drift guard:** `packages/harness/tests/clidocs.test.ts` (part of
+`npm test`) keeps `docs/cli-reference.md` in sync with the code-owned CLI
+catalogue: two-way env-var coverage against `clihelp.ts::ENVIRONMENT`, the
+env→flag mapping, two-way long-flag coverage for the run/chat/tui/serve
+accepted flags, and a tolerant command-heading check. It also audits
+command-scoped flag tables per command: a `Flag` table under a command heading
+(today `### serve`) may document only flags that command accepts, and every
+run/chat/tui/serve accepted flag must be documented in the command's own table
+or the shared `## Flags` table; failures name the command and both directions
+(`serve: documented-but-not-accepted: --workspace; accepted-but-undocumented:
+--host`). Parsing ignores fenced code blocks; prose/code-example flag
+mentions, the shared table's per-row scope notes, `--help` (covered once
+globally) and env rows mapped to `—` (runtime-only) are intentionally outside
+the comparison. A missing reference file (bare npm tarball) skips instead of
+failing. Run it alone with `node --test tests/clidocs.test.ts`.
+
 ## TypeScript package (primary)
 
 ```powershell
@@ -98,7 +114,7 @@ npm run test:spawn      # node --test tests/ (child processes allowed)
 ```
 
 On the canonical integrated run for this round the in-process suite is
-**1 524 tests: 1 522 pass, 0 fail, 2 skipped** (exit 0); the two skips are
+**1 526 tests: 1 524 pass, 0 fail, 2 skipped** (exit 0); the two skips are
 environment-gated and never failures — the workspace symlink-parity test and
 the MCP stdio spawn are unavailable in this environment. `npm run typecheck`
 and `npm run build` pass, the hermetic CLI E2E is 17/17 on sources and 17/17
@@ -447,9 +463,25 @@ the ubuntu matrix, plus `tests/clidocs.test.ts` (6 tests, part of
 pins the 94-token inventory and the accent-text WCAG-AA contrast floor);
 browser suite
 17 offline scenarios + the opt-in `real` skip; reference tree unchanged at
-33/33. Known scope limit: naive-ui's static theme overrides do not follow the
-accent, so native naive-ui primary controls keep the brand blue — the accent
-applies to the app chrome that consumes the token layer.
+33/33. The wave-13 slice covered the token-consuming chrome; wave 14 threads
+the accent into naive-ui's primary overrides so native primary controls follow
+it too (below), while non-primary intents stay static.
+
+Wave 14 closes that limitation and strengthens the documentation guard:
+`web/src/theme.ts` gains a pure `accentThemeOverrides(accent, scheme)` table
+(blue/violet/teal/amber × light/dark, the naive-ui primary family mapped to
+the same hexes as the CSS `--accent*` tokens) and `App.vue` merges it into
+`NConfigProvider` reactively, so native naive-ui primary controls (buttons,
+switches, input focus borders) follow the operator accent in light and dark
+and update on an accent or theme switch without a reload. A drift test parses
+`tokens.css` and fails if the JS mapping and CSS tokens diverge (tokens suite
+13 tests; foreign hexes are rejected); the `appearance-accent` scenario now
+also polls the native Settings primary button's computed background through
+Blue → Violet (light) → Violet (dark) → Blue. In the package, `clidocs.test.ts`
+grew to 8 tests with the per-command flag audit described above. Package
+suite: **1 526 tests (1 524 pass, 2 environment skips)**; web suite 337
+(tokens 13, uiPrefs 9); browser suite 17 offline scenarios + the opt-in `real`
+skip; reference tree unchanged at 33/33.
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
@@ -656,8 +688,10 @@ bounded, and switching to the plain session shows no replay rows), plus
 `appearance-accent` (Settings → Appearance's native Accent radio group:
 a keyboard-only move to Violet flips the root `data-accent` attribute and the
 computed `--accent`/`--accent-text` tokens in light and after switching to
-dark (the dark accent text clears WCAG AA 4.5:1 against the panel surface),
-the choice survives a reload, restoring Blue returns the base palette, and the
+dark (the dark accent text clears WCAG AA 4.5:1 against the panel surface), a
+native naive-ui primary control (the Settings primary action) follows the
+accent in light and dark and returns to the base blue after restoring it, the
+choice survives a reload, restoring Blue returns the base palette, and the
 theme/density cards keep their count and measurements). On the canonical run
 that is
 **17 PASS, 0 FAIL, 1 SKIP** (the opt-in `real` scenario). The queue dock and the session-scope approval decisions

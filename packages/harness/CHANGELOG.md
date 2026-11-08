@@ -33,9 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `uiPrefs.ts`, `App.vue`, `SettingsDialog.vue`, Appearance section and the
   12 sheets whose accent text moved to `--accent-text`; tests
   `web/tests/tokens.test.ts` (12), `uiPrefs.test.ts` (9), browser suite
-  17 scenarios. Known scope limit: naive-ui's static theme overrides do not
-  follow the variant, so native naive-ui primary controls keep the brand
-  blue — the accent applies to the app chrome that consumes the token layer.
+  17 scenarios. Native naive-ui primary controls originally kept the brand
+  blue in this slice; wave 14 threads the accent into naive-ui's primary
+  theme overrides (see the wave-14 Changed entry).
 - **Opt-in serve-level load/soak runner** (wave 12): new
   `packages/harness/e2e/serve-load.ts` (`npm run test:e2e:serve-load`) starts
   the real `serve` backend (hermetic `--mock` self-test or real
@@ -758,6 +758,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Native naive-ui controls follow the accent; per-command docs guard**
+  (wave 14): `web/src/theme.ts` gains the pure
+  `accentThemeOverrides(accent, scheme)` mapping and the canonical
+  `ACCENT_NAIVE_PALETTES` table (blue/violet/teal/amber × light/dark), mapping
+  naive-ui's primary family (`primaryColor`, hover, pressed, suppl) to the same
+  hexes as the CSS `--accent*` tokens; `App.vue` merges it into
+  `NConfigProvider` reactively, so native primary controls (buttons, switches,
+  input focus borders) follow the operator accent in light and dark and update
+  immediately on an accent or theme switch without a reload. A new drift test
+  parses `tokens.css` and fails if the JS mapping and CSS tokens diverge
+  (tokens suite 12 → 13; foreign hexes rejected), and the `appearance-accent`
+  browser scenario now polls the native Settings primary button's computed
+  background through Blue → Violet (light) → Violet (dark) → Blue (±2/channel,
+  transition-aware). Non-primary intents (error/success/warning) deliberately
+  stay static. In the package, `tests/clidocs.test.ts` grew from 6 to 8 tests
+  with a **per-command flag audit**: a `Flag` table under a command heading may
+  document only flags that command accepts, every run/chat/tui/serve accepted
+  flag must be documented in its table or the shared `## Flags` table, and
+  failures name the command and both directions; the parser is fence-aware and
+  the header documents what is intentionally outside the audit.
 - **Two-platform CI and a docs↔CLI drift guard** (wave 13):
   `.github/workflows/ci.yml` now runs the hermetic gates on two platforms — the
   existing ubuntu matrix (Node 22/24) plus a `windows-latest` Node 24 leg
