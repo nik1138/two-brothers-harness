@@ -172,7 +172,21 @@ test("sessions list and show resolve a migrated directory session", async () => 
       show.err.join("\n"),
     );
     assert.ok(show.out.some((line) => line.startsWith("session:")));
+    assert.ok(show.out.some((line) => line.includes("show-me.jsonl")));
     assert.ok(show.out.some((line) => line.includes("hello")));
+
+    const exported = makeIO();
+    assert.equal(
+      await main(
+        ["sessions", "export", "show-me", "--sessions-dir", dir, "--format", "json"],
+        exported,
+      ),
+      0,
+      exported.err.join("\n"),
+    );
+    const doc = JSON.parse(exported.out.at(-1)!);
+    assert.equal(doc.name, "show-me.jsonl");
+    assert.equal(doc.envelopes.length, 1);
   });
 });
 

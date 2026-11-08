@@ -2643,22 +2643,32 @@ function parseLimit(raw: unknown, io: CliIO): LimitParse {
   return { ok: true, limit: Number.parseInt(text, 10) };
 }
 
-/** Resolve `sessions show <name>`: the name works with or without the
- * `.jsonl` suffix (and may be a path relative to the sessions directory). */
-function resolveSessionFile(sessionsDir: string, requested: string): string | null {
+/** A resolved session: its public name plus the on-disk envelope path. */
+interface ResolvedSessionEntry {
+  name: string;
+  path: string;
+}
+
+/** Resolve a session name or path to its public name and envelope path. */
+function resolveSessionEntry(
+  sessionsDir: string,
+  requested: string,
+): ResolvedSessionEntry | null {
   const name = requested.trim();
   if (!name) return null;
   // Explicit paths keep their historical resolution (they may point outside
   // the sessions root); bare names resolve through either layout.
   if (!/[\\/]/.test(name) && !path.isAbsolute(name)) {
     const resolved = new SessionLayout(sessionsDir).resolve(name);
-    if (resolved !== null) return resolved.sessionPath;
+    if (resolved !== null) return { name: resolved.name, path: resolved.sessionPath };
   }
   const candidates = name.endsWith(".jsonl") ? [name] : [`${name}.jsonl`, name];
   for (const candidate of candidates) {
     const resolved = path.resolve(sessionsDir, candidate);
     try {
-      if (fs.statSync(resolved).isFile()) return resolved;
+      if (fs.statSync(resolved).isFile()) {
+        return { name: path.basename(resolved), path: resolved };
+      }
     } catch {
       // try the next candidate
     }
@@ -2768,13 +2778,14 @@ function showSession(
     return 2;
   }
   const requested = names[0];
-  const filePath = resolveSessionFile(sessionsDir, requested);
-  if (filePath === null) {
+  const entry = resolveSessionEntry(sessionsDir, requested);
+  if (entry === null) {
     io.error(`Unknown session: ${requested} (in ${path.resolve(sessionsDir)})`);
     io.error("Run 'two-brothers sessions' for the session list.");
     return 2;
   }
-  const scan = scanSessionFile(filePath, path.basename(filePath));
+  const filePath = entry.path;
+  const scan = scanSessionFile(filePath, entry.name);
   if (scan.error !== null && scan.title === "(unreadable)") {
     io.error(`[error] ${scan.error}`);
     return 1;
@@ -2873,8 +2884,12 @@ function searchSessionsCommand(
  * sidecar title wins over the derived one, and the file mtime supplies
  * `updated` (Unix seconds) for the export header. `null` when unreadable.
  */
-function exportDocForCli(sessionsDir: string, filePath: string): SessionSearchDoc | null {
-  const name = path.basename(filePath);
+function exportDocForCli(
+  sessionsDir: string,
+  filePath: string,
+  sessionName?: string,
+): SessionSearchDoc | null {
+  const name = sessionName ?? path.basename(filePath);
   const scan = scanSessionFile(filePath, name);
   if (scan.title === "(unreadable)") return null;
   const stem = name.replace(/\.jsonl$/, "");
@@ -2931,12 +2946,13 @@ function exportSessionCommand(
     return sessionsUsageError(`unknown export format: ${format} (use markdown, json or html)`, io);
   }
   const requested = args[0];
-  const filePath = resolveSessionFile(sessionsDir, requested);
-  if (filePath === null) {
+  const entry = resolveSessionEntry(sessionsDir, requested);
+  if (entry === null) {
     io.error(`[error] session not found: ${requested} (in ${path.resolve(sessionsDir)})`);
     return 1;
   }
-  const doc = exportDocForCli(sessionsDir, filePath);
+  const filePath = entry.path;
+  const doc = exportDocForCli(sessionsDir, filePath, entry.name);
   if (doc === null) {
     io.error(`[error] cannot read session file: ${filePath}`);
     return 1;
@@ -3000,12 +3016,12 @@ function forkSessionCommand(
     atSeq = Number.parseInt(atText, 10);
   }
   const requested = args[0];
-  const filePath = resolveSessionFile(sessionsDir, requested);
-  if (filePath === null) {
+  const entry = resolveSessionEntry(sessionsDir, requested);
+  if (entry === null) {
     io.error(`[error] session not found: ${requested} (in ${path.resolve(sessionsDir)})`);
     return 1;
   }
-  const sourceName = path.basename(filePath);
+  const sourceName = entry.name;
   let result;
   try {
     result = forkSession(sessionsDir, sourceName, {
@@ -3060,12 +3076,13 @@ function rewindSessionCommand(
     return 2;
   }
   const requested = args[0];
-  const filePath = resolveSessionFile(sessionsDir, requested);
-  if (filePath === null) {
+  const entry = resolveSessionEntry(sessionsDir, requested);
+  if (entry === null) {
     io.error(`[error] session not found: ${requested} (in ${path.resolve(sessionsDir)})`);
     return 1;
   }
-  const name = path.basename(filePath);
+  const filePath = entry.path;
+  const name = entry.name;
   let result;
   try {
     result = rewindSession(new SessionStore(filePath), parsed.turns);
@@ -3150,12 +3167,12 @@ function undoSessionCommand(
     return sessionsUsageError("--apply and --discard are mutually exclusive", io);
   }
   const requested = args[0];
-  const filePath = resolveSessionFile(sessionsDir, requested);
-  if (filePath === null) {
+  const entry = resolveSessionEntry(sessionsDir, requested);
+  if (entry === null) {
     io.error(`[error] session not found: ${requested} (in ${path.resolve(sessionsDir)})`);
     return 1;
   }
-  const name = path.basename(filePath);
+  const name = entry.name;
   const store = path.join(sessionsDir, "undo");
 
   let runId: string;

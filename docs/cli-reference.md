@@ -734,8 +734,9 @@ node dist/cli.js sessions migrate --sessions-dir sessions --json
 ```
 
 `--dry-run` prints the plan without touching disk. `--json` prints
-`{dryRun, layout, entries[]}` where each entry is
-`{name, sourcePath, targetPath, status, detail?}` and `status` is `migrated`,
+`{dryRun, layout, entries[]}` where `layout` is the resulting layout (`dirs`
+on a clean dry run) and each entry is
+`{name, sourcePath, targetPath, status, detail?}`; `status` is `migrated`,
 `already`, `conflict` or `error`. See [Session storage](session-storage.md)
 for the two layouts, compatibility rules and the backup caveat.
 

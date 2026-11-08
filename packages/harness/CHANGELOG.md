@@ -38,8 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conflicts without overwriting, and writes the marker only after a clean
   pass. Metadata and runtime-event stores take an optional `SessionLayout`;
   the server materialises a session directory before the run manager persists
-  its first event. Tests: `tests/sessionlayout.test.ts`,
-  `tests/serverlayout.test.ts`, `tests/sessionsmigrate.test.ts`.
+  its first event. The CLI resolves the public session name in both layouts
+  (`show`/`export`/`fork`/`rewind`/`undo`), so a directory session never
+  surfaces as `session.jsonl`. Event-only session directories are scanned for
+  restart recovery even when a failed run never wrote a transcript. Tests:
+  `tests/sessionlayout.test.ts`, `tests/serverlayout.test.ts`,
+  `tests/sessionsmigrate.test.ts`.
 - **Wave 26: browser coverage for the wave-25 web surfaces, TUI clipboard and
   attention, an external editor, the undo lifecycle, fork-from-here, session
   hardening, a doctor MCP check and per-preset context windows:**

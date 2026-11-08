@@ -70,7 +70,7 @@ export interface SessionMigrationEntry {
 
 export interface SessionMigrationResult {
   dryRun: boolean;
-  /** Layout after the pass (`dirs` when the marker was written). */
+  /** Layout after the pass; a clean dry run reports the intended `dirs`. */
   layout: SessionLayoutMode;
   entries: SessionMigrationEntry[];
 }
@@ -545,5 +545,11 @@ export function migrateFlatSessions(
 
   const hasFailure = entries.some((entry) => entry.status === "conflict" || entry.status === "error");
   if (!dryRun && !hasFailure) layout.setMode("dirs");
-  return { dryRun, layout: layout.mode(), entries };
+  // A clean dry run reports the layout the real pass would write; a failure
+  // leaves the store in its current layout.
+  return {
+    dryRun,
+    layout: hasFailure ? layout.mode() : "dirs",
+    entries,
+  };
 }

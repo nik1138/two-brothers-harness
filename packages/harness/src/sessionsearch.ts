@@ -376,6 +376,7 @@ export function loadSessionDocs(
   const maxSessions = clampCap(options.maxSessions, SEARCH_MAX_SESSIONS);
   const maxEvents = clampCap(options.maxEventsPerSession, SEARCH_MAX_EVENTS_PER_SESSION);
   const dir = typeof sessionsDir === "string" ? sessionsDir : "";
+  if (!dir.trim()) return { docs: [], skipped: 0, truncated: false };
   const layout = new SessionLayout(dir);
 
   let locations;

@@ -167,7 +167,7 @@ test("migration dry run writes nothing", () => {
     writeFlat(root, "dry.jsonl");
     const result = migrateFlatSessions(root, { dryRun: true });
     assert.equal(result.dryRun, true);
-    assert.equal(result.layout, "flat");
+    assert.equal(result.layout, "dirs");
     assert.equal(result.entries.length, 1);
     assert.equal(result.entries[0]!.status, "migrated");
     assert.equal(fs.existsSync(path.join(root, "dry.jsonl")), true);
@@ -333,6 +333,10 @@ test("event-only session directories are recoverable by findRun", () => {
   } finally {
     cleanup(root);
   }
+});
+
+test("loadSessionDocs with an empty sessions dir is empty, not cwd", () => {
+  assert.deepEqual(loadSessionDocs(""), { docs: [], skipped: 0, truncated: false });
 });
 
 test("loadSessionDocs reads directory sessions", () => {
