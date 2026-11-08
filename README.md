@@ -510,7 +510,7 @@ the DSH `xhtoken` provider (`SPARK-TRANSCRIPT.md`).
 
 - Start here: [Quickstart](docs/quickstart.md), [CLI reference](docs/cli-reference.md)
 - Extend: [Plugins](docs/plugins.md), [Testing](docs/testing.md)
-- Project: [Backlog](docs/backlog.md), [Design review](docs/design-review.md)
+- Project: [Backlog](docs/backlog.md), [Design review](docs/design-review.md), [Release runbook](docs/release.md)
 - History: [TS rewrite plan](docs/history/ts-rewrite-plan.md), [CLI audit](docs/history/cli-audit.md), [web UI audit](docs/history/web-ui-audit.md), [verification log](docs/history/handoff.md)
 - Contracts: [Protocol](PROTOCOL.md), [Design](DESIGN.md), [JSON Schema](shared/protocol.schema.json)
 - Full index: [docs/README.md](docs/README.md)

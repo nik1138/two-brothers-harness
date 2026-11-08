@@ -62,7 +62,9 @@ The backend is the TypeScript server in `packages/harness`:
 - `src/streaming.ts` — pure live-token draft fed by the run SSE named `token` frames: bounded per-role thinking/text buffers, envelope/run-end clearing and render-ready blocks; used by `App.vue`/`ChatView.vue`
 - `src/basecommands.ts` — first-party (`GET /api/commands` → `baseCommands`) slash-command model: normalization/sort/merge with discovered templates (discovered shadows base), alias/description search, `/name args` parsing/resolution and the action dispatch payload; used by `Composer.vue`/`App.vue`
 - `src/composerKeys.ts` — pure composer key contract (IME-safe submit, Ctrl/⌘+Enter, picker accept/dismiss, `?`/Ctrl+⌘+/ chord, double-Escape stop window)
-- `src/shortcuts.ts` — single-source keyboard-shortcut table rendered by the `/help` overlay; `src/download.ts` — shared session export Blob download used by the row menu and `/export`
+- `src/shortcuts.ts` — single-source keyboard-shortcut table rendered by the `/help` overlay (static defaults; `shortcutEntries()` renders the current rebindable chords); `src/download.ts` — shared session export Blob download used by the row menu and `/export`
+- `src/keybindings.ts` — persisted, validated device key-binding model for the three rebindable global chords (Mod meaning, browser-reserved refusal, conflict-aware rebind/reset, event parsing/matching, labels); used by `App.vue`, `ChatView.vue`, `KeyboardSection.vue`, `ShortcutHelpDialog.vue`
+- `src/theme.ts` — the one sanctioned raw-colour home outside `tokens.css`: static naive-ui overrides plus the accent palettes and `accentThemeOverrides(accent, scheme)` mapping (drift-tested against the CSS accent tokens) consumed by `NConfigProvider`
 - `src/providerSettings.ts` — pure provider-preset model for Settings → Providers: tolerant `seed`/`customized` normalization, inline master–detail open/selection state, draft dirty tracking, role usage badges, delete eligibility/impact copy, add-form validation and list keyboard arithmetic; used by `ProvidersSection.vue`
 - `src/uiPrefs.ts` — persisted device-local conversation preferences (`showPromptAudits`, default off, versioned key + injectable storage) and the pure transcript visibility filter; used by `App.vue`, `ChatView.vue` and Settings → Advanced
 - `src/components/` help/status dialogs: `ShortcutHelpDialog` (`/help`, `?`), `SessionStatusDialog` (`/status`), `PermissionInfoDialog` (`/permission`)
@@ -80,13 +82,14 @@ The backend is the TypeScript server in `packages/harness`:
    switch; Appearance uses its own `.appearance-*` names).
 2. **`npm run build` must keep passing** (outputs `dist/`). The backend serves
    that build, so a broken build breaks the product, not just CI. `npm test`
-   runs the chat/timeline projection tests, the draft-store tests, the
-   command-palette build/score/filter tests, and the session-status/recents
-   stores (plain
-   `node --test` via `tests/register-ts.mjs`); keep it green too — the smoke
-   test calls it. Run test files individually (`node --import
-   ./tests/register-ts.mjs --test tests/drafts.test.ts`) when the sandbox
-   blocks spawned test runners.
+   runs the projection/store/model suites (chat, timeline, drafts, palette,
+   session status, recents, density, find, search, workspace order, mentions,
+   streaming, base commands, composer keys, keybindings, provider settings,
+   uiPrefs, queue state, approval policy/session, folding, composer status,
+   todo, recall, tokens) as plain `node --test` via `tests/register-ts.mjs`;
+   keep it green too — the smoke test calls it. Run test files individually
+   (`node --import ./tests/register-ts.mjs --test tests/drafts.test.ts`) when
+   the sandbox blocks spawned test runners.
 3. `npm run dev` proxies `/api` to the backend — start it first:
 
    - `cd packages/harness && node dist/cli.js serve --port 8600 --sessions-dir sessions`

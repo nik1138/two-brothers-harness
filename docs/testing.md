@@ -118,7 +118,10 @@ On the canonical integrated run for this round the in-process suite is
 environment-gated and never failures — the workspace symlink-parity test and
 the MCP stdio spawn are unavailable in this environment. `npm run typecheck`
 and `npm run build` pass, the hermetic CLI E2E is 17/17 on sources and 17/17
-against `--dist`, the tarball smoke is 7/7 and `pack:check` passes.
+against `--dist`, the tarball smoke is 7/7 and `pack:check` passes. The
+tarball smoke pins its own consumer manifest inside the temp dir, so it also
+passes when `TEMP`/`TMP` points inside the checkout (the documented Windows
+Vite workaround).
 
 Environment note (Windows): the shell-execution tests spawn the `bash` found on
 `PATH`; the documented/verified environment is Git Bash
@@ -157,7 +160,7 @@ write, corrupt-section fail-soft, secret-free; 31 tests), and `tests/server.test
 (strict scope validation, persist-before-resolve, restart survival, session
 delete clears, auto-allow on a repeated identical request). The CLI text layout
 is covered by `tests/clistyle.test.ts` (now 27 tests) and `tests/cli.test.ts`
-(now 26) — block separation, the ruled decision, Markdown bodies and their
+(now 27) — block separation, the ruled decision, Markdown bodies and their
 sanitization, the compact footer's presence rules,
 `stripAnsi(colored) === plain`, machine modes escape-free, responsive help
 columns, and live TTY streaming: a TTY sink streams each block and prints the
@@ -561,6 +564,7 @@ The suite (`tests/chat.test.ts`, `tests/timeline.test.ts`,
 `tests/search.test.ts`, `tests/workspaceOrder.test.ts`,
 `tests/mentions.test.ts`, `tests/streaming.test.ts`,
 `tests/basecommands.test.ts`, `tests/composerKeys.test.ts`,
+`tests/keybindings.test.ts`,
 `tests/providerSettings.test.ts`, `tests/uiPrefs.test.ts`,
 `tests/queueState.test.ts`, `tests/approvalSession.test.ts`,
 `tests/folding.test.ts`, `tests/composerStatus.test.ts`,
@@ -618,13 +622,22 @@ key classifier), the Settings → Approvals model
 `GET /api/settings` section (old backend = unsupported + Ask), the save
 patch omitted for an unsupported backend and for a server-pinned mode (a
 pin is never persisted by a normal save), and the pinned/unsupported
-read-only reasons), and the design-token layer (`tests/tokens.test.ts`, 9
+read-only reasons), the keybinding store/model (`tests/keybindings.test.ts`,
+13 tests: defaults and canonical chords, validation (Mod required, printable
+key, Alt/duplicate/reserved refusal with the complete documented reserved set
+pinned by a table-driven test), the versioned bounded fail-soft store and its
+repair rules, event parsing/matching with Ctrl/Cmd equivalence, conflict-aware
+rebinds, platform labels, and the dynamic `/help` entries), and the
+design-token layer (`tests/tokens.test.ts`, 14
 tests: every `var(--x)` reference in `style.css` and the 17 migrated component
 sheets is defined, every core colour token exists in the light block and both
 dark blocks — which must stay identical —, the spacing scale is complete and
 ordered, no colour literal is left in the migrated sheets, canonical
-radius/scale-spacing literals are banned there too, and `theme.ts`
-stays mapped to the colour tokens); 329/329 web tests. The modules are
+radius/scale-spacing literals are banned there too, `theme.ts`
+stays mapped to the colour tokens, the 94-token inventory is pinned, the
+accent variants and their light/dark parity are checked, and the accent-text
+WCAG-AA floors plus the computed naive-ui primary-family contrast floors fail
+with the exact pair and ratio); 350/350 web tests. The modules are
 dependency-free at runtime, so plain `node --test` runs them
 via the `tests/register-ts.mjs` bootstrap (a tiny resolve hook for the
 extensionless imports); `npm test` wires that up. The full `web/` gate also
@@ -818,10 +831,18 @@ cycle on it was run through a `subagent` and captured in
 
 ## What is not covered by tests
 
-- Real network errors / timeouts / 429s (only mock HTTP).
-- Behavior with very long contexts.
-- Concurrent sessions; the web workspace backend is single-user and runs
-  cooperate on one FIFO worker (runs queue), so true parallelism is untested.
+- Real network errors / timeouts / 429s are driven over real loopback TCP by
+  the fault-injection runner (`packages/harness/e2e/faults.ts`, part of the
+  smoke gate), and real endpoints are exercised only by the opt-in manual
+  runners (`e2e/load.ts`, `e2e/serve-load.ts`); WAN latency/load and
+  real-provider fault injection stay deliberate manual coverage.
+- Production-scale long contexts: the compaction stress suite covers
+  cut/serialization and the token-mode budgets, but a wall-clock benchmark on
+  true production-size contexts is not in the gates.
+- Full parallelism: the web backend is single-user and runs cooperate on one
+  FIFO worker (runs queue); the hermetic load suite covers eight concurrent
+  queued runs, and the opt-in `serve-load.ts` measures the real pool but is
+  not a gate.
 - Restart recovery: session JSONL, `*.meta.json`, and
   `sessions/runtime/*.events.jsonl` survive a backend restart, but in-memory
   run state (run records, pending approvals) does not.

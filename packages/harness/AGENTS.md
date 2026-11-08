@@ -462,6 +462,19 @@ the protocol reference and is not modified by work here either.
    timeouts to 1–600 s (`MIN/MAX_SHELL_TIMEOUT_S`; default 30 s,
    non-positive = no timer). Tests: `tests/serveshutdown.test.ts`,
    `tests/security.test.ts`. No new runtime deps.
+   **Waves 7–16 (2026-11-08) added, all in `src/` + `tests/` with hermetic
+   coverage:** persisted bounded reasoning in run events and session runtime
+   sidecars (`runevents.ts`, `runtime.ts`; web/TUI replay); Anthropic extended
+   thinking (`--thinking-budget` / `TWO_BROTHERS_THINKING_BUDGET`: request
+   `thinking`, signed/redacted block capture and verbatim tool-loop passback;
+   `provider.ts`, `context.ts`, `harness.ts`, `config.ts`, `tests/thinkingpassback.test.ts`);
+   `TWO_BROTHERS_JSON` aligned with `--json` (machine object, explicit-mode
+   precedence); command-scoped `--thinking-budget` parsing; the docs↔CLI
+   drift guard (`tests/clidocs.test.ts`, part of `npm test`); real-socket
+   fault-injection runner (`e2e/faults.ts`, in the smoke gate and CI); opt-in
+   manual real-network load runners (`e2e/load.ts`, `e2e/serve-load.ts`);
+   two-platform CI (ubuntu Node 22/24 + Windows Node 24). No new runtime
+   deps.
 
 ## Commands
 
@@ -482,5 +495,8 @@ node dist/selftest.js   # offline gate (after build)
 node src/cli.ts run "..." --provider mock   # dev run via type stripping
 npm run test:e2e:cli       # hermetic offline CLI subprocess E2E (mock)
 npm run test:e2e:cli:dist  # same, against built dist/cli.js
+npm run test:e2e:faults    # real-socket fault injection (loopback, in the smoke gate)
+npm run test:e2e:load      # OPT-IN manual real-network load runner (needs an endpoint)
+npm run test:e2e:serve-load # OPT-IN manual serve-level load/soak runner (mock or real endpoint)
 npm run pack:check         # publint + attw on the packed tarball
 ```

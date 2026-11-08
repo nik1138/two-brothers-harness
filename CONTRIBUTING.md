@@ -29,8 +29,9 @@ npm install
 
 ## Gates
 
-Every pull request must keep these green. CI runs the package gates on Node 22
-and 24.
+Every pull request must keep these green. CI runs the hermetic gates on an
+ubuntu matrix (Node 22 and 24) and a `windows-latest` leg (Node 24, with Git
+Bash first on `PATH` for the shell-spawning suites).
 
 ```bash
 cd packages/harness
@@ -38,23 +39,36 @@ npm run typecheck
 npm test
 npm run build && node dist/selftest.js
 node e2e/cli.ts
+node e2e/cli.ts --dist
+node e2e/faults.ts
 npm run pack:check
 ```
 
 ```bash
 cd web
+npm test
 npm run build
+```
+
+```bash
+node --test e2e/web-freshness.test.mjs   # from the repo root
 ```
 
 Notes:
 
 - `npm run pack:check` runs `publint` and `attw` against the packed tarball, so
   build first.
-- CI additionally runs `npm run test:spawn` and an offline mock run; the root
-  `npm run check` enforces the exact dependency pins and the runtime-dependency
-  list.
-- Browser E2E (`scripts/e2e-test.ps1`, Playwright on the system Edge) is not
-  part of the PR gate, but changes to the web workspace should keep it passing.
+- CI additionally runs `npm run test:spawn`, a mocked CLI run, the hermetic
+  server status/prompt-audit E2E, and (on the Node 22 engines floor only) the
+  tarball-install smoke; the root `npm run check` enforces the exact
+  dependency pins and the runtime-dependency list.
+- Browser E2E (`scripts/e2e-test.ps1`, Playwright on the system Edge) and the
+  opt-in live/real-network runners (`e2e/load.ts`, `e2e/serve-load.ts`) are
+  not part of the PR gate, but changes to the web workspace should keep the
+  browser suite passing.
+- The full offline pre-flight is `scripts/smoke-test.ps1`; the release
+  rehearsal (including the tarball smoke and browser suite) is documented in
+  [`docs/release.md`](docs/release.md).
 
 ## Repository layout
 

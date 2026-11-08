@@ -163,7 +163,7 @@ node dist/cli.js run "Plan a migration from Redis to Valkey" --provider mock
 - Index: `docs/README.md`
 - User docs: `docs/quickstart.md`, `docs/cli-reference.md`
 - Developer docs: `docs/testing.md`, `docs/design-review.md`, `docs/plugins.md`,
-  `docs/backlog.md`
+  `docs/release.md`, `docs/backlog.md`
 - History (content frozen): `docs/history/ts-rewrite-plan.md`,
   `docs/history/cli-audit.md`, `docs/history/web-ui-audit.md`,
   `docs/history/handoff.md`

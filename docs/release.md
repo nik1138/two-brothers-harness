@@ -7,10 +7,35 @@ below has happened yet; this is the exact checklist for the owner.
 
 Mechanics live in `.github/workflows/publish.yml` — read its header comment
 first; it documents the same one-time setup inline. Pushing a `v*` tag (or
-running the workflow by hand) executes the full gate (typecheck → build →
-tests → web build → selftest → `pack:check`) and then publishes with
-`npm publish --tag next --provenance`. Releases land on the **`next`**
-dist-tag, never `latest`, until explicitly promoted below.
+running the workflow by hand) executes the release gate — typecheck, build,
+in-process + spawned tests, hermetic CLI E2E, real-socket fault injection, web
+unit tests + build, selftest, `pack:check`, and a tag↔version check — and then
+publishes with `npm publish --tag next --provenance`. A `v*` tag whose version
+does not match `packages/harness/package.json` fails before publishing.
+Releases land on the **`next`** dist-tag, never `latest`, until explicitly
+promoted below.
+
+## Pre-push release-candidate rehearsal
+
+Run from a clean `main` on Windows with Git Bash first on `PATH` and
+`TEMP`/`TMP` pointing at the checkout's `.tmp` (the documented Vite
+workaround):
+
+1. `git status --short` is empty and `git log -1 --oneline` is the intended
+   commit.
+2. Root `npm run check` passes (pinned deps + runtime-dependency list).
+3. `scripts/smoke-test.ps1` ends with `SMOKE TEST: PASS` (package
+   typecheck/build/tests/dist selftest/mock run/CLI E2E/real-socket faults,
+   reference selftest, web tests/build).
+4. `node scripts/tarball-smoke.mjs` prints `TARBALL SMOKE: PASS (7/7)` (it is
+   robust to `TEMP` inside the checkout) and
+   `cd packages/harness && npm run pack:check` exits 0.
+5. `scripts/e2e-test.ps1` finishes **18 PASS / 0 FAIL / 1 SKIP** (the opt-in
+   `real` scenario) after the web build; the packaged-web freshness guard
+   auto-syncs the copy.
+6. Push and confirm CI green on the ubuntu Node 22/24 matrix and the
+   `windows-latest` Node 24 leg.
+7. Only then follow the publishing checklist below (tag + workflow).
 
 ## One-time external setup (owner, ~15 minutes, no repo changes)
 
