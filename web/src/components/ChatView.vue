@@ -8,6 +8,13 @@ import { findMatches, nextMatch, prevMatch } from '../find'
 import type { FindMatch } from '../find'
 import { buildFoldRows } from '../folding'
 import type { FoldRenderRow } from '../folding'
+import {
+  createTranscriptSliceMemo,
+  initialTranscriptWindow,
+  showEarlierTranscriptWindow,
+  transcriptWindow,
+} from '../transcriptWindow'
+import type { TranscriptWindowState } from '../transcriptWindow'
 import { nextActorLabel, timestampOf } from '../runtime'
 import type { ReasoningItem, TimelineEntry } from '../runtime'
 import { DEFAULT_KEYBINDINGS, matchesBinding } from '../keybindings'
@@ -25,6 +32,12 @@ import AppIcon from './AppIcon.vue'
 const props = defineProps<{
   timeline: TimelineEntry[]
   loading: boolean
+  /**
+   * Session identity. App keys this view by session id, so a switch remounts it;
+   * this prop is the local reset contract for hosts that reuse one instance, so
+   * a pagination window opened on one session can never leak into another.
+   */
+  sessionId?: string | null
   /** Short live-run status line shown at the end of the stream, if any. */
   activity: string | null
   /** Answer a pending approval; returns true when the backend accepted it. */
@@ -281,22 +294,68 @@ function markdownBlocks(m: ChatMessage): MarkdownBlock[] {
 }
 
 // -- timeline windowing ------------------------------------------------------
-// The projection keeps the whole timeline (merge caching, context meter and the
-// working line need it); rendering is capped to the newest rows so a long run
-// stays responsive. "Show earlier" reveals one more page and keeps the reading
-// position stable.
-const WINDOW_STEP = 500
-const windowSize = ref(WINDOW_STEP)
-const windowStart = computed(() => Math.max(0, props.timeline.length - windowSize.value))
-const hiddenCount = computed(() => windowStart.value)
-const visibleTimeline = computed(() => props.timeline.slice(windowStart.value))
+// The projection keeps the whole timeline (merge caching, context meter, run
+// anchors and the working line need it); only the render is paginated. The
+// newest 200 blocks render by default and "Show earlier" prepends the previous
+// 100, keeping the reading position stable. The rendered count is bounded by
+// page + loaded for the life of the mount, so a long live run appending rows
+// can never grow the DOM without bound (at worst the "Show earlier" control
+// appears when the timeline outgrows the page). transcriptWindow.ts owns the
+// bounds, control label and announcement copy. A "block" is one rendered
+// timeline row (chat group, divider, system note, tool/approval/audit card or
+// replayed reasoning row). A session that fits the default window renders
+// exactly the same rows as before: the control and its live region only exist
+// while something is hidden.
+//
+// Find scope: the bar searches the loaded transcript (the rendered window plus
+// expanded folds) and states "searching loaded messages" whenever the window
+// hides rows. Auto-loading every block when find opens was rejected: it would
+// throw away the render cap exactly when the transcript is largest and could
+// yank the reader's viewport. This is the honest, low-risk scope for the slice.
+const windowState = ref<TranscriptWindowState>(initialTranscriptWindow(props.timeline.length))
+const windowView = computed(() =>
+  transcriptWindow(props.timeline.length, windowState.value),
+)
+/** Newest-rows slice, memoized per (timeline array, absolute start). */
+const sliceWindow = createTranscriptSliceMemo<TimelineEntry>()
+const visibleTimeline = computed(() => sliceWindow(props.timeline, windowView.value.start))
+
+/** Polite copy for the last activation; empty until the operator pages back. */
+const windowAnnouncement = ref('')
+/** The live region exists only for a paged transcript (short sessions: no DOM). */
+const windowPaged = computed(
+  () => windowView.value.hidden > 0 || windowAnnouncement.value !== '',
+)
+
+/**
+ * Session switch. App also remounts this component via :key; the watcher keeps
+ * the window contract local for any host that reuses one instance.
+ */
+watch(
+  () => props.sessionId,
+  () => {
+    windowState.value = initialTranscriptWindow(props.timeline.length)
+    windowAnnouncement.value = ''
+  },
+)
+
+/**
+ * A shrinking timeline (rewind, truncated reload) shows whatever remains; the
+ * state counts *loaded earlier rows*, so a later append cannot resurrect a
+ * stale absolute window and growth stays bounded by page + loaded.
+ */
 
 async function showEarlier() {
+  const step = showEarlierTranscriptWindow(props.timeline.length, windowState.value)
+  if (step.loaded === 0) return
   const el = scrollEl.value
-  const fromTop = el ? el.scrollHeight - el.scrollTop : 0
-  windowSize.value += WINDOW_STEP
+  // Keep the distance from the bottom across the top-side insert: the rows the
+  // reader is looking at must not jump when an earlier chunk is prepended.
+  const fromBottom = el ? el.scrollHeight - el.scrollTop : 0
+  windowState.value = step.state
+  windowAnnouncement.value = step.announcement
   await nextTick()
-  if (el) el.scrollTop = Math.max(0, el.scrollHeight - fromTop)
+  if (el) el.scrollTop = Math.max(0, el.scrollHeight - fromBottom)
 }
 
 // -- step folding ------------------------------------------------------------
@@ -326,7 +385,7 @@ const foldRows = computed<FoldRenderRow[]>(() =>
       dockedApprovalId: props.dockedApprovalId ?? null,
       expanded: expandedFolds.value,
     },
-    windowStart.value,
+    windowView.value.start,
   ),
 )
 
@@ -372,6 +431,15 @@ function toggleReasoning(id: string): void {
 // dissent notes, system activities, tool/approval/audit headers and bodies);
 // collapsed drill-down drawers are left out so the counter never points at
 // text that cannot be painted.
+//
+// Scope vs pagination: find searches only the loaded, rendered transcript. When
+// the window hides older rows the bar states "searching loaded messages"; the
+// count is truthful about that scope and never claims to cover the session.
+// Auto-loading every block when the bar opens was rejected for this slice: it
+// would throw away the render cap exactly when the transcript is largest and
+// could move the reader's viewport. A collapsed fold remains unsearchable until
+// it is expanded, exactly as before; the global Escape/Enter contract below is
+// unchanged.
 //
 // Escape layering, topmost first: command palette → dialogs → mobile drawer →
 // this find bar. The palette and every dialog are modal AppDialogs with
@@ -910,6 +978,11 @@ watch(
         role="status"
         aria-live="polite"
       >{{ findStatus }}</span>
+      <span
+        v-if="windowView.hidden > 0"
+        class="find-scope"
+        title="Find searches only the loaded messages. Load earlier messages to search older ones; a collapsed activity group is searched once expanded."
+      >searching loaded messages</span>
       <div class="find-actions">
         <button
           type="button"
@@ -957,11 +1030,11 @@ watch(
     <p v-if="loading" class="empty-hint">Loading…</p>
     <template v-else>
       <button
-        v-if="hiddenCount > 0"
+        v-if="windowView.hasEarlier"
         type="button"
         class="show-earlier"
         @click="showEarlier"
-      >Show earlier messages ({{ hiddenCount }})</button>
+      >{{ windowView.controlLabel }}</button>
 
       <!-- Older completed-run activity folds into one disclosure row per group
            (folding.ts owns the projection). Collapsed rows leave the DOM, so
@@ -1257,6 +1330,17 @@ watch(
       </template>
     </template>
     </div>
+    <!-- Paging announcement: polite and truthful about what loaded and what
+         remains. The region exists only while the transcript is paged (it is
+         rendered before an activation, so the text change is announced, and
+         kept after the last chunk removes the control). -->
+    <p
+      v-if="windowPaged"
+      class="visually-hidden"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    >{{ windowAnnouncement }}</p>
     <p class="visually-hidden" role="status" aria-live="polite">{{ streamAnnouncement }}</p>
   </div>
 </template>
@@ -1575,6 +1659,15 @@ watch(
 
 .find-status-empty {
   color: var(--danger);
+}
+
+/* The transcript window can hide older rows; the bar says so instead of
+   implying that the counter covers the whole session. */
+.find-scope {
+  flex: none;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  white-space: nowrap;
 }
 
 .find-actions {

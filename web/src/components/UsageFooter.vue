@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
-import type { RunUsage } from '../types'
+import type { RunCost, RunUsage } from '../types'
+import { costLabel, costTitle } from '../usageCost'
 
 const props = defineProps<{
   /** A run this app follows is actively working on the selected session. */
@@ -13,6 +14,11 @@ const props = defineProps<{
   turns: number
   /** Latest known usage for the selected session; null when unavailable. */
   usage: RunUsage | null
+  /**
+   * Latest known run cost estimate for the session; null/absent = unknown.
+   * The segment is omitted entirely in that case (never "$0.00").
+   */
+  cost?: RunCost | null
 }>()
 
 const now = ref(Date.now())
@@ -58,6 +64,11 @@ const cachePct = computed(() => {
   return Math.round((u.cached_tokens / u.input_tokens) * 100)
 })
 
+/** `~$0.0312 est.`, or null when the backend could not attribute a cost. */
+const costText = computed(() => costLabel(props.cost))
+/** Tooltip: the priced model plus "estimated …, not a bill". */
+const costTitleText = computed(() => costTitle(props.cost))
+
 const visible = computed(() => ticking.value || props.usage !== null || props.turns > 0)
 </script>
 
@@ -91,6 +102,10 @@ const visible = computed(() => ticking.value || props.usage !== null || props.tu
             >{{ usage.model_calls }}
             {{ usage.model_calls === 1 ? 'model call' : 'model calls' }}</span
           >
+        </template>
+        <template v-if="costText !== null">
+          <span class="usage-sep" aria-hidden="true">·</span>
+          <span class="usage-cost" :title="costTitleText ?? undefined">{{ costText }}</span>
         </template>
       </template>
     </template>
@@ -134,5 +149,10 @@ const visible = computed(() => ticking.value || props.usage !== null || props.tu
 
 .usage-sep {
   opacity: 0.7;
+}
+
+/* The estimate's tooltip carries the model/disclaimer; hint that it is hoverable. */
+.usage-cost {
+  cursor: help;
 }
 </style>

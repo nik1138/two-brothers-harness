@@ -159,6 +159,23 @@ export interface RunUsage {
   input_tokens: number
   output_tokens: number
   cached_tokens: number
+  /**
+   * Prompt tokens written to a provider cache (wave 24, Anthropic's
+   * `cache_creation_input_tokens`). Optional: pre-wave-24 records omit it —
+   * render/read code must treat a missing value as 0.
+   */
+  cache_write_tokens?: number
+}
+
+/**
+ * Estimated USD cost of one run (wave 24). Present on a run record only when
+ * both roles resolved to the same priced model; `null` means unknown, never
+ * `$0`. `model` is the price-table row the id matched.
+ */
+export interface RunCost {
+  currency: 'USD'
+  total: number
+  model: string
 }
 
 export interface RunStart {
@@ -198,6 +215,8 @@ export interface RunRecord {
   error?: string
   decision?: Record<string, unknown>
   usage?: RunUsage | null
+  /** Additive run cost estimate; `null`/absent = unknown (omit the segment). */
+  cost?: RunCost | null
 }
 
 /** Operator-facing role settings — never contains API key material. */

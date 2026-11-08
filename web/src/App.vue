@@ -41,6 +41,7 @@ import type {
   Envelope,
   RoleSettingsView,
   RunEvent,
+  RunCost,
   RunMode,
   RunProvider,
   RunRecord,
@@ -239,6 +240,13 @@ const drawerQuery =
 const sidebarCollapsed = ref<boolean>(drawerQuery?.matches ?? false)
 /** Latest known per-run usage, keyed by session (from run_end events / run records). */
 const runUsageBySession = ref<Record<string, RunUsage | null>>({})
+/**
+ * Latest known run cost estimate, keyed by session (wave 24). Null/absent is
+ * honest unknown (mixed models or an unpriced model); the footer omits the
+ * segment then. Cost is not in `run_end`, so it is refreshed from the run
+ * record after a terminal event.
+ */
+const runCostBySession = ref<Record<string, RunCost | null>>({})
 /** Newest known run record per session; terminal state survives a reload via the 5 s pool poll. */
 interface LastRunInfo {
   status: RunStatus
@@ -377,6 +385,10 @@ const selectedWorkspaceName = computed<string | null>(() => {
 /** Latest known usage for the selected session, if any. */
 const usageForSelected = computed(() =>
   selected.value ? (runUsageBySession.value[selected.value] ?? null) : null,
+)
+/** Latest known run cost estimate for the selected session (null = unknown). */
+const costForSelected = computed(() =>
+  selected.value ? (runCostBySession.value[selected.value] ?? null) : null,
 )
 /** The followed run is actually working — queued or running, not parked. */
 const live = computed(
@@ -1114,6 +1126,7 @@ async function refreshUsageForSession(session: string) {
     // action copy says the link is unknown rather than pretending.
     recordLastRun(latest)
     runUsageBySession.value = { ...runUsageBySession.value, [session]: latest.usage ?? null }
+    runCostBySession.value = { ...runCostBySession.value, [session]: latest.cost ?? null }
   } catch {
     // usage stats are best-effort; never block session loading on them
   }
@@ -1263,6 +1276,9 @@ function finalizeRun(runId: string, status: RunStatus, error: string | null) {
       if (rec.usage) {
         runUsageBySession.value = { ...runUsageBySession.value, [entry.session]: rec.usage }
       }
+      // Cost is computed by the backend at run completion (not in run_end), so
+      // the terminal record is its only source; null clears a stale estimate.
+      runCostBySession.value = { ...runCostBySession.value, [entry.session]: rec.cost ?? null }
       if (rec.status === 'failed' && rec.error && !runErrorBySession.value[entry.session]) {
         setRunError(entry.session, rec.error)
       }
@@ -2490,6 +2506,7 @@ onUnmounted(() => {
       <ChatView
         v-if="selected"
         :key="selected"
+        :session-id="selected"
         :timeline="timeline"
         :loading="loading"
         :activity="activity"
@@ -2601,6 +2618,7 @@ onUnmounted(() => {
         :started-at="runStartedAt"
         :turns="turns"
         :usage="usageForSelected"
+        :cost="costForSelected"
       />
       <Composer
         :session-id="selected"
