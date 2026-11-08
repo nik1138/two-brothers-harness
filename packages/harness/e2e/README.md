@@ -3,10 +3,11 @@
 The live suites run the harness against a **live OpenAI-compatible endpoint**
 (LM Studio) with the small local models `spark-x2.6-4b@q4_k_m` (senior) and
 `lfm3-1.7b` (junior); they are the only non-hermetic test surface in the
-package. The server-status suites (`e2e/server-status.ts`) and the
-prompt-audit suite (`e2e/server-prompt-audit.ts`) are fully hermetic — mock
-providers, in-process servers, temp dirs — and run even when no endpoint is
-reachable. Everything under `tests/` stays offline; nothing here runs in
+package. The server-status suites (`e2e/server-status.ts`), the prompt-audit
+suite (`e2e/server-prompt-audit.ts`) and the real-socket fault-injection runner
+(`e2e/faults.ts`) are fully hermetic — mock/scripted providers, in-process
+servers on ephemeral loopback ports, temp dirs — and run even when no endpoint
+is reachable. Everything under `tests/` stays offline; nothing here runs in
 `npm test`.
 
 ## Prerequisites
@@ -26,6 +27,7 @@ npm run test:e2e        # in-process, imports src/
 npm run test:e2e:dist   # same suites against the built dist/ artifact
 node e2e/server-status.ts   # hermetic status-contract suites only (no endpoint)
 node e2e/server-prompt-audit.ts   # hermetic prompt_audit SSE suite only
+node e2e/faults.ts   # hermetic real-socket retry/timeout/overflow faults (no endpoint)
 ```
 
 Expected duration: roughly 6–10 minutes for the in-process suites, plus
@@ -91,6 +93,36 @@ Evidence per run: session JSONL files, `raw-replies-<ts>.json` (every model
 reply exactly as it came off the wire), and `report-<ts>.json` (models,
 envelope kinds, usage, approval count, durations, per-suite PASS/FAIL/SKIP,
 observed model-output quirks) — all under `e2e/runs/` (gitignored).
+
+## Real-socket fault injection (`e2e/faults.ts`)
+
+`node e2e/faults.ts` (npm script `test:e2e:faults`) is a fully offline,
+deterministic runner that starts a scripted `node:http` server on a loopback
+ephemeral port and drives the package's **real** retry/timeout/overflow
+machinery over real TCP (`fetch`/undici) — no fetch stubs, no external
+network, temp dirs only. It fills the "no real-network fault injection" gap
+without giving up hermeticity; the in-process registry/logic coverage stays in
+`tests/`.
+
+| Scenario | Asserts |
+|---|---|
+| `429-retry-after` | `429` + `Retry-After: 1` then success: exactly 2 attempts, and the header replaces the fixed backoff (the documented 1 s wait is recorded through the provider's `sleeper` seam); one recorded model call. |
+| `5xx-transient` | `500`, `503` then success: exactly 3 attempts; waits equal the documented exponential backoff; one recorded model call. |
+| `timeout-retry` | The first attempt hangs past a 150 ms per-attempt timeout and the retry succeeds: the documented `[warn] provider attempt timed out …` line, the same request re-sent, one recorded model call. |
+| `overflow-surface` | A `413` context-overflow body raises `ProviderContextOverflowError` after ONE attempt even with 6 retries configured: no wait, classification `context-overflow`, no recorded usage. |
+| `overflow-recovery` | A real seeded ~92 KB session: the first senior call overflows, the harness compacts once through the same socket-backed provider and retries the node once; the cycle completes (`consult → proposal → review → decision`), the session JSONL keeps exactly one summary and still restores/appends with dense `seq`. |
+| `overflow-bounded` | The same seeded session against an always-overflow server: exactly 3 requests (overflow → one compaction → retried overflow) and then the documented error; never an infinite retry. |
+| `quota-fatal` | `429 insufficient_quota` is fatal (`reason provider-limit`): one attempt, zero waits, no retry budget burned, the provider message preserved. |
+
+Bounded and deterministic: each scenario has a 10 s watchdog and the whole run
+must stay under 30 s (typically ~0.3 s — the documented backoff waits are
+compressed through the provider's injectable `sleeper` seam; only the timeout
+scenario uses real wall time). Every scenario owns its server and closes it in
+`finally`; the exit code is 0 only when all scenarios pass, with one PASS/FAIL
+line per scenario. Evidence (scenario results, durations, request counts) is
+written to `e2e/runs/faults-report-<ts>.json` (gitignored). It is not part of
+`npm test`; the offline smoke gate runs it as a package-gate step, and you can
+also run it directly or via `npm run test:e2e:faults`.
 
 ## Automation mode (`--mode print|json`)
 

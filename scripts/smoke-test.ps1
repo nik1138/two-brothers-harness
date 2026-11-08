@@ -6,9 +6,9 @@
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-test.ps1
 #
 # Runs: packages/harness typecheck -> build -> npm test -> dist selftest ->
-# mock run -> hermetic CLI E2E, the typescript/ reference selftest, the
-# web/ unit tests, and the web/ build. Everything is offline; no model
-# endpoint or API key is needed.
+# mock run -> hermetic CLI E2E -> real-socket fault injection, the
+# typescript/ reference selftest, the web/ unit tests, and the web/ build.
+# Everything is offline; no model endpoint or API key is needed.
 
 $ErrorActionPreference = "Stop"
 
@@ -25,6 +25,18 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
     }
 }
 Write-Output "Using Node: $((Get-Command node).Source) ($(node --version))"
+
+# The package shell suites spawn `bash`. Prefer Git Bash over a WSL bash.exe
+# (system32) first on PATH, whose temp-dir handling makes cleanup-only
+# assertions fail for environmental reasons. Prepending the Git for Windows
+# bin directory makes the documented command self-contained when Git Bash is
+# installed; without it the suites still run and docs/testing.md documents the
+# prerequisite.
+$gitBashDir = "C:\Program Files\Git\bin"
+if (Test-Path (Join-Path $gitBashDir "bash.exe")) {
+    $env:PATH = "$gitBashDir;$env:PATH"
+    Write-Output "Using Git Bash: $(Join-Path $gitBashDir 'bash.exe')"
+}
 
 # Run an external command, letting its stderr through without aborting on it,
 # and throw on a non-zero exit code.
@@ -82,6 +94,11 @@ Pop-Location
 Section "Package: hermetic CLI E2E"
 Push-Location $pkg
 Run-External "cli e2e" "node" "e2e/cli.ts"
+Pop-Location
+
+Section "Package: real-socket fault injection"
+Push-Location $pkg
+Run-External "faults e2e" "node" "e2e/faults.ts"
 Pop-Location
 
 Section "Protocol reference: selftest"

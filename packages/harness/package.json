@@ -56,6 +56,7 @@
     "test:e2e:dist": "node e2e/run-dist.mjs",
     "test:e2e:cli": "node e2e/cli.ts",
     "test:e2e:cli:dist": "node e2e/cli.ts --dist",
+    "test:e2e:faults": "node e2e/faults.ts",
     "selftest": "node dist/selftest.js",
     "cli": "node src/cli.ts",
     "pack:check": "publint && attw --pack --profile esm-only"
