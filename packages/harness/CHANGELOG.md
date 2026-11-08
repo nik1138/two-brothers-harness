@@ -9,6 +9,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Wave 24: serve compaction parity, doctor TUI checks, cache-aware cost
+  accounting, web transcript paging and run cost, TUI session picker, CLI
+  work-mode warning, and bounded shell output with reliable process-tree kill:**
+  - **Serve compaction configuration parity:** `createServer` resolves
+    compaction settings from config (`compactionSettingsFromConfig`) when
+    `ServerOptions.compaction` is not supplied, so `serve` runs honor the same
+    `compact`, `compactThreshold`, `compactKeepRecent`,
+    `compactThresholdTokens` and `contextWindow` settings as CLI runs.
+  - **Doctor TUI-file checks:** `doctor` adds `tui-keys` and `tui-history`
+    checks in deterministic order (with injectable `env`/`home`). `tui-keys`
+    reports the effective path (`TWO_BROTHERS_TUI_KEYS_FILE` or
+    `~/.two-brothers/tui-keys.json`); `tui-history` reports
+    `TWO_BROTHERS_TUI_HISTORY_FILE` or `~/.two-brothers/tui-history.json`, and a
+    missing history file passes because the TUI creates it on the first
+    submit. API keys are never rendered.
+  - **Cache-aware cost and cache-write accounting:** `estimateCost` treats
+    prompt-cache writes separately from cache reads (`cache_write_tokens`;
+    Anthropic `cache_creation_input_tokens` maps to `cache_write_tokens`;
+    OpenAI-compatible and Gemini report zero). Cache reads price at
+    `cachedInputPer1M` (falling back to the full input rate) and cache writes
+    at `cacheWritePer1M` (falling back to the full input rate). An unknown
+    model returns `null`, so the UI omits the estimate instead of showing a
+    made-up value.
+  - **Web transcript paging and run-cost estimate:** the conversation view
+    windows large transcripts (`TRANSCRIPT_PAGE_SIZE` 200,
+    `TRANSCRIPT_CHUNK_SIZE` 100) and prepends earlier messages with **Show
+    earlier**; in-transcript find searches only the messages currently loaded
+    (messages inside a collapsed group are searched once the group is
+    expanded). The usage footer can show a run-cost estimate
+    (`~$X.XXXX est.`) only for a finite, non-negative USD total with a
+    non-empty model; a `null`, absent or malformed cost omits the segment.
+  - **TUI session picker:** the `/sessions` resume picker shows a readable
+    title instead of the raw file stem — the metadata sidecar title, else the
+    first operator message read from a bounded JSONL prefix (64 KiB, 20
+    events), else the stem — plus a short age (`2h ago`) with `(unknown time)`
+    when the stat failed. The raw file name stays searchable.
+  - **CLI work-mode no-tools warning:** `run`/`chat` in `work` mode with no
+    tools bound prints one `[warn]` line to stderr before the run starts
+    (stdout and exit codes unchanged). The warning states that CLI runs are
+    not workspace-bound, so the junior cannot read, edit or run commands and
+    deliverables cannot be verified.
+  - **Bounded shell output and reliable process-tree kill:** `run_shell`
+    captures output as a bounded head+tail stream (UTF-8 safe across chunks)
+    with O(cap) memory and reports truncation with a marker. On Windows,
+    timeout or cancellation kills the full process tree via the absolute
+    `%SystemRoot%\System32\taskkill.exe` with a bounded wait
+    (`TASKKILL_TIMEOUT_MS` 5000 ms) and a `child.kill()` fallback, so detached
+    descendants do not outlive the run.
+
+  Package suite **1 772 tests (1 770 pass, 2 environment skips)**; web suite
+  **421/421**; the browser-E2E matrix is unchanged (no scenario added this
+  wave). No protocol/session-format change; no new runtime dependency.
+
 - **Mid-run operator steering (wave 23):** the operator can steer a
   cooperation cycle that is already working instead of only queueing the next
   task. A steer is protocol-compatible by construction: it is appended to the

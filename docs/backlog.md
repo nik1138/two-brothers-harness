@@ -43,6 +43,37 @@ Design anchors that already exist:
 
 ## Later goals / items
 
+- **Browser E2E for the wave-23 cooperation surfaces** (deferred from wave 24)
+  — session fork, session rewind, run-scoped file undo and mid-run steering all
+  have unit + server coverage but no browser scenario. One hermetic
+  `cooperation-surfaces` scenario in `e2e/run.mjs` should assert user-visible
+  truths: the session-row **Fork session…** action creates a new session row
+  and the source is unchanged; the **Rewind** confirmation removes the turn;
+  the undo preview applies and the marker file the scripted run wrote is gone
+  (or the refusal is honest); steering POSTs and the draft clears only on
+  acceptance while the run acknowledges. It needs a scripted run that writes a
+  marker file (undo) and a slow/streaming run (steering) in the fixture server;
+  keep the browser matrix and `e2e/web-freshness.test.mjs` green, and do not
+  add sleeps where a deterministic poll exists. Wave 24 deliberately left this
+  uncovered rather than adding a flaky scenario.
+- **Crash-torn session resume (vendor scout F3)** — the pi/opencode scout
+  reported that a session file whose last JSONL line was half-written when the
+  process died is not resumed cleanly; the reference fix is to truncate to the
+  last complete line and say so once. Reproduce hermetically first (write a
+  session, cut the final line mid-object, `--resume`), then make the reader
+  drop the torn trailing record instead of failing the session, keeping dense
+  `seq` intact and never rewriting the file behind the operator's back.
+- **Detached POSIX children on TUI shutdown (vendor scout F4)** — the shell
+  runner now kills its Windows tree reliably (wave 24), but the TUI's own exit
+  path does not reap a detached POSIX process group it may have started; a
+  Ctrl+C during a running turn should stop the group before restoring the
+  terminal. Audit the TUI shutdown path against the shell runner's `killpg`
+  behavior and cover it with a process-free assertion (no leftover pid after
+  exit), not a timing sleep.
+- **TUI steering surface** — wave 23 shipped steering end to end in the
+  runtime, HTTP API and web composer; a TUI chord that queues the compose text
+  for the running turn (and reports the pending count) is still missing.
+
 - **npm publish prep** — verify `@two-brothers/harness` name availability
   (fallbacks), publishConfig + provenance (OIDC), `publint`/`attw` gates,
   and pi's supply-chain practices (exact-version pins + check script,
@@ -1202,7 +1233,8 @@ Design anchors that already exist:
   `web/src/App.vue`, `web/src/components/Composer.vue`,
   `web/src/shortcuts.ts`; tests `tests/steering.test.ts` (20) and
   `web/tests/steering.test.ts` (6). Remaining: TUI steering, a browser E2E
-  scenario, real-provider validation.
+  scenario (deferred again in wave 24 — see "Later goals / items"),
+  real-provider validation.
 - **Session fork + self-contained HTML export** — `POST
   /api/sessions/{name}/fork` and `sessions fork <name> [--at <seq>] [--name
   <new>]` copy a session prefix byte-for-byte into a NEW session file (dense

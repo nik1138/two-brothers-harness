@@ -29,7 +29,8 @@ The script runs:
    settings and model discovery, queue visibility, session-scope approvals,
    step folding, composer status seats, plan docks, streaming, composer prompt
    recall, the approval-policy model, the design-token layer, mid-run steering,
-   session fork/rewind, run-scoped file undo and the HTML export helpers)
+   session fork/rewind, run-scoped file undo, the HTML export helpers,
+   transcript windowing and the run-cost footer)
 10. the `web/` build
 
 Expected final line: `SMOKE TEST: PASS`. It is an offline pre-flight, not the
@@ -115,7 +116,7 @@ npm run test:spawn      # node --test tests/ (child processes allowed)
 ```
 
 On the canonical integrated run for this round the in-process suite is
-**1 693 tests: 1 691 pass, 0 fail, 2 skipped** (exit 0); the two skips are
+**1 772 tests: 1 770 pass, 0 fail, 2 skipped** (exit 0); the two skips are
 environment-gated and never failures — the workspace symlink-parity test and
 the MCP stdio spawn are unavailable in this environment. `npm run typecheck`
 and `npm run build` pass, the hermetic CLI E2E is 19/19 on sources and 19/19
@@ -123,6 +124,18 @@ against `--dist`, the tarball smoke is 7/7 and `pack:check` passes. The
 tarball smoke pins its own consumer manifest inside the temp dir, so it also
 passes when `TEMP`/`TMP` points inside the checkout (the documented Windows
 Vite workaround).
+
+Wave 24 added or extended, all hermetic: `tests/usagecache.test.ts`
+(cache-write usage extraction/merge/tracking, cache-aware estimation and the
+additive key's optional shape), `tests/tuisessionpick.test.ts` (bounded JSONL
+prefix parsing and title/age resolution), `tests/shell.test.ts` (bounded
+head+tail output across chunk and UTF-8 boundaries, plus the injectable
+`taskkill`/child-spawn seams), `tests/doctor.test.ts` (the `tui-keys` /
+`tui-history` rows through injectable `env`/`home`), `tests/serverbase.test.ts`
+(compaction settings derived from config), `tests/server.test.ts` (run cost and
+serve compaction) and `tests/cli.test.ts` (one work-mode warning, unchanged
+stdout/exit code). The web workspace adds `tests/transcriptWindow.test.ts` and
+`tests/usageFooter.test.ts`.
 
 Environment note (Windows): the shell-execution tests spawn the `bash` found on
 `PATH`; the documented/verified environment is Git Bash

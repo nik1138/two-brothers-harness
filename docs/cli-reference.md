@@ -613,9 +613,19 @@ line per check, in this order — Node engine (the package's `>= 22.19` floor),
 settings file (`<sessions-dir>/settings.json`), sessions-directory
 writability, per-role provider configuration (kind, base URL, model, key
 presence), the provider endpoint (`GET {base-url}/models`; skipped for
-`mock`), built web assets, and the `<cwd>/plugins` directory. API keys are
-never printed. The endpoint probe is bounded by `--timeout` (seconds, default
-5) and only runs for `openai`.
+`mock`), built web assets, the `<cwd>/plugins` directory, the TUI keys file and
+the TUI prompt history file. API keys are never printed. The endpoint probe is
+bounded by `--timeout` (seconds, default 5) and only runs for `openai`.
+
+The two TUI rows are read-only and content-blind: `tui-keys` resolves the same
+file the TUI uses (`--keys-file` origin is not available to `doctor`, so
+`TWO_BROTHERS_TUI_KEYS_FILE` or `~/.two-brothers/tui-keys.json`), and
+`tui-history` reads `TWO_BROTHERS_TUI_HISTORY_FILE` or
+`~/.two-brothers/tui-history.json`. An absent default file passes (defaults
+active / prompt history is optional); a missing explicitly named file, invalid
+JSON, an unsupported version, an oversized file or an unreadable path warns
+with only the first bounded resolver diagnostic — the file itself is never
+dumped, and no chord or prompt text is echoed.
 
 Exit code: `0` when no check failed, `1` when at least one check failed, `2` on
 a usage/config error. Warnings (a missing settings file or plugins directory,
@@ -720,6 +730,13 @@ node dist/cli.js serve --approval-mode readonly           # pin the mode for the
 | `--sessions-dir` | `sessions` | directory of JSONL session files to expose |
 | `--workers` | (runtime default) | background run workers (env `TWO_BROTHERS_WORKERS`) |
 | `--approval-mode` | `ask`, `readonly`, `edits`, `allow-all` | `ask` | pin the [approval mode](#approval-modes) for every run this server starts (env `TWO_BROTHERS_APPROVAL_MODE`); the pin is in-memory only and never persisted — without it the saved `approval_policy` setting applies |
+
+Web runs also honor the shared compaction flags (`--compact`,
+`--compact-threshold <chars>`, `--compact-threshold-tokens <n>`,
+`--compact-keep-recent <chars>`, `--context-window <n>`, and their
+`TWO_BROTHERS_COMPACT*` env vars): the resolved run config feeds every web run
+and the manual `POST /api/sessions/{name}/compact` budgets. Without any of them
+web runs never auto-compact — exactly the CLI's "unset means off" behavior.
 
 The backend is a **local single-user workspace server**. API overview:
 
@@ -1156,6 +1173,15 @@ metadata only at `GET /api/skills`.
 | `work` | senior delegates (`delegation`) → junior `deliverable` → `review` → `decision` |
 | `auto` | senior chooses; in v0.1 this reduces to `consult` |
 
+A CLI `work` run binds no workspace, so it binds no tools — the junior cannot
+read, edit or run a command, and a `deliverable` cannot be verified against
+real files. `run` states that instead of silently producing an unverifiable
+deliverable: one `[warn] work mode has no tools bound: ...` line goes to stderr
+before the run starts (a `chat` turn in `work` mode warns the same way). stdout,
+the exit code and `--json` output are byte-identical to a run without the
+warning. Use `serve` (workspace-bound web runs) or `consult` mode when the
+junior must touch the workspace.
+
 ## Approval modes
 
 A workspace-bound run applies one operator-selected **approval mode** to
@@ -1229,8 +1255,11 @@ stable, width-safe layout:
   footer ends the transcript:
   `tokens 40 in / 20 out · cache 25% · 4 calls · cost $0.0300`. Segments appear
   only when known — `cache` only with a recorded cache hit, `cost` only when
-  both roles resolve to one priced model, and no footer at all when the run
-  reported no usage. The legacy `tokens:` / `cost:` diagnostic lines are the
+  both roles resolve to one priced model **and** one prompt-cache family (the
+  three wire families report cache tokens against different prompt bases, so a
+  cached run is priced with its family's mapping; an ambiguous mixed-family run
+  shows no cost rather than a double- or under-counted number), and no footer at
+  all when the run reported no usage. The legacy `tokens:` / `cost:` diagnostic lines are the
   print-mode format and stay on stderr there (see
   [Automation output](#automation-output-ts-package)); the human transcript does
   not print them.

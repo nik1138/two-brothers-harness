@@ -69,6 +69,14 @@ adding ids is explicit (**Add N to draft**, then **Save changes**).
 | The approval card shows "Allowed once — this backend does not support session scope." | The backend ignored the additive `scope: "session"` field (older backend that predates session-scope approvals). | The allow applied to that request only — nothing pretends otherwise. Rebuild and restart the backend to use **Always allow this session**. |
 | A session grant asks again after a restart / for another session | Grants are per session file, stored in `sessions/settings.json` under `approvals`, and cleared when the session is deleted; a corrupt settings file reads as empty (fail closed). | Re-allow in the current session; check the session still exists and the settings file is valid JSON. A damaged `approvals` section never silently auto-allows — the card simply asks again. |
 
+## Web runs never compact
+
+| Symptom | Why | Fix |
+|---|---|---|
+| A long web run keeps growing its context until the provider overflows, and the session never gains a summary envelope | Web runs use the compaction settings resolved from `serve`'s own configuration. With no `--compact*`, `--context-window` or `TWO_BROTHERS_COMPACT*` value, `serve` behaves exactly like a CLI run without compaction flags: auto-compaction is off. | Restart `serve` with budgets, e.g. `serve --compact-threshold 60000 --compact-keep-recent 20000` (or `--context-window`/`--compact-threshold-tokens` for token mode). A completed auto-compaction appends one `compacted into the following summary` envelope and rewrites the session JSONL. |
+| The web **Compact** action ignores the budget I expected | `POST /api/sessions/{name}/compact` resolves the same config budgets, but an explicit `ServerOptions.compaction` (embedded use) still wins when one is set. | Restart `serve` with the flags; a browser client cannot pass budgets per request. `before_events`/`after_events` in the response says whether anything was cut. |
+| `serve --help` does not list the compaction flags | Older builds accepted the shared flags without listing them on the serve surface. | Current builds list `--compact`, `--compact-threshold`, `--compact-threshold-tokens`, `--compact-keep-recent` and `--context-window` in `serve --help`; the shared option table always parsed them. |
+
 ## Endpoint unreachable, refused, or rate-limited
 
 | Symptom | `doctor` check | Fix |
@@ -164,6 +172,14 @@ node dist/cli.js serve --port 8600 --sessions-dir sessions
 | `/provider` refuses to change anything while a turn runs | Provider changes are refused while a turn or compaction is in progress so an in-flight run cannot switch endpoints mid-call | Stop or wait for the turn (then `/provider`), or change it before starting the next task. |
 | An explicit `--provider openai` did not override the persisted non-default provider | Older builds could not distinguish a flag that repeats the default from an absent flag; current builds record provenance (`providerExplicit`), so an explicit `--provider`/`TWO_BROTHERS_PROVIDER` value wins even when it equals the default | Update to a current build. Without either, the persisted provider staying in effect is the intended behavior. |
 
+## TUI keys and prompt-history files
+
+| Symptom | `doctor` check | Fix |
+|---|---|---|
+| `doctor` reports `tui-keys` warn with a chord message (e.g. `"palette" must be a non-empty array of chord strings`) | `tui-keys` loads the same file the TUI uses — `TWO_BROTHERS_TUI_KEYS_FILE` when set, else `~/.two-brothers/tui-keys.json` — and shows only the resolver's first bounded diagnostic, never the file contents | Fix the binding (an array of chord strings such as `["ctrl+p"]`) or delete the file to return to the default chords; the TUI keeps the defaults until the file loads. `doctor` and the TUI agree because they share the loader. |
+| `doctor` reports `tui-history` warn: `not valid JSON — delete it to start a fresh history`, or an unsupported-version message | `tui-history` reads `TWO_BROTHERS_TUI_HISTORY_FILE` or `~/.two-brothers/tui-history.json` and classifies the document before asking the store for the effective entries | Delete the file (prompt history is optional; the TUI recreates it on the next accepted submission) or restore a `{"version": 1, "entries": [...]}` document. The reply never quotes the file's text. |
+| `tui-keys` passes with `not found — defaults active` or `tui-history` passes with `not found — no saved prompt history (optional)` | Absent files are a pass, not a problem | Nothing to fix. An explicitly named file (`TWO_BROTHERS_TUI_KEYS_FILE`) that is missing is a warn because you asked for that file. |
+
 ## Approval modes
 
 | Symptom | Why | Fix |
@@ -205,6 +221,14 @@ node dist/cli.js serve --port 8600 --sessions-dir sessions
 | `POST /api/runs` returns 400 `usage: /plan <objective>` or `… is a built-in action, not a task` | Built-in **prompt** commands require their argument, and built-in **action** commands (`compact`, `export`, `permission`, `status`, `mode`, `new`, `help`) are performed by the surface — submitting one as a run would create an empty turn, so the API refuses it | Send the argument (`/plan <objective>`), or perform the action in the client: `/compact` is also available as `POST /api/sessions/{name}/compact`. A client without the local action should say so instead of submitting the line. |
 | The web `/compact` action reports "a run is active" or a summarizer failure | Manual compaction is refused while a run for that session is queued/running/waiting (409), and a provider failure is a 502 with the message; nothing is written on failure | Wait for or stop the run, then retry; if it fails again, check the configured Senior endpoint with `doctor` and re-run with `--verbose` on the server. |
 | A built-in command (e.g. `/plan`) behaves differently after adding a `plan.md` | A discovered `<name>.md` template shadows a built-in of the same name (exact-name priority, deepseek-harness rule) | Rename or remove the template file, or use the built-in under its other spellings (aliases) where the template does not shadow them. |
+
+## Shell output and process trees
+
+| Symptom | Why | Fix |
+|---|---|---|
+| A `workspace_run_shell` result ends with `...[truncated N chars]...` | Output is captured as a bounded head+tail stream (the default cap is 20 000 characters per stream): the first and last halves are kept and `N` is the number of characters omitted. A command like `yes` therefore costs bounded memory instead of the whole stream. | Deliberate. Make the command print less (redirect to a file, `\| tail -n 200`, `--quiet`) when you need the middle of the output. |
+| A timed-out or cancelled shell command still seems to leave a process behind | Cleanup kills the whole tree: on Windows via the absolute `%SystemRoot%\System32\taskkill.exe /F /T /PID`, on POSIX via the child's own process group; when the kill cannot complete, the runner falls back to `child.kill()`. | Nothing to do for a process the runner started. A survivor was already detached from that tree (`start /B`, a service, a daemon) — kill it explicitly; the runner only reaps what it spawned. |
+| A model-supplied shell timeout looks clamped | `run_shell` clamps the model's timeout to 1–600 seconds (default 30 s; a non-positive value means no timer). | Pass a realistic timeout in the tool call; the clamp keeps a runaway command from hanging a run. |
 
 ## Web plan, folding and status seats
 
