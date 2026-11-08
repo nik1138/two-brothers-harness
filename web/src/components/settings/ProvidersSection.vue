@@ -31,6 +31,7 @@ import {
   newDiscoveryState,
   nextProviderIndex,
   normalizeProviders,
+  parseProviderContextWindow,
   providerBadge,
   providerDeleteAllowed,
   providerDeleteImpact,
@@ -116,9 +117,13 @@ const draft = reactive<ProviderDraft>({
   apiKey: '',
   models: [],
   kind: PROVIDER_KIND_DEFAULT,
+  contextWindow: '0',
 })
 const draftDirty = computed(() =>
   openProvider.value ? isProviderDraftDirty(openProvider.value, draft) : false,
+)
+const contextWindowProblem = computed(
+  () => parseProviderContextWindow(draft.contextWindow).error,
 )
 
 // -- model discovery ("Refresh models") --------------------------------------
@@ -231,6 +236,7 @@ function resetDraft(provider: ProviderView | null = openProvider.value): void {
   draft.apiKey = next.apiKey
   draft.models = next.models
   draft.kind = next.kind
+  draft.contextWindow = next.contextWindow
 }
 
 /** Drop any probe result and invalidate an in-flight one (newer token wins). */
@@ -498,10 +504,17 @@ async function saveSelected(): Promise<void> {
     detailError.value = urlProblem
     return
   }
+  const window = parseProviderContextWindow(draft.contextWindow)
+  if (window.error) {
+    detailError.value = window.error
+    return
+  }
   const patch: ProviderPatchRequest = {
     base_url: draft.baseUrl.trim(),
     models: cleanModelList(draft.models),
     kind: draft.kind || PROVIDER_KIND_DEFAULT,
+    // 0 clears the stored window (unknown); the server validates strictly too.
+    context_window: window.value,
   }
   if (draft.apiKey.trim()) patch.api_key = draft.apiKey.trim()
   busy.value = true
@@ -819,6 +832,36 @@ async function submitAdd(): Promise<void> {
                 placeholder="http://127.0.0.1:1234/v1"
                 @keydown.enter.prevent="saveSelected"
               />
+            </label>
+
+            <label class="provider-field">
+              <span class="provider-field-label">Context window (tokens)</span>
+              <n-input
+                v-model:value="draft.contextWindow"
+                :status="contextWindowProblem ? 'error' : undefined"
+                :input-props="{
+                  inputmode: 'numeric',
+                  'aria-invalid': contextWindowProblem ? 'true' : undefined,
+                  'aria-describedby': contextWindowProblem
+                    ? 'provider-context-window-error'
+                    : undefined,
+                }"
+                :disabled="busy"
+                placeholder="0 (unknown)"
+                @keydown.enter.prevent="saveSelected"
+              />
+              <span
+                v-if="contextWindowProblem"
+                id="provider-context-window-error"
+                class="provider-field-error"
+                role="alert"
+              >
+                {{ contextWindowProblem }}
+              </span>
+              <span v-else class="provider-field-note">
+                0 = unknown. Used only for context compaction; a run-level flag, environment
+                variable, or saved Advanced context window wins over this preset.
+              </span>
             </label>
 
             <label class="provider-field">

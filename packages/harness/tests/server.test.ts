@@ -2016,6 +2016,80 @@ test("provider presets: CRUD, masking, duplicate 409, ref clearing", async () =>
   }
 });
 
+test("provider presets: context_window round-trips, validates and clears", async () => {
+  const srv = await startServer();
+  try {
+    const created = await post<Record<string, any>>(srv.base, "/api/providers", {
+      name: "Windowed",
+      base_url: "http://127.0.0.1:1234/v1",
+      context_window: 8192,
+    });
+    assert.equal(created.status, 201);
+    assert.equal(created.body.provider.context_window, 8192);
+
+    // GET exposes the window; seed rows that never set one omit the field, so
+    // the old response shape stays byte-compatible.
+    const list = (await get<Record<string, any>>(srv.base, "/api/providers")).body
+      .providers as Array<Record<string, any>>;
+    assert.equal(list.find((preset) => preset.name === "Windowed")?.context_window, 8192);
+    assert.ok(
+      !("context_window" in (list.find((preset) => preset.name === "openai") ?? {})),
+      "a preset without a window keeps the old shape",
+    );
+
+    // omitting the field keeps it; sending a new value updates it
+    const kept = await api<Record<string, any>>(srv.base, "PUT", "/api/providers/Windowed", {
+      models: ["m"],
+    });
+    assert.equal(kept.status, 200);
+    assert.equal(kept.body.provider.context_window, 8192);
+    const changed = await api<Record<string, any>>(srv.base, "PUT", "/api/providers/Windowed", {
+      context_window: 16384,
+    });
+    assert.equal(changed.status, 200);
+    assert.equal(changed.body.provider.context_window, 16384);
+
+    // invalid values are 400s and never touch the stored window
+    for (const bad of [-1, 1.5, "8192", true, Number.MAX_SAFE_INTEGER + 1]) {
+      assert.equal(
+        (
+          await api(srv.base, "PUT", "/api/providers/Windowed", {
+            context_window: bad,
+          })
+        ).status,
+        400,
+        `PUT context_window=${String(bad)}`,
+      );
+      assert.equal(
+        (
+          await post(srv.base, "/api/providers", {
+            name: `bad-${String(bad).replace(/[^a-z0-9]/gi, "")}`,
+            base_url: "http://127.0.0.1:9/v1",
+            context_window: bad,
+          })
+        ).status,
+        400,
+        `POST context_window=${String(bad)}`,
+      );
+    }
+    const afterBad = (await get<Record<string, any>>(srv.base, "/api/providers")).body
+      .providers as Array<Record<string, any>>;
+    assert.equal(afterBad.find((preset) => preset.name === "Windowed")?.context_window, 16384);
+
+    // 0 clears the window (unknown == absent)
+    const cleared = await api<Record<string, any>>(srv.base, "PUT", "/api/providers/Windowed", {
+      context_window: 0,
+    });
+    assert.equal(cleared.status, 200);
+    assert.ok(!("context_window" in cleared.body.provider));
+    const afterClear = (await get<Record<string, any>>(srv.base, "/api/providers")).body
+      .providers as Array<Record<string, any>>;
+    assert.ok(!("context_window" in (afterClear.find((preset) => preset.name === "Windowed") ?? {})));
+  } finally {
+    await srv.close();
+  }
+});
+
 test("provider presets: GET exposes additive seed/customized flags", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tb-provider-flags-"));
   try {

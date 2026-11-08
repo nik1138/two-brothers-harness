@@ -1186,6 +1186,153 @@ test("run: explicit ServerOptions.compaction wins wholesale over the persisted s
   }
 });
 
+// ---------------------------------------------------------------------------
+// preset context window (wave 26)
+// ---------------------------------------------------------------------------
+
+/** Create one stored provider preset, optionally declaring a context window. */
+async function addWindowedProvider(
+  server: RunningServer,
+  name: string,
+  contextWindow?: number,
+): Promise<Record<string, any>> {
+  const res = await post<Record<string, any>>(server.base, "/api/providers", {
+    name,
+    base_url: `http://${name}.example/v1`,
+    ...(contextWindow !== undefined ? { context_window: contextWindow } : {}),
+  });
+  assert.equal(res.status, 201, JSON.stringify(res.body));
+  return res.body.provider as Record<string, any>;
+}
+
+/** Point both roles at named presets (models come from the roles). */
+async function useProviderPresets(
+  server: RunningServer,
+  senior: string,
+  junior: string,
+): Promise<void> {
+  const res = await api<Record<string, any>>(server.base, "PUT", "/api/settings", {
+    senior: { provider_ref: senior, model: "mock-senior" },
+    junior: { provider_ref: junior, model: "mock-junior" },
+  });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+}
+
+test("run: a preset context window drives token-mode compaction when nothing is run-level", async () => {
+  const server = await startServer();
+  try {
+    await addWindowedProvider(server, "windowed", 100);
+    await useProviderPresets(server, "windowed", "windowed");
+    const view = await get<Record<string, any>>(server.base, "/api/settings");
+    assert.deepEqual(view.body.compaction.context_window, {
+      persisted: 0,
+      effective: 100,
+      source: "preset",
+    });
+    assert.equal(view.body.compaction.threshold_tokens.source, "absent");
+
+    const record = await runToEnd(server, {
+      task: AUTO_COMPACT_TASK,
+      session: "preset-auto.jsonl",
+    });
+    assert.equal(record.status, "completed");
+    assert.equal(
+      summaryCount(server, "preset-auto.jsonl"),
+      1,
+      "the preset window switched compaction to token mode and fired",
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("settings: both role presets use the smaller window; one window is enough", async () => {
+  const server = await startServer();
+  try {
+    await addWindowedProvider(server, "small-window", 4096);
+    await addWindowedProvider(server, "large-window", 8192);
+    await addWindowedProvider(server, "no-window");
+    await useProviderPresets(server, "small-window", "large-window");
+
+    const both = await get<Record<string, any>>(server.base, "/api/settings");
+    assert.deepEqual(both.body.compaction.context_window, {
+      persisted: 0,
+      effective: 4096,
+      source: "preset",
+    });
+
+    // Only one role declares a window: that one is used (no smaller-of-two).
+    await useProviderPresets(server, "large-window", "no-window");
+    const one = await get<Record<string, any>>(server.base, "/api/settings");
+    assert.deepEqual(one.body.compaction.context_window, {
+      persisted: 0,
+      effective: 8192,
+      source: "preset",
+    });
+
+    // Neither declares one: unknown, not a fabricated window.
+    await useProviderPresets(server, "no-window", "no-window");
+    const none = await get<Record<string, any>>(server.base, "/api/settings");
+    assert.deepEqual(none.body.compaction.context_window, {
+      persisted: 0,
+      effective: 0,
+      source: "absent",
+    });
+  } finally {
+    await server.close();
+  }
+});
+
+test("run: a persisted or flag context window wins over the preset fallback", async () => {
+  const servers: RunningServer[] = [];
+  try {
+    // Persisted 100k tokens wins over the preset's 100: no cutoff in this
+    // short run (the preset alone would have compacted).
+    const persisted = await startServer();
+    servers.push(persisted);
+    await addWindowedProvider(persisted, "windowed", 100);
+    await useProviderPresets(persisted, "windowed", "windowed");
+    await putCompaction(persisted, { context_window: 100000 });
+    const persistedView = await get<Record<string, any>>(persisted.base, "/api/settings");
+    assert.deepEqual(persistedView.body.compaction.context_window, {
+      persisted: 100000,
+      effective: 100000,
+      source: "persisted",
+    });
+    const persistedRun = await runToEnd(persisted, {
+      task: AUTO_COMPACT_TASK,
+      session: "preset-persisted-wins.jsonl",
+    });
+    assert.equal(persistedRun.status, "completed");
+    assert.equal(summaryCount(persisted, "preset-persisted-wins.jsonl"), 0);
+
+    // The serve flag/env config wins over both the persisted 50 (which would
+    // compact) and the preset 100.
+    const flagged = await startServer({
+      configFactory: () =>
+        resolveConfig({ provider: "mock", mode: "consult", contextWindow: 100000 }),
+    });
+    servers.push(flagged);
+    await addWindowedProvider(flagged, "windowed", 100);
+    await useProviderPresets(flagged, "windowed", "windowed");
+    await putCompaction(flagged, { context_window: 50 });
+    const flaggedView = await get<Record<string, any>>(flagged.base, "/api/settings");
+    assert.deepEqual(flaggedView.body.compaction.context_window, {
+      persisted: 50,
+      effective: 100000,
+      source: "flag",
+    });
+    const flaggedRun = await runToEnd(flagged, {
+      task: AUTO_COMPACT_TASK,
+      session: "preset-flag-wins.jsonl",
+    });
+    assert.equal(flaggedRun.status, "completed");
+    assert.equal(summaryCount(flagged, "preset-flag-wins.jsonl"), 0);
+  } finally {
+    for (const server of servers) await server.close();
+  }
+});
+
 test("compact: the manual route merges config > persisted", async () => {
   const servers: RunningServer[] = [];
   try {

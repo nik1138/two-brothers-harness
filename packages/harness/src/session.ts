@@ -18,12 +18,41 @@
  * export call `loadDetailed()` and never rewrite the file. Interior
  * corruption (a bad non-final record) is still a typed `SessionError` naming
  * the line; only the final fragment is recoverable.
+ *
+ * Single-writer assumption: one process owns a session log. The repair still
+ * fails safe if that is violated — it captures the file's identity (size +
+ * mtimeMs + inode where available) before reading and re-checks it immediately
+ * before the rename, so a concurrent append makes the repair abort with a
+ * retryable `SessionError` (original bytes untouched, temp removed) instead of
+ * clobbering bytes it never saw.
  */
 import * as fs from "node:fs";
 import type { Message } from "./protocol.ts";
 import { SharedContext } from "./context.ts";
 
-export class SessionError extends Error {}
+export class SessionError extends Error {
+  /**
+   * True when the operation failed because the file changed underneath it and
+   * retrying the same call may succeed (the repair CAS). Ordinary IO and
+   * corruption failures stay non-retryable.
+   */
+  readonly retryable: boolean;
+
+  constructor(message: string, options: { retryable?: boolean } = {}) {
+    super(message);
+    this.retryable = options.retryable ?? false;
+  }
+}
+
+/**
+ * Additive store options. `beforeRename` is a test seam: it runs after the
+ * repair's temp-file write and before the final CAS re-stat/rename, so a test
+ * can deterministically append between the check and the rename ("another
+ * process wrote while we repaired") without sleeps. Production callers omit it.
+ */
+export interface SessionStoreOptions {
+  beforeRename?: () => void;
+}
 
 /** Additive torn-tail recovery detail returned by the load helpers. */
 export interface SessionRecovery {
@@ -52,6 +81,18 @@ interface SessionScan extends SessionLoadResult {
   lastCompleteEnd: number;
   /** True when the file is empty or its final byte is `\n`. */
   endsWithNewline: boolean;
+  /** File identity captured BEFORE the content read; `null` when unavailable. */
+  signature: FileSignature | null;
+}
+
+/**
+ * Repair CAS signature: size (an append always changes it), mtimeMs (in-place
+ * rewrites) and inode where the platform reports one (replace-by-rename).
+ */
+interface FileSignature {
+  size: number;
+  mtimeMs: number;
+  ino: number | null;
 }
 
 /**
@@ -65,11 +106,37 @@ export function sessionRecoveryWarning(path: string, recovery: SessionRecovery):
   );
 }
 
+function fileSignature(stat: fs.Stats): FileSignature {
+  return {
+    size: stat.size,
+    mtimeMs: stat.mtimeMs,
+    // Node reports 0 where the platform has no inode (some Windows volumes);
+    // keep that as "unavailable" rather than comparing a meaningless 0.
+    ino: typeof stat.ino === "number" && Number.isFinite(stat.ino) && stat.ino !== 0
+      ? stat.ino
+      : null,
+  };
+}
+
+/** Full-identity comparison; two `null`s never count as "unchanged". */
+function sameFileSignature(a: FileSignature | null, b: FileSignature | null): boolean {
+  return (
+    a !== null &&
+    b !== null &&
+    a.size === b.size &&
+    a.mtimeMs === b.mtimeMs &&
+    a.ino === b.ino
+  );
+}
+
 export class SessionStore {
   readonly path: string;
+  /** Test seam; see `SessionStoreOptions.beforeRename`. */
+  private readonly beforeRename?: () => void;
 
-  constructor(path: string) {
+  constructor(path: string, options: SessionStoreOptions = {}) {
     this.path = path;
+    this.beforeRename = options.beforeRename;
   }
 
   exists(): boolean {
@@ -120,18 +187,24 @@ export class SessionStore {
    * whose line lacks its trailing newline is KEPT and exactly one newline is
    * added the same way (that is not corruption). Empty/whitespace-only files
    * and a clean file are left byte-identical. Read-only listing/search/export
-   * use `loadDetailed()`, never this method.
+   * use `loadDetailed()`, never this method. The truncation/normalization is
+   * CAS-guarded against a concurrent writer (see `rewritePrefixAtomically`);
+   * a lost race raises a retryable `SessionError` and leaves the file intact.
    */
   loadForAppend(): SessionLoadResult {
     const scan = this.scan();
     if (scan.recovered) {
       // Keep the raw prefix through the last complete newline; CRLF/BOM and
       // any blank lines stay byte-identical.
-      this.rewritePrefixAtomically(scan.buffer.subarray(0, scan.lastCompleteEnd), false, scan.buffer.length);
+      this.rewritePrefixAtomically(
+        scan.buffer.subarray(0, scan.lastCompleteEnd),
+        false,
+        scan.signature,
+      );
     } else if (scan.events.length > 0 && !scan.endsWithNewline) {
       // A complete, valid final envelope without its newline is not a tear,
       // but appending after it would merge two JSON objects onto one line.
-      this.rewritePrefixAtomically(scan.buffer, true, scan.buffer.length);
+      this.rewritePrefixAtomically(scan.buffer, true, scan.signature);
     }
     return {
       events: scan.events,
@@ -166,7 +239,20 @@ export class SessionStore {
         buffer: Buffer.alloc(0),
         lastCompleteEnd: 0,
         endsWithNewline: true,
+        signature: null,
       };
+    }
+    // Capture the repair-CAS identity BEFORE the content read. Any write after
+    // this point (an append, an in-place rewrite, a replace) changes the
+    // re-stat in `rewritePrefixAtomically`, so this scan's stale prefix can
+    // never be renamed over bytes it did not see. Single-writer assumption:
+    // one process owns a session log; a second process is exactly the race the
+    // CAS refuses with a retryable `SessionError` instead of losing its bytes.
+    let signature: FileSignature | null = null;
+    try {
+      signature = fileSignature(fs.statSync(this.path));
+    } catch {
+      signature = null;
     }
     let buffer: Buffer;
     try {
@@ -230,6 +316,7 @@ export class SessionStore {
       buffer,
       lastCompleteEnd,
       endsWithNewline: buffer.length === 0 || buffer[buffer.length - 1] === 0x0a,
+      signature,
     };
   }
 
@@ -251,11 +338,27 @@ export class SessionStore {
 
   /**
    * Write `prefix` (+ an optional newline) to a temp file in the same
-   * directory and rename it over the session. A concurrent append between our
-   * scan and the rename makes the rename a no-op failure instead of clobbering
-   * bytes we did not read: the caller retries (`SessionError`).
+   * directory and rename it over the session.
+   *
+   * CAS rule (single-writer assumption: one process owns a session log): the
+   * scan captured a full identity — size + mtimeMs + inode where available —
+   * BEFORE it read the bytes. After the temp write this method re-stats and
+   * compares that identity immediately before `renameSync`. If anything
+   * changed (another process appended, rewrote in place, or replaced the
+   * file), the original file is left byte-untouched, the temp file is
+   * removed, and a retryable `SessionError` is raised. The caller retries the
+   * whole load/repair against the now-current file. This closes the window
+   * where a size-only check between the scan and the rename could clobber a
+   * concurrent appender's bytes.
+   *
+   * `beforeRename` is the deterministic test seam: it runs after the temp
+   * write and before the CAS re-stat, so a test can simulate that appender.
    */
-  private rewritePrefixAtomically(prefix: Buffer, addNewline: boolean, expectedSize: number): void {
+  private rewritePrefixAtomically(
+    prefix: Buffer,
+    addNewline: boolean,
+    expected: FileSignature | null,
+  ): void {
     const tmpPath = `${this.path}.tmp-${process.pid}-${Math.random().toString(16).slice(2, 8)}`;
     try {
       const fd = fs.openSync(tmpPath, "w");
@@ -265,8 +368,20 @@ export class SessionStore {
       } finally {
         fs.closeSync(fd);
       }
-      if (fs.statSync(this.path).size !== expectedSize) {
-        throw new Error("session file changed while repairing the torn tail; retry");
+      // Test seam: a write here must be caught by the re-stat below.
+      this.beforeRename?.();
+      let current: FileSignature | null = null;
+      try {
+        current = fileSignature(fs.statSync(this.path));
+      } catch {
+        current = null;
+      }
+      if (!sameFileSignature(expected, current)) {
+        throw new SessionError(
+          `cannot repair session file ${this.path}: session file changed while ` +
+            "repairing the torn tail; retry",
+          { retryable: true },
+        );
       }
       fs.renameSync(tmpPath, this.path);
     } catch (exc) {
@@ -275,7 +390,12 @@ export class SessionStore {
       } catch {
         // best-effort temp cleanup
       }
-      throw new SessionError(`cannot repair session file ${this.path}: ${exc}`);
+      if (exc instanceof SessionError) throw exc;
+      const code = (exc as NodeJS.ErrnoException).code;
+      throw new SessionError(
+        `cannot repair session file ${this.path}: ${exc}`,
+        { retryable: code === "EPERM" || code === "EBUSY" || code === "EACCES" },
+      );
     }
   }
 

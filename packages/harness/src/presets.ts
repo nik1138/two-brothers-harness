@@ -5,9 +5,11 @@
  * typing a base URL first.
  *
  * Shape: one `Preset` matches the persisted `ProviderPreset`
- * (`settings_store.ts`: `name`, `base_url`, `api_key`, `kind`, `models`) with
- * one additive field — `api_key_env`, the NAME of the environment variable
- * that holds the key. Seeds never carry a literal key (`api_key` stays "");
+ * (`settings_store.ts`: `name`, `base_url`, `api_key`, `kind`, `models`,
+ * `context_window`) with one additive field — `api_key_env`, the NAME of the
+ * environment variable that holds the key. Seeds never carry a literal key
+ * (`api_key` stays ""); `context_window` is likewise optional (the curated
+ * table deliberately does not invent per-model windows);
  * `presetApiKey()` resolves the variable at use time. A seed's `name` is also
  * its id: `settings.provider_ref` matches presets by `name`.
  *
@@ -159,6 +161,13 @@ export function mergeSeedPresets(stored: readonly ProviderPreset[] = []): Preset
       api_key: preset.api_key,
       kind: preset.kind || PROVIDER_KIND_DEFAULT,
       models: [...preset.models],
+      // A stored override's context window survives the merge; 0/invalid means
+      // unknown and keeps the field absent (byte-compatible with old presets).
+      ...(typeof preset.context_window === "number" &&
+      Number.isSafeInteger(preset.context_window) &&
+      preset.context_window > 0
+        ? { context_window: preset.context_window }
+        : {}),
     };
     const index = indexByName.get(copy.name.toLowerCase());
     if (index === undefined) {

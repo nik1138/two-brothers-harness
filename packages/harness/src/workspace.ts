@@ -832,6 +832,16 @@ export interface WorkspaceMutationImage {
   size?: number;
   /** Why `content` is absent (oversized or unreadable); never fails the tool call. */
   skipped?: string;
+  /**
+   * POSIX permission word (permission bits plus setuid/setgid/sticky) of the
+   * target when this side was captured. Windows omits it. Additive: old
+   * recorders ignore it, and the undo store copies it into the record.
+   */
+  mode?: number;
+  /** POSIX owner uid at capture time (Windows omits it). */
+  uid?: number;
+  /** POSIX owner gid at capture time (Windows omits it). */
+  gid?: number;
 }
 
 /**
@@ -866,6 +876,14 @@ export interface WorkspaceOptions {
 
 /** One captured side of a mutation is skipped beyond this size (the undo store's bound). */
 export const MAX_MUTATION_CAPTURE_BYTES = 2 * 1024 * 1024;
+
+/** POSIX mode/ownership metadata for an undo image; Windows records none. */
+function captureModeMeta(
+  stat: fs.Stats,
+): Pick<WorkspaceMutationImage, "mode" | "uid" | "gid"> {
+  if (process.platform === "win32") return {};
+  return { mode: stat.mode & 0o7777, uid: stat.uid, gid: stat.gid };
+}
 
 /** The only door between the models and the local filesystem. */
 export class Workspace {
@@ -983,23 +1001,30 @@ export class Workspace {
       };
     }
     if (!stat.isFile()) {
-      return { exists: true, size: stat.size, skipped: "target is not a regular file" };
+      return {
+        exists: true,
+        size: stat.size,
+        skipped: "target is not a regular file",
+        ...captureModeMeta(stat),
+      };
     }
     if (stat.size > MAX_MUTATION_CAPTURE_BYTES) {
       return {
         exists: true,
         size: stat.size,
         skipped: `file size ${stat.size} exceeds the ${MAX_MUTATION_CAPTURE_BYTES}-byte capture limit`,
+        ...captureModeMeta(stat),
       };
     }
     try {
       const content = fs.readFileSync(target);
-      return { exists: true, content, size: content.byteLength };
+      return { exists: true, content, size: content.byteLength, ...captureModeMeta(stat) };
     } catch (exc) {
       return {
         exists: true,
         size: stat.size,
         skipped: `cannot read the target: ${exc instanceof Error ? exc.message : String(exc)}`,
+        ...captureModeMeta(stat),
       };
     }
   }

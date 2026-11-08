@@ -23,7 +23,9 @@ import {
   newDiscoveryState,
   nextProviderIndex,
   normalizeProviders,
+  parseProviderContextWindow,
   providerBadge,
+  providerContextWindowOf,
   providerDeleteAllowed,
   providerDeleteImpact,
   providerDraftOf,
@@ -66,6 +68,7 @@ function view(overrides: Partial<ProviderView> = {}): ProviderView {
     api_key_set: false,
     kind: PROVIDER_KIND_DEFAULT,
     models: ['spark', 'lfm'],
+    context_window: 0,
     seed: false,
     customized: true,
     ...overrides,
@@ -119,6 +122,42 @@ test('normalizeProviders: trims fields and cleans model lists', () => {
   assert.equal(provider?.api_key_set, false)
   assert.equal(provider?.kind, PROVIDER_KIND_DEFAULT)
   assert.deepEqual(provider?.models, ['a', 'b'])
+})
+
+test('normalizeProviders: context window is tolerant and defaults to unknown', () => {
+  assert.equal(normalizeProviders([rawProvider({ context_window: 8192 })])[0]?.context_window, 8192)
+  assert.equal(normalizeProviders([rawProvider()])[0]?.context_window, 0)
+  for (const bad of [0, -1, 1.5, '8192', true, null, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.equal(
+      normalizeProviders([rawProvider({ context_window: bad })])[0]?.context_window,
+      0,
+      `invalid ${String(bad)} reads as unknown`,
+    )
+  }
+})
+
+test('providerContextWindowOf: only positive safe integers survive', () => {
+  assert.equal(providerContextWindowOf(8192), 8192)
+  assert.equal(providerContextWindowOf(0), 0)
+  for (const bad of [-1, 1.5, '8192', null, undefined, Number.NaN, Infinity]) {
+    assert.equal(providerContextWindowOf(bad), 0)
+  }
+})
+
+test('parseProviderContextWindow: strict whole-token input, empty = unknown', () => {
+  assert.deepEqual(parseProviderContextWindow(''), { value: 0, error: null })
+  assert.deepEqual(parseProviderContextWindow('   '), { value: 0, error: null })
+  assert.deepEqual(parseProviderContextWindow('0'), { value: 0, error: null })
+  assert.deepEqual(parseProviderContextWindow('8192'), { value: 8192, error: null })
+  assert.deepEqual(parseProviderContextWindow(' 08192 '), { value: 8192, error: null })
+  for (const bad of ['-1', '1.5', '+3', '1e3', '0x10', '8,192', 'abc', '8192 tokens']) {
+    const parsed = parseProviderContextWindow(bad)
+    assert.equal(parsed.value, 0, bad)
+    assert.match(parsed.error ?? '', /whole number of tokens/, bad)
+  }
+  const huge = parseProviderContextWindow('9'.repeat(400))
+  assert.equal(huge.value, 0)
+  assert.match(huge.error ?? '', /too large/)
 })
 
 test('cleanModelList/sameModelList: trim, dedupe, order-sensitive compare', () => {
@@ -211,13 +250,19 @@ test('providerDeleteImpact names the roles that will switch to Manual', () => {
 // -- drafts & dirty tracking --------------------------------------------------
 
 test('providerDraftOf: key starts empty; models/kind are copied', () => {
-  const provider = view({ base_url: 'http://x', models: ['m1'], kind: 'anthropic' })
+  const provider = view({
+    base_url: 'http://x',
+    models: ['m1'],
+    kind: 'anthropic',
+    context_window: 8192,
+  })
   const draft = providerDraftOf(provider)
   assert.deepEqual(draft, {
     baseUrl: 'http://x',
     apiKey: '',
     models: ['m1'],
     kind: 'anthropic',
+    contextWindow: '8192',
   })
   draft.models.push('m2')
   assert.deepEqual(provider.models, ['m1'], 'models are copied')
@@ -226,6 +271,7 @@ test('providerDraftOf: key starts empty; models/kind are copied', () => {
     apiKey: '',
     models: [],
     kind: PROVIDER_KIND_DEFAULT,
+    contextWindow: '0',
   })
 })
 
@@ -245,6 +291,18 @@ test('isProviderDraftDirty tracks URL, typed key, models and kind', () => {
   assert.equal(isProviderDraftDirty(provider, { ...base, models: ['b'] }), true)
   assert.equal(isProviderDraftDirty(provider, { ...base, kind: 'anthropic' }), true)
   assert.equal(isProviderDraftDirty(provider, null), false)
+})
+
+test('isProviderDraftDirty tracks the context window strictly', () => {
+  const provider = view({ context_window: 8192 })
+  const base = providerDraftOf(provider)
+  assert.equal(isProviderDraftDirty(provider, base), false)
+  assert.equal(isProviderDraftDirty(provider, { ...base, contextWindow: ' 08192 ' }), false)
+  assert.equal(isProviderDraftDirty(provider, { ...base, contextWindow: '16384' }), true)
+  assert.equal(isProviderDraftDirty(provider, { ...base, contextWindow: '0' }), true)
+  // an unparsable window is dirty so the unsaved guard sees it
+  assert.equal(isProviderDraftDirty(provider, { ...base, contextWindow: '-1' }), true)
+  assert.equal(isProviderDraftDirty(provider, { ...base, contextWindow: '1.5' }), true)
 })
 
 test('apiKeyPlaceholder/state stay honest and never echo the key', () => {
@@ -337,6 +395,7 @@ test('applyProviderUpdate merges the PUT response and preserves seed flags', () 
     api_key_set: true,
     kind: 'anthropic',
     models: ['custom'],
+    context_window: 16384,
   }
   const next = applyProviderUpdate(current, saved)
   assert.equal(next[0]?.seed, true, 'additive flag preserved')
@@ -345,7 +404,12 @@ test('applyProviderUpdate merges the PUT response and preserves seed flags', () 
   assert.equal(next[0]?.api_key_set, true)
   assert.equal(next[0]?.kind, 'anthropic')
   assert.deepEqual(next[0]?.models, ['custom'])
+  assert.equal(next[0]?.context_window, 16384)
   assert.deepEqual(next[1], current[1], 'other rows untouched')
+
+  // a response without the field clears it back to unknown (0 semantics)
+  const cleared = applyProviderUpdate(next, { ...saved, context_window: undefined })
+  assert.equal(cleared[0]?.context_window, 0)
 })
 
 test('applyProviderReset replaces override values and flags with the pristine response', () => {
@@ -375,6 +439,7 @@ test('applyProviderReset replaces override values and flags with the pristine re
     api_key_set: false,
     kind: 'openai-compatible',
     models: ['deepseek-chat', 'deepseek-chat'],
+    context_window: 65536,
     seed: true,
     customized: false,
   }

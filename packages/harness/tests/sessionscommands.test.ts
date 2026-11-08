@@ -19,6 +19,10 @@ import * as path from "node:path";
 import { test } from "node:test";
 
 import { main, type CliIO } from "../src/cli.ts";
+import { SessionMetadataStore } from "../src/metadata.ts";
+import { Decision, PermissionManager, StaticBroker } from "../src/permissions.ts";
+import { Workspace, WorkspaceRegistry } from "../src/workspace.ts";
+import { beginUndoCapture } from "../src/workspacehistory.ts";
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -114,6 +118,55 @@ function writeExportFixture(dir: string): string {
   );
   fs.writeFileSync(path.join(dir, "notes.txt"), "not a session\n", "utf-8");
   return file;
+}
+
+interface UndoFixture {
+  sessionsDir: string;
+  workspaceDir: string;
+  runId: string;
+  workspaceId: string;
+}
+
+/**
+ * One workspace-bound session (`chat.jsonl` + meta sidecar + registry) with a
+ * persisted undo record: the run edits `existing.txt` and creates
+ * `created.txt`. Exercises the CLI exactly as the server would persist it.
+ */
+async function writeUndoFixture(dir: string): Promise<UndoFixture> {
+  const sessionsDir = path.join(dir, "sessions");
+  const workspaceDir = path.join(dir, "workspace");
+  fs.mkdirSync(sessionsDir);
+  fs.mkdirSync(workspaceDir);
+  fs.writeFileSync(path.join(workspaceDir, "existing.txt"), "original\n", "utf-8");
+  fs.writeFileSync(
+    path.join(sessionsDir, "chat.jsonl"),
+    sessionEnvelope(1, "user", "senior", "message", { text: "Chat task" }) + "\n",
+    "utf-8",
+  );
+  const linked = new WorkspaceRegistry(path.join(sessionsDir, "workspaces.json")).add(
+    workspaceDir,
+    "ws",
+  );
+  new SessionMetadataStore(sessionsDir).save("chat.jsonl", {
+    title: "Chat",
+    workspaceId: linked.id,
+  });
+
+  const runId = "run-1";
+  const capture = beginUndoCapture(path.join(sessionsDir, "undo"), runId, workspaceDir, {
+    session: "chat.jsonl",
+    retention: false,
+  });
+  const ws = new Workspace(
+    workspaceDir,
+    new PermissionManager(null, new StaticBroker(Decision.ALLOW)),
+    null,
+    { mutationRecorder: capture.recorder },
+  );
+  await ws.edit_file("existing.txt", "original", "edited");
+  await ws.write_file("created.txt", "made by the run\n");
+  capture.close();
+  return { sessionsDir, workspaceDir, runId, workspaceId: linked.id };
 }
 
 // ---------------------------------------------------------------------------
@@ -403,6 +456,247 @@ test("sessions export: an unwritable --output path exits 1 with a clear message"
 });
 
 // ---------------------------------------------------------------------------
+// sessions undo
+// ---------------------------------------------------------------------------
+
+test("sessions undo: default previews the newest record against the linked workspace", async () => {
+  await withTempDir(async (dir) => {
+    const fx = await writeUndoFixture(dir);
+    const io = makeIO();
+    const code = await main(["sessions", "undo", "chat", "--sessions-dir", fx.sessionsDir], io);
+    assert.equal(code, 0, io.err.join("\n"));
+    assert.deepEqual(io.err, []);
+    const text = io.out.join("\n");
+    assert.match(text, /session: chat\.jsonl/);
+    assert.match(text, /run: run-1/);
+    assert.match(text, /workspace: /);
+    assert.match(text, /2 file\(s\): 1 applicable, 1 created, 0 deleted/);
+    assert.match(text, /applicable\s+edit\s+existing\.txt/);
+    assert.match(text, /created\s+write\s+created\.txt/);
+    assert.match(text, /preview only; pass --apply/);
+    // Preview is read-only.
+    assert.equal(
+      fs.readFileSync(path.join(fx.workspaceDir, "existing.txt"), "utf-8"),
+      "edited\n",
+    );
+    assert.equal(fs.existsSync(path.join(fx.workspaceDir, "created.txt")), true);
+  });
+});
+
+test("sessions undo --json: the preview object mirrors the HTTP route", async () => {
+  await withTempDir(async (dir) => {
+    const fx = await writeUndoFixture(dir);
+    const io = makeIO();
+    const code = await main(
+      ["sessions", "undo", "chat", "--sessions-dir", fx.sessionsDir, "--json"],
+      io,
+    );
+    assert.equal(code, 0, io.err.join("\n"));
+    const body = JSON.parse(io.out[0]);
+    assert.equal(body.session, "chat.jsonl");
+    assert.equal(body.run_id, fx.runId);
+    assert.equal(body.workspace_root, fs.realpathSync(fx.workspaceDir));
+    assert.equal(body.counts.applicable, 1);
+    assert.equal(body.counts.created, 1);
+    assert.equal(body.counts.total, 2);
+    assert.deepEqual(
+      body.statuses
+        .map((entry: Record<string, unknown>) => [entry.path, entry.status])
+        .sort(),
+      [["created.txt", "created"], ["existing.txt", "applicable"]],
+    );
+  });
+});
+
+test("sessions undo --apply restores reversible files and reports the counts", async () => {
+  await withTempDir(async (dir) => {
+    const fx = await writeUndoFixture(dir);
+    const io = makeIO();
+    const code = await main(
+      [
+        "sessions",
+        "undo",
+        "chat",
+        "--run",
+        fx.runId,
+        "--apply",
+        "--json",
+        "--sessions-dir",
+        fx.sessionsDir,
+      ],
+      io,
+    );
+    assert.equal(code, 0, io.err.join("\n"));
+    const body = JSON.parse(io.out[0]);
+    assert.equal(body.session, "chat.jsonl");
+    assert.equal(body.run_id, fx.runId);
+    assert.equal(body.applied, 2);
+    assert.equal(body.refused, 0);
+    assert.equal(body.failed, 0);
+    assert.equal(body.counts.total, 2);
+    for (const file of body.files) assert.equal(file.status, "applied");
+    assert.equal(
+      fs.readFileSync(path.join(fx.workspaceDir, "existing.txt"), "utf-8"),
+      "original\n",
+    );
+    assert.equal(fs.existsSync(path.join(fx.workspaceDir, "created.txt")), false);
+
+    // A second apply refuses everything (post-run content no longer matches).
+    const again = makeIO();
+    const againCode = await main(
+      ["sessions", "undo", "chat", "--run", fx.runId, "--apply", "--json", "--sessions-dir", fx.sessionsDir],
+      again,
+    );
+    assert.equal(againCode, 0, again.err.join("\n"));
+    assert.equal(JSON.parse(again.out[0]).refused, 2);
+  });
+});
+
+test("sessions undo --discard drops the record and collects its unreferenced blobs", async () => {
+  await withTempDir(async (dir) => {
+    const fx = await writeUndoFixture(dir);
+    const io = makeIO();
+    const code = await main(
+      [
+        "sessions",
+        "undo",
+        "chat",
+        "--run",
+        fx.runId,
+        "--discard",
+        "--json",
+        "--sessions-dir",
+        fx.sessionsDir,
+      ],
+      io,
+    );
+    assert.equal(code, 0, io.err.join("\n"));
+    const body = JSON.parse(io.out[0]);
+    assert.equal(body.discarded, true);
+    assert.equal(body.session, "chat.jsonl");
+    assert.equal(body.run_id, fx.runId);
+    assert.ok(body.blobs_removed > 0);
+    assert.equal(
+      fs.existsSync(path.join(fx.sessionsDir, "undo", "runs", `${fx.runId}.json`)),
+      false,
+    );
+
+    // The record is gone: a later preview is an honest unknown record.
+    const after = makeIO();
+    const afterCode = await main(
+      ["sessions", "undo", "chat", "--run", fx.runId, "--sessions-dir", fx.sessionsDir],
+      after,
+    );
+    assert.equal(afterCode, 1);
+    assert.match(after.err.join("\n"), /no undo record/);
+  });
+});
+
+test("sessions undo: unknown session/record and missing workspace link exit 1", async () => {
+  await withTempDir(async (dir) => {
+    const fx = await writeUndoFixture(dir);
+
+    const noSession = makeIO();
+    assert.equal(
+      await main(["sessions", "undo", "nope", "--sessions-dir", fx.sessionsDir], noSession),
+      1,
+    );
+    assert.match(noSession.err.join("\n"), /session not found/);
+
+    const noRecord = makeIO();
+    assert.equal(
+      await main(
+        ["sessions", "undo", "chat", "--run", "run-missing", "--sessions-dir", fx.sessionsDir],
+        noRecord,
+      ),
+      1,
+    );
+    assert.match(noRecord.err.join("\n"), /no undo record/);
+
+    // A real session with a linked workspace but no undo record of its own.
+    fs.writeFileSync(
+      path.join(fx.sessionsDir, "empty.jsonl"),
+      sessionEnvelope(1, "user", "senior", "message", { text: "Empty" }) + "\n",
+      "utf-8",
+    );
+    new SessionMetadataStore(fx.sessionsDir).save("empty.jsonl", {
+      title: "Empty",
+      workspaceId: fx.workspaceId,
+    });
+    const empty = makeIO();
+    assert.equal(
+      await main(["sessions", "undo", "empty", "--sessions-dir", fx.sessionsDir], empty),
+      1,
+    );
+    assert.match(empty.err.join("\n"), /no undo record for empty\.jsonl/);
+
+    // A session without any workspace link cannot undo into a guess: seed a
+    // record for it first so the missing link (not a missing record) is hit.
+    fs.writeFileSync(
+      path.join(fx.sessionsDir, "plain.jsonl"),
+      sessionEnvelope(1, "user", "senior", "message", { text: "Plain" }) + "\n",
+      "utf-8",
+    );
+    const runsDir = path.join(fx.sessionsDir, "undo", "runs");
+    const chatRecord = JSON.parse(fs.readFileSync(path.join(runsDir, `${fx.runId}.json`), "utf-8"));
+    fs.writeFileSync(
+      path.join(runsDir, "run-plain.json"),
+      JSON.stringify({ ...chatRecord, session: "plain.jsonl" }),
+      "utf-8",
+    );
+    const plain = makeIO();
+    assert.equal(
+      await main(["sessions", "undo", "plain", "--sessions-dir", fx.sessionsDir], plain),
+      1,
+    );
+    assert.match(plain.err.join("\n"), /no linked workspace/);
+
+    // Discard needs no workspace link: cleanup still works after the
+    // workspace was removed or the session never had one.
+    const plainDiscard = makeIO();
+    assert.equal(
+      await main(
+        ["sessions", "undo", "plain", "--run", "run-plain", "--discard", "--sessions-dir", fx.sessionsDir],
+        plainDiscard,
+      ),
+      0,
+      plainDiscard.err.join("\n"),
+    );
+    assert.match(plainDiscard.out.join("\n"), /discarded the undo record for plain\.jsonl/);
+  });
+});
+
+test("sessions undo: usage errors exit 2 (no name, extra args, conflicting flags, bad run id)", async () => {
+  const noName = makeIO();
+  assert.equal(await main(["sessions", "undo"], noName), 2);
+  assert.match(noName.err.join("\n"), /no session name/);
+
+  const extra = makeIO();
+  assert.equal(await main(["sessions", "undo", "a", "b"], extra), 2);
+  assert.match(extra.err.join("\n"), /unexpected argument/);
+
+  const conflict = makeIO();
+  assert.equal(
+    await main(["sessions", "undo", "chat", "--apply", "--discard"], conflict),
+    2,
+  );
+  assert.match(conflict.err.join("\n"), /mutually exclusive/);
+
+  await withTempDir(async (dir) => {
+    const fx = await writeUndoFixture(dir);
+    const badRun = makeIO();
+    assert.equal(
+      await main(
+        ["sessions", "undo", "chat", "--run", "../escape", "--sessions-dir", fx.sessionsDir],
+        badRun,
+      ),
+      2,
+    );
+    assert.match(badRun.err.join("\n"), /invalid undo run id/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // help catalog / completions stay derived from the same source
 // ---------------------------------------------------------------------------
 
@@ -414,11 +708,15 @@ test("help and completions pick up the new sessions subcommands and flags", asyn
   assert.match(helpText, /sessions export <name>/);
   assert.match(helpText, /sessions fork <name>/);
   assert.match(helpText, /sessions rewind <name> --turns <n>/);
+  assert.match(helpText, /sessions undo <name> \[--run <id>\] \[--apply\] \[--discard\]/);
   assert.match(helpText, /--format <markdown\|json\|html>/);
   assert.match(helpText, /--output <path>/);
   assert.match(helpText, /--at <seq>/);
   assert.match(helpText, /--name <name>/);
   assert.match(helpText, /--turns <n>/);
+  assert.match(helpText, /--run <id>/);
+  assert.match(helpText, /--apply/);
+  assert.match(helpText, /--discard/);
 
   const bash = makeIO();
   assert.equal(await main(["completions", "bash"], bash), 0, bash.err.join("\n"));
@@ -427,5 +725,8 @@ test("help and completions pick up the new sessions subcommands and flags", asyn
   assert.match(script, /--output/);
   assert.match(script, /--at/);
   assert.match(script, /--turns/);
+  assert.match(script, /--run/);
+  assert.match(script, /--apply/);
+  assert.match(script, /--discard/);
   assert.match(script, /sessions/);
 });

@@ -18,6 +18,17 @@ export const FORK_MENU_HINT =
 /** Menu label: the ellipsis marks the follow-up confirmation/notice. */
 export const FORK_MENU_LABEL = 'Fork session…'
 
+/**
+ * Transcript action label (wave 26): branches the conversation at one operator
+ * message instead of at the end. The accessible name is the full label; the
+ * bubble renders the compact visible word "fork".
+ */
+export const FORK_FROM_HERE_LABEL = 'Fork from here…'
+
+/** One-line explanation for the transcript action (honest, no jargon). */
+export const FORK_FROM_HERE_HINT =
+  'Copy this session through this message into a new session; the source is untouched.'
+
 /** What the row knows about the session's state when the action is offered. */
 export interface ForkAvailabilityContext {
   /** A run is live (queued/running/waiting) for this session. */
@@ -67,6 +78,40 @@ export function forkRequestBody(
   const name = typeof options.name === 'string' ? options.name.trim() : ''
   if (name) body.name = name
   return body
+}
+
+/**
+ * The cut point a transcript bubble can fork at, or null when the bubble is not
+ * a safe marker. Only operator `message` envelopes carry a bubble (repair and
+ * compaction traffic projects as system activity), and the protocol keeps `seq`
+ * dense/positive, so a valid bubble seq is exactly the prefix the backend
+ * copies (`at seq 1..N`).
+ */
+export function forkFromHerePoint(
+  message: { kind?: string | null; seq?: number | null } | null | undefined,
+): { seq: number } | null {
+  if (!message || message.kind !== 'message') return null
+  const seq = message.seq
+  if (typeof seq !== 'number' || !Number.isInteger(seq) || seq < 1) return null
+  return { seq }
+}
+
+/**
+ * Confirmation shown before a prefix fork. It names the cut (the envelope seq
+ * of the message the operator picked) and repeats the one fact that matters:
+ * the source session is never modified.
+ */
+export function forkFromHereConfirmation(input: {
+  seq: number
+  session?: string | null
+}): string {
+  const seq = Number.isInteger(input.seq) && input.seq >= 1 ? input.seq : 0
+  const source =
+    typeof input.session === 'string' && input.session.trim()
+      ? ` ${input.session.trim()}`
+      : ' this session'
+  const through = seq > 0 ? ` through this message (envelope ${seq})` : ' through this message'
+  return `Copy${source}${through} into a new session; the source is untouched.`
 }
 
 /** Envelope count from a fork result, defensively bounded (display only). */

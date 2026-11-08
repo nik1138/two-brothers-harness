@@ -35,6 +35,7 @@ export const COMPACTION_SOURCES: readonly CompactionFieldSource[] = [
   'options',
   'flag',
   'persisted',
+  'preset',
   'absent',
 ]
 
@@ -74,7 +75,8 @@ export const COMPACTION_FIELDS: readonly CompactionFieldCopy[] = [
     label: 'Context window (tokens)',
     help:
       'The model context window, used to derive token-mode triggers and budgets. ' +
-      'Leave 0 when the window is unknown.',
+      'Leave 0 when the window is unknown; a serve flag/env or this saved value ' +
+      "wins over the roles' provider presets (the smaller preset window applies last).",
   },
 ]
 
@@ -307,6 +309,8 @@ export function effectiveCompactionText(field: CompactionFieldState): string {
       return `Effective: ${field.effective} (set by the server process)`
     case 'persisted':
       return `Effective: ${field.effective}`
+    case 'preset':
+      return `Effective: ${field.effective} (from the provider preset)`
     default:
       return 'Effective: not configured'
   }

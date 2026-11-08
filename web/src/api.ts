@@ -750,6 +750,8 @@ export interface ProviderCreateRequest {
   /** Preset flavor; only "openai-compatible" exists today. */
   kind?: string
   models?: string[]
+  /** Context window in tokens; 0/absent = unknown. */
+  context_window?: number
 }
 
 export interface ProviderPatchRequest {
@@ -758,6 +760,8 @@ export interface ProviderPatchRequest {
   api_key?: string
   kind?: string
   models?: string[]
+  /** Context window in tokens; 0 clears it (unknown). */
+  context_window?: number
 }
 
 export async function listProviders(): Promise<ProviderPreset[]> {

@@ -219,6 +219,19 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
     when: "composer",
   },
   {
+    id: "external-edit",
+    title: "Edit draft in external editor",
+    description:
+      "Open the composer draft in $VISUAL/$EDITOR, then read the saved text back.",
+    group: "Composer",
+    // Ctrl+G: unused here, one control byte, outside the XON/XOFF pair and
+    // the vendor convention for an external editor. Idle-only: an editor that
+    // owns the terminal while a turn streams would hide the run.
+    keys: [{ name: "g", ctrl: true }],
+    when: "composer",
+    idleOnly: true,
+  },
+  {
     id: "steer",
     title: "Steer the running turn",
     description: "Send the composer text into the running turn at its next step — not a new task.",
@@ -260,6 +273,17 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
     // the conventional find key. Opening is app-scope only, so a modal
     // overlay keeps its own keys (palette/help still own their scope).
     keys: [{ name: "f", ctrl: true }],
+    when: "app",
+  },
+  {
+    id: "copy",
+    title: "Copy last reply",
+    description: "Copy the newest committed reply to the system clipboard.",
+    group: "Transcript",
+    // Ctrl+X: unbound here, one control byte, outside the XON/XOFF pair, and
+    // the conventional cut/copy partner. App scope keeps every modal surface
+    // (palette/help/find/approval) on its own keys.
+    keys: [{ name: "x", ctrl: true }],
     when: "app",
   },
   {

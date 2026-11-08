@@ -120,6 +120,24 @@ test("mergeSeedPresets: no stored presets yields the seeds; stored arrays are co
   assert.deepEqual(preset.models, ["a"], "merge does not alias stored models");
 });
 
+test("mergeSeedPresets: a stored context window survives; seeds never invent one", () => {
+  // Seeds omit the field: absence means unknown, not a fabricated window.
+  for (const seed of seedPresets()) {
+    assert.equal(seed.context_window, undefined, `${seed.name}: no invented window`);
+  }
+  const merged = mergeSeedPresets([
+    stored({ name: "mine", context_window: 8192 }),
+    stored({ name: "openai", base_url: "https://proxy.example/v1", context_window: 16384 }),
+    stored({ name: "plain" }),
+  ]);
+  assert.equal(merged.find((preset) => preset.name === "mine")?.context_window, 8192);
+  assert.equal(merged.find((preset) => preset.name.toLowerCase() === "openai")?.context_window, 16384);
+  assert.equal(merged.find((preset) => preset.name === "plain")?.context_window, undefined);
+  // 0 and invalid values read as unknown (never carried through the merge)
+  const zero = mergeSeedPresets([stored({ name: "zero", context_window: 0 })]);
+  assert.equal(zero[zero.length - 1]?.context_window, undefined);
+});
+
 test("presetApiKey: env-var name wins, literal key falls back, value never stored", () => {
   const seed = presetById("openai")!;
   assert.equal(presetApiKey(seed, { OPENAI_API_KEY: "sk-from-env" }), "sk-from-env");

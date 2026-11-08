@@ -384,6 +384,111 @@ test("a corrupt or non-dense source is source-unreadable and nothing is written"
   }
 });
 
+test("a crash-torn tail is dropped: the complete prefix forks with dense seq, source untouched", () => {
+  const dir = tmpdir();
+  try {
+    const torn = '{"v":1,"id":"torn","seq":4';
+    const sourceText = RAW_LINES.join("\n") + "\n" + torn; // no final newline
+    const source = path.join(dir, "torn.jsonl");
+    fs.writeFileSync(source, sourceText, "utf-8");
+    const sourceHash = sha256(source);
+
+    const result = forkSession(dir, "torn");
+    assert.equal(result.events, 3);
+    assert.deepEqual(result.forked_from, { name: "torn.jsonl", seq: 3 });
+    // Only the complete envelope prefix is copied, byte-exactly.
+    assert.equal(
+      fs.readFileSync(path.join(dir, result.name), "utf-8"),
+      RAW_LINES.join("\n") + "\n",
+    );
+    assert.deepEqual(
+      new SessionStore(path.join(dir, result.name)).load().map((event) => event.seq),
+      [1, 2, 3],
+    );
+    // The source (torn fragment included) is never rewritten by a fork.
+    assert.equal(sha256(source), sourceHash);
+    assert.equal(fs.readFileSync(source, "utf-8"), sourceText);
+
+    // A prefix cut on a torn-tail source still stops at the cut envelope.
+    const cut = forkSession(dir, "torn", { atSeq: 2 });
+    assert.equal(cut.events, 2);
+    assert.equal(
+      fs.readFileSync(path.join(dir, cut.name), "utf-8"),
+      RAW_LINES.slice(0, 2).join("\n") + "\n",
+    );
+    assert.equal(sha256(source), sourceHash);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a valid final envelope without a trailing newline forks byte-exactly", () => {
+  const dir = tmpdir();
+  try {
+    const sourceText = RAW_LINES.join("\n"); // complete, but no final terminator
+    const source = path.join(dir, "nonl.jsonl");
+    fs.writeFileSync(source, sourceText, "utf-8");
+    const sourceHash = sha256(source);
+
+    const result = forkSession(dir, "nonl");
+    assert.equal(result.events, 3);
+    assert.deepEqual(result.forked_from, { name: "nonl.jsonl", seq: 3 });
+    assert.equal(fs.readFileSync(path.join(dir, result.name), "utf-8"), sourceText);
+    assert.deepEqual(
+      new SessionStore(path.join(dir, result.name)).load().map((event) => event.seq),
+      [1, 2, 3],
+    );
+    assert.equal(sha256(source), sourceHash);
+
+    const cut = forkSession(dir, "nonl", { atSeq: 2 });
+    assert.equal(
+      fs.readFileSync(path.join(dir, cut.name), "utf-8"),
+      RAW_LINES.slice(0, 2).join("\n") + "\n",
+    );
+    assert.deepEqual(
+      new SessionStore(path.join(dir, cut.name)).load().map((event) => event.seq),
+      [1, 2],
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("torn-tail tolerance never hides interior or newline-terminated corruption", () => {
+  const dir = tmpdir();
+  try {
+    const torn = '{"v":1,"id":"torn","seq":4';
+    // Interior bad record, even with a recoverable torn tail after it.
+    fs.writeFileSync(
+      path.join(dir, "interior.jsonl"),
+      RAW_LINES[0] + "\nnot json\n" + RAW_LINES[1] + "\n" + torn,
+      "utf-8",
+    );
+    // A malformed but newline-terminated LAST line is not a torn fragment.
+    fs.writeFileSync(
+      path.join(dir, "lastcomplete.jsonl"),
+      RAW_LINES.join("\n") + "\nnot json\n",
+      "utf-8",
+    );
+    // A final unterminated fragment that parses but is not an object is not a
+    // tear either (same rule as the reader).
+    fs.writeFileSync(
+      path.join(dir, "array.jsonl"),
+      RAW_LINES.join("\n") + "\n[1,2]",
+      "utf-8",
+    );
+
+    for (const source of ["interior", "lastcomplete", "array"]) {
+      const error = forkError(() => forkSession(dir, source));
+      assert.equal(error.code, "source-unreadable", `expected source-unreadable for ${source}`);
+      assert.match(error.message, /line \d+/, error.message);
+    }
+    assert.ok(!listNames(dir).some((name) => name.includes("-fork-")), "nothing was written");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("derived fork titles use the source title, stay bounded and handle long/absent titles", () => {
   const dir = tmpdir();
   try {

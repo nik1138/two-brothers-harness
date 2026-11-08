@@ -58,7 +58,7 @@ test('the four budget fields and their copy are the documented set', () => {
   assert.match(COMPACTION_ZERO_HELP, /0 = off\/unknown/)
   assert.match(COMPACTION_ZERO_HELP, /pins/)
   assert.match(COMPACTION_UNSUPPORTED_REASON, /does not support persisted compaction/)
-  assert.deepEqual(COMPACTION_SOURCES, ['options', 'flag', 'persisted', 'absent'])
+  assert.deepEqual(COMPACTION_SOURCES, ['options', 'flag', 'persisted', 'preset', 'absent'])
 })
 
 // ---------------------------------------------------------------------------
@@ -273,6 +273,10 @@ test('effective copy is honest about pins and unconfigured fields', () => {
   assert.match(
     effectiveCompactionText({ persisted: 12000, effective: 12000, source: 'persisted' }),
     /^Effective: 12000$/,
+  )
+  assert.match(
+    effectiveCompactionText({ persisted: 0, effective: 8192, source: 'preset' }),
+    /^Effective: 8192 \(from the provider preset\)$/,
   )
   assert.equal(
     effectiveCompactionText({ persisted: 0, effective: 0, source: 'absent' }),

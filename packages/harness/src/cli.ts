@@ -141,6 +141,17 @@ import {
 import { rewindSession, validateRewindTurns } from "./sessionrewind.ts";
 import { discoverSkills, type SkillCatalog } from "./skills.ts";
 import { envPinnedPairs, SettingsStore } from "./settings_store.ts";
+import { WorkspaceRegistry } from "./workspace.ts";
+import {
+  applyUndo,
+  collectOrphanBlobs,
+  discardUndo,
+  listUndoRecords,
+  loadUndoRecord,
+  previewUndo,
+  WorkspaceUndoError,
+  type WorkspaceUndoRecord,
+} from "./workspacehistory.ts";
 import { runTuiApp } from "./tui/app.ts";
 import {
   defaultTuiKeysPath,
@@ -774,6 +785,25 @@ export function commandsRootsForCli(
     path.join(os.homedir(), ".two-brothers", "commands"),
   );
   return roots;
+}
+
+/**
+ * MCP config file for an invocation: `--mcp-config` > the pinned
+ * `TWO_BROTHERS_MCP_CONFIG` environment variable (`clihelp.ts` and
+ * `docs/cli-reference.md` map the two to each other). A blank/whitespace
+ * value on either layer means "not configured"; a blank flag falls back to
+ * the env value. The path is returned as given — the MCP loader resolves
+ * relative paths — and flag/env are pinned like every other `TWO_BROTHERS_*`
+ * value, never persisted.
+ */
+export function mcpConfigFromValues(
+  values: Record<string, any>,
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  const flag = typeof values["mcp-config"] === "string" ? values["mcp-config"].trim() : "";
+  if (flag !== "") return flag;
+  const envFile = (env.TWO_BROTHERS_MCP_CONFIG ?? "").trim();
+  return envFile !== "" ? envFile : undefined;
 }
 
 /** Truthy `TWO_BROTHERS_*` boolean env value (the `coerce` convention). */
@@ -1563,8 +1593,7 @@ function planPlugins(dir: string): DryRunTools["plugins"] {
 
 /** MCP config presence/server count; never spawns a server. */
 function planMcp(values: Record<string, any>): DryRunTools["mcp"] {
-  const file =
-    typeof values["mcp-config"] === "string" ? values["mcp-config"].trim() : "";
+  const file = mcpConfigFromValues(values) ?? "";
   if (!file) {
     return { configured: false, file: null, present: false, servers: 0, error: null };
   }
@@ -1836,11 +1865,12 @@ async function doRun(
     throw exc;
   }
   if (dryRun) return printDryRun("run", cfg, values, io, resolved);
+  const mcpConfig = mcpConfigFromValues(values);
   try {
     const context = openSession(cfg, io);
     const resources = await loadRunResources(cfg, values, io);
     return await runOnce(cfg, resolved.task, io, context, {
-      ...(values["mcp-config"] ? { mcpConfig: values["mcp-config"] } : {}),
+      ...(mcpConfig !== undefined ? { mcpConfig } : {}),
       outputMode: resolveOutputMode(values, cfg.jsonOut),
       jsonDecision: values.json === true,
       resources,
@@ -2007,6 +2037,9 @@ async function doChat(
   }
   // Plugins + skills load once per REPL process; every turn reuses them.
   const resources = await loadRunResources(cfg, values, io);
+  // `--mcp-config` > `TWO_BROTHERS_MCP_CONFIG`, resolved once per REPL process
+  // like the resources above; every turn forwards the same choice.
+  const mcpConfig = mcpConfigFromValues(values);
   // Slash commands are discovered once per REPL session (a new `<name>.md`
   // needs a new session, unlike the per-turn plugin collection).
   const commandRoots = commandsRootsForCli(values);
@@ -2111,7 +2144,7 @@ async function doChat(
 
   /** `/permission`: the fail-closed policy and what this process can scope. */
   const printReplPermission = (): void => {
-    const mcpConfig = typeof values["mcp-config"] === "string" ? values["mcp-config"].trim() : "";
+    const mcpFile = mcpConfig ?? "";
     const pluginCount = resources.plugins?.plugins.size ?? 0;
     io.log("permission:");
     io.log(
@@ -2124,7 +2157,7 @@ async function doChat(
     );
     io.log(
       `  tool scopes: MCP ${
-        mcpConfig === "" ? "not configured" : `from --mcp-config ${path.resolve(mcpConfig)}`
+        mcpFile === "" ? "not configured" : `from MCP config ${path.resolve(mcpFile)}`
       }; plugin tools need a workspace-bound run`,
     );
     io.log(`  plugins: ${pluginCount} discovered (hooks apply; plugin tools are inactive here)`);
@@ -2257,7 +2290,7 @@ async function doChat(
       const discovered = commands.commands.find((cmd) => cmd.name === matched.name);
       if (discovered !== undefined) {
         const turnCode = await runOnce(cfg, expandCommand(discovered, matched.args), io, context, {
-          ...(values["mcp-config"] ? { mcpConfig: values["mcp-config"] } : {}),
+          ...(mcpConfig !== undefined ? { mcpConfig } : {}),
           outputMode: turnOutputMode,
           jsonDecision: turnJsonDecision,
           resources,
@@ -2290,7 +2323,7 @@ async function doChat(
           }
           if (task !== null) {
             const turnCode = await runOnce(cfg, task, io, context, {
-              ...(values["mcp-config"] ? { mcpConfig: values["mcp-config"] } : {}),
+              ...(mcpConfig !== undefined ? { mcpConfig } : {}),
               outputMode: turnOutputMode,
               jsonDecision: turnJsonDecision,
               resources,
@@ -2311,7 +2344,7 @@ async function doChat(
       continue;
     }
     const turnCode = await runOnce(cfg, trimmed, io, context, {
-      ...(values["mcp-config"] ? { mcpConfig: values["mcp-config"] } : {}),
+      ...(mcpConfig !== undefined ? { mcpConfig } : {}),
       outputMode: turnOutputMode,
       jsonDecision: turnJsonDecision,
       resources,
@@ -2432,6 +2465,8 @@ async function doTui(
     const warning = approvalModeWarning(pinnedApprovalMode);
     if (warning !== null) io.error(paintWarningPrefix(style, `[warn] ${warning}`));
   }
+  // `--mcp-config` > `TWO_BROTHERS_MCP_CONFIG`, pinned for this TUI process only.
+  const mcpConfig = mcpConfigFromValues(values);
   return runTuiApp({
     cfg,
     io,
@@ -2445,9 +2480,7 @@ async function doTui(
     commandsRoots: commandsRootsForCli(values),
     ...(workspace !== "" ? { workspaceRoot: workspace } : {}),
     ...(pinnedApprovalMode !== undefined ? { approvalMode: pinnedApprovalMode } : {}),
-    ...(typeof values["mcp-config"] === "string" && values["mcp-config"].trim()
-      ? { mcpConfig: values["mcp-config"] }
-      : {}),
+    ...(mcpConfig !== undefined ? { mcpConfig } : {}),
     ...(streamTokensForCli(values) ? { streamTokens: true } : {}),
     ...(initialTask ? { initialTask } : {}),
   });
@@ -2592,6 +2625,9 @@ const SESSIONS_OPTIONS = {
   at: { type: "string" as const },
   name: { type: "string" as const },
   turns: { type: "string" as const },
+  run: { type: "string" as const },
+  apply: { type: "boolean" as const, default: false },
+  discard: { type: "boolean" as const, default: false },
   ...HELP_OPTIONS,
 } satisfies ParseArgsOptionsConfig;
 
@@ -3076,6 +3112,216 @@ function rewindSessionCommand(
   return 0;
 }
 
+/**
+ * `sessions undo <name> [--run <id>] [--apply] [--discard] [--json]`: preview,
+ * apply or discard one run's captured file mutations through the shared
+ * workspace-history store (`src/workspacehistory.ts`, `<sessions>/undo`) and
+ * the session's linked workspace (`*.meta.json` -> `workspaces.json`). The
+ * server is not required: the store and the workspace link are both persisted.
+ * Default is a read-only preview. Exit codes: 1 for an unknown session/record
+ * (or an unreadable/unusable record and per-file apply failures), 2 for a
+ * usage error.
+ */
+function undoSessionCommand(
+  sessionsDir: string,
+  args: string[],
+  runRaw: unknown,
+  applyMode: boolean,
+  discardMode: boolean,
+  jsonMode: boolean,
+  io: CliIO,
+): number {
+  const usage =
+    "no session name: sessions undo <name> [--run <id>] [--apply] [--discard] [--json]";
+  if (args.length === 0) return sessionsUsageError(usage, io);
+  if (args.length > 1) return sessionsUsageError(`unexpected argument: ${args.slice(1).join(" ")}`, io);
+  if (applyMode && discardMode) {
+    return sessionsUsageError("--apply and --discard are mutually exclusive", io);
+  }
+  const requested = args[0];
+  const filePath = resolveSessionFile(sessionsDir, requested);
+  if (filePath === null) {
+    io.error(`[error] session not found: ${requested} (in ${path.resolve(sessionsDir)})`);
+    return 1;
+  }
+  const name = path.basename(filePath);
+  const store = path.join(sessionsDir, "undo");
+
+  let runId: string;
+  if (typeof runRaw === "string" && runRaw.trim() !== "") {
+    runId = runRaw.trim();
+    let record: WorkspaceUndoRecord;
+    try {
+      record = loadUndoRecord(store, runId);
+    } catch (exc) {
+      return undoCliError(exc, io);
+    }
+    if (record.session !== undefined && record.session !== name) {
+      io.error(`[error] no undo record for run ${runId} in ${name}`);
+      return 1;
+    }
+  } else {
+    const newest = listUndoRecords(store).find((entry) => entry.session === name);
+    if (newest === undefined) {
+      io.error(`[error] no undo record for ${name} (in ${path.resolve(store)})`);
+      return 1;
+    }
+    runId = newest.run_id;
+  }
+
+  if (discardMode) {
+    // Discard only deletes the record and unreferenced blobs: it does not need
+    // a workspace link, so cleanup still works after the workspace is gone.
+    let discarded = false;
+    try {
+      discarded = discardUndo(store, runId);
+    } catch (exc) {
+      return undoCliError(exc, io);
+    }
+    if (!discarded) {
+      io.error(`[error] no undo record for run ${runId}`);
+      return 1;
+    }
+    const gc = collectOrphanBlobs(store);
+    if (jsonMode) {
+      io.log(
+        JSON.stringify({
+          discarded: true,
+          session: name,
+          run_id: runId,
+          ...(gc.removed.length > 0 ? { blobs_removed: gc.removed.length } : {}),
+          ...(gc.diagnostics.length > 0 ? { gc_diagnostics: gc.diagnostics } : {}),
+        }),
+      );
+      return 0;
+    }
+    io.log(
+      `discarded the undo record for ${name} (run ${runId}); ` +
+        `removed ${gc.removed.length} unreferenced blob(s)`,
+    );
+    if (gc.skipped !== undefined) io.error(`[warning] blob collection skipped: ${gc.skipped}`);
+    return 0;
+  }
+
+  // The session's workspace link is the authority (same rule the HTTP route
+  // applies through the live registry); a session without a link or a record
+  // from another workspace is refused instead of restoring into a guess.
+  const meta = new SessionMetadataStore(sessionsDir).get(name);
+  const workspaceId =
+    meta !== null && typeof meta.workspace_id === "string" ? meta.workspace_id.trim() : "";
+  const linked =
+    workspaceId === ""
+      ? null
+      : new WorkspaceRegistry(path.join(sessionsDir, "workspaces.json")).get(workspaceId);
+  if (linked === null) {
+    io.error(
+      workspaceId === ""
+        ? `[error] session ${name} has no linked workspace; undo needs a workspace-bound run`
+        : `[error] session ${name} links to an unregistered workspace (${workspaceId})`,
+    );
+    return 1;
+  }
+  const workspaceRoot = linked.path;
+
+  if (applyMode) {
+    let result;
+    try {
+      result = applyUndo(store, runId, workspaceRoot);
+    } catch (exc) {
+      return undoCliError(exc, io);
+    }
+    const statusCount = (status: string): number =>
+      result.entries.filter((entry) => entry.preview_status === status).length;
+    const counts = {
+      applicable: statusCount("applicable"),
+      created: statusCount("created"),
+      deleted: statusCount("deleted"),
+      changed_since: statusCount("changed-since"),
+      skipped: statusCount("skipped"),
+      missing: statusCount("missing"),
+      total: result.entries.length,
+    };
+    if (jsonMode) {
+      io.log(
+        JSON.stringify({
+          session: name,
+          run_id: runId,
+          workspace_root: result.workspace_root,
+          applied: result.applied,
+          refused: result.refused,
+          failed: result.failed,
+          files: result.entries,
+          counts,
+          ...(result.omitted !== undefined ? { omitted: result.omitted } : {}),
+        }),
+      );
+    } else {
+      io.log(
+        `applied ${result.applied}, refused ${result.refused}, failed ${result.failed} ` +
+          `in ${name} (run ${runId})`,
+      );
+      for (const entry of result.entries) {
+        const note = entry.reason !== undefined ? ` — ${entry.reason}` : "";
+        io.log(`  ${entry.status.padEnd(8)} ${entry.action.padEnd(6)} ${entry.path}${note}`);
+      }
+      if (result.omitted !== undefined) {
+        io.log(`  ${result.omitted.entries} more mutation(s) were not captured (${result.omitted.reason})`);
+      }
+    }
+    return result.failed > 0 ? 1 : 0;
+  }
+
+  let preview;
+  try {
+    preview = previewUndo(store, runId, workspaceRoot);
+  } catch (exc) {
+    return undoCliError(exc, io);
+  }
+  if (jsonMode) {
+    io.log(
+      JSON.stringify({
+        session: name,
+        run_id: runId,
+        workspace_root: preview.workspace_root,
+        created_at: preview.created_at,
+        statuses: preview.entries,
+        counts: preview.counts,
+        ...(preview.omitted !== undefined ? { omitted: preview.omitted } : {}),
+      }),
+    );
+    return 0;
+  }
+  io.log(`session: ${name}`);
+  io.log(`run: ${runId}`);
+  io.log(`workspace: ${preview.workspace_root}`);
+  io.log(`created: ${preview.created_at || "(unknown)"}`);
+  io.log(
+    `${preview.counts.total} file(s): ${preview.counts.applicable} applicable, ` +
+      `${preview.counts.created} created, ${preview.counts.deleted} deleted, ` +
+      `${preview.counts.changed_since} changed-since, ${preview.counts.skipped} skipped, ` +
+      `${preview.counts.missing} missing`,
+  );
+  for (const entry of preview.entries) {
+    const note = entry.reason !== undefined ? ` — ${entry.reason}` : "";
+    io.log(`  ${entry.status.padEnd(12)} ${entry.action.padEnd(6)} ${entry.path}${note}`);
+  }
+  if (preview.omitted !== undefined) {
+    io.log(`${preview.omitted.entries} more mutation(s) were not captured (${preview.omitted.reason})`);
+  }
+  io.log("preview only; pass --apply to restore these files or --discard to drop the record");
+  return 0;
+}
+
+/** Map a workspace-undo store error to the CLI's honest exit code + one line. */
+function undoCliError(exc: unknown, io: CliIO): number {
+  if (exc instanceof WorkspaceUndoError) {
+    io.error(`[error] ${exc.message}`);
+    return exc.code === "invalid_run_id" ? 2 : 1;
+  }
+  io.error(`[error] ${exc instanceof Error ? exc.message : String(exc)}`);
+  return 1;
+}
+
 function doSessions(
   argv: string[],
   io: CliIO,
@@ -3133,10 +3379,21 @@ function doSessions(
   if (subcommand === "rewind") {
     return rewindSessionCommand(sessionsDir, positionals.slice(1), values.turns, jsonMode, io);
   }
+  if (subcommand === "undo") {
+    return undoSessionCommand(
+      sessionsDir,
+      positionals.slice(1),
+      values.run,
+      values.apply === true,
+      values.discard === true,
+      jsonMode,
+      io,
+    );
+  }
   // Kept as a thrown argument error (the long-standing contract for extra
   // positionals, covered by tests/cli.test.ts).
   throw new Error(
-    `unexpected argument '${subcommand}' (sessions takes 'list', 'show', 'search', 'export', 'fork' or 'rewind')`,
+    `unexpected argument '${subcommand}' (sessions takes 'list', 'show', 'search', 'export', 'fork', 'rewind' or 'undo')`,
   );
 }
 
@@ -3440,6 +3697,9 @@ async function doServe(
   const pluginsDirFlag =
     (typeof values["plugins-dir"] === "string" && values["plugins-dir"].trim()) ||
     (process.env.TWO_BROTHERS_PLUGINS_DIR ?? "").trim();
+  // `--mcp-config` > `TWO_BROTHERS_MCP_CONFIG`; the server treats the file as
+  // the per-run MCP base (a missing file warns and keeps plugin servers).
+  const mcpConfig = mcpConfigFromValues(values);
   const app = createServer({
     // CLI flags (applied per run via the config factory) > env > persisted.
     configFactory: () => resolveConfig(argsToConfigArgs(values)),
@@ -3448,9 +3708,7 @@ async function doServe(
     ...(pluginsDirFlag ? { pluginsDir: path.resolve(pluginsDirFlag) } : {}),
     skillsDirs: skillsRootsForCli(values),
     commandsDirs: commandsRootsForCli(values),
-    ...(typeof values["mcp-config"] === "string" && values["mcp-config"].trim()
-      ? { mcpConfig: values["mcp-config"] }
-      : {}),
+    ...(mcpConfig !== undefined ? { mcpConfig } : {}),
     ...(approvalPolicy !== undefined ? { approvalPolicy } : {}),
   });
   const server = await app.listen(host, port);

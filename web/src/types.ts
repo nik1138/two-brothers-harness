@@ -253,9 +253,11 @@ export interface ApprovalPolicyView {
  * `GET/PUT /api/settings`). Mirrors `CompactionFieldSource` in
  * `packages/harness/src/config.ts`: `flag` = serve CLI flag/env pin,
  * `options` = an explicit server option, `persisted` = the saved section,
+ * `preset` = the smaller context window declared by the roles' provider
+ * presets (a fallback that only applies when nothing run-level is set),
  * `absent` = not configured (the harness default, if any, applies).
  */
-export type CompactionFieldSource = 'options' | 'flag' | 'persisted' | 'absent'
+export type CompactionFieldSource = 'options' | 'flag' | 'persisted' | 'preset' | 'absent'
 
 /** One compaction budget: stored value, effective value and its source. */
 export interface CompactionFieldView {
@@ -676,6 +678,12 @@ export interface ProviderPreset {
   kind: string
   /** Manual model list (model discovery is deferred). */
   models: string[]
+  /**
+   * Additive (`GET/PUT /api/providers`): context window in tokens for the
+   * models this preset serves. Positive; `0`/absent means unknown. Older
+   * backends omit it (treat as 0).
+   */
+  context_window?: number
   /**
    * Additive (`GET /api/providers`): the name comes from the built-in seed
    * table. Older backends omit it — treat a missing flag as `false`.

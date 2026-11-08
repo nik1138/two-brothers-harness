@@ -31,9 +31,30 @@ import { PermissionManager } from "../src/permissions.ts";
 import { createServer, type ServerHandle } from "../src/server.ts";
 import { Workspace } from "../src/workspace.ts";
 
+function removeTempDirSync(root: string): void {
+  // Windows can keep a short-lived handle on the directory after a spawned
+  // shell exits; Node's rmSync maxRetries does not reliably retry EPERM here,
+  // so retry explicitly. Atomics.wait gives a synchronous backoff.
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    try {
+      fs.rmSync(root, { recursive: true, force: true });
+      return;
+    } catch (exc) {
+      const code = (exc as NodeJS.ErrnoException).code;
+      if (
+        attempt === 49 ||
+        (code !== "EPERM" && code !== "EBUSY" && code !== "ENOTEMPTY")
+      ) {
+        throw exc;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    }
+  }
+}
+
 function tmpdir(prefix: string): { root: string; cleanup: () => void } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-  return { root, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
+  return { root, cleanup: () => removeTempDirSync(root) };
 }
 
 interface RunningServer {

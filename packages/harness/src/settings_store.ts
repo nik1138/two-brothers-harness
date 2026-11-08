@@ -11,7 +11,7 @@
  *
  *     read()           -> {senior: {provider, model, base_url, api_key, ...}, ...}
  *     readPlugins()    -> [name, ...]                        // one shared list
- *     readProviders()  -> [{name, base_url, api_key, kind, models}, ...]   // key decrypted
+ *     readProviders()  -> [{name, base_url, api_key, kind, models, context_window?}, ...]   // key decrypted
  *     readApprovalPolicy() -> "ask" | "readonly" | "edits" | "allow-all"
  *     readCompaction() -> {threshold_chars?, threshold_tokens?, ...}  // budgets
  *     write(settings, plugins?, providers?)                  // api_key in
@@ -124,10 +124,25 @@ export interface ProviderPreset {
   kind: string;
   /** Manual model list for the preset (model discovery is deferred; default []). */
   models: string[];
+  /**
+   * Additive context window in tokens for models this preset serves (snake_case
+   * like `base_url`). A positive safe integer; `0`/absent means unknown. Seeds
+   * may omit it, and older stored presets never carry it — absent behaves
+   * exactly like 0. Reading is fail-soft: a negative, float or string value is
+   * dropped (unknown), never coerced.
+   */
+  context_window?: number;
 }
 
 /** Preset `kind` default — additive field, tolerant at the boundary. */
 export const PROVIDER_KIND_DEFAULT = "openai-compatible";
+
+/** One usable preset context window: a positive safe integer, else unknown. */
+function providerContextWindow(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : undefined;
+}
 
 /** Max session-allowed pairs persisted per session (oldest dropped first). */
 export const MAX_SESSION_APPROVALS = 64;
@@ -455,6 +470,7 @@ export class SettingsStore {
       stored: string | null;
       kind: string;
       models: string[];
+      context_window?: number;
     }> = [];
     for (const item of section) {
       if (!isRecord(item)) continue;
@@ -468,6 +484,7 @@ export class SettingsStore {
         stored: typeof key === "string" && key ? key : null,
         kind: asNonEmptyString(item.kind) ?? PROVIDER_KIND_DEFAULT,
         models: asStringList(item.models),
+        context_window: providerContextWindow(item.context_window),
       });
     }
     const unsealed = unsealMany(
@@ -480,6 +497,7 @@ export class SettingsStore {
       api_key: k.stored ? unsealed[i] : "",
       kind: k.kind,
       models: [...k.models],
+      ...(k.context_window !== undefined ? { context_window: k.context_window } : {}),
     }));
   }
 
@@ -669,6 +687,10 @@ export class SettingsStore {
           kind: asNonEmptyString(item.kind) ?? PROVIDER_KIND_DEFAULT,
           models: asStringList(item.models),
         };
+        // Additive context window: only a positive safe integer is stored, so
+        // 0/absent/invalid clears it (the preset then behaves as unknown).
+        const contextWindow = providerContextWindow(item.context_window);
+        if (contextWindow !== undefined) preset.context_window = contextWindow;
         const key = item.api_key;
         if (typeof key === "string" && key) {
           pending.push({ holder: preset });

@@ -43,17 +43,30 @@ import { MockProvider } from "../src/provider.ts";
 // helpers
 // ---------------------------------------------------------------------------
 
+function removeTempDirSync(root: string): void {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    try {
+      fs.rmSync(root, { recursive: true, force: true });
+      return;
+    } catch (exc) {
+      const code = (exc as NodeJS.ErrnoException).code;
+      if (
+        attempt === 49 ||
+        (code !== "EPERM" && code !== "EBUSY" && code !== "ENOTEMPTY")
+      ) {
+        throw exc;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    }
+  }
+}
+
 function tmpdir(): { root: string; cleanup: () => void } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-ws-"));
-  // Windows can still hold a just-killed shell's cwd/handle for a moment, so
-  // the recursive remove retries the transient EPERM/EBUSY instead of turning
-  // a cleanup-only race into a suite failure (the same hardening the load and
-  // reliability suites already use).
-  return {
-    root,
-    cleanup: () =>
-      fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 }),
-  };
+  // Windows can still hold a just-killed shell's cwd/handle for a moment;
+  // Node's rmSync maxRetries does not reliably retry EPERM, so retry
+  // explicitly instead of turning a cleanup-only race into a suite failure.
+  return { root, cleanup: () => removeTempDirSync(root) };
 }
 
 const approved = (root: string): Workspace =>

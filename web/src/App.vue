@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { NConfigProvider, NMessageProvider, darkTheme, lightTheme } from 'naive-ui'
+import { NButton, NConfigProvider, NMessageProvider, darkTheme, lightTheme } from 'naive-ui'
 import { accentThemeOverrides, darkThemeOverrides, themeOverrides } from './theme'
 import {
   applyThemeAttribute,
@@ -20,6 +20,7 @@ import {
   approvalOutcomeNotice,
   compactSession,
   createSession,
+  forkSession,
   getRun,
   getSession,
   getSessionRuntimeEvents,
@@ -76,6 +77,15 @@ import {
   rewindPreview,
 } from './sessionRewind'
 import type { RewindAction, RewindPreview } from './sessionRewind'
+import {
+  FORK_FROM_HERE_LABEL,
+  forkAvailability,
+  forkFailureNotice,
+  forkFromHereConfirmation,
+  forkRequestBody,
+  forkSuccessNotice,
+} from './sessionFork'
+import type { ForkAvailability } from './sessionFork'
 import {
   UNDO_ACTION_LABEL,
   undoActionHint,
@@ -144,6 +154,7 @@ import DiffReview from './components/DiffReview.vue'
 import ApprovalCard from './components/ApprovalCard.vue'
 import QueueDock from './components/QueueDock.vue'
 import RewindDialog from './components/RewindDialog.vue'
+import AppDialog from './components/AppDialog.vue'
 import RunUndoDialog from './components/RunUndoDialog.vue'
 import TodoPanel from './components/TodoPanel.vue'
 import UsageFooter from './components/UsageFooter.vue'
@@ -493,6 +504,81 @@ async function onSessionForked(name: string): Promise<void> {
     await loadSession(name)
   }
 }
+
+// -- fork from here (wave 26) --------------------------------------------------
+/**
+ * Branch the conversation at one operator message (envelope `seq`). Unlike the
+ * session-row action (whole conversation, no `seq`), this always sends the
+ * clicked bubble's `seq`, so the backend copies exactly that prefix into a new
+ * session and leaves the source untouched. The confirmation dialog owns the
+ * request; a failure stays inline and changes no session state.
+ */
+const forkFromHereTarget = ref<{ seq: number; session: string } | null>(null)
+/** One fork request at a time; the dialog stays open (and persistent) while it runs. */
+const forkFromHereBusy = ref(false)
+/** Honest failure copy shown inline (the dialog is the error surface). */
+const forkFromHereError = ref<string | null>(null)
+/** A live run blocks the fork (the backend also 409s); a request blocks a second one. */
+const forkFromHereContext = computed(() => ({
+  live: runActive.value,
+  busy: forkFromHereBusy.value,
+}))
+/** Resolver prop for ChatView: availability for one operator message. */
+function forkFromHereFor(_seq: number): ForkAvailability {
+  return forkAvailability(forkFromHereContext.value)
+}
+/** Open the fork-from-here confirmation for one operator message (`seq`). */
+function requestForkFromHere(seq: number): void {
+  const name = selected.value
+  if (!name || forkFromHereBusy.value) return
+  const state = forkAvailability(forkFromHereContext.value)
+  if (!state.available) {
+    showNotice(state.reason ?? 'Forking is unavailable right now.')
+    return
+  }
+  forkFromHereError.value = null
+  forkFromHereTarget.value = { seq, session: name }
+}
+/** Cancel the confirmation (never while the request is in flight). */
+function closeForkFromHere(): void {
+  if (forkFromHereBusy.value) return
+  forkFromHereTarget.value = null
+  forkFromHereError.value = null
+}
+/**
+ * Confirm the prefix fork: `POST /api/sessions/{name}/fork` with `{seq}`. On
+ * success the existing fork notice is shown, the list refreshes and the new
+ * session opens; on failure the copy stays in the dialog and nothing is opened
+ * (the source was never modified, and the backend rolled back any partial file).
+ */
+async function confirmForkFromHere(): Promise<void> {
+  const target = forkFromHereTarget.value
+  if (!target || forkFromHereBusy.value) return
+  forkFromHereBusy.value = true
+  forkFromHereError.value = null
+  try {
+    const result = await forkSession(target.session, forkRequestBody({ seq: target.seq }))
+    forkFromHereTarget.value = null
+    showNotice(forkSuccessNotice(result, target.session))
+    await refreshSessions(false)
+    if (sessions.value.some((session) => session.name === result.name)) {
+      await loadSession(result.name)
+    }
+  } catch (e) {
+    forkFromHereError.value = forkFailureNotice({
+      status: e instanceof ApiError ? e.status : undefined,
+      detail: errText(e),
+    })
+  } finally {
+    forkFromHereBusy.value = false
+  }
+}
+/** The confirmation is session-scoped: a session switch closes it. */
+watch(selected, () => {
+  if (forkFromHereBusy.value) return
+  forkFromHereTarget.value = null
+  forkFromHereError.value = null
+})
 
 // -- run-scoped file undo (wave 23) -------------------------------------------
 /**
@@ -2575,6 +2661,8 @@ onUnmounted(() => {
         :find-binding="keybindings.find"
         :rewind-for="rewindForSeq"
         :on-rewind="requestRewind"
+        :fork-from-here-for="forkFromHereFor"
+        :on-fork-from-here="requestForkFromHere"
         :live-run-id="activeRun?.run_id ?? null"
         :resolve-approval="resolveApproval"
         :docked-approval-id="pendingApproval?.approvalId ?? null"
@@ -2746,6 +2834,48 @@ onUnmounted(() => {
       @rewound="onSessionRewound"
       @error="reportError"
     />
+    <AppDialog
+      v-if="forkFromHereTarget"
+      :show="true"
+      size="sm"
+      title="Fork from here?"
+      :description="`Session ${forkFromHereTarget.session}`"
+      :persistent="forkFromHereBusy"
+      initial-focus=".fork-from-here-cancel"
+      @close="closeForkFromHere"
+    >
+      <div class="fork-from-here-body">
+        <p class="fork-from-here-copy">
+          {{ forkFromHereConfirmation(forkFromHereTarget) }}
+        </p>
+        <p class="fork-from-here-hint">
+          The new fork opens when it is ready; the original keeps its place in the sidebar.
+        </p>
+        <p v-if="forkFromHereError" class="fork-from-here-error" role="alert">
+          {{ forkFromHereError }}
+        </p>
+      </div>
+
+      <template #footer>
+        <n-button
+          attr-type="button"
+          class="fork-from-here-cancel"
+          :disabled="forkFromHereBusy"
+          @click="closeForkFromHere"
+        >
+          Cancel
+        </n-button>
+        <n-button
+          attr-type="button"
+          type="primary"
+          class="fork-from-here-confirm"
+          :loading="forkFromHereBusy"
+          @click="confirmForkFromHere"
+        >
+          {{ forkFromHereBusy ? 'Forking…' : FORK_FROM_HERE_LABEL }}
+        </n-button>
+      </template>
+    </AppDialog>
     <RunUndoDialog
       v-if="undoPreview && selected"
       :session="selected"
@@ -3007,5 +3137,33 @@ onUnmounted(() => {
 .run-undo-open:disabled {
   cursor: progress;
   opacity: 0.6;
+}
+
+/* Fork-from-here confirmation: the copy names the cut and the untouched
+   source; a failed request stays inline (role=alert) so nothing looks forked. */
+.fork-from-here-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.fork-from-here-copy {
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.fork-from-here-hint {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+}
+
+.fork-from-here-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.78rem;
+  line-height: 1.4;
 }
 </style>
