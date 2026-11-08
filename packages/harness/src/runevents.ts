@@ -25,6 +25,8 @@ import * as path from "node:path";
 import type { SessionLayout } from "./sessionlayout.ts";
 import { randomUUID } from "node:crypto";
 
+import { sanitizeOutput } from "./output.ts";
+
 import {
   Action,
   Decision,
@@ -39,6 +41,14 @@ export const CLIP_RESULT_CHARS = 800;
 export const CLIP_ARG_CHARS = 200;
 export const CLIP_EVIDENCE_CHARS = 240;
 export const MAX_EVIDENCE_ENTRIES = 12;
+/**
+ * Hard cap on the additive `preview` one compacted workspace result carries.
+ * Small enough that one tool_completed sidecar line stays bounded even with
+ * the existing clipped fields alongside it.
+ */
+export const CLIP_PREVIEW_CHARS = 500;
+/** Hard cap on directory entries / search matches summarised into a preview. */
+export const MAX_PREVIEW_ENTRIES = 20;
 
 /** Common envelope every run-manager-emitted event carries. */
 export interface RuntimeEventMeta {
@@ -259,6 +269,94 @@ export function clipArgs(args: Record<string, unknown> | null | undefined): Reco
   return out;
 }
 
+/** Character cap on one name/path line inside a preview. */
+const CLIP_PREVIEW_NAME_CHARS = 120;
+
+/** Workspace result kinds that get a bounded display preview. */
+const PREVIEW_TOOL_NAMES = new Set(["read_file", "list_dir", "search_text"]);
+
+/** `workspace_read_file` / `read_file` -> `read_file`; unsupported -> null. */
+function previewToolKind(tool: unknown): string | null {
+  if (typeof tool !== "string") return null;
+  const name = tool.startsWith("workspace_") ? tool.slice("workspace_".length) : tool;
+  return PREVIEW_TOOL_NAMES.has(name) ? name : null;
+}
+
+/** One sanitized, single-line name/path inside a preview. */
+function previewValue(value: unknown): string {
+  const text = value === null || value === undefined ? "" : String(value);
+  return clipText(sanitizeOutput(text), CLIP_PREVIEW_NAME_CHARS);
+}
+
+/** Join up to the entry cap, keeping an honest count of what the preview omits. */
+function previewLines(
+  values: unknown[],
+  lineOf: (value: unknown) => string,
+  omittedBeyond: number,
+): string {
+  const shown = values.slice(0, MAX_PREVIEW_ENTRIES);
+  const lines = shown.map(lineOf).filter((line) => line !== "");
+  const omitted =
+    values.length - shown.length + (Number.isFinite(omittedBeyond) && omittedBeyond > 0 ? omittedBeyond : 0);
+  if (omitted > 0) lines.push(`... (${omitted} more)`);
+  return clipBlock(sanitizeOutput(lines.join("\n")), CLIP_PREVIEW_CHARS);
+}
+
+/**
+ * Additive bounded preview for the object results the web tool card cannot
+ * otherwise show: a directory listing, a file's content head, or search match
+ * paths. Returns null for anything unrecognised or empty, so small and
+ * unsupported results keep their historical compact shape byte-for-byte.
+ * Never carries a whole file: content is clipped to {@link CLIP_PREVIEW_CHARS}
+ * and listings/matches to {@link MAX_PREVIEW_ENTRIES}.
+ */
+function toolResultPreview(record: Record<string, unknown>): string | null {
+  const kind = previewToolKind(record.tool);
+  if (kind === null) return null;
+  if (kind === "read_file") {
+    const content = record.content;
+    if (typeof content !== "string" || content === "") return null;
+    return clipBlock(sanitizeOutput(content), CLIP_PREVIEW_CHARS);
+  }
+  if (kind === "list_dir") {
+    const entries = record.entries;
+    if (!Array.isArray(entries) || entries.length === 0) return null;
+    const omitted = typeof record.omitted_entries === "number" ? record.omitted_entries : 0;
+    const preview = previewLines(
+      entries,
+      (entry) => {
+        if (entry !== null && typeof entry === "object" && !Array.isArray(entry)) {
+          const item = entry as Record<string, unknown>;
+          const name = previewValue(item.name);
+          const type = previewValue(item.type);
+          return type ? `${type} ${name}` : name;
+        }
+        return previewValue(entry);
+      },
+      omitted,
+    );
+    return preview === "" ? null : preview;
+  }
+  const matches = record.matches;
+  if (!Array.isArray(matches) || matches.length === 0) return null;
+  const omitted = typeof record.omitted_matches === "number" ? record.omitted_matches : 0;
+  const preview = previewLines(
+    matches,
+    (match) => {
+      if (match !== null && typeof match === "object" && !Array.isArray(match)) {
+        const item = match as Record<string, unknown>;
+        const path = previewValue(item.path);
+        const line =
+          typeof item.line === "number" && Number.isFinite(item.line) ? `:${item.line}` : "";
+        return path ? `${path}${line}` : "";
+      }
+      return previewValue(match);
+    },
+    omitted,
+  );
+  return preview === "" ? null : preview;
+}
+
 /**
  * Compact a tool result for runtime events and deliverable evidence.
  * Workspace tools (Stage 5) return JSON objects with a `tool` key; those are
@@ -314,6 +412,8 @@ export function compactToolResult(raw: unknown, limit = CLIP_RESULT_CHARS): unkn
       };
     }
   }
+  const preview = toolResultPreview(record);
+  if (preview !== null) compact.preview = preview;
   return compact;
 }
 

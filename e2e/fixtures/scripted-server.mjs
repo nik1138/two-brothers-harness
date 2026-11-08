@@ -27,12 +27,16 @@
 //
 //   --port PORT            (required) TCP port to listen on
 //   --scenario NAME        approval | slow | plan | folding | delete | reasoning
-//                          | cooperation | title (default: approval)
+//                          | cooperation | title | list (default: approval)
 //                          approval: one workspace_write_file call, then the
 //                                    deliverable after the tool result; the first
 //                                    senior opening reply is deliberately
 //                                    malformed once so the harness' real
 //                                    [[REPAIR_REQUEST]] retry path runs
+//                          list:     one workspace_list_dir call (no approval),
+//                                    then the deliverable; the browser scenario
+//                                    asserts the card's additive bounded
+//                                    `preview` toggle and plain-text rows
 //                          title:    same write-then-deliver flow as approval
 //                                    (no repair seed); a task carrying the
 //                                    `e2e-title` marker gets an abortable slow
@@ -222,7 +226,7 @@ function parseEvents(messages) {
 let callCounter = 0
 
 /** Scenarios whose runs are started in work mode (the senior delegates). */
-const WORK_SCENARIOS = new Set(['approval', 'plan', 'folding', 'delete', 'cooperation', 'title'])
+const WORK_SCENARIOS = new Set(['approval', 'plan', 'folding', 'delete', 'cooperation', 'title', 'list'])
 
 /**
  * Plan snapshots the `plan` scenario writes, one whole-list snapshot per run:
@@ -425,6 +429,11 @@ function decide(body) {
       (e) => e.from === 'senior' && e.kind === 'decision',
     ).length
     if (role === 'junior') {
+      if (OPTS.scenario === 'list') {
+        // one directory listing (auto-allowed, no approval), then deliver
+        if (toolResults === 0) return toolCall('workspace_list_dir', { path: '.' })
+        return deliverableReply()
+      }
       if (OPTS.scenario === 'plan') {
         // one whole-plan snapshot per run, then the deliverable
         if (toolResults === 0) return toolCall('todo_write', { todos: planForRun(completedRuns) })

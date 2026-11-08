@@ -4,6 +4,7 @@ import type { ToolActivityItem } from '../runtime'
 import type { CommandResultPayload } from './CommandResult.vue'
 import DiffView from './DiffView.vue'
 import CommandResult from './CommandResult.vue'
+import { toolPreviewOf } from '../toolPreview'
 
 const props = defineProps<{
   item: ToolActivityItem
@@ -116,6 +117,9 @@ const textResult = computed<string | null>(() => {
   return null
 })
 
+/** Additive bounded workspace preview (file head / entries / match paths). */
+const preview = computed<string | null>(() => toolPreviewOf(view.result))
+
 /** Remaining args worth showing (path/command already surfaced in the header). */
 const extraArgs = computed(() =>
   Object.entries(view.args).filter(
@@ -225,6 +229,7 @@ const outputChars = computed(() => {
       const unified = (d as Record<string, unknown>).unified
       if (typeof unified === 'string') n += unified.length
     }
+    if (preview.value) n += preview.value.length
     return n
   }
   return typeof view.result === 'string' ? view.result.length : 0
@@ -250,7 +255,12 @@ const summaryParts = computed<string[]>(() => {
 
 const toggleLabel = computed(() => (open.value ? 'Hide details' : 'Show details'))
 const expandable = computed(
-  () => diff.value !== null || commandResult.value !== null || textResult.value !== null || extraArgs.value.length > 0,
+  () =>
+    diff.value !== null ||
+    commandResult.value !== null ||
+    textResult.value !== null ||
+    preview.value !== null ||
+    extraArgs.value.length > 0,
 )
 </script>
 
@@ -302,6 +312,7 @@ const expandable = computed(
       />
       <CommandResult v-else-if="commandResult" :result="commandResult" />
       <pre v-else-if="textResult" class="tool-text">{{ textResult }}</pre>
+      <pre v-if="preview" class="tool-text tool-preview">{{ preview }}</pre>
     </div>
   </article>
 </template>
