@@ -446,6 +446,105 @@ test("workspaces: register, list, remove + validation", async () => {
   }
 });
 
+test("a run inherits the session's linked workspace for tool calling", async () => {
+  const srv = await startServer({
+    providerOverrides: {
+      junior: new MockProvider([
+        { tool: "workspace_list_dir", args: { path: "." } },
+        {
+          text: JSON.stringify({
+            result: "listed the linked workspace",
+            artifacts: ["notes.txt"],
+            notes: "",
+            confidence: 0.8,
+          }),
+        },
+      ]),
+    },
+  });
+  const ws = tmpdir("tb-linked-tools-");
+  try {
+    fs.writeFileSync(path.join(ws.root, "notes.txt"), "hello from the linked workspace");
+    const registered = await post<Record<string, any>>(srv.base, "/api/workspaces", {
+      path: ws.root,
+      name: "linked-tools",
+    });
+    assert.equal(registered.status, 201);
+    const session = await post<Record<string, any>>(srv.base, "/api/sessions", {
+      title: "linked tools",
+      workspace_id: registered.body.id,
+    });
+    assert.equal(session.status, 201);
+
+    // Exact web-composer shape when the sidebar filter is "all": the session
+    // link is the only workspace source, so the run must inherit it.
+    const started = await post<Record<string, any>>(srv.base, "/api/runs", {
+      task: "List the files in the folder",
+      mode: "work",
+      provider: "mock",
+      session: session.body.name,
+      workspace_id: null,
+    });
+    assert.equal(started.status, 202, JSON.stringify(started.body));
+    const events = await runUntilEnd(srv.base, started.body.run_id);
+    assert.equal(events.at(-1)?.status, "completed");
+
+    const audit = events.find(
+      (event) => event.type === "prompt_audit" && event.role === "junior",
+    );
+    assert.ok(audit, "expected a junior prompt audit");
+    assert.ok(
+      (audit.tools as string[]).includes("workspace_list_dir"),
+      `offered tools: ${JSON.stringify(audit.tools)}`,
+    );
+    const completed = events.find(
+      (event) => event.type === "tool_completed" && event.tool === "workspace_list_dir",
+    );
+    assert.equal(completed?.status, "ok", JSON.stringify(completed));
+  } finally {
+    await srv.close();
+    ws.cleanup();
+  }
+});
+
+test("a file mention on a linked session reads through its workspace", async () => {
+  const srv = await startServer();
+  const ws = tmpdir("tb-linked-mention-");
+  try {
+    fs.writeFileSync(path.join(ws.root, "notes.txt"), "hello from the linked workspace");
+    const registered = await post<Record<string, any>>(srv.base, "/api/workspaces", {
+      path: ws.root,
+      name: "linked-mention",
+    });
+    const session = await post<Record<string, any>>(srv.base, "/api/sessions", {
+      title: "linked mention",
+      workspace_id: registered.body.id,
+    });
+
+    const started = await post<Record<string, any>>(srv.base, "/api/runs", {
+      task: "Use @./notes.txt",
+      provider: "mock",
+      session: session.body.name,
+    });
+    assert.equal(started.status, 202, JSON.stringify(started.body));
+    const events = await runUntilEnd(srv.base, started.body.run_id);
+    assert.equal(events.at(-1)?.status, "completed");
+
+    const detail = await get<Record<string, any>>(
+      srv.base,
+      `/api/sessions/${encodeURIComponent(session.body.name)}`,
+    );
+    const first = detail.body.events[0] as Record<string, any>;
+    assert.match(
+      String(first?.payload?.text),
+      /^<file path="notes.txt">\nhello from the linked workspace\n<\/file>$/,
+    );
+  } finally {
+    await srv.close();
+    ws.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Session metadata (create / rename / listing titles)
 // ---------------------------------------------------------------------------
