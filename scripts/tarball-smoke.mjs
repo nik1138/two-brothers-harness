@@ -7,7 +7,7 @@
 //   node scripts/tarball-smoke.mjs
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,6 +44,17 @@ const tempDir = mkdtempSync(join(tmpdir(), "harness-tarball-smoke-"));
 let tarballPath;
 
 try {
+	// npm resolves the project prefix by walking up from the working
+	// directory. If TEMP lives inside a project (the documented Windows dev
+	// flow points TEMP at the checkout's .tmp for Vite builds), an otherwise
+	// empty temp dir would resolve to that project and `npm install <tarball>`
+	// would report "up to date" without installing anything. Pin an explicit
+	// consumer manifest so the temp dir is always its own project.
+	writeFileSync(
+		join(tempDir, "package.json"),
+		`${JSON.stringify({ name: "tarball-smoke-consumer", version: "0.0.0", private: true }, null, 2)}\n`,
+	);
+
 	// 1. Pack the tarball (npm prints the filename on the last stdout line).
 	const pack = run("npm", ["pack", "--pack-destination", tempDir, "--no-audit", "--no-fund"], packageDir);
 	const packLines = pack.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
