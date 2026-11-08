@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { NConfigProvider, NMessageProvider, darkTheme, lightTheme } from 'naive-ui'
-import { darkThemeOverrides, themeOverrides } from './theme'
+import { accentThemeOverrides, darkThemeOverrides, themeOverrides } from './theme'
 import {
   applyThemeAttribute,
   readThemeMode,
@@ -1998,6 +1998,23 @@ function onThemeChange(mode: ThemeMode) {
 // apply before the first paint so a pinned scheme does not flash the OS one
 syncTheme()
 watch([themeMode, isDark], syncTheme)
+
+/**
+ * naive-ui overrides for the current scheme plus the operator-selected accent:
+ * the static base palette provides every non-accent value, and the accent
+ * mapping from ./theme overrides the primary family so NATIVE naive-ui primary
+ * controls (n-button type=primary, switches, input focus borders, …) follow
+ * Settings → Appearance exactly like the CSS-token chrome. Computed, so an
+ * accent or light/dark change re-renders native controls immediately.
+ */
+const configThemeOverrides = computed(() => {
+  const scheme = isDark.value ? 'dark' : 'light'
+  const base = isDark.value ? darkThemeOverrides : themeOverrides
+  return {
+    ...base,
+    common: { ...base.common, ...accentThemeOverrides(accent.value, scheme).common },
+  }
+})
 // settings saves can turn the onboarding hint on or off; no interval, only a save
 watch(settingsVersion, () => {
   void probeSettings()
@@ -2060,7 +2077,7 @@ onUnmounted(() => {
 <template>
   <n-config-provider
     :theme="isDark ? darkTheme : lightTheme"
-    :theme-overrides="isDark ? darkThemeOverrides : themeOverrides"
+    :theme-overrides="configThemeOverrides"
   >
     <n-message-provider>
     <div class="workspace" :class="{ 'sidebar-collapsed': sidebarCollapsed }">

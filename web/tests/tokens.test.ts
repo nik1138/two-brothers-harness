@@ -9,7 +9,9 @@
 //      defined (in tokens.css, or locally in the same sheet);
 //   2. every core colour token exists in the light block and is overridden by
 //      both dark blocks, which must stay byte-identical to each other;
-//   3. no colour literal is left in the migrated sheets;
+//   3. no colour literal is left in the migrated sheets (theme.ts is the one
+//      sanctioned home for raw colour values outside tokens.css: it maps the
+//      token colours to naive-ui's plain-value theme overrides);
 //   4. canonical radius sizes and spacing-scale steps are tokens in the
 //      migrated sheets (the mechanical migration contract);
 //   5. the spacing scale, type/motion/radius/focus tokens exist where they
@@ -23,7 +25,7 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { darkThemeOverrides, themeOverrides } from '../src/theme.ts'
+import { accentThemeOverrides, darkThemeOverrides, themeOverrides } from '../src/theme.ts'
 
 const read = (relative: string): string =>
   readFileSync(fileURLToPath(new URL(relative, import.meta.url)), 'utf8')
@@ -490,6 +492,116 @@ const DARK_TEXT_SURFACES = [
 
 /** WCAG AA for normal-size text. */
 const ACCENT_TEXT_MIN_CONTRAST = 4.5
+
+test('token layer: naive-ui accent overrides mirror the CSS accent tokens (no drift)', () => {
+  const ACCENTS = ['blue', 'violet', 'teal', 'amber'] as const
+  const EXPECTED_KEYS = [
+    'primaryColor',
+    'primaryColorHover',
+    'primaryColorPressed',
+    'primaryColorSuppl',
+  ]
+  const lightPalette = (accent: string): Map<string, string> =>
+    accent === 'blue'
+      ? LIGHT
+      : declarations(
+          tokenBlocks.find((block) => block.prelude === `:root[data-accent='${accent}']`)!.body,
+        )
+  const darkPalette = (accent: string): Map<string, string> =>
+    accent === 'blue'
+      ? DARK_PINNED
+      : declarations(
+          tokenBlocks.find(
+            (block) => block.prelude === `:root[data-theme='dark'][data-accent='${accent}']`,
+          )!.body,
+        )
+  const tokenValues = new Set<string>()
+  for (const block of tokenBlocks) {
+    const atRule = block.prelude.startsWith('@')
+    for (const value of declarations(block.body, !atRule).values()) tokenValues.add(value.toLowerCase())
+    for (const inner of blocks(block.body)) {
+      for (const value of declarations(inner.body).values()) tokenValues.add(value.toLowerCase())
+    }
+  }
+
+  for (const accent of ACCENTS) {
+    const mapped: string[] = []
+    for (const scheme of ['light', 'dark'] as const) {
+      const palette = scheme === 'light' ? lightPalette(accent) : darkPalette(accent)
+      const common = accentThemeOverrides(accent, scheme).common as unknown as Record<
+        string,
+        string
+      >
+      assert.deepEqual(
+        Object.keys(common).sort(),
+        [...EXPECTED_KEYS].sort(),
+        `${accent} ${scheme}: the accent mapping must only override the primary family`,
+      )
+      assert.equal(
+        common.primaryColor,
+        palette.get('--accent'),
+        `${accent} ${scheme}: primaryColor must equal the CSS --accent`,
+      )
+      assert.equal(
+        common.primaryColorHover,
+        palette.get('--accent-hover'),
+        `${accent} ${scheme}: primaryColorHover must equal the CSS --accent-hover`,
+      )
+      assert.equal(
+        common.primaryColorPressed,
+        palette.get('--accent-pressed'),
+        `${accent} ${scheme}: primaryColorPressed must equal the CSS --accent-pressed`,
+      )
+      assert.equal(
+        common.primaryColorSuppl,
+        palette.get('--accent'),
+        `${accent} ${scheme}: primaryColorSuppl must equal the CSS --accent`,
+      )
+      for (const value of Object.values(common)) {
+        mapped.push(value)
+        assert.ok(
+          tokenValues.has(value.toLowerCase()),
+          `${accent} ${scheme}: ${value} must be a token value defined in tokens.css`,
+        )
+      }
+    }
+    const lightCommon = accentThemeOverrides(accent, 'light').common as unknown as Record<
+      string,
+      string
+    >
+    const darkCommon = accentThemeOverrides(accent, 'dark').common as unknown as Record<
+      string,
+      string
+    >
+    assert.notEqual(
+      lightCommon.primaryColor,
+      darkCommon.primaryColor,
+      `${accent}: the light and dark naive-ui primaries must come from their own scheme`,
+    )
+  }
+
+  // Fail-soft: an unknown accent falls back to blue for the requested scheme;
+  // an unknown scheme falls back to light.
+  const fallback = accentThemeOverrides(
+    'magenta' as never,
+    'sepia' as never,
+  ).common as unknown as Record<string, string>
+  assert.equal(fallback.primaryColor, LIGHT.get('--accent'))
+  assert.equal(fallback.primaryColorHover, LIGHT.get('--accent-hover'))
+  assert.equal(fallback.primaryColorPressed, LIGHT.get('--accent-pressed'))
+  const fallbackDark = accentThemeOverrides(
+    'magenta' as never,
+    'dark',
+  ).common as unknown as Record<string, string>
+  assert.equal(fallbackDark.primaryColor, darkPalette('blue').get('--accent'))
+  assert.equal(fallbackDark.primaryColorHover, darkPalette('blue').get('--accent-hover'))
+  assert.equal(fallbackDark.primaryColorPressed, darkPalette('blue').get('--accent-pressed'))
+  const fallbackScheme = accentThemeOverrides(
+    'violet',
+    'sepia' as never,
+  ).common as unknown as Record<string, string>
+  assert.equal(fallbackScheme.primaryColor, lightPalette('violet').get('--accent'))
+})
 
 test('token layer: accent variants override the same accent/focus/selected set in both schemes', () => {
   const sortedEntries = (map: Map<string, string>): Record<string, string> =>

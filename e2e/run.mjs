@@ -1086,7 +1086,9 @@ async function scenarioAppearanceDensity(runner) {
 // chosen non-default accent (root attribute + computed accent token), reload
 // persistence, and restoring the default — with the theme/density groups intact.
 // Under the dark variant it also asserts the text-only `--accent-text` token is
-// the lightened AA-compliant value (computed contrast vs the dark panel).
+// the lightened AA-compliant value (computed contrast vs the dark panel), and a
+// native naive-ui primary control (the Settings Save button) follows the accent
+// in light and dark and returns to the base primary after restoring Blue.
 
 async function scenarioAppearanceAccent(runner) {
   const be = await startBackend({ kind: 'mock' })
@@ -1097,6 +1099,38 @@ async function scenarioAppearanceAccent(runner) {
     page.evaluate(() =>
       getComputedStyle(document.documentElement).getPropertyValue('--accent').trim(),
     )
+  /** The settings dialog's stable native naive-ui primary action. */
+  const nativePrimary = (dialog) =>
+    dialog.locator('.settings-footer-actions button.n-button--primary-type').first()
+  /** Computed background colour of that native primary control. */
+  const nativePrimaryBackground = async (dialog) => {
+    const button = nativePrimary(dialog)
+    await button.waitFor({ state: 'visible' })
+    await waitFor(async () => !(await button.isDisabled()), {
+      desc: 'the native settings primary button to be enabled',
+    })
+    return button.evaluate((el) => getComputedStyle(el).backgroundColor)
+  }
+  /** True when an rgb() string is within a small channel tolerance of `hex`. */
+  const matchesHex = (actual, hex) => {
+    const channels = (value) => (value.match(/\d+/g) ?? []).slice(0, 3).map(Number)
+    const expected = (hex.replace('#', '').match(/../g) ?? []).map((pair) =>
+      Number.parseInt(pair, 16),
+    )
+    const rgb = channels(actual)
+    return (
+      rgb.length === 3 && rgb.every((channel, index) => Math.abs(channel - expected[index]) <= 2)
+    )
+  }
+  /**
+   * Assert the native naive-ui primary control follows `hex` (polled: the
+   * naive-ui CSS variables are applied on Vue's next render flush).
+   */
+  const assertNativePrimary = async (dialog, hex, label) => {
+    await waitFor(async () => matchesHex(await nativePrimaryBackground(dialog), hex), {
+      desc: `${label} (native naive-ui primary background ${hex})`,
+    })
+  }
   try {
     await page.goto(be.base)
     await page.locator('nav[aria-label="Sessions"]').waitFor()
@@ -1105,12 +1139,14 @@ async function scenarioAppearanceAccent(runner) {
     assert.equal(await accentAttribute(), 'blue', 'the default accent is blue')
     assert.equal(await accentToken(), '#3568d4', 'blue is the base accent token')
 
-    const { pane } = await openAppearanceSettings(page)
+    const { dialog, pane } = await openAppearanceSettings(page)
     assert.equal(
       await pane.locator('.appearance-card').count(),
       5,
       'the theme + density card groups stay exactly 5 cards',
     )
+    // Native naive-ui primary controls follow the same accent (blue at rest).
+    await assertNativePrimary(dialog, '#3568d4', 'default blue native primary')
     const accentGroup = pane.getByRole('radiogroup', { name: 'Accent' })
     assert.equal(
       await accentGroup.locator('input[type="radio"]').count(),
@@ -1138,6 +1174,7 @@ async function scenarioAppearanceAccent(runner) {
       'keyboard navigation selects the Violet accent',
     )
     assert.equal(await accentToken(), '#6d28d9', 'violet changes the effective accent token')
+    await assertNativePrimary(dialog, '#6d28d9', 'light violet native primary')
     assert.equal(
       await pane.locator('.appearance-card').count(),
       5,
@@ -1158,6 +1195,7 @@ async function scenarioAppearanceAccent(runner) {
     )
     assert.equal(await accentAttribute(), 'violet', 'the accent survives a theme change')
     assert.equal(await accentToken(), '#7c3aed', 'the dark violet accent block applies in dark')
+    await assertNativePrimary(dialog, '#7c3aed', 'dark violet native primary')
 
     // The text-only accent token is lightened for AA contrast on dark surfaces.
     assert.equal(
@@ -1193,7 +1231,7 @@ async function scenarioAppearanceAccent(runner) {
     await page.locator('nav[aria-label="Sessions"]').waitFor()
     assert.equal(await accentAttribute(), 'violet', 'the violet accent survives a reload')
     assert.equal(await accentToken(), '#7c3aed', 'the reloaded page keeps the dark violet palette')
-    await openAppearanceSettings(page)
+    const { dialog: reloadedDialog } = await openAppearanceSettings(page)
     assert.equal(
       await page
         .getByRole('radiogroup', { name: 'Accent' })
@@ -1222,6 +1260,7 @@ async function scenarioAppearanceAccent(runner) {
       { timeout: 5000 },
     )
     assert.equal(await accentToken(), '#3568d4', 'blue restores the default accent token')
+    await assertNativePrimary(reloadedDialog, '#3568d4', 'restored blue native primary')
     await page.reload()
     await page.locator('nav[aria-label="Sessions"]').waitFor()
     assert.equal(await accentAttribute(), 'blue', 'restoring the default survives a reload')

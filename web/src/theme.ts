@@ -1,8 +1,13 @@
 import type { GlobalThemeOverrides } from 'naive-ui'
 
+import type { AccentTheme } from './uiPrefs'
+
 /**
  * Naive UI theme overrides mapped from the design tokens in style.css
- * (:root custom properties). Keep the two in sync when tokens change.
+ * (:root custom properties). Keep the two in sync when tokens change; this
+ * module is the sanctioned home for raw hex values outside tokens.css because
+ * naive-ui takes plain values rather than CSS custom properties (tokens.test.ts
+ * asserts the accent mapping below cannot drift from the CSS accent tokens).
  *
  * | token                  | naive var                     |
  * |------------------------|-------------------------------|
@@ -153,4 +158,70 @@ export const darkThemeOverrides: GlobalThemeOverrides = {
     boxShadow2: '0 8px 24px -12px rgb(0 0 0 / 55%)',
     boxShadow3: '0 24px 64px -18px rgb(0 0 0 / 70%)',
   },
+}
+
+// -- accent themes --------------------------------------------------------------
+
+/** Effective colour scheme for the naive-ui overrides (`isDark` in App.vue). */
+export type ThemeScheme = 'light' | 'dark'
+
+/** The accent-derived naive-ui variables (native primary-control colours). */
+export interface AccentNaivePalette {
+  accent: string
+  hover: string
+  pressed: string
+}
+
+/**
+ * Canonical accent hexes for naive-ui, mirroring the semantic CSS tokens in
+ * tokens.css: `--accent`, `--accent-hover`, `--accent-pressed` in the matching
+ * scheme and `data-accent` variant. This is the only place outside tokens.css
+ * that may spell these colours; the drift test in tokens.test.ts keeps the two
+ * sources identical (all four variants × light/dark).
+ */
+export const ACCENT_NAIVE_PALETTES: Record<
+  AccentTheme,
+  Record<ThemeScheme, AccentNaivePalette>
+> = {
+  blue: {
+    light: { accent: '#3568d4', hover: '#2a56b4', pressed: '#234a9e' },
+    dark: { accent: '#2f6fed', hover: '#4f7fe8', pressed: '#2753c9' },
+  },
+  violet: {
+    light: { accent: '#6d28d9', hover: '#5b21b6', pressed: '#4c1d95' },
+    dark: { accent: '#7c3aed', hover: '#8b5cf6', pressed: '#6d28d9' },
+  },
+  teal: {
+    light: { accent: '#0e7490', hover: '#155e75', pressed: '#164e63' },
+    dark: { accent: '#0f7d99', hover: '#0e8aa8', pressed: '#0b6080' },
+  },
+  amber: {
+    light: { accent: '#b45309', hover: '#92400e', pressed: '#78350f' },
+    dark: { accent: '#a35407', hover: '#b45309', pressed: '#8a4306' },
+  },
+}
+
+/**
+ * naive-ui overrides for one accent theme + scheme, merged over
+ * `themeOverrides` / `darkThemeOverrides` by App.vue's NConfigProvider. This is
+ * what makes native naive-ui primary controls (n-button type=primary, switches,
+ * input focus borders, …) follow Settings → Appearance instead of staying
+ * brand-blue. Pure: no DOM/global state; an unknown accent falls back to blue
+ * for the requested scheme (and an unknown scheme to light) instead of throwing.
+ */
+export function accentThemeOverrides(
+  accent: AccentTheme,
+  scheme: ThemeScheme,
+): GlobalThemeOverrides {
+  const schemeKey: ThemeScheme = scheme === 'dark' ? 'dark' : 'light'
+  const palette =
+    ACCENT_NAIVE_PALETTES[accent]?.[schemeKey] ?? ACCENT_NAIVE_PALETTES.blue[schemeKey]
+  return {
+    common: {
+      primaryColor: palette.accent,
+      primaryColorHover: palette.hover,
+      primaryColorPressed: palette.pressed,
+      primaryColorSuppl: palette.accent,
+    },
+  }
 }
