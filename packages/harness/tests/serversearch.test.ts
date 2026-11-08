@@ -489,7 +489,7 @@ test("export: 404 for a missing session, 400 for bad names and unknown formats",
       `/api/sessions/${EXPORT_SESSION}/export?format=pdf`,
     );
     assert.equal(badFormat.status, 400);
-    assert.equal(badFormat.body.detail, "format must be markdown or json");
+    assert.equal(badFormat.body.detail, "format must be markdown, json or html");
 
     // The format is trimmed/case-insensitive and the default is markdown.
     const upper = await fetch(

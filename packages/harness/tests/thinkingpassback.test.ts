@@ -1186,6 +1186,10 @@ test("mixed per-role kinds: only the junior Anthropic role sends thinking; the s
 // ---------------------------------------------------------------------------
 
 test("request-shape evidence: the exact Anthropic body with and without the option", async () => {
+  // Since wave 23 every Anthropic request carries the prompt-cache breakpoints
+  // (see tests/anthropiccache.test.ts); thinking stays the only difference the
+  // option itself adds.
+  const CACHE_CONTROL = { type: "ephemeral" } as const;
   const off = stubFetch(() => jsonResponse({ content: [{ type: "text", text: "ok" }] }));
   await anthropic(off.fetchImpl).chat(MESSAGES);
   assert.equal(
@@ -1193,11 +1197,16 @@ test("request-shape evidence: the exact Anthropic body with and without the opti
     JSON.stringify({
       model: "claude-test",
       max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-      messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
-      system: "SYS",
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: "hello", cache_control: CACHE_CONTROL }],
+        },
+      ],
+      system: [{ type: "text", text: "SYS", cache_control: CACHE_CONTROL }],
       temperature: 0.2,
     }),
-    "the disabled request is exactly the pre-thinking body",
+    "the disabled request is exactly the pre-thinking body plus the cache breakpoints",
   );
 
   const on = stubFetch(() => jsonResponse({ content: [{ type: "text", text: "ok" }] }));
@@ -1207,8 +1216,13 @@ test("request-shape evidence: the exact Anthropic body with and without the opti
     JSON.stringify({
       model: "claude-test",
       max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-      messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
-      system: "SYS",
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: "hello", cache_control: CACHE_CONTROL }],
+        },
+      ],
+      system: [{ type: "text", text: "SYS", cache_control: CACHE_CONTROL }],
       // temperature is intentionally absent: the API rejects it while thinking
       // is enabled (its default 1 applies).
       thinking: { type: "enabled", budget_tokens: 2048 },

@@ -40,6 +40,16 @@
  *   and the `run_end` close semantics are byte-unchanged. Tokens are
  *   ephemeral: never persisted to the runtime sidecar, never replayed, and
  *   only delivered to connections open while the run is producing them.
+ * - `POST /api/runs/{run_id}/steer` (wave 23) accepts `{text}` for an ACTIVE
+ *   run (status running, or waiting on an approval — the text is applied at
+ *   the next node boundary / tool-loop iteration, after the approval
+ *   resolves). The text is trimmed, must be non-empty and at most
+ *   `STEER_TEXT_MAX_CHARS` (400 otherwise; a non-string `text` is the standard
+ *   invalid-body 400). An unknown run is 404; a queued/terminal run or a full
+ *   pending queue (8) is an honest 409. Accepted: 200
+ *   `{run_id, status, pending}`. No event is emitted on acceptance: the text
+ *   rides a normal user->senior `message` envelope when the harness appends it,
+ *   so SSE consumers see it exactly once, in order, with its dense `seq`.
  * - A run record carries the requested `mode` (the config default when the
  *   request omits it), so a client can retry a failed run with its exact mode.
  * - Run records are in-memory; when a run id is unknown after a backend
@@ -122,16 +132,37 @@
  *   session, 200 `{compacted: true, before_events, after_events}` or — honestly,
  *   not an error — `{compacted: false, reason: "nothing to compact"}`, and 502
  *   when the summarizer/provider fails (nothing is written in that case).
+ * - `POST /api/sessions/{name}/fork` (wave 23) copies a session prefix into a
+ *   NEW session file (`src/sessionfork.ts`): body `{seq?: integer, name?:
+ *   string}`, `seq` defaults to the whole session; the copied file is a
+ *   byte-exact prefix (dense `seq` stays dense) plus a local `.meta.json`
+ *   `parent: {name, seq}` lineage link and a `<source title> (fork)` title.
+ *   201 `{name, title, events, forked_from: {name, seq}}`; 400 invalid
+ *   seq/name, 404 unknown source, 409 target name taken or the session is
+ *   busy (live run/manual compaction), 422 corrupt source, 500 unwritable
+ *   sessions directory (a failed metadata write rolls the JSONL back). The
+ *   source file is never modified.
+ * - `POST /api/sessions/{name}/rewind` (wave 23) drops the last N operator
+ *   turns (`src/sessionrewind.ts`): body `{turns}`, a strict integer 1..100.
+ *   200 reports the honest cut — `{name, rewritten, kept, removed, turns,
+ *   requested_turns, stopped_at_compaction, stops_before, reason}`; a cut that
+ *   removes nothing is not an error (`rewritten: false`, file untouched, a
+ *   `reason` explains why). 400 non-integer/out-of-range depth, 404 unknown
+ *   session, 409 live run/manual compaction, 422 corrupt session, 500 a
+ *   failed rewrite. The kept prefix keeps its dense `seq`, so resume works.
  * - `GET /api/search?q=<query>&limit=<n>` full-text searches every session
  *   document (`src/sessionsearch.ts`, newest session first) and returns the
  *   bounded `SessionSearchResult` hit list. A trimmed query shorter than
  *   `SEARCH_MIN_QUERY_CHARS` is a 400 ("query must be at least 2 characters")
  *   and `limit` is clamped to 1..100 (default 20). Corrupt session files are
  *   skipped by `loadSessionDocs`, never fatal. `GET
- *   /api/sessions/{name}/export?format=markdown|json` renders one session as
- *   a downloadable attachment (`Content-Disposition`, markdown or JSON); an
- *   unknown format is a 400, a missing/`..`-unsafe name is a 404/400, and a
- *   HEAD request returns the same headers without a body.
+ *   /api/sessions/{name}/export?format=markdown|json|html` renders one
+ *   session as a downloadable attachment (`Content-Disposition`; markdown and
+ *   json bodies are byte-identical to the pre-wave-23 exporter, `html` is ONE
+ *   self-contained page from `sessionToHtmlString` with inlined CSS, escaped
+ *   payloads and no scripts/links); an unknown format is a 400, a
+ *   missing/`..`-unsafe name is a 404/400, and a HEAD request returns the same
+ *   headers without a body.
  * - Each run merges the plugin-contributed MCP servers under the configured
  *   `mcpConfig` file (`mergeMcpConfig`: a configured entry wins a name
  *   collision, then the first plugin), connects them, folds the per-role
@@ -252,7 +283,8 @@ import {
   type Provider,
   type RemoteModel,
 } from "./provider.ts";
-import { restoreContext, SessionStore } from "./session.ts";
+import { restoreContext, SessionError, SessionStore } from "./session.ts";
+import { forkSession, SessionForkError } from "./sessionfork.ts";
 import {
   SEARCH_DEFAULT_LIMIT,
   SEARCH_MAX_LIMIT,
@@ -260,10 +292,12 @@ import {
   exportSessionFileName,
   loadSessionDocs,
   searchSessions,
+  sessionToHtmlString,
   sessionToJsonString,
   sessionToMarkdown,
   type SessionSearchDoc,
 } from "./sessionsearch.ts";
+import { computeRewindCut, rewindSession, validateRewindTurns } from "./sessionrewind.ts";
 import {
   PROVIDER_KIND_DEFAULT,
   SettingsStore,
@@ -274,6 +308,8 @@ import { discoverSkills, type SkillCatalog } from "./skills.ts";
 import { RunApprovalBroker, RuntimeEventStore } from "./runevents.ts";
 import {
   ACTIVE_STATES,
+  STEERABLE_STATES,
+  STEER_TEXT_MAX_CHARS,
   TERMINAL_STATES,
   resolveRoleEndpoints,
   RunManager,
@@ -282,6 +318,7 @@ import {
   type PublicRuntimeSettings,
   type RoleEndpoints,
   type RunJob,
+  type RunRecord,
 } from "./runtime.ts";
 import type { StreamEvent, TokenStreamEvent } from "./runstream.ts";
 import {
@@ -1099,6 +1136,62 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   }
 
   /**
+   * Fork and rewind read/rewrite one session file, so they must not race a live
+   * run (which appends to, and compaction may rewrite, the same file) or a
+   * manual compaction that owns it. This is the compact route's guard without
+   * the reservation: both operations complete synchronously after the check, so
+   * no run can be admitted between the check and the file work. The action
+   * wording keeps the 409 honest per route.
+   */
+  function assertSessionQuiescent(name: string, action: "fork" | "rewind"): void {
+    const live = state.runs.list().some(
+      (record) => record.session === name && ACTIVE_STATES.has(String(record.status)),
+    );
+    if (live) {
+      throw new HttpError(
+        409,
+        `a run is active for this session; stop it before ${action === "fork" ? "forking" : "rewinding"} it`,
+      );
+    }
+    if (state.compactions.has(name)) {
+      throw new HttpError(409, "a compaction is in progress for this session; retry in a moment");
+    }
+  }
+
+  /** HTTP status for a typed fork failure (never a generic 500 for user input). */
+  function forkErrorStatus(error: SessionForkError): number {
+    switch (error.code) {
+      case "source-missing":
+        return 404;
+      case "invalid-name":
+      case "invalid-seq":
+        return 400;
+      case "name-taken":
+        return 409;
+      case "source-unreadable":
+        return 422;
+      default:
+        // write-failed: the session directory is not writable, not a request
+        // problem, and the fork rollback already removed any partial file.
+        return 500;
+    }
+  }
+
+  /**
+   * Cheap file identity for the rewind rewrite CAS: size + mtime (ns) + inode
+   * wherever the platform reports one. `null` when the file cannot be stat'ed
+   * (which the rewind route reports as a changed-session 409).
+   */
+  function sessionFileSignature(filePath: string): string | null {
+    try {
+      const stat = fs.statSync(filePath);
+      return `${stat.size}:${stat.mtimeMs}:${String(stat.ino ?? 0)}`;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Build the summarizer provider for a manual compaction through the exact
    * provider construction a run uses (per-role resolved endpoints / presets +
    * the server's test provider overrides) so the endpoint never grows a second
@@ -1218,6 +1311,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     endpoints?: RoleEndpoints,
     injections?: string[],
     onToken?: LiveTokenHook,
+    steering?: () => string[],
   ): Promise<HarnessResult> {
     const store = storeFor(name);
     const context = store.exists() ? restoreContext(store) : new SharedContext(store);
@@ -1287,6 +1381,11 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       ...(options.compaction ? { compaction: options.compaction } : {}),
       ...(toolScopes ? { toolScopes } : {}),
       ...(hooks ? { hooks } : {}),
+      // Mid-run operator steering (wave 23): the run job hands the record's
+      // bounded queue drain here, so a `POST /api/runs/{run_id}/steer` text is
+      // appended as a normal user->senior `message` envelope at the next node
+      // boundary / tool-loop iteration. Never an early/faked event.
+      ...(steering ? { steering } : {}),
       // Live thinking/text deltas are only requested when the caller supplied
       // a token sink (the server does that solely for background runs with
       // `stream_tokens: true`): the harness requires both options together,
@@ -1342,6 +1441,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     req: RunRequestData,
     broker: RunApprovalBroker,
     injections: string[] = [],
+    steering?: () => string[],
   ): RunJob {
     // The config is built inside the job so a run picks up settings current
     // at start time; the broker binds the per-run emit hook and cancel
@@ -1375,6 +1475,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         // Only a streaming submission forwards the record's token hook; every
         // other run leaves the harness on its non-streaming provider path.
         req.stream_tokens === true ? onToken : undefined,
+        steering,
       );
       return {
         cancelled: result.cancelled,
@@ -1708,17 +1809,31 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       compileRoute(method, "/api/sessions/{name}/export", (ctx) => {
         const name = sessionFileName(ctx.params.name);
         const requestedFormat = (ctx.query.get("format") ?? "markdown").trim().toLowerCase();
-        if (requestedFormat !== "markdown" && requestedFormat !== "json") {
-          throw new HttpError(400, "format must be markdown or json");
+        if (
+          requestedFormat !== "markdown" &&
+          requestedFormat !== "json" &&
+          requestedFormat !== "html"
+        ) {
+          throw new HttpError(400, "format must be markdown, json or html");
         }
-        const format: "markdown" | "json" = requestedFormat;
+        const format: "markdown" | "json" | "html" = requestedFormat;
         const doc = sessionExportDoc(name);
-        const body = format === "markdown" ? sessionToMarkdown(doc) : sessionToJsonString(doc);
+        // markdown/json stay byte-identical to the pre-wave-23 exporter; html
+        // only adds a third self-contained rendering of the same document.
+        const body =
+          format === "markdown"
+            ? sessionToMarkdown(doc)
+            : format === "json"
+              ? sessionToJsonString(doc)
+              : sessionToHtmlString(doc);
+        const contentType =
+          format === "markdown"
+            ? "text/markdown; charset=utf-8"
+            : format === "json"
+              ? "application/json; charset=utf-8"
+              : "text/html; charset=utf-8";
         ctx.res.writeHead(200, {
-          "Content-Type":
-            format === "markdown"
-              ? "text/markdown; charset=utf-8"
-              : "application/json; charset=utf-8",
+          "Content-Type": contentType,
           "Content-Disposition": `attachment; filename="${exportSessionFileName(name, format)}"`,
           "Content-Length": Buffer.byteLength(body, "utf-8"),
         });
@@ -1938,6 +2053,38 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     }),
   );
 
+  /**
+   * Fork by copy (wave 23): `{seq?, name?}` writes a NEW session file holding
+   * the source's first `seq` envelopes (default: all). Only a quiescent
+   * session can be forked (same live-run/manual-compaction guard as
+   * `/compact`), so the copied prefix is stable. A typed `SessionForkError`
+   * maps to its honest status; the source is never modified and `forkSession`
+   * rolls the new JSONL back on a metadata write failure.
+   */
+  routes.push(
+    compileRoute("POST", "/api/sessions/{name}/fork", async (ctx) => {
+      const name = sessionFileName(ctx.params.name);
+      const store = storeFor(name);
+      if (!store.exists()) throw new HttpError(404, "not found");
+      const body = await ctx.json();
+      assertSessionQuiescent(name, "fork");
+      const forkOptions = {
+        ...(body.seq === undefined ? {} : { atSeq: body.seq as number }),
+        ...(body.name === undefined ? {} : { name: body.name as string }),
+      };
+      let result;
+      try {
+        result = forkSession(sessionsDir, name, forkOptions);
+      } catch (exc) {
+        if (exc instanceof SessionForkError) {
+          throw new HttpError(forkErrorStatus(exc), exc.message);
+        }
+        throw exc;
+      }
+      return new Respond(201, result);
+    }),
+  );
+
   routes.push(
     compileRoute("POST", "/api/sessions/{name}/compact", async (ctx) => {
       const name = sessionFileName(ctx.params.name);
@@ -2008,6 +2155,104 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         return { compacted: true, before_events: before, after_events: context.events.length };
       } finally {
         ctx.res.off("close", onResponseClose);
+        state.compactions.delete(name);
+      }
+    }),
+  );
+
+  /**
+   * Rewind (wave 23): drop the last `turns` operator turns (`{turns}` strict
+   * 1..100) from one quiescent session. Only a session with no queued/running/
+   * waiting run and no manual compaction is rewound, and the write takes the
+   * same `state.compactions` reservation the compact route uses, so run
+   * admission and the rewrite cannot interleave. A size+mtime+inode CAS is
+   * taken around the read: a file that changed between the load and the rewrite
+   * (a second `serve`/CLI sharing the directory) is an honest 409 "session
+   * changed; retry" and nothing is written. The helper's rewrite is atomic
+   * (temp + rename) and keeps the kept prefix's dense `seq`, so resume works;
+   * a cut that removes nothing is a 200 with `rewritten: false` and an honest
+   * `reason`. A successful rewrite also clears the session's runtime-event
+   * sidecar (`state.runtimeEvents.delete`): tool/approval history for the
+   * removed runs is gone, while the transcript (the kept envelopes) remains;
+   * the response says whether the sidecar was cleared. A corrupt file is 422
+   * before any rewrite and a failed rewrite is 500.
+   */
+  routes.push(
+    compileRoute("POST", "/api/sessions/{name}/rewind", async (ctx) => {
+      const name = sessionFileName(ctx.params.name);
+      const store = storeFor(name);
+      if (!store.exists()) throw new HttpError(404, "not found");
+      // Capture the file identity BEFORE the body upload: a session rewritten
+      // by another process while the request was in flight is stale, even if
+      // it settles before our synchronous read below.
+      const initialSignature = sessionFileSignature(store.path);
+      const body = await ctx.json();
+      const parsed = validateRewindTurns(body.turns);
+      if (!parsed.ok) throw new HttpError(400, parsed.error);
+      assertSessionQuiescent(name, "rewind");
+      // Serialize the synchronous read+rewrite against run admission and other
+      // session mutations exactly like the compact route (released in finally).
+      if (state.compactions.has(name)) {
+        throw new HttpError(409, "a compaction is in progress for this session; retry in a moment");
+      }
+      state.compactions.add(name);
+      try {
+        const before = sessionFileSignature(store.path);
+        if (initialSignature === null || before !== initialSignature) {
+          throw new HttpError(409, "session changed while rewinding; retry");
+        }
+        let events;
+        try {
+          events = store.load();
+        } catch {
+          throw new HttpError(422, "session file cannot be read; it may be corrupt");
+        }
+        // Read-side CAS: compute the planned cut, then re-stat. A mismatch
+        // means another process touched the file between our load and the
+        // helper's reload below; refuse instead of rewriting a stale read.
+        computeRewindCut(events, parsed.turns);
+        const after = sessionFileSignature(store.path);
+        if (before === null || after !== before) {
+          throw new HttpError(409, "session changed while rewinding; retry");
+        }
+        let result;
+        try {
+          result = rewindSession(store, parsed.turns);
+        } catch (exc) {
+          if (exc instanceof SessionError) {
+            throw new HttpError(500, "cannot rewrite the session file");
+          }
+          throw exc;
+        }
+        // The transcript rewrite and the sidecar clear are one operator action:
+        // stale runtime evidence for removed runs must not survive it. A clear
+        // failure is disclosed in the response instead of pretending success.
+        let runtimeEventsCleared = false;
+        let runtimeEventsClearError: string | null = null;
+        if (result.rewritten) {
+          try {
+            runtimeEventsCleared = state.runtimeEvents.delete(name);
+          } catch (exc) {
+            runtimeEventsClearError = errorDetail(exc);
+          }
+        }
+        const cut = result.cut;
+        return {
+          name,
+          rewritten: result.rewritten,
+          kept: cut.keptCount,
+          removed: cut.removedCount,
+          turns: cut.turns,
+          requested_turns: cut.requestedTurns,
+          stopped_at_compaction: cut.stoppedAtCompaction,
+          stops_before: cut.stopsBefore,
+          reason: cut.reason,
+          runtime_events_cleared: runtimeEventsCleared,
+          ...(runtimeEventsClearError === null
+            ? {}
+            : { runtime_events_clear_error: runtimeEventsClearError }),
+        };
+      } finally {
         state.compactions.delete(name);
       }
     }),
@@ -2517,10 +2762,22 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       // can reach a workspace tool; the job re-reads at start so a queued run
       // also sees allows granted while it waited.
       broker.seedSessionAllows(state.settingsStore.readSessionApprovals(name));
-      const record = state.runs.submit(
+      // The steering drain reads the run record that `submit` creates; the
+      // back-reference is assigned synchronously before the worker can start
+      // the job (dispatch resolves in a later microtask), so the closure is
+      // never called with a null record.
+      let record: RunRecord | null = null;
+      record = state.runs.submit(
         prepared.task,
         name,
-        buildRunJob(prepared.task, name, runReq, broker, prepared.injections),
+        buildRunJob(
+          prepared.task,
+          name,
+          runReq,
+          broker,
+          prepared.injections,
+          () => record?.drainSteering() ?? [],
+        ),
         effectiveMode(runReq),
         { streamTokens: req.stream_tokens === true },
       );
@@ -2560,6 +2817,53 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       const record = state.runs.stop(ctx.params.run_id);
       if (record === null) throw new HttpError(404, "not found");
       return { run_id: record.runId, status: record.status };
+    }),
+  );
+
+  /**
+   * Mid-run operator steering (wave 23): queue one text on an ACTIVE run
+   * (running, or waiting on an approval — applied at the next node boundary /
+   * tool-loop iteration after it resolves). The route validates the text and
+   * maps the manager's outcome onto the fixed contract:
+   * 200 `{run_id, status, pending}` when accepted; 400 for a non-string body
+   * (invalid request body), empty text or text over `STEER_TEXT_MAX_CHARS`;
+   * 404 for an unknown run; 409 when the run is queued/terminal or the pending
+   * queue is full. The acceptance is the only immediate feedback — no SSE event
+   * is faked here; consumers see the familiar `envelope` frame only when the
+   * harness actually appends it.
+   */
+  routes.push(
+    compileRoute("POST", "/api/runs/{run_id}/steer", async (ctx) => {
+      const body = await ctx.json();
+      if (typeof body.text !== "string") throw invalidBody();
+      const text = body.text.trim();
+      if (!text) throw new HttpError(400, "text must not be empty");
+      if (text.length > STEER_TEXT_MAX_CHARS) {
+        throw new HttpError(400, `text is too long (max ${STEER_TEXT_MAX_CHARS} chars)`);
+      }
+      const result = state.runs.steer(ctx.params.run_id, text);
+      if (!result.accepted) {
+        const record = result.record;
+        if (result.reason === "unknown_run" || record === null) {
+          throw new HttpError(404, "not found");
+        }
+        if (result.reason === "queue_full") {
+          throw new HttpError(
+            409,
+            `steering queue is full (${result.pending} pending); retry after the run's next step`,
+          );
+        }
+        if (result.reason === "invalid_text") throw new HttpError(400, "invalid steering text");
+        // not_active: the run exists but has no cooperation cycle to steer —
+        // say the real status instead of a generic "conflict".
+        throw new HttpError(
+          409,
+          `run is ${record.status}; steering applies only to a running or approval-parked run`,
+        );
+      }
+      const accepted = result.record;
+      if (accepted === null) throw new HttpError(404, "not found");
+      return { run_id: accepted.runId, status: accepted.status, pending: result.pending };
     }),
   );
 

@@ -822,13 +822,66 @@ function realpathNonStrict(target: string): string {
 
 export type WorkspaceResult = Record<string, unknown>;
 
+/** One captured side of a file mutation (the seam for run-scoped edit undo). */
+export interface WorkspaceMutationImage {
+  /** Whether the target existed when this side was captured. */
+  exists: boolean;
+  /** Exact file bytes, present only when the content was captured. */
+  content?: Buffer;
+  /** Byte size when the target existed. */
+  size?: number;
+  /** Why `content` is absent (oversized or unreadable); never fails the tool call. */
+  skipped?: string;
+}
+
+/**
+ * One completed workspace mutation: the file's exact bytes before and after.
+ * Only successful write/edit/delete calls emit a record — a denied or failed
+ * mutation emits nothing.
+ */
+export interface WorkspaceMutationRecord {
+  action: "write" | "edit" | "delete";
+  /** Workspace-relative POSIX path. */
+  path: string;
+  /** Canonical absolute workspace root. */
+  root: string;
+  pre: WorkspaceMutationImage;
+  post: WorkspaceMutationImage;
+}
+
+/**
+ * Optional run-scoped undo capture hook. Called synchronously on the mutation
+ * path after the change succeeded; a throwing recorder is contained and
+ * reported as one diagnostic, never propagated into the tool result.
+ */
+export type WorkspaceMutationRecorder = (record: WorkspaceMutationRecord) => void;
+
+/** Constructor options for the optional mutation-capture seam. */
+export interface WorkspaceOptions {
+  /** Absent/null keeps the default path byte-identical and free of extra reads. */
+  readonly mutationRecorder?: WorkspaceMutationRecorder | null;
+  /** Receives one bounded line per failed capture; never throws into the tool path. */
+  readonly onCaptureDiagnostic?: ((message: string) => void) | null;
+}
+
+/** One captured side of a mutation is skipped beyond this size (the undo store's bound). */
+export const MAX_MUTATION_CAPTURE_BYTES = 2 * 1024 * 1024;
+
 /** The only door between the models and the local filesystem. */
 export class Workspace {
   readonly root: string;
   readonly permissions: PermissionManager;
   readonly shell: ShellRunner;
 
-  constructor(root: string, permissions?: PermissionManager | null, shell?: ShellRunner | null) {
+  private mutationRecorder: WorkspaceMutationRecorder | null;
+  private captureDiagnosticSink: ((message: string) => void) | null;
+
+  constructor(
+    root: string,
+    permissions?: PermissionManager | null,
+    shell?: ShellRunner | null,
+    options: WorkspaceOptions = {},
+  ) {
     const rootPath = expandUser(root);
     if (!fs.existsSync(rootPath)) {
       throw new WorkspaceError(`workspace root does not exist: ${root}`);
@@ -839,6 +892,20 @@ export class Workspace {
     this.root = fs.realpathSync(rootPath);
     this.permissions = permissions ?? new PermissionManager();
     this.shell = shell ?? new ShellRunner({ cwd: this.root });
+    this.mutationRecorder = options.mutationRecorder ?? null;
+    this.captureDiagnosticSink = options.onCaptureDiagnostic ?? null;
+  }
+
+  /**
+   * Install or clear the run-scoped undo capture hook (tests and the server's
+   * per-run wiring). Passing no diagnostic sink keeps the current one.
+   */
+  setMutationRecorder(
+    recorder: WorkspaceMutationRecorder | null,
+    onDiagnostic?: ((message: string) => void) | null,
+  ): void {
+    this.mutationRecorder = recorder;
+    if (onDiagnostic !== undefined) this.captureDiagnosticSink = onDiagnostic;
   }
 
   // -- path handling ---------------------------------------------------------
@@ -893,6 +960,81 @@ export class Workspace {
     const status = exc instanceof PermissionDenied ? "denied" : "error";
     const message = exc instanceof Error ? exc.message : String(exc);
     return this.result(tool, p, status, { error: message });
+  }
+
+  // -- optional mutation-capture seam -----------------------------------------
+
+  /**
+   * Capture one side of a mutation for the undo recorder. Bounded (files over
+   * `MAX_MUTATION_CAPTURE_BYTES` are described, not read) and fail-soft: an
+   * unreadable file becomes an image with a `skipped` reason instead of an
+   * error, because capture must never fail the tool call.
+   */
+  private captureImage(target: string): WorkspaceMutationImage {
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(target);
+    } catch (exc) {
+      const code = (exc as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") return { exists: false };
+      return {
+        exists: false,
+        skipped: `cannot stat the target: ${exc instanceof Error ? exc.message : String(exc)}`,
+      };
+    }
+    if (!stat.isFile()) {
+      return { exists: true, size: stat.size, skipped: "target is not a regular file" };
+    }
+    if (stat.size > MAX_MUTATION_CAPTURE_BYTES) {
+      return {
+        exists: true,
+        size: stat.size,
+        skipped: `file size ${stat.size} exceeds the ${MAX_MUTATION_CAPTURE_BYTES}-byte capture limit`,
+      };
+    }
+    try {
+      const content = fs.readFileSync(target);
+      return { exists: true, content, size: content.byteLength };
+    } catch (exc) {
+      return {
+        exists: true,
+        size: stat.size,
+        skipped: `cannot read the target: ${exc instanceof Error ? exc.message : String(exc)}`,
+      };
+    }
+  }
+
+  /**
+   * Deliver one completed mutation to the optional recorder. The recorder runs
+   * outside the tool result (its failure can never fail the mutation) and after
+   * the change succeeded; a throwing recorder gets exactly one diagnostic.
+   */
+  private recordMutation(
+    action: WorkspaceMutationRecord["action"],
+    target: string,
+    pre: WorkspaceMutationImage,
+    post: WorkspaceMutationImage,
+  ): void {
+    const recorder = this.mutationRecorder;
+    if (recorder === null) return;
+    try {
+      recorder({ action, path: this.display(target), root: this.root, pre, post });
+    } catch (exc) {
+      this.captureDiagnostic(
+        `undo capture failed for ${this.display(target)}: ${exc instanceof Error ? exc.message : String(exc)}`,
+      );
+    }
+  }
+
+  /** One bounded diagnostic per failed capture; a broken sink is ignored. */
+  private captureDiagnostic(line: string): void {
+    const sink = this.captureDiagnosticSink;
+    if (sink === null) return;
+    try {
+      sink(line);
+    } catch {
+      // a broken diagnostic sink never breaks a tool call
+    }
   }
 
   private async authorize(
@@ -1086,11 +1228,13 @@ export class Workspace {
           "",
           diffDetail("write", this.display(target), oldText ?? "", content),
         );
+        const pre = this.mutationRecorder === null ? null : this.captureImage(target);
         fs.mkdirSync(path.dirname(target), { recursive: true });
         fs.writeFileSync(target, content, "utf-8");
         const result = this.result(tool, target, "ok");
         result.bytes_written = Buffer.byteLength(content, "utf-8");
         result.diff = makeDiff(this.display(target), oldText ?? "", content);
+        if (pre !== null) this.recordMutation("write", target, pre, this.captureImage(target));
         return result;
       });
     } catch (exc) {
@@ -1137,11 +1281,14 @@ export class Workspace {
           "",
           diffDetail("edit", this.display(target), raw, updated),
         );
+        const pre = this.mutationRecorder === null ? null : this.captureImage(target);
         fs.writeFileSync(target, updated, "utf-8");
-        return this.result(tool, target, "ok", {
+        const result = this.result(tool, target, "ok", {
           replaced: plan.replaced,
           diff: makeDiff(this.display(target), raw, updated),
         });
+        if (pre !== null) this.recordMutation("edit", target, pre, this.captureImage(target));
+        return result;
       });
     } catch (exc) {
       if (exc instanceof WorkspaceError || exc instanceof PermissionDenied) {
@@ -1180,8 +1327,11 @@ export class Workspace {
           // unreadable stat/read: the approval still names the target
         }
         await this.authorize(Action.DELETE, target, "", DELETE_APPROVAL_REASON, detail);
+        const pre = this.mutationRecorder === null ? null : this.captureImage(target);
         fs.unlinkSync(target);
-        return this.result(tool, target, "ok", { deleted: true });
+        const result = this.result(tool, target, "ok", { deleted: true });
+        if (pre !== null) this.recordMutation("delete", target, pre, this.captureImage(target));
+        return result;
       });
     } catch (exc) {
       if (exc instanceof WorkspaceError || exc instanceof PermissionDenied) {

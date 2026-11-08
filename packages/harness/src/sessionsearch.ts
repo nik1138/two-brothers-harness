@@ -15,9 +15,15 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { deriveTitle, SessionMetadataStore } from "./metadata.ts";
+import {
+  deriveTitle,
+  isWindowsReservedDeviceName,
+  SessionMetadataStore,
+  SESSION_NAME_MAX_CHARS,
+} from "./metadata.ts";
 import type { Message } from "./protocol.ts";
 import { SessionStore } from "./session.ts";
+import { sanitizeText } from "./tui/text.ts";
 
 /** Shortest query (after trimming) that is actually searched. */
 export const SEARCH_MIN_QUERY_CHARS = 2;
@@ -101,6 +107,41 @@ export interface SessionExportOptions {
 const MAX_PAYLOAD_DEPTH = 6;
 /** Per-envelope payload rendering cap in exported documents. */
 const EXPORT_MAX_PAYLOAD_CHARS = 20_000;
+/** Hard cap on one rendered HTML export document, in characters. */
+export const HTML_EXPORT_MAX_DOC_CHARS = 2_000_000;
+/** Budget reserved for the truncation note and the document tail. */
+const HTML_EXPORT_TAIL_RESERVE = 600;
+/**
+ * Bound applied to each metadata field rendered into the HTML head (title,
+ * session name, workspace, exported-at). The head is part of the document cap,
+ * so unbounded metadata (a hostile/absurd title is arbitrarily large) could
+ * push the document past `HTML_EXPORT_MAX_DOC_CHARS` before any envelope is
+ * clipped. 500 characters is far more than a usable label and keeps the head
+ * small even after HTML escaping.
+ */
+export const HTML_EXPORT_META_CHARS = 500;
+
+/** Clip one metadata field to `max` characters, appending `…` when clipped. */
+function clipExportMeta(text: string, max = HTML_EXPORT_META_CHARS): string {
+  if (text.length <= max) return text;
+  return text.slice(0, Math.max(0, max - 1)) + "…";
+}
+
+/**
+ * Render a Unix-seconds metadata value as an ISO timestamp, or `"none"` when
+ * absent/non-finite/out of the ECMAScript `Date` range. `new Date(...).toISOString()`
+ * throws `RangeError: Invalid time value` beyond ±8.64e15 ms (e.g. a corrupt
+ * sidecar with `updated: 1e300`), so the range is checked BEFORE constructing
+ * the date; export never throws on malformed metadata.
+ */
+function isoTimestamp(unixSeconds: unknown): string {
+  if (typeof unixSeconds !== "number" || !Number.isFinite(unixSeconds)) return "none";
+  const millis = unixSeconds * 1000;
+  // ECMAScript TimeClip bound: |ms| <= 8.64e15 (0.1e15 * 86.4).
+  if (!Number.isFinite(millis) || Math.abs(millis) > 8.64e15) return "none";
+  const date = new Date(millis);
+  return Number.isNaN(date.getTime()) ? "none" : date.toISOString();
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -471,10 +512,7 @@ export function sessionToMarkdown(
   const name = typeof record.name === "string" ? record.name : "";
   const workspace =
     typeof record.workspace_id === "string" && record.workspace_id ? record.workspace_id : "none";
-  const updated =
-    typeof record.updated === "number" && Number.isFinite(record.updated)
-      ? new Date(record.updated * 1000).toISOString()
-      : "none";
+  const updated = isoTimestamp(record.updated);
   const exportedAt =
     typeof options.exportedAt === "string" && options.exportedAt
       ? options.exportedAt
@@ -535,21 +573,211 @@ export function sessionToJsonString(
   return JSON.stringify(payload, null, 2) + "\n";
 }
 
+/** Self-contained stylesheet for `sessionToHtmlString` (no external URLs). */
+const HTML_EXPORT_STYLE = [
+  ":root { color-scheme: light dark; }",
+  'body { margin: 0; padding: 2rem 1rem; font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; color: #1f2328; background: #ffffff; }',
+  "main { max-width: 60rem; margin: 0 auto; }",
+  "h1 { font-size: 1.45rem; line-height: 1.3; margin: 0 0 1.25rem; overflow-wrap: anywhere; }",
+  "dl.meta { display: grid; grid-template-columns: max-content 1fr; gap: 0.15rem 1rem; margin: 0 0 2rem; font-size: 0.88rem; }",
+  "dl.meta dt { font-weight: 600; }",
+  "dl.meta dd { margin: 0; overflow-wrap: anywhere; }",
+  "section.event { border-top: 1px solid #d0d7de; padding: 1rem 0; }",
+  "section.event h2 { font-size: 0.95rem; font-weight: 600; margin: 0 0 0.35rem; overflow-wrap: anywhere; }",
+  ".seq { color: #57606a; }",
+  ".kind { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; background: #f6f8fa; border-radius: 4px; padding: 0 0.3rem; }",
+  "p.ts { margin: 0 0 0.5rem; color: #57606a; font-size: 0.8rem; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }",
+  "pre.payload { margin: 0; padding: 0.75rem; background: #f6f8fa; border-radius: 6px; font: 0.85rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }",
+  "p.truncated { margin: 2rem 0 0; color: #9a6700; }",
+  "@media (prefers-color-scheme: dark) { body { color: #e6edf3; background: #0d1117; } section.event { border-color: #30363d; } .seq, p.ts { color: #8b949e; } .kind, pre.payload { background: #161b22; } p.truncated { color: #d29922; } }",
+].join("\n");
+
+/** Escape text for HTML text nodes and quoted attribute values. */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/** One envelope label (`from`/`to`/`kind`): sanitized, escaped, never empty. */
+function htmlEnvelopeLabel(value: unknown, fallback: string): string {
+  const text = typeof value === "string" ? value : "";
+  return escapeHtml(sanitizeText(text || fallback));
+}
+
 /**
- * Safe download basename for one session: `foo.jsonl` → `foo.md` / `foo.json`.
- * Path components, traversal dots and characters illegal in file names are
- * stripped; an unusable name falls back to `session`.
+ * Payload body for one HTML envelope: verbatim message text, otherwise a
+ * pretty-printed JSON object (arrays/scalars inline), bounded by the same
+ * per-payload cap the Markdown export uses.
  */
-export function exportSessionFileName(name: string, format: "markdown" | "json"): string {
+function htmlPayloadText(event: Record<string, unknown>): string {
+  const payload = event.payload;
+  if (event.kind === "message") {
+    const text = messageText(payload);
+    if (text !== null) return boundExportedPayload(text);
+  }
+  if (isRecord(payload)) {
+    let pretty: string;
+    try {
+      pretty = JSON.stringify(payload, null, 2) ?? "";
+    } catch {
+      pretty = String(payload);
+    }
+    return boundExportedPayload(pretty || "_(no payload fields)_");
+  }
+  if (Array.isArray(payload)) {
+    let inline: string;
+    try {
+      inline = JSON.stringify(payload) ?? "";
+    } catch {
+      inline = "";
+    }
+    return boundExportedPayload(inline || "_(no payload fields)_");
+  }
+  return boundExportedPayload(renderStructuredPayload(payload));
+}
+
+/** One envelope as a self-contained `<section>` block. */
+function htmlEventSection(event: unknown, index: number): string {
+  const envelope = isRecord(event) ? event : {};
+  const rawSeq = envelope.seq;
+  const seq =
+    typeof rawSeq === "number" && Number.isFinite(rawSeq) ? String(rawSeq) : String(index + 1);
+  const from = htmlEnvelopeLabel(envelope.from, "unknown");
+  const to = htmlEnvelopeLabel(envelope.to, "unknown");
+  const kind = htmlEnvelopeLabel(envelope.kind, "unknown");
+  const lines = [
+    `<section class="event" id="seq-${escapeHtml(seq)}">`,
+    `<h2><span class="seq">${escapeHtml(seq)}</span> ${from} → ${to} <span class="kind">${kind}</span></h2>`,
+  ];
+  if (typeof envelope.ts === "string" && envelope.ts) {
+    lines.push(`<p class="ts">${escapeHtml(sanitizeText(envelope.ts))}</p>`);
+  }
+  lines.push(
+    `<pre class="payload">${escapeHtml(sanitizeText(htmlPayloadText(envelope)))}</pre>`,
+    "</section>",
+  );
+  return lines.join("\n");
+}
+
+/**
+ * Render one session as a single self-contained HTML document.
+ *
+ * Content scope and caps match `sessionToMarkdown`: every envelope becomes one
+ * section with its `seq`/`from`/`to`/`kind` labels, an optional `ts` line and
+ * the payload bounded to 20_000 characters with an explicit truncation
+ * marker. Payload text goes through the display sanitizer (ANSI escapes and
+ * C0/C1 control bytes removed) and is then HTML-escaped, so hostile payload
+ * markup stays literal text. The document contains no scripts, no external
+ * URLs and no links; the stylesheet is inlined. `exportedAt` is injectable for
+ * deterministic tests, and every head metadata field (title, session name,
+ * workspace, exported-at) is clipped to `HTML_EXPORT_META_CHARS` first, so
+ * absurd metadata cannot push the document past its cap; timestamps outside
+ * the `Date` range render as `none` instead of throwing. The document is
+ * bounded to `HTML_EXPORT_MAX_DOC_CHARS` characters at envelope boundaries;
+ * when that cap drops envelopes, a visible note states how many were omitted
+ * (the JSON export stays the complete form).
+ */
+export function sessionToHtmlString(
+  doc: SessionSearchDoc,
+  options: SessionExportOptions = {},
+): string {
+  const record = isRecord(doc) ? (doc as Record<string, unknown>) : {};
+  const rawTitle = clipExportMeta(
+    typeof record.title === "string" ? record.title.trim() : "",
+  );
+  const title = escapeHtml(sanitizeText(rawTitle || "Untitled session"));
+  const name = escapeHtml(
+    sanitizeText(clipExportMeta(typeof record.name === "string" ? record.name : "")),
+  );
+  const workspace = escapeHtml(
+    sanitizeText(
+      clipExportMeta(
+        typeof record.workspace_id === "string" && record.workspace_id
+          ? record.workspace_id
+          : "none",
+      ),
+    ),
+  );
+  const updated = isoTimestamp(record.updated);
+  const exportedAt =
+    typeof options.exportedAt === "string" && options.exportedAt
+      ? options.exportedAt
+      : new Date().toISOString();
+  const events: unknown[] = Array.isArray(record.events) ? record.events : [];
+
+  const head = [
+    "<!doctype html>",
+    '<html lang="en">',
+    "<head>",
+    '<meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    `<title>${title}</title>`,
+    `<style>\n${HTML_EXPORT_STYLE}\n</style>`,
+    "</head>",
+    "<body>",
+    "<main>",
+    "<header>",
+    `<h1>${title}</h1>`,
+    '<dl class="meta">',
+    `<dt>session</dt><dd>${name}</dd>`,
+    `<dt>workspace</dt><dd>${workspace}</dd>`,
+    `<dt>updated</dt><dd>${escapeHtml(updated)}</dd>`,
+    `<dt>exported</dt><dd>${escapeHtml(sanitizeText(clipExportMeta(exportedAt)))}</dd>`,
+    `<dt>envelopes</dt><dd>${events.length}</dd>`,
+    "</dl>",
+    "</header>",
+  ].join("\n");
+  const tail = "</main>\n</body>\n</html>";
+
+  const sections: string[] = [];
+  let size = head.length + tail.length + 2; // the two joining newlines
+  for (let index = 0; index < events.length; index += 1) {
+    const section = htmlEventSection(events[index], index);
+    if (size + section.length + 1 + HTML_EXPORT_TAIL_RESERVE > HTML_EXPORT_MAX_DOC_CHARS) break;
+    sections.push(section);
+    size += section.length + 1;
+  }
+  const shown = sections.length;
+  const note =
+    shown < events.length
+      ? `<p class="truncated">Document truncated at ${HTML_EXPORT_MAX_DOC_CHARS} characters: showing ${shown} of ${events.length} envelopes. Use the JSON export for the complete session.</p>`
+      : "";
+  const body = [head, ...sections, note, tail].filter((part) => part !== "").join("\n");
+  return withSingleTrailingNewline(body);
+}
+
+/**
+ * Safe download basename for one session: `foo.jsonl` → `foo.md` / `foo.json`
+ * / `foo.html`. Path components, traversal dots and characters illegal in file
+ * names are stripped; an unusable name falls back to `session`. The stem is
+ * bounded to `SESSION_NAME_MAX_CHARS`, and a Windows reserved device name is
+ * mangled with a leading underscore (`CON.html` cannot be written on Windows),
+ * mirroring the fork-name rule. The format mapping is explicit: only `html` and
+ * `json` select their extension; any other value falls back to Markdown — an
+ * unknown/absent format never silently becomes an HTML download.
+ */
+export function exportSessionFileName(
+  name: string,
+  format: "markdown" | "json" | "html",
+): string {
   const raw = typeof name === "string" ? name : "";
   let base = raw.replace(/\\/g, "/").split("/").pop() ?? "";
   base = base.replace(/\.jsonl$/i, "");
-  base = base.replace(/\.(md|json)$/i, "");
+  base = base.replace(/\.(md|json|html)$/i, "");
   base = base
     .replace(/[<>:"|?*\u0000-\u001f]/g, "-")
     .replace(/^\.+/, "")
     .replace(/[. ]+$/, "")
     .trim();
   if (!base) base = "session";
-  return base + (format === "markdown" ? ".md" : ".json");
+  base = base.slice(0, SESSION_NAME_MAX_CHARS);
+  if (isWindowsReservedDeviceName(base)) {
+    base = `_${base}`.slice(0, SESSION_NAME_MAX_CHARS);
+  }
+  const extension = format === "html" ? ".html" : format === "json" ? ".json" : ".md";
+  return base + extension;
 }

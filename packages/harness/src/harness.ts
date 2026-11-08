@@ -132,6 +132,21 @@
  *   delivered as a `<skill-loaded>` user `message` envelope (kimi-code's
  *   convention, `deliverSkillRequest`) — at most three per run, each name at
  *   most once, role-scoped, and never a throw.
+ * - Mid-run operator steering (wave 23, pi's `steer` idea reimplemented): the
+ *   optional `options.steering` drain callback is read at every state-machine
+ *   node boundary (after `maybeCompact`, so the text is not folded into a
+ *   summary produced by the same boundary) and at every tool-loop iteration.
+ *   Each drained text is appended as an ORDINARY `message` envelope from
+ *   "user" to "senior" — payload `{text}`, dense `seq`, session JSONL
+ *   included — with {@link STEERING_PREFIX} in the payload text so the model
+ *   can tell it from the task. In a tool loop the opening system+user pair is
+ *   re-rendered from the shared context so the next request of the in-flight
+ *   conversation carries the steer inside the canonical transcript; it is
+ *   never a second consecutive user turn (Anthropic and Google reject
+ *   non-alternating turns, and the tool conversation's own replacement must
+ *   not lose its tool/assistant pairing). No protocol kind, field or
+ *   session-format change; nothing is appended after cancellation and a broken
+ *   callback is fail-soft (one warning in `result.warnings`).
  */
 import { maxTokensForRole, thinkingBudgetForRole, type Config } from "./config.ts";
 import { SharedContext, type ChatMessage } from "./context.ts";
@@ -343,6 +358,27 @@ export const WORKSPACE_MUTATION_TOOL_NAMES: ReadonlySet<string> = new Set([
   "workspace_delete_file",
   "workspace_run_shell",
 ]);
+
+/**
+ * Prefix carried by an operator steering envelope's payload text (wave 23,
+ * mid-run steering). A steer rides as an ORDINARY protocol `message` envelope
+ * from `"user"` to `"senior"` — the initial-task shape — so protocol kinds,
+ * payload fields and the session JSONL format are untouched. The prefix is
+ * plain payload text, deliberately bounded (a short byte-stable marker) and
+ * documented here so the model can tell an operator steer from the original
+ * task: the task is rendered inside `[[TASK]]`, a steer appears in
+ * "Context events:" as `[[OPERATOR STEER]] …`. Consumers that only read the
+ * payload text see the marker verbatim; nothing parses it.
+ */
+export const STEERING_PREFIX = "[[OPERATOR STEER]] ";
+
+/**
+ * Hard bound on steer envelopes appended to one run's shared context. The
+ * runtime queue is already capped (`STEER_QUEUE_MAX` pending); this second,
+ * run-lifetime cap keeps a callback that keeps producing text from growing the
+ * context without bound. Beyond it a drained text is dropped with one warning.
+ */
+export const MAX_STEERING_ENVELOPES_PER_RUN = 16;
 
 /** Hard bound on the junior's tool-calling loop iterations. */
 export const MAX_JUNIOR_TOOL_ITERATIONS = 8;
@@ -729,6 +765,21 @@ export interface HarnessOptions {
    */
   streamTokens?: boolean;
   /**
+   * Mid-run operator steering (wave 23): a drain callback read at every
+   * state-machine node boundary and at every tool-loop iteration. Each
+   * returned text is appended to the shared context as an ordinary protocol
+   * `message` envelope from "user" to "senior" — payload `{text}`, dense
+   * `seq`, session JSONL included — prefixed with {@link STEERING_PREFIX}, so
+   * the NEXT provider call sees it. The callback is expected to
+   * return-and-clear (a drained queue); it is called at most once per
+   * boundary, in order, and never after the run is cancelled/terminal. Fail
+   * soft by contract: a throwing callback (or a malformed return) records one
+   * warning and never breaks the run. No new protocol kind/field and no
+   * session-format change; an SSE consumer sees the envelope only when the
+   * harness actually appends it.
+   */
+  steering?: () => string[];
+  /**
    * Per-attempt-timeout diagnostics (`provider.ts`): called at most once per
    * timed-out attempt that will be retried, never when the run is quiet.
    * Defaults to the provider's own sink (`console.error`), so warnings are
@@ -767,9 +818,11 @@ export interface HarnessResult {
   context: SharedContext;
   errors: string[];
   /**
-   * Fail-soft compaction warnings ("context compaction failed: …; continuing
-   * with the full context") — never run errors; a run with warnings still
-   * exits 0.
+   * Fail-soft warnings (never run errors; a run with warnings still exits 0):
+   * compaction failures ("context compaction failed: …; continuing with the
+   * full context") and a broken/malformed operator-steering callback
+   * ("operator steering failed: …; continuing without it"). Dropped steer
+   * envelopes at {@link MAX_STEERING_ENVELOPES_PER_RUN} warn the same way.
    */
   warnings: string[];
   /** True when the run was stopped by the operator mid-cycle. */
@@ -993,6 +1046,12 @@ export class TwoBrothersHarness {
   /** Set once a compaction attempt failed this run: never hammer a failing summarizer. */
   private compactionFailed = false;
   private compactionWarnings: string[] = [];
+  /** Fail-soft operator-steering warnings (folded into `result.warnings`). */
+  private steeringWarnings: string[] = [];
+  /** Set once a steering callback failed this run: never call it again. */
+  private steeringFailed = false;
+  /** Steer envelopes appended this run (capped by MAX_STEERING_ENVELOPES_PER_RUN). */
+  private steeringCount = 0;
 
   constructor(cfg: Config, options: HarnessOptions = {}) {
     this.cfg = cfg;
@@ -1168,6 +1227,76 @@ export class TwoBrothersHarness {
     state.runEvents.push(message);
     this.options.onEnvelope?.(message);
     this.emitStream({ type: "envelope", envelope: message, at: nowIso() });
+  }
+
+  /**
+   * Drain the operator-steering callback once and append one ordinary
+   * `message` envelope per drained text (user → senior, payload `{text}` with
+   * {@link STEERING_PREFIX} in front), so the next provider call sees it.
+   *
+   * Contract: at most one callback invocation per boundary (the callback is a
+   * return-and-clear drain, preserving submission order); nothing is appended
+   * after the run is cancelled (`signal` aborted) or when the run-lifetime cap
+   * is reached; empty/non-string entries are ignored; a throwing callback or a
+   * non-array return is fail-soft (one warning, never a run failure) and
+   * disables further drains for the run — a permanently broken callback is not
+   * hammered at every boundary. The appended texts are returned so a tool loop
+   * can re-render its opening transcript; the shared context alone does not
+   * reach the next request of an already-built tool conversation.
+   */
+  private drainSteering(state: CooperationState): string[] {
+    const steering = this.options.steering;
+    if (steering === undefined || this.steeringFailed) return [];
+    if (this.options.signal?.aborted) return []; // a stopped run appends nothing
+    if (this.steeringCount >= MAX_STEERING_ENVELOPES_PER_RUN) return [];
+    let drained: unknown;
+    try {
+      drained = steering();
+    } catch (err) {
+      this.steeringFailed = true;
+      this.steeringWarnings.push(
+        `operator steering failed (${err instanceof Error ? err.message : String(err)}); continuing without it`,
+      );
+      return [];
+    }
+    if (!Array.isArray(drained)) {
+      this.steeringFailed = true;
+      this.steeringWarnings.push("operator steering failed (the callback did not return a list); continuing without it");
+      return [];
+    }
+    const appended: string[] = [];
+    // Normalize first so a drop count is exact: non-strings and blank texts
+    // were never candidates and must not inflate the reported drop count.
+    const texts: string[] = [];
+    for (const raw of drained) {
+      if (typeof raw !== "string") continue;
+      const text = raw.trim();
+      if (text !== "") texts.push(text);
+    }
+    for (const text of texts) {
+      if (this.steeringCount >= MAX_STEERING_ENVELOPES_PER_RUN) {
+        const dropped = texts.length - appended.length;
+        this.steeringWarnings.push(
+          `operator steering dropped: at most ${MAX_STEERING_ENVELOPES_PER_RUN} steer messages are applied per run`,
+        );
+        // Additive runtime event: the run's `public()` view aggregates it as
+        // `steering_dropped`, so an HTTP client (and the SSE/sidecar consumer)
+        // sees the leftover texts were discarded by the cap instead of only a
+        // 200 acceptance. A drop is never silent.
+        this.emitRuntime({
+          type: "steering_dropped",
+          dropped,
+          applied: this.steeringCount,
+          limit: MAX_STEERING_ENVELOPES_PER_RUN,
+        });
+        break;
+      }
+      const payload = STEERING_PREFIX + text;
+      this.append(state, "user", "senior", "message", { text: payload });
+      appended.push(payload);
+      this.steeringCount += 1;
+    }
+    return appended;
   }
 
   /**
@@ -1790,6 +1919,17 @@ export class TwoBrothersHarness {
     let text = "";
     for (let i = 0; i < maxIterations; i++) {
       this.checkCancel();
+      // Mid-run steering is also drained at every tool-loop iteration: a text
+      // that arrived while this node works must reach the NEXT request of the
+      // in-flight conversation. The opening system+user pair is RE-RENDERED
+      // from the shared context (the drained steer now rides the transcript)
+      // while the tool turns are preserved. Deliberately not a second user
+      // turn: consecutive user roles are legal on the OpenAI wire but would be
+      // a malformed request for Anthropic (alternating turns) and Google
+      // (alternating contents), and the model reads the canonical rendered
+      // transcript anyway — the same text every later node call sees.
+      const steered = this.drainSteering(state);
+      if (steered.length > 0) messages = [...rebuild(), ...messages.slice(2)];
       let response: ToolChatResponse;
       const capture = this.reasoningCapture(role, auditKind);
       const callOptions =
@@ -2144,6 +2284,9 @@ export class TwoBrothersHarness {
     this.checkCancel(); // stopped before the start: raise, write nothing
     this.compactionFailed = false;
     this.compactionWarnings = [];
+    this.steeringWarnings = [];
+    this.steeringFailed = false;
+    this.steeringCount = 0;
     const ctx = context ?? new SharedContext();
     const release = await acquireSession(ctx);
     const sessionId = this.sessionId(ctx);
@@ -2185,6 +2328,11 @@ export class TwoBrothersHarness {
       let node: NodeResult = "senior_open";
       while (node !== "END") {
         await this.maybeCompact(state);
+        // Operator steering lands at the state-machine node boundary. Draining
+        // AFTER maybeCompact keeps the just-drained text out of a summary this
+        // boundary produces, so the next model call sees it verbatim; it is a
+        // normal context envelope from here on. A stopped run drains nothing.
+        this.drainSteering(state);
         node = await this.nodes[node](state);
       }
 
@@ -2195,7 +2343,7 @@ export class TwoBrothersHarness {
         rounds: state.rounds,
         context: ctx,
         errors: [...state.errors, ...this.lastErrors],
-        warnings: [...this.compactionWarnings],
+        warnings: [...this.compactionWarnings, ...this.steeringWarnings],
         cancelled: false,
         usage: this.usageSnapshot(),
         promptAudits: state.promptAudits,
@@ -2219,7 +2367,7 @@ export class TwoBrothersHarness {
           rounds: 0,
           context: ctx,
           errors: [...state.errors, "stopped by operator"],
-          warnings: [...this.compactionWarnings],
+          warnings: [...this.compactionWarnings, ...this.steeringWarnings],
           cancelled: true,
           usage: this.usageSnapshot(),
           promptAudits: state.promptAudits,

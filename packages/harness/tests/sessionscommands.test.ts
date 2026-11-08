@@ -412,13 +412,20 @@ test("help and completions pick up the new sessions subcommands and flags", asyn
   const helpText = help.out.join("\n");
   assert.match(helpText, /sessions search <query>/);
   assert.match(helpText, /sessions export <name>/);
-  assert.match(helpText, /--format <markdown\|json>/);
+  assert.match(helpText, /sessions fork <name>/);
+  assert.match(helpText, /sessions rewind <name> --turns <n>/);
+  assert.match(helpText, /--format <markdown\|json\|html>/);
   assert.match(helpText, /--output <path>/);
+  assert.match(helpText, /--at <seq>/);
+  assert.match(helpText, /--name <name>/);
+  assert.match(helpText, /--turns <n>/);
 
   const bash = makeIO();
   assert.equal(await main(["completions", "bash"], bash), 0, bash.err.join("\n"));
   const script = bash.out.join("\n");
   assert.match(script, /--format/);
   assert.match(script, /--output/);
+  assert.match(script, /--at/);
+  assert.match(script, /--turns/);
   assert.match(script, /sessions/);
 });

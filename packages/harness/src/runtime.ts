@@ -47,6 +47,34 @@ export const ACTIVE_STATES: ReadonlySet<string> = new Set(["queued", "running", 
 export const TERMINAL_STATES: ReadonlySet<string> = new Set(["completed", "failed", "cancelled"]);
 const VALID_PROVIDERS: ReadonlySet<string> = new Set(["openai", "mock"]);
 
+/**
+ * Run statuses that accept mid-run operator steering (wave 23). Both are
+ * honestly steerable: a `running` run drains at its next node boundary /
+ * tool-loop iteration; a `waiting` run is parked on an operator approval and
+ * drains at the next boundary after the approval resolves. `queued` runs have
+ * not started the cooperation cycle (steering there would only pre-seed a run
+ * the operator can still cancel) and `TERMINAL_STATES` are over — both are a
+ * 409 on the HTTP route. Deliberately NOT `ACTIVE_STATES`: a queued run is
+ * observable but not steerable.
+ */
+export const STEERABLE_STATES: ReadonlySet<string> = new Set(["running", "waiting"]);
+
+/**
+ * Largest single steering text accepted (characters, after trimming). Shared
+ * with the HTTP route (`POST /api/runs/{run_id}/steer`) so a 400 there and a
+ * rejected `RunRecord.steer` agree; deliberately small — a steer is an
+ * operator aside, not a new task.
+ */
+export const STEER_TEXT_MAX_CHARS = 4000;
+
+/**
+ * Pending steering texts a run may hold before the operator gets a 409. The
+ * harness drains the queue at least once per node boundary / tool-loop
+ * iteration, so a full queue means the model call in flight is long; the
+ * operator can retry after the next step.
+ */
+export const STEER_QUEUE_MAX = 8;
+
 /** What a run job returns: decision + errors + optional usage totals. */
 export interface RunJobResult {
   cancelled?: boolean;
@@ -382,6 +410,8 @@ export class RunRecord {
   job: RunJob | null = null;
   /** Set by the submitter (the server's analogue); stop() denyAll()s it. */
   approvals: RunApprovalBroker | ApprovalBroker | null = null;
+  /** Bounded pending operator steering texts, oldest first (in-memory only). */
+  private readonly _steering: string[] = [];
 
   private _resolveDone!: (finished: boolean) => void;
   private _doneFlag = false;
@@ -457,12 +487,58 @@ export class RunRecord {
     // dropped so a late token (or a late subscriber) is a no-op.
     this._closeLiveTokens();
     this._doneFlag = true;
+    // Nothing will ever drain a terminal run's steering queue, so it must not
+    // outlive the run: the texts are dropped with the record (a later `steer`
+    // cannot revive them, and `public()` reports no pending text).
+    this._steering.length = 0;
     this._resolveDone(true);
   }
 
   /** Synchronous terminal-state probe (the SSE endpoint's `done.is_set()`). */
   get isDone(): boolean {
     return this._doneFlag;
+  }
+
+  // -- mid-run operator steering (wave 23) ------------------------------------
+
+  /** How many steer texts are waiting for the harness to pick up. */
+  get pendingSteering(): number {
+    return this._steering.length;
+  }
+
+  /**
+   * Queue one operator steering text: trimmed, non-empty, at most
+   * {@link STEER_TEXT_MAX_CHARS}, accepted only while the run is active (not
+   * aborted, not terminal) and while the queue is below {@link STEER_QUEUE_MAX}.
+   * Returns true when accepted. The harness drains it in submission order at
+   * the next node boundary / tool-loop iteration (`drainSteering`); this method
+   * never touches the context or the events — the envelope appears only when
+   * the harness actually appends it. A stopped/finished run refuses here, so a
+   * text can never be accepted into a queue nothing will drain.
+   */
+  steer(text: unknown): boolean {
+    if (this._doneFlag || this.signal.aborted) return false;
+    if (typeof text !== "string") return false;
+    const trimmed = text.trim();
+    if (trimmed === "" || trimmed.length > STEER_TEXT_MAX_CHARS) return false;
+    if (this._steering.length >= STEER_QUEUE_MAX) return false;
+    this._steering.push(trimmed);
+    return true;
+  }
+
+  /**
+   * Drain the pending steering texts in submission order (the
+   * `HarnessOptions.steering` callback). Returns-and-clears, matching the
+   * harness's drain-once contract. A terminal/cancelled run drains to an empty
+   * list and drops whatever was still queued: nothing may be appended after
+   * the cycle ended.
+   */
+  drainSteering(): string[] {
+    if (this._doneFlag || this.signal.aborted) {
+      this._steering.length = 0;
+      return [];
+    }
+    return this._steering.splice(0, this._steering.length);
   }
 
   public(): Record<string, unknown> {
@@ -479,6 +555,16 @@ export class RunRecord {
     if (this.error) out.error = this.error;
     if (this.decision !== null) out.decision = this.decision;
     out.usage = { ...this.usage };
+    // Mid-run steering honesty (wave 23): a client polling the record learns
+    // that texts were dropped at the per-run harness cap and how many are still
+    // waiting — no extra route and no faked event. Both fields are additive and
+    // only present when they carry information.
+    let steeringDropped = 0;
+    for (const event of this.events) {
+      if (event.type === "steering_dropped") steeringDropped += event.dropped;
+    }
+    if (steeringDropped > 0) out.steering_dropped = steeringDropped;
+    if (!this._doneFlag && this._steering.length > 0) out.steering_pending = this._steering.length;
     return out;
   }
 
@@ -508,6 +594,29 @@ class DispatchQueue {
 }
 
 /**
+ * Why one steering attempt was rejected (the HTTP route maps these onto its
+ * honest 400/404/409 contract):
+ * - `unknown_run` — no such in-memory run (404);
+ * - `not_active` — the run is queued or terminal, so no cooperation cycle can
+ *   apply the text (409, with the run's real status);
+ * - `queue_full` — {@link STEER_QUEUE_MAX} texts are already pending (409);
+ * - `invalid_text` — empty/oversized/non-string text (400; the route rejects
+ *   these before calling the manager, this is the defensive result).
+ */
+export type SteerRejection = "unknown_run" | "not_active" | "queue_full" | "invalid_text";
+
+/** One `RunManager.steer` outcome: accepted (+ pending count) or a rejection. */
+export interface SteerResult {
+  accepted: boolean;
+  /** The targeted record, or null for `unknown_run`. */
+  record: RunRecord | null;
+  /** Pending steering texts after this call (the accepted 200's `pending`). */
+  pending: number;
+  /** Set exactly when `accepted` is false. */
+  reason?: SteerRejection;
+}
+
+/**
  * Worker-pool background runner; run state is in-memory for the process
  * lifetime (Python parity).
  *
@@ -527,6 +636,11 @@ class DispatchQueue {
  * `RunRecord.onLiveToken` subscribers (the server's SSE bridge), in memory
  * only. They never enter `record.events`, the sidecar, `public()` or the
  * replayable `?after` cursor, and the registry is closed at `finish()`.
+ *
+ * Mid-run operator steering is likewise in-memory only: `steer(runId, text)`
+ * queues a bounded text on the run's `RunRecord`; the job's harness drains it
+ * and appends an ordinary envelope (see `RunRecord.steer`/`drainSteering`).
+ * The manager never emits an early event for a queued text.
  */
 export class RunManager {
   private readonly _workers: number;
@@ -607,6 +721,41 @@ export class RunManager {
       record.finish();
     }
     return record;
+  }
+
+  /**
+   * Queue one operator steering text on an active run (the HTTP route and
+   * tests share this). Accepted only for {@link STEERABLE_STATES} while the
+   * record is neither done nor aborted — `stop()` (which leaves the status
+   * `running` until the job unwinds) and a terminal `finish()` win the race, so
+   * a POST after stop can never be a 200 for text nothing will drain. A
+   * queued/terminal run is `not_active`. Text bounds and the pending cap live
+   * on `RunRecord.steer`. No runtime event is emitted here: the client's 200 is
+   * the acceptance, and SSE consumers see the envelope only once the harness
+   * appends it.
+   */
+  steer(runId: string, text: unknown): SteerResult {
+    const record = this._records.get(runId);
+    if (record === undefined) {
+      return { accepted: false, record: null, pending: 0, reason: "unknown_run" };
+    }
+    if (!STEERABLE_STATES.has(record.status) || record.isDone || record.signal.aborted) {
+      return {
+        accepted: false,
+        record,
+        pending: record.pendingSteering,
+        reason: "not_active",
+      };
+    }
+    if (!record.steer(text)) {
+      return {
+        accepted: false,
+        record,
+        pending: record.pendingSteering,
+        reason: record.pendingSteering >= STEER_QUEUE_MAX ? "queue_full" : "invalid_text",
+      };
+    }
+    return { accepted: true, record, pending: record.pendingSteering };
   }
 
   /** Test/CLI helper: block until the run reaches a terminal state. */

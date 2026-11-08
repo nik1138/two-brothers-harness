@@ -343,13 +343,28 @@ export const FLAGS: Record<string, FlagHelp> = {
   },
   format: {
     name: "format",
-    value: "<markdown|json>",
+    value: "<markdown|json|html>",
     description: "sessions export format (default markdown)",
   },
   output: {
     name: "output",
     value: "<path>",
     description: "write the sessions export to a file instead of stdout ('-' = stdout)",
+  },
+  at: {
+    name: "at",
+    value: "<seq>",
+    description: "fork the source session up to this envelope seq (default: the whole session)",
+  },
+  name: {
+    name: "name",
+    value: "<name>",
+    description: "explicit new session name for a fork (default <source>-fork-<k>)",
+  },
+  turns: {
+    name: "turns",
+    value: "<n>",
+    description: "number of operator turns to rewind (1-100)",
   },
   preset: {
     name: "preset",
@@ -772,38 +787,61 @@ defineCommand({
 
 defineCommand({
   name: "sessions",
-  summary: "list, read, search and export stored sessions",
+  summary: "list, read, search, export, fork and rewind stored sessions",
   commandLine: "two-brothers sessions [--sessions-dir <dir>] [--json] [--limit <n>]",
   usage: [
     "sessions [--sessions-dir <dir>] [--json] [--limit <n>]",
     "sessions show <name> [--json] [--limit <n>]",
     "sessions search <query> [--json] [--limit <n>]",
-    "sessions export <name> [--format markdown|json] [--output <path>]",
+    "sessions export <name> [--format markdown|json|html] [--output <path>]",
+    "sessions fork <name> [--at <seq>] [--name <new>] [--json]",
+    "sessions rewind <name> --turns <n> [--json]",
   ],
   description:
     "List the JSONL session files of a sessions directory with readable titles " +
     "(derived from the first operator message), envelope counts and the " +
-    "last-modified time. Output-only: it never changes the files. Subcommands: " +
-    "`sessions show <name>` prints one session's summary and its protocol " +
-    "envelopes, `sessions search <query>` full-text searches every session " +
-    "(title and envelope text) and `sessions export <name>` renders one " +
-    "session as a Markdown or JSON document. Session names resolve with or " +
-    "without the .jsonl suffix.",
-  flags: ["sessions-dir", "json", "limit", "format", "output", "help"],
+    "last-modified time. Mostly read-only: listing, show, search and export " +
+    "never change a file; `sessions fork` creates a new session file (the " +
+    "source is never modified) and `sessions rewind` rewrites one, dropping the " +
+    "removed runs' tool/approval history sidecar while keeping the transcript " +
+    "that remains. Subcommands: `sessions show <name>` prints one session's " +
+    "summary and its protocol envelopes, `sessions search <query>` full-text " +
+    "searches every session (title and envelope text), `sessions export " +
+    "<name>` renders one session as a Markdown, JSON or self-contained HTML " +
+    "document, `sessions fork <name>` copies a session (or a prefix) into a " +
+    "new session file with a local lineage link, and `sessions rewind <name> " +
+    "--turns <n>` drops the last n operator turns from a session. Session " +
+    "names resolve with or without the .jsonl suffix.",
+  flags: [
+    "sessions-dir",
+    "json",
+    "limit",
+    "format",
+    "output",
+    "at",
+    "name",
+    "turns",
+    "help",
+  ],
   flagNotes: {
-    json: "print JSON instead of human text: a list array, a show object, or the search result",
+    json: "print JSON instead of human text: a list array, a show object, or the search/fork/rewind result",
     limit:
       "list: cap the rows; show: cap the envelopes printed; search: cap the hits (1-100)",
-    format: "export format: markdown (default) or json",
+    format: "export format: markdown (default), json, or a self-contained html page",
     output:
       "export destination path; '-' or omitted writes to stdout and prints a 'wrote <path>' note to stderr",
+    at: "fork: last envelope seq to copy (1..last; default the whole session)",
+    name: "fork: explicit new session name (default <source>-fork-<k>; never overwrites)",
+    turns: "rewind: number of operator turns to remove (strict integer 1-100)",
   },
   details: [
     "Subcommands:",
     "  (none)          list session files (default)",
     "  show <name>     one session's summary and protocol envelopes",
     "  search <query>  full-text search across every session document",
-    "  export <name>   download one session (markdown by default, or json)",
+    "  export <name>   download one session (markdown, json or html)",
+    "  fork <name>     copy a session/prefix into a new session file",
+    "  rewind <name>   drop the last operator turns from a session",
   ],
   examples: [
     "two-brothers sessions",
@@ -814,6 +852,9 @@ defineCommand({
     "two-brothers sessions search redis --json --limit 5",
     "two-brothers sessions export s --output session.md",
     "two-brothers sessions export s.jsonl --format json",
+    "two-brothers sessions export s --format html --output session.html",
+    "two-brothers sessions fork s --at 4 --name branch-a",
+    "two-brothers sessions rewind s --turns 1",
   ],
 });
 

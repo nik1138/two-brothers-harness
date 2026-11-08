@@ -1599,6 +1599,28 @@ export const ANTHROPIC_THINKING_MAX_TOKENS_HEADROOM = 1024;
 const API_VERSION_SEGMENT = /\/v\d+(?:(?:alpha|beta)\d*)?$/i;
 
 /**
+ * The explicit prompt-cache breakpoint every Anthropic request carries. The
+ * Messages API reuses a prompt prefix only when it is marked with
+ * `cache_control`; `{type: "ephemeral"}` asks for the default 5-minute cache
+ * and deliberately sends no `ttl` (long retention is a separate follow-up).
+ *
+ * Placement is deterministic, Anthropic-wire-only and documented here:
+ * - the merged system prompt becomes ONE text block that carries the marker;
+ * - the LAST tool definition carries it (the tool list is identical on every
+ *   call in a run, so the cached prefix covers the tools too);
+ * - the LAST content block of the newest user turn carries it — the plain
+ *   transcript's task/repair turn, or the tool loop's `tool_result` turn — so
+ *   each provider call re-marks the growing prefix it is about to send.
+ *
+ * That is at most three breakpoints, under the API's four-per-request cap.
+ * The first call of a run writes the cache (billed at the cache-write premium);
+ * the 2nd..Nth calls in the same cooperation cycle read it and report
+ * `usage.cache_read_input_tokens`, which the adapter maps to `cached_tokens`.
+ * OpenAI-compatible and Google request bodies never see this field.
+ */
+const ANTHROPIC_CACHE_CONTROL = { type: "ephemeral" } as const;
+
+/**
  * `baseUrl` plus a version segment when the caller did not already include
  * one: `https://api.anthropic.com` → `/v1/messages`, while an explicit
  * `…/v1` (or `…/v1beta`) base is used as-is.
@@ -1619,10 +1641,11 @@ interface AnthropicContentBlock {
 }
 
 /**
- * Our chat messages in the Messages API shape. The system prompt becomes the
- * top-level `system` string (all system messages merged, so it never rides in
- * `messages`), assistant `toolCalls` become `tool_use` blocks and tool results
- * become `tool_result` blocks answering the preceding `tool_use` turn.
+ * Our chat messages in the Messages API shape. The system prompt is merged
+ * into one top-level `system` string (so it never rides in `messages`), sent by
+ * `requestBody` as a single cached text block; assistant `toolCalls` become
+ * `tool_use` blocks and tool results become `tool_result` blocks answering the
+ * preceding `tool_use` turn.
  *
  * Extended thinking: an assistant turn's captured `thinkingBlocks` are echoed
  * back FIRST, verbatim (`{type: "thinking", thinking, signature}` or
@@ -1688,12 +1711,37 @@ function anthropicMessages(messages: ChatMessage[]): {
   return { system: systemParts.join("\n\n"), messages: wire };
 }
 
-/** `Tool` definitions in the Messages API shape (`input_schema`). */
+/**
+ * Put the prompt-cache breakpoint on the newest conversation turn: the last
+ * content block of the last user message in the wire array. A plain transcript
+ * ends with the user task turn and a tool loop ends with the user turn carrying
+ * the `tool_result` blocks, so both re-mark the prefix the API should cache.
+ * Assistant turns never get the marker (no request in this harness ends on
+ * one), which keeps the placement deterministic.
+ */
+function markAnthropicCacheBreakpoint(wire: Array<Record<string, unknown>>): void {
+  for (let index = wire.length - 1; index >= 0; index -= 1) {
+    const message = wire[index]!;
+    if (message.role !== "user" || !Array.isArray(message.content)) continue;
+    const blocks = message.content as Array<Record<string, unknown>>;
+    const last = blocks[blocks.length - 1];
+    if (last) last.cache_control = ANTHROPIC_CACHE_CONTROL;
+    return;
+  }
+}
+
+/**
+ * `Tool` definitions in the Messages API shape (`input_schema`), with the
+ * prompt-cache breakpoint on the LAST definition: tools precede the system and
+ * conversation blocks, so one marker caches the whole stable tool prefix while
+ * the API's breakpoint budget stays under its four-per-request cap.
+ */
 function anthropicToolDefinitions(tools: Tool[]): unknown[] {
-  return tools.map((tool) => ({
+  return tools.map((tool, index) => ({
     name: tool.name,
     description: tool.description,
     input_schema: tool.parameters,
+    ...(index === tools.length - 1 ? { cache_control: ANTHROPIC_CACHE_CONTROL } : {}),
   }));
 }
 
@@ -1733,7 +1781,9 @@ function anthropicCompletion(data: unknown, url: string): ToolChatResponse {
  * Anthropic usage → our counters. `input_tokens` counts only uncached prompt
  * tokens (cache reads come back separately in `cache_read_input_tokens`);
  * `cache_creation_input_tokens` is a cache write, not a hit, so it is not
- * reported as cached.
+ * reported as cached. An absent server-side cache report maps to 0 — honest
+ * accounting never invents a cache hit from a request that merely carried a
+ * breakpoint.
  */
 function anthropicUsage(data: unknown): Omit<UsageTotals, "model_calls"> {
   const usage = isRecord(data) && isRecord(data.usage) ? data.usage : {};
@@ -1791,9 +1841,19 @@ interface AnthropicStreamState extends StreamState {
  * adapter raises the request cap to `budget + ANTHROPIC_THINKING_MAX_TOKENS_HEADROOM`
  * and warns once (an explicit larger cap is sent untouched). The API also
  * rejects temperature/top_p while thinking is enabled, so `temperature` is
- * omitted on those requests (its default 1 applies). Unset keeps the request
- * byte-identical to the pre-thinking adapter, and no other adapter reads the
- * field.
+ * omitted on those requests (its default 1 applies). Unset sends no `thinking`
+ * field: the option is the only wire difference it adds (both bodies carry the
+ * prompt-cache markers described below), and no other adapter reads the field.
+ *
+ * Prompt caching: every request carries up to three `cache_control:
+ * {type: "ephemeral"}` breakpoints (last system block, last tool definition,
+ * newest-turn block — see `ANTHROPIC_CACHE_CONTROL`) so the repeated prefix of
+ * a cooperation cycle is served from Anthropic's prompt cache on the 2nd..Nth
+ * call. The marker set is deterministic and additive: it is the one deliberate
+ * change to the pre-caching Anthropic wire body, and no other adapter family
+ * sees it. `cache_read_input_tokens` is mapped to `cached_tokens` (cache writes
+ * are not counted as hits); usage display shows the cached portion only when
+ * the provider actually reported one.
  */
 export class AnthropicProvider extends BaseHttpProvider {
   readonly maxTokens: number;
@@ -2016,23 +2076,32 @@ export class AnthropicProvider extends BaseHttpProvider {
     tools: Tool[] | undefined,
   ): Record<string, unknown> {
     const { system, messages: wire } = anthropicMessages(messages);
+    // Explicit prompt caching (see ANTHROPIC_CACHE_CONTROL): mark the newest
+    // conversation turn on every attempt, streaming included — requestBody is
+    // shared by both wire paths.
+    markAnthropicCacheBreakpoint(wire);
     const body: Record<string, unknown> = {
       model: this.model,
       max_tokens: this.requestMaxTokens(),
       messages: wire,
     };
-    if (system) body.system = system;
+    if (system) {
+      // The merged system prompt is the first stable prefix block; an empty or
+      // absent system prompt sends no `system` field at all (never an empty
+      // block) and simply leaves the tool/turn breakpoints.
+      body.system = [{ type: "text", text: system, cache_control: ANTHROPIC_CACHE_CONTROL }];
+    }
     // Extended thinking: the Messages API does not accept temperature/top_p
     // when thinking is enabled (its default temperature 1 applies), so the
-    // field is omitted then. Without thinking this is exactly the pre-thinking
-    // request body.
+    // field is omitted then. Without thinking the body is the same minus the
+    // `thinking` field; the prompt-cache markers are unaffected either way.
     if (this.thinkingBudgetTokens === undefined && Number.isFinite(this.temperature)) {
       body.temperature = this.temperature;
     }
     if (tools && tools.length > 0) body.tools = anthropicToolDefinitions(tools);
     if (this.thinkingBudgetTokens !== undefined) {
-      // Extended thinking: the only wire difference the option adds. Absent =
-      // the exact pre-thinking request (no `thinking` field).
+      // Extended thinking: the only field the option adds (the prompt-cache
+      // markers are unaffected). Absent = no `thinking` field at all.
       body.thinking = { type: "enabled", budget_tokens: this.thinkingBudgetTokens };
     }
     return body;

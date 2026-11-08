@@ -67,6 +67,8 @@ export {
   SENIOR_VERIFY_TOOL_NAMES,
   MAX_JUNIOR_TOOL_ITERATIONS,
   MAX_SENIOR_VERIFY_ITERATIONS,
+  STEERING_PREFIX,
+  MAX_STEERING_ENVELOPES_PER_RUN,
 } from "./harness.ts";
 export {
   loadMcpToolSpecs,
@@ -155,6 +157,9 @@ export {
 export {
   ACTIVE_STATES,
   TERMINAL_STATES,
+  STEERABLE_STATES,
+  STEER_TEXT_MAX_CHARS,
+  STEER_QUEUE_MAX,
   RuntimeSettings,
   RunRecord,
   RunManager,
@@ -173,6 +178,8 @@ export {
   type PublicRuntimeRoleSettings,
   type PublicRuntimeSettings,
   type RuntimeSettingsSnapshot,
+  type SteerRejection,
+  type SteerResult,
 } from "./runtime.ts";
 export {
   type Provider,

@@ -138,7 +138,7 @@ function googleProvider(
 // Anthropic request mapping
 // ---------------------------------------------------------------------------
 
-test("anthropic: system is top-level, tool blocks map both ways", async () => {
+test("anthropic: cached top-level system, tool blocks map both ways, cache breakpoints", async () => {
   const stub = stubFetch(() =>
     jsonResponse({
       content: [{ type: "text", text: "ok" }],
@@ -160,7 +160,10 @@ test("anthropic: system is top-level, tool blocks map both ways", async () => {
   assert.equal(body.model, "claude-test");
   assert.equal(body.max_tokens, DEFAULT_MAX_OUTPUT_TOKENS);
   assert.equal(body.temperature, 0.2);
-  assert.equal(body.system, "SYS"); // never inside messages
+  // The system prompt is one cached text block, never a message.
+  assert.deepEqual(body.system, [
+    { type: "text", text: "SYS", cache_control: { type: "ephemeral" } },
+  ]);
   assert.deepEqual(body.messages, [
     { role: "user", content: [{ type: "text", text: "hello" }] },
     {
@@ -171,7 +174,13 @@ test("anthropic: system is top-level, tool blocks map both ways", async () => {
       role: "user",
       content: [
         { type: "tool_result", tool_use_id: "call_1", content: "result text" },
-        { type: "tool_result", tool_use_id: "call_1", content: "result two" },
+        {
+          type: "tool_result",
+          tool_use_id: "call_1",
+          content: "result two",
+          // The newest turn carries the conversation cache breakpoint.
+          cache_control: { type: "ephemeral" },
+        },
       ],
     },
   ]);
@@ -180,6 +189,8 @@ test("anthropic: system is top-level, tool blocks map both ways", async () => {
       name: "lookup",
       description: "Look something up",
       input_schema: TOOLS[0].parameters,
+      // The last (here: only) tool definition carries the tools breakpoint.
+      cache_control: { type: "ephemeral" },
     },
   ]);
 });
@@ -197,7 +208,7 @@ test("anthropic: an explicit /v1 base is not prefixed twice; maxTokens is honore
   assert.equal(stub.requests[0].body.max_tokens, 1234);
 });
 
-test("anthropic: multiple system messages merge in order", async () => {
+test("anthropic: multiple system messages merge in order into one cached block", async () => {
   const stub = stubFetch(() => jsonResponse({ content: [], usage: {} }));
   const provider = anthropicProvider(stub.fetchImpl);
   await provider.chat([
@@ -205,7 +216,9 @@ test("anthropic: multiple system messages merge in order", async () => {
     { role: "system", content: "second" },
     { role: "user", content: "u" },
   ]);
-  assert.equal(stub.requests[0].body.system, "first\n\nsecond");
+  assert.deepEqual(stub.requests[0].body.system, [
+    { type: "text", text: "first\n\nsecond", cache_control: { type: "ephemeral" } },
+  ]);
 });
 
 // ---------------------------------------------------------------------------
@@ -821,6 +834,11 @@ test("adapters drive the cooperation loop end-to-end (Google senior, Anthropic j
   assert.deepEqual(result.errors, []);
   assert.equal(result.decision?.decision, "DEC");
   assert.equal(result.usage?.model_calls, 4);
+  // Cached prompt tokens from both families reach the run total: 3 Google calls
+  // × 2 cached + 1 Anthropic call × 3 cached (the Anthropic adapter's
+  // cache_read_input_tokens mapping). The run usage is what `--json`/the web
+  // footer report, so this pins the honest end-to-end accounting.
+  assert.equal(result.usage?.cached_tokens, 9);
   assert.ok(urls.some((url) => url.includes("/v1beta/models/gemini-test:generateContent")));
   assert.ok(urls.some((url) => url.endsWith("/v1/messages")));
 });

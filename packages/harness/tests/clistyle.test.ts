@@ -565,7 +565,7 @@ test("clihelp: generated help columns scale with the terminal width", () => {
     .split("\n")
     .find((line) => line.includes("two-brothers sessions")) as string;
   assert.ok(
-    sessionsWide.includes("list, read, search and export stored sessions"),
+    sessionsWide.includes("list, read, search, export, fork and rewind stored sessions"),
     sessionsWide,
   );
   // ...while the 96-column fallback keeps the historical two-line layout
@@ -573,7 +573,7 @@ test("clihelp: generated help columns scale with the terminal width", () => {
     .split("\n")
     .find((line) => line.includes("two-brothers sessions")) as string;
   assert.ok(
-    !sessionsFallback.includes("list, read, search and export stored sessions"),
+    !sessionsFallback.includes("list, read, search, export, fork and rewind stored sessions"),
     sessionsFallback,
   );
 

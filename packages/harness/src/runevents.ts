@@ -188,6 +188,24 @@ export interface ReasoningEvent extends RuntimeEventMeta {
   truncated: boolean;
 }
 
+/**
+ * Additive event: operator steering texts were DISCARDED because the
+ * per-run envelope cap (`MAX_STEERING_ENVELOPES_PER_RUN`, harness.ts) was
+ * reached. `dropped` is how many valid texts the drain that hit the cap threw
+ * away, `applied` the steer envelopes already appended this run and `limit`
+ * the cap. Emitted once per drain that drops text; persisted by the run
+ * sidecar like every typed event, and `RunRecord.public()` aggregates it as
+ * `steering_dropped` so an HTTP client that only polls the run record still
+ * learns a 200-accepted text was not applied (a drop is never silent).
+ * Consumers that do not know the type can ignore it safely.
+ */
+export interface SteeringDroppedEvent extends RuntimeEventMeta {
+  type: "steering_dropped";
+  dropped: number;
+  applied: number;
+  limit: number;
+}
+
 /** The job raised; surfaced to the operator before run_end. */
 export interface RunErrorEvent extends RuntimeEventMeta {
   type: "run_error";
@@ -215,6 +233,7 @@ export type RuntimeEvent =
   | TodoUpdatedEvent
   | PromptAuditEvent
   | ReasoningEvent
+  | SteeringDroppedEvent
   | RunErrorEvent
   | RunEndEvent;
 

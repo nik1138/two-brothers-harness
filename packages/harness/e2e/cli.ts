@@ -729,10 +729,171 @@ async function scenarioSessionsExport(): Promise<string> {
     check(missing.status === 1, `missing-session export exit code ${missing.status}, expected 1`);
     check(/session not found: nope/.test(missing.stderr), "missing-session diagnostic missing");
 
+    // --format html: one self-contained page, no scripts, escaped payloads.
+    const html = runCli(["sessions", "export", "export", "--sessions-dir", dir, "--format", "html"]);
+    check(html.status === 0, `sessions export --format html exit code ${html.status}: ${html.stderr.slice(-300)}`);
+    check(html.stderr === "", `sessions export --format html wrote to stderr: ${html.stderr.slice(-200)}`);
+    check(html.stdout.startsWith("<!doctype html>\n"), `html export doctype missing: ${html.stdout.slice(0, 80)}`);
+    check(html.stdout.includes('<meta charset="utf-8">'), "html export charset meta missing");
+    check(html.stdout.includes('<section class="event" id="seq-1">'), "html export envelope section missing");
+    check(!/<script/i.test(html.stdout), "html export emitted a script tag");
+    check(html.stdout.trimEnd().endsWith("</html>"), "html export did not close cleanly");
+
+    const htmlFile = path.join(dir, "session.html");
+    const htmlWritten = runCli([
+      "sessions", "export", "export", "--sessions-dir", dir,
+      "--format", "html", "--output", htmlFile,
+    ]);
+    check(htmlWritten.status === 0, `html --output exit code ${htmlWritten.status}: ${htmlWritten.stderr.slice(-300)}`);
+    check(/^wrote .*session\.html$/m.test(htmlWritten.stderr), `html --output confirmation missing: ${htmlWritten.stderr.trim()}`);
+    check(fs.existsSync(htmlFile), "the html --output file was not written");
+    check(fs.readFileSync(htmlFile, "utf-8").startsWith("<!doctype html>"), "written html has no doctype");
+
     // A too-short search query is a usage error: exit 2.
     const short = runCli(["sessions", "search", "x", "--sessions-dir", dir]);
     check(short.status === 2, `short-query exit code ${short.status}, expected 2`);
-    return "markdown stdout, JSON document, --output file written, missing session 1, short query 2";
+    const badFormat = runCli(["sessions", "export", "export", "--sessions-dir", dir, "--format", "pdf"]);
+    check(badFormat.status === 2, `bad export format exit code ${badFormat.status}, expected 2`);
+    return "markdown stdout, JSON document, html page + file, --output file written, missing session 1, bad format/short query 2";
+  } finally {
+    rmDir(dir);
+  }
+}
+
+/**
+ * `sessions fork`: a verbatim prefix copy with a local lineage link. Asserts the
+ * new name/seqs, an `--at` cut, `--json`, the source staying byte-identical,
+ * and the honest exit codes for missing/invalid input.
+ */
+async function scenarioSessionsFork(): Promise<string> {
+  const dir = mkTempDir("tb-cli-sessions-fork-");
+  try {
+    const sessionFile = path.join(dir, "fork.jsonl");
+    const created = runCli([
+      "run", "Name one benefit of code review",
+      "--provider", "mock",
+      "--session-file", sessionFile,
+    ]);
+    check(created.status === 0, `setup run exit code ${created.status}: ${created.stderr.slice(-300)}`);
+    const sourceSeqs = loadSessionSeqs(sessionFile);
+    const sourceBytes = fs.readFileSync(sessionFile);
+    check(sourceSeqs.length === 5, `unexpected source seqs: ${sourceSeqs.join(",")}`);
+
+    // whole session, JSON result
+    const whole = runCli(["sessions", "fork", "fork", "--sessions-dir", dir, "--json"]);
+    check(whole.status === 0, `sessions fork exit code ${whole.status}: ${whole.stderr.slice(-300)}`);
+    let parsed: { name?: unknown; title?: unknown; events?: unknown; forked_from?: { name?: unknown; seq?: unknown } };
+    try {
+      parsed = JSON.parse(whole.stdout) as typeof parsed;
+    } catch {
+      throw new CheckError(`sessions fork --json is not JSON: ${whole.stdout.slice(0, 200)}`);
+    }
+    check(parsed.name === "fork-fork-1.jsonl", `unexpected fork name: ${String(parsed.name)}`);
+    check(parsed.events === 5, `unexpected fork event count: ${String(parsed.events)}`);
+    check(parsed.forked_from?.name === "fork.jsonl", `unexpected forked_from name: ${String(parsed.forked_from?.name)}`);
+    check(parsed.forked_from?.seq === 5, `unexpected forked_from seq: ${String(parsed.forked_from?.seq)}`);
+    check(typeof parsed.title === "string" && /\(fork\)$/.test(parsed.title), `unexpected fork title: ${String(parsed.title)}`);
+    const forkFile = path.join(dir, "fork-fork-1.jsonl");
+    check(fs.existsSync(forkFile), "the fork session file was not written");
+    check(loadSessionSeqs(forkFile).join(",") === "1,2,3,4,5", "fork seqs are not dense 1..5");
+    const forkMeta = JSON.parse(fs.readFileSync(path.join(dir, "fork-fork-1.meta.json"), "utf-8")) as {
+      parent?: { name?: string; seq?: number };
+    };
+    check(forkMeta.parent?.name === "fork.jsonl" && forkMeta.parent?.seq === 5, "fork sidecar parent link missing");
+    check(fs.readFileSync(sessionFile).equals(sourceBytes), "the source session changed during a fork");
+
+    // prefix cut with an explicit name; human output names the new session
+    const cut = runCli(["sessions", "fork", "fork", "--sessions-dir", dir, "--at", "2", "--name", "branch-a"]);
+    check(cut.status === 0, `sessions fork --at exit code ${cut.status}: ${cut.stderr.slice(-300)}`);
+    check(/forked branch-a\.jsonl .*at seq 2/.test(cut.stdout), `fork human line missing: ${cut.stdout.trim()}`);
+    check(loadSessionSeqs(path.join(dir, "branch-a.jsonl")).join(",") === "1,2", "prefix fork seqs are wrong");
+
+    // honest failures: missing source 1, bad --at 2, taken/invalid --name 1
+    const missing = runCli(["sessions", "fork", "nope", "--sessions-dir", dir]);
+    check(missing.status === 1, `missing fork source exit code ${missing.status}, expected 1`);
+    check(/session not found: nope/.test(missing.stderr), "missing fork source diagnostic missing");
+    const badAt = runCli(["sessions", "fork", "fork", "--sessions-dir", dir, "--at", "abc"]);
+    check(badAt.status === 2, `bad --at exit code ${badAt.status}, expected 2`);
+    const taken = runCli(["sessions", "fork", "fork", "--sessions-dir", dir, "--name", "branch-a"]);
+    check(taken.status === 1, `taken fork name exit code ${taken.status}, expected 1`);
+    check(/already exists/.test(taken.stderr), "taken fork name diagnostic missing");
+    const traversal = runCli(["sessions", "fork", "fork", "--sessions-dir", dir, "--name", "../evil"]);
+    check(traversal.status === 1, `traversal fork name exit code ${traversal.status}, expected 1`);
+    return "whole/prefix copy, parent sidecar link, source byte-identical, JSON+human output, honest 1/2 exits";
+  } finally {
+    rmDir(dir);
+  }
+}
+
+/**
+ * `sessions rewind`: drop the last operator turn, keep the earlier transcript
+ * with dense seq, clear the session's runtime-event sidecar (only that one) and
+ * report honest no-op/bad-depth exits.
+ */
+async function scenarioSessionsRewind(): Promise<string> {
+  const dir = mkTempDir("tb-cli-sessions-rewind-");
+  try {
+    const sessionFile = path.join(dir, "rew.jsonl");
+    const first = runCli([
+      "run", "Name one benefit of code review",
+      "--provider", "mock",
+      "--session-file", sessionFile,
+    ]);
+    check(first.status === 0, `setup run 1 exit code ${first.status}: ${first.stderr.slice(-300)}`);
+    const second = runCli([
+      "run", "Name one risk of tight deadlines",
+      "--provider", "mock",
+      "--session-file", sessionFile,
+      "--resume",
+    ]);
+    check(second.status === 0, `setup run 2 exit code ${second.status}: ${second.stderr.slice(-300)}`);
+    check(loadSessionSeqs(sessionFile).length === 10, "two-turn setup did not produce 10 envelopes");
+
+    // sidecars: this session's is cleared by the rewrite, another's is untouched
+    fs.mkdirSync(path.join(dir, "runtime"), { recursive: true });
+    const sidecar = path.join(dir, "runtime", "rew.jsonl.events.jsonl");
+    const otherSidecar = path.join(dir, "runtime", "other.jsonl.events.jsonl");
+    fs.writeFileSync(sidecar, '{"type":"run_status","status":"completed","run_id":"r1"}\n', "utf-8");
+    fs.writeFileSync(otherSidecar, '{"type":"run_status","status":"completed","run_id":"r2"}\n', "utf-8");
+
+    const json = runCli(["sessions", "rewind", "rew", "--sessions-dir", dir, "--turns", "1", "--json"]);
+    check(json.status === 0, `sessions rewind exit code ${json.status}: ${json.stderr.slice(-300)}`);
+    let parsed: {
+      rewritten?: unknown;
+      kept?: unknown;
+      removed?: unknown;
+      dropped_turns?: unknown;
+      runtime_events_cleared?: unknown;
+    };
+    try {
+      parsed = JSON.parse(json.stdout) as typeof parsed;
+    } catch {
+      throw new CheckError(`sessions rewind --json is not JSON: ${json.stdout.slice(0, 200)}`);
+    }
+    check(parsed.rewritten === true, "rewind JSON did not report a rewrite");
+    check(parsed.removed === 5 && parsed.kept === 5, `unexpected rewind counts: ${json.stdout.slice(0, 200)}`);
+    check(parsed.runtime_events_cleared === true, "rewind JSON did not report the sidecar clear");
+    check(loadSessionSeqs(sessionFile).join(",") === "1,2,3,4,5", "rewind kept seqs are not dense 1..5");
+    check(!fs.existsSync(sidecar), "the rewound session's runtime sidecar was not cleared");
+    check(fs.existsSync(otherSidecar), "another session's runtime sidecar was cleared");
+
+    // deeper-than-available clamps honestly; a second rewind is a no-op success
+    const clamp = runCli(["sessions", "rewind", "rew", "--sessions-dir", dir, "--turns", "99"]);
+    check(clamp.status === 0, `clamping rewind exit code ${clamp.status}: ${clamp.stderr.slice(-300)}`);
+    check(/rewound rew\.jsonl:/.test(clamp.stdout), `rewind human line missing: ${clamp.stdout.trim()}`);
+    check(loadSessionSeqs(sessionFile).length === 0, "clamping rewind did not remove the last turn");
+    const noop = runCli(["sessions", "rewind", "rew", "--sessions-dir", dir, "--turns", "1"]);
+    check(noop.status === 0, `no-op rewind exit code ${noop.status}, expected 0`);
+    check(/nothing to rewind in rew\.jsonl:/.test(noop.stdout), `no-op rewind line missing: ${noop.stdout.trim()}`);
+
+    // honest failures: bad depth 2, missing session 1
+    for (const bad of ["0", "101", "abc"]) {
+      const badTurns = runCli(["sessions", "rewind", "rew", "--sessions-dir", dir, "--turns", bad]);
+      check(badTurns.status === 2, `bad --turns ${bad} exit code ${badTurns.status}, expected 2`);
+    }
+    const missing = runCli(["sessions", "rewind", "nope", "--sessions-dir", dir, "--turns", "1"]);
+    check(missing.status === 1, `missing rewind session exit code ${missing.status}, expected 1`);
+    return "1 of 2 turns removed, dense kept seq, sidecar cleared (others untouched), clamp/no-op honest, 1/2 exits";
   } finally {
     rmDir(dir);
   }
@@ -866,6 +1027,8 @@ const SCENARIOS: Array<{ name: string; run: () => Promise<string> }> = [
   { name: "sessions-show", run: scenarioSessionsShow },
   { name: "sessions-search", run: scenarioSessionsSearch },
   { name: "sessions-export", run: scenarioSessionsExport },
+  { name: "sessions-fork", run: scenarioSessionsFork },
+  { name: "sessions-rewind", run: scenarioSessionsRewind },
   { name: "style", run: scenarioStyle },
 ];
 

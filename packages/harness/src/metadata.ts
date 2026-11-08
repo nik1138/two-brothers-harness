@@ -15,6 +15,53 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 const TITLE_MAX = 80;
+/** Suffix `deriveForkTitle` appends to the source title. */
+const FORK_TITLE_SUFFIX = " (fork)";
+
+/**
+ * Longest portable session-name STEM (the part before `.jsonl`). Path
+ * components much longer than this are not portable across common filesystems
+ * and make for unusable download names, so fork names and export file names
+ * are bounded to it with an explicit error/truncation at the call site.
+ */
+export const SESSION_NAME_MAX_CHARS = 120;
+
+/**
+ * Windows reserved device names. Windows refuses to create these as ordinary
+ * files even with an extension (`CON`, `con.txt`, `NUL.log`), so a session
+ * named `CON` passes POSIX-style validation but fails later as a write error
+ * on Windows. Fork names reject them; export file names mangle them.
+ */
+const WINDOWS_RESERVED_DEVICE_NAMES = new Set([
+  "con",
+  "prn",
+  "aux",
+  "nul",
+  ...Array.from({ length: 9 }, (_, index) => `com${index + 1}`),
+  ...Array.from({ length: 9 }, (_, index) => `lpt${index + 1}`),
+]);
+
+/**
+ * True when `name` is a Windows reserved device name: `CON`, `PRN`, `AUX`,
+ * `NUL`, `COM1`..`COM9`, `LPT1`..`LPT9`, case-insensitive and with or without
+ * an extension (`CON.txt` is reserved too). Only the part before the FIRST dot
+ * is compared, which is exactly Windows' rule.
+ */
+export function isWindowsReservedDeviceName(name: string): boolean {
+  const base = name.split(".")[0]?.trim().toLowerCase() ?? "";
+  return WINDOWS_RESERVED_DEVICE_NAMES.has(base);
+}
+
+/**
+ * Canonical `<sessionsDir>/<stem>.meta.json` sidecar path for a session name
+ * (with or without the `.jsonl` suffix). Shared by `SessionMetadataStore` and
+ * the fork rollback, which must clean up a partially written sidecar.
+ */
+export function sessionMetaPath(sessionsDir: string, sessionName: string): string {
+  let stem = path.basename(sessionName);
+  if (stem.endsWith(".jsonl")) stem = stem.slice(0, -".jsonl".length);
+  return path.join(sessionsDir, `${stem}.meta.json`);
+}
 
 /** First operator message text, whitespace-collapsed and truncated. */
 export function deriveTitle(
@@ -32,6 +79,37 @@ export function deriveTitle(
   return fallback || "Untitled session";
 }
 
+/**
+ * Title for a forked session: the source title plus `" (fork)"`, bounded to
+ * `TITLE_MAX` characters (the source title is trimmed; an empty one falls back
+ * to "Untitled session", like `deriveTitle`). Nested forks keep appending the
+ * suffix, which honestly records the lineage depth on its own.
+ */
+export function deriveForkTitle(sourceTitle: string): string {
+  const base =
+    (typeof sourceTitle === "string" ? sourceTitle.trim() : "") || "Untitled session";
+  if (base.length + FORK_TITLE_SUFFIX.length <= TITLE_MAX) return base + FORK_TITLE_SUFFIX;
+  const room = Math.max(0, TITLE_MAX - FORK_TITLE_SUFFIX.length - 1);
+  return `${base.slice(0, room)}…${FORK_TITLE_SUFFIX}`;
+}
+
+/** Local (non-protocol) lineage link recorded on a forked session's sidecar. */
+export interface SessionParentLink {
+  /** Source session file name including `.jsonl`. */
+  name: string;
+  /** Last copied envelope `seq` (0 when an empty session was copied). */
+  seq: number;
+}
+
+/** Tolerant `parent` sidecar read: anything not `{name, seq}` is ignored. */
+function normalizeParent(value: unknown): SessionParentLink | null {
+  if (!isRecord(value)) return null;
+  const name = typeof value.name === "string" ? value.name.trim() : "";
+  if (!name) return null;
+  if (typeof value.seq !== "number" || !Number.isInteger(value.seq) || value.seq < 0) return null;
+  return { name, seq: value.seq };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -45,9 +123,7 @@ export class SessionMetadataStore {
   }
 
   private metaPath(sessionName: string): string {
-    let stem = path.basename(sessionName);
-    if (stem.endsWith(".jsonl")) stem = stem.slice(0, -".jsonl".length);
-    return path.join(this.sessionsDir, `${stem}.meta.json`);
+    return sessionMetaPath(this.sessionsDir, sessionName);
   }
 
   get(sessionName: string): Record<string, unknown> | null {
@@ -70,13 +146,19 @@ export class SessionMetadataStore {
     return true;
   }
 
-  /** Create or update metadata; `undefined` fields keep existing values. */
+  /**
+   * Create or update metadata; `undefined` fields keep existing values.
+   * `parent` is the additive local lineage link written by a session fork
+   * (`src/sessionfork.ts`); an unparseable value is ignored rather than
+   * written, so one bad caller can never corrupt the sidecar.
+   */
   save(
     sessionName: string,
     options: {
       title?: string | undefined;
       workspaceId?: string | undefined;
       events?: Array<Record<string, unknown>> | undefined;
+      parent?: SessionParentLink | undefined;
     } = {},
   ): Record<string, unknown> {
     const now = Math.floor(Date.now() / 1000);
@@ -89,6 +171,10 @@ export class SessionMetadataStore {
       meta.title = deriveTitle(options.events, path.basename(sessionName).replace(/\.jsonl$/, ""));
     }
     if (options.workspaceId !== undefined) meta.workspace_id = options.workspaceId;
+    if (options.parent !== undefined) {
+      const parent = normalizeParent(options.parent);
+      if (parent !== null) meta.parent = parent;
+    }
     meta.updated = now;
     fs.mkdirSync(this.sessionsDir, { recursive: true });
     fs.writeFileSync(this.metaPath(sessionName), JSON.stringify(meta, null, 2), "utf-8");

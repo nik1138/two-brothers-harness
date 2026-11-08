@@ -90,7 +90,7 @@ import {
 } from "./clilayout.ts";
 import { formatDoctorReport, runDoctor } from "./doctor.ts";
 import { TwoBrothersHarness, type PromptAuditEntry, type ToolScopes } from "./harness.ts";
-import type { RuntimeEvent } from "./runevents.ts";
+import { RuntimeEventStore, type RuntimeEvent } from "./runevents.ts";
 import {
   loadMcpToolSpecs,
   loadMcpTools,
@@ -121,14 +121,17 @@ import type { RoleEndpoint } from "./runtime.ts";
 import { selftest } from "./selftest.ts";
 import { createServer } from "./server.ts";
 import { restoreContext, SessionError, SessionStore } from "./session.ts";
+import { forkSession, SessionForkError } from "./sessionfork.ts";
 import {
   SEARCH_MIN_QUERY_CHARS,
   loadSessionDocs,
   searchSessions,
+  sessionToHtmlString,
   sessionToJsonString,
   sessionToMarkdown,
   type SessionSearchDoc,
 } from "./sessionsearch.ts";
+import { rewindSession, validateRewindTurns } from "./sessionrewind.ts";
 import { discoverSkills, type SkillCatalog } from "./skills.ts";
 import { envPinnedPairs, SettingsStore } from "./settings_store.ts";
 import { runTuiApp } from "./tui/app.ts";
@@ -2458,6 +2461,9 @@ const SESSIONS_OPTIONS = {
   limit: { type: "string" as const },
   format: { type: "string" as const },
   output: { type: "string" as const },
+  at: { type: "string" as const },
+  name: { type: "string" as const },
+  turns: { type: "string" as const },
   ...HELP_OPTIONS,
 } satisfies ParseArgsOptionsConfig;
 
@@ -2725,7 +2731,7 @@ function exportDocForCli(sessionsDir: string, filePath: string): SessionSearchDo
 }
 
 /**
- * `sessions export <name> [--format markdown|json] [--output <path>]`:
+ * `sessions export <name> [--format markdown|json|html] [--output <path>]`:
  * default markdown on stdout; `--output <path>` writes the file and prints a
  * short `wrote <path>` confirmation to stderr (`--output -` means stdout).
  * Session names resolve with or without the `.jsonl` suffix. A missing
@@ -2741,7 +2747,7 @@ function exportSessionCommand(
 ): number {
   if (args.length === 0) {
     return sessionsUsageError(
-      "no session name: sessions export <name> [--format markdown|json] [--output <path>]",
+      "no session name: sessions export <name> [--format markdown|json|html] [--output <path>]",
       io,
     );
   }
@@ -2749,8 +2755,8 @@ function exportSessionCommand(
     return sessionsUsageError(`unexpected argument: ${args.slice(1).join(" ")}`, io);
   }
   const format = (typeof formatRaw === "string" ? formatRaw : "markdown").trim().toLowerCase();
-  if (format !== "markdown" && format !== "json") {
-    return sessionsUsageError(`unknown export format: ${format} (use markdown or json)`, io);
+  if (format !== "markdown" && format !== "json" && format !== "html") {
+    return sessionsUsageError(`unknown export format: ${format} (use markdown, json or html)`, io);
   }
   const requested = args[0];
   const filePath = resolveSessionFile(sessionsDir, requested);
@@ -2763,7 +2769,12 @@ function exportSessionCommand(
     io.error(`[error] cannot read session file: ${filePath}`);
     return 1;
   }
-  const body = format === "markdown" ? sessionToMarkdown(doc) : sessionToJsonString(doc);
+  const body =
+    format === "markdown"
+      ? sessionToMarkdown(doc)
+      : format === "json"
+        ? sessionToJsonString(doc)
+        : sessionToHtmlString(doc);
   const output = typeof outputRaw === "string" ? outputRaw.trim() : "";
   if (!output || output === "-") {
     // the renderers end with exactly one newline; `io.log` adds one itself
@@ -2779,6 +2790,161 @@ function exportSessionCommand(
     return 1;
   }
   io.error(`wrote ${path.resolve(output)}`);
+  return 0;
+}
+
+/**
+ * `sessions fork <name> [--at <seq>] [--name <new>]`: copy a session (or its
+ * first `--at` envelopes) into a NEW session file and print the new name.
+ * `--json` prints the fork result object instead of the human line. A missing
+ * source, an out-of-range `--at`, an invalid/taken `--name` or a write
+ * failure is a runtime error (exit 1); a non-numeric `--at`, a missing/extra
+ * name or an unknown flag is a usage error (exit 2).
+ */
+function forkSessionCommand(
+  sessionsDir: string,
+  args: string[],
+  atRaw: unknown,
+  nameRaw: unknown,
+  jsonMode: boolean,
+  io: CliIO,
+): number {
+  if (args.length === 0) {
+    return sessionsUsageError(
+      "no session name: sessions fork <name> [--at <seq>] [--name <new>]",
+      io,
+    );
+  }
+  if (args.length > 1) {
+    return sessionsUsageError(`unexpected argument: ${args.slice(1).join(" ")}`, io);
+  }
+  const atText = typeof atRaw === "string" ? atRaw.trim() : "";
+  let atSeq: number | undefined;
+  if (atText !== "") {
+    if (!/^[1-9]\d*$/.test(atText)) {
+      io.error(`[error] invalid --at: ${String(atRaw)} (use a positive integer envelope seq)`);
+      return 2;
+    }
+    atSeq = Number.parseInt(atText, 10);
+  }
+  const requested = args[0];
+  const filePath = resolveSessionFile(sessionsDir, requested);
+  if (filePath === null) {
+    io.error(`[error] session not found: ${requested} (in ${path.resolve(sessionsDir)})`);
+    return 1;
+  }
+  const sourceName = path.basename(filePath);
+  let result;
+  try {
+    result = forkSession(sessionsDir, sourceName, {
+      ...(atSeq === undefined ? {} : { atSeq }),
+      ...(nameRaw === undefined ? {} : { name: String(nameRaw) }),
+    });
+  } catch (exc) {
+    if (exc instanceof SessionForkError) {
+      io.error(`[error] ${exc.message}`);
+      return 1;
+    }
+    throw exc;
+  }
+  if (jsonMode) {
+    io.log(JSON.stringify(result));
+    return 0;
+  }
+  io.log(
+    `forked ${result.name} from ${result.forked_from.name} at seq ${result.forked_from.seq} ` +
+      `(${result.events} envelope(s); title: ${result.title})`,
+  );
+  return 0;
+}
+
+/**
+ * `sessions rewind <name> --turns <n>`: drop the last n operator turns from
+ * one persisted session and print what actually happened (the pure helper's
+ * honest cut reason). `--turns` is a strict integer 1..100: a bad value is a
+ * usage error (exit 2); a missing/corrupt session exits 1. A cut that removes
+ * nothing is a success with an honest reason, never a fake error.
+ */
+function rewindSessionCommand(
+  sessionsDir: string,
+  args: string[],
+  turnsRaw: unknown,
+  jsonMode: boolean,
+  io: CliIO,
+): number {
+  if (args.length === 0) {
+    return sessionsUsageError("no session name: sessions rewind <name> --turns <n>", io);
+  }
+  if (args.length > 1) {
+    return sessionsUsageError(`unexpected argument: ${args.slice(1).join(" ")}`, io);
+  }
+  if (turnsRaw === undefined) {
+    return sessionsUsageError("missing --turns: sessions rewind <name> --turns <1-100>", io);
+  }
+  const text = String(turnsRaw).trim();
+  const parsed = validateRewindTurns(/^\d+$/.test(text) ? Number.parseInt(text, 10) : Number.NaN);
+  if (!parsed.ok) {
+    io.error(`[error] ${parsed.error}`);
+    return 2;
+  }
+  const requested = args[0];
+  const filePath = resolveSessionFile(sessionsDir, requested);
+  if (filePath === null) {
+    io.error(`[error] session not found: ${requested} (in ${path.resolve(sessionsDir)})`);
+    return 1;
+  }
+  const name = path.basename(filePath);
+  let result;
+  try {
+    result = rewindSession(new SessionStore(filePath), parsed.turns);
+  } catch (exc) {
+    io.error(`[error] ${exc instanceof Error ? exc.message : String(exc)}`);
+    return 1;
+  }
+  const cut = result.cut;
+  // Same operator action as the HTTP route: rewriting the transcript clears the
+  // session's runtime-event sidecar (tool/approval history of the removed runs
+  // is gone; the kept transcript remains). A clear failure is disclosed.
+  let runtimeEventsCleared = false;
+  let runtimeEventsClearError: string | null = null;
+  if (result.rewritten) {
+    try {
+      runtimeEventsCleared = new RuntimeEventStore(path.join(sessionsDir, "runtime")).delete(name);
+    } catch (exc) {
+      runtimeEventsClearError = exc instanceof Error ? exc.message : String(exc);
+    }
+  }
+  if (jsonMode) {
+    io.log(
+      JSON.stringify({
+        name,
+        rewritten: result.rewritten,
+        kept: cut.keptCount,
+        removed: cut.removedCount,
+        turns: cut.turns,
+        requested_turns: cut.requestedTurns,
+        stopped_at_compaction: cut.stoppedAtCompaction,
+        stops_before: cut.stopsBefore,
+        reason: cut.reason,
+        runtime_events_cleared: runtimeEventsCleared,
+        ...(runtimeEventsClearError === null
+          ? {}
+          : { runtime_events_clear_error: runtimeEventsClearError }),
+      }),
+    );
+    return 0;
+  }
+  const sidecarNote =
+    runtimeEventsClearError !== null
+      ? `; could not clear the tool/approval history sidecar: ${runtimeEventsClearError}`
+      : runtimeEventsCleared
+        ? "; cleared the tool/approval history sidecar (the transcript is kept)"
+        : "";
+  io.log(
+    result.rewritten
+      ? `rewound ${name}: ${cut.reason}${sidecarNote}`
+      : `nothing to rewind in ${name}: ${cut.reason}`,
+  );
   return 0;
 }
 
@@ -2826,10 +2992,23 @@ function doSessions(
       io,
     );
   }
+  if (subcommand === "fork") {
+    return forkSessionCommand(
+      sessionsDir,
+      positionals.slice(1),
+      values.at,
+      values.name,
+      jsonMode,
+      io,
+    );
+  }
+  if (subcommand === "rewind") {
+    return rewindSessionCommand(sessionsDir, positionals.slice(1), values.turns, jsonMode, io);
+  }
   // Kept as a thrown argument error (the long-standing contract for extra
   // positionals, covered by tests/cli.test.ts).
   throw new Error(
-    `unexpected argument '${subcommand}' (sessions takes 'list', 'show', 'search' or 'export')`,
+    `unexpected argument '${subcommand}' (sessions takes 'list', 'show', 'search', 'export', 'fork' or 'rewind')`,
   );
 }
 
