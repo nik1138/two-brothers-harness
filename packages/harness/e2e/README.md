@@ -184,6 +184,82 @@ SIGINT/SIGTERM terminate every child run (`SIGTERM`, then `SIGKILL` after a
 2 s grace) and exit 130/143; a normal exit sweeps any straggler child too, so a
 cancelled load never leaves orphan CLI runs behind.
 
+## serve-level load/soak (opt-in/manual)
+
+`node e2e/serve-load.ts` (npm script `test:e2e:serve-load`) is the **serve-level**
+counterpart of the CLI load runner: it starts the real `serve` backend, registers
+a temp workspace and one session per run over HTTP, submits a bounded-concurrency
+batch of `POST /api/runs`, polls `GET /api/runs` until every run is terminal, and
+reports honest per-run `queued -> running -> completed` timings plus a summary.
+It exercises the actual **RunManager / worker-pool / queue** path, which the
+CLI-level runner cannot see.
+
+> **Warning:** it starts a local server and, in real mode, needs a **reachable
+> endpoint** and sends **real model calls**. It is **never** run by `npm test`,
+> the offline smoke gate or CI — manual / release observation only.
+
+**Run `npm run build` first** (it spawns `dist/cli.js serve`; when `dist/` is
+missing it warns and falls back to `src/cli.ts` through Node native type
+stripping). No new dependencies; nothing is built here. The `--mock` mode is a
+hermetic self-test: the mock provider needs no endpoint at all.
+
+```powershell
+cd packages/harness
+npm run build
+# hermetic self-test: real serve + RunManager/queue, no endpoint needed
+node e2e/serve-load.ts --mock --runs 3 --workers 1
+# real endpoint (owner LM Studio example); keep the batch small — the model is slow
+node e2e/serve-load.ts --base-url http://192.168.31.123:1234/v1 --model lfm3-1.7b `
+  --runs 2 --workers 1 --timeout 900 --retries 1
+npm run test:e2e:serve-load -- --mock --runs 3
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--mock` | off | start `serve --provider mock` (hermetic self-test; no endpoint; a supplied `--base-url`/`--model` is ignored with a warning). |
+| `--base-url <url>` | `TWO_BROTHERS_E2E_BASE_URL` (required in real mode) | OpenAI-compatible base URL; `http(s)` only. |
+| `--model <id>` | `TWO_BROTHERS_E2E_MODEL` (required in real mode) | Model id used for **both** roles. |
+| (endpoint auth) | `TWO_BROTHERS_E2E_API_KEY` | Forwarded to the serve child as `TWO_BROTHERS_API_KEY` when set; ambient provider switches are scrubbed and the runner never prints keys. |
+| `--runs <n>` | `3` (max 50) | Total runs submitted. |
+| `--workers <n>` | `1` (max 32) | Passed as `serve --workers`; 1 keeps queueing visible. |
+| `--concurrency <n>` | = runs (max 50) | Max in-flight `POST /api/runs` submissions. |
+| `--port <n>` | `8631` | serve port; fails clearly when busy. |
+| `--timeout <s>` | `120` (max 3600) | Per-attempt provider timeout (serve `--timeout`). |
+| `--retries <n>` | `1` (max 10) | Retries after a failed model call (serve env). |
+| `--task <text>` | Redis→Valkey planning prompt | Task text for every run. |
+| `--keep` | off | Keep the temp sessions dir + workspace for inspection. |
+| `-h`, `--help` | — | Usage, exit 0. |
+
+Design notes: every run gets its **own session** (`POST /api/sessions`,
+workspace-linked) because RunManager strictly serializes runs that share a
+session (context `seq` invariant) — per-run sessions are what let `--workers > 1`
+actually run concurrently; with the default `--workers 1` the queue is what you
+measure. State sequences are taken from the authoritative per-session runtime
+sidecars (`<sessions>/runtime/<session>.events.jsonl`): HTTP polling alone can
+miss transitions (a mock run can block the server's event loop), so the runner
+merges the persisted `run_status`/`run_end` sequence with what it polled. Per-run
+timings are **client-observed** (one `GET /api/runs` snapshot per poll interval;
+whole-second server records are used only when a transition was missed), and the
+`submit` latency on each line reports client-observed POST latency: under load
+later submissions can lag behind the first run, but submit latency alone is not
+the queueing proof — the persisted sidecar `queued -> running -> terminal`
+sequence (counted in the summary) is the authoritative evidence. On a quiet
+machine the mock self-test can complete in a few hundred milliseconds per run.
+
+The runner prints one `run <n>: PASS|FAIL <state> (total/queued/ran/submit,
+model calls, queued -> running -> completed [session])` line per run, then a
+final `=== serve-level load summary ===` block: mode, serve settings, runs,
+configured vs **observed max in-flight POSTs**, **observed peak queued/running**,
+the count of runs whose server-side `queued -> running -> terminal` sequence was
+persisted, successes (`completed`) / failures, terminal-state counts, queue-wait
+and execution `min/median/max`, submit latency `min/median/max`, total wall time. Exit codes: `0` every run reached `completed`,
+`1` at least one run failed/cancelled/missed the batch deadline or the server
+could not start, `2` invalid usage. The batch deadline is derived from
+`--timeout` and `runs/workers`; stragglers are cooperatively stopped
+(`POST /api/runs/{id}/stop`) and reported as failures. SIGINT/SIGTERM stop the
+serve child and exit 130/143; a normal exit stops it too (SIGTERM, SIGKILL after
+a 5 s grace), and the temp dirs are removed unless `--keep` — no orphan server.
+
 ## Automation mode (`--mode print|json`)
 
 For CI and other non-interactive callers, `run` accepts pi-style output modes
