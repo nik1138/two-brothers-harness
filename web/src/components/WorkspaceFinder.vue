@@ -700,7 +700,7 @@ onMounted(() => {
   height: 1.9rem;
   padding: 0 0.55rem;
   border: 1px solid var(--border-subtle);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: transparent;
   color: var(--text-primary);
   font: inherit;
@@ -798,10 +798,10 @@ onMounted(() => {
 .wsf-crumb {
   flex: none;
   max-width: 11rem;
-  padding: 0.1rem 0.25rem;
+  padding: 0.1rem var(--space-1);
   overflow: hidden;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-secondary);
   font-size: 0.82rem;
@@ -877,7 +877,7 @@ onMounted(() => {
   align-items: center;
   gap: 0.45rem;
   min-width: 0;
-  padding: 0.4rem 0.5rem;
+  padding: 0.4rem var(--space-2);
   border-radius: var(--radius-sm);
   font-size: 0.85rem;
   cursor: pointer;
@@ -933,7 +933,7 @@ onMounted(() => {
   align-items: center;
   justify-content: center;
   gap: 0.45rem;
-  padding: 1.6rem 1rem;
+  padding: 1.6rem var(--space-4);
   color: var(--text-secondary);
   font-size: 0.85rem;
   text-align: center;
@@ -979,7 +979,7 @@ onMounted(() => {
   flex: none;
   align-items: center;
   justify-content: space-between;
-  gap: 0.5rem;
+  gap: var(--space-2);
   min-height: 0.9rem;
   padding: 0 0.15rem;
   color: var(--text-secondary);
@@ -1016,9 +1016,9 @@ onMounted(() => {
 
 .wsf-clear {
   flex: none;
-  padding: 0.1rem 0.25rem;
+  padding: 0.1rem var(--space-1);
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--accent);
   font-size: 0.76rem;
@@ -1033,7 +1033,7 @@ onMounted(() => {
   display: flex;
   flex: none;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: var(--space-1);
 }
 
 .wsf-name-label {
@@ -1061,7 +1061,7 @@ onMounted(() => {
 
 .wsf-action-buttons {
   display: flex;
-  gap: 0.5rem;
+  gap: var(--space-2);
   margin-left: auto;
 }
 

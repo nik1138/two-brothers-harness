@@ -93,7 +93,7 @@ const toggleLabel = computed(() => (open.value ? 'Hide prompt' : 'Show prompt'))
   display: flex;
   align-items: center;
   gap: 0.45rem;
-  padding: 0.25rem 0.6rem;
+  padding: var(--space-1) 0.6rem;
   flex-wrap: wrap;
 }
 
@@ -103,7 +103,7 @@ const toggleLabel = computed(() => (open.value ? 'Hide prompt' : 'Show prompt'))
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 0.05rem 0.42rem;
   color: var(--text-on-accent);
 }
@@ -126,7 +126,7 @@ const toggleLabel = computed(() => (open.value ? 'Hide prompt' : 'Show prompt'))
 .audit-meta {
   display: inline-flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--space-2);
   flex: 1 1 auto;
   min-width: 0;
   margin-left: auto;
@@ -160,7 +160,7 @@ const toggleLabel = computed(() => (open.value ? 'Hide prompt' : 'Show prompt'))
 
 .audit-details {
   border-top: 1px solid var(--border-subtle);
-  padding: 0.4rem 0.6rem 0.5rem;
+  padding: 0.4rem 0.6rem var(--space-2);
   background: var(--surface-panel);
 }
 
@@ -173,7 +173,7 @@ const toggleLabel = computed(() => (open.value ? 'Hide prompt' : 'Show prompt'))
 
 .audit-list {
   display: flex;
-  gap: 0.5rem;
+  gap: var(--space-2);
 }
 
 .audit-list dt {

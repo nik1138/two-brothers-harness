@@ -10,7 +10,9 @@
 //   2. every core colour token exists in the light block and is overridden by
 //      both dark blocks, which must stay byte-identical to each other;
 //   3. no colour literal is left in the migrated sheets;
-//   4. the spacing scale, type/motion/radius/focus tokens exist where they
+//   4. canonical radius sizes and spacing-scale steps are tokens in the
+//      migrated sheets (the mechanical migration contract);
+//   5. the spacing scale, type/motion/radius/focus tokens exist where they
 //      belong, and theme.ts maps the documented naive-ui colours to tokens.
 
 import assert from 'node:assert/strict'
@@ -25,13 +27,22 @@ const read = (relative: string): string =>
 
 const TOKENS_CSS = read('../src/tokens.css')
 
-/** Sheets migrated to the token layer: style.css plus the owned components. */
+/** Sheets migrated to the token layer: style.css plus the chrome components. */
 const MIGRATED_SHEETS: ReadonlyArray<{ name: string; source: string }> = [
   { name: 'style.css', source: read('../src/style.css') },
   { name: 'Sidebar.vue', source: read('../src/components/Sidebar.vue') },
   { name: 'SessionGroup.vue', source: read('../src/components/SessionGroup.vue') },
   { name: 'SessionRow.vue', source: read('../src/components/SessionRow.vue') },
   { name: 'WelcomeHero.vue', source: read('../src/components/WelcomeHero.vue') },
+  { name: 'CommandPalette.vue', source: read('../src/components/CommandPalette.vue') },
+  { name: 'ToolActivity.vue', source: read('../src/components/ToolActivity.vue') },
+  { name: 'ApprovalCard.vue', source: read('../src/components/ApprovalCard.vue') },
+  { name: 'UsageFooter.vue', source: read('../src/components/UsageFooter.vue') },
+  { name: 'ContextMeter.vue', source: read('../src/components/ContextMeter.vue') },
+  { name: 'PromptAudit.vue', source: read('../src/components/PromptAudit.vue') },
+  { name: 'CommandResult.vue', source: read('../src/components/CommandResult.vue') },
+  { name: 'SidebarFooter.vue', source: read('../src/components/SidebarFooter.vue') },
+  { name: 'WorkspaceFinder.vue', source: read('../src/components/WorkspaceFinder.vue') },
 ]
 
 // --- tiny CSS scanners --------------------------------------------------------
@@ -276,7 +287,8 @@ test('token layer: the spacing scale is complete, ordered and rem-based', () => 
 
 test('token layer: every var(--x) used by the migrated sheets is defined', () => {
   // Properties a migrated component sheet sets on a chrome ancestor and its
-  // descendants inherit (SessionGroup renders inside Sidebar's `.sidebar`).
+  // descendants inherit: Sidebar's `.sidebar` defines it, and SessionGroup /
+  // SidebarFooter render inside that column.
   const inherited = new Set(['--sidebar-inline'])
   const sidebar = MIGRATED_SHEETS.find((sheet) => sheet.name === 'Sidebar.vue')
   assert.ok(sidebar, 'Sidebar.vue must stay in the migrated set')
@@ -312,6 +324,53 @@ test('migrated sheets: no colour literal outside tokens.css', () => {
     }
   }
   assert.deepEqual(problems, [], `colour literals must live in tokens.css: ${problems.join(', ')}`)
+})
+
+test('migrated sheets: canonical radii and scale spacing use tokens', () => {
+  // Values the token layer defines must never stay literal in a migrated
+  // sheet. Radii are checked in every border-radius value; the spacing scale
+  // only in true spacing properties — a one-step value on an icon width or a
+  // font size is not spacing and keeps its literal (the wave-4 policy).
+  const CANONICAL_RADII = new Set(['4px', '6px', '10px', '14px', '18px', '999px'])
+  const CANONICAL_SPACING = [
+    '0.25rem',
+    '0.5rem',
+    '0.75rem',
+    '1rem',
+    '1.25rem',
+    '1.5rem',
+    '2rem',
+    '2.5rem',
+  ] as const
+  const SPACING_PROPERTY =
+    /^(padding|margin|gap|row-gap|column-gap|inset|top|right|bottom|left|scroll-margin|scroll-padding)/
+  const literalPattern = (raw: string): RegExp =>
+    new RegExp(`(?<![\\w.])${raw.replace(/[.]/g, '\\.')}(?![0-9.])`)
+
+  const problems: string[] = []
+  for (const sheet of MIGRATED_SHEETS) {
+    const css = stripComments(styleSheet(sheet.source, sheet.name))
+    for (const match of css.matchAll(/border-radius:\s*([^;]+);/g)) {
+      for (const value of match[1]!.split(/\s+/)) {
+        if (CANONICAL_RADII.has(value.trim())) {
+          problems.push(`${sheet.name}: border-radius ${value.trim()}`)
+        }
+      }
+    }
+    for (const match of css.matchAll(/([a-zA-Z-]+)\s*:\s*([^;{}]+);/g)) {
+      if (!SPACING_PROPERTY.test(match[1]!)) continue
+      for (const raw of CANONICAL_SPACING) {
+        if (literalPattern(raw).test(match[2]!)) {
+          problems.push(`${sheet.name}: ${match[1]} ${raw}`)
+        }
+      }
+    }
+  }
+  assert.deepEqual(
+    problems,
+    [],
+    `canonical radius/spacing values must be tokens: ${problems.join(', ')}`,
+  )
 })
 
 test('token layer: naive theme overrides stay mapped to the colour tokens', () => {

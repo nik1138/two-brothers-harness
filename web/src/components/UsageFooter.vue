@@ -108,7 +108,7 @@ const visible = computed(() => ticking.value || props.usage !== null || props.tu
   width: 100%;
   max-width: 880px;
   margin: 0 auto;
-  padding: 0 1.25rem 0.4rem;
+  padding: 0 var(--space-5) 0.4rem;
   font-size: 0.75rem;
   color: var(--text-secondary);
 }

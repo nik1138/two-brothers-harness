@@ -139,7 +139,7 @@ function select(mode: ThemeMode) {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 0.25rem;
+  gap: var(--space-1);
   height: 28px;
   padding: 0 0.3rem;
   font: inherit;
@@ -149,7 +149,7 @@ function select(mode: ThemeMode) {
   color: var(--text-secondary);
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;

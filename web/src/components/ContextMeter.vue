@@ -28,11 +28,11 @@ const level = computed<'hidden' | 'note' | 'warning'>(() =>
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 0.5rem;
+  gap: var(--space-2);
   width: 100%;
   max-width: 880px;
   margin: 0 auto;
-  padding: 0.55rem 1.25rem 0;
+  padding: 0.55rem var(--space-5) 0;
   font-size: 0.78rem;
   line-height: 1.4;
 }
@@ -43,14 +43,14 @@ const level = computed<'hidden' | 'note' | 'warning'>(() =>
 
 .context-meter-note .context-meter-count {
   border: 1px solid var(--border-subtle);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--surface-panel);
   padding: 0.1rem 0.6rem;
 }
 
 .context-meter-warning .context-meter-count {
   border: 1px solid var(--warning);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--warning-soft);
   color: var(--warning);
 }

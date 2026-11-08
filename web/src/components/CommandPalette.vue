@@ -448,7 +448,7 @@ watch(activeIndex, async (index) => {
   display: flex;
   flex: none;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--space-2);
   padding: 0.7rem 0.9rem;
   border-bottom: 1px solid var(--border-subtle);
 }
@@ -513,8 +513,8 @@ watch(activeIndex, async (index) => {
 }
 
 .palette-group + .palette-group {
-  margin-top: 0.25rem;
-  padding-top: 0.25rem;
+  margin-top: var(--space-1);
+  padding-top: var(--space-1);
   border-top: 1px solid var(--border-subtle);
 }
 
@@ -522,7 +522,7 @@ watch(activeIndex, async (index) => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.35rem 0.55rem 0.25rem;
+  padding: 0.35rem 0.55rem var(--space-1);
   font-size: 0.68rem;
   font-weight: 650;
   letter-spacing: 0.06em;
@@ -582,7 +582,7 @@ watch(activeIndex, async (index) => {
 
 .palette-empty {
   margin: 0;
-  padding: 1.6rem 1rem;
+  padding: 1.6rem var(--space-4);
   color: var(--text-secondary);
   font-size: 0.86rem;
   text-align: center;
@@ -624,7 +624,7 @@ watch(activeIndex, async (index) => {
   color: var(--text-secondary);
   background: var(--surface-canvas);
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 
 .palette-count {

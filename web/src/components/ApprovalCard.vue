@@ -238,7 +238,7 @@ function onKeydown(e: KeyboardEvent) {
   gap: 0.45rem;
   font-size: 0.85rem;
   /* keeps scrollIntoView from pinning the card flush against the edge */
-  scroll-margin-block: 1rem;
+  scroll-margin-block: var(--space-4);
 }
 
 .approval:focus-visible {
@@ -288,7 +288,7 @@ function onKeydown(e: KeyboardEvent) {
 .approval-status {
   font-size: 0.7rem;
   font-weight: 600;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 0.1rem 0.55rem;
 }
 
@@ -451,7 +451,7 @@ function onKeydown(e: KeyboardEvent) {
 .approval-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  gap: var(--space-2);
 }
 
 .approval-btn {
@@ -492,7 +492,7 @@ function onKeydown(e: KeyboardEvent) {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 0.72rem;
   border: 1px solid var(--border-strong);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   padding: 0 0.3rem;
   background: var(--surface-panel);
   color: var(--text-primary);

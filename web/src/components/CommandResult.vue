@@ -152,14 +152,14 @@ onUnmounted(() => {
 .cmd-meta {
   display: inline-flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--space-2);
   flex-shrink: 0;
 }
 
 .cmd-status {
   font-size: 0.7rem;
   font-weight: 600;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 0.1rem 0.55rem;
   color: var(--text-on-accent);
 }
@@ -247,7 +247,7 @@ onUnmounted(() => {
 
 .cmd-none {
   margin: 0;
-  padding: 0 0.7rem 0.5rem;
+  padding: 0 0.7rem var(--space-2);
   font-size: 0.78rem;
 }
 </style>

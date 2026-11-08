@@ -325,7 +325,7 @@ const expandable = computed(
   z-index: 1;
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--space-2);
   padding: 0.4rem 0.7rem;
   flex-wrap: wrap;
 }
@@ -336,8 +336,8 @@ const expandable = computed(
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  border-radius: 999px;
-  padding: 0.08rem 0.5rem;
+  border-radius: var(--radius-pill);
+  padding: 0.08rem var(--space-2);
   color: var(--text-on-accent);
 }
 
@@ -369,7 +369,7 @@ const expandable = computed(
 .tool-meta {
   display: inline-flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--space-2);
   flex-shrink: 0;
   margin-left: auto;
 }
@@ -384,8 +384,8 @@ const expandable = computed(
   color: var(--text-secondary);
   background: var(--surface-canvas);
   border: 1px solid var(--border-subtle);
-  border-radius: 999px;
-  padding: 0.05rem 0.5rem;
+  border-radius: var(--radius-pill);
+  padding: 0.05rem var(--space-2);
 }
 
 .tool-summary-truncated {
@@ -402,7 +402,7 @@ const expandable = computed(
 .tool-status {
   font-size: 0.7rem;
   font-weight: 600;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 0.1rem 0.55rem;
 }
 
@@ -439,10 +439,10 @@ const expandable = computed(
 
 .tool-details {
   border-top: 1px solid var(--border-subtle);
-  padding: 0.5rem 0.7rem 0.7rem;
+  padding: var(--space-2) 0.7rem 0.7rem;
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: var(--space-2);
 }
 
 .tool-args {
@@ -455,7 +455,7 @@ const expandable = computed(
 
 .tool-arg {
   display: flex;
-  gap: 0.5rem;
+  gap: var(--space-2);
 }
 
 .tool-arg dt {
