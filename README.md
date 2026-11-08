@@ -120,6 +120,16 @@ server then serves (the npm tarball ships its own copy of that build).
   `--compact-threshold-tokens`), incremental summaries via
   `<previous-summary>`, split-payload cuts, and one compact-and-retry on a
   provider context overflow.
+- **Persisted compaction settings.** The web Settings → Advanced
+  **Auto-compaction** card saves `threshold_chars`, `threshold_tokens`,
+  `keep_recent_chars` and `context_window` to `sessions/settings.json`; an
+  explicitly-set non-zero server flag/env still wins, and `0` means off (or
+  unknown for the context window).
+- **Crash-torn session resume.** A half-written final JSONL record no longer
+  loses a session: the search/detail readers ignore only that fragment and
+  `--resume` repairs the file atomically before appending, keeping dense
+  `seq`. Interior corruption still fails loudly, and read-only listing/search
+  never rewrite.
 - **Streaming.** `run --stream` emits one bounded NDJSON record per run event
   (status, envelopes, repairs, tool calls, terminal result);
   `run --stream --stream-tokens` adds a `token` record per provider text delta,
@@ -212,7 +222,9 @@ server then serves (the npm tarball ships its own copy of that build).
   run. The same bounded in-memory queue is exposed as
   `POST /api/runs/{run_id}/steer`; a text that later hits the per-run envelope
   cap is reported through the additive `steering_dropped` run field/event,
-  and nothing is appended after a stop. TUI steering is a follow-up.
+  and nothing is appended after a stop. In the TUI, `Ctrl+N` (also the
+  **Steer the running turn** palette row) queues the composer text for the
+  running turn under the same bounds.
 - **Sessions and resume.** Every envelope is appended to a JSONL session file
   (flushed immediately, dense `seq`); `--resume` rebuilds the shared context,
   and `sessions` lists files with readable titles.
@@ -417,9 +429,11 @@ node dist/cli.js run "Now plan the rollback" --provider mock --session-file sess
 ```
 
 Every protocol envelope is appended to the JSONL file and flushed immediately,
-so a crashed run leaves a valid, replayable log. `--resume` rebuilds the shared
-context and `seq` numbering continues densely. An existing file without
-`--resume` is an error — use `--resume` or delete the file.
+so a crash loses at most the final, partially written line. `--resume` drops
+that torn trailing fragment with one bounded warning, repairs the file
+atomically, rebuilds the shared context, and continues dense `seq` numbering;
+interior corruption still fails loudly. An existing file without `--resume` is
+an error — use `--resume` or delete the file.
 
 ### Delegation with MCP tools
 

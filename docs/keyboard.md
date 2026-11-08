@@ -357,9 +357,29 @@ at startup, so changing `--keys-file`/the env needs a restart.
 | `Up` / `Down` | Recall earlier submitted tasks: a single-line draft recalls immediately; on a multi-line draft the arrows only leave the composer at its very start (Up) or very end (Down) and otherwise move the caret inside the draft. The live draft is preserved and restored exactly when you come back to it, and recall never adds to the persisted history. |
 | `Ctrl+R` | Incremental prompt-history search, newest first; accepting puts the entry back in the composer. |
 | `Ctrl+O` | Stash the draft, or restore the stashed draft. |
+| `Ctrl+N` | Queue the composer text for the **running** turn; it applies at the run's next step (never a new task). At most 4 000 characters and eight pending texts; a blank/oversized draft or a full queue is refused with an honest notice, never silently truncated. The draft clears only on acceptance, the notices distinguish queued, applied and still pending, and leftovers at turn end are reported. `Enter` while a turn runs still refuses (and names this chord). The `Ctrl+P` palette's **Steer the running turn** row does the same. |
 | `/` (line start) | Inline command picker. It groups the TUI's own commands first, then built-in prompts and built-in actions (each row badged `builtin`/`action`), then discovered `<name>.md` templates with a `usage — description` footer for the highlighted row. `↑`/`↓` move, `Enter`/`Tab` insert or run, `Shift+Tab`/`Esc` closes and keeps the draft. |
 | `@` (token start) | Inline mention picker. Shared skills insert `@skill:name ` and role-scoped rows are visible but disabled; in a `--workspace` run, a path-like `@dir/file` token opens the workspace-file picker and inserts the canonical `@path ` token (the file is attached read-only before the turn). File mentions stay literal text only when no workspace is bound. |
 | (held key) | A held-down `Enter`/`Tab` cannot repeat a submit: explicit key-repeat events and identical presses on unchanged text within 400 ms are ignored, while a deliberate press after typing is accepted. |
+
+### Steering a running turn
+
+`Ctrl+N` sends the composer text into the **running** turn at its next step —
+it is not a queued task and it never starts a run. The queue carries the
+runtime's bounds (eight pending texts, 4 000 characters each), the draft is
+cleared only when the steer is accepted, and the notice names how many texts
+are pending; a steer still queued when the turn ends is reported as not applied
+rather than silently dropped.
+
+`Ctrl+S` is deliberately **not** the chord: many terminals keep it for XOFF
+output flow control, so pressing it can freeze the screen until `Ctrl+Q` (XON).
+Use `Ctrl+N`, or the `Ctrl+P` palette's **Steer the running turn** row, which
+queues exactly the same text under the same caps (there is no typed `/steer`
+form). The action exists only while a turn runs; with no turn it refuses and
+says so. Unlike the web, the TUI has no queue dock: the pending count is
+reported in the notice, not as a list. `Ctrl+N` is a fixed composer binding,
+not one of the three rebindable global chords; the palette row is the fallback
+that works on every terminal.
 
 ### Read the transcript
 

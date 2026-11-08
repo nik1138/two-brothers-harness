@@ -114,6 +114,24 @@ node dist/cli.js serve --port 8600 --sessions-dir sessions
 | `settings` warns: `not found — it will be created on the first settings save` | `settings` | No action needed; `onboard` writes the file, or save Settings in the web UI. |
 | `engine` fails: `Node ... is below the required >= 22.19` | `engine` | Upgrade Node to 22.19 or newer. |
 
+## A session disappears after a crash
+
+| Symptom | Why | Fix |
+|---|---|---|
+| `run --resume` (or `chat --resume`) exited 1 with `corrupt session file …, line N` after a crash, and the file looks cut off mid-line | The last append was interrupted, leaving a half-written final JSONL line. Current builds recover exactly that case: the torn trailing fragment is ignored in memory, `--resume` repairs the file atomically before appending (truncation to the last complete line, or one added newline after a valid final envelope), and the next envelope keeps dense `seq`. An interior bad line is still a typed error and is never guessed around. | Upgrade to a current build and retry `--resume`; the kept prefix keeps its dense `seq` and the warning names the dropped line and byte count. If the error names a line other than the last, the file has interior corruption — restore it from a backup or start a new session; do not hand-edit envelope bytes. |
+| `sessions --json` / `sessions show` report `error: "corrupt line N"` for a session that `--resume` accepts | The CLI listing is tolerant but still reports every unparseable line it finds; it never rewrites the file. The torn-tail-aware read path (`sessions search`, the web read routes, `--resume`) is what recovers only an incomplete final fragment; the CLI export also renders the complete prefix and skips the bad line. | Expected: the listing names the line without refusing the session. `--resume` repairs it; read-only surfaces leave the file byte-identical. Only `--resume` (or fork/rewind/compaction) writes. |
+| After `--resume` the repaired session seems to have a gap | A repair never drops a complete record. A gap means more than one line was damaged, or another process truncated the same file. | Keep one writer per `--session-file`; check for a second `run`/`chat`/`serve` pointing at the same path. |
+| `sessions rewind` refuses a session whose last line is torn | Rewind is destructive, so it keeps the strict reader: it refuses before rewriting rather than guessing at the source. | Run `--resume` once to repair the file, then retry the rewind. |
+
+## Ctrl+C left a build running
+
+| Symptom | Why | Fix |
+|---|---|---|
+| After `Ctrl+C` in `run`/`chat`, a build or watcher is still running | The first signal aborts the turn and waits a bounded cleanup; the shell runner kills the process tree it started and drains it. A process that daemonized or detached (`start /B`, `nohup`, a service) is outside that tree, and a second `Ctrl+C` force-exits without waiting. | Find and kill the survivor explicitly; prefer foreground commands inside a turn. The runner only reaps what it spawned. |
+| `Ctrl+C` printed nothing but the process took a moment to exit | That is the bounded cleanup (`TURN_CANCEL_BUDGET_MS`, 8 000 ms) waiting for the aborted turn and shell drain, not a hang. | Wait for the exit; a second signal force-exits if cleanup is stuck. Notices go to stderr, so piped/machine stdout stays clean. |
+| `run --json` / `--stream` output stopped mid-stream after `Ctrl+C` | The run was cancelled, so only the records already emitted exist; a cancel is not a completed run. | Treat the run as cancelled, not successful; re-run if you need the full machine output. |
+| An interactive `chat` returns to the `task>` prompt after `Ctrl+C` instead of exiting | By design: while a turn runs, Ctrl+C cancels that turn (like the TUI) and the REPL stays usable. A piped/non-TTY `chat` exits `130`, and `SIGTERM`/`SIGHUP` end the REPL after the turn unwinds (`143`/`129`). | Keep entering tasks, or exit the REPL normally. The idle REPL's own Ctrl+C behavior is unchanged. |
+
 ## Web UI missing or stale
 
 | Symptom | `doctor` check | Fix |

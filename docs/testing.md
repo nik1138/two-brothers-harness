@@ -30,7 +30,8 @@ The script runs:
    step folding, composer status seats, plan docks, streaming, composer prompt
    recall, the approval-policy model, the design-token layer, mid-run steering,
    session fork/rewind, run-scoped file undo, the HTML export helpers,
-   transcript windowing and the run-cost footer)
+   transcript windowing and the run-cost footer, the persisted compaction card
+   and the tab-title model)
 10. the `web/` build
 
 Expected final line: `SMOKE TEST: PASS`. It is an offline pre-flight, not the
@@ -664,6 +665,40 @@ tests (1 691 pass, 2 environment skips)**, web suite **403/403**, hermetic CLI
 E2E **19/19** on sources and `--dist`, browser E2E **19 offline scenarios + 1
 opt-in `real` skip** (no new browser scenario this wave), `npm run typecheck`
 green.
+
+Wave 25 adds crash-torn resume, TUI steering, persisted compaction settings,
+signal-aware CLI runs and the web tab title, all hermetic: `tests/session.test.ts`
+(12: a cut-mid-object final fragment is ignored on read, `--resume` repairs the
+file atomically before appending with dense `seq`, a valid final line without a
+newline gets exactly one, interior corruption stays a line-numbered typed error,
+and empty/whitespace files stay byte-identical), `tests/sessionsearch.test.ts`
+(36: a torn-tail session stays in listing/search with additive
+`recovered`/`dropped_bytes` and unchanged bytes/mtime) and
+`tests/sessionapi.test.ts` (10: the web list/detail read routes keep a torn
+session, never rewrite it, and rewind still refuses it with 422);
+`tests/tuisteering.test.ts` (8: chord queue bounds, trim/empty/oversized/full
+copy, drain order and abort clearing, turn-end leftovers) plus the
+`tests/tuikeymap.test.ts` registry/scope case and the assembled-app case in
+`tests/tuiintegration.test.ts` (composer clears only on acceptance, the steer
+envelope appears once at the next boundary, no second task);
+`tests/settings.test.ts` (42) and `tests/serverbase.test.ts` (15: fail-closed
+read, strict write, section preservation, additive per-field
+`{persisted, effective, source}` + `force`/`pinned`, strict `PUT` validation,
+explicit `ServerOptions` > explicitly-set non-zero flag/env > persisted >
+absent, and the manual `/compact` merge) with
+`web/tests/compactionSettings.test.ts` (12: fail-soft old-backend state, strict
+input parsing, save payload, dirty tracking, pinned/effective copy);
+`tests/cliwiring.test.ts` (+8, driving the `src/turnsignal.ts` seam: first/second SIGINT, SIGTERM `143`, SIGHUP
+POSIX-gated with its absence asserted on win32 and force code `129`, dispose
+idempotence, the REPL emitter, bounded-wait behavior and the budget floor) plus
+the serve `SIGHUP` path in `tests/serveshutdown.test.ts`; and
+`web/tests/tabTitle.test.ts` (16: the full title matrix and precedence, the
+unread-only-when-unselected rule, control/bidi sanitizing, blank/non-string
+inputs, the 120-character cap per shape including surrogate safety). Real POSIX
+signal delivery still needs POSIX hardware; the hermetic tests drive the
+injected platform/emitter seam. Web suite **449/449**; the browser-E2E matrix
+is unchanged at **20 offline scenarios plus the opt-in `real` skip**. The
+full-gate package total is recorded in the wave-25 CHANGELOG entry.
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a

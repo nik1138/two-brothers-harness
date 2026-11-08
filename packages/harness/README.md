@@ -99,7 +99,12 @@ plan), `/provider` connects a provider from the same persisted settings the
 web workspace and `onboard` write (preset or manual endpoint; the typed key is
 masked and encrypted at rest), and `Up`/`Down` recall earlier submitted tasks
 at the draft edges (single-line drafts immediately; multiline only at their
-very start/end, with the live draft restored exactly). `/permission` states
+very start/end, with the live draft restored exactly). A running turn accepts
+steering from the composer (`Ctrl+N`, also the palette's **Steer the running
+turn** row): the text is queued for that turn at its next step, bounded to
+eight pending texts of 4 000 characters, with queued/applied/leftover copy and
+the draft cleared only on acceptance; `Enter` still refuses while a turn runs.
+`/permission` states
 the effective approval mode and its honest description (with the `allow-all`
 warning), the bound-root policy and this process's session allows; without a
 `--approval-mode`/env pin its buttons persist one of the four modes — `ask`,
@@ -154,7 +159,12 @@ backend without the field shows Ask and never receives a patch, and the mode
 never bypasses workspace confinement. `Up`/`Down` in the composer recall
 earlier accepted tasks at the draft edges and restore the live draft exactly.
 Runs use the configured models — the UI has no separate
-"mock" switch.
+"mock" switch. The browser tab title tracks the selected session and run state
+(`▶` running/queued, `!` waiting, `(failed)`, an unread count when nothing is
+selected), so a background tab shows when the brothers need you. Settings →
+**Advanced** saves the persisted auto-compaction budgets (`compaction` in
+`sessions/settings.json`); a pinned server flag/env wins and is shown as
+pinned.
 
 ## Features
 
@@ -181,7 +191,8 @@ Runs use the configured models — the UI has no separate
   run**/`Alt+Enter`): the text is appended to the shared context as an
   ordinary operator message at the run's next step — never a queued task —
   with a bounded pending queue and an honest `steering_dropped` report when
-  the per-run envelope cap is reached. TUI steering is a follow-up.
+  the per-run envelope cap is reached. The TUI queues composer text with
+  `Ctrl+N` (also the palette) under the same bounds.
 - **Composer prompt recall**: Up/Down walk accepted submissions in the TUI and
   the web composer, newest first, preserving and restoring the live draft
   exactly (multiline drafts only leave at their edges; only submitted tasks
