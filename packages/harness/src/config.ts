@@ -8,6 +8,7 @@
  * ever contacted by surprise. `mock` runs need nothing.
  */
 import {
+  ANTHROPIC_MIN_THINKING_BUDGET,
   DEFAULT_PROVIDER_KIND,
   isProviderKind,
   PROVIDER_KIND_HINT,
@@ -92,6 +93,18 @@ export interface Config {
   seniorMaxTokens: number;
   juniorMaxTokens: number;
   /**
+   * Anthropic extended-thinking budget in tokens (`--thinking-budget`, env
+   * `TWO_BROTHERS_THINKING_BUDGET`). 0 = unset: no `thinking` field is sent and
+   * the Anthropic request stays byte-identical to before the option existed.
+   * When > 0 the Anthropic Messages adapter sends
+   * `thinking: {type: "enabled", budget_tokens: N}` on every request and the
+   * tool loop echoes the signed thinking blocks back verbatim. Other provider
+   * families ignore it. Must be at least `ANTHROPIC_MIN_THINKING_BUDGET`
+   * (1024); when it does not fit under the effective `max_tokens`, the adapter
+   * raises that request cap with one honest warning.
+   */
+  thinkingBudget: number;
+  /**
    * Operator approval mode for workspace actions (`--approval-mode`, env
    * `TWO_BROTHERS_APPROVAL_MODE`). Only a surface that binds a
    * `PermissionManager` (the web `serve` runs, the TUI workspace) acts on it;
@@ -131,6 +144,7 @@ export const DEFAULTS: Omit<Config, "seniorSystem" | "juniorSystem"> = {
   maxTokens: undefined,
   seniorMaxTokens: 0,
   juniorMaxTokens: 0,
+  thinkingBudget: 0,
   approvalMode: DEFAULT_APPROVAL_MODE,
 };
 
@@ -166,6 +180,7 @@ const ENV_KEYS: Record<string, string> = {
   maxTokens: "TWO_BROTHERS_MAX_TOKENS",
   seniorMaxTokens: "TWO_BROTHERS_SENIOR_MAX_TOKENS",
   juniorMaxTokens: "TWO_BROTHERS_JUNIOR_MAX_TOKENS",
+  thinkingBudget: "TWO_BROTHERS_THINKING_BUDGET",
   approvalMode: "TWO_BROTHERS_APPROVAL_MODE",
 };
 
@@ -181,6 +196,7 @@ const INT_FIELDS = [
   "maxTokens",
   "seniorMaxTokens",
   "juniorMaxTokens",
+  "thinkingBudget",
 ] as const;
 const FLOAT_FIELDS = ["temperature"] as const;
 
@@ -330,6 +346,21 @@ export function maxTokensForRole(cfg: Config, role: "senior" | "junior"): number
 }
 
 /**
+ * The Anthropic extended-thinking budget a role should send. Run-level today —
+ * there is no per-role thinking override — and `undefined` = unset, so the
+ * request carries no `thinking` field. Kept as a per-role function so a future
+ * override slots in exactly like {@link maxTokensForRole}.
+ */
+export function thinkingBudgetForRole(
+  cfg: Config,
+  _role: "senior" | "junior",
+): number | undefined {
+  return Number.isFinite(cfg.thinkingBudget) && cfg.thinkingBudget > 0
+    ? Math.trunc(cfg.thinkingBudget)
+    : undefined;
+}
+
+/**
  * Fail fast before a run: raise `RunConfigError` listing every gap, so a
  * missing base_url/model surfaces within seconds instead of reaching the
  * network. Ports `config.validate_run_config`; with per-role `endpoints`
@@ -414,6 +445,23 @@ export function resolveConfig(args: Args = {}): Config {
     if (!Number.isFinite(value) || value < 0) {
       throw new Error(`invalid ${field}: ${String(value)} (use a positive integer or 0 for unset)`);
     }
+  }
+  // Anthropic extended thinking: 0 = unset (today's byte-identical request).
+  // A set budget must be a positive integer and at least the API minimum; the
+  // adapter handles the max_tokens relationship (it must exceed the budget)
+  // with an honest raised-cap warning, so every surface reaches a valid
+  // request without new error plumbing.
+  if (!Number.isFinite(cfg.thinkingBudget) || cfg.thinkingBudget < 0) {
+    throw new Error(
+      `invalid thinking budget: ${String(cfg.thinkingBudget)} ` +
+        "(use a positive integer or 0 for unset; --thinking-budget <n>)",
+    );
+  }
+  if (cfg.thinkingBudget > 0 && cfg.thinkingBudget < ANTHROPIC_MIN_THINKING_BUDGET) {
+    throw new Error(
+      `invalid thinking budget: ${cfg.thinkingBudget} (Anthropic requires at least ` +
+        `${ANTHROPIC_MIN_THINKING_BUDGET} tokens; --thinking-budget <n>)`,
+    );
   }
   return cfg;
 }

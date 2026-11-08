@@ -163,6 +163,13 @@ export const FLAGS: Record<string, FlagHelp> = {
     value: "<n>",
     description: "output-token cap for both roles (env TWO_BROTHERS_MAX_TOKENS)",
   },
+  "thinking-budget": {
+    name: "thinking-budget",
+    value: "<n>",
+    description:
+      "Anthropic extended-thinking budget in tokens (min 1024; other providers ignore it; " +
+      "env TWO_BROTHERS_THINKING_BUDGET)",
+  },
   temperature: {
     name: "temperature",
     value: "<f>",
@@ -451,6 +458,7 @@ defineCommand({
     "junior-system",
     "max-rounds",
     "max-tokens",
+    "thinking-budget",
     "temperature",
     "timeout",
     "retries",
@@ -479,6 +487,7 @@ defineCommand({
     "no-live",
     "dry-run",
     "task-file",
+    "thinking-budget",
     "approval-mode",
   ],
   flagNotes: {
@@ -532,6 +541,7 @@ defineCommand({
     "junior-system",
     "max-rounds",
     "max-tokens",
+    "thinking-budget",
     "temperature",
     "timeout",
     "retries",
@@ -559,6 +569,7 @@ defineCommand({
     "live",
     "no-live",
     "dry-run",
+    "thinking-budget",
     "approval-mode",
   ],
   flagNotes: {
@@ -630,6 +641,7 @@ defineCommand({
     "junior-system",
     "max-rounds",
     "max-tokens",
+    "thinking-budget",
     "temperature",
     "timeout",
     "retries",
@@ -651,7 +663,7 @@ defineCommand({
     "approval-mode",
     "help",
   ],
-  acceptedFlags: [...SHARED_FLAGS, "workspace", "approval-mode"],
+  acceptedFlags: [...SHARED_FLAGS, "workspace", "thinking-budget", "approval-mode"],
   flagNotes: {
     mode: "cooperation mode consult|work|auto (print/json are run output modes)",
     workspace:
@@ -694,6 +706,7 @@ defineCommand({
     "senior-model",
     "junior-model",
     "max-tokens",
+    "thinking-budget",
     "plugins-dir",
     "skills-dir",
     "commands-dir",
@@ -702,7 +715,7 @@ defineCommand({
     "verbose",
     "help",
   ],
-  acceptedFlags: [...SHARED_FLAGS, "host", "port", "sessions-dir", "workers", "approval-mode"],
+  acceptedFlags: [...SHARED_FLAGS, "host", "port", "sessions-dir", "workers", "thinking-budget", "approval-mode"],
   flagNotes: {
     timeout:
       "per-provider-attempt timeout in seconds (default 120; env TWO_BROTHERS_TIMEOUT); " +
@@ -1399,6 +1412,14 @@ export function renderMainHelp(
       style,
     ),
     paintHelpLine(
+      "  --thinking-budget <n>      Anthropic extended-thinking budget in tokens (min 1024;",
+      style,
+    ),
+    paintHelpLine(
+      "                             other providers ignore it; env TWO_BROTHERS_THINKING_BUDGET)",
+      style,
+    ),
+    paintHelpLine(
       "  --max-rounds <n>   --temperature <f>   --mode consult|work|auto",
       style,
     ),
@@ -1487,15 +1508,15 @@ export function renderMainHelp(
       style,
     ),
     paintHelpLine(
-      "  TWO_BROTHERS_MAX_TOKENS, TWO_BROTHERS_MCP_CONFIG, TWO_BROTHERS_PLUGINS_DIR,",
+      "  TWO_BROTHERS_MAX_TOKENS, TWO_BROTHERS_THINKING_BUDGET, TWO_BROTHERS_MCP_CONFIG,",
       style,
     ),
     paintHelpLine(
-      "  TWO_BROTHERS_SKILLS_DIR, TWO_BROTHERS_COMMANDS_DIR, TWO_BROTHERS_STREAM_TOKENS,",
+      "  TWO_BROTHERS_PLUGINS_DIR, TWO_BROTHERS_SKILLS_DIR, TWO_BROTHERS_COMMANDS_DIR,",
       style,
     ),
     paintHelpLine(
-      "  TWO_BROTHERS_APPROVAL_MODE.",
+      "  TWO_BROTHERS_STREAM_TOKENS, TWO_BROTHERS_APPROVAL_MODE.",
       style,
     ),
     "",
@@ -1572,6 +1593,7 @@ export const ENVIRONMENT: readonly EnvironmentHelp[] = [
   { variable: "TWO_BROTHERS_CONTEXT_WINDOW", flag: "--context-window" },
   { variable: "TWO_BROTHERS_COMPACT_KEEP_RECENT", flag: "--compact-keep-recent" },
   { variable: "TWO_BROTHERS_MAX_TOKENS", flag: "--max-tokens" },
+  { variable: "TWO_BROTHERS_THINKING_BUDGET", flag: "--thinking-budget" },
   {
     variable: "TWO_BROTHERS_SENIOR_MAX_TOKENS",
     flag: "--max-tokens",

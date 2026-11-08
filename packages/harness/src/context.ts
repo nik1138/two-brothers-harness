@@ -5,6 +5,7 @@
  */
 import type { Message } from "./protocol.ts";
 import { createMessage, validateMessage } from "./protocol.ts";
+import type { ThinkingBlock } from "./provider.ts";
 import type { SessionStore } from "./session.ts";
 
 const TASK_START = "[[TASK]]";
@@ -22,12 +23,21 @@ export interface ToolCall {
  * system+user pairs; tool-calling loops additionally build assistant
  * messages (carrying `toolCalls`) and tool result messages (carrying
  * `toolCallId`) — the OpenAI wire shape.
+ *
+ * `thinkingBlocks` is internal wire-replay metadata, never part of the shared
+ * transcript or the protocol: the Anthropic adapter captures the signed
+ * extended-thinking blocks of an assistant turn there, and the same adapter
+ * echoes them verbatim on the next tool-loop request (Anthropic rejects a tool
+ * loop whose assistant turns dropped their signatures). Other adapters ignore
+ * it, and nothing renders or persists it.
  */
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
   toolCalls?: ToolCall[];
   toolCallId?: string;
+  /** Signed Anthropic extended-thinking blocks to echo on the assistant turn. */
+  thinkingBlocks?: ThinkingBlock[];
 }
 
 export class SharedContext {

@@ -104,10 +104,36 @@ export interface Tool {
   execute(args: Record<string, unknown>, signal?: AbortSignal): string | Promise<string>;
 }
 
+/**
+ * One signed Anthropic extended-thinking block captured from a response.
+ *
+ * The Messages API returns thinking blocks as
+ * `{type: "thinking", thinking, signature}` (and, when the provider redacts
+ * reasoning, `{type: "redacted_thinking", data}`); a tool loop must echo them
+ * back verbatim on the assistant turn or the API rejects the request. `text`
+ * never becomes reply content; `signature` is opaque replay metadata.
+ */
+export interface ThinkingBlock {
+  /** Reasoning text (`thinking` blocks); "" for a redacted block. */
+  text: string;
+  /** Signature from `signature_delta`; required to echo the block back. */
+  signature: string;
+  /** Encrypted payload of a `redacted_thinking` block, echoed as `data`. */
+  redacted?: string;
+}
+
 /** One completion: either plain text, structured tool calls, or both. */
 export interface ToolChatResponse {
   content: string;
   toolCalls: ToolCall[];
+  /**
+   * Signed extended-thinking blocks this response carried, in arrival order.
+   * Only the Anthropic adapter populates it (and only when the request enabled
+   * thinking); the harness copies them onto the assistant `ChatMessage` and
+   * the adapter echoes them on the next tool-loop request. Other adapters and
+   * callers that do not know the field ignore it.
+   */
+  thinkingBlocks?: ThinkingBlock[];
 }
 
 /**
@@ -240,6 +266,18 @@ export interface ProviderConfig {
    * when this is set.
    */
   maxTokens?: number;
+  /**
+   * Anthropic extended-thinking budget in tokens (`--thinking-budget`). When
+   * set, the Messages adapter adds
+   * `thinking: {type: "enabled", budget_tokens: N}` to every request and
+   * captures the signed thinking blocks so tool loops can echo them back
+   * verbatim. ONLY the Anthropic adapter reads it: other adapters ignore the
+   * field and their request bytes stay exactly as before. Unset keeps today's
+   * request (no `thinking` field at all). Must be at least
+   * {@link ANTHROPIC_MIN_THINKING_BUDGET}; when it does not fit under the
+   * effective `max_tokens` the adapter raises that cap with one honest warning.
+   */
+  thinkingBudgetTokens?: number;
   /**
    * The provider's context window in tokens. Adapters ignore it on the wire —
    * it feeds compaction budgets only (`CompactionSettings.contextWindow`).
@@ -1003,7 +1041,8 @@ export abstract class BaseHttpProvider implements Provider {
   private readonly runSignal?: AbortSignal;
   private readonly fetchImpl: FetchLike;
   private readonly sleeper: Sleeper;
-  private readonly onWarning: (line: string) => void;
+  /** Per-instance diagnostics sink (subclasses may use it for their own warns). */
+  protected readonly onWarning: (line: string) => void;
   private timeoutWarnings = 0;
 
   constructor(cfg: ModelProviderConfig) {
@@ -1542,6 +1581,21 @@ export const ANTHROPIC_VERSION = "2023-06-01";
 /** Anthropic requires `max_tokens`; this is the cap when none is configured. */
 export const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
 
+/**
+ * Smallest `budget_tokens` the Messages API accepts for extended thinking; a
+ * smaller configured budget is a configuration error, never silently raised.
+ */
+export const ANTHROPIC_MIN_THINKING_BUDGET = 1024;
+
+/**
+ * Output room the adapter keeps ABOVE an extended-thinking budget when the
+ * configured `max_tokens` does not fit it. The API requires
+ * `max_tokens > budget_tokens`, so the adapter raises its request cap to
+ * `budget + headroom` and warns once (an operator's cap that already leaves
+ * room — including a deliberately larger one — is sent untouched).
+ */
+export const ANTHROPIC_THINKING_MAX_TOKENS_HEADROOM = 1024;
+
 const API_VERSION_SEGMENT = /\/v\d+(?:(?:alpha|beta)\d*)?$/i;
 
 /**
@@ -1556,6 +1610,9 @@ function versionedApiUrl(baseUrl: string, version: string, path: string): string
 interface AnthropicContentBlock {
   type?: string;
   text?: string;
+  thinking?: string;
+  signature?: string;
+  data?: string;
   id?: string;
   name?: string;
   input?: unknown;
@@ -1566,6 +1623,13 @@ interface AnthropicContentBlock {
  * top-level `system` string (all system messages merged, so it never rides in
  * `messages`), assistant `toolCalls` become `tool_use` blocks and tool results
  * become `tool_result` blocks answering the preceding `tool_use` turn.
+ *
+ * Extended thinking: an assistant turn's captured `thinkingBlocks` are echoed
+ * back FIRST, verbatim (`{type: "thinking", thinking, signature}` or
+ * `{type: "redacted_thinking", data}`), before the text and `tool_use` blocks —
+ * the Messages API rejects a tool loop whose signed blocks were dropped or
+ * altered. The blocks are replayed exactly as received (never re-sanitized or
+ * trimmed) and other adapters never look at them.
  */
 function anthropicMessages(messages: ChatMessage[]): {
   system: string;
@@ -1582,6 +1646,17 @@ function anthropicMessages(messages: ChatMessage[]): {
     }
     if (message.role === "assistant") {
       const blocks: Array<Record<string, unknown>> = [];
+      for (const thinking of message.thinkingBlocks ?? []) {
+        if (thinking.redacted !== undefined) {
+          blocks.push({ type: "redacted_thinking", data: thinking.redacted });
+        } else {
+          blocks.push({
+            type: "thinking",
+            thinking: thinking.text,
+            signature: thinking.signature,
+          });
+        }
+      }
       if (message.content) blocks.push({ type: "text", text: message.content });
       for (const call of message.toolCalls ?? []) {
         blocks.push({ type: "tool_use", id: call.id, name: call.name, input: call.args ?? {} });
@@ -1629,6 +1704,7 @@ function anthropicCompletion(data: unknown, url: string): ToolChatResponse {
   }
   const texts: string[] = [];
   const toolCalls: ToolCall[] = [];
+  const thinkingBlocks: ThinkingBlock[] = [];
   for (const raw of blocks) {
     if (!isRecord(raw)) continue;
     const block = raw as AnthropicContentBlock;
@@ -1641,9 +1717,16 @@ function anthropicCompletion(data: unknown, url: string): ToolChatResponse {
         name: String(block.name ?? ""),
         args,
       });
+    } else if (block.type === "thinking" && typeof block.thinking === "string") {
+      // Signed reasoning replay metadata, never part of the reply content.
+      thinkingBlocks.push({ text: block.thinking, signature: String(block.signature ?? "") });
+    } else if (block.type === "redacted_thinking" && typeof block.data === "string") {
+      thinkingBlocks.push({ text: "", signature: "", redacted: block.data });
     }
   }
-  return { content: texts.join(""), toolCalls };
+  return thinkingBlocks.length > 0
+    ? { content: texts.join(""), toolCalls, thinkingBlocks }
+    : { content: texts.join(""), toolCalls };
 }
 
 /**
@@ -1664,7 +1747,8 @@ function anthropicUsage(data: unknown): Omit<UsageTotals, "model_calls"> {
 /**
  * One Anthropic content block being assembled from the stream. `thinking`
  * blocks hold extended-reasoning text: it is reported through the thinking
- * sink and never appears in the returned content blocks.
+ * sink and never appears in the returned content text, while its signature is
+ * kept for verbatim replay on the next tool-loop request.
  */
 interface AnthropicStreamBlock {
   type: "text" | "tool_use" | "thinking";
@@ -1673,6 +1757,10 @@ interface AnthropicStreamBlock {
   json: string;
   id: string;
   name: string;
+  /** Accumulated `signature_delta.signature` (thinking blocks only). */
+  signature: string;
+  /** Encrypted payload of a `redacted_thinking` start block, when present. */
+  redacted: string;
 }
 
 /** Per-attempt Anthropic stream accumulator. */
@@ -1693,14 +1781,61 @@ interface AnthropicStreamState extends StreamState {
  * they arrive (`thinking_delta` blocks go to the thinking sink and never into
  * the returned content), `message_delta.usage.output_tokens` completes the
  * usage `message_start` began, `message_stop` ends the stream. `tool_use`
- * blocks reassemble from `content_block_start` + `input_json_delta` fragments.
+ * blocks reassemble from `content_block_start` + `input_json_delta` fragments,
+ * and extended-thinking blocks keep their `signature_delta` so the harness can
+ * echo them verbatim on the next tool-loop request.
+ *
+ * Extended thinking (`ProviderConfig.thinkingBudgetTokens`): the request gains
+ * `thinking: {type: "enabled", budget_tokens: N}`. The Messages API requires
+ * `max_tokens > budget_tokens`; when the configured cap does not leave room the
+ * adapter raises the request cap to `budget + ANTHROPIC_THINKING_MAX_TOKENS_HEADROOM`
+ * and warns once (an explicit larger cap is sent untouched). The API also
+ * rejects temperature/top_p while thinking is enabled, so `temperature` is
+ * omitted on those requests (its default 1 applies). Unset keeps the request
+ * byte-identical to the pre-thinking adapter, and no other adapter reads the
+ * field.
  */
 export class AnthropicProvider extends BaseHttpProvider {
   readonly maxTokens: number;
+  /** Effective extended-thinking budget; undefined = thinking not requested. */
+  readonly thinkingBudgetTokens?: number;
+  private thinkingCapWarned = false;
 
   constructor(cfg: ModelProviderConfig) {
     super(cfg);
     this.maxTokens = Math.max(1, Math.trunc(cfg.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS));
+    const requested = cfg.thinkingBudgetTokens;
+    const normalized =
+      requested !== undefined && Number.isFinite(requested) && requested > 0
+        ? Math.trunc(requested)
+        : undefined;
+    if (normalized !== undefined && normalized < ANTHROPIC_MIN_THINKING_BUDGET) {
+      throw new Error(
+        `thinking budget ${normalized} is below the Anthropic minimum ` +
+          `${ANTHROPIC_MIN_THINKING_BUDGET} tokens (--thinking-budget <n>)`,
+      );
+    }
+    this.thinkingBudgetTokens = normalized;
+  }
+
+  /**
+   * The `max_tokens` the next request sends. With extended thinking enabled the
+   * API requires `max_tokens > budget_tokens`: a cap that does not leave room is
+   * raised to `budget + headroom` and reported once through the provider's
+   * warning sink (honest, not silent); a suitable cap is sent untouched.
+   */
+  private requestMaxTokens(): number {
+    const budget = this.thinkingBudgetTokens;
+    if (budget === undefined || budget < this.maxTokens) return this.maxTokens;
+    const raised = budget + ANTHROPIC_THINKING_MAX_TOKENS_HEADROOM;
+    if (!this.thinkingCapWarned) {
+      this.thinkingCapWarned = true;
+      this.onWarning(
+        `[warn] thinking budget ${budget} needs max_tokens greater than it; ` +
+          `sending max_tokens ${raised} (raise --max-tokens to choose the cap)`,
+      );
+    }
+    return raised;
   }
 
   async chat(
@@ -1759,7 +1894,8 @@ export class AnthropicProvider extends BaseHttpProvider {
       const index = coerceInt(parsed.index);
       const block = isRecord(parsed.content_block) ? parsed.content_block : {};
       // `thinking` blocks carry extended reasoning: they start no reply text
-      // and are only reported through thinking_delta below.
+      // and are only reported through thinking_delta below, while their
+      // signature is kept for verbatim replay.
       const blockType =
         block.type === "tool_use"
           ? "tool_use"
@@ -1768,10 +1904,22 @@ export class AnthropicProvider extends BaseHttpProvider {
             : "text";
       const started: AnthropicStreamBlock = {
         type: blockType,
-        text: typeof block.text === "string" ? block.text : "",
+        text:
+          typeof block.text === "string"
+            ? block.text
+            : typeof block.thinking === "string"
+              ? block.thinking
+              : "",
         json: "",
         id: typeof block.id === "string" ? block.id : "",
         name: typeof block.name === "string" ? block.name : "",
+        signature: typeof block.signature === "string" ? block.signature : "",
+        // A redacted block arrives whole at start: its encrypted payload is
+        // opaque and must be echoed back verbatim, never parsed.
+        redacted:
+          block.type === "redacted_thinking" && typeof block.data === "string"
+            ? block.data
+            : "",
       };
       if (started.type === "text" && started.text) emit(started.text);
       stream.blocks.set(index, started);
@@ -1786,12 +1934,24 @@ export class AnthropicProvider extends BaseHttpProvider {
         json: "",
         id: "",
         name: "",
+        signature: "",
+        redacted: "",
       };
       if (delta.type === "thinking_delta" && typeof delta.thinking === "string") {
         block.type = "thinking";
-        // Thinking is reported to the thinking sink only; it is not part of
-        // the assembled content blocks (`streamResult` skips it).
-        if (delta.thinking) emit(delta.thinking, "thinking");
+        // Thinking is reported to the thinking sink only; its text is ALSO
+        // accumulated on the block so `streamResult` can hand the signed block
+        // to `anthropicCompletion` for tool-loop passback. It never joins the
+        // returned reply content.
+        if (delta.thinking) {
+          block.text += delta.thinking;
+          emit(delta.thinking, "thinking");
+        }
+      } else if (delta.type === "signature_delta" && typeof delta.signature === "string") {
+        // Opaque replay metadata: accumulated (never emitted as text) so the
+        // next tool-loop request can echo the signed block verbatim.
+        block.type = "thinking";
+        block.signature += delta.signature;
       } else if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
         block.json += delta.partial_json;
       } else if (typeof delta.text === "string") {
@@ -1799,8 +1959,6 @@ export class AnthropicProvider extends BaseHttpProvider {
         block.text += delta.text;
         emit(delta.text);
       }
-      // `signature_delta` and any other delta types contribute nothing to the
-      // reply (the signature is replay metadata, not visible text).
       stream.blocks.set(index, block);
       return false;
     }
@@ -1823,6 +1981,19 @@ export class AnthropicProvider extends BaseHttpProvider {
           name: block.name,
           input: isRecord(parsed) ? parsed : {},
         });
+      } else if (block.type === "thinking") {
+        // Signed reasoning: its text never joins the reply, but the assembled
+        // response carries it in the same shape the non-streaming API uses, so
+        // `anthropicCompletion` exposes the block for tool-loop passback.
+        if (block.redacted) {
+          content.push({ type: "redacted_thinking", data: block.redacted });
+        } else if (block.text || block.signature) {
+          content.push({
+            type: "thinking",
+            thinking: block.text,
+            signature: block.signature,
+          });
+        }
       } else if (block.text) {
         content.push({ type: "text", text: block.text });
       }
@@ -1847,12 +2018,23 @@ export class AnthropicProvider extends BaseHttpProvider {
     const { system, messages: wire } = anthropicMessages(messages);
     const body: Record<string, unknown> = {
       model: this.model,
-      max_tokens: this.maxTokens,
+      max_tokens: this.requestMaxTokens(),
       messages: wire,
     };
     if (system) body.system = system;
-    if (Number.isFinite(this.temperature)) body.temperature = this.temperature;
+    // Extended thinking: the Messages API does not accept temperature/top_p
+    // when thinking is enabled (its default temperature 1 applies), so the
+    // field is omitted then. Without thinking this is exactly the pre-thinking
+    // request body.
+    if (this.thinkingBudgetTokens === undefined && Number.isFinite(this.temperature)) {
+      body.temperature = this.temperature;
+    }
     if (tools && tools.length > 0) body.tools = anthropicToolDefinitions(tools);
+    if (this.thinkingBudgetTokens !== undefined) {
+      // Extended thinking: the only wire difference the option adds. Absent =
+      // the exact pre-thinking request (no `thinking` field).
+      body.thinking = { type: "enabled", budget_tokens: this.thinkingBudgetTokens };
+    }
     return body;
   }
 

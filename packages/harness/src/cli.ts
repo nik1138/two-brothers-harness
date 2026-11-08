@@ -25,7 +25,13 @@ import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
 
-import { resolveConfig, maxTokensForRole, validateRunConfig, type Config } from "./config.ts";
+import {
+  resolveConfig,
+  maxTokensForRole,
+  thinkingBudgetForRole,
+  validateRunConfig,
+  type Config,
+} from "./config.ts";
 import {
   APPROVAL_MODES,
   approvalModeWarning,
@@ -102,6 +108,7 @@ import {
 } from "./plugins.ts";
 import {
   buildProvider,
+  ANTHROPIC_MIN_THINKING_BUDGET,
   DEFAULT_PROVIDER_KIND,
   isProviderKind,
   listModels,
@@ -203,6 +210,16 @@ const APPROVAL_MODE_OPTIONS = {
 } satisfies ParseArgsOptionsConfig;
 
 /**
+ * `--thinking-budget` is parsed by `run`, `chat`, `tui` and `serve` only — the
+ * surfaces that build role providers and validate the option. It stays out of
+ * the shared `OPTIONS` table so other commands reject it instead of silently
+ * ignoring an Anthropic extended-thinking setting.
+ */
+const THINKING_BUDGET_OPTIONS = {
+  "thinking-budget": { type: "string" as const },
+} satisfies ParseArgsOptionsConfig;
+
+/**
  * `tui`-only flags. Like `--dry-run` they stay out of the shared `OPTIONS`
  * table, so `run`/`chat`/`serve` reject them instead of silently ignoring
  * them. `--workspace <dir>` binds every TUI turn to one confined workspace
@@ -270,6 +287,39 @@ function reportApprovalModeProblem(
   return 2;
 }
 
+/**
+ * Validate an explicit `--thinking-budget` (or its
+ * `TWO_BROTHERS_THINKING_BUDGET` env counterpart) before `resolveConfig` runs:
+ * it must be a positive integer of at least `ANTHROPIC_MIN_THINKING_BUDGET`
+ * (1024). `null` = valid or absent. A budget that does not fit under the
+ * effective `max_tokens` is not an error here: the Anthropic adapter keeps the
+ * request valid by raising that cap with one honest warning (the
+ * budget < max_tokens relationship is a provider-api detail the adapter owns).
+ */
+function thinkingBudgetProblem(values: Record<string, any>): string | null {
+  const raw =
+    typeof values["thinking-budget"] === "string" && values["thinking-budget"].trim()
+      ? values["thinking-budget"].trim()
+      : (process.env.TWO_BROTHERS_THINKING_BUDGET ?? "").trim();
+  if (!raw) return null;
+  const parsed = /^\d+$/.test(raw) ? Number.parseInt(raw, 10) : Number.NaN;
+  if (!Number.isFinite(parsed) || parsed < ANTHROPIC_MIN_THINKING_BUDGET) {
+    return (
+      `invalid thinking budget: ${raw} (use an integer of at least ` +
+      `${ANTHROPIC_MIN_THINKING_BUDGET} tokens; --thinking-budget <n>)`
+    );
+  }
+  return null;
+}
+
+/** One usage-error block for a bad `--thinking-budget`; returns exit code 2. */
+function reportThinkingBudgetProblem(command: string, problem: string, io: CliIO): number {
+  io.error(`[error] ${problem}`);
+  io.error(`Usage: ${commandUsage(command)}`);
+  io.error(`Run 'two-brothers ${command} --help'.`);
+  return 2;
+}
+
 const FLAG_TO_CONFIG: Record<string, string> = {
   provider: "provider",
   "provider-kind": "kind",
@@ -287,6 +337,7 @@ const FLAG_TO_CONFIG: Record<string, string> = {
   "junior-system": "juniorSystem",
   "max-rounds": "maxRounds",
   "max-tokens": "maxTokens",
+  "thinking-budget": "thinkingBudget",
   temperature: "temperature",
   timeout: "timeout",
   retries: "retries",
@@ -570,6 +621,9 @@ function nativeProviders(
         retries: cfg.retries,
         contextWindow: cfg.contextWindow,
         maxTokens,
+        // Extended thinking is Anthropic-only; buildProvider forwards the
+        // field and every other adapter ignores it (request bytes unchanged).
+        thinkingBudgetTokens: thinkingBudgetForRole(cfg, role),
         ...(onWarning ? { onWarning } : {}),
       },
       role,
@@ -1545,7 +1599,7 @@ async function doRun(
 ): Promise<number> {
   const parsed = parseCommandArgs(
     argv,
-    { ...OPTIONS, ...HELP_OPTIONS, ...RUN_INPUT_OPTIONS, ...LIVE_OPTIONS, ...APPROVAL_MODE_OPTIONS },
+    { ...OPTIONS, ...HELP_OPTIONS, ...RUN_INPUT_OPTIONS, ...LIVE_OPTIONS, ...APPROVAL_MODE_OPTIONS, ...THINKING_BUDGET_OPTIONS },
     "run",
     io,
     true,
@@ -1558,6 +1612,8 @@ async function doRun(
   }
   const approvalProblem = approvalModeProblem(values);
   if (approvalProblem !== null) return reportApprovalModeProblem("run", approvalProblem, io);
+  const thinkingProblem = thinkingBudgetProblem(values);
+  if (thinkingProblem !== null) return reportThinkingBudgetProblem("run", thinkingProblem, io);
   const cfg = resolveConfig(argsToConfigArgs(values));
   if (
     values.stream === true &&
@@ -1706,7 +1762,7 @@ async function doChat(
 ): Promise<number> {
   const parsed = parseCommandArgs(
     argv,
-    { ...OPTIONS, ...HELP_OPTIONS, ...DRY_RUN_OPTIONS, ...LIVE_OPTIONS, ...APPROVAL_MODE_OPTIONS },
+    { ...OPTIONS, ...HELP_OPTIONS, ...DRY_RUN_OPTIONS, ...LIVE_OPTIONS, ...APPROVAL_MODE_OPTIONS, ...THINKING_BUDGET_OPTIONS },
     "chat",
     io,
   );
@@ -1718,6 +1774,8 @@ async function doChat(
   }
   const approvalProblem = approvalModeProblem(values);
   if (approvalProblem !== null) return reportApprovalModeProblem("chat", approvalProblem, io);
+  const thinkingProblem = thinkingBudgetProblem(values);
+  if (thinkingProblem !== null) return reportThinkingBudgetProblem("chat", thinkingProblem, io);
   const cfg = resolveConfig(argsToConfigArgs(values));
   // `--stream-tokens` is a `run --stream` option; a REPL turn prints the
   // human transcript, so there is no stream sink to carry token records.
@@ -2103,7 +2161,7 @@ async function doTui(
 ): Promise<number> {
   const parsed = parseCommandArgs(
     argv,
-    { ...OPTIONS, ...TUI_OPTIONS, ...APPROVAL_MODE_OPTIONS, ...HELP_OPTIONS },
+    { ...OPTIONS, ...TUI_OPTIONS, ...APPROVAL_MODE_OPTIONS, ...THINKING_BUDGET_OPTIONS, ...HELP_OPTIONS },
     "tui",
     io,
     true,
@@ -2116,6 +2174,8 @@ async function doTui(
   }
   const approvalProblem = approvalModeProblem(values);
   if (approvalProblem !== null) return reportApprovalModeProblem("tui", approvalProblem, io);
+  const thinkingProblem = thinkingBudgetProblem(values);
+  if (thinkingProblem !== null) return reportThinkingBudgetProblem("tui", thinkingProblem, io);
   if (isOutputMode(values.mode)) {
     io.error(
       "Error: tui is interactive; --mode takes consult|work|auto (print/json are run output modes).",
@@ -2925,6 +2985,7 @@ async function doServe(
       "sessions-dir": { type: "string" as const },
       workers: { type: "string" as const },
       ...APPROVAL_MODE_OPTIONS,
+      ...THINKING_BUDGET_OPTIONS,
       ...HELP_OPTIONS,
     },
     "serve",
@@ -2963,6 +3024,8 @@ async function doServe(
     const warning = approvalModeWarning(normalized);
     if (warning !== null) io.error(`[warn] ${warning}`);
   }
+  const thinkingProblem = thinkingBudgetProblem(values);
+  if (thinkingProblem !== null) return reportThinkingBudgetProblem("serve", thinkingProblem, io);
   // Explicit --plugins-dir (or TWO_BROTHERS_PLUGINS_DIR) wins; otherwise the
   // server keeps its module-relative default (`<repo>/plugins`), which is what
   // existing checkouts and tests rely on. Skill roots follow the same

@@ -94,6 +94,14 @@
  *   consumers that do not know it ignore it. Without streaming the provider
  *   contract returns no reasoning text at all, so non-streaming runs emit
  *   nothing — the TUI keeps its live-only thinking (no replay).
+ * - Anthropic extended thinking (`--thinking-budget`) is a provider-layer
+ *   option: the Messages adapter adds `thinking: {type:"enabled",
+ *   budget_tokens:N}` when configured and captures the signed thinking blocks
+ *   from the response. The tool loop carries those blocks on the assistant
+ *   `ChatMessage` it appends, and the same adapter echoes them verbatim on the
+ *   next tool-loop request (the API rejects a loop whose signatures were
+ *   dropped). Unset keeps the Anthropic request byte-identical, other adapters
+ *   ignore the field, and the blocks never enter a protocol envelope.
  * - Structured-payload discipline (BACKLOG, fixes 1 + 2 + 3): every structured
  *   node reply is checked against the strict zod schema and gets exactly ONE
  *   repair re-ask when it fails. Before the repair runs, the relaxed strict
@@ -125,7 +133,7 @@
  *   convention, `deliverSkillRequest`) — at most three per run, each name at
  *   most once, role-scoped, and never a throw.
  */
-import { maxTokensForRole, type Config } from "./config.ts";
+import { maxTokensForRole, thinkingBudgetForRole, type Config } from "./config.ts";
 import { SharedContext, type ChatMessage } from "./context.ts";
 import {
   compactContext,
@@ -951,6 +959,7 @@ function providerFromEndpoint(
       retries: cfg.retries,
       contextWindow: cfg.contextWindow,
       maxTokens: maxTokensForRole(cfg, role),
+      thinkingBudgetTokens: thinkingBudgetForRole(cfg, role),
       model: endpoint.model || (role === "senior" ? cfg.seniorModel : cfg.juniorModel),
       ...(onWarning ? { onWarning } : {}),
     };
@@ -1803,7 +1812,20 @@ export class TwoBrothersHarness {
         text = response.content;
         break;
       }
-      messages.push({ role: "assistant", content: response.content, toolCalls: response.toolCalls });
+      // Carry the adapter's signed extended-thinking blocks onto the assistant
+      // turn so the NEXT tool-loop request can echo them verbatim (Anthropic
+      // rejects a tool loop whose signed thinking was dropped). Only the
+      // Anthropic adapter populates the field; every other adapter leaves it
+      // undefined and its request bytes are unchanged. Internal only — never
+      // rendered or persisted in the shared context/protocol.
+      messages.push({
+        role: "assistant",
+        content: response.content,
+        toolCalls: response.toolCalls,
+        ...(response.thinkingBlocks !== undefined && response.thinkingBlocks.length > 0
+          ? { thinkingBlocks: response.thinkingBlocks }
+          : {}),
+      });
       for (const call of response.toolCalls) {
         const tool = toolMap.get(call.name);
         let result: string;
