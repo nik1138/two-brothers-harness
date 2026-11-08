@@ -39,7 +39,7 @@ workaround).
    captured output tail and exit 1: clean tree → candidate build +
    `npm run check` → `scripts/smoke-test.ps1` (`SMOKE TEST: PASS`) →
    `node scripts/tarball-smoke.mjs` (`TARBALL SMOKE: PASS (7/7)`) and
-   `npm run pack:check` → `scripts/e2e-test.ps1` (21 PASS / 0 FAIL / 1 SKIP;
+   `npm run pack:check` → `scripts/e2e-test.ps1` (22 PASS / 0 FAIL / 1 SKIP;
    needs system Edge, not run in CI) → final clean-tree check.
 
    Fast iterations: `-SkipBrowser` (skip the system-Edge pass) and

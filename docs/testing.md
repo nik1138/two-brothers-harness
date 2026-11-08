@@ -774,8 +774,9 @@ preservation, run-level > persisted > smaller-preset precedence, old presets
 byte-compatible) and the web provider/compaction suites (45 focused).
 Package suite **1 912 tests** (1 906 pass and 6 platform skips on Windows; the
 WSL Linux pass is 1 911 pass with 1 skip); web suite **459/459**; the browser
-matrix is **21 offline scenarios plus the opt-in `real` skip**
-(**21 PASS, 0 FAIL, 1 SKIP**).
+matrix is **21 hermetic scenario blocks** (22 PASS lines — the `chat/resume`
+block reports chat and resume separately) plus the opt-in `real` skip
+(**22 PASS, 0 FAIL, 1 SKIP**).
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
@@ -1055,8 +1056,9 @@ native-valid but non-whole value is an inline `role=alert` with `aria-invalid`
 that blocks the save before any PUT; a corrected save rides the dialog's single
 Save action, persists the budgets in `sessions/settings.json`, and the
 persisted values plus their effective lines survive a reload). The offline
-suite now holds 21 scenarios; the last canonical run is **21 PASS, 0 FAIL,
-1 SKIP** (the opt-in `real` scenario). The queue dock and the session-scope approval decisions
+suite now holds 21 hermetic scenario blocks; the last canonical run is **22
+PASS, 0 FAIL, 1 SKIP** (the `chat/resume` block prints one line for chat and
+one for resume). The queue dock and the session-scope approval decisions
 remain covered by the web unit suites, not by separate browser scenarios. The
 default suite is fully offline; the
 opt-in `real` scenario (below) reports `SKIP` unless an endpoint is configured.

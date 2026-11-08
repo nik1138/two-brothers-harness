@@ -161,9 +161,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Package suite `1 912 tests` (1 906 pass and 6 platform skips on Windows; the
   WSL Linux pass is 1 911 pass with 1 skip); web suite `459/459`; the
-  browser-E2E matrix is `21` offline scenarios plus the opt-in `real` skip
-  (`21 PASS, 0 FAIL, 1 SKIP`). No protocol or session-format change (all
-  record/API additions are optional), and no new runtime dependency.
+  browser-E2E matrix is `21` offline scenario blocks (22 PASS lines — the
+  `chat/resume` block reports chat and resume separately) plus the opt-in
+  `real` skip (`22 PASS, 0 FAIL, 1 SKIP`). No protocol or session-format
+  change (all record/API additions are optional), and no new runtime
+  dependency.
 
 - **Wave 25: crash-torn session resume, TUI steering, persisted compaction
   settings, cooperative CLI cancellation and a live tab title:**
