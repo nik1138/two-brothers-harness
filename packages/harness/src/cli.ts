@@ -3528,6 +3528,24 @@ function doHelp(
     return 2;
   }
   if (commandHelp(target) === undefined) return reportUnknownCommand(target, io, style);
+  if (target === "tui") {
+    // `help tui` has no `--keys-file` flag context, so it resolves the same
+    // env/default precedence `tui --help` uses when no flag is passed: an
+    // invalid/unreadable configured file prints the same one-line diagnostic
+    // and falls back to the default chords (a missing default file is silent).
+    const resolved = resolveTuiKeyCommandsForCli({});
+    if (resolved.diagnostics.length > 0) {
+      io.error(`[tui keys] ${resolved.diagnostics.join("; ")}`);
+    }
+    io.log(commandHelpFor(target, style, resolved.commands));
+    io.log("");
+    io.log(
+      'note: this key guide uses the env/default TUI keys file (TWO_BROTHERS_TUI_KEYS_FILE ' +
+        'or ~/.two-brothers/tui-keys.json); run "two-brothers tui --help --keys-file <path>" ' +
+        "to show a flag-selected file.",
+    );
+    return 0;
+  }
   io.log(commandHelpFor(target, style));
   return 0;
 }

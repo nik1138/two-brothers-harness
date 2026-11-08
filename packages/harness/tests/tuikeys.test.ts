@@ -38,7 +38,11 @@ import {
   type TuiCommand,
 } from "../src/tui/keymap.ts";
 import { commandHelp, ENVIRONMENT, FLAGS } from "../src/clihelp.ts";
-import { resolveTuiKeyCommandsForCli, tuiKeysFileForCli } from "../src/cli.ts";
+import {
+  main,
+  resolveTuiKeyCommandsForCli,
+  tuiKeysFileForCli,
+} from "../src/cli.ts";
 
 function chord(name: string, extras: Partial<KeyChord> = {}): KeyChord {
   return { name, ...extras };
@@ -356,6 +360,26 @@ test("resolveTuiCommandsFromFile: valid file applies, missing file keeps default
 // CLI/help catalogue parity (the docs↔CLI drift guard's other half)
 // --------------------------------------------------------------------------- //
 
+interface CliCapture {
+  out: string[];
+  err: string[];
+  log(line: string): void;
+  error(line: string): void;
+}
+
+function makeCliIO(): CliCapture {
+  const out: string[] = [];
+  const err: string[] = [];
+  return { out, err, log: (line) => out.push(line), error: (line) => err.push(line) };
+}
+
+function keyRows(text: string): string[] {
+  return text
+    .split("\n")
+    .filter((line) => /^ {2}(Ctrl\+[A-Z]|F[0-9]+|!|PgUp|PgDn)/u.test(line))
+    .map((line) => line.trimEnd());
+}
+
 test("catalogue: --keys-file is a documented tui flag with the env mirror", () => {
   assert.ok("keys-file" in FLAGS, "FLAGS has keys-file");
   const tui = commandHelp("tui");
@@ -417,4 +441,47 @@ test("CLI resolution: flag beats env beats the default path; explicit problems a
 
   for (const temp of [flagFile, envFile, corrupt]) rmSync(temp.dir, { recursive: true, force: true });
   rmSync(home, { recursive: true, force: true });
+});
+
+test("CLI: help tui resolves the env/default keys file and matches tui --help", async () => {
+  const good = tempFile("good.json", doc({ palette: ["ctrl+g"], help: ["f2"], stash: ["ctrl+u"] }));
+  const bad = tempFile("bad.json", "{oops");
+  const previous = process.env.TWO_BROTHERS_TUI_KEYS_FILE;
+  try {
+    process.env.TWO_BROTHERS_TUI_KEYS_FILE = good.file;
+
+    const helpIo = makeCliIO();
+    assert.equal(await main(["help", "tui"], helpIo), 0);
+    assert.deepEqual(helpIo.err, [], "help tui keeps stderr clean for a valid file");
+    const helpText = helpIo.out.join("\n");
+    assert.match(helpText, /Ctrl\+G/, "help tui shows the effective palette chord");
+    assert.match(helpText, /F2/, "help tui shows the effective help chord");
+    assert.doesNotMatch(helpText, /Ctrl\+P/, "the dead default chord is not advertised");
+    assert.match(helpText, /--keys-file/, "the footer explains the flag context");
+
+    const tuiIo = makeCliIO();
+    assert.equal(await main(["tui", "--help"], tuiIo), 0);
+    assert.deepEqual(tuiIo.err, [], "tui --help keeps stderr clean for a valid file");
+    assert.deepEqual(
+      keyRows(helpText),
+      keyRows(tuiIo.out.join("\n")),
+      "help tui and tui --help print the same effective key rows",
+    );
+
+    process.env.TWO_BROTHERS_TUI_KEYS_FILE = bad.file;
+    const badHelpIo = makeCliIO();
+    assert.equal(await main(["help", "tui"], badHelpIo), 0);
+    assert.equal(badHelpIo.err.length, 1, "one honest diagnostic");
+    assert.match(badHelpIo.err[0] ?? "", /^\[tui keys\] .*invalid JSON/);
+    assert.match(badHelpIo.out.join("\n"), /Ctrl\+P/, "help tui falls back to the defaults");
+
+    const badTuiIo = makeCliIO();
+    assert.equal(await main(["tui", "--help"], badTuiIo), 0);
+    assert.equal(badTuiIo.err.length, 1, "tui --help prints the same one-line diagnostic");
+    assert.match(badTuiIo.err[0] ?? "", /^\[tui keys\] .*invalid JSON/);
+  } finally {
+    if (previous === undefined) delete process.env.TWO_BROTHERS_TUI_KEYS_FILE;
+    else process.env.TWO_BROTHERS_TUI_KEYS_FILE = previous;
+    for (const temp of [good, bad]) rmSync(temp.dir, { recursive: true, force: true });
+  }
 });

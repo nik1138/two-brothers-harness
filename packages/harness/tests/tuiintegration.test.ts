@@ -618,3 +618,29 @@ test("injected key overrides: help moves chords and the overlay lists the effect
   input.key("escape");
   assert.equal(await quit(input, app), 0);
 });
+
+test("injected key overrides: a printable help chord opens help only on an empty composer", async () => {
+  const resolved = resolveTuiCommands({ help: [{ name: "!" }] });
+  assert.deepEqual(resolved.diagnostics, []);
+  const { app, input, output } = startApp({ commands: resolved.commands });
+  assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+
+  // Empty composer: the printable rebound chord opens the help overlay.
+  input.type("!");
+  assert.ok(await waitFor(() => textOf(output).includes("HELP")), "! opens help when the draft is empty");
+  assert.match(textOf(output), /!\s+Keyboard help/, "the help overlay lists the effective printable chord");
+  input.key("escape");
+  assert.ok(await waitFor(() => !lastFrameText(output).includes("HELP")));
+
+  // Non-empty composer: the same keypress is typing, not the help chord.
+  input.type("wow");
+  assert.ok(await waitFor(() => textOf(output).includes("wow")));
+  input.type("!");
+  assert.ok(await waitFor(() => textOf(output).includes("wow!")), "! reaches the editor with text present");
+  assert.equal(
+    await waitFor(() => lastFrameText(output).includes("HELP"), 300),
+    false,
+    "a non-empty composer never opens help from the printable chord",
+  );
+  assert.equal(await quit(input, app), 0);
+});
