@@ -761,6 +761,11 @@ defineCommand({
     "junior-model",
     "max-tokens",
     "thinking-budget",
+    "compact",
+    "compact-threshold",
+    "compact-threshold-tokens",
+    "compact-keep-recent",
+    "context-window",
     "plugins-dir",
     "skills-dir",
     "commands-dir",
@@ -774,6 +779,13 @@ defineCommand({
     timeout:
       "per-provider-attempt timeout in seconds (default 120; env TWO_BROTHERS_TIMEOUT); " +
       "raise this for slow local models",
+    compact:
+      "force one compaction in every web run; `--compact-threshold` and the " +
+      "other budgets also size the manual POST /api/sessions/{name}/compact",
+    "compact-threshold":
+      "character trigger for web-run auto-compaction, and the threshold a manual " +
+      "compaction reports (env TWO_BROTHERS_COMPACT_THRESHOLD); without any " +
+      "compaction flag or env, web runs never auto-compact",
     "approval-mode":
       "pin the approval mode for every web run of this server (never persisted); " +
       "without the flag/env the saved approval_policy setting (or ask) applies",

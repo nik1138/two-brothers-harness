@@ -287,7 +287,19 @@ export {
   presetApiKey,
   type Preset,
 } from "./presets.ts";
-export { estimateCost, priceForModel, MODEL_PRICES, type CostEstimate, type CostUsage, type ModelPrice } from "./cost.ts";
+export {
+  costUsageForFamily,
+  estimateCost,
+  estimateRunCostFromUsage,
+  priceForModel,
+  MODEL_PRICES,
+  type CostEstimate,
+  type CostPromptFamily,
+  type CostUsage,
+  type ModelPrice,
+  type PromptTokenUsage,
+  type RunCostInput,
+} from "./cost.ts";
 export { validateArgs, type JsonSchemaSubset, type JsonSchemaType, type ValidationResult } from "./toolschema.ts";
 export { SessionError, SessionStore, restoreContext } from "./session.ts";
 export {
@@ -295,6 +307,7 @@ export {
   DEFAULTS,
   type Args,
   resolveConfig,
+  compactionSettingsFromConfig,
   RunConfigError,
   openaiRoleProblem,
   validateRunConfig,

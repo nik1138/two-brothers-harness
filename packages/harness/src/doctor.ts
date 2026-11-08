@@ -30,6 +30,19 @@
  *                copy, then the repo's web/dist — the same candidates the
  *                server serves) with an index.html
  *   plugins      <cwd>/plugins — optional, so merely a warn when absent
+ *   tui-keys     TUI keys file: `TWO_BROTHERS_TUI_KEYS_FILE` when set, else
+ *                `~/.two-brothers/tui-keys.json` (doctor has no --keys-file).
+ *                An absent default file passes ("defaults active"); an absent
+ *                explicitly named file, invalid JSON, a wrong version, an
+ *                oversized or unreadable file warns with the first bounded
+ *                diagnostic from the TUI keys resolver. A valid file passes
+ *                with the effective palette/help/stash chord summary. The file
+ *                itself is never dumped; only the resolver's bounded lines are
+ *                shown.
+ *   tui-history  TUI prompt history file: `TWO_BROTHERS_TUI_HISTORY_FILE` when
+ *                set, else `~/.two-brothers/tui-history.json`. Missing passes
+ *                (history is optional); a corrupt or unreadable file warns; a
+ *                readable file passes with its effective entry count.
  *
  * API keys are never rendered: role details say "key set"/"key not set" and
  * the endpoint detail never includes request headers or response bodies.
@@ -39,12 +52,25 @@
  * are matched by ENOENT/ENOTDIR.
  */
 import * as fs from "node:fs";
+import { homedir } from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { Config } from "./config.ts";
 import { plainCliStyle, type CliStyle } from "./clistyle.ts";
 import type { ThemeToken } from "./tui/theme.ts";
+import {
+  defaultTuiHistoryPath,
+  loadHistory,
+  TUI_HISTORY_VERSION,
+} from "./tui/historystore.ts";
+import {
+  defaultTuiKeysPath,
+  globalKeySummary,
+  loadTuiKeyCommands,
+  TUI_KEYS_DIAGNOSTIC_MAX_CHARS,
+  type TuiKeysSource,
+} from "./tui/keyoverrides.ts";
 import {
   DEFAULT_PROVIDER_KIND,
   isProviderKind,
@@ -84,6 +110,17 @@ export interface DoctorOptions {
   webRoots?: string[];
   /** Base directory for the relative options above (default `process.cwd()`). */
   cwd?: string;
+  /**
+   * Environment used to resolve the TUI keys/history file overrides
+   * (`TWO_BROTHERS_TUI_KEYS_FILE`, `TWO_BROTHERS_TUI_HISTORY_FILE`). Defaults
+   * to `process.env`; inject `{}` for a hermetic, no-override report.
+   */
+  env?: NodeJS.ProcessEnv;
+  /**
+   * Home directory used for the default TUI keys path
+   * (`~/.two-brothers/tui-keys.json`). Defaults to `os.homedir()`.
+   */
+  home?: string;
   /** Transport for the endpoint probe (default the global `fetch`). */
   fetchImpl?: FetchLike;
   /** Endpoint probe timeout in milliseconds (default 5000; non-positive = default). */
@@ -614,6 +651,144 @@ function checkPlugins(cwd: string): DoctorCheck {
 }
 
 // ---------------------------------------------------------------------------
+// TUI local config files
+// ---------------------------------------------------------------------------
+
+/** Environment override naming the TUI keys file (same as the TUI resolver). */
+const TUI_KEYS_FILE_ENV = "TWO_BROTHERS_TUI_KEYS_FILE";
+
+/**
+ * Where doctor looks for the TUI keys file: the pinned
+ * `TWO_BROTHERS_TUI_KEYS_FILE` env value when set (origin `env`), else the
+ * TUI default `~/.two-brothers/tui-keys.json` (origin `default`). Doctor has
+ * no `--keys-file`, so only those two origins exist here.
+ */
+function tuiKeysSource(env: NodeJS.ProcessEnv, home: string, cwd: string): TuiKeysSource {
+  const raw = env[TUI_KEYS_FILE_ENV];
+  const override = typeof raw === "string" ? raw.trim() : "";
+  if (override !== "") return { path: path.resolve(cwd, override), origin: "env" };
+  return { path: defaultTuiKeysPath(home), origin: "default" };
+}
+
+/** The TUI prompt-history path: env override when set, else the injected home. */
+function tuiHistoryFile(env: NodeJS.ProcessEnv, home: string, cwd: string): string {
+  return path.resolve(cwd, defaultTuiHistoryPath(env, home));
+}
+
+/** First non-empty diagnostic, clipped to the resolver's own display bound. */
+function firstBoundedDiagnostic(diagnostics: readonly string[]): string | null {
+  const first = diagnostics.map((line) => line.trim()).find((line) => line !== "");
+  if (first === undefined) return null;
+  return first.length > TUI_KEYS_DIAGNOSTIC_MAX_CHARS
+    ? `${first.slice(0, TUI_KEYS_DIAGNOSTIC_MAX_CHARS - 1)}…`
+    : first;
+}
+
+/**
+ * The TUI keys check. Resolution and validation are delegated to
+ * `keyoverrides.ts` (the same loader the TUI uses), so doctor can never
+ * disagree with the TUI about a file. A missing optional default is a pass;
+ * every other non-loaded outcome is a warn carrying only the first bounded
+ * resolver diagnostic — the file itself is never dumped.
+ */
+function checkTuiKeys(source: TuiKeysSource): DoctorCheck {
+  const id = "tui-keys";
+  const label = "TUI keys file";
+  const loaded = loadTuiKeyCommands(source);
+  if (loaded.state === "loaded") {
+    return makeCheck(id, label, "pass", `${source.path} — ${globalKeySummary(loaded.commands)}`);
+  }
+  if (loaded.state === "missing") {
+    if (source.origin === "default") {
+      return makeCheck(id, label, "pass", `${source.path} not found — defaults active`);
+    }
+    return makeCheck(
+      id,
+      label,
+      "warn",
+      firstBoundedDiagnostic(loaded.diagnostics) ??
+        `${source.path} not found — using the default chords`,
+    );
+  }
+  return makeCheck(
+    id,
+    label,
+    "warn",
+    firstBoundedDiagnostic(loaded.diagnostics) ??
+      `${source.path}: invalid keys file — using the default chords`,
+  );
+}
+
+/**
+ * Why `text` is not a history document the TUI would load, or `null` when it
+ * is readable. `loadHistory` is deliberately fail-soft (every problem becomes
+ * an empty history), so doctor classifies the document itself and then asks
+ * the store for the effective, normalized entries.
+ */
+function historyDocumentProblem(text: string): string | null {
+  let document: unknown;
+  try {
+    document = JSON.parse(text);
+  } catch {
+    // Never surface the parser message: it can quote the file's bytes.
+    return "not valid JSON — delete it to start a fresh history";
+  }
+  if (!isRecord(document)) return "not a JSON object — delete it to start a fresh history";
+  if (document.version !== TUI_HISTORY_VERSION) {
+    return (
+      `unsupported version (expected ${TUI_HISTORY_VERSION}) — ` +
+      "delete it to start a fresh history"
+    );
+  }
+  if (!Array.isArray(document.entries)) {
+    return '"entries" must be an array of prompt strings — delete it to start a fresh history';
+  }
+  return null;
+}
+
+/**
+ * The TUI history check. The file is optional: a missing path passes
+ * informationally, a corrupt/unreadable one warns, and a readable document
+ * passes with the count of effective (normalized, capped) entries.
+ */
+function checkTuiHistory(filePath: string): DoctorCheck {
+  const id = "tui-history";
+  const label = "TUI history file";
+  let stats: fs.Stats;
+  try {
+    stats = fs.statSync(filePath);
+  } catch (exc) {
+    if (isMissingPath(exc)) {
+      return makeCheck(
+        id,
+        label,
+        "pass",
+        `${filePath} not found — no saved prompt history (optional)`,
+      );
+    }
+    return makeCheck(id, label, "warn", `cannot read ${filePath} — prompt history is optional`);
+  }
+  if (!stats.isFile()) {
+    return makeCheck(id, label, "warn", `${filePath} is not a file — prompt history is optional`);
+  }
+  let text: string;
+  try {
+    text = fs.readFileSync(filePath, "utf-8");
+  } catch {
+    return makeCheck(id, label, "warn", `cannot read ${filePath} — prompt history is optional`);
+  }
+  const problem = historyDocumentProblem(text);
+  if (problem !== null) return makeCheck(id, label, "warn", `${filePath}: ${problem}`);
+  const count = loadHistory(filePath).length;
+  return makeCheck(
+    id,
+    label,
+    "pass",
+    `${filePath} — ${count} ${count === 1 ? "entry" : "entries"}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // report
 // ---------------------------------------------------------------------------
 
@@ -644,6 +819,8 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     const settingsPath = asText(raw.settingsPath)
       ? path.resolve(cwd, asText(raw.settingsPath))
       : path.join(sessionsDir, "settings.json");
+    const env: NodeJS.ProcessEnv = isRecord(raw.env) ? (raw.env as NodeJS.ProcessEnv) : process.env;
+    const home = asText(raw.home) || homedir();
     const providedRoots = Array.isArray(raw.webRoots) ? raw.webRoots : null;
     const webRoots =
       providedRoots === null
@@ -659,6 +836,12 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     await runCheck("endpoint", "Provider endpoint", () => checkEndpoint(config, raw));
     await runCheck("web-assets", "Web assets", () => checkWebAssets(webRoots));
     await runCheck("plugins", "Plugins directory", () => checkPlugins(cwd));
+    await runCheck("tui-keys", "TUI keys file", () =>
+      checkTuiKeys(tuiKeysSource(env, home, cwd)),
+    );
+    await runCheck("tui-history", "TUI history file", () =>
+      checkTuiHistory(tuiHistoryFile(env, home, cwd)),
+    );
   } catch (exc) {
     checks.push(makeCheck("doctor", "Doctor", "fail", `unexpected failure: ${shortError(exc)}`));
   }

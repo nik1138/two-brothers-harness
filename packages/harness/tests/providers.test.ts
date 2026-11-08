@@ -300,6 +300,7 @@ test("extractUsage reads prompt/completion tokens and cached_tokens details", ()
     input_tokens: 7,
     output_tokens: 3,
     cached_tokens: 2,
+    cache_write_tokens: 0,
   });
 });
 
@@ -308,7 +309,7 @@ test("extractUsage falls back to DeepSeek-style prompt_cache_hit_tokens", () => 
     extractUsage({
       usage: { prompt_tokens: 11, completion_tokens: 4, prompt_cache_hit_tokens: 6 },
     }),
-    { input_tokens: 11, output_tokens: 4, cached_tokens: 6 },
+    { input_tokens: 11, output_tokens: 4, cached_tokens: 6, cache_write_tokens: 0 },
   );
 });
 
@@ -317,8 +318,14 @@ test("extractUsage returns zeros when usage is absent", () => {
     input_tokens: 0,
     output_tokens: 0,
     cached_tokens: 0,
+    cache_write_tokens: 0,
   });
-  assert.deepEqual(extractUsage(null), { input_tokens: 0, output_tokens: 0, cached_tokens: 0 });
+  assert.deepEqual(extractUsage(null), {
+    input_tokens: 0,
+    output_tokens: 0,
+    cached_tokens: 0,
+    cache_write_tokens: 0,
+  });
 });
 
 test("mergeUsage sums every key and does not mutate inputs", () => {
@@ -331,6 +338,7 @@ test("mergeUsage sums every key and does not mutate inputs", () => {
     input_tokens: 40,
     output_tokens: 20,
     cached_tokens: 12,
+    cache_write_tokens: 0,
   });
   assert.equal(emptyUsage().model_calls, 0);
 });
@@ -344,6 +352,7 @@ test("usage tracker accumulates per call and snapshots a copy", () => {
     input_tokens: 17,
     output_tokens: 8,
     cached_tokens: 3,
+    cache_write_tokens: 0,
   });
   tracker.snapshot().input_tokens = 999; // snapshot is a copy
   assert.equal(tracker.snapshot().input_tokens, 17);
@@ -358,6 +367,7 @@ test("successful call records usage exactly once (after retries)", async () => {
     input_tokens: 7,
     output_tokens: 3,
     cached_tokens: 2,
+    cache_write_tokens: 0,
   });
 });
 
@@ -395,6 +405,7 @@ test("buildProvider mock roles are unaffected and report deterministic usage", a
     input_tokens: 10,
     output_tokens: 5,
     cached_tokens: 0,
+    cache_write_tokens: 0,
   });
   await provider.chat([{ role: "user", content: "hi" }], "message");
   assert.equal(provider.usage.snapshot().model_calls, 2);
@@ -410,5 +421,6 @@ test("mock usage snapshots merge into a run-level aggregate", async () => {
     input_tokens: 20,
     output_tokens: 10,
     cached_tokens: 0,
+    cache_write_tokens: 0,
   });
 });

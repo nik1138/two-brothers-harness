@@ -24,6 +24,10 @@ import {
   type DoctorReport,
 } from "../src/doctor.ts";
 import type { FetchLike } from "../src/provider.ts";
+import {
+  TUI_KEYS_DIAGNOSTIC_MAX_CHARS,
+  TUI_KEYS_MAX_BYTES,
+} from "../src/tui/keyoverrides.ts";
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -56,7 +60,9 @@ function writeFileAt(filePath: string, text: string): void {
 /**
  * Options rooted in `dir`. Defaults are the "empty environment" case: no
  * sessions dir, no settings file, no web build, no plugins — and the mock
- * provider, so no endpoint is contacted.
+ * provider, so no endpoint is contacted. The TUI keys default resolves under
+ * the temp `home` and the history override points at a temp path, so the real
+ * home directory is never read.
  */
 function baseOptions(dir: string, overrides: Partial<DoctorOptions> = {}): DoctorOptions {
   return {
@@ -65,7 +71,17 @@ function baseOptions(dir: string, overrides: Partial<DoctorOptions> = {}): Docto
     sessionsDir: path.join(dir, "sessions"),
     settingsPath: path.join(dir, "settings.json"),
     webRoots: [path.join(dir, "web")],
+    home: path.join(dir, "home"),
+    env: envFor(dir),
     ...overrides,
+  };
+}
+
+/** Hermetic env for the TUI file checks: a temp history path, plus overrides. */
+function envFor(dir: string, extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return {
+    TWO_BROTHERS_TUI_HISTORY_FILE: path.join(dir, "tui-history.json"),
+    ...extra,
   };
 }
 
@@ -164,7 +180,17 @@ test("report lists every check in deterministic order and is stable across runs"
     const first = await runDoctor(options);
     assert.deepEqual(
       first.checks.map((check) => check.id),
-      ["engine", "settings", "sessions-dir", "roles", "endpoint", "web-assets", "plugins"],
+      [
+        "engine",
+        "settings",
+        "sessions-dir",
+        "roles",
+        "endpoint",
+        "web-assets",
+        "plugins",
+        "tui-keys",
+        "tui-history",
+      ],
     );
     for (const check of first.checks) {
       assert.ok(
@@ -644,7 +670,7 @@ test("web assets default to the packaged/repo candidates without throwing", asyn
     });
     const web = requireCheck(report, "web-assets");
     assert.ok(["pass", "warn"].includes(web.status));
-    assert.equal(report.checks.length, 7);
+    assert.equal(report.checks.length, 9);
   });
 });
 
@@ -666,6 +692,200 @@ test("plugins dir: existing passes, missing warns (optional)", async () => {
     const foundCheck = requireCheck(found, "plugins");
     assert.equal(foundCheck.status, "pass");
     assert.match(foundCheck.detail ?? "", /found:/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TUI keys file
+// ---------------------------------------------------------------------------
+
+test("tui-keys: a missing default file passes with 'defaults active' (no warn)", async () => {
+  await withTempDir(async (dir) => {
+    const report = await runDoctor(baseOptions(dir));
+    const check = requireCheck(report, "tui-keys");
+    assert.equal(check.label, "TUI keys file");
+    assert.equal(check.status, "pass");
+    assert.match(check.detail ?? "", /defaults active/);
+    assert.ok(
+      (check.detail ?? "").includes(path.join(dir, "home", ".two-brothers", "tui-keys.json")),
+      "the default path is the TUI default under the injected home",
+    );
+    assert.equal(report.ok, true);
+  });
+});
+
+test("tui-keys: an env-named missing file warns (a typo is not silent)", async () => {
+  await withTempDir(async (dir) => {
+    const keysPath = path.join(dir, "chosen-keys.json");
+    const report = await runDoctor(
+      baseOptions(dir, { env: envFor(dir, { TWO_BROTHERS_TUI_KEYS_FILE: keysPath }) }),
+    );
+    const check = requireCheck(report, "tui-keys");
+    assert.equal(check.status, "warn");
+    assert.match(check.detail ?? "", /file not found/);
+    assert.ok((check.detail ?? "").includes(keysPath), "the explicitly named path is reported");
+    assert.equal(report.ok, true, "a warn does not fail the report");
+  });
+});
+
+test("tui-keys: a valid file passes with the effective chord summary", async () => {
+  await withTempDir(async (dir) => {
+    const keysPath = path.join(dir, "keys.json");
+    writeFileAt(
+      keysPath,
+      JSON.stringify({
+        version: 1,
+        bindings: { palette: ["ctrl+g"], help: ["f2"], stash: ["ctrl+u"] },
+      }),
+    );
+    const report = await runDoctor(
+      baseOptions(dir, { env: envFor(dir, { TWO_BROTHERS_TUI_KEYS_FILE: keysPath }) }),
+    );
+    const check = requireCheck(report, "tui-keys");
+    assert.equal(check.status, "pass");
+    assert.ok((check.detail ?? "").includes(keysPath));
+    assert.match(check.detail ?? "", /palette Ctrl\+G/);
+    assert.match(check.detail ?? "", /help F2/);
+    assert.match(check.detail ?? "", /stash Ctrl\+U/);
+    const line = formatDoctorReport(report).find((text) => text.startsWith("[pass] TUI keys file"));
+    assert.match(line ?? "", / — .*palette Ctrl\+G/);
+  });
+});
+
+test("tui-keys: invalid JSON warns with only one bounded diagnostic and no file body", async () => {
+  await withTempDir(async (dir) => {
+    // A bare token is a syntax error V8's own message would quote back
+    // (`Unexpected token … "MARKER-NOT-FOR-OUTPUT" is not valid JSON`).
+    const keysPath = path.join(dir, "broken-keys.json");
+    writeFileAt(keysPath, "MARKER-NOT-FOR-OUTPUT sk-never-render");
+    const report = await runDoctor(
+      baseOptions(dir, { env: envFor(dir, { TWO_BROTHERS_TUI_KEYS_FILE: keysPath }) }),
+    );
+    const check = requireCheck(report, "tui-keys");
+    assert.equal(check.status, "warn");
+    assert.match(check.detail ?? "", /invalid JSON/);
+    assert.ok(
+      (check.detail ?? "").length <= TUI_KEYS_DIAGNOSTIC_MAX_CHARS,
+      `diagnostic is bounded (${(check.detail ?? "").length} chars)`,
+    );
+    assert.ok(!(check.detail ?? "").includes("MARKER-NOT-FOR-OUTPUT"), "file contents are not echoed");
+    assert.ok(!(check.detail ?? "").includes("Unexpected token"), "the parser message is not echoed");
+    assert.equal(report.ok, true);
+  });
+});
+
+test("tui-keys: a wrong version and an oversized file warn", async () => {
+  await withTempDir(async (dir) => {
+    const keysPath = path.join(dir, "wrong-version.json");
+    const secret = "sk-never-render-this-value";
+    writeFileAt(keysPath, JSON.stringify({ version: 2, note: secret, bindings: {} }));
+    const wrongVersion = await runDoctor(
+      baseOptions(dir, { env: envFor(dir, { TWO_BROTHERS_TUI_KEYS_FILE: keysPath }) }),
+    );
+    const versionCheck = requireCheck(wrongVersion, "tui-keys");
+    assert.equal(versionCheck.status, "warn");
+    assert.match(versionCheck.detail ?? "", /unsupported version \(expected 1\)/);
+    assert.ok(!(versionCheck.detail ?? "").includes("version 2"), "the file's version value is not echoed");
+    assert.ok(!(versionCheck.detail ?? "").includes(secret), "unrelated file fields are not echoed");
+
+    const oversizedPath = path.join(dir, "oversized-keys.json");
+    writeFileAt(oversizedPath, "x".repeat(TUI_KEYS_MAX_BYTES + 1));
+    const oversized = await runDoctor(
+      baseOptions(dir, { env: envFor(dir, { TWO_BROTHERS_TUI_KEYS_FILE: oversizedPath }) }),
+    );
+    const sizeCheck = requireCheck(oversized, "tui-keys");
+    assert.equal(sizeCheck.status, "warn");
+    assert.match(sizeCheck.detail ?? "", /max 16384/);
+    assert.ok(!(sizeCheck.detail ?? "").includes("xxxxxxxxxx"), "the body is never printed");
+    assert.ok((sizeCheck.detail ?? "").length <= TUI_KEYS_DIAGNOSTIC_MAX_CHARS);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TUI history file
+// ---------------------------------------------------------------------------
+
+test("tui-history: a missing file passes informationally (history is optional)", async () => {
+  await withTempDir(async (dir) => {
+    const report = await runDoctor(baseOptions(dir));
+    const check = requireCheck(report, "tui-history");
+    assert.equal(check.label, "TUI history file");
+    assert.equal(check.status, "pass");
+    assert.match(check.detail ?? "", /not found/);
+    assert.match(check.detail ?? "", /optional/);
+    assert.ok((check.detail ?? "").includes(path.join(dir, "tui-history.json")));
+    assert.equal(report.ok, true);
+  });
+});
+
+test("tui-history: a readable file passes with its effective entry count", async () => {
+  await withTempDir(async (dir) => {
+    const historyPath = path.join(dir, "tui-history.json");
+    writeFileAt(
+      historyPath,
+      JSON.stringify({ version: 1, entries: ["first task", "second task", "second task"] }),
+    );
+    const report = await runDoctor(baseOptions(dir));
+    const check = requireCheck(report, "tui-history");
+    assert.equal(check.status, "pass");
+    assert.match(check.detail ?? "", /2 entries/, "consecutive duplicates collapse like the store");
+    assert.ok((check.detail ?? "").includes(historyPath));
+
+    writeFileAt(historyPath, JSON.stringify({ version: 1, entries: ["only task"] }));
+    const single = requireCheck(await runDoctor(baseOptions(dir)), "tui-history");
+    assert.match(single.detail ?? "", /1 entry\b/, "singular wording for one entry");
+  });
+});
+
+test("tui-history: the injected home supplies the default path when no env override is set", async () => {
+  await withTempDir(async (dir) => {
+    const defaultPath = path.join(dir, "home", ".two-brothers", "tui-history.json");
+    writeFileAt(defaultPath, JSON.stringify({ version: 1, entries: ["home task", "home task 2"] }));
+    // No TWO_BROTHERS_TUI_HISTORY_FILE: the default must come from `home`,
+    // never from the real user home.
+    const report = await runDoctor(baseOptions(dir, { env: {} }));
+    const check = requireCheck(report, "tui-history");
+    assert.equal(check.status, "pass");
+    assert.ok((check.detail ?? "").includes(defaultPath), check.detail ?? "");
+    assert.match(check.detail ?? "", /2 entries/);
+  });
+});
+
+test("tui-history: corrupt, wrong-version and unreadable files warn without contents", async () => {
+  await withTempDir(async (dir) => {
+    const historyPath = path.join(dir, "tui-history.json");
+    const secret = "sk-history-never-render";
+
+    writeFileAt(historyPath, '{"version":1,"entries":["MARKER-HISTORY-CONTENT');
+    const corrupt = requireCheck(await runDoctor(baseOptions(dir)), "tui-history");
+    assert.equal(corrupt.status, "warn");
+    assert.match(corrupt.detail ?? "", /not valid JSON/);
+    assert.ok(!(corrupt.detail ?? "").includes("MARKER-HISTORY-CONTENT"));
+
+    writeFileAt(historyPath, JSON.stringify({ version: 9, note: secret, entries: [] }));
+    const wrongVersion = requireCheck(await runDoctor(baseOptions(dir)), "tui-history");
+    assert.equal(wrongVersion.status, "warn");
+    assert.match(wrongVersion.detail ?? "", /unsupported version \(expected 1\)/);
+    assert.ok(!(wrongVersion.detail ?? "").includes(secret));
+
+    writeFileAt(historyPath, JSON.stringify({ version: 1, entries: "not-an-array" }));
+    const malformed = requireCheck(await runDoctor(baseOptions(dir)), "tui-history");
+    assert.equal(malformed.status, "warn");
+    assert.match(malformed.detail ?? "", /"entries" must be an array/);
+
+    const directoryPath = path.join(dir, "history-dir");
+    fs.mkdirSync(directoryPath, { recursive: true });
+    const notAFile = requireCheck(
+      await runDoctor(
+        baseOptions(dir, { env: envFor(dir, { TWO_BROTHERS_TUI_HISTORY_FILE: directoryPath }) }),
+      ),
+      "tui-history",
+    );
+    assert.equal(notAFile.status, "warn");
+    assert.match(notAFile.detail ?? "", /is not a file/);
+
+    const stillOk = await runDoctor(baseOptions(dir));
+    assert.equal(stillOk.ok, true, "warn never fails the report");
   });
 });
 
@@ -702,13 +922,13 @@ test("runDoctor never throws on partial or hostile input and still reports every
       settingsPath: path.join(dir, "settings.json"),
       webRoots: [],
     } as DoctorOptions);
-    assert.equal(partial.checks.length, 7);
+    assert.equal(partial.checks.length, 9);
     assert.equal(partial.ok, false, "openai roles without a base URL fail");
     assert.match(requireCheck(partial, "roles").detail ?? "", /no senior base URL/);
 
     const noOptions = await runDoctor({ cwd: dir } as unknown as DoctorOptions);
     assert.equal(typeof noOptions.ok, "boolean");
-    assert.equal(noOptions.checks.length, 7);
+    assert.equal(noOptions.checks.length, 9);
 
     const hostile = await runDoctor({
       config: makeConfig({ provider: "mock" }),
@@ -718,7 +938,7 @@ test("runDoctor never throws on partial or hostile input and still reports every
       webRoots: ["", 42 as unknown as string, path.join(dir, "web")],
       timeoutMs: Number.NaN,
     } as unknown as DoctorOptions);
-    assert.equal(hostile.checks.length, 7);
+    assert.equal(hostile.checks.length, 9);
     assert.ok(hostile.checks.every((check) => typeof check.label === "string"));
   });
 });

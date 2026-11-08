@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { deriveTitle, isCliEntry, main, type CliIO } from "../src/cli.ts";
+import { deriveTitle, isCliEntry, main, workModeWithoutToolsWarning, type CliIO } from "../src/cli.ts";
 import { resolveCliStyle } from "../src/clistyle.ts";
 
 function makeIO(): CliIO & { out: string[]; err: string[] } {
@@ -625,4 +625,119 @@ test("chat: a TTY REPL turn streams live per turn and keeps the footer once", as
   // the banner and resolved-role rows are untouched by live mode
   assert.match(liveText, /Two Brothers REPL\./);
   assert.match(liveText, /senior: provider=mock model=/);
+});
+
+// ---------------------------------------------------------------------------
+// work mode without a tool belt warns honestly (stderr only)
+// ---------------------------------------------------------------------------
+
+const WORK_WARNING_ROW = /^\[warn\] work mode has no tools bound/;
+
+const fakeTool = {
+  name: "echo",
+  description: "Echo the arguments.",
+  parameters: { type: "object", properties: {}, additionalProperties: false },
+  execute: () => "ok",
+};
+
+test("run: work mode with no tool belt emits exactly one stderr warning", async () => {
+  const io = makeIO();
+  const code = await main([...MOCK_RUN_ARGS, "--mode", "work"], io);
+  assert.equal(code, 0, io.err.join("\n"));
+
+  const warnings = io.err.filter((line) => WORK_WARNING_ROW.test(line));
+  assert.equal(warnings.length, 1, io.err.join("\n"));
+  const warning = warnings[0] as string;
+  assert.match(warning, /not workspace-bound/);
+  assert.match(warning, /junior cannot read or write files/);
+  assert.match(warning, /deliverable it claims may not exist/);
+  assert.match(warning, /--mcp-config/);
+  assert.match(warning, /`serve`\/TUI/);
+
+  // stdout is untouched: the warning is a diagnostic, never a transcript block
+  const stdout = io.out.join("\n");
+  assert.doesNotMatch(stdout, /work mode has no tools bound/);
+  assert.ok(io.out.some((line) => line.includes("[senior -> user] decision")));
+});
+
+test("run: the work-mode warning never fires with a tool or a non-work mode", async () => {
+  // No tool belt but not work mode: no warning at all.
+  for (const mode of ["consult", "auto"]) {
+    const io = makeIO();
+    assert.equal(await main([...MOCK_RUN_ARGS, "--mode", mode], io), 0, io.err.join("\n"));
+    assert.deepEqual(
+      io.err.filter((line) => WORK_WARNING_ROW.test(line)),
+      [],
+      `${mode}: ${io.err.join("\n")}`,
+    );
+  }
+
+  // The predicate is the single source of truth: any non-empty scope suppresses it.
+  assert.equal(workModeWithoutToolsWarning("work", { junior: [fakeTool] }), null);
+  assert.equal(workModeWithoutToolsWarning("work", { shared: [fakeTool] }), null);
+  assert.equal(workModeWithoutToolsWarning("work", { senior: [fakeTool] }), null);
+  assert.equal(workModeWithoutToolsWarning("consult", {}), null);
+
+  const missing = workModeWithoutToolsWarning("work", { junior: [] });
+  assert.ok(missing !== null, "empty scope lists are still an empty belt");
+  assert.match(missing, /work mode has no tools bound/);
+  assert.ok(workModeWithoutToolsWarning("work", {}) !== null);
+  assert.ok(workModeWithoutToolsWarning("work", { shared: [], senior: [], junior: [] }) !== null);
+});
+
+test("run: a bound MCP tool suppresses the work-mode warning", async (t) => {
+  const serverPath = fileURLToPath(new URL("./fixtures/mcp-demo-server.mjs", import.meta.url));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "tb-cli-work-tools-"));
+  let code: number | null = null;
+  const io = makeIO();
+  try {
+    const configPath = path.join(tmp, "mcp.json");
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        mcpServers: { demo: { command: process.execPath, args: [serverPath], role: "junior" } },
+      }),
+      "utf-8",
+    );
+    code = await main(
+      ["run", "smoke", "--provider", "mock", "--mode", "work", "--mcp-config", configPath],
+      io,
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+  if (io.err.some((line) => line.startsWith("[warn] MCP server 'demo'"))) {
+    // spawning unavailable in this environment: with no loaded tool the honest
+    // warning must fire instead; a CI host with process spawning asserts absence.
+    t.diagnostic("MCP stdio spawn unavailable; skipping the suppression assertion");
+    assert.ok(
+      io.err.some((line) => WORK_WARNING_ROW.test(line)),
+      "an unloadable server leaves an empty belt, which must warn",
+    );
+    return;
+  }
+  assert.equal(code, 0, io.err.join("\n"));
+  assert.deepEqual(io.err.filter((line) => WORK_WARNING_ROW.test(line)), []);
+  assert.ok(io.out.some((line) => line.includes("[senior -> user] decision")));
+});
+
+test("run: the work-mode warning is stderr-only in machine output modes", async () => {
+  const work = makeIO();
+  assert.equal(await main([...MOCK_RUN_ARGS, "--mode", "work", "--json"], work), 0);
+  assert.equal(work.out.length, 1, "one machine object on stdout");
+  const parsed = JSON.parse(work.out[0]) as Record<string, unknown>;
+  assert.deepEqual(
+    Object.keys(parsed).sort(),
+    ["cost", "decision", "errors", "events", "rounds", "task", "usage"],
+    "the machine object shape is unchanged",
+  );
+  assert.ok(work.err.some((line) => WORK_WARNING_ROW.test(line)), "the warning still reaches stderr");
+  assert.doesNotMatch(work.out[0], /work mode has no tools bound/, "stdout carries no warning text");
+
+  // A consult machine run is byte-identical to before: no warning, one object.
+  const consult = makeIO();
+  assert.equal(await main([...MOCK_RUN_ARGS, "--json"], consult), 0);
+  assert.deepEqual(consult.err, [], "clean machine runs keep stderr silent");
+  assert.equal(consult.out.length, 1);
+  JSON.parse(consult.out[0]);
 });

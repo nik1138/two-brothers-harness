@@ -34,7 +34,11 @@ import {
   findBaseCommand,
 } from "../src/basecommands.ts";
 import { COMPACTION_SUMMARY_PREFIX, isCompactionSummary } from "../src/compaction.ts";
-import { resolveConfig } from "../src/config.ts";
+import {
+  compactionFieldsFromConfig,
+  compactionSettingsFromConfig,
+  resolveConfig,
+} from "../src/config.ts";
 import type { ChatMessage } from "../src/context.ts";
 import type { Message } from "../src/protocol.ts";
 import {
@@ -717,6 +721,35 @@ test("compact: a second concurrent compaction is a 409 and one summary is writte
 // P2s: config-derived budgets, corrupt files, client abort
 // ---------------------------------------------------------------------------
 
+test("compact: the config field mapping is ungated; the auto-compaction helper is gated", () => {
+  // A keep-recent budget alone shapes a manual compaction but never enables
+  // auto compaction, so the two helpers must differ only in that gate.
+  const keepRecentOnly = resolveConfig({ provider: "mock", compactKeepRecent: 300 });
+  assert.deepEqual(compactionFieldsFromConfig(keepRecentOnly), { keepRecentChars: 300 });
+  assert.equal(compactionSettingsFromConfig(keepRecentOnly), undefined);
+
+  const triggered = resolveConfig({
+    provider: "mock",
+    compactThreshold: "12000",
+    compactKeepRecent: "300",
+    contextWindow: "8000",
+  });
+  assert.deepEqual(compactionFieldsFromConfig(triggered), {
+    thresholdChars: 12000,
+    keepRecentChars: 300,
+    contextWindow: 8000,
+  });
+  assert.deepEqual(compactionSettingsFromConfig(triggered), {
+    thresholdChars: 12000,
+    keepRecentChars: 300,
+    contextWindow: 8000,
+  });
+
+  const forced = resolveConfig({ provider: "mock", compact: true, compactKeepRecent: "300" });
+  assert.deepEqual(compactionFieldsFromConfig(forced), { force: true, keepRecentChars: 300 });
+  assert.deepEqual(compactionSettingsFromConfig(forced), { force: true, keepRecentChars: 300 });
+});
+
 test("compact: budgets come from the resolved config when ServerOptions.compaction is unset", async () => {
   // A serve-level `--compact-keep-recent 300` equivalent: resolved through the
   // config factory only, no ServerOptions.compaction. The default budget
@@ -826,6 +859,105 @@ test("compact: a client disconnect aborts the summarizer and releases the guard"
       Array.from({ length: events.length }, (_, index) => index + 1),
     );
     assert.ok(events.some((event) => event.payload?.text === "after abort"));
+  } finally {
+    await server.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// run path: config-derived auto compaction (wave 24, A1)
+// ---------------------------------------------------------------------------
+
+const AUTO_COMPACT_TASK =
+  "Trace the cache regression, explain the cause, and propose a concrete fix.";
+
+test("run: serve auto-compacts from the resolved config and a control run does not", async () => {
+  // The serve-parser accepts `--compact-threshold` / `--compact-keep-recent`
+  // and their env equivalents; the resolved config reaches the run harness.
+  // The control server has zero compaction config, so its options object must
+  // stay byte-identical (no summary).
+  const compactedServer = await startServer({
+    configFactory: () =>
+      resolveConfig({
+        provider: "mock",
+        mode: "consult",
+        compactThreshold: 200,
+        compactKeepRecent: 100,
+      }),
+  });
+  const controlServer = await startServer();
+  try {
+    const compacted = await runToEnd(compactedServer, {
+      task: AUTO_COMPACT_TASK,
+      session: "config-auto.jsonl",
+    });
+    assert.equal(compacted.status, "completed");
+    const events = readSession(compactedServer, "config-auto.jsonl");
+    assert.equal(
+      events.filter((event) => isCompactionSummary(event as unknown as Message)).length,
+      1,
+      "the config-derived auto trigger wrote exactly one summary",
+    );
+    assert.ok(
+      events.some(
+        (event) =>
+          typeof event.payload?.text === "string" &&
+          event.payload.text.includes(COMPACTION_SUMMARY_PREFIX),
+      ),
+      "the summary carries the shared COMPACTION_SUMMARY_PREFIX marker",
+    );
+
+    const control = await runToEnd(controlServer, {
+      task: AUTO_COMPACT_TASK,
+      session: "control.jsonl",
+    });
+    assert.equal(control.status, "completed");
+    const controlEvents = readSession(controlServer, "control.jsonl");
+    assert.equal(
+      controlEvents.filter((event) => isCompactionSummary(event as unknown as Message)).length,
+      0,
+      "zero compaction config must not compact",
+    );
+    assert.ok(
+      !controlEvents.some(
+        (event) =>
+          typeof event.payload?.text === "string" &&
+          event.payload.text.includes(COMPACTION_SUMMARY_PREFIX),
+      ),
+      "the control transcript carries no summary marker",
+    );
+  } finally {
+    await compactedServer.close();
+    await controlServer.close();
+  }
+});
+
+test("run: explicit ServerOptions.compaction wins over the resolved config", async () => {
+  // The config factory says "never compact in this short run" (100k chars);
+  // the explicit options say "compact early". Only the latter can produce a
+  // summary, so its presence proves explicit options take precedence.
+  const server = await startServer({
+    configFactory: () =>
+      resolveConfig({
+        provider: "mock",
+        mode: "consult",
+        compactThreshold: 100000,
+        compactKeepRecent: 40000,
+      }),
+    compaction: { thresholdChars: 200, keepRecentChars: 100 },
+  });
+  try {
+    const record = await runToEnd(server, {
+      task: AUTO_COMPACT_TASK,
+      session: "explicit.jsonl",
+    });
+    assert.equal(record.status, "completed");
+    const events = readSession(server, "explicit.jsonl");
+    assert.equal(
+      events.filter((event) => isCompactionSummary(event as unknown as Message)).length,
+      1,
+      "the explicit threshold/keep-recent applied instead of the config's 100k threshold",
+    );
   } finally {
     await server.close();
   }

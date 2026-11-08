@@ -26,6 +26,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
 
 import {
+  compactionSettingsFromConfig,
   resolveConfig,
   maxTokensForRole,
   thinkingBudgetForRole,
@@ -79,7 +80,7 @@ import {
   matchCommand,
   type CommandCatalog,
 } from "./commands.ts";
-import { estimateCost, type CostEstimate } from "./cost.ts";
+import { estimateRunCostFromUsage, type CostEstimate } from "./cost.ts";
 import { plainCliStyle, resolveCliStyle, terminalWidth, type CliStyle } from "./clistyle.ts";
 import {
   createLiveTranscript,
@@ -113,6 +114,7 @@ import {
   isProviderKind,
   listModels,
   PROVIDER_KIND_HINT,
+  roleProviderKind,
   resolveProviderKind,
   type Provider,
   type Tool,
@@ -518,18 +520,27 @@ function renderPromptAudits(
 export { renderMessages };
 
 
+/**
+ * Boolean parser flags (`--compact`, `--resume`, `--json`, …). Their parser
+ * default is `false`, so forwarding that default as a config arg would override
+ * a true `TWO_BROTHERS_*` env value (resolveConfig merges env before args).
+ * They are forwarded only when the flag is actually set.
+ */
+const BOOLEAN_CONFIG_FLAGS = new Set(
+  Object.entries(OPTIONS)
+    .filter(([, spec]) => (spec as { type?: string }).type === "boolean")
+    .map(([flag]) => flag),
+);
+
 function argsToConfigArgs(values: Record<string, any>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const [flag, configKey] of Object.entries(FLAG_TO_CONFIG)) {
     // "print"/"json" are output modes for `run`, not cooperation modes —
     // leave cfg.mode at its default (or the env value) in that case
     if (flag === "mode" && isOutputMode(values[flag])) continue;
-    // Boolean flags default to `false`; forwarding that default would override
-    // a true TWO_BROTHERS_* env value (resolveConfig merges env before args).
-    // Forward `--json` only when set, so Config.jsonOut keeps reflecting the
-    // flag OR its env spelling (TWO_BROTHERS_JSON) for the output-mode
-    // resolution and for embedders.
-    if (flag === "json" && values[flag] !== true) continue;
+    // `--json` is also forwarded when set, so Config.jsonOut keeps reflecting
+    // the flag OR its env spelling (TWO_BROTHERS_JSON) for output resolution.
+    if (BOOLEAN_CONFIG_FLAGS.has(flag) && values[flag] !== true) continue;
     if (values[flag] !== undefined) result[configKey] = values[flag];
   }
   return result;
@@ -642,34 +653,6 @@ function nativeProviders(
     );
   }
   return out;
-}
-
-/**
- * Compaction settings from the CLI flags (and their `TWO_BROTHERS_COMPACT*` /
- * `TWO_BROTHERS_CONTEXT_WINDOW` env equivalents): `--compact` forces one
- * compaction at the start, `--compact-threshold <chars>` auto-compacts
- * whenever the rendered context passes that size, and
- * `--compact-threshold-tokens <n>` / `--context-window <n>` switch to token
- * mode (trigger in estimated tokens; the char flags are then ignored).
- * Nothing is returned when none is set (the harness then never compacts —
- * the default).
- */
-function compactionOptions(cfg: Config): CompactionSettings | undefined {
-  if (
-    !cfg.compact &&
-    cfg.compactThreshold <= 0 &&
-    cfg.compactThresholdTokens <= 0 &&
-    cfg.contextWindow <= 0
-  ) {
-    return undefined;
-  }
-  return {
-    ...(cfg.compact ? { force: true } : {}),
-    ...(cfg.compactThreshold > 0 ? { thresholdChars: cfg.compactThreshold } : {}),
-    ...(cfg.compactKeepRecent > 0 ? { keepRecentChars: cfg.compactKeepRecent } : {}),
-    ...(cfg.compactThresholdTokens > 0 ? { thresholdTokens: cfg.compactThresholdTokens } : {}),
-    ...(cfg.contextWindow > 0 ? { contextWindow: cfg.contextWindow } : {}),
-  };
 }
 
 function openSession(cfg: Config, io: CliIO): SharedContext {
@@ -932,11 +915,36 @@ function activePluginNames(manager: PluginManager): string[] {
   return [...manager.plugins.keys()];
 }
 
+/**
+ * Honest work-mode notice for the CLI path, or `null` when no warning applies.
+ *
+ * `two-brothers run --mode work` has no workspace option, so no workspace
+ * built-ins can bind; without any MCP or plugin-contributed tool the junior
+ * has no way to read or write files. In that configuration a small model can
+ * fabricate a deliverable that the run accepts with exit 0. The warning is one
+ * bounded line on stderr (stdout and exit codes stay untouched), and it never
+ * fires when at least one tool is available.
+ */
+export function workModeWithoutToolsWarning(
+  mode: Config["mode"],
+  scopes: ToolScopes,
+): string | null {
+  if (mode !== "work") return null;
+  const hasAnyTool = Object.values(scopes).some((list) => (list?.length ?? 0) > 0);
+  if (hasAnyTool) return null;
+  return (
+    "work mode has no tools bound: CLI runs are not workspace-bound, so the junior " +
+    "cannot read or write files and a deliverable it claims may not exist. Use `serve`/TUI " +
+    "with a workspace, or bind tools with --mcp-config or a plugin's mcpServers."
+  );
+}
+
 /** Loose view of a `UsageTotals` (or an empty object) for CLI rendering. */
 interface UsageView {
   input_tokens?: unknown;
   output_tokens?: unknown;
   cached_tokens?: unknown;
+  cache_write_tokens?: unknown;
   model_calls?: unknown;
 }
 
@@ -960,17 +968,19 @@ export function usageLine(usage: UsageView, style: CliStyle = plainCliStyle): st
 
 /**
  * The run's cost estimate, when the merged usage can be attributed to one
- * model: both roles must resolve to the same id (the run result carries one
- * merged counter set, not per-role splits, so a mixed-model run honestly
- * reports no estimate). `null` when unknown — the caller prints no line and
- * JSON carries `null`.
+ * model and one prompt-cache family: the harness reports one merged counter
+ * set, not per-role splits, so mixed models stay unknown, and cache tokens are
+ * priced with the same family mapping the server and TUI use (a CLI run against
+ * Anthropic must not price cache reads/writes at the full input rate). `null`
+ * when unknown — the caller prints no line and JSON carries `null`.
  */
 export function estimateRunCost(cfg: Config, usage: UsageView): CostEstimate | null {
-  const model = cfg.seniorModel.trim();
-  if (!model || model !== cfg.juniorModel.trim()) return null;
-  return estimateCost(model, {
-    promptTokens: usageInt(usage.input_tokens),
-    completionTokens: usageInt(usage.output_tokens),
+  return estimateRunCostFromUsage({
+    seniorModel: cfg.seniorModel,
+    juniorModel: cfg.juniorModel,
+    seniorFamily: roleProviderKind(cfg, undefined, "senior"),
+    juniorFamily: roleProviderKind(cfg, undefined, "junior"),
+    usage,
   });
 }
 
@@ -1204,9 +1214,17 @@ async function runOnce(
   }
   // Plugin tools join after the MCP scopes (shared/senior/junior buckets).
   if (bindings !== null) toolScopes = mergePluginScopes(toolScopes, bindings);
+  // Work mode without any belt is the one configuration where the CLI cannot
+  // deliver on the mode's promise: there is no workspace option on this path,
+  // so the junior has no filesystem access. Warn once, before the run starts,
+  // on stderr only — stdout/exit codes stay exactly as they are.
+  const workWarning = workModeWithoutToolsWarning(cfg.mode, toolScopes);
+  if (workWarning !== null) {
+    io.error(paintWarningPrefix(textStyle, `[warn] ${workWarning}`));
+  }
   try {
     const hasScopes = Object.values(toolScopes).some((list) => list !== undefined);
-    const compaction = compactionOptions(cfg);
+    const compaction = compactionSettingsFromConfig(cfg);
     const providerWarnings = providerWarningSink(io, 3, textStyle);
     const native = nativeProviders(cfg, endpoints, providerWarnings);
     const harness = new TwoBrothersHarness(cfg, {

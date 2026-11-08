@@ -17,8 +17,9 @@
  * - streaming requests carry the identical markers (`requestBody` is shared by
  *   both wire paths);
  * - `cache_read_input_tokens` flows into the `UsageTracker`/run usage as
- *   `cached_tokens`, cache WRITES are not counted as hits, and an absent
- *   server-side cache report stays 0 (never fabricated);
+ *   `cached_tokens` and `cache_creation_input_tokens` as `cache_write_tokens`
+ *   (a write is never a hit), and an absent server-side cache report stays 0
+ *   (never fabricated);
  * - the usage display shows the cached portion only when a hit was reported;
  * - OpenAI-compatible and Google request bodies stay byte-identical and never
  *   see `cache_control` (the feature is Anthropic-wire-only).
@@ -386,6 +387,7 @@ test("anthropic: streaming requests carry the same breakpoints and read cache us
     input_tokens: 50,
     output_tokens: 7,
     cached_tokens: 25,
+    cache_write_tokens: 0,
   });
 });
 
@@ -393,7 +395,7 @@ test("anthropic: streaming requests carry the same breakpoints and read cache us
 // honest cache accounting
 // ---------------------------------------------------------------------------
 
-test("anthropic: cached reads map to cached_tokens; cache writes and absent reports do not", async () => {
+test("anthropic: cache reads map to cached_tokens and cache writes to cache_write_tokens", async () => {
   const stub = stubFetch((_request, index) => {
     const usage = [
       // First call: a cache read (40) plus a cache write (10).
@@ -413,27 +415,31 @@ test("anthropic: cached reads map to cached_tokens; cache writes and absent repo
     input_tokens: 120,
     output_tokens: 30,
     cached_tokens: 40,
+    cache_write_tokens: 10,
   });
 
   await provider.chat(PLAIN_MESSAGES);
-  // No fabricated cache hit: the counter keeps the reported 40.
+  // No fabricated cache hit: the counter keeps the reported 40, and the write
+  // counter keeps the 10 written by the first call.
   assert.deepEqual(provider.usageSnapshot(), {
     model_calls: 2,
     input_tokens: 131,
     output_tokens: 32,
     cached_tokens: 40,
+    cache_write_tokens: 10,
   });
 
   await provider.chat(PLAIN_MESSAGES);
-  // Cache creation (a cache WRITE) is deliberately not mapped into our counters
-  // in this slice — there is no write counter, so the write tokens are
-  // undercounted; they are never misreported as a hit, so cached_tokens stays
-  // 40. A dedicated cache-write counter is a deferred follow-up.
+  // Cache creation (a cache WRITE) is mapped to `cache_write_tokens`: the
+  // +100 written by this call joins the 10 from the first, so the run reports
+  // 110 written prompt tokens. A write is never a hit, so `cached_tokens`
+  // stays 40.
   assert.deepEqual(provider.usageSnapshot(), {
     model_calls: 3,
     input_tokens: 136,
     output_tokens: 33,
     cached_tokens: 40,
+    cache_write_tokens: 110,
   });
 });
 
@@ -443,6 +449,7 @@ test("usage: the run aggregate keeps the cached portion and display shows it onl
     input_tokens: 0,
     output_tokens: 0,
     cached_tokens: 0,
+    cache_write_tokens: 0,
   });
   // The run total is the merge of the roles' snapshots (the real run path).
   const merged = mergeUsage(
@@ -454,6 +461,7 @@ test("usage: the run aggregate keeps the cached portion and display shows it onl
     input_tokens: 130,
     output_tokens: 35,
     cached_tokens: 40,
+    cache_write_tokens: 0,
   });
 
   const withCache = humanFooter(merged, null);

@@ -75,12 +75,32 @@ export const STEER_TEXT_MAX_CHARS = 4000;
  */
 export const STEER_QUEUE_MAX = 8;
 
-/** What a run job returns: decision + errors + optional usage totals. */
+/**
+ * One run's estimated USD cost (wave 24, web run-cost visibility). A run-level
+ * projection only — `total` is the estimate for the run's MERGED usage, so it
+ * is computed only when both roles resolve to the same priced model id; every
+ * other run reports `null` rather than a fabricated split.
+ */
+export interface RunCost {
+  currency: "USD";
+  /** Estimated total in USD (input + output; cache subsets priced honestly). */
+  total: number;
+  /** The resolved price-table row the model id matched (e.g. `gpt-4o`). */
+  model: string;
+}
+
+/** What a run job returns: decision + errors + optional usage totals + cost. */
 export interface RunJobResult {
   cancelled?: boolean;
   decision?: Record<string, unknown>;
   errors?: string[];
   usage?: UsageTotals;
+  /**
+   * Additive per-run cost estimate, or `null` when it cannot be attributed
+   * honestly (mixed models, unknown price row, mixed provider families with
+   * cache counters). Absent behaves like `null`.
+   */
+  cost?: RunCost | null;
 }
 
 export type EnvelopeHook = (message: unknown) => void;
@@ -404,6 +424,12 @@ export class RunRecord {
   error = "";
   decision: Record<string, unknown> | null = null;
   usage: UsageTotals = emptyUsage();
+  /**
+   * Additive run cost estimate (wave 24); `null` until the job reports one —
+   * unknown stays unknown, never `$0`. Returned by `public()` on every record
+   * so the web footer can render it or omit the segment honestly.
+   */
+  cost: RunCost | null = null;
   readonly events: RuntimeEvent[] = [];
   readonly controller = new AbortController();
   readonly done: Promise<boolean>;
@@ -555,6 +581,9 @@ export class RunRecord {
     if (this.error) out.error = this.error;
     if (this.decision !== null) out.decision = this.decision;
     out.usage = { ...this.usage };
+    // Additive run cost (wave 24): always present, honestly null when the run
+    // is not attributable to one priced model (mirrors the CLI/TUI rule).
+    out.cost = this.cost === null ? null : { ...this.cost };
     // Mid-run steering honesty (wave 23): a client polling the record learns
     // that texts were dropped at the per-run harness cap and how many are still
     // waiting — no extra route and no faked event. Both fields are additive and
@@ -907,6 +936,10 @@ export class RunManager {
     if (result.usage !== undefined && isRecord(result.usage)) {
       record.usage = { ...emptyUsage(), ...(result.usage as Partial<UsageTotals>) };
     }
+    // Additive run cost (wave 24): the job computes it where the resolved
+    // config/endpoints are in scope. A job that reports none leaves the record
+    // honestly null; a terminal failed/cancelled unwind already stayed null.
+    record.cost = result.cost ?? null;
     const end: RuntimeEvent = {
       type: "run_end",
       status: record.status,

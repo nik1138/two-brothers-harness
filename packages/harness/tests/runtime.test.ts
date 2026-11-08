@@ -193,6 +193,7 @@ test("run_end carries per-run usage", async () => {
     input_tokens: 10,
     output_tokens: 5,
     cached_tokens: 3,
+    cache_write_tokens: 0,
   });
   const end = record.events[record.events.length - 1] as { type: string; usage: Record<string, number> };
   assert.equal(end.type, "run_end");

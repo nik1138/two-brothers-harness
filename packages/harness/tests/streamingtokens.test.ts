@@ -240,6 +240,7 @@ test("openai-compatible: deltas arrive in order and the final chunk carries usag
       input_tokens: OPENAI_USAGE.prompt_tokens,
       output_tokens: OPENAI_USAGE.completion_tokens,
       cached_tokens: 0,
+      cache_write_tokens: 0,
     });
   } finally {
     await stub.close();
@@ -268,6 +269,7 @@ test("anthropic: content_block_delta text + message_start/message_delta usage", 
       input_tokens: 21,
       output_tokens: 9,
       cached_tokens: 3,
+      cache_write_tokens: 0,
     });
   } finally {
     await stub.close();
@@ -301,6 +303,7 @@ test("gemini: :streamGenerateContent?alt=sse text parts + usageMetadata", async 
       input_tokens: 10, // promptTokenCount - cachedContentTokenCount
       output_tokens: 10, // candidatesTokenCount + thoughtsTokenCount
       cached_tokens: 3,
+      cache_write_tokens: 0,
     });
   } finally {
     await stub.close();
@@ -424,6 +427,7 @@ test("anthropic: tool_use input_json_delta fragments reassemble", async () => {
       input_tokens: 4,
       output_tokens: 5,
       cached_tokens: 0,
+      cache_write_tokens: 0,
     });
   } finally {
     await stub.close();

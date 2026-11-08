@@ -8,9 +8,17 @@
  * and an output cap, and can be cancelled cooperatively through an
  * `AbortSignal`.
  *
- * Cleanup kills the whole process tree: on Windows via
- * `taskkill /F /T /PID` (with a `child.kill()` fallback), on POSIX via
- * `killpg` (the child is spawned detached, i.e. in its own session, so
+ * Output is bounded while it streams: each `data` chunk is decoded
+ * incrementally (a `StringDecoder` keeps split UTF-8 sequences whole) and
+ * sanitized with the same escape/control coverage as `output.ts`, then fed
+ * to a head+tail accumulator that retains at most the output cap. A command
+ * like `yes` therefore costs O(cap) memory, not O(command lifetime).
+ *
+ * Cleanup kills the whole process tree: on Windows via the absolute
+ * `%SystemRoot%\System32\taskkill.exe` (never a PATH lookup, so a workspace
+ * cannot plant a same-named executable) spawned asynchronously with ignored
+ * stdio and a bounded wait, with `child.kill()` as the fallback; on POSIX
+ * via `killpg` (the child is spawned detached, i.e. in its own session, so
  * `process.kill(-pid, "SIGKILL")` reaps the group). Python creates the
  * Windows child with CREATE_NEW_PROCESS_GROUP; Node cannot pass raw
  * creation flags, but `taskkill /T` walks the tree regardless, so nothing
@@ -24,11 +32,14 @@ import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from "node:chi
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { performance } from "node:perf_hooks";
+import { StringDecoder } from "node:string_decoder";
 import { sanitizeOutput } from "./output.ts";
 
 export const DEFAULT_TIMEOUT_S = 30.0;
 export const DEFAULT_MAX_OUTPUT_CHARS = 20_000;
 export const KILL_GRACE_S = 2.0;
+/** Bounded wait for the async Windows tree-kill (much shorter than the old 10 s). */
+export const TASKKILL_TIMEOUT_MS = 5_000;
 
 export const STATUS_OK = "ok";
 export const STATUS_ERROR = "error";
@@ -49,19 +60,144 @@ export interface ShellResult {
   error: string;
 }
 
-/** Decode bytes the way Python does: UTF-8 with errors="replace". */
-function decode(data: Buffer | null): string {
-  return data === null ? "" : data.toString("utf8");
+/**
+ * A never-terminated escape sequence is emitted as-is once it exceeds this;
+ * the carry itself is therefore bounded too.
+ */
+const MAX_ESCAPE_CARRY_CHARS = 8_192;
+
+/**
+ * Prefixes of a *complete* 7-bit escape sequence, i.e. sequences whose
+ * remaining bytes can still arrive in a later chunk: a bare ESC, a CSI
+ * header without its final byte, an ESC + intermediate bytes without the
+ * final byte, and a string-form opener (`OSC`/`DCS`/`APC`/`PM`/`SOS`) before
+ * its `BEL`/`ST` terminator — including a trailing ESC that may be the first
+ * half of `ST` (`ESC \`).
+ */
+const INCOMPLETE_ESCAPE_PATTERNS: readonly RegExp[] = [
+  /^\x1b$/,
+  /^\x1b\[[\x30-\x3f]*[\x20-\x2f]*$/,
+  /^\x1b[\x20-\x2f]+$/,
+  /^\x1b[\]PX^_][^\x07\x1b]*\x1b?$/,
+];
+
+/** Start index of an escape sequence that is still waiting for bytes, or -1. */
+function incompleteEscapeStart(text: string): number {
+  const escape = text.lastIndexOf("\x1b");
+  if (escape < 0) return -1;
+  const suffix = text.slice(escape);
+  return INCOMPLETE_ESCAPE_PATTERNS.some((pattern) => pattern.test(suffix))
+    ? escape
+    : -1;
 }
 
-/** Middle-truncation exactly as Python's `_truncate`. */
-function truncate(text: string, limit: number): { text: string; truncated: boolean } {
-  if (text.length <= limit) return { text, truncated: false };
-  const half = Math.floor(limit / 2);
-  return {
-    text: text.slice(0, half) + `\n...[truncated ${text.length - limit} chars]...\n` + text.slice(-half),
-    truncated: true,
-  };
+/**
+ * Sanitize a decoded stream chunk by chunk. A sequence can straddle a chunk
+ * boundary (e.g. `ESC` at the end of one write, `[31m` at the start of the
+ * next), so an incomplete trailing sequence is carried into the next chunk —
+ * but only while it is genuinely incomplete. An earlier version carried
+ * everything from the last `ESC` onward, which split a *terminated* string
+ * sequence at its `ESC \` terminator and leaked the OSC payload (a window
+ * title, an OSC-8 URL) into the tool result; sanitizing the whole text
+ * whenever the tail cannot continue keeps `sanitizeOutput`'s whole-sequence
+ * coverage intact.
+ */
+class StreamingSanitizer {
+  private pending = "";
+
+  push(text: string): string {
+    if (!text) return "";
+    const combined = this.pending + text;
+    this.pending = "";
+    const start = incompleteEscapeStart(combined);
+    if (start >= 0 && combined.length - start <= MAX_ESCAPE_CARRY_CHARS) {
+      this.pending = combined.slice(start);
+      return sanitizeOutput(combined.slice(0, start));
+    }
+    return sanitizeOutput(combined);
+  }
+
+  /** Flush the carried tail; an unterminated escape sanitizes like the whole. */
+  end(): string {
+    const rest = this.pending;
+    this.pending = "";
+    return rest ? sanitizeOutput(rest) : "";
+  }
+}
+
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
+/**
+ * Head+tail window over a sanitized character stream with bounded memory.
+ *
+ * It reproduces the runner's established middle-truncation contract
+ * (`<head>\n...[truncated N chars]...\n<tail>`, N = characters omitted) but
+ * never retains more than `limit` characters while the command runs. The
+ * retained edges are code-point safe: a surrogate pair split by the window
+ * is dropped as a whole and counted in N, so the result never carries half
+ * an emoji.
+ */
+export class BoundedOutput {
+  private readonly limit: number;
+  private readonly headLimit: number;
+  private readonly tailLimit: number;
+  private head = "";
+  private tail = "";
+  private total = 0;
+
+  constructor(limit: number) {
+    this.limit = limit;
+    this.headLimit = Math.floor(limit / 2);
+    this.tailLimit = limit - this.headLimit;
+  }
+
+  /** Characters currently retained (never more than the configured cap). */
+  get retainedChars(): number {
+    return this.head.length + this.tail.length;
+  }
+
+  push(text: string): void {
+    if (!text) return;
+    this.total += text.length;
+    let rest = text;
+    if (this.head.length < this.headLimit) {
+      const take = Math.min(this.headLimit - this.head.length, rest.length);
+      this.head += rest.slice(0, take);
+      rest = rest.slice(take);
+    }
+    if (rest) {
+      this.tail += rest;
+      if (this.tail.length > this.tailLimit) {
+        this.tail = this.tail.slice(this.tail.length - this.tailLimit);
+      }
+    }
+  }
+
+  finish(): { text: string; truncated: boolean } {
+    if (this.total <= this.limit) {
+      // No truncation: head+tail is the complete (short) stream.
+      return { text: this.head + this.tail, truncated: false };
+    }
+    let head = this.head;
+    let tail = this.tail;
+    if (head.length > 0 && isHighSurrogate(head.charCodeAt(head.length - 1))) {
+      head = head.slice(0, -1);
+    }
+    if (tail.length > 0 && isLowSurrogate(tail.charCodeAt(0))) {
+      tail = tail.slice(1);
+    }
+    const omitted = this.total - head.length - tail.length;
+    return {
+      text: head + `\n...[truncated ${omitted} chars]...\n` + tail,
+      truncated: true,
+    };
+  }
 }
 
 /** Find an executable on PATH, mirroring shutil.which for a plain name. */
@@ -106,30 +242,123 @@ function probeBash(): string | null {
   return null;
 }
 
-function killTree(child: ChildProcess): void {
-  if (process.platform === "win32") {
-    try {
-      if (child.pid !== undefined) {
-        const killed = spawnSync("taskkill", ["/F", "/T", "/PID", String(child.pid)], {
-          stdio: "ignore",
-          timeout: 10_000,
-        });
-        if (killed.error) throw killed.error;
-      }
-    } catch {
-      try {
-        child.kill();
-      } catch {
-        // already gone
-      }
+/** The minimal child surface `killTree` needs from `spawn`. */
+export interface TaskkillProcess {
+  once(event: "error", listener: (error: Error) => void): unknown;
+  once(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
+}
+
+export interface TaskkillOptions {
+  stdio: "ignore";
+  timeout: number;
+  windowsHide: boolean;
+}
+
+/** Injectable spawn-like used by `killTree` (tests pass a fake). */
+export type TaskkillSpawn = (
+  file: string,
+  args: readonly string[],
+  options: TaskkillOptions,
+) => TaskkillProcess;
+
+export interface KillTreeOptions {
+  platform?: NodeJS.Platform;
+  env?: NodeJS.ProcessEnv;
+  spawnTaskkill?: TaskkillSpawn;
+  /** Override the bounded taskkill wait (tests only). */
+  timeoutMs?: number;
+}
+
+/**
+ * Resolve the system taskkill binary by absolute path.
+ *
+ * A bare `taskkill` is resolved through the usual Windows search order
+ * (current directory included), so a workspace-planted `taskkill.exe` could
+ * run with server privileges exactly when abort/timeout cleanup fires. The
+ * SystemRoot/WINDIR environment is authoritative; only an absolute value is
+ * trusted, with `C:\Windows` as the sane fallback when neither is set.
+ */
+export function resolveTaskkillPath(env: NodeJS.ProcessEnv = process.env): string {
+  let root = "C:\\Windows";
+  for (const candidate of [env.SystemRoot, env.WINDIR, env.windir]) {
+    const value = candidate?.trim();
+    if (value && path.win32.isAbsolute(value)) {
+      root = value;
+      break;
     }
-  } else {
+  }
+  return path.win32.join(root, "System32", "taskkill.exe");
+}
+
+const defaultTaskkillSpawn: TaskkillSpawn = (file, args, options) =>
+  spawn(file, [...args], options) as unknown as TaskkillProcess;
+
+/**
+ * Kill a child's whole process tree, asynchronously and never throwing.
+ *
+ * Windows: spawn the absolute System32 taskkill with ignored stdio and a
+ * bounded timeout, consume its async `error`, and fall back to
+ * `child.kill()` when the spawn fails, the wait expires, or taskkill reports
+ * failure. POSIX: signal the child's own process group. Cleanup is best
+ * effort; callers must never observe an exception from it.
+ */
+export async function killTree(child: ChildProcess, options: KillTreeOptions = {}): Promise<void> {
+  const fallbackKill = (): void => {
+    try {
+      child.kill();
+    } catch {
+      // already gone
+    }
+  };
+
+  // The child exited on its own before cleanup ran: never signal a PID that
+  // may already have been reused by an unrelated process. (POSIX keeps the
+  // process-group kill below: the group can outlive its leader.)
+  if ((options.platform ?? process.platform) !== "win32") {
     try {
       if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
     } catch {
       // ESRCH / EPERM: the group is already gone
     }
+    return;
   }
+
+  if (child.exitCode != null || child.signalCode != null) return;
+
+  const pid = child.pid;
+  if (pid === undefined) {
+    fallbackKill();
+    return;
+  }
+
+  const timeoutMs = options.timeoutMs ?? TASKKILL_TIMEOUT_MS;
+  const spawnTaskkill = options.spawnTaskkill ?? defaultTaskkillSpawn;
+
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+    const finish = (useFallback: boolean): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      if (useFallback) fallbackKill();
+      resolve();
+    };
+
+    // The timer is the hard bound even if taskkill's own timeout never fires.
+    timer = setTimeout(() => finish(true), timeoutMs + 250);
+    try {
+      const killer = spawnTaskkill(resolveTaskkillPath(options.env), ["/F", "/T", "/PID", String(pid)], {
+        stdio: "ignore",
+        timeout: timeoutMs,
+        windowsHide: true,
+      });
+      killer.once("error", () => finish(true));
+      killer.once("exit", (code) => finish(code !== 0));
+    } catch {
+      finish(true);
+    }
+  });
 }
 
 export interface ShellRunnerOptions {
@@ -138,7 +367,24 @@ export interface ShellRunnerOptions {
   maxOutputChars?: number;
   /** Full environment for the child; omitted = inherit (plus PATH_EXTRA). */
   env?: Record<string, string>;
+  /**
+   * Test seam: replace the child spawn. Omitted = `node:child_process.spawn`
+   * with the normal `bash -c` / platform-shell shape. Production never sets
+   * this; the streaming and cleanup tests use it to stay hermetic (some
+   * sandboxes deny piped child spawns).
+   */
+  spawnChild?: ShellChildSpawn;
 }
+
+/** Injectable child spawn used by `ShellRunner` (tests pass a fake). */
+export type ShellChildSpawn = (
+  command: string,
+  args: readonly string[] | undefined,
+  options: SpawnOptions,
+) => ChildProcess;
+
+const defaultShellSpawn: ShellChildSpawn = (command, args, options) =>
+  args === undefined ? spawn(command, options) : spawn(command, [...args], options);
 
 export class ShellRunner {
   readonly cwd: string | undefined;
@@ -146,11 +392,13 @@ export class ShellRunner {
   readonly maxOutputChars: number;
   readonly env: Record<string, string> | undefined;
   private readonly bash: string | null;
+  private readonly spawnChild: ShellChildSpawn;
 
   constructor(options: ShellRunnerOptions = {}) {
     this.cwd = options.cwd;
     this.defaultTimeout = options.defaultTimeout ?? DEFAULT_TIMEOUT_S;
     this.maxOutputChars = options.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
+    this.spawnChild = options.spawnChild ?? defaultShellSpawn;
     if (options.env === undefined) {
       // TWO_BROTHERS_SHELL_PATH_EXTRA prepends directories to the child PATH
       // so confined workspace shells can find interpreters/tools the harness
@@ -204,18 +452,26 @@ export class ShellRunner {
     };
     try {
       child = this.bash
-        ? spawn(this.bash, ["-c", command], spawnOptions)
-        : spawn(command, { ...spawnOptions, shell: true });
+        ? this.spawnChild(this.bash, ["-c", command], spawnOptions)
+        : this.spawnChild(command, undefined, { ...spawnOptions, shell: true });
     } catch (err) {
       result.status = STATUS_ERROR;
       result.error = err instanceof Error ? err.message : String(err);
       return result;
     }
 
-    const stdoutChunks: Buffer[] = [];
-    const stderrChunks: Buffer[] = [];
-    child.stdout?.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
-    child.stderr?.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
+    const stdoutCapture = new BoundedOutput(this.maxOutputChars);
+    const stderrCapture = new BoundedOutput(this.maxOutputChars);
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
+    const stdoutSanitizer = new StreamingSanitizer();
+    const stderrSanitizer = new StreamingSanitizer();
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdoutCapture.push(stdoutSanitizer.push(stdoutDecoder.write(chunk)));
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderrCapture.push(stderrSanitizer.push(stderrDecoder.write(chunk)));
+    });
 
     let onAbort: (() => void) | undefined;
     const aborted = new Promise<"abort">((resolve) => {
@@ -244,23 +500,23 @@ export class ShellRunner {
       result.cancelled = true;
       result.status = STATUS_CANCELLED;
       result.error = "cancelled by caller";
-      killTree(child);
+      await cleanupKilledTree(child);
       await this.drainAfterKill(child);
     } else if (outcome === "timeout") {
       result.timed_out = true;
       result.status = STATUS_TIMEOUT;
       result.error = `timed out after ${timeout.toFixed(1)}s`;
-      killTree(child);
+      await cleanupKilledTree(child);
       await this.drainAfterKill(child);
     } else if (result.status === STATUS_OK) {
       result.exit_code = child.exitCode;
     }
 
     result.duration_ms = Math.floor(performance.now() - started);
-    // strip ANSI escapes/control chars before the cap so terminal junk never
-    // enters the model context and the cap measures clean text
-    const out = truncate(sanitizeOutput(decode(Buffer.concat(stdoutChunks))), this.maxOutputChars);
-    const err = truncate(sanitizeOutput(decode(Buffer.concat(stderrChunks))), this.maxOutputChars);
+    // Flush the incremental decoders/sanitizers, then apply the same
+    // middle-truncation contract the whole-string path used to produce.
+    const out = finishCaptured(stdoutDecoder, stdoutSanitizer, stdoutCapture);
+    const err = finishCaptured(stderrDecoder, stderrSanitizer, stderrCapture);
     result.stdout = out.text;
     result.stderr = err.text;
     result.truncated = out.truncated || err.truncated;
@@ -269,10 +525,30 @@ export class ShellRunner {
 
   /** Wait for the killed child to finish, up to the kill grace period. */
   private async drainAfterKill(child: ChildProcess): Promise<void> {
-    if (child.exitCode !== null || child.signalCode !== null) return;
+    if (child.exitCode != null || child.signalCode != null) return;
     await Promise.race([
       new Promise<void>((resolve) => child.once("exit", () => resolve())),
       new Promise<void>((resolve) => setTimeout(resolve, (KILL_GRACE_S + 5) * 1000)),
     ]);
+  }
+}
+
+/** Flush a stream's decoder/sanitizer and close its bounded window. */
+function finishCaptured(
+  decoder: StringDecoder,
+  sanitizer: StreamingSanitizer,
+  capture: BoundedOutput,
+): { text: string; truncated: boolean } {
+  capture.push(sanitizer.push(decoder.end()));
+  capture.push(sanitizer.end());
+  return capture.finish();
+}
+
+/** Cleanup must never throw into the tool path. */
+async function cleanupKilledTree(child: ChildProcess): Promise<void> {
+  try {
+    await killTree(child);
+  } catch {
+    // best effort: the drain below still bounds the wait
   }
 }

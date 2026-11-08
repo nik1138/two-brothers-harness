@@ -346,17 +346,18 @@ export function parseTuiKeysDocument(text: string, source: string): TuiKeysParse
   let document: unknown;
   try {
     document = JSON.parse(cleanText);
-  } catch (exc) {
-    return fail(`invalid JSON (${errorMessage(exc)})`);
+  } catch {
+    // Never surface the parser message: V8 quotes a short input excerpt, and
+    // this diagnostic reaches `doctor` (a content-blind check) and the TUI.
+    return fail("invalid JSON");
   }
   if (document === null || typeof document !== "object" || Array.isArray(document)) {
     return fail('the document must be a JSON object like { "version": 1, "bindings": { … } }');
   }
   const record = document as Record<string, unknown>;
   if (record.version !== TUI_KEYS_VERSION) {
-    return fail(
-      `unsupported version ${JSON.stringify(record.version)} (expected ${TUI_KEYS_VERSION})`,
-    );
+    // The version value is file content too; report only what is expected.
+    return fail(`unsupported version (expected ${TUI_KEYS_VERSION})`);
   }
   const rawBindings = record.bindings;
   if (rawBindings === undefined) {

@@ -233,6 +233,8 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import {
+  compactionFieldsFromConfig,
+  compactionSettingsFromConfig,
   resolveConfig,
   RunConfigError,
   validateRunConfig,
@@ -248,6 +250,7 @@ import {
 import { compactContext, type CompactionSettings } from "./compaction.ts";
 import { discoverCommands, expandCommand, matchCommand, type CommandCatalog } from "./commands.ts";
 import { SharedContext } from "./context.ts";
+import { estimateRunCostFromUsage } from "./cost.ts";
 import { TwoBrothersHarness, type HarnessResult, type ToolScopes } from "./harness.ts";
 import {
   loadMcpToolSpecs,
@@ -294,8 +297,10 @@ import {
   isProviderKind,
   listModels,
   PROVIDER_KIND_HINT,
+  roleProviderKind,
   type Provider,
   type RemoteModel,
+  type UsageTotals,
 } from "./provider.ts";
 import { restoreContext, SessionError, SessionStore } from "./session.ts";
 import { forkSession, SessionForkError } from "./sessionfork.ts";
@@ -331,6 +336,7 @@ import {
   type LiveTokenHook,
   type PublicRuntimeSettings,
   type RoleEndpoints,
+  type RunCost,
   type RunJob,
   type RunRecord,
 } from "./runtime.ts";
@@ -387,6 +393,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function errorDetail(exc: unknown): string {
   return exc instanceof Error ? exc.message : String(exc);
+}
+
+/**
+ * Estimate one run's USD cost from its merged usage, or `null` when the run
+ * cannot be attributed honestly. The same-model/same-family policy lives in
+ * `cost.ts::estimateRunCostFromUsage`, shared with the CLI and TUI so the three
+ * surfaces can never disagree about a cached run; the returned `model` is the
+ * price-table row the id resolved to (e.g. `gpt-4o-2024-08-06` → `gpt-4o`).
+ */
+function estimateRecordCost(
+  cfg: Config,
+  endpoints: RoleEndpoints | undefined,
+  usage: UsageTotals | undefined,
+): RunCost | null {
+  if (usage === undefined) return null;
+  const estimate = estimateRunCostFromUsage({
+    seniorModel: endpoints?.senior.model || cfg.seniorModel || "",
+    juniorModel: endpoints?.junior.model || cfg.juniorModel || "",
+    seniorFamily: roleProviderKind(cfg, endpoints?.senior, "senior"),
+    juniorFamily: roleProviderKind(cfg, endpoints?.junior, "junior"),
+    usage,
+  });
+  if (estimate === null) return null;
+  return { currency: "USD", total: estimate.totalCost, model: estimate.model };
 }
 
 /**
@@ -780,7 +810,10 @@ export interface ServerOptions {
   mcpConfig?: string;
   /**
    * Compaction settings for web runs (auto-compact threshold, keep-recent
-   * budget, force). Unset = no compaction, matching the CLI defaults.
+   * budget, force). When set, wins wholesale over the resolved config's
+   * compaction fields; unset = derive them from the config factory, so the
+   * serve `--compact*` flags and env vars reach every run (zero config = no
+   * auto compaction, the CLI default).
    */
   compaction?: CompactionSettings;
   /** Worker-pool size (default: `TWO_BROTHERS_WORKERS` or 2). */
@@ -1065,7 +1098,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     return items;
   }
 
-  function buildCfg(req: RunRequestData): { cfg: Config; endpoints: RoleEndpoints } {
+  function buildCfg(req: RunRequestData, warn = true): { cfg: Config; endpoints: RoleEndpoints } {
     const cfg = state.configFactory();
     // Run-level provider (flags/env) before role settings overlay it —
     // it is the fallback for roles that do not set their own provider.
@@ -1108,7 +1141,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       req.provider === undefined,
     );
     for (const warning of endpoints.warnings) {
-      console.warn(`[two-brothers] ${warning}`);
+      if (warn) console.warn(`[two-brothers] ${warning}`);
     }
     return { cfg, endpoints };
   }
@@ -1117,17 +1150,14 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
    * Compaction settings the *resolved run config* carries: the serve-level
    * `--compact-*` / `TWO_BROTHERS_COMPACT*` / `--context-window` flags reach
    * `Config` through the config factory, so a server started with a small
-   * keep-recent budget must honour it on a manual compaction too. Mirrors the
-   * CLI's `compactionOptions` field mapping; unset (0) fields are omitted so
-   * `compaction.ts` defaults apply. The `--compact` force flag is irrelevant to
-   * a manual request, which always asks for one compaction.
+   * keep-recent budget must honour it on a manual compaction too. Uses the
+   * ungated field mapping (a manual request can use budgets while auto
+   * compaction is off) shared with the run path; only `force` is dropped,
+   * because the request always asks for exactly one compaction.
    */
   function configCompactionSettings(cfg: Config): CompactionSettings {
-    const settings: CompactionSettings = {};
-    if (cfg.compactThreshold > 0) settings.thresholdChars = cfg.compactThreshold;
-    if (cfg.compactKeepRecent > 0) settings.keepRecentChars = cfg.compactKeepRecent;
-    if (cfg.compactThresholdTokens > 0) settings.thresholdTokens = cfg.compactThresholdTokens;
-    if (cfg.contextWindow > 0) settings.contextWindow = cfg.contextWindow;
+    const settings = { ...compactionFieldsFromConfig(cfg) };
+    delete settings.force;
     return settings;
   }
 
@@ -1388,6 +1418,13 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
    * marked `rebuilt: true` (additive; live in-memory records omit the field)
    * so the UI can explain the blank fields instead of guessing. Returns null
    * when no sidecar holds a terminal run with that id.
+   *
+   * `cost` is not an event field either: it is RECOMPUTED here from the
+   * persisted `run_end` usage and the models the CURRENT config resolves to
+   * (same rule as the live run job). A settings/model change between the run
+   * and this read can therefore change the estimate, and an unpriceable or
+   * now-mixed-model config honestly reports `null`. The usage counters
+   * themselves are never rewritten.
    */
   function recoverRun(runId: string): Record<string, unknown> | null {
     const found = state.runtimeEvents.findRun(runId);
@@ -1418,7 +1455,18 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       record.error = error.message;
     }
     if (isRecord(end.decision)) record.decision = end.decision;
-    record.usage = isRecord(end.usage) ? { ...emptyUsage(), ...end.usage } : { ...emptyUsage() };
+    const usage = isRecord(end.usage) ? { ...emptyUsage(), ...end.usage } : { ...emptyUsage() };
+    record.usage = usage;
+    // Recompute (never persist) the cost: the event stream stays free of a
+    // derived field, and the current config is the only model source after a
+    // restart. A failing config factory keeps the record usable with a null
+    // estimate rather than turning the read into a 500.
+    try {
+      const { cfg, endpoints } = buildCfg({ task: "" }, false);
+      record.cost = estimateRecordCost(cfg, endpoints, usage);
+    } catch {
+      record.cost = null;
+    }
     return record;
   }
 
@@ -1510,6 +1558,13 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         undoCapture = null;
       }
     }
+    // Config-derived auto-compaction (wave 24): `serve` accepts the same
+    // `--compact*` / `--context-window` flags and env vars as `run`/`chat`,
+    // so the resolved config feeds the harness exactly like the CLI does.
+    // An explicit `ServerOptions.compaction` still wins wholesale (the
+    // operator/programmatic pin overrides the factory), and zero config keeps
+    // the options object byte-identical.
+    const compaction = options.compaction ?? compactionSettingsFromConfig(cfg);
     const harness = new TwoBrothersHarness(cfg, {
       workspace,
       signal,
@@ -1519,7 +1574,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       junior: providerOverrides?.junior,
       endpoints,
       skills: skillCatalog(),
-      ...(options.compaction ? { compaction: options.compaction } : {}),
+      ...(compaction ? { compaction } : {}),
       ...(toolScopes ? { toolScopes } : {}),
       ...(hooks ? { hooks } : {}),
       // Mid-run operator steering (wave 23): the run job hands the record's
@@ -1628,6 +1683,9 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         decision: result.decision,
         errors: result.errors,
         usage: result.usage,
+        // Additive run cost (wave 24): computed here, where the resolved
+        // config + per-role endpoints are in scope. `null` is honest.
+        cost: estimateRecordCost(cfg, endpoints, result.usage),
       };
     };
   }

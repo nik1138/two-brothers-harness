@@ -688,6 +688,22 @@ test("every command: --help and -h print command help on stdout, exit 0", async 
   }
 });
 
+test("serve --help documents the compaction budgets web runs honour", async () => {
+  const io = makeIO();
+  assert.equal(await main(["serve", "--help"], io), 0);
+  const text = io.out.join("\n");
+  for (const flag of [
+    "--compact",
+    "--compact-threshold",
+    "--compact-threshold-tokens",
+    "--compact-keep-recent",
+    "--context-window",
+  ]) {
+    assert.match(text, new RegExp(`${flag}(?![\\w-])`), `serve help lists ${flag}`);
+  }
+  assert.match(text, /auto-compact/, "serve help says what the budgets drive");
+});
+
 test("help <command> prints that command's help, exit 0", async () => {
   for (const command of HELP_COMMANDS) {
     const io = makeIO();
@@ -1290,6 +1306,34 @@ test("config --json: stable object with per-role sources and masked keys", async
 // ---------------------------------------------------------------------------
 // run input: --dry-run, --task-file and `run -`
 // ---------------------------------------------------------------------------
+
+test("run --dry-run honours TWO_BROTHERS_COMPACT when the flag is absent", async () => {
+  await withTempDir(async (dir) => {
+    await withCleanCliEnv(async () => {
+      process.env.TWO_BROTHERS_COMPACT = "1";
+      try {
+        const io = makeIO();
+        const code = await main(
+          [
+            "run",
+            "env compact task",
+            "--provider",
+            "mock",
+            "--session-file",
+            path.join(dir, "env-compact.jsonl"),
+            "--dry-run",
+          ],
+          io,
+        );
+        assert.equal(code, 0, io.err.join("\n"));
+        // The parser default `compact: false` must not override the env value.
+        assert.match(io.out.join("\n"), /\(forced once\)/);
+      } finally {
+        delete process.env.TWO_BROTHERS_COMPACT;
+      }
+    });
+  });
+});
 
 test("run --dry-run: prints the plan, writes no session, calls no provider", async () => {
   await withTempDir(async (dir) => {

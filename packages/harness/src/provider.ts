@@ -312,22 +312,68 @@ export function resolveProviderKind(
   return value;
 }
 
+/**
+ * The family a role actually talks to, for accounting paths that must never
+ * throw: a role endpoint kind wins over the run-level kind, exactly like
+ * provider construction. An invalid kind is the harness's clear, actionable
+ * failure to surface later; a cost or display estimate returns `null` instead
+ * of turning it into a second failure.
+ */
+export function roleProviderKind(
+  cfg: Pick<ProviderConfig, "kind" | "seniorKind" | "juniorKind">,
+  endpoint: { kind?: string } | undefined,
+  role: "senior" | "junior",
+): ProviderKind | null {
+  try {
+    if (endpoint?.kind) {
+      return resolveProviderKind({ kind: endpoint.kind, seniorKind: "", juniorKind: "" }, role);
+    }
+    return resolveProviderKind(cfg, role);
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // usage tracking (UsageTracker / extract_usage / merge_usage in Python)
 // ---------------------------------------------------------------------------
 
-export const USAGE_KEYS = ["model_calls", "input_tokens", "output_tokens", "cached_tokens"] as const;
+export const USAGE_KEYS = [
+  "model_calls",
+  "input_tokens",
+  "output_tokens",
+  "cached_tokens",
+  "cache_write_tokens",
+] as const;
 
 export interface UsageTotals {
   model_calls: number;
   input_tokens: number;
   output_tokens: number;
   cached_tokens: number;
+  /**
+   * Prompt tokens WRITTEN to a provider-side prompt cache — Anthropic's
+   * `cache_creation_input_tokens` (billed at the cache-write premium). A write
+   * is never a hit, so this is disjoint from `cached_tokens`. 0 for families
+   * whose payloads report no clear cache-write counter (OpenAI-compatible,
+   * Gemini); see `extractUsage`/`googleUsage` for the documented decision.
+   *
+   * Optional in the TYPE only, so existing object literals stay assignable;
+   * every aggregate producer (`emptyUsage`, `mergeUsage`, tracker snapshots)
+   * always emits it.
+   */
+  cache_write_tokens?: number;
 }
 
-/** The zero usage aggregate: `{model_calls, input_tokens, output_tokens, cached_tokens}`. */
+/** The zero usage aggregate: every `USAGE_KEYS` counter at 0. */
 export function emptyUsage(): UsageTotals {
-  return { model_calls: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0 };
+  return {
+    model_calls: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    cached_tokens: 0,
+    cache_write_tokens: 0,
+  };
 }
 
 function coerceInt(value: unknown): number {
@@ -341,6 +387,12 @@ function coerceInt(value: unknown): number {
  * prototype does — `usage.prompt_tokens_details.cached_tokens` (OpenAI style)
  * — falling back to `usage.prompt_cache_hit_tokens` (DeepSeek style), which
  * the prototype surfaces through its provider SDK's `cache_read` mapping.
+ *
+ * `cache_write_tokens` stays 0 for this family: OpenAI-compatible payloads
+ * report cache reads but expose no per-token cache-write counter (OpenAI's
+ * automatic caching has no separate write fee), and no clear equivalent exists
+ * to read, so nothing is guessed. Anthropic's `cache_creation_input_tokens`
+ * is mapped by its own adapter.
  */
 export function extractUsage(data: unknown): Omit<UsageTotals, "model_calls"> {
   const usage =
@@ -357,6 +409,7 @@ export function extractUsage(data: unknown): Omit<UsageTotals, "model_calls"> {
     input_tokens: coerceInt(raw.prompt_tokens),
     output_tokens: coerceInt(raw.completion_tokens),
     cached_tokens: cached,
+    cache_write_tokens: 0,
   };
 }
 
@@ -365,7 +418,7 @@ export function mergeUsage(...usages: Array<Partial<UsageTotals> | null | undefi
   const total = emptyUsage();
   for (const usage of usages) {
     for (const key of USAGE_KEYS) {
-      total[key] += coerceInt(usage?.[key]);
+      total[key] = (total[key] ?? 0) + coerceInt(usage?.[key]);
     }
   }
   return total;
@@ -375,17 +428,19 @@ export function mergeUsage(...usages: Array<Partial<UsageTotals> | null | undefi
 export class UsageTracker {
   private totals = emptyUsage();
 
-  record(inputTokens = 0, outputTokens = 0, cachedTokens = 0): void {
+  record(inputTokens = 0, outputTokens = 0, cachedTokens = 0, cacheWriteTokens = 0): void {
     this.totals.model_calls += 1;
     this.totals.input_tokens += coerceInt(inputTokens);
     this.totals.output_tokens += coerceInt(outputTokens);
     this.totals.cached_tokens += coerceInt(cachedTokens);
+    this.totals.cache_write_tokens =
+      (this.totals.cache_write_tokens ?? 0) + coerceInt(cacheWriteTokens);
   }
 
   /** Record one call's usage straight from an OpenAI-compatible response JSON. */
   recordResponse(data: unknown): void {
-    const { input_tokens, output_tokens, cached_tokens } = extractUsage(data);
-    this.record(input_tokens, output_tokens, cached_tokens);
+    const { input_tokens, output_tokens, cached_tokens, cache_write_tokens } = extractUsage(data);
+    this.record(input_tokens, output_tokens, cached_tokens, cache_write_tokens);
   }
 
   snapshot(): UsageTotals {
@@ -1613,8 +1668,9 @@ const API_VERSION_SEGMENT = /\/v\d+(?:(?:alpha|beta)\d*)?$/i;
  *   each provider call re-marks the growing prefix it is about to send.
  *
  * That is at most three breakpoints, under the API's four-per-request cap.
- * The first call of a run writes the cache (billed at the cache-write premium);
- * the 2nd..Nth calls in the same cooperation cycle read it and report
+ * The first call of a run writes the cache (billed at the cache-write premium;
+ * `usage.cache_creation_input_tokens` is mapped to `cache_write_tokens`); the
+ * 2nd..Nth calls in the same cooperation cycle read it and report
  * `usage.cache_read_input_tokens`, which the adapter maps to `cached_tokens`.
  * OpenAI-compatible and Google request bodies never see this field.
  */
@@ -1779,11 +1835,13 @@ function anthropicCompletion(data: unknown, url: string): ToolChatResponse {
 
 /**
  * Anthropic usage → our counters. `input_tokens` counts only uncached prompt
- * tokens (cache reads come back separately in `cache_read_input_tokens`);
- * `cache_creation_input_tokens` is a cache write, not a hit, so it is not
- * reported as cached. An absent server-side cache report maps to 0 — honest
- * accounting never invents a cache hit from a request that merely carried a
- * breakpoint.
+ * tokens: cache reads come back separately in `cache_read_input_tokens`
+ * (mapped to `cached_tokens`, a hit) and cache writes in
+ * `cache_creation_input_tokens` (mapped to `cache_write_tokens`, billed at
+ * the write premium — a write is never a hit). Total prompt tokens for cost
+ * purposes are the three summed. An absent server-side cache report maps to
+ * 0 — honest accounting never invents cache activity from a request that
+ * merely carried a breakpoint.
  */
 function anthropicUsage(data: unknown): Omit<UsageTotals, "model_calls"> {
   const usage = isRecord(data) && isRecord(data.usage) ? data.usage : {};
@@ -1791,6 +1849,7 @@ function anthropicUsage(data: unknown): Omit<UsageTotals, "model_calls"> {
     input_tokens: coerceInt(usage.input_tokens),
     output_tokens: coerceInt(usage.output_tokens),
     cached_tokens: coerceInt(usage.cache_read_input_tokens),
+    cache_write_tokens: coerceInt(usage.cache_creation_input_tokens),
   };
 }
 
@@ -1851,9 +1910,10 @@ interface AnthropicStreamState extends StreamState {
  * a cooperation cycle is served from Anthropic's prompt cache on the 2nd..Nth
  * call. The marker set is deterministic and additive: it is the one deliberate
  * change to the pre-caching Anthropic wire body, and no other adapter family
- * sees it. `cache_read_input_tokens` is mapped to `cached_tokens` (cache writes
- * are not counted as hits); usage display shows the cached portion only when
- * the provider actually reported one.
+ * sees it. `cache_read_input_tokens` is mapped to `cached_tokens` and
+ * `cache_creation_input_tokens` to `cache_write_tokens` (writes are never
+ * counted as hits); usage display shows the cache portions only when the
+ * provider actually reported them.
  */
 export class AnthropicProvider extends BaseHttpProvider {
   readonly maxTokens: number;
@@ -2109,7 +2169,12 @@ export class AnthropicProvider extends BaseHttpProvider {
 
   protected recordUsage(data: unknown): void {
     const usage = anthropicUsage(data);
-    this.usage.record(usage.input_tokens, usage.output_tokens, usage.cached_tokens);
+    this.usage.record(
+      usage.input_tokens,
+      usage.output_tokens,
+      usage.cached_tokens,
+      usage.cache_write_tokens,
+    );
   }
 
   protected describeError(status: number, detail: string, statusText: string): ProviderErrorDetail {
@@ -2238,6 +2303,12 @@ function googleCompletion(data: unknown, url: string): ToolChatResponse {
  * Gemini usage → our counters. `promptTokenCount` includes cached content, so
  * the cached count is subtracted to keep `input_tokens` uncached (as in
  * pi-ai); thought tokens count as output.
+ *
+ * `cache_write_tokens` stays 0: Gemini reports cached-content READS
+ * (`cachedContentTokenCount`) but no per-token cache-write counter — explicit
+ * context caching is billed as storage per token-hour, not a write fee, and
+ * implicit caching has no write charge — so there is no clear equivalent to
+ * map, and none is guessed.
  */
 function googleUsage(data: unknown): Omit<UsageTotals, "model_calls"> {
   const meta = isRecord(data) && isRecord(data.usageMetadata) ? data.usageMetadata : {};
@@ -2246,6 +2317,7 @@ function googleUsage(data: unknown): Omit<UsageTotals, "model_calls"> {
     input_tokens: Math.max(0, coerceInt(meta.promptTokenCount) - cached),
     output_tokens: coerceInt(meta.candidatesTokenCount) + coerceInt(meta.thoughtsTokenCount),
     cached_tokens: cached,
+    cache_write_tokens: 0,
   };
 }
 
@@ -2389,7 +2461,7 @@ export class GoogleProvider extends BaseHttpProvider {
 
   protected recordUsage(data: unknown): void {
     const usage = googleUsage(data);
-    this.usage.record(usage.input_tokens, usage.output_tokens, usage.cached_tokens);
+    this.usage.record(usage.input_tokens, usage.output_tokens, usage.cached_tokens, 0);
   }
 
   protected describeError(status: number, detail: string, statusText: string): ProviderErrorDetail {

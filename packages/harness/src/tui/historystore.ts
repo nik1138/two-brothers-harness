@@ -45,13 +45,17 @@ export interface TuiHistoryFile {
 /**
  * Resolve the history path: the environment override when set, else
  * `~/.two-brothers/tui-history.json` (the same local-state directory used by
- * skills and commands). The `env` parameter keeps this testable without
- * mutating the process environment.
+ * skills and commands). The `env`/`home` parameters keep this testable without
+ * mutating the process environment or reading the real user home (embedders
+ * such as `doctor` inject both).
  */
-export function defaultTuiHistoryPath(env: NodeJS.ProcessEnv = process.env): string {
+export function defaultTuiHistoryPath(
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = os.homedir(),
+): string {
   const override = env[TUI_HISTORY_FILE_ENV];
   if (typeof override === "string" && override.trim() !== "") return override.trim();
-  return path.join(os.homedir(), ".two-brothers", "tui-history.json");
+  return path.join(home, ".two-brothers", "tui-history.json");
 }
 
 /** Clip one entry to the character cap without splitting a grapheme. */

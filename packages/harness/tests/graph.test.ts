@@ -432,6 +432,7 @@ test("mock consult run aggregates usage onto the result", async () => {
     input_tokens: 40,
     output_tokens: 20,
     cached_tokens: 0,
+    cache_write_tokens: 0,
   });
 });
 
@@ -472,6 +473,7 @@ test("custom providers without usage tracking report zeros", async () => {
     input_tokens: 0,
     output_tokens: 0,
     cached_tokens: 0,
+    cache_write_tokens: 0,
   });
 });
 

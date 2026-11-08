@@ -7,6 +7,7 @@
  * a clear error until they are configured (flags/env), so no endpoint is
  * ever contacted by surprise. `mock` runs need nothing.
  */
+import type { CompactionSettings } from "./compaction.ts";
 import {
   ANTHROPIC_MIN_THINKING_BUDGET,
   DEFAULT_PROVIDER_KIND,
@@ -464,6 +465,49 @@ export function resolveConfig(args: Args = {}): Config {
     );
   }
   return cfg;
+}
+
+/**
+ * Every positive compaction budget the resolved config carries, with no
+ * enable gate: `force` plus the four budgets, copied only when set. Callers
+ * that must act on a *manual* compaction request use this directly (the
+ * budgets are meaningful even while auto compaction is off); callers that ask
+ * "should this run compact at all?" use {@link compactionSettingsFromConfig}.
+ */
+export function compactionFieldsFromConfig(cfg: Config): CompactionSettings {
+  return {
+    ...(cfg.compact ? { force: true } : {}),
+    ...(cfg.compactThreshold > 0 ? { thresholdChars: cfg.compactThreshold } : {}),
+    ...(cfg.compactKeepRecent > 0 ? { keepRecentChars: cfg.compactKeepRecent } : {}),
+    ...(cfg.compactThresholdTokens > 0 ? { thresholdTokens: cfg.compactThresholdTokens } : {}),
+    ...(cfg.contextWindow > 0 ? { contextWindow: cfg.contextWindow } : {}),
+  };
+}
+
+/**
+ * Compaction settings derived from the resolved config — the single mapping
+ * behind every auto-compaction surface (`run`/`chat`, `tui`, `serve`).
+ *
+ * `--compact` (and `TWO_BROTHERS_COMPACT`) becomes `force`; the budgets come
+ * from {@link compactionFieldsFromConfig}, so the positive-only field mapping
+ * exists once. `undefined` when nothing enables compaction is deliberate: the
+ * harness then never compacted before this helper and its options stay
+ * byte-identical (no default-behavior change). `keepRecentChars` alone does not
+ * enable compaction — it only shapes a compaction that some trigger asked for.
+ *
+ * The `CompactionSettings` import is type-only, so there is no runtime import
+ * cycle with `compaction.ts` (which does not import `config.ts`).
+ */
+export function compactionSettingsFromConfig(cfg: Config): CompactionSettings | undefined {
+  if (
+    !cfg.compact &&
+    cfg.compactThreshold <= 0 &&
+    cfg.compactThresholdTokens <= 0 &&
+    cfg.contextWindow <= 0
+  ) {
+    return undefined;
+  }
+  return compactionFieldsFromConfig(cfg);
 }
 
 // ---------------------------------------------------------------------------

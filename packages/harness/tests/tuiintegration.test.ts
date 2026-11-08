@@ -902,3 +902,84 @@ test("/keys show reports an unwatchable embedded session honestly", async () => 
   );
   assert.equal(await quit(input, app), 0);
 });
+
+test("/sessions picker: sidecar and derived titles with human ages, resume unchanged", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-tui-sessions-picker-"));
+  const sessionsDir = path.join(root, "sessions");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  const metaName = "2026-11-08T11-58-46-279-aaaaaa.jsonl";
+  const plainName = "2026-11-08T12-00-00-000-bbbbbb.jsonl";
+  const userLine = (text: string): string =>
+    JSON.stringify({
+      v: 1,
+      id: `id-${text.length}`,
+      seq: 1,
+      ts: "2026-11-08T11:58:46Z",
+      from: "user",
+      to: "senior",
+      kind: "message",
+      payload: { text },
+    });
+  fs.writeFileSync(path.join(sessionsDir, metaName), `${userLine("raw first message")}\n`, "utf8");
+  fs.writeFileSync(
+    path.join(sessionsDir, plainName),
+    `${userLine("Derived title from the first message")}\n`,
+    "utf8",
+  );
+  fs.writeFileSync(
+    path.join(sessionsDir, metaName.replace(/\.jsonl$/, ".meta.json")),
+    JSON.stringify({ title: "Sidecar title for resume", created: 1, updated: 2 }, null, 2),
+    "utf8",
+  );
+  const { app, input, output } = startApp({ sessionsDir });
+  try {
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+
+    input.type("/sessions");
+    input.key("escape"); // dismiss the inline / picker, keep the draft
+    input.enter();
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("RESUME SESSION")),
+      "the resume picker opened",
+    );
+    const frame = lastFrameText(output);
+    assert.ok(frame.includes("Sidecar title for resume"), "the metadata sidecar title is the label");
+    assert.ok(
+      !frame.includes("raw first message"),
+      "the sidecar title wins over the message-derived title",
+    );
+    assert.ok(
+      !frame.includes(metaName.slice(0, -".jsonl".length)),
+      "the raw .jsonl stem is not shown as a label",
+    );
+    assert.ok(
+      frame.includes("Derived title from the first message"),
+      "a metadata-less session falls back to the first operator message",
+    );
+    assert.ok(
+      !frame.includes(plainName.slice(0, -".jsonl".length)),
+      "the metadata-less raw stem is not shown either",
+    );
+    assert.match(frame, /— just now/, "the description is a short human age");
+    assert.ok(
+      frame.split("\n").every((row) => stripAnsi(row).length <= 80),
+      "the title-bearing picker stays width-safe at 80 columns",
+    );
+
+    // Resume behavior is unchanged: accept the first session (alphabetical
+    // file order), confirm, and land in the restored context.
+    input.enter();
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes('Resume "Sidecar title for resume"?')),
+      "the confirmation names the readable title",
+    );
+    input.enter();
+    assert.ok(
+      await waitFor(() => textOf(output).includes("resumed Sidecar title for resume")),
+      "the session resumes and the success toast names the title",
+    );
+    assert.equal(await quit(input, app), 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

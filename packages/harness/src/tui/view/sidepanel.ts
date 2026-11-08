@@ -139,9 +139,10 @@ export function toggleSidePanelEnabled(current: boolean | null): boolean {
 // --------------------------------------------------------------------------- //
 
 /**
- * Compaction configuration as the app resolved it (`compactionOptions`), with
- * the same default budgets the compaction module applies. `off` means no
- * trigger is configured; `undefined` (the whole field) means "unknown".
+ * Compaction configuration as the app resolved it
+ * (`compactionSettingsFromConfig`), with the same default budgets the
+ * compaction module applies. `off` means no trigger is configured;
+ * `undefined` (the whole field) means "unknown".
  */
 export interface SidePanelCompaction {
   mode: "tokens" | "chars" | "off";

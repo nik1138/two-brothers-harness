@@ -40,8 +40,8 @@ import {
   DEFAULT_KEEP_RECENT_TOKENS,
   estimateTokens,
 } from "../compaction.ts";
-import { maxTokensForRole, validateRunConfig, type Config } from "../config.ts";
-import { estimateCost } from "../cost.ts";
+import { compactionSettingsFromConfig, maxTokensForRole, validateRunConfig, type Config } from "../config.ts";
+import { estimateRunCostFromUsage } from "../cost.ts";
 import { SharedContext } from "../context.ts";
 import { TwoBrothersHarness, type ToolScopes } from "../harness.ts";
 import { deriveTitle, SessionMetadataStore } from "../metadata.ts";
@@ -97,6 +97,7 @@ import {
   buildProvider,
   MockProvider,
   resolveProviderKind,
+  roleProviderKind,
   type Provider,
   type ProviderConfig,
 } from "../provider.ts";
@@ -251,6 +252,12 @@ import {
   type PickerItem,
   type PickerState,
 } from "./view/picker.ts";
+import {
+  parseSessionEventPrefix,
+  sessionPickerItems,
+  SESSION_TITLE_PREFIX_BYTES,
+  type SessionPickEntry,
+} from "./view/sessionpick.ts";
 import {
   createProviderConnectState,
   providerConnectKey,
@@ -951,27 +958,6 @@ export function openTuiContext(cfg: Config, io: TuiIO): SharedContext {
   return new SharedContext(store);
 }
 
-/**
- * Compaction settings from the resolved config (same flags as `run`).
- */
-function compactionOptions(cfg: Config): CompactionSettings | undefined {
-  if (
-    !cfg.compact &&
-    cfg.compactThreshold <= 0 &&
-    cfg.compactThresholdTokens <= 0 &&
-    cfg.contextWindow <= 0
-  ) {
-    return undefined;
-  }
-  return {
-    ...(cfg.compact ? { force: true } : {}),
-    ...(cfg.compactThreshold > 0 ? { thresholdChars: cfg.compactThreshold } : {}),
-    ...(cfg.compactKeepRecent > 0 ? { keepRecentChars: cfg.compactKeepRecent } : {}),
-    ...(cfg.compactThresholdTokens > 0 ? { thresholdTokens: cfg.compactThresholdTokens } : {}),
-    ...(cfg.contextWindow > 0 ? { contextWindow: cfg.contextWindow } : {}),
-  };
-}
-
 /** Fold plugin scope buckets into the MCP-derived `toolScopes` registry. */
 function mergeScopes(scopes: ToolScopes, bindings: PluginBindings): ToolScopes {
   const merge = (current: Tool[] | undefined, extra: Tool[]): Tool[] | undefined => {
@@ -1112,7 +1098,7 @@ async function buildTurnHarness(setup: TurnSetup): Promise<TurnHarness> {
   }
   if (bindings !== null) toolScopes = mergeScopes(toolScopes, bindings);
   const hasScopes = Object.values(toolScopes).some((list) => list !== undefined);
-  const compaction = compactionOptions(cfg);
+  const compaction = compactionSettingsFromConfig(cfg);
   const harness = new TwoBrothersHarness(cfg, {
     ...(setup.workspace !== undefined ? { workspace: setup.workspace } : {}),
     ...(hasScopes ? { toolScopes } : {}),
@@ -1162,6 +1148,7 @@ interface UsageSnapshot {
   input: number;
   output: number;
   cached: number;
+  cacheWrite: number;
   calls: number;
 }
 
@@ -1277,6 +1264,7 @@ function usageOf(value: unknown): UsageSnapshot {  const record = (value ?? {}) 
     input: num("input_tokens"),
     output: num("output_tokens"),
     cached: num("cached_tokens"),
+    cacheWrite: num("cache_write_tokens"),
     calls: num("model_calls"),
   };
 }
@@ -1793,7 +1781,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
 
   /** The compaction configuration as the harness will see it (no new math). */
   const sidePanelCompaction = (): SidePanelCompaction => {
-    const settings = compactionOptions(sessionCfg);
+    const settings = compactionSettingsFromConfig(sessionCfg);
     if (settings === undefined) return { mode: "off" };
     const tokenMode =
       (settings.thresholdTokens ?? 0) > 0 || (settings.contextWindow ?? 0) > 0;
@@ -2412,15 +2400,18 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
           usage = usageOf(result.usage);
           lastElapsedMs = Date.now() - turnStartedAt;
           measureContext();
-          const senior = turnProviders.endpoints.senior.model.trim() || sessionCfg.seniorModel.trim();
-          const junior = turnProviders.endpoints.junior.model.trim() || sessionCfg.juniorModel.trim();
-          const estimate =
-            senior !== "" && senior === junior
-              ? estimateCost(senior, {
-                  promptTokens: usage.input,
-                  completionTokens: usage.output,
-                })
-              : null;
+          const estimate = estimateRunCostFromUsage({
+            seniorModel: turnProviders.endpoints.senior.model || sessionCfg.seniorModel,
+            juniorModel: turnProviders.endpoints.junior.model || sessionCfg.juniorModel,
+            seniorFamily: roleProviderKind(sessionCfg, turnProviders.endpoints.senior, "senior"),
+            juniorFamily: roleProviderKind(sessionCfg, turnProviders.endpoints.junior, "junior"),
+            usage: {
+              input_tokens: usage.input,
+              output_tokens: usage.output,
+              cached_tokens: usage.cached,
+              cache_write_tokens: usage.cacheWrite,
+            },
+          });
           // an honest unknown marker, never a fabricated zero
           cost = estimate === null ? null : estimate.totalCost;
           for (const warning of result.warnings) {
@@ -2844,26 +2835,56 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     }
   };
 
-  const openSessionPicker = (): void => {
-    const items: PickerItem[] = [];
+  /**
+   * Bounded, fail-soft JSONL prefix read for the picker's derived title. A
+   * missing/unreadable file (or a sidecar-only session) yields `[]`, so title
+   * resolution falls through to the file stem instead of failing the picker.
+   */
+  const readSessionTitleEvents = (file: string): Array<Record<string, any>> => {
     try {
+      const fd = fs.openSync(file, "r");
+      try {
+        const buffer = Buffer.alloc(SESSION_TITLE_PREFIX_BYTES);
+        const read = fs.readSync(fd, buffer, 0, SESSION_TITLE_PREFIX_BYTES, 0);
+        return parseSessionEventPrefix(buffer.toString("utf-8", 0, read));
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch {
+      return [];
+    }
+  };
+
+  const openSessionPicker = (): void => {
+    const entries: SessionPickEntry[] = [];
+    try {
+      const metadata = new SessionMetadataStore(sessionsDir);
       for (const name of fs.readdirSync(sessionsDir).filter((n) => n.endsWith(".jsonl")).sort()) {
-        let updated = "(unknown time)";
+        let mtimeMs: number | null = null;
         try {
-          updated = String(fs.statSync(path.join(sessionsDir, name)).mtime);
+          mtimeMs = fs.statSync(path.join(sessionsDir, name)).mtimeMs;
         } catch {
-          // unreadable stat still lists the session
+          // unreadable stat still lists the session with an honest unknown age
         }
-        items.push({
-          id: name,
-          label: name.slice(0, -".jsonl".length),
-          description: updated,
-          keywords: [name],
-        });
+        // Readable titles come from the metadata sidecar the web sidebar and
+        // `/export` already use; only a sidecar without a usable title costs a
+        // bounded JSONL prefix read for the first-operator-message fallback.
+        let sidecarTitle: unknown;
+        try {
+          sidecarTitle = metadata.get(name)?.title;
+        } catch {
+          // a corrupt/unreadable sidecar falls through to the derived title
+        }
+        const events =
+          typeof sidecarTitle === "string" && sidecarTitle.trim() !== ""
+            ? undefined
+            : readSessionTitleEvents(path.join(sessionsDir, name));
+        entries.push({ name, sidecarTitle, events, mtimeMs });
       }
     } catch {
       // missing sessions dir: the picker shows its empty state
     }
+    const items = sessionPickerItems(entries);
     overlay = {
       kind: "picker",
       title: "RESUME SESSION",
@@ -3064,7 +3085,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     // Manual compaction always honours the configured keep-recent budget,
     // even when auto-compaction itself is off (no threshold configured).
     const settings: CompactionSettings = {
-      ...(compactionOptions(sessionCfg) ?? {}),
+      ...(compactionSettingsFromConfig(sessionCfg) ?? {}),
       ...(sessionCfg.compactKeepRecent > 0
         ? { keepRecentChars: sessionCfg.compactKeepRecent }
         : {}),

@@ -182,6 +182,7 @@ test("openai-compatible: a streamed attempt accepts an application/json completi
       input_tokens: OPENAI_USAGE.prompt_tokens,
       output_tokens: OPENAI_USAGE.completion_tokens,
       cached_tokens: 0,
+      cache_write_tokens: 0,
     });
 
     // A non-streaming request is byte-identical to before (no stream flag).
@@ -264,6 +265,7 @@ test("anthropic: a streamed request accepts the normal JSON messages shape", asy
       input_tokens: 4,
       output_tokens: 2,
       cached_tokens: 1,
+      cache_write_tokens: 0,
     });
   } finally {
     await stub.close();
@@ -302,6 +304,7 @@ test("gemini: a streamed request accepts the normal JSON candidates shape", asyn
       input_tokens: 5, // promptTokenCount - cachedContentTokenCount
       output_tokens: 4, // candidatesTokenCount + thoughtsTokenCount
       cached_tokens: 2,
+      cache_write_tokens: 0,
     });
   } finally {
     await stub.close();

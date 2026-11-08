@@ -24,11 +24,13 @@ import { resolveConfig, type Config } from "../src/config.ts";
 import type { ChatMessage } from "../src/context.ts";
 import {
   MockProvider,
+  UsageTracker,
   type MockScriptStep,
   type Provider,
   type Tool,
   type ToolChatOptions,
   type ToolChatResponse,
+  type UsageTotals,
 } from "../src/provider.ts";
 import {
   createServer,
@@ -37,6 +39,7 @@ import {
   type ServerHandle,
   type ServerOptions,
 } from "../src/server.ts";
+import type { RunCost } from "../src/runtime.ts";
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -201,9 +204,43 @@ function slowProvider(delayMs: number): Provider {
   };
 }
 
+/**
+ * A mock provider with deterministic per-call usage, including cache counters
+ * (wave 24 cost mapping tests). The harness reads `usageSnapshot()` after the
+ * run, so this wrapper's tracker — not the inner MockProvider's — is the run's
+ * usage source.
+ */
+function meteredMockProvider(
+  input: number,
+  output: number,
+  cached: number,
+  cacheWrite: number,
+): Provider & { usageSnapshot(): UsageTotals } {
+  const inner = new MockProvider();
+  const tracker = new UsageTracker();
+  const record = (): void => tracker.record(input, output, cached, cacheWrite);
+  return {
+    async chat(messages: ChatMessage[], responseKind?: string, _signal?: AbortSignal) {
+      record();
+      return inner.chat(messages, responseKind);
+    },
+    async chatWithTools(messages: ChatMessage[], tools: Tool[], options?: ToolChatOptions) {
+      record();
+      return inner.chatWithTools(messages, tools, options) as Promise<ToolChatResponse>;
+    },
+    usageSnapshot: () => tracker.snapshot(),
+  };
+}
+
 /** One consult cycle with the deterministic mock: 5 envelopes, usage 40/20. */
 const CONSULT_KINDS = ["message", "consult", "proposal", "review", "decision"];
-const EXPECTED_USAGE = { model_calls: 4, input_tokens: 40, output_tokens: 20, cached_tokens: 0 };
+const EXPECTED_USAGE = {
+  model_calls: 4,
+  input_tokens: 40,
+  output_tokens: 20,
+  cached_tokens: 0,
+  cache_write_tokens: 0,
+};
 
 // ---------------------------------------------------------------------------
 // Stage 1: session files + synchronous run
@@ -847,6 +884,166 @@ test("usage reaches run record, run_end, sidecar and session events endpoint", a
     assert.deepEqual(sessionEnds.at(-1)?.usage, EXPECTED_USAGE);
   } finally {
     await srv.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Run cost (wave 24): additive USD estimate on the run public view, honestly
+// null when the merged usage cannot be attributed to one priced model
+// ---------------------------------------------------------------------------
+
+test("run cost: same priced model on both roles yields an additive USD estimate", async () => {
+  const srv = await startServer({
+    configFactory: mockConfig({ seniorModel: "gpt-4o", juniorModel: "gpt-4o" }),
+  });
+  try {
+    const started = await post<Record<string, any>>(srv.base, "/api/runs", { task: "price me" });
+    const record = await waitTerminal(srv.base, started.body.run_id);
+    assert.equal(record.status, "completed");
+    assert.ok(record.cost, "same-model priced run should carry a cost estimate");
+    const cost = record.cost as RunCost;
+    assert.equal(cost.currency, "USD");
+    assert.equal(cost.model, "gpt-4o");
+    // mock usage: 4 calls × (10 in / 5 out) = 40/20 at gpt-4o's $2.5/$10 per 1M
+    assert.ok(
+      Math.abs(cost.total - 0.0003) < 1e-9,
+      `unexpected cost total: ${String(cost.total)}`,
+    );
+    // the public view is shared by the list route (same shape, same value)
+    const listed = await get<Array<Record<string, any>>>(
+      srv.base,
+      `/api/runs?session=${encodeURIComponent(String(record.session))}`,
+    );
+    assert.deepEqual(listed.body.find((r) => r.run_id === record.run_id)?.cost, record.cost);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("run cost: different role models stay honestly null", async () => {
+  const srv = await startServer({
+    configFactory: mockConfig({ seniorModel: "gpt-4o", juniorModel: "gpt-4o-mini" }),
+  });
+  try {
+    const started = await post<Record<string, any>>(srv.base, "/api/runs", { task: "mixed" });
+    const record = await waitTerminal(srv.base, started.body.run_id);
+    assert.equal(record.status, "completed");
+    // the field is always present (additive public view), but never invented
+    assert.ok("cost" in record);
+    assert.equal(record.cost, null);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("run cost: an unknown price row stays null (never $0)", async () => {
+  const srv = await startServer({
+    configFactory: mockConfig({
+      seniorModel: "unpriced-model-xyz",
+      juniorModel: "unpriced-model-xyz",
+    }),
+  });
+  try {
+    const started = await post<Record<string, any>>(srv.base, "/api/runs", { task: "unknown" });
+    const record = await waitTerminal(srv.base, started.body.run_id);
+    assert.equal(record.status, "completed");
+    assert.equal(record.cost, null);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("run cost: cache counters are priced with the run's provider family", async () => {
+  // Anthropic semantics: input_tokens is uncached-only, cache reads/writes are
+  // disjoint counters, and the total prompt is input + reads + writes.
+  const srv = await startServer({
+    configFactory: mockConfig({
+      provider: "mock",
+      kind: "anthropic",
+      seniorModel: "claude-sonnet-4",
+      juniorModel: "claude-sonnet-4",
+    }),
+    providerOverrides: {
+      senior: meteredMockProvider(1000, 100, 800, 100),
+      junior: meteredMockProvider(1000, 100, 800, 100),
+    },
+  });
+  try {
+    const started = await post<Record<string, any>>(srv.base, "/api/runs", { task: "cache me" });
+    const record = await waitTerminal(srv.base, started.body.run_id);
+    assert.equal(record.status, "completed");
+    assert.deepEqual(record.usage, {
+      model_calls: 4,
+      input_tokens: 4000,
+      output_tokens: 400,
+      cached_tokens: 3200,
+      cache_write_tokens: 400,
+    });
+    assert.ok(record.cost);
+    const cost = record.cost as RunCost;
+    assert.equal(cost.model, "claude-sonnet-4");
+    // total prompt 7600 = 4000 uncached × $3 + 3200 reads × $0.30 + 400
+    // writes × $3.75, plus 400 completion tokens × $15 (all per 1M).
+    const expected = (4000 * 3 + 3200 * 0.3 + 400 * 3.75 + 400 * 15) / 1_000_000;
+    assert.ok(
+      Math.abs(cost.total - expected) < 1e-12,
+      `expected ${String(expected)}, got ${String(cost.total)}`,
+    );
+  } finally {
+    await srv.close();
+  }
+});
+
+test("run cost: sidecar-rebuilt record recomputes from current models + usage", async () => {
+  const tmp = tmpdir("tb-cost-recover-");
+  const options: ServerOptions = {
+    configFactory: mockConfig({ seniorModel: "gpt-4o", juniorModel: "gpt-4o" }),
+    sessionsDir: tmp.root,
+    webDist: null,
+  };
+  try {
+    const first = createServer(options);
+    const serverA = await first.listen("127.0.0.1", 0);
+    const baseA = `http://127.0.0.1:${(serverA.address() as AddressInfo).port}`;
+    const started = await post<Record<string, any>>(baseA, "/api/runs", { task: "recover cost" });
+    const live = await waitTerminal(baseA, started.body.run_id);
+    assert.equal(live.status, "completed");
+    assert.ok(live.cost);
+    const liveCost = live.cost as RunCost;
+    await first.close();
+
+    // same config after the restart → the recomputation matches the live record
+    const second = createServer(options);
+    const serverB = await second.listen("127.0.0.1", 0);
+    const baseB = `http://127.0.0.1:${(serverB.address() as AddressInfo).port}`;
+    try {
+      const recovered = await get<Record<string, any>>(baseB, `/api/runs/${started.body.run_id}`);
+      assert.equal(recovered.status, 200);
+      assert.equal(recovered.body.rebuilt, true);
+      assert.deepEqual(recovered.body.usage, live.usage);
+      assert.deepEqual(recovered.body.cost, live.cost);
+    } finally {
+      await second.close();
+    }
+
+    // A model change between the run and the read can change the estimate (the
+    // persisted usage counters are never rewritten) — documented behavior.
+    const third = createServer({
+      ...options,
+      configFactory: mockConfig({ seniorModel: "gpt-4o-mini", juniorModel: "gpt-4o-mini" }),
+    });
+    const serverC = await third.listen("127.0.0.1", 0);
+    const baseC = `http://127.0.0.1:${(serverC.address() as AddressInfo).port}`;
+    try {
+      const repriced = await get<Record<string, any>>(baseC, `/api/runs/${started.body.run_id}`);
+      assert.deepEqual(repriced.body.usage, live.usage);
+      assert.equal(repriced.body.cost.model, "gpt-4o-mini");
+      assert.notEqual(repriced.body.cost.total, liveCost.total);
+    } finally {
+      await third.close();
+    }
+  } finally {
+    tmp.cleanup();
   }
 });
 
