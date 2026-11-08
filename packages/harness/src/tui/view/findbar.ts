@@ -386,6 +386,8 @@ export interface FindBarRenderOptions {
   width: number;
   /** Theme for the label/status/hint tones and the inverted match span. */
   theme?: Theme;
+  /** Registry commands whose effective chords drive the hints (default `TUI_COMMANDS`). */
+  commands?: readonly TuiCommand[];
   /** Override the registry-derived hints (tests/embedding). */
   hints?: string;
 }
@@ -492,9 +494,10 @@ export function findBarView(state: FindState, options: FindBarRenderOptions): Fi
   }
 
   const wantsPreview = activeFindMatch(state) !== undefined;
+  const commands = options.commands ?? TUI_COMMANDS;
   const candidates = options.hints !== undefined
     ? [options.hints]
-    : [findBarHints(TUI_COMMANDS), findBarHints(TUI_COMMANDS, { compact: true })];
+    : [findBarHints(commands), findBarHints(commands, { compact: true })];
   const chooseHint = (requirePreview: boolean): { text: string; width: number } => {
     for (const candidate of candidates) {
       if (candidate === "") continue;

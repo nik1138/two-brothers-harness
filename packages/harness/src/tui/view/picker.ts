@@ -42,6 +42,8 @@ export interface PickerOptions {
   emptyText?: string;
   hints?: string;
   theme?: Theme;
+  /** Registry commands whose effective chords drive the footer (default `TUI_COMMANDS`). */
+  commands?: readonly TuiCommand[];
 }
 
 export interface PickerView {
@@ -147,7 +149,7 @@ export function pickerView(
   const filtered = filterPickerItems(items, state.query);
   const selected = filtered.length === 0 ? -1 : Math.min(Math.max(0, Math.floor(state.selected)), filtered.length - 1);
   const query = theme.paint("accent", clipDisplay(`> ${state.query}`, contentWidth));
-  const defaultHints = hintSegments(TUI_COMMANDS, [
+  const defaultHints = hintSegments(options.commands ?? TUI_COMMANDS, [
     { id: "list-move", label: "move" },
     { id: "list-accept", label: "select" },
     { id: "list-close", label: "close" },

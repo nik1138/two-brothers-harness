@@ -155,6 +155,7 @@ import {
   paletteEntries,
   resolveKey,
   TUI_COMMANDS,
+  type KeyChord,
   type KeyLike,
   type PaletteEntry,
   type SlashCommandInfo,
@@ -301,6 +302,13 @@ export interface TuiAppOptions {
   mcpConfig?: string;
   /** `--stream-tokens`: append provider text deltas in place while a turn runs. */
   streamTokens?: boolean;
+  /**
+   * The effective TUI command table (default {@link TUI_COMMANDS}): the
+   * file-configured key overrides resolved at startup. Matching, the
+   * palette/help listings, status hints and every surface footer derive their
+   * chords from this one table.
+   */
+  commands?: readonly TuiCommand[];
   /**
    * `tui --approval-mode` / `TWO_BROTHERS_APPROVAL_MODE`: pin the workspace
    * approval policy for this TUI process. Never persisted; without a pin the
@@ -1154,6 +1162,20 @@ class TuiExit extends Error {
   }
 }
 
+/**
+ * True when a chord is one printable, unmodified character. The help command's
+ * printable chord is typing when the composer has text (the long-standing "?"
+ * rule, generalized to whatever chord a keys file gives help).
+ */
+function isSinglePrintableKeyChord(chord: KeyChord): boolean {
+  if (chord.ctrl === true || chord.alt === true || chord.shift === true) return false;
+  const units = [...chord.name];
+  return (
+    units.length === 1 &&
+    !/[\u0000-\u001f\u007f\s]/u.test(chord.name)
+  );
+}
+
 /** Printable single characters only (paste/escape sequences are ignored). */
 export function printableChar(key: Key): string | null {
   if (key.ctrl) return null;
@@ -1243,6 +1265,8 @@ function usageOf(value: unknown): UsageSnapshot {  const record = (value ?? {}) 
 export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   const input = options.input ?? process.stdin;
   const output = options.output ?? process.stdout;
+  /** One resolved registry table for matching, labels, palette/help and hints. */
+  const commands = options.commands ?? TUI_COMMANDS;
   // `tui --workspace <dir>`: validate the confined root before the screen is
   // built. A bad root is a clear startup error (exit 2) and never opens the
   // alternate screen; an omitted flag keeps the TUI exactly as before.
@@ -1445,11 +1469,11 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
    * only `/plan`, `/goal`, `/feedback`, `/compact`, `/export`, `/permission`,
    * `/status` and `/new` are added.
    */
-  const baseCommandList = (): BaseCommand[] => tuiBaseCommands({ templates: slashInfos() });
+  const baseCommandList = (): BaseCommand[] => tuiBaseCommands({ templates: slashInfos(), commands });
 
   /** Help entries: registry keys + discovered templates + base commands. */
   const helpOverlayEntries = (): PaletteEntry[] => [
-    ...helpEntries(TUI_COMMANDS, { commands: slashInfos(), running }),
+    ...helpEntries(commands, { commands: slashInfos(), running }),
     ...tuiBasePaletteEntries(baseCommandList()),
   ];
 
@@ -1684,7 +1708,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
    */
   const statusHints = (): string | undefined => {
     const fold = toolFoldHint(model, toolExpansion);
-    return composeStatusHints(TUI_COMMANDS, tipStep, {
+    return composeStatusHints(commands, tipStep, {
       running,
       ...(fold !== null ? { fold: { commandId: fold.commandId, label: fold.label } } : {}),
     });
@@ -1858,8 +1882,8 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     if (overlay.kind === "palette") {
       const boxW = Math.max(30, Math.min(Math.max(columns - 4, 30), 76));
       const boxH = Math.max(8, Math.min(Math.max(rows - 4, 8), 22));
-      const entries = paletteEntries(TUI_COMMANDS, { commands: slashInfos(), running });
-      const lines = paletteView(TUI_COMMANDS, overlay.state, entries, {
+      const entries = paletteEntries(commands, { commands: slashInfos(), running });
+      const lines = paletteView(commands, overlay.state, entries, {
         width: Math.max(10, boxW - 4),
         height: Math.max(3, boxH - 2),
         title: "Commands",
@@ -1871,7 +1895,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       const boxW = Math.max(30, Math.min(Math.max(columns - 4, 30), 80));
       const boxH = Math.max(8, Math.min(Math.max(rows - 4, 8), 24));
       const entries = helpOverlayEntries();
-      const lines = helpView(TUI_COMMANDS, overlay.state, entries, {
+      const lines = helpView(commands, overlay.state, entries, {
         width: Math.max(10, boxW - 4),
         height: Math.max(3, boxH - 2),
         title: "Help",
@@ -1885,6 +1909,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       const lines = historySearchView(overlay.state, {
         width: Math.max(10, boxW - 4),
         height: Math.max(3, boxH - 2),
+        commands,
       }).lines;
       return renderBox(lines, { width: boxW, title: "HISTORY", theme });
     }
@@ -1897,6 +1922,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         title: overlay.title,
         ...(overlay.emptyText !== undefined ? { emptyText: overlay.emptyText } : {}),
         theme,
+        commands,
       }).lines;
     }
     if (overlay.kind === "provider") {
@@ -1906,6 +1932,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
         width: boxW,
         height: boxH,
         theme,
+        commands,
       }).lines;
     }
     const boxW = Math.max(30, Math.min(Math.max(columns - 8, 30), 72));
@@ -1918,18 +1945,18 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     const size = terminal.size();
     const findBar = find === null
       ? undefined
-      : findBarView(find, { width: size.columns, theme }).lines;
+      : findBarView(find, { width: size.columns, theme, commands }).lines;
     const findBlockId = find === null ? undefined : activeFindMatch(find)?.match.blockId;
     // The inline picker is a composer affordance, never a modal surface: it is
     // hidden while any overlay is up or while an approval owns the footer.
     const mentionRows = overlay === null && approval === null && mention !== null
-      ? mentionPickerView(mention, { width: size.columns, theme }).lines
+      ? mentionPickerView(mention, { width: size.columns, theme, commands }).lines
       : undefined;
     // A parked approval replaces the composer (the run needs an answer, not a
     // draft); closing an overlay above it never answers it.
     const approvalRows = approval === null
       ? undefined
-      : approvalPanelView(approval, { width: size.columns, theme }).lines;
+      : approvalPanelView(approval, { width: size.columns, theme, commands }).lines;
     // The model's plan is display-only state: a dock above the composer that
     // never takes a key and never replaces the composer.
     const todoRows = todos.length === 0
@@ -1942,6 +1969,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       editor,
       status: statusState(),
       theme,
+      commands,
       scroll,
       overlay: overlayLines(size.columns, size.rows),
       ...(approvalRows !== undefined ? { approvalPanel: approvalRows } : {}),
@@ -2076,7 +2104,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   /** Fold one keypress into the parked approval panel (its own key scope). */
   const handleApprovalKey = (key: Key): void => {
     if (approval === null) return;
-    const result = approvalPanelKey(TUI_COMMANDS, approval, key);
+    const result = approvalPanelKey(commands, approval, key);
     approval = result.state;
     switch (result.action) {
       case "move":
@@ -2526,7 +2554,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   /** Fold one keypress into the open find bar; Enter/arrows/Esc come from the registry. */
   const handleFindBarKey = (key: KeyLike): void => {
     if (find === null) return;
-    const result = findKey(TUI_COMMANDS, find, key);
+    const result = findKey(commands, find, key);
     if (result.action === "close") {
       closeFindBar();
       return;
@@ -2555,13 +2583,13 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
    * `@skill:` opens stay as cheap as before.
    */
   const mentionCatalogs = (kind: "command" | "skill" | "file"): {
-    commands: typeof TUI_COMMANDS;
+    commands: readonly TuiCommand[];
     templates: SlashCommandInfo[];
     skills: SkillCatalog["skills"];
     baseCommands: BaseCommand[];
     files: WorkspaceFileEntry[];
   } => ({
-    commands: TUI_COMMANDS,
+    commands,
     templates: slashInfos(),
     skills: resources.skills.skills,
     baseCommands: baseCommandList(),
@@ -2617,7 +2645,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
    */
   const handleMentionKey = (key: KeyLike): void => {
     if (mention === null) return;
-    const result = mentionPickerKey(TUI_COMMANDS, mention, key);
+    const result = mentionPickerKey(commands, mention, key);
     if (result.action === "close") {
       mention = null;
       render();
@@ -3252,7 +3280,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
 
   /** `/status`: the existing status surface (the side panel's own rows). */
   const openStatusDialog = (): void => {
-    const entries = sidePanelEntries(sidePanelState()).filter((entry) => entry.label !== "");
+    const entries = sidePanelEntries(sidePanelState(), commands).filter((entry) => entry.label !== "");
     const details = entries.map((entry) => `${entry.label}: ${entry.value}`).join("\n");
     const phase = running ? "running" : compacting ? "compacting" : "idle";
     overlay = {
@@ -3506,7 +3534,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     const prefix = text.slice(1).toLowerCase();
     if (prefix === "") return;
     const names = [
-      ...TUI_COMMANDS.map((c) => c.slash).filter((s): s is string => s !== undefined),
+      ...commands.map((c) => c.slash).filter((s): s is string => s !== undefined),
       ...resources.commands.commands.map((c) => c.name),
       ...baseCommandList().flatMap((command) => [command.name, ...command.aliases]),
     ];
@@ -3647,7 +3675,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       // discovered template can never shadow a native app surface such as
       // `/provider`. Native commands this dispatcher does not own fall through
       // to the template/base resolution below unchanged.
-      const builtin = findSlashCommand(TUI_COMMANDS, matched.name);
+      const builtin = findSlashCommand(commands, matched.name);
       if (builtin !== null && dispatchSlash(builtin, matched.args)) return;
       // A discovered template shadows a same-named base command; when no
       // template claims the name, a first-party base command handles it
@@ -3690,8 +3718,8 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
   const handleOverlayKey = (key: KeyLike): void => {
     if (overlay === null) return;
     if (overlay.kind === "palette") {
-      const entries = paletteEntries(TUI_COMMANDS, { commands: slashInfos(), running });
-      const result = handlePaletteKey(TUI_COMMANDS, overlay.state, key, entries);
+      const entries = paletteEntries(commands, { commands: slashInfos(), running });
+      const result = handlePaletteKey(commands, overlay.state, key, entries);
       overlay = { ...overlay, state: result.state };
       if (result.action === "close") overlay = null;
       else if (result.action === "accept" && result.entry !== undefined) {
@@ -3705,7 +3733,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
     }
     if (overlay.kind === "help") {
       const entries = helpOverlayEntries();
-      const result = handleHelpKey(TUI_COMMANDS, overlay.state, key, entries);
+      const result = handleHelpKey(commands, overlay.state, key, entries);
       overlay = { ...overlay, state: result.state };
       if (result.action === "close") overlay = null;
       else if (result.action === "accept" && result.entry !== undefined) {
@@ -3835,14 +3863,15 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       handleMentionKey(key);
       return;
     }
-    const match = resolveKey(TUI_COMMANDS, key, "app");
-    // A literal "?" with text in the composer is typing, not the help chord —
-    // tasks are full of questions. F1 (and "?" on an empty composer) still
+    const match = resolveKey(commands, key, "app");
+    // A printable one-character chord that opened help is typing while the
+    // composer has text (the rule "?" always had, now derived from whichever
+    // chord the rebindable help command carries). F1 and function keys still
     // open help.
     const helpChordBlocksTyping =
       match !== null &&
       match.command.id === "help" &&
-      match.chord.name === "?" &&
+      isSinglePrintableKeyChord(match.chord) &&
       editor.text !== "";
     if (match !== null && !helpChordBlocksTyping && dispatchCommand(match.command)) {
       return;
@@ -3968,6 +3997,7 @@ export async function runTuiApp(options: TuiAppOptions): Promise<number> {
       if (overlay === null && find === null) {
         const decision = guardComposerSubmit(lastRepeatGuard, event.key, editor.text, {
           mentionOpen: mention !== null,
+          commands,
         });
         lastRepeatGuard = decision.snapshot;
         if (decision.suppress) continue;

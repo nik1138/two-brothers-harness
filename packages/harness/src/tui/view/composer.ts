@@ -3,7 +3,7 @@ import {
   graphemes,
   type EditorState,
 } from "../editor.ts";
-import { hintSegments, TUI_COMMANDS } from "../keymap.ts";
+import { hintSegments, TUI_COMMANDS, type TuiCommand } from "../keymap.ts";
 import {
   boxContentWidth,
   renderBox,
@@ -32,6 +32,8 @@ export interface ComposerOptions {
   maxRows?: number;
   showCursor?: boolean;
   theme?: Theme;
+  /** Registry commands whose effective chords drive the hint row (default `TUI_COMMANDS`). */
+  commands?: readonly TuiCommand[];
 }
 
 export interface ComposerView {
@@ -91,11 +93,12 @@ export function composerView(options: ComposerOptions): ComposerView {
     return paintInputRow(row, cursorVisible && index === visibleCursor ? cursorColumn : null, theme);
   });
 
+  const commands = options.commands ?? TUI_COMMANDS;
   const hint = options.running === true
-    ? `Turn running · ${hintSegments(TUI_COMMANDS, [{ id: "cancel", label: "cancel" }])}`
+    ? `Turn running · ${hintSegments(commands, [{ id: "cancel", label: "cancel" }])}`
     : options.disabled === true
       ? "Composer unavailable"
-      : hintSegments(TUI_COMMANDS, [
+      : hintSegments(commands, [
           { id: "submit", label: "send" },
           { id: "newline", label: "newline" },
         ]);

@@ -1,4 +1,4 @@
-import { hintSegments, TUI_COMMANDS } from "../keymap.ts";
+import { hintSegments, TUI_COMMANDS, type TuiCommand } from "../keymap.ts";
 import {
   boxContentWidth,
   centerStyled,
@@ -16,6 +16,8 @@ export interface WelcomeOptions {
   juniorModel?: string;
   examples?: readonly string[];
   theme?: Theme;
+  /** Registry commands whose effective chords drive the hints (default `TUI_COMMANDS`). */
+  commands?: readonly TuiCommand[];
 }
 
 const DEFAULT_EXAMPLES = [
@@ -68,11 +70,12 @@ export function renderWelcome(options: WelcomeOptions): string[] {
   rows.push("");
   rows.push(theme.paint("strong", "Get started"));
   wrappedRows(rows, "Type a task below.", contentWidth, theme);
-  const editHints = hintSegments(TUI_COMMANDS, [
+  const commands = options.commands ?? TUI_COMMANDS;
+  const editHints = hintSegments(commands, [
     { id: "submit", label: "send" },
     { id: "newline", label: "newline" },
   ]);
-  const appHints = hintSegments(TUI_COMMANDS, [
+  const appHints = hintSegments(commands, [
     { id: "palette", label: "commands" },
     { id: "help", label: "help" },
   ]);

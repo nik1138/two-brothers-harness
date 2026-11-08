@@ -1,4 +1,4 @@
-import { TUI_COMMANDS, hintSegments } from "../keymap.ts";
+import { TUI_COMMANDS, hintSegments, type TuiCommand } from "../keymap.ts";
 import { clipDisplay, clipStyled, fitStyled, styledWidth } from "../screen.ts";
 import { plainTheme, type Theme, type ThemeToken } from "../theme.ts";
 
@@ -71,6 +71,8 @@ export interface StatusSegment {
 export interface StatusBarOptions {
   width: number;
   theme?: Theme;
+  /** Registry commands whose effective chords drive the default hint (default `TUI_COMMANDS`). */
+  commands?: readonly TuiCommand[];
 }
 
 /** Compact count used by the status bar and the side panel (`12.5k`, `1.2m`). */
@@ -107,7 +109,10 @@ function modelSegment(role: "SENIOR" | "JUNIOR", model: string | undefined): Sta
 }
 
 /** Build both semantic rows before responsive fitting. */
-export function statusBarSegments(state: StatusBarState): [StatusSegment[], StatusSegment[]] {
+export function statusBarSegments(
+  state: StatusBarState,
+  commands: readonly TuiCommand[] = TUI_COMMANDS,
+): [StatusSegment[], StatusSegment[]] {
   const first: StatusSegment[] = [
     { text: state.mode.trim() || "consult", tone: "accent" },
   ];
@@ -135,7 +140,7 @@ export function statusBarSegments(state: StatusBarState): [StatusSegment[], Stat
     second.push({ text: transient, tone: "dim", clip: true });
   } else {
     second.push({
-      text: state.hints ?? hintSegments(TUI_COMMANDS, [
+      text: state.hints ?? hintSegments(commands, [
         { id: "palette", label: "commands" },
         { id: "help", label: "help" },
       ]),
@@ -223,7 +228,7 @@ export function renderStatusBar(state: StatusBarState, options: StatusBarOptions
   const width = Math.max(0, Math.floor(options.width));
   if (width === 0) return ["", ""];
   const theme = options.theme ?? plainTheme;
-  return statusBarSegments(state).map((segments) =>
+  return statusBarSegments(state, options.commands ?? TUI_COMMANDS).map((segments) =>
     fitStyled(fitStatusSegments(segments, width, theme), width),
   );
 }

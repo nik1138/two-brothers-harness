@@ -20,7 +20,7 @@
  * the app does not know renders as `unknown` (or the existing honest
  * `cost unknown` marker) instead of a plausible-looking zero.
  */
-import { findCommand, formatChord, TUI_COMMANDS } from "../keymap.ts";
+import { findCommand, formatChord, TUI_COMMANDS, type TuiCommand } from "../keymap.ts";
 import { blankRow, boxContentWidth, fitStyled, renderBox, sanitizeDisplayText } from "../screen.ts";
 import { truncateToWidth } from "../text.ts";
 import { plainTheme, type Theme, type ThemeToken } from "../theme.ts";
@@ -314,7 +314,10 @@ export function sidePanelKeyTips(
  * and usage first, because a short body clips the list from the bottom. Empty
  * labels are separator/plain rows (the key tips).
  */
-export function sidePanelEntries(state: SidePanelState): SidePanelEntry[] {
+export function sidePanelEntries(
+  state: SidePanelState,
+  commands: readonly TuiCommand[] = TUI_COMMANDS,
+): SidePanelEntry[] {
   const seniorUnset = (state.seniorModel ?? "").trim() === "";
   const juniorUnset = (state.juniorModel ?? "").trim() === "";
   const rows: SidePanelEntry[] = [
@@ -383,7 +386,7 @@ export function sidePanelEntries(state: SidePanelState): SidePanelEntry[] {
     { label: "MCP", value: mcpValue(state.discovery?.mcp), tone: "muted" },
     { label: "", value: "", tone: "dim" },
   ];
-  for (const tip of sidePanelKeyTips()) rows.push({ label: "", value: tip, tone: "dim" });
+  for (const tip of sidePanelKeyTips(commands)) rows.push({ label: "", value: tip, tone: "dim" });
   return rows;
 }
 
@@ -396,10 +399,11 @@ export function sidePanelRows(
   state: SidePanelState,
   contentWidth: number,
   theme: Theme = plainTheme,
+  commands: readonly TuiCommand[] = TUI_COMMANDS,
 ): string[] {
   const columns = Math.max(1, Math.floor(contentWidth));
   const rows: string[] = [];
-  for (const cell of sidePanelEntries(state)) {
+  for (const cell of sidePanelEntries(state, commands)) {
     const value = sanitizeDisplayText(cell.value);
     if (cell.label === "") {
       rows.push(value === "" ? "" : theme.paint(cell.tone, truncateToWidth(value, columns)));
@@ -424,6 +428,8 @@ export interface SidePanelViewOptions {
   width: number;
   height: number;
   theme?: Theme;
+  /** Registry commands whose effective chords drive the key-tip rows (default `TUI_COMMANDS`). */
+  commands?: readonly TuiCommand[];
 }
 
 /**
@@ -437,7 +443,7 @@ export function sidePanelView(state: SidePanelState, options: SidePanelViewOptio
   if (width === 0 || height === 0) return [];
   const theme = options.theme ?? plainTheme;
   const contentWidth = Math.max(1, boxContentWidth(width));
-  const rows = sidePanelRows(state, contentWidth, theme);
+  const rows = sidePanelRows(state, contentWidth, theme, options.commands ?? TUI_COMMANDS);
 
   if (width < 4 || height < 4) {
     const lines = rows.slice(0, height).map((row) => fitStyled(row, width));

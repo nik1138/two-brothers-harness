@@ -53,6 +53,7 @@ import "./todos.test.ts";
 import "./tui.test.ts";
 import "./tuieditor.test.ts";
 import "./tuikeymap.test.ts";
+import "./tuikeys.test.ts";
 import "./tuiterminal.test.ts";
 import "./tuiwidth.test.ts";
 import "./tuivisualmodel.test.ts";

@@ -132,7 +132,11 @@ import {
 import { discoverSkills, type SkillCatalog } from "./skills.ts";
 import { envPinnedPairs, SettingsStore } from "./settings_store.ts";
 import { runTuiApp } from "./tui/app.ts";
-import { tuiHelpLines } from "./tui/keymap.ts";
+import {
+  defaultTuiKeysPath,
+  resolveTuiCommandsFromFile,
+} from "./tui/keyoverrides.ts";
+import { tuiHelpLines, TUI_COMMANDS, type TuiCommand } from "./tui/keymap.ts";
 
 /**
  * The shared `run` / `chat` / `tui` / `serve` flag table. Exported so the
@@ -227,6 +231,7 @@ const THINKING_BUDGET_OPTIONS = {
  */
 const TUI_OPTIONS = {
   workspace: { type: "string" as const },
+  "keys-file": { type: "string" as const },
 } satisfies ParseArgsOptionsConfig;
 
 const RUN_INPUT_OPTIONS = {
@@ -777,6 +782,47 @@ export function streamTokensForCli(
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
   return values["stream-tokens"] === true || envFlag(env, "TWO_BROTHERS_STREAM_TOKENS");
+}
+
+/** Resolved TUI keys-file choice (`--keys-file` > env > default path). */
+export interface CliTuiKeysFile {
+  path: string;
+  /** The operator named the path (flag or env), so a missing file is reported. */
+  explicit: boolean;
+}
+
+/**
+ * The TUI keys file for one invocation: `--keys-file` > the pinned
+ * `TWO_BROTHERS_TUI_KEYS_FILE` environment variable > the default
+ * `~/.two-brothers/tui-keys.json`. Flag and env are pinned like every other
+ * `TWO_BROTHERS_*` value — never persisted.
+ */
+export function tuiKeysFileForCli(
+  values: Record<string, any>,
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = os.homedir(),
+): CliTuiKeysFile {
+  const flag = typeof values["keys-file"] === "string" ? values["keys-file"].trim() : "";
+  if (flag !== "") return { path: path.resolve(flag), explicit: true };
+  const envFile = (env.TWO_BROTHERS_TUI_KEYS_FILE ?? "").trim();
+  if (envFile !== "") return { path: path.resolve(envFile), explicit: true };
+  return { path: defaultTuiKeysPath(home), explicit: false };
+}
+
+/**
+ * The effective TUI command table for one invocation. Fail-soft by contract: a
+ * missing default file is silent, while an unreadable/invalid file (or an
+ * explicitly named one that is absent) yields the default commands plus one
+ * honest diagnostic line, never a crash or a half-applied table.
+ */
+export function resolveTuiKeyCommandsForCli(
+  values: Record<string, any>,
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = os.homedir(),
+): { commands: readonly TuiCommand[]; diagnostics: readonly string[]; file: CliTuiKeysFile } {
+  const file = tuiKeysFileForCli(values, env, home);
+  const resolved = resolveTuiCommandsFromFile(file.path, { explicit: file.explicit });
+  return { commands: resolved.commands, diagnostics: resolved.diagnostics, file };
 }
 
 /** One `run`/`chat` process's plugin + skill resources. */
@@ -2141,17 +2187,26 @@ function printResolvedRoles(cfg: Config, io: CliIO): void {
 
 /** Command help as printed by `<command> --help` / `help <command>`; the TUI
  * additionally prints the key guide generated from the same keymap registry
- * that powers the in-app Ctrl+P palette and `?` overlay. */
-function commandHelpFor(command: string, style: CliStyle = plainCliStyle): string {
+ * that powers the in-app Ctrl+P palette and `?` overlay (with any keys-file
+ * overrides already resolved). */
+function commandHelpFor(
+  command: string,
+  style: CliStyle = plainCliStyle,
+  commands: readonly TuiCommand[] = TUI_COMMANDS,
+): string {
   const text = renderCommandHelp(command, style);
   if (command !== "tui") return text;
   // tuiHelpLines() already starts with its own "Keys:" heading.
-  return `${text}\n\n${tuiHelpLines().join("\n")}`;
+  return `${text}\n\n${tuiHelpLines(commands).join("\n")}`;
 }
 
 /** `tui --help`: the clihelp spec plus the generated key guide. */
-function printTuiHelp(io: CliIO, style: CliStyle = plainCliStyle): void {
-  io.log(commandHelpFor("tui", style));
+function printTuiHelp(
+  io: CliIO,
+  style: CliStyle = plainCliStyle,
+  commands: readonly TuiCommand[] = TUI_COMMANDS,
+): void {
+  io.log(commandHelpFor("tui", style, commands));
 }
 
 async function doTui(
@@ -2168,8 +2223,16 @@ async function doTui(
   );
   if (parsed === null) return 2;
   const { values, positionals } = parsed;
+  // The keys file is read once at startup (no hot reload): the same resolved
+  // table drives `--help`, matching, labels, the palette/help listings and the
+  // status hints. An unreadable/invalid file prints one honest line and keeps
+  // the defaults.
+  const keyResolution = resolveTuiKeyCommandsForCli(values);
+  if (keyResolution.diagnostics.length > 0) {
+    io.error(`[tui keys] ${keyResolution.diagnostics.join("; ")}`);
+  }
   if (isHelpRequested(values)) {
-    printTuiHelp(io, style);
+    printTuiHelp(io, style, keyResolution.commands);
     return 0;
   }
   const approvalProblem = approvalModeProblem(values);
@@ -2209,6 +2272,7 @@ async function doTui(
   return runTuiApp({
     cfg,
     io,
+    commands: keyResolution.commands,
     pluginsDir: pluginsDirForCli(values),
     skillsRoots: skillsRootsForCli(values),
     commandsRoots: commandsRootsForCli(values),

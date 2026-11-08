@@ -695,6 +695,8 @@ export interface MentionPickerRenderOptions {
   /** Total row budget (header + list + footers). Default 8. */
   maxRows?: number;
   theme?: Theme;
+  /** Registry commands whose effective chords drive the footer (default `TUI_COMMANDS`). */
+  commands?: readonly TuiCommand[];
   /** Override the registry-derived hint line (tests/embedding). */
   hints?: string;
 }
@@ -794,7 +796,7 @@ export function mentionPickerView(
   const selectedItem = selected < 0 ? undefined : filtered[selected];
   const selectionHint = mentionPickerSelectionHint(selectedItem);
   if (selectionHint !== "") footerRows.push(styledRow(theme, "muted", selectionHint, columns));
-  footerRows.push(styledRow(theme, "dim", options.hints ?? mentionPickerHints(), columns));
+  footerRows.push(styledRow(theme, "dim", options.hints ?? mentionPickerHints(options.commands ?? TUI_COMMANDS), columns));
   if (state.kind === "skill") {
     footerRows.push(
       styledRow(

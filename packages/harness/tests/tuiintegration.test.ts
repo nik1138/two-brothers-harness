@@ -19,6 +19,7 @@ import { test } from "node:test";
 import { resolveConfig } from "../src/config.ts";
 import { toNdjsonLine, type ToolCallStreamEvent } from "../src/runstream.ts";
 import { CANCELLED_TURN_HINT, runTuiApp, type TuiIO } from "../src/tui/app.ts";
+import { resolveTuiCommands } from "../src/tui/keyoverrides.ts";
 import { stripAnsi } from "../src/tui/render.ts";
 import { ANSI } from "../src/tui/render.ts";
 import { resolveTheme } from "../src/tui/theme.ts";
@@ -572,4 +573,48 @@ test("a discovered provider.md can never shadow the native /provider connect sur
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("injected key overrides: a rebound palette chord opens it and the default chord is dead", async () => {
+  const resolved = resolveTuiCommands({ palette: [{ name: "g", ctrl: true }] });
+  assert.deepEqual(resolved.diagnostics, []);
+  const { app, input, output } = startApp({ commands: resolved.commands });
+  assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+  input.key("p", { ctrl: true });
+  assert.equal(
+    await waitFor(() => textOf(output).includes("COMMANDS"), 300),
+    false,
+    "Ctrl+P no longer opens the palette",
+  );
+  input.key("g", { ctrl: true });
+  assert.ok(await waitFor(() => textOf(output).includes("COMMANDS")), "Ctrl+G opens the palette");
+  assert.match(textOf(output), /Command palette/);
+  input.key("escape");
+  assert.ok(await waitFor(() => !lastFrameText(output).includes("COMMANDS")));
+  assert.equal(await quit(input, app), 0);
+});
+
+test("injected key overrides: help moves chords and the overlay lists the effective ones", async () => {
+  const resolved = resolveTuiCommands({
+    help: [{ name: "f2" }],
+    palette: [{ name: "g", ctrl: true }],
+  });
+  assert.deepEqual(resolved.diagnostics, []);
+  const { app, input, output } = startApp({ commands: resolved.commands });
+  assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+  // "?" is no longer the help chord: it types into the composer instead.
+  input.type("?");
+  assert.equal(
+    await waitFor(() => textOf(output).includes("HELP"), 300),
+    false,
+    "the default help chord no longer opens help",
+  );
+  input.key("f2");
+  assert.ok(await waitFor(() => textOf(output).includes("HELP")), "F2 opens help");
+  const text = textOf(output);
+  assert.match(text, /F2/, "the help listing shows the effective help chord");
+  assert.match(text, /Ctrl\+G/, "the help listing shows the effective palette chord");
+  assert.doesNotMatch(text, /Ctrl\+P/, "the dead default chord is not advertised");
+  input.key("escape");
+  assert.equal(await quit(input, app), 0);
 });

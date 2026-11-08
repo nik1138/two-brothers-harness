@@ -301,6 +301,15 @@ export const FLAGS: Record<string, FlagHelp> = {
       "read-only verification for the senior, and an approval panel for writes/shell " +
       "(tui only)",
   },
+  "keys-file": {
+    name: "keys-file",
+    value: "<path>",
+    description:
+      "JSON file with TUI key overrides for the palette, keyboard help and draft " +
+      "stash commands (default ~/.two-brothers/tui-keys.json; env " +
+      "TWO_BROTHERS_TUI_KEYS_FILE; missing file = defaults; invalid file prints one " +
+      "diagnostic and keeps the defaults; tui only)",
+  },
   host: {
     name: "host",
     value: "<addr>",
@@ -622,8 +631,10 @@ defineCommand({
     "files read read-only. The workspace approval policy is the saved " +
     "approval_policy setting (see /permission; ask|readonly|edits|allow-all) " +
     "unless --approval-mode/env pins it for this process. The key guide printed below is " +
-    "generated from the same registry that powers the in-app Ctrl+P palette and " +
-    "the ? help overlay.",
+    "generated from the same registry that powers the in-app command palette and " +
+    "help overlay; the three global chords (palette, help, draft stash) can be " +
+    "rebound from a versioned JSON file with --keys-file (env " +
+    "TWO_BROTHERS_TUI_KEYS_FILE).",
   flags: [
     "provider",
     "provider-kind",
@@ -659,15 +670,21 @@ defineCommand({
     "skills-dir",
     "commands-dir",
     "workspace",
+    "keys-file",
     "stream-tokens",
     "approval-mode",
     "help",
   ],
-  acceptedFlags: [...SHARED_FLAGS, "workspace", "thinking-budget", "approval-mode"],
+  acceptedFlags: [...SHARED_FLAGS, "workspace", "keys-file", "thinking-budget", "approval-mode"],
   flagNotes: {
     mode: "cooperation mode consult|work|auto (print/json are run output modes)",
     workspace:
       "confined workspace root for this TUI run (workspace tools + operator approvals)",
+    "keys-file":
+      "user-authored JSON with chord overrides for the palette, help and draft-stash " +
+      "commands (env TWO_BROTHERS_TUI_KEYS_FILE; missing file = defaults; invalid file " +
+      "prints one diagnostic and keeps the defaults; never persisted, reloaded at " +
+      "startup only)",
     "approval-mode":
       "pin the approval mode for this TUI process (never persisted); without it " +
       "the saved approval_policy setting (or ask) applies and /permission writes it",
@@ -1610,6 +1627,7 @@ export const ENVIRONMENT: readonly EnvironmentHelp[] = [
   { variable: "TWO_BROTHERS_COMMANDS_DIR", flag: "--commands-dir" },
   { variable: "TWO_BROTHERS_STREAM_TOKENS", flag: "--stream-tokens", note: "boolean" },
   { variable: "TWO_BROTHERS_APPROVAL_MODE", flag: "--approval-mode" },
+  { variable: "TWO_BROTHERS_TUI_KEYS_FILE", flag: "--keys-file", note: "tui" },
   { variable: "TWO_BROTHERS_WORKERS", flag: "--workers", note: "serve" },
 ];
 

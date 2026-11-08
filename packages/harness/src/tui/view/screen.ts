@@ -1,4 +1,5 @@
 import type { EditorState } from "../editor.ts";
+import type { TuiCommand } from "../keymap.ts";
 import type { TuiModel } from "../model.ts";
 import { blankRow, composeScreen, fitStyled } from "../screen.ts";
 import { plainTheme, type Theme } from "../theme.ts";
@@ -23,6 +24,8 @@ export interface ScreenOptions {
   editor: EditorState;
   status: StatusBarState;
   theme?: Theme;
+  /** Registry commands whose effective chords drive every footer hint (default `TUI_COMMANDS`). */
+  commands?: readonly TuiCommand[];
   scroll?: TranscriptScroll;
   expandedTools?: boolean;
   composerMaxRows?: number;
@@ -115,7 +118,11 @@ export function screenView(options: ScreenOptions): ScreenView {
     ...status,
     ...(activity !== undefined ? { activity } : {}),
   };
-  const statusLines = renderStatusBar(statusState, { width, theme });
+  const statusLines = renderStatusBar(statusState, {
+    width,
+    theme,
+    ...(options.commands !== undefined ? { commands: options.commands } : {}),
+  });
   const mentionPicker = options.mentionPicker ?? [];
   const approvalPanel = options.approvalPanel ?? [];
   const todoPanel = options.todoPanel ?? [];
@@ -140,6 +147,7 @@ export function screenView(options: ScreenOptions): ScreenView {
         running: status.running,
         maxRows: options.composerMaxRows,
         theme,
+        ...(options.commands !== undefined ? { commands: options.commands } : {}),
       });
   const bodyHeight = Math.max(
     0,
@@ -189,11 +197,17 @@ export function screenView(options: ScreenOptions): ScreenView {
     juniorModel: status.juniorModel,
     examples: options.welcomeExamples,
     theme,
+    ...(options.commands !== undefined ? { commands: options.commands } : {}),
   });
 
   const panelLines =
     layout !== null && panelOpen && panelState !== undefined
-      ? sidePanelView(panelState, { width: layout.panelWidth, height: bodyHeight, theme })
+      ? sidePanelView(panelState, {
+          width: layout.panelWidth,
+          height: bodyHeight,
+          theme,
+          ...(options.commands !== undefined ? { commands: options.commands } : {}),
+        })
       : [];
   const sidePanel: ScreenSidePanel | null =
     layout === null ? null : { layout, lines: panelLines };

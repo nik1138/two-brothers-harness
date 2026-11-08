@@ -21,7 +21,7 @@ import {
   type EditorState,
 } from "../editor.ts";
 import type { KeyLike } from "../keymap.ts";
-import { hintSegments, TUI_COMMANDS } from "../keymap.ts";
+import { hintSegments, TUI_COMMANDS, type TuiCommand } from "../keymap.ts";
 import type {
   ProviderConnectRequest,
   ProviderPresetChoice,
@@ -83,6 +83,8 @@ export interface ProviderConnectViewOptions {
   width: number;
   height?: number;
   theme?: Theme;
+  /** Registry commands whose effective chords drive the footer hints (default `TUI_COMMANDS`). */
+  commands?: readonly TuiCommand[];
 }
 
 /** One rendered frame. */
@@ -598,14 +600,17 @@ function stageTitle(state: ProviderConnectState): string {
   }
 }
 
-function footerHints(state: ProviderConnectState): string {
+function footerHints(
+  state: ProviderConnectState,
+  commands: readonly TuiCommand[] = TUI_COMMANDS,
+): string {
   if (state.editing !== null) return "enter accept · esc cancel";
   if (state.stage === "manual") {
     return state.selected < FIELD_ORDER.length
       ? "enter edit · ↑↓ move · esc back"
       : "enter select · ↑↓ move · esc back";
   }
-  return hintSegments(TUI_COMMANDS, [
+  return hintSegments(commands, [
     { id: "list-move", label: "move" },
     { id: "list-accept", label: "select" },
     { id: "list-close", label: "close" },
@@ -681,7 +686,7 @@ export function providerConnectView(
     start = listed.start;
   }
 
-  const footer = themed(theme, "dim", clipDisplay(footerHints(state), contentWidth));
+  const footer = themed(theme, "dim", clipDisplay(footerHints(state, options.commands ?? TUI_COMMANDS), contentWidth));
   const content = [...header, ...body, ...errorRows, footer];
   while (height !== undefined && content.length < Math.max(0, height - 2)) content.push("");
   // `renderBox` clips and ellipsizes the title to its own budget (inner - 3);

@@ -150,6 +150,8 @@ export interface ApprovalPanelRenderOptions {
   /** Terminal width; every row is exactly this many cells. */
   width: number;
   theme?: Theme;
+  /** Registry commands whose effective chords drive the hint row (default `TUI_COMMANDS`). */
+  commands?: readonly TuiCommand[];
 }
 
 /** The rendered docked panel. */
@@ -267,7 +269,7 @@ export function approvalPanelView(
   rows.push(choiceRow(1, selected === APPROVAL_ALLOW_SESSION, theme));
   rows.push(choiceRow(2, selected === APPROVAL_DENY, theme));
   rows.push("");
-  for (const row of wrapDisplay(approvalPanelHints(TUI_COMMANDS, item), contentWidth)) {
+  for (const row of wrapDisplay(approvalPanelHints(options.commands ?? TUI_COMMANDS, item), contentWidth)) {
     rows.push(theme.paint("dim", row));
   }
   for (const row of wrapDisplay(

@@ -186,6 +186,8 @@ export interface HistorySearchRenderOptions {
   width: number;
   height: number;
   title?: string;
+  /** Registry commands whose effective chords drive the footer (default `TUI_COMMANDS`). */
+  commands?: readonly TuiCommand[];
   /** Override the registry-derived footer (tests/embedding). */
   hints?: string;
 }
@@ -231,7 +233,7 @@ export function historySearchView(
     viewTruncate(`> ${sanitizeDisplayText(state.query)}`, width),
     width,
   );
-  const footer = viewPad(options.hints ?? historySearchHints(), width);
+  const footer = viewPad(options.hints ?? historySearchHints(options.commands ?? TUI_COMMANDS), width);
   if (height === 0) {
     return { lines: [], visible: [], noMatch, selectedRow: -1 };
   }
