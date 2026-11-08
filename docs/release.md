@@ -1,9 +1,11 @@
 # Release runbook — `@two-brothers/harness`
 
-How the package ships to npm. **Status: pre-release.** As of this writing the
-package is **not on npm** — `@two-brothers/harness` does not exist on the
-public registry and the `@two-brothers` scope has no public org page. Nothing
-below has happened yet; this is the exact checklist for the owner.
+How the package ships to npm. **Status: 0.0.0 placeholder live; 0.0.1 ready
+to publish.** `@two-brothers/harness@0.0.0` exists on the public registry (it
+only reserves the name and exists for OIDC setup), and `@two-brothers` has a
+public org page. The only remaining external step is linking the Trusted
+Publisher, then running the publish workflow; the `0.0.1` source tree is on
+`main` and every release gate below has passed.
 
 Mechanics live in `.github/workflows/publish.yml` — read its header comment
 first; it documents the same one-time setup inline. Pushing a `v*` tag (or
@@ -57,28 +59,13 @@ workaround).
    `windows-latest` Node 24 leg.
 5. Only then follow the publishing checklist below (tag + workflow).
 
-## One-time external setup (owner, ~15 minutes, no repo changes)
+## One-time external setup (owner, ~5 minutes remaining)
 
-1. **Create the free `@two-brothers` org** at <https://www.npmjs.com/org/create>
-   (npm orgs are free; you are only asked for a scope name and billing details
-   are not required for a free org). As of 2026-11-04 the name showed no
-   public org page and `npm view @two-brothers/harness` returned 404 — confirm
-   availability in the org-creation form; if it is taken, rename the package
-   scope in `packages/harness/package.json` first (a manifest change that
-   needs a matching lockfile refresh).
-2. **Make the package exist.** npm requires a package to exist before its
-   Trusted Publisher settings can be edited. Choose one:
-   - **Placeholder (keeps the first real publish in CI):** check the org page
-     for a **Create a package** action; if it is available, reserve
-     `@two-brothers/harness` there. Otherwise publish a minimal placeholder
-     (for example `npx setup-npm-trusted-publish @two-brothers/harness`, a
-     third-party MIT helper, or any empty `0.0.0` package) with a `npm login`
-     scope-member account.
-   - **Manual first publish:** `npm login`, then from `packages/harness`
-     `npm publish --tag next --access public`. This publishes `0.0.1` once
-     with a token; configure Trusted Publishing immediately afterwards for
-     every later release.
-3. **Link the Trusted Publisher.** Open the package's
+1. **npm org and package existence are done.** `@two-brothers` exists and
+   `@two-brothers/harness@0.0.0` is a live placeholder, so the package settings
+   and Trusted Publisher UI are available. `npm whoami` is `nik1138`; local npm
+   is **11.21.2**, which supports `npm trust`.
+2. **Link the Trusted Publisher.** Open the package's
    **Settings → Trusted publishing** on npmjs.com (or
    <https://www.npmjs.com/package/@two-brothers/harness/access>) and add a
    GitHub Actions trusted publisher with:
@@ -92,13 +79,19 @@ workaround).
      workflow runs direct `npm publish`, so stage-only is not enough.
      Optionally enable **npm dist-tag** if the workflow should promote tags.
      The package `repository.url` must match this GitHub repository exactly
-     (it does today).
+     (it does in 0.0.1).
 
-   Alternatively, with npm CLI ≥ 11.15 and account-level 2FA:
-   `npm trust github @two-brothers/harness --file publish.yml --repo
-   nik1138/two-brothers-harness --allow-publish` (omit `--environment` for a
-   blank environment). A new trusted-publisher configuration must complete a
-   successful publish within **2 days**, or it expires.
+   CLI equivalent (needs account-level 2FA; npm prompts for an OTP or opens a
+   browser authentication URL):
+
+   ```powershell
+   npm trust github @two-brothers/harness --file publish.yml --repo nik1138/two-brothers-harness --allow-publish
+   npm trust list @two-brothers/harness   # verify; also needs the OTP
+   ```
+
+   Omitting `--environment` leaves it blank. A new trusted-publisher
+   configuration must complete a successful publish within **2 days**, or it
+   expires; do this immediately before running the workflow.
 
    **Private repository caveat:** npm does not generate provenance for
    packages built from private source repositories, even with trusted

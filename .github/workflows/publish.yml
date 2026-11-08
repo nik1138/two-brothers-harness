@@ -1,40 +1,36 @@
 # Release workflow: publish packages/harness (@two-brothers/harness) to npm.
 #
-# Triggered by pushing a version tag (e.g. `v0.0.1`). Auth is via npm Trusted
-# Publisher (OIDC) — no registry token is stored or passed anywhere:
-# npm >= 11 exchanges the GitHub OIDC token (id-token: write) for a short-lived
-# publish token when the repo is linked to the package as a trusted publisher.
+# Auth is via npm Trusted Publisher (OIDC) — no registry token is stored or
+# passed anywhere: npm >= 11 exchanges the GitHub OIDC token (id-token: write)
+# for a short-lived publish token when the repo is linked to the package as a
+# trusted publisher.
 #
-# ── One-time manual setup (must happen BEFORE the first `v*` tag push) ──────
+# ── Current state (2026-11-08) ──────────────────────────────────────────────
 #
-# 1. Create the npm scope/org:
-#      a) The `@two-brothers` organization must exist on npmjs.com
-#         (https://www.npmjs.com/org/create), OR
-#      b) change the package name in packages/harness/package.json to a scope
-#         the publisher already owns.
-#    The package name determines which org owns the published package.
+# The @two-brothers org exists and @two-brothers/harness@0.0.0 is a live
+# placeholder, so the package settings page and Trusted Publisher UI are
+# available. The next publish is the real 0.0.1.
 #
-# 2. Link this GitHub repo as a Trusted Publisher:
-#      - On https://www.npmjs.com, sign in → navigate to the package
-#        (@two-brothers/harness) if it already exists, otherwise to the
-#        @two-brothers organization → "Settings" → "Trusted Publishers"
-#        (or, for an existing package: package page → "Settings" tab →
-#        "Trusted Publishers" section).
-#      - Add a GitHub Actions trusted publisher with:
-#          Organization:  <your GitHub org/user owning this repo>
-#          Repository:    two-brothers-harness
-#          Workflow:      publish.yml     (must match this file's name)
-#          Environment:   (leave blank — no GitHub environment is used here)
-#    Note: a package's first publish can only be done by a scope member with a
-#    token; Trusted Publisher handles all subsequent publishes (including the
-#    first publish *if* the package is created via "Create a package" in the
-#    org's Provenance/Trusted Publisher UI beforehand).
+# Trusted Publisher fields:
+#   Organization/user:  nik1138 (the GitHub owner, not the npm org)
+#   Repository:         two-brothers-harness
+#   Workflow filename:  publish.yml (filename only)
+#   Environment:        blank (no GitHub environment is used)
+#   Allowed actions:    npm publish MUST be enabled. Configurations created
+#                       after 2026-09-03 default to stage-only; this workflow
+#                       runs direct `npm publish`, so stage-only is not enough.
+#                       Enable npm dist-tag too only if CI should promote tags.
 #
-# 3. Tag the release: bump `version` in packages/harness/package.json, merge,
-#    then `git tag vX.Y.Z && git push origin vX.Y.Z`. This workflow runs the
-#    release gate (typecheck → build → in-process + spawned tests → hermetic CLI E2E → real-socket fault injection → web unit tests + build → selftest → pack:check → tag↔version check) before
-#    publishing with `--tag next`, so the release lands on the `next`
-#    dist-tag, not `latest`.
+# A newly created trusted publisher must complete one successful publish within
+# 2 days or it expires. Prefer GitHub → Actions → publish → Run workflow on
+# `main` (workflow_dispatch); a `v*` tag is optional and must match the package
+# version. The workflow runs the full gate before publishing with
+# `--tag next`, so the release lands on the `next` dist-tag, not `latest`.
+#
+# Provenance: npm generates it automatically under trusted publishing for a
+# public repository. It is not generated for private source repositories, so
+# the publish step deliberately does not pass --provenance (a private repo
+# would fail instead of publishing).
 # ────────────────────────────────────────────────────────────────────────────
 
 name: publish
