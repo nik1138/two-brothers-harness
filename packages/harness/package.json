@@ -33,7 +33,7 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "two-brothers": "./dist/cli.js"
+    "two-brothers": "dist/cli.js"
   },
   "files": [
     "dist",
