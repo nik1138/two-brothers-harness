@@ -187,6 +187,15 @@ test("sessions list and show resolve a migrated directory session", async () => 
     const doc = JSON.parse(exported.out.at(-1)!);
     assert.equal(doc.name, "show-me.jsonl");
     assert.equal(doc.envelopes.length, 1);
+
+    const explicit = new SessionLayout(dir).resolve("show-me")!.sessionPath;
+    const showPath = makeIO();
+    assert.equal(
+      await main(["sessions", "show", explicit, "--sessions-dir", dir], showPath),
+      0,
+      showPath.err.join("\n"),
+    );
+    assert.ok(showPath.out.some((line) => line.includes("show-me.jsonl")));
   });
 });
 

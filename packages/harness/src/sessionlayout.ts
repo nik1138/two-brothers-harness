@@ -204,13 +204,13 @@ function ensureDir(dir: string): void {
   fs.mkdirSync(dir, { recursive: true });
 }
 
-/** Atomic, durable-enough marker write (temp + rename, fsync before rename). */
-function writeDurable(target: string, data: string): void {
+/** Atomic, durable-enough file write (fsync, then rename where a target exists). */
+function writeDurable(target: string, data: string | Buffer): void {
   ensureDir(path.dirname(target));
   const temp = `${target}.tmp-${process.pid}-${randomBytes(3).toString("hex")}`;
   const fd = fs.openSync(temp, "w");
   try {
-    fs.writeFileSync(fd, data, "utf-8");
+    fs.writeFileSync(fd, data);
     fs.fsyncSync(fd);
   } finally {
     fs.closeSync(fd);
@@ -448,10 +448,10 @@ export function migrateFlatSessions(
           // Adopt an interrupted previous migration: fill missing sidecars,
           // then remove the flat source files.
           if (metaRaw !== null && !fs.existsSync(target.metaPath)) {
-            fs.writeFileSync(target.metaPath, metaRaw, "utf-8");
+            writeDurable(target.metaPath, metaRaw);
           }
           if (fs.existsSync(eventsPath) && !fs.existsSync(target.eventsPath)) {
-            fs.copyFileSync(eventsPath, target.eventsPath);
+            writeDurable(target.eventsPath, fs.readFileSync(eventsPath));
           }
           fs.unlinkSync(sourcePath);
           if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
@@ -510,10 +510,10 @@ export function migrateFlatSessions(
     try {
       ensureDir(tempDir);
       const sessionBytes = fs.readFileSync(sourcePath);
-      fs.writeFileSync(path.join(tempDir, "session.jsonl"), sessionBytes);
-      if (metaRaw !== null) fs.writeFileSync(path.join(tempDir, "meta.json"), metaRaw);
+      writeDurable(path.join(tempDir, "session.jsonl"), sessionBytes);
+      if (metaRaw !== null) writeDurable(path.join(tempDir, "meta.json"), metaRaw);
       if (fs.existsSync(eventsPath)) {
-        fs.copyFileSync(eventsPath, path.join(tempDir, "events.jsonl"));
+        writeDurable(path.join(tempDir, "events.jsonl"), fs.readFileSync(eventsPath));
       }
       // Parent exists (ensureDir above); rename publishes the whole directory.
       ensureDir(path.dirname(target.dir as string));

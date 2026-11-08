@@ -2649,6 +2649,20 @@ interface ResolvedSessionEntry {
   path: string;
 }
 
+/** Public name for an explicit path: directory sessions keep their stem. */
+function sessionNameForPath(sessionsDir: string, filePath: string): string {
+  const root = path.resolve(sessionsDir);
+  const resolved = path.resolve(filePath);
+  const relative = path.relative(root, resolved);
+  if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) {
+    const parts = relative.split(/[\\/]/).filter(Boolean);
+    if (parts.length === 3 && parts[2] === "session.jsonl") {
+      return `${parts[1]}.jsonl`;
+    }
+  }
+  return path.basename(resolved);
+}
+
 /** Resolve a session name or path to its public name and envelope path. */
 function resolveSessionEntry(
   sessionsDir: string,
@@ -2667,7 +2681,7 @@ function resolveSessionEntry(
     const resolved = path.resolve(sessionsDir, candidate);
     try {
       if (fs.statSync(resolved).isFile()) {
-        return { name: path.basename(resolved), path: resolved };
+        return { name: sessionNameForPath(sessionsDir, resolved), path: resolved };
       }
     } catch {
       // try the next candidate
