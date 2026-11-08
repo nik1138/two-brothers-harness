@@ -27,13 +27,16 @@ const read = (relative: string): string =>
 
 const TOKENS_CSS = read('../src/tokens.css')
 
-/** Sheets migrated to the token layer: style.css plus the chrome components. */
+/** Sheets migrated to the token layer: style.css plus every chrome component. */
 const MIGRATED_SHEETS: ReadonlyArray<{ name: string; source: string }> = [
   { name: 'style.css', source: read('../src/style.css') },
+  { name: 'App.vue', source: read('../src/App.vue') },
   { name: 'Sidebar.vue', source: read('../src/components/Sidebar.vue') },
   { name: 'SessionGroup.vue', source: read('../src/components/SessionGroup.vue') },
   { name: 'SessionRow.vue', source: read('../src/components/SessionRow.vue') },
   { name: 'WelcomeHero.vue', source: read('../src/components/WelcomeHero.vue') },
+  { name: 'ChatView.vue', source: read('../src/components/ChatView.vue') },
+  { name: 'Composer.vue', source: read('../src/components/Composer.vue') },
   { name: 'CommandPalette.vue', source: read('../src/components/CommandPalette.vue') },
   { name: 'ToolActivity.vue', source: read('../src/components/ToolActivity.vue') },
   { name: 'ApprovalCard.vue', source: read('../src/components/ApprovalCard.vue') },

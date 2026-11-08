@@ -2395,7 +2395,7 @@ onUnmounted(() => {
   color: var(--text-on-accent);
   background: var(--accent);
   border: 1px solid var(--accent);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   white-space: nowrap;
 }
@@ -2418,7 +2418,7 @@ onUnmounted(() => {
   color: var(--text-secondary);
   background: transparent;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
 }
 
@@ -2453,12 +2453,12 @@ onUnmounted(() => {
   flex: none;
   align-items: center;
   gap: 0.35rem;
-  padding: 0.18rem 0.5rem;
+  padding: 0.18rem var(--space-2);
   font-size: 0.75rem;
   color: var(--text-secondary);
   background: transparent;
   border: 1px solid var(--border-strong);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   cursor: pointer;
   white-space: nowrap;
 }
@@ -2481,7 +2481,7 @@ onUnmounted(() => {
   color: var(--text-secondary);
   background: var(--surface-canvas);
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 
 @media (max-width: 640px) {

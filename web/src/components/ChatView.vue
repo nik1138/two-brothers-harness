@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { computed, defineComponent, h, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import type { PropType, VNode } from 'vue'
 import { NButton } from 'naive-ui'
@@ -41,7 +41,7 @@ const props = defineProps<{
   streaming?: StreamingBlocks | null
   /**
    * Render per-model-call prompt-audit annotations. Off by default: the
-   * Settings в†’ Advanced preference owns this, so a normal transcript reads
+   * Settings → Advanced preference owns this, so a normal transcript reads
    * cleanly. Rows are absent from the DOM (find/scroll cannot reach them).
    */
   showPromptAudits?: boolean
@@ -286,7 +286,7 @@ async function showEarlier() {
 // every conversation row stay open; a collapsed group's rows leave the DOM
 // entirely, so the find cache is invalidated on each toggle (see below).
 
-/** Fold-group keys the operator expanded вЂ” per mount, i.e. per session. */
+/** Fold-group keys the operator expanded — per mount, i.e. per session. */
 const expandedFolds = ref<ReadonlySet<string>>(new Set())
 
 function toggleFold(key: string): void {
@@ -314,13 +314,13 @@ const foldRows = computed<FoldRenderRow[]>(() =>
 // -- replayed reasoning rows --------------------------------------------------
 // The runtime sidecar persists one bounded, sanitized reasoning record per
 // streaming provider call (backend capture is streaming-only, so a
-// non-streaming run has none вЂ” exactly like an older backend). Replay renders
+// non-streaming run has none — exactly like an older backend). Replay renders
 // them as quiet, collapsed-by-default disclosure rows, visually the same shape
 // as the live thinking block but static and labelled "replayed". The body is
 // plain text from the projection (Vue text interpolation), so reasoning can
 // never become markup; it is also excluded from the shared-context meter.
 
-/** Replayed reasoning rows the reader expanded вЂ” per mount (per session). */
+/** Replayed reasoning rows the reader expanded — per mount (per session). */
 const expandedReasoning = ref<ReadonlySet<string>>(new Set())
 
 const REASONING_ROLE_LABEL: Readonly<Record<'senior' | 'junior', string>> = {
@@ -354,7 +354,7 @@ function toggleReasoning(id: string): void {
 // collapsed drill-down drawers are left out so the counter never points at
 // text that cannot be painted.
 //
-// Escape layering, topmost first: command palette в†’ dialogs в†’ mobile drawer в†’
+// Escape layering, topmost first: command palette → dialogs → mobile drawer →
 // this find bar. The palette and every dialog are modal AppDialogs with
 // role="dialog"; the drawer marks the chat shell inert. A keydown while any of
 // those is above the bar is deliberately left to that layer, so Ctrl+F cannot
@@ -367,7 +367,7 @@ function toggleReasoning(id: string): void {
 // name), so no <mark> wrappers are inserted: Vue's text nodes, copy behavior
 // and the transcript structure stay untouched. Browsers without the API still
 // get the counter and scroll-to-match. App.vue keys ChatView by session, so a
-// session switch remounts this component вЂ” the bar, its focus and its highlight
+// session switch remounts this component — the bar, its focus and its highlight
 // registry entries therefore cannot leak across sessions (unmount clears the
 // global registry explicitly as well).
 
@@ -724,7 +724,7 @@ async function copyMessage(m: ChatMessage) {
 // -- live "who is acting" status line ------------------------------------------
 // One line, not two: the shell's `activity` text (stopping / queued / working)
 // and the derived actor label share a single row so the stream never shows
-// duplicate "workingвЂ¦" banners.
+// duplicate "working…" banners.
 
 /** A run is live when the shell says so; `loading` also covers session loads. */
 const runLive = computed(() => props.loading || props.activity !== null)
@@ -766,7 +766,7 @@ const statusLine = computed(() => {
   const tail = props.timeline[props.timeline.length - 1]?.entry
   const at = timestampOf(tail)
   const secs = at === null ? null : Math.max(0, Math.floor((now.value - at) / 1000))
-  // shell status wins (StoppingвЂ¦ / Run queuedвЂ¦); a live working run also gets
+  // shell status wins (Stopping… / Run queued…); a live working run also gets
   // the elapsed clock
   if (props.activity) {
     if (
@@ -774,12 +774,12 @@ const statusLine = computed(() => {
       !props.activity.startsWith('Run queued') &&
       !props.activity.startsWith('Stopping')
     ) {
-      return `${props.activity} В· ${secs}s`
+      return `${props.activity} · ${secs}s`
     }
     return props.activity
   }
-  const label = nextActorLabel(tail) ?? 'WorkingвЂ¦'
-  return secs !== null ? `${label} В· ${secs}s` : label
+  const label = nextActorLabel(tail) ?? 'Working…'
+  return secs !== null ? `${label} · ${secs}s` : label
 })
 
 // -- live streaming draft (ephemeral SSE `token` frames) ----------------------
@@ -880,7 +880,7 @@ watch(
           aria-label="Previous match"
           :disabled="findTotal === 0"
           @click="moveFind(-1)"
-        >в†‘</button>
+        >↑</button>
         <button
           type="button"
           class="find-btn"
@@ -888,7 +888,7 @@ watch(
           aria-label="Next match"
           :disabled="findTotal === 0"
           @click="moveFind(1)"
-        >в†“</button>
+        >↓</button>
         <button
           type="button"
           class="find-btn find-close"
@@ -907,7 +907,7 @@ watch(
       aria-label="Conversation"
       @scroll.passive="onScroll"
     >
-    <p v-if="loading" class="empty-hint">LoadingвЂ¦</p>
+    <p v-if="loading" class="empty-hint">Loading…</p>
     <template v-else>
       <button
         v-if="hiddenCount > 0"
@@ -933,7 +933,7 @@ watch(
               :name="row.expanded ? 'chevron-down' : 'chevron-right'"
               :size="12"
             />
-            <span class="fold-ellipsis" aria-hidden="true">вЂ¦</span>
+            <span class="fold-ellipsis" aria-hidden="true">…</span>
             <span class="fold-label">{{ row.summary.label }}</span>
             <span class="fold-hint" aria-hidden="true">{{
               row.expanded ? 'collapse' : 'expand'
@@ -981,7 +981,7 @@ watch(
           :resolve="resolveApproval"
         />
 
-        <!-- Replayed reasoning: a collapsed, honest "Thinking В· replayed" row
+        <!-- Replayed reasoning: a collapsed, honest "Thinking · replayed" row
              from the runtime sidecar (bounded/sanitized by the backend). Mirrors
              the live thinking block's disclosure chrome; plain text only. -->
         <section
@@ -995,13 +995,13 @@ watch(
             class="stream-thinking-head"
             :aria-expanded="isReasoningExpanded(row.entry.id)"
             :aria-controls="reasoningBodyId(row.entry)"
-            :aria-label="`Replayed ${REASONING_ROLE_LABEL[row.entry.role]} reasoning вЂ” ${isReasoningExpanded(row.entry.id) ? 'collapse' : 'expand'}`"
+            :aria-label="`Replayed ${REASONING_ROLE_LABEL[row.entry.role]} reasoning — ${isReasoningExpanded(row.entry.id) ? 'collapse' : 'expand'}`"
             @click="toggleReasoning(row.entry.id)"
           >
             <span class="stream-thinking-dot" aria-hidden="true"></span>
             <span class="stream-thinking-label">
-              Thinking В· replayed
-              <span class="reasoning-who">В· {{ REASONING_ROLE_LABEL[row.entry.role] }}</span>
+              Thinking · replayed
+              <span class="reasoning-who">· {{ REASONING_ROLE_LABEL[row.entry.role] }}</span>
             </span>
             <AppIcon
               :name="isReasoningExpanded(row.entry.id) ? 'chevron-down' : 'chevron-right'"
@@ -1119,7 +1119,7 @@ watch(
           >
             <span class="stream-thinking-dot" aria-hidden="true"></span>
             <span class="stream-thinking-label">
-              {{ streamingThinking.streaming ? 'ThinkingвЂ¦' : 'Thought for a moment' }}
+              {{ streamingThinking.streaming ? 'Thinking…' : 'Thought for a moment' }}
             </span>
             <AppIcon
               :name="thinkingExpanded ? 'chevron-down' : 'chevron-right'"
@@ -1149,7 +1149,7 @@ watch(
             <header class="group-header">
               <span class="speaker-name">{{ SPEAKER_LABEL[streamingSpeaker] }}</span>
               <span class="stream-state">
-                {{ streamingText.streaming ? 'respondingвЂ¦' : 'complete' }}
+                {{ streamingText.streaming ? 'responding…' : 'complete' }}
               </span>
             </header>
             <article class="bubble stream-bubble">
@@ -1234,7 +1234,7 @@ watch(
 .system-activity {
   display: flex;
   align-items: baseline;
-  gap: 0.5rem;
+  gap: var(--space-2);
   max-width: 46rem;
   margin: 0.1rem 0;
   padding: 0.28rem 0.7rem;
@@ -1302,7 +1302,7 @@ watch(
   font-size: 0.72rem;
   color: var(--text-secondary);
   border: 1px solid var(--border-subtle);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 0.05rem 0.55rem;
   user-select: none;
 }
@@ -1341,7 +1341,7 @@ watch(
   display: block;
   margin: 0.2rem auto 0.7rem;
   border: 1px solid var(--border-subtle);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--surface-panel);
   color: var(--text-secondary);
   font-size: 0.78rem;
@@ -1355,7 +1355,7 @@ watch(
 }
 
 /* Fold row: one muted disclosure line for a completed run's tool/audit rows.
-   Width-safe вЂ” the label ellipsizes instead of wrapping the transcript. */
+   Width-safe — the label ellipsizes instead of wrapping the transcript. */
 .fold-row {
   display: flex;
   justify-content: flex-start;
@@ -1377,7 +1377,7 @@ watch(
   color: var(--text-secondary);
   background: transparent;
   border: 1px dashed var(--border-subtle);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   cursor: pointer;
 }
 
@@ -1417,7 +1417,7 @@ watch(
 
 .run-error {
   max-width: 46rem;
-  margin: 0.5rem 0;
+  margin: var(--space-2) 0;
   border: 1px solid var(--danger);
   border-radius: var(--radius-md);
   background: var(--danger-soft);
@@ -1550,7 +1550,7 @@ watch(
   .find-bar {
     width: calc(100% - 1.25rem);
     padding: 0.35rem 0.45rem;
-    gap: 0.25rem;
+    gap: var(--space-1);
   }
 
   .find-input {
@@ -1655,7 +1655,7 @@ watch(
   font-size: 0.88em;
   background: var(--surface-hover);
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   padding: 0.02rem 0.3rem;
 }
 
@@ -1679,7 +1679,7 @@ watch(
 
 .md-body .md-pre {
   margin: 0;
-  padding: 0.5rem 0.65rem;
+  padding: var(--space-2) 0.65rem;
   overflow-x: auto;
   font-size: 0.85em;
   line-height: 1.45;
@@ -1714,7 +1714,7 @@ watch(
 .md-body .md-table th,
 .md-body .md-table td {
   border: 1px solid var(--border-subtle);
-  padding: 0.25rem 0.55rem;
+  padding: var(--space-1) 0.55rem;
   text-align: left;
 }
 
@@ -1738,7 +1738,7 @@ watch(
 }
 
 .md-body .md-note {
-  margin: 0.5rem 0 0;
+  margin: var(--space-2) 0 0;
   color: var(--text-secondary);
   font-size: 0.78rem;
   font-style: italic;

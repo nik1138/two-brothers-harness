@@ -1733,7 +1733,7 @@ onBeforeUnmount(() => {
   width: 100%;
   max-width: var(--composer-max-width, 880px);
   margin: 0 auto;
-  padding: 0 1.25rem 1rem;
+  padding: 0 var(--space-5) var(--space-4);
   display: block;
 }
 
@@ -1881,7 +1881,7 @@ onBeforeUnmount(() => {
   gap: 0.35rem;
   min-width: 0;
   height: 1.9rem;
-  padding: 0 0.5rem;
+  padding: 0 var(--space-2);
   font: inherit;
   font-size: 0.78rem;
   color: var(--text-secondary);
@@ -1952,7 +1952,7 @@ onBeforeUnmount(() => {
 .route-pair {
   display: inline-flex;
   align-items: baseline;
-  gap: 0.25rem;
+  gap: var(--space-1);
 }
 
 .route-role {
@@ -1991,7 +1991,7 @@ onBeforeUnmount(() => {
 .composer-foot {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: var(--space-3);
   min-height: 1rem;
   padding: 0 0.2rem;
 }
@@ -2042,7 +2042,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.3rem 0.5rem 0.2rem;
+  padding: 0.3rem var(--space-2) 0.2rem;
   font-size: 0.68rem;
   font-weight: 650;
   letter-spacing: 0.05em;
@@ -2059,9 +2059,9 @@ onBeforeUnmount(() => {
 .mention-option {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--space-2);
   min-width: 0;
-  padding: 0.4rem 0.5rem;
+  padding: 0.4rem var(--space-2);
   font-size: 0.83rem;
   border-radius: var(--radius-sm);
   cursor: pointer;
@@ -2099,7 +2099,7 @@ onBeforeUnmount(() => {
   text-transform: uppercase;
   color: var(--accent);
   background: var(--accent-soft);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
 }
 
 .mention-option-hint {
@@ -2153,7 +2153,7 @@ onBeforeUnmount(() => {
 /* popover content (teleported by naive-ui) */
 .menu-heading {
   margin: 0;
-  padding: 0.2rem 0.5rem 0.35rem;
+  padding: 0.2rem var(--space-2) 0.35rem;
   font-size: 0.68rem;
   font-weight: 600;
   letter-spacing: 0.05em;
@@ -2173,7 +2173,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: flex-start;
   gap: 0.55rem;
-  padding: 0.45rem 0.5rem;
+  padding: 0.45rem var(--space-2);
   border-radius: var(--radius-sm);
   cursor: pointer;
 }
@@ -2242,7 +2242,7 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
   align-items: baseline;
   gap: 0.15rem 0.6rem;
-  padding: 0.4rem 0.5rem;
+  padding: 0.4rem var(--space-2);
 }
 
 .model-role {
@@ -2270,19 +2270,19 @@ onBeforeUnmount(() => {
 
 .menu-empty {
   margin: 0;
-  padding: 0.35rem 0.5rem;
+  padding: 0.35rem var(--space-2);
   font-size: 0.78rem;
   color: var(--text-secondary);
 }
 
 .menu-divider {
   height: 1px;
-  margin: 0.25rem 0.4rem;
+  margin: var(--space-1) 0.4rem;
   background: var(--border-subtle);
 }
 
 .menu-action {
-  padding: 0.45rem 0.5rem;
+  padding: 0.45rem var(--space-2);
   font: inherit;
   font-size: 0.8rem;
   font-weight: 600;
@@ -2311,7 +2311,7 @@ onBeforeUnmount(() => {
 
 @media (max-width: 620px) {
   .composer {
-    padding: 0 0.75rem 0.75rem;
+    padding: 0 var(--space-3) var(--space-3);
   }
 
   .chip-caption {
