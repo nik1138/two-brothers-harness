@@ -29,6 +29,7 @@ import {
 } from '../steering'
 import { composerSeats } from '../composerStatus'
 import { clearDraft, getDraft, setDraft } from '../drafts'
+import { appendQuoteDraft } from '../messageQuote'
 import { createRecallState, loadRecall, recordRecall, saveRecall, stepRecall } from '../recall'
 import type { RecallState } from '../recall'
 import {
@@ -99,6 +100,13 @@ const props = defineProps<{
    * saves it and focuses the caret at the end so the operator can edit it.
    */
   prefill?: { token: number; text: string } | null
+  /**
+   * Shell-requested message quote. Unlike `prefill`, a quote APPENDS to the
+   * unsent draft (one blank line before it) and never replaces text; the token
+   * makes every request distinct. The caret lands after the quote and the
+   * composer takes focus. Nothing is submitted.
+   */
+  quote?: { token: number; text: string } | null
   /**
    * Dev/test-only provider injection. The normal composer has no provider
    * control and always submits `provider: null` so the per-role settings (or
@@ -1474,6 +1482,41 @@ watch(
       el.focus()
       const end = prefill.text.length
       el.setSelectionRange(end, end)
+    })
+  },
+)
+// Message quote: APPEND to the current draft (a quote is extra context, never
+// a replacement for unsent work). One blank line separates an existing draft
+// from the blockquote; an empty draft becomes the quote itself. Persist the
+// merged text, focus the box and put the caret after the quote. Only the token
+// triggers this, so re-renders and typing are never disturbed, and nothing is
+// submitted.
+watch(
+  () => props.quote?.token ?? 0,
+  () => {
+    const quote = props.quote
+    if (!quote || typeof quote.text !== 'string' || quote.text === '') return
+    const current = composerValue()
+    const next = appendQuoteDraft(current, quote.text)
+    if (next === current) return
+    cancelDraftSave()
+    restoringDraft = false
+    recallState = createRecallState()
+    applyingRecall = false
+    task.value = next
+    if (props.sessionId) setDraft(props.sessionId, next)
+    else unsessionedDraft = next
+    void nextTick(() => {
+      resizeInput()
+      const el = inputEl.value
+      if (!el) return
+      el.focus()
+      const end = next.length
+      try {
+        el.setSelectionRange(end, end)
+      } catch {
+        // a detached/disabled textarea must never throw while restoring the caret
+      }
     })
   },
 )

@@ -810,6 +810,67 @@ async function scenarioChat(runner) {
       { desc: 'the toolbar to appear for keyboard focus' },
     )
 
+    // -- quote appends to the unsent draft (never replaces, never sends) ------
+    const composerInput = page.locator('textarea.composer-input')
+    await composerInput.fill('Keep this draft')
+    await shortWrap.hover()
+    await shortTurn.locator('.bubble-quote').click()
+    const quotedWhole = await composerInput.inputValue()
+    assert.equal(
+      quotedWhole,
+      'Keep this draft\n\n> OK\n\n',
+      `the whole-message quote must append after the draft (got ${JSON.stringify(quotedWhole)})`,
+    )
+    assert.equal(
+      await page.evaluate(() => document.activeElement?.id),
+      'composer-input',
+      'quoting must focus the composer',
+    )
+    assert.equal(
+      await composerInput.evaluate((el) => el.selectionStart),
+      quotedWhole.length,
+      'the caret must sit after the inserted quote',
+    )
+
+    // A live selection inside the bubble body is quoted instead of the whole
+    // message; the action must read it before the browser clears it.
+    await composerInput.fill('Selection draft')
+    const decisionBubble = decision.first()
+    const decisionWrap = decisionBubble.locator('xpath=..')
+    const decisionBody = decisionBubble.locator('.bubble-body')
+    await decisionBubble.scrollIntoViewIfNeeded()
+    await decisionWrap.hover()
+    const selectedText = await decisionBody.evaluate((body) => {
+      const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT)
+      let node = walker.nextNode()
+      while (node && !node.textContent) node = walker.nextNode()
+      if (!node || !node.textContent) return ''
+      const range = document.createRange()
+      range.setStart(node, 0)
+      range.setEnd(node, Math.min(24, node.textContent.length))
+      const selection = window.getSelection()
+      if (!selection) return ''
+      selection.removeAllRanges()
+      selection.addRange(range)
+      return selection.toString()
+    })
+    assert.ok(selectedText.trim().length > 0, 'the selection probe must select decision text')
+    await decisionWrap.locator('.bubble-quote').click()
+    const quotedSelection = await composerInput.inputValue()
+    const firstSelectedLine = selectedText.split('\n')[0].trimEnd()
+    assert.ok(
+      quotedSelection.startsWith('Selection draft\n\n> '),
+      `the selection quote must append after the draft (got ${JSON.stringify(quotedSelection)})`,
+    )
+    assert.ok(
+      quotedSelection.includes(`> ${firstSelectedLine}`),
+      `the selected text must be quoted (expected ${JSON.stringify(firstSelectedLine)})`,
+    )
+    assert.ok(
+      !quotedSelection.includes('> OK'),
+      'a fresh selection must not reuse the earlier whole-message quote',
+    )
+
     consoleGuard.assertClean()
     runner.pass('chat')
 

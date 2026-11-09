@@ -48,6 +48,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Quote a message into the composer (web):** assistant and operator bubbles
+  expose a hover/focus `quote` action beside `copy`. A selection that
+  intersects the bubble body is quoted as-is; otherwise the whole message uses
+  the same text source as `copy`. The action appends an ordinary Markdown
+  blockquote to the current unsent draft (one blank line before it; an empty
+  draft becomes the quote), focuses the composer and puts the caret after the
+  quote — it never replaces a draft or submits. `quoteBlock` caps the source at
+  4 000 characters with an honest truncation marker and never splits a
+  surrogate pair; blank lines stay `>`. Files: `web/src/messageQuote.ts`,
+  `web/src/components/ChatView.vue`, `web/src/components/Composer.vue`,
+  `web/src/App.vue`; tests `web/tests/messageQuote.test.ts`; E2E `chat`
+  coverage.
 - **Spill retention (operator-managed):** `SpillStore.stats()` reports the
   number and total bytes of valid `<id>.txt` artifacts (regular files only,
   `lstat`, symlinks/temp files/malformed ids ignored, a missing root is an

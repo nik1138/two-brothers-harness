@@ -28,6 +28,7 @@ import {
 import type { ForkAvailability } from '../sessionFork'
 import { parseMarkdown } from '../markdown'
 import type { MarkdownBlock, MarkdownInline } from '../markdown'
+import { quoteBlock, quoteTextForSelection } from '../messageQuote'
 import type { StreamingBlocks } from '../streaming'
 import ToolActivity from './ToolActivity.vue'
 import ApprovalCard from './ApprovalCard.vue'
@@ -96,6 +97,12 @@ const props = defineProps<{
   forkFromHereFor?: (seq: number) => ForkAvailability | null
   /** Open the fork-from-here confirmation for one operator message (`seq`). */
   onForkFromHere?: (seq: number) => void
+  /**
+   * Append a message quote to the composer draft. The view owns selection
+   * capture and Markdown formatting; the shell only routes the text. Omitted =
+   * no quote control is rendered.
+   */
+  onQuote?: (quote: string) => void
 }>()
 
 const scrollEl = ref<HTMLElement | null>(null)
@@ -823,6 +830,45 @@ async function copyMessage(m: ChatMessage) {
   }
 }
 
+// -- per-bubble quote ---------------------------------------------------------
+// Quoting is selection-aware: a live selection that intersects this bubble's
+// rendered body wins, otherwise the whole message (the same text source as
+// copy) is quoted. The button's pointerdown is prevented so the browser cannot
+// collapse the selection before the click reads it. Formatting stays in
+// messageQuote.ts (ordinary Markdown; no protocol or persistence change).
+
+/** The current selection's text when at least one range intersects `el`. */
+function selectionTextWithin(el: Element | null): string | null {
+  if (!el || typeof window === 'undefined') return null
+  const selection = window.getSelection()
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null
+  let intersects = false
+  for (let i = 0; i < selection.rangeCount; i += 1) {
+    try {
+      if (selection.getRangeAt(i).intersectsNode(el)) {
+        intersects = true
+        break
+      }
+    } catch {
+      // a detached/stale range must never break the action
+    }
+  }
+  return intersects ? selection.toString() : null
+}
+
+/** Quote the selected text inside this bubble, or the whole message. */
+function quoteMessage(m: ChatMessage, event: MouseEvent): void {
+  if (!props.onQuote || !m.body) return
+  const button = event.currentTarget
+  const wrap = button instanceof HTMLElement ? button.closest('.bubble-wrap') : null
+  const body = wrap?.querySelector('.bubble-body') ?? null
+  const chosen = quoteTextForSelection(selectionTextWithin(body), copyTextOf(m))
+  if (chosen === null) return
+  const quote = quoteBlock(chosen)
+  if (quote === '') return
+  props.onQuote(quote)
+}
+
 // -- operator rewind affordance -----------------------------------------------
 // Session rewind is offered on REAL operator tasks only (the shell's resolver
 // mirrors the backend boundary rule); the confirmation itself runs in the
@@ -1259,6 +1305,17 @@ watch(
                   aria-label="Copy message"
                   @click="copyMessage(m)"
                 >{{ copiedId === m.id ? 'copied' : 'copy' }}</button>
+
+                <button
+                  v-if="m.body && onQuote"
+                  type="button"
+                  class="bubble-copy bubble-quote"
+                  title="Quote — the selected text, or the whole message"
+                  aria-label="Quote message"
+                  @pointerdown.prevent
+                  @mousedown.prevent
+                  @click="quoteMessage(m, $event)"
+                >quote</button>
 
                 <button
                   v-if="row.entry.group.author === 'operator' && forkAction(m)"
