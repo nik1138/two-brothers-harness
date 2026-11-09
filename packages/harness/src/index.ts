@@ -113,6 +113,18 @@ export {
   type SpillReadOptions,
 } from "./spill.ts";
 export {
+  REPEAT_GUARD_DEFAULT_ARGUMENTS_PREVIEW_CHARS,
+  REPEAT_GUARD_DEFAULT_THRESHOLDS,
+  REPEAT_GUARD_ENV,
+  RepeatToolGuard,
+  canonicalToolArguments,
+  repeatToolGuardFromEnv,
+  validateRepeatThresholds,
+  wildcardToolPattern,
+  type RepeatToolGuardOptions,
+  type RepeatToolObservation,
+} from "./repeatguard.ts";
+export {
   clipText,
   clipBlock,
   clipArgs,

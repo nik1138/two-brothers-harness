@@ -112,6 +112,7 @@ import "./tuireasoningreplay.test.ts";
 import "./thinkingpassback.test.ts";
 import "./clidocs.test.ts";
 import "./steering.test.ts";
+import "./repeatguard.test.ts";
 import "./sessionrewind.test.ts";
 import "./workspaceundo.test.ts";
 import "./serverundo.test.ts";

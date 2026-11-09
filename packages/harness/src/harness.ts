@@ -169,6 +169,7 @@ import {
 } from "./payloads.ts";
 import { boundOutput, sanitizeOutput } from "./output.ts";
 import { loadPrompts } from "./prompts.ts";
+import { RepeatToolGuard, type RepeatToolGuardOptions } from "./repeatguard.ts";
 import {
   dispatchHook,
   type HookRegistry,
@@ -738,6 +739,17 @@ export interface HarnessOptions {
    * the harness does not delete them.
    */
   spill?: SpillOptions;
+  /**
+   * Advisory repeat-tool-call guard (`repeatguard.ts`): one instance per
+   * tool-loop invocation counts consecutive calls with the same tool name and
+   * canonically identical arguments, and appends a gentle reminder to the
+   * MODEL-FACING tool result at the first threshold (default 3) and a detailed
+   * one at later thresholds (5, 8). It never blocks a call; a new user message
+   * (or the next node's loop) resets the chain. Enabled by default with the
+   * defaults; `false` disables it. Runtime `tool_completed`/stream
+   * `tool_result` records and protocol envelopes are unchanged.
+   */
+  repeatToolGuard?: RepeatToolGuardOptions | false;
   /** Overrides `cfg.maxRounds` for this harness instance. */
   maxRounds?: number;
   /**
@@ -2052,6 +2064,12 @@ export class TwoBrothersHarness {
     }
     const toolMap = new Map(tools.map((tool) => [tool.name, tool]));
     const evidence: string[] = [];
+    // One advisory chain per tool loop: the next node (or a new user message
+    // drained below) starts fresh, so repetition across nodes is never a loop.
+    const repeatGuard =
+      this.options.repeatToolGuard === false
+        ? null
+        : new RepeatToolGuard(this.options.repeatToolGuard ?? {});
     // The streaming seam as the plain path: each loop round is one provider
     // call, so it gets its own token sinks AND its own reasoning capture.
     const baseOptions = { responseKind: wireKind, signal: this.options.signal };
@@ -2068,7 +2086,10 @@ export class TwoBrothersHarness {
       // (alternating contents), and the model reads the canonical rendered
       // transcript anyway — the same text every later node call sees.
       const steered = this.drainSteering(state);
-      if (steered.length > 0) messages = [...rebuild(), ...messages.slice(2)];
+      if (steered.length > 0) {
+        repeatGuard?.reset();
+        messages = [...rebuild(), ...messages.slice(2)];
+      }
       let response: ToolChatResponse;
       const capture = this.reasoningCapture(role, auditKind);
       const callOptions =
@@ -2106,6 +2127,11 @@ export class TwoBrothersHarness {
           : {}),
       });
       for (const call of response.toolCalls) {
+        // Advisory guard: every ATTEMPT advances the chain, including an
+        // unknown tool or a call the hook/approval path denies. The reminder
+        // rides only the model-facing result below; runtime/stream records and
+        // protocol envelopes keep the tool's own compact result.
+        const observation = repeatGuard?.observe(call.name, call.args);
         const tool =
           toolMap.get(call.name) ??
           (call.name === SPILL_READ_TOOL_NAME && this.spillStore !== null
@@ -2123,7 +2149,13 @@ export class TwoBrothersHarness {
           const line = toolEvidenceLine(compactToolResult(result), call.name);
           if (!evidence.includes(line)) evidence.push(line);
         }
-        messages.push({ role: "tool", content: result, toolCallId: call.id });
+        const modelResult =
+          observation?.reminder === undefined
+            ? result
+            : result === ""
+              ? observation.reminder
+              : `${result}\n\n${observation.reminder}`;
+        messages.push({ role: "tool", content: modelResult, toolCallId: call.id });
       }
     }
     return { evidence, text, messages };
