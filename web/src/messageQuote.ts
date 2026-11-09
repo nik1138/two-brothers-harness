@@ -32,10 +32,14 @@ function isLowSurrogate(code: number): boolean {
  *   quote was truncated. Empty/whitespace-only input yields `''`.
  */
 export function quoteBlock(text: string, maxChars: number = QUOTE_MAX_CHARS): string {
-  const normalized = typeof text === 'string' ? text.replace(/\r\n?/gu, '\n').trim() : ''
+  const normalized =
+    typeof text === 'string' ? text.replace(/\r\n?|[\u2028\u2029]/gu, '\n').trim() : ''
   if (normalized === '') return ''
 
-  const limit = Number.isFinite(maxChars) ? Math.max(0, Math.floor(maxChars)) : 0
+  const limit =
+    typeof maxChars === 'number' && Number.isFinite(maxChars)
+      ? Math.max(0, Math.floor(maxChars))
+      : QUOTE_MAX_CHARS
   let excerpt = normalized
   let truncated = false
   if (excerpt.length > limit) {
@@ -74,6 +78,21 @@ export function quoteTextForSelection(
   const fallback = typeof fallbackText === 'string' ? fallbackText : ''
   if (fallback.trim() !== '') return fallback
   return null
+}
+
+/**
+ * The draft a quote should append to. While prompt-history recall is active
+ * the visible text is a recalled history entry, not the operator's unsent
+ * work; the original draft is stashed in `recall.draft`. Quoting must restore
+ * that stashed draft and append the quote to it, never discard it. Without an
+ * active recall the visible composer value is the draft.
+ */
+export function quoteDraftBase(
+  visible: string,
+  recall: { active: boolean; draft: string } | null | undefined,
+): string {
+  if (recall?.active && typeof recall.draft === 'string') return recall.draft
+  return typeof visible === 'string' ? visible : ''
 }
 
 /**

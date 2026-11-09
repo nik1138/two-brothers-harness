@@ -66,7 +66,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `## Workspace instructions` block LAST in both roles' system prompts. Only
   regular files directly under the workspace root are read (missing,
   directory, symlink, empty, binary and unreadable files are skipped; nothing
-  outside the root is ever read); normalized content is de-duplicated, capped
+  outside the root is ever read; a candidate larger than 1 MiB is skipped
+  entirely and the skip is logged on serve and shown in the TUI); normalized
+  content is de-duplicated, capped
   at 16 Ki characters per file and 32 Ki characters in total, and truncation
   names the file and omitted-character count. The fixed warning marks the
   text as untrusted project guidance that never overrides system/operator

@@ -11,6 +11,7 @@ import {
   QUOTE_MAX_CHARS,
   appendQuoteDraft,
   quoteBlock,
+  quoteDraftBase,
   quoteTextForSelection,
 } from '../src/messageQuote.ts'
 
@@ -26,6 +27,16 @@ test('quoteBlock formats every line and ends with a blank line', () => {
 
 test('quoteBlock normalizes CRLF and lone CR to LF', () => {
   assert.equal(quoteBlock('a\r\nb\rc\nd'), '> a\n> b\n> c\n> d\n\n')
+})
+
+test('quoteBlock normalizes U+2028/U+2029 line separators', () => {
+  assert.equal(quoteBlock('a\u2028b\u2029c'), '> a\n> b\n> c\n\n')
+})
+
+test('quoteBlock falls back to the default cap for a non-finite maxChars', () => {
+  const source = 'x'.repeat(QUOTE_MAX_CHARS + 5)
+  assert.match(quoteBlock(source, Number.NaN), new RegExp(`truncated at ${QUOTE_MAX_CHARS}`))
+  assert.match(quoteBlock(source, Infinity), new RegExp(`truncated at ${QUOTE_MAX_CHARS}`))
 })
 
 test('quoteBlock preserves interior blank lines as a bare marker', () => {
@@ -78,6 +89,16 @@ test('appendQuoteDraft appends without replacing an unsent draft', () => {
   assert.equal(appendQuoteDraft('keep me', ''), 'keep me')
 })
 
+test('quoteDraftBase preserves the stashed draft while recall is active', () => {
+  assert.equal(quoteDraftBase('visible', { active: false, draft: 'keep me' }), 'visible')
+  assert.equal(quoteDraftBase('recalled prompt', { active: true, draft: 'keep me' }), 'keep me')
+  assert.equal(quoteDraftBase('recalled prompt', { active: true, draft: '' }), '')
+  assert.equal(quoteDraftBase('visible', null), 'visible')
+  // The regression scenario: draft -> ArrowUp -> quote must not lose the draft.
+  const base = quoteDraftBase('old prompt', { active: true, draft: 'keep me' })
+  assert.equal(appendQuoteDraft(base, '> q\n\n'), 'keep me\n\n> q\n\n')
+})
+
 test('the quote action is wired source-level (no DOM harness in web tests)', () => {
   const chat = readFileSync(
     new URL('../src/components/ChatView.vue', import.meta.url),
@@ -105,8 +126,9 @@ test('the quote action is wired source-level (no DOM harness in web tests)', () 
     new URL('../src/components/Composer.vue', import.meta.url),
     'utf8',
   )
-  assert.match(composer, /import \{ appendQuoteDraft \} from '\.\.\/messageQuote'/)
+  assert.match(composer, /import \{ appendQuoteDraft, quoteDraftBase \} from '\.\.\/messageQuote'/)
   assert.match(composer, /props\.quote\?\.token/)
+  assert.match(composer, /quoteDraftBase\(composerValue\(\), recallState\)/)
   assert.match(composer, /appendQuoteDraft\(current, quote\.text\)/)
   assert.match(composer, /el\.focus\(\)/)
   assert.match(composer, /el\.setSelectionRange\(end, end\)/)

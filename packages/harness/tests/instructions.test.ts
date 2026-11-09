@@ -159,6 +159,18 @@ test("the per-file cap truncates with an explicit marker", (t) => {
   assert.match(block, /\[truncated: 6 characters omitted from AGENTS\.md\]/);
 });
 
+test("the per-file cap never splits a surrogate pair", (t) => {
+  const root = tempWorkspace(t);
+  write(root, "AGENTS.md", "a\u{1F600}b");
+
+  const files = loadWorkspaceInstructions(root, { maxChars: 2 });
+  assert.equal(files[0].content, "a");
+  assert.equal(files[0].chars, 1);
+  assert.equal(files[0].omittedChars, 3);
+  assert.doesNotMatch(files[0].content, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/u);
+  assert.doesNotMatch(files[0].content, /(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u);
+});
+
 test("the aggregate cap truncates and can omit a whole later file", (t) => {
   const root = tempWorkspace(t);
   write(root, "AGENTS.md", "aaaaaaaaaa");

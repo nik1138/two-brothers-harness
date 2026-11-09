@@ -857,14 +857,20 @@ async function scenarioChat(runner) {
     assert.ok(selectedText.trim().length > 0, 'the selection probe must select decision text')
     await decisionWrap.locator('.bubble-quote').click()
     const quotedSelection = await composerInput.inputValue()
-    const firstSelectedLine = selectedText.split('\n')[0].trimEnd()
-    assert.ok(
-      quotedSelection.startsWith('Selection draft\n\n> '),
-      `the selection quote must append after the draft (got ${JSON.stringify(quotedSelection)})`,
-    )
-    assert.ok(
-      quotedSelection.includes(`> ${firstSelectedLine}`),
-      `the selected text must be quoted (expected ${JSON.stringify(firstSelectedLine)})`,
+    // Build the exact expected blockquote from the selected text. This proves
+    // the selection branch ran; the whole-message fallback would produce a
+    // different (much longer) quote and fail this equality.
+    const expectedQuote =
+      selectedText
+        .replace(/\r\n?|[\u2028\u2029]/gu, '\n')
+        .trim()
+        .split('\n')
+        .map((line) => (line.trim() === '' ? '>' : `> ${line}`))
+        .join('\n') + '\n\n'
+    assert.equal(
+      quotedSelection,
+      `Selection draft\n\n${expectedQuote}`,
+      `the selection quote must append the exact selected block (got ${JSON.stringify(quotedSelection)})`,
     )
     assert.ok(
       !quotedSelection.includes('> OK'),

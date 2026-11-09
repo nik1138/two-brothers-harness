@@ -1886,6 +1886,13 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         steering,
         runIdOf,
       );
+      // Workspace-instruction skips (oversize/binary/unreadable) are fail-soft
+      // but must not be silent on the serve path; the TUI already prints them.
+      for (const warning of result.warnings) {
+        if (warning.startsWith("workspace instruction")) {
+          console.warn(`[two-brothers] run ${name}: ${warning}`);
+        }
+      }
       return {
         cancelled: result.cancelled,
         decision: result.decision,

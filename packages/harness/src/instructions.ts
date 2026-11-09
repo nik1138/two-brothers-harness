@@ -229,6 +229,16 @@ function characterBudget(value: unknown, fallback: number): number {
   return Math.floor(value);
 }
 
+/** Slice to `maxChars` UTF-16 units without splitting a surrogate pair. */
+function safeInstructionPrefix(text: string, maxChars: number): string {
+  if (maxChars <= 0) return "";
+  if (text.length <= maxChars) return text;
+  let end = maxChars;
+  const code = text.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+  return text.slice(0, end);
+}
+
 /**
  * Load the root-level workspace instructions in {@link WORKSPACE_INSTRUCTION_FILES}
  * order (or a caller-supplied root-level name list).
@@ -291,8 +301,8 @@ export function loadWorkspaceInstructions(
     for (const candidate of loaded) {
       const originalChars = candidate.content.length;
       const take = Math.min(originalChars, maxChars, remaining);
-      remaining -= take;
-      const content = candidate.content.slice(0, take);
+      const content = safeInstructionPrefix(candidate.content, take);
+      remaining -= content.length;
       files.push({
         label: candidate.label,
         content,
