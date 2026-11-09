@@ -1451,13 +1451,16 @@ public session name and envelope bytes are unchanged. Tests:
 ## Shipped 2026-11-09 (wave 28: settings schema versioning)
 
 `sessions/settings.json` now carries a top-level `"version": 1` on every write
-(`SETTINGS_SCHEMA_VERSION`) and exposes `GET /api/settings.schema` as
-`{version, supported, writable}`. A legacy v0 file reads exactly as before and
-normalizes on its next save; invalid/negative/string versions read fail-soft
-and normalize too; unknown top-level sections survive a v0/v1 write. A
-document from a newer release stays readable (known sections and `GET` keep
-working) but every settings write refuses with `SettingsSchemaVersionError`
-(HTTP 409 from the server's settings write routes) instead of downgrading it.
+(`SETTINGS_SCHEMA_VERSION`) and exposes it additively as `schema` on
+`GET /api/settings` as `{version, supported, writable}`. A legacy v0 file reads
+exactly as before and normalizes on its next save; invalid/negative/string
+versions read fail-soft and normalize too; unknown top-level sections survive a
+v0/v1 write. A document from a newer release stays readable (known sections and
+`GET` keep working) but every settings write refuses with
+`SettingsSchemaVersionError` (HTTP 409 from the server's settings write routes)
+instead of downgrading it. An existing-but-unreadable document additionally
+reports `readable: false`/`reason`, reads fail-soft, and refuses every write
+with `SettingsReadOnlyError` (HTTP 409) without touching its bytes.
 Tests: `tests/settingsschema.test.ts` (new), `tests/settings.test.ts` and
 `tests/server.test.ts`. See `docs/cli-reference.md` → `GET/PUT
 /api/settings`, `docs/session-storage.md` → "Settings file schema" and
@@ -1473,7 +1476,10 @@ Also shipped in wave 28:
 - **Line-ranged `workspace_read_file`** — optional 1-based `offset` and
   `limit` page through a large file with bounded memory; results add
   `lines`/`total_lines`/`eof`/`next_offset`, while calls without either keep
-  the historical byte-identical head+tail result.
+  the historical byte-identical head+tail result. A page that clips its first
+  line keeps `next_offset` on that line and adds `next_char_offset`, passed
+  back as `char_offset` to recover the rest of the line and then the following
+  lines; `eof` stays honest and no surrogate pair is split.
 - **Advisory repeat-tool guard** — ported from deepseek-harness's
   `repeat-tool-reminder` (MIT); identical consecutive calls get a gentle
   reminder at 3 and detailed reminders at 5/8, appended only to the
@@ -1485,6 +1491,16 @@ Also shipped in wave 28:
 - **Web message quotes** — assistant/operator bubbles gain a selection-aware
   `quote` action that appends a capped Markdown blockquote to the current
   unsent composer draft, never replacing it or submitting.
+
+Wave 28 review hardening (same release): a symlink/junction spill root is
+refused instead of followed; a failed writer-lock write removes its just-created
+`.writer.json` and an old malformed lock is reclaimed after a grace; an existing
+unreadable `settings.json` reads fail-soft but refuses writes with 409; a
+character-clipped `workspace_read_file` line continues through
+`next_char_offset`/`char_offset`; session deletion no longer requires a writable
+settings document when the session has no persisted approvals; `spill stats`
+rejects gc-only flags; and the startup spill retention runs after a successful
+bind.
 
 Deferred follow-ups: a settings backend choice (JSON now, optional
 `node:sqlite`), session-format version headers plus frozen adjacent

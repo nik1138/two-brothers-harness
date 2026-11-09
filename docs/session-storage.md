@@ -75,6 +75,16 @@ reads its known sections — `GET /api/settings` reports
 is refused (`SettingsSchemaVersionError`, HTTP 409) rather than downgrading the
 document. Upgrade back to that release or restore a backup before downgrading.
 
+If the file **exists but cannot be read** (permission, sharing violation,
+antivirus lock, I/O error), reads stay fail-soft and return their empty/default
+values, but `GET /api/settings` reports
+`schema: {version: null, supported: 1, writable: false, readable: false,
+reason}`. Every write is refused with `SettingsReadOnlyError` (HTTP 409) and
+the bytes are left untouched: a temporarily unreadable document is never
+replaced by a partial/default one. A missing file and a syntactically corrupt
+JSON document keep their ordinary fail-soft behavior (missing is writable;
+corrupt recovers on the next save).
+
 ## Migration
 
 ```powershell
@@ -110,9 +120,16 @@ keep the backup or move the sessions back before downgrading.
 
 - `two-brothers doctor --sessions-dir <dir>` still checks writability.
 - `two-brothers sessions --sessions-dir <dir>` lists both layouts.
-- `serve`/TUI hold `<sessions-dir>/.writer.json` while running; migration
-  refuses while it names a live pid. A crash leaves a stale lock that the next
-  writer reclaims automatically; `--force` is the explicit unsafe override.
+- `serve`/TUI hold `<sessions-dir>/.writer.json` while running; migration and
+  `spill gc` briefly take the same lock and refuse while it names a live pid.
+  `run` and `chat` do not take the store lock, so stop them before migrating
+  or pruning. A crash leaves a stale lock that the next writer reclaims
+  automatically. If a lock-write/fsync failure leaves an empty or partial
+  `.writer.json` (for example a full disk), the failed acquisition removes its
+  own just-created file; a crash between create and write leaves a malformed
+  lock that is reclaimed only after a 5-second grace (a fresh malformed lock
+  still refuses, because a concurrent writer may be mid-write). `--force` is
+  the explicit unsafe override for migration.
 - After migration, `<project>/<stem>/session.jsonl` is the durable transcript;
   `meta.json` carries the title/workspace link and `events.jsonl` the runtime
   evidence (tool calls, approvals, reasoning, plan snapshots).

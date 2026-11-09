@@ -19,6 +19,7 @@ import {
   APPROVAL_POLICY_SECTION,
   COMPACTION_SECTION,
   SETTINGS_SCHEMA_VERSION,
+  SettingsReadOnlyError,
   SettingsSchemaVersionError,
   SettingsStore,
 } from "../src/settings_store.ts";
@@ -276,6 +277,74 @@ test("invalid/negative/string versions read fail-soft and normalize to 1 on writ
     const raw = readRaw(file);
     assert.equal(raw.version, 1);
     assert.equal(new SettingsStore(file).read().senior?.model, "recovered");
+  } finally {
+    cleanup();
+  }
+});
+
+test("an existing-but-unreadable document reads fail-soft but every write refuses", () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const file = path.join(root, "settings.json");
+    // Cross-platform simulation of an existing path that cannot be read as a
+    // file: a directory at the settings path. The write paths must refuse
+    // before touching it rather than replacing it with a v1 document.
+    fs.mkdirSync(file);
+    const sentinel = path.join(file, "keep.txt");
+    fs.writeFileSync(sentinel, "untouched", "utf-8");
+
+    const store = new SettingsStore(file);
+    assert.deepEqual(store.read(), {}, "role reads stay fail-soft");
+    assert.deepEqual(store.readPlugins(), []);
+    assert.deepEqual(store.readProviders(), []);
+    assert.deepEqual(store.readCompaction(), {});
+    assert.deepEqual(store.readSessionApprovals("s1.jsonl"), []);
+    assert.equal(store.readApprovalPolicy(), "ask");
+    const state = store.schemaState();
+    assert.equal(state.writable, false);
+    assert.equal(state.version, null);
+    assert.equal(state.supported, SETTINGS_SCHEMA_VERSION);
+    assert.equal(state.readable, false);
+    assert.ok((state.reason ?? "").length > 0);
+
+    const attempts: Array<[string, () => unknown]> = [
+      ["write", () => store.write({ senior: { model: "replacement" } })],
+      ["writeApprovalPolicy", () => store.writeApprovalPolicy("allow-all")],
+      ["writeCompaction", () => store.writeCompaction({ threshold_chars: 1 })],
+      ["addSessionApproval", () => store.addSessionApproval("s1.jsonl", PAIR)],
+      ["clearSessionApprovals", () => store.clearSessionApprovals("s1.jsonl")],
+    ];
+    for (const [label, attempt] of attempts) {
+      assert.throws(
+        attempt,
+        (exc: unknown) => {
+          assert.ok(exc instanceof SettingsReadOnlyError, `${label}: ${String(exc)}`);
+          assert.equal(exc.name, "SettingsReadOnlyError");
+          assert.match(exc.message, /cannot be read/);
+          assert.match(exc.message, /refusing to overwrite/);
+          return true;
+        },
+        `${label} must refuse an unreadable document`,
+      );
+      assert.equal(fs.existsSync(file), true, `${label} leaves the path in place`);
+      assert.equal(fs.statSync(file).isDirectory(), true, `${label} must not replace it`);
+      assert.equal(fs.readFileSync(sentinel, "utf-8"), "untouched");
+    }
+
+    // Missing and syntactically corrupt documents keep their existing
+    // fail-soft behavior (missing is writable; corrupt recovers on write).
+    const missingFile = path.join(root, "missing-settings.json");
+    const missing = new SettingsStore(missingFile);
+    assert.deepEqual(missing.schemaState(), { version: null, supported: 1, writable: true });
+    missing.write({ junior: { model: "created" } });
+    assert.equal(new SettingsStore(missingFile).read().junior?.model, "created");
+
+    const corruptFile = path.join(root, "corrupt-settings.json");
+    fs.writeFileSync(corruptFile, "{not json", "utf-8");
+    const corrupt = new SettingsStore(corruptFile);
+    assert.deepEqual(corrupt.schemaState(), { version: null, supported: 1, writable: true });
+    corrupt.write({ junior: { model: "recovered" } });
+    assert.equal(new SettingsStore(corruptFile).read().junior?.model, "recovered");
   } finally {
     cleanup();
   }

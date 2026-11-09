@@ -23,6 +23,7 @@ import {
 import {
   SPILL_READ_MAX_CHARS,
   SPILL_READ_TOOL_NAME,
+  SpillRootUnsafeError,
   SpillStore,
   spillMarker,
   spillPreview,
@@ -338,15 +339,79 @@ test("stats counts valid regular artifacts and their bytes only", async () => {
   }
 });
 
-test("stats is fail-soft when the root is not a readable directory", async () => {
+test("stats is empty for a missing root and refuses an unsafe one", async () => {
   const tmp = tmpdir("tb-spill-stats-fail-");
   try {
     const blocker = path.join(tmp.root, "blocker");
     fs.writeFileSync(blocker, "a file, not a directory");
     const notADir = new SpillStore(blocker);
-    assert.deepEqual(notADir.stats(), { files: 0, bytes: 0 });
+    assert.throws(() => notADir.stats(), SpillRootUnsafeError);
     const missing = new SpillStore(path.join(tmp.root, "missing", "spill"));
     assert.deepEqual(missing.stats(), { files: 0, bytes: 0 });
+  } finally {
+    tmp.cleanup();
+  }
+});
+
+test("a symlink/junction root is refused and external artifacts survive", async (t) => {
+  const tmp = tmpdir("tb-spill-root-link-");
+  try {
+    const external = path.join(tmp.root, "external");
+    fs.mkdirSync(external, { recursive: true });
+    const externalFile = path.join(external, `${spillId("a")}.txt`);
+    fs.writeFileSync(externalFile, "external artifact");
+    const old = new Date(Date.now() - 10 * 86_400_000);
+    fs.utimesSync(externalFile, old, old);
+    const link = path.join(tmp.root, "spill");
+    let linked = false;
+    try {
+      fs.symlinkSync(external, link, process.platform === "win32" ? "junction" : "dir");
+      linked = true;
+    } catch {
+      linked = false;
+    }
+    if (!linked) {
+      t.skip("host cannot create a directory symlink/junction; unsafe-root case skipped");
+      return;
+    }
+    const store = new SpillStore(link);
+    assert.equal(fs.lstatSync(link).isSymbolicLink(), true, "link is a symlink/junction");
+    assert.throws(() => store.stats(), SpillRootUnsafeError);
+    assert.throws(() => store.prune({ olderThanMs: 1_000 }), SpillRootUnsafeError);
+    await assert.rejects(store.save("new text"), SpillRootUnsafeError);
+    await assert.rejects(store.read(spillId("a")), SpillRootUnsafeError);
+    assert.equal(fs.readFileSync(externalFile, "utf8"), "external artifact");
+    assert.deepEqual(fs.readdirSync(external), [`${spillId("a")}.txt`]);
+  } finally {
+    tmp.cleanup();
+  }
+});
+
+test("prune removes stale temp files but keeps recent ones and never counts them as artifacts", async () => {
+  const tmp = tmpdir("tb-spill-temp-");
+  try {
+    const store = new SpillStore(tmp.root);
+    const now = Date.UTC(2026, 0, 2);
+    const old = now - 86_400_000;
+    const stale = writeSpill(tmp.root, `.tmp-${spillId("a")}`, "stale temp", old);
+    const recent = writeSpill(tmp.root, `.tmp-${spillId("b")}`, "recent temp", now);
+    const artifact = writeSpill(tmp.root, `${spillId("c")}.txt`, "artifact", now);
+
+    const dry = store.prune({ olderThanMs: 60_000, now, dryRun: true });
+    assert.equal(dry.tempsRemoved, 1);
+    assert.equal(dry.tempBytes, Buffer.byteLength("stale temp"));
+    assert.equal(fs.existsSync(stale), true, "dry run removes no temp file");
+
+    const real = store.prune({ olderThanMs: 60_000, now });
+    assert.equal(real.filesBefore, 1);
+    assert.equal(real.removed, 0);
+    assert.equal(real.kept, 1);
+    assert.equal(real.filesAfter, 1);
+    assert.equal(real.tempsRemoved, 1);
+    assert.equal(real.tempBytes, Buffer.byteLength("stale temp"));
+    assert.equal(fs.existsSync(stale), false);
+    assert.equal(fs.existsSync(recent), true, "recent temp kept");
+    assert.equal(fs.existsSync(artifact), true, "artifact kept");
   } finally {
     tmp.cleanup();
   }
@@ -405,7 +470,7 @@ test("prune ignores malformed names, temp files, directories and symlinks", asyn
     const now = Date.UTC(2026, 0, 2);
     const old = now - 86_400_000;
     const validName = `${spillId("a")}.txt`;
-    const tempFile = writeSpill(tmp.root, ".tmp-0123456789abcdef", "temp", old);
+    const tempFile = writeSpill(tmp.root, ".tmp-not-a-valid-id", "temp", old);
     const malformed = writeSpill(tmp.root, "notes.txt", "malformed", old);
     const uppercase = writeSpill(
       tmp.root,

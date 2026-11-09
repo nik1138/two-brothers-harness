@@ -506,6 +506,8 @@ export {
 export {
   SettingsStore,
   SettingsSchemaVersionError,
+  SettingsReadOnlyError,
+  SettingsWriteRefusedError,
   SETTINGS_SCHEMA_VERSION,
   envPinnedPairs,
   APPROVAL_POLICY_SECTION,

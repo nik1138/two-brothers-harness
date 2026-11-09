@@ -318,9 +318,16 @@ workspace root:
   first line (default 1), `limit` the page size in lines (default 2 000,
   clamped to 1–5 000), and `max_chars` (default 20 000) still bounds the page
   characters. A ranged result carries `content`, `truncated`, `offset`,
-  `lines`, `total_lines`, `eof` and `next_offset` when more lines remain.
-  Without `offset`/`limit` the read is the historical whole-file head+tail
-  window, byte-identical to before.
+  `lines`, `total_lines`, `eof` and, when more remains, `next_offset`. If the
+  page clips the **first** requested line, `next_offset` stays on that line and
+  the result also carries `next_char_offset` (0-based UTF-16 offset into the
+  line); pass it back as `char_offset` with the same `offset`/`limit` to read
+  the undelivered tail and then continue into following lines. `eof` is false
+  while any line or character tail remains, and a surrogate pair is never
+  split (a `max_chars: 1` astral first character returns empty `content`,
+  `lines: 0` and no advance instead of skipping it). Without
+  `offset`/`limit`/`char_offset` the read is the historical whole-file
+  head+tail window, byte-identical to before.
 - Reads auto-allow. Writes, edits, deletes and shell commands park the run on
   the [approval panel](#approvals-in-the-tui) instead of the composer — unless
   the effective [approval mode](#approval-modes) lets them run without asking
@@ -769,14 +776,17 @@ node dist/cli.js spill gc [--sessions-dir <dir>] --older-than <n>m|h|d [--dry-ru
 
 `spill stats` is read-only and prints the count and total bytes of valid
 `<id>.txt` artifacts (or `no spill files in <root>`); a missing root is an
-empty store (exit 0). `spill gc` deletes valid artifacts whose mtime is
-strictly older than `--older-than`, which is **required** and uses a positive
-integer with `m` (minutes), `h` (hours) or `d` (days) — a missing or malformed
-value is a usage error (exit 2), so there is no accidental delete-everything
-default. `--dry-run` reports the same counts and deletes nothing. `gc` takes
-the sessions-store single-writer lock and refuses while `serve`/the TUI holds
-it (the holder is named); `--force` bypasses the lock (unsafe while it runs). A
-missing sessions directory is an empty store and is not created.
+empty store (exit 0). An existing root that is a symlink/junction or not a real
+directory is refused (exit 1) instead of being followed, and gc-only flags
+(`--older-than`, `--dry-run`, `--force`) are a usage error (exit 2). `spill gc`
+deletes valid artifacts whose mtime is strictly older than `--older-than`,
+which is **required** and uses a positive integer with `m` (minutes), `h`
+(hours) or `d` (days) — a missing or malformed value is a usage error (exit 2),
+so there is no accidental delete-everything default. `--dry-run` reports the
+same counts and deletes nothing. `gc` takes the sessions-store single-writer
+lock and refuses while `serve`/the TUI holds it (the holder is named);
+`--force` bypasses the lock (unsafe while it runs). A missing sessions
+directory is an empty store and is not created.
 
 | Option | Default | Description |
 |---|---|---|
@@ -784,14 +794,17 @@ missing sessions directory is an empty store and is not created.
 | `--older-than` | (required for `gc`) | positive age with a unit: `30m`, `24h`, `7d`; files strictly older than now minus this age are deleted |
 | `--dry-run` | off | `gc`: report what would be removed without deleting anything |
 | `--force` | off | `gc`: bypass the sessions-store single-writer lock (unsafe while `serve`/TUI is running) |
-| `--json` | off | `stats`: `{root, files, bytes}`; `gc`: the prune counts (`removed`, `kept`, `bytes`, `failed`, `files_before`, `files_after`, `dry_run`, `older_than_ms`, `root`, `errors`) |
+| `--json` | off | `stats`: `{root, files, bytes}`; `gc`: the prune counts (`removed`, `kept`, `bytes`, `failed`, `files_before`, `files_after`, `temps_removed`, `temp_bytes`, `dry_run`, `older_than`, `older_than_ms`, `root`, `errors`) |
 
 Only regular files directly under the root whose names are exactly
-`<valid-id>.txt` (lowercase hex id, 16–64 characters) are candidates. Symlinks
-are `lstat`ed and skipped (never followed), as are directories, temp `.tmp-*`
-files and malformed ids. An unlink failure is reported as a warning and counted
-(`failed`); the rest of the pass continues and the command exits 1 when any file
-could not be removed.
+`<valid-id>.txt` (lowercase hex id, 16–64 characters) are artifact candidates.
+Symlinks are `lstat`ed and skipped (never followed), as are directories,
+malformed ids and temp names outside the exact `.tmp-<id>` shape. `prune` may
+also remove a stale regular `.tmp-<id>` save file whose mtime is strictly older
+than the cutoff; those are reported separately (`temps_removed`, `temp_bytes`)
+and never counted as artifacts. An unlink failure is reported as a warning and
+counted (`failed`); the rest of the pass continues and the command exits 1 when
+any file could not be removed.
 
 ### `doctor`
 
@@ -928,7 +941,7 @@ node dist/cli.js serve --approval-mode readonly           # pin the mode for the
 | `--port` | `8600` | port |
 | `--sessions-dir` | `sessions` | directory of JSONL session files to expose |
 | `--workers` | (runtime default) | background run workers (env `TWO_BROTHERS_WORKERS`) |
-| `--spill-retention-days` | (off) | prune `<sessions-dir>/spill` files older than this many days once at startup; the server already holds the writer lock, a prune failure only logs a warning and never fails startup. Off by default: spill files are otherwise only deleted by an explicit `spill gc` |
+| `--spill-retention-days` | (off) | prune `<sessions-dir>/spill` files older than this many days once after a successful bind; the server already holds the writer lock, a failed bind prunes nothing, and a prune failure only logs a skip line and never fails startup. Off by default: spill files are otherwise only deleted by an explicit `spill gc` |
 | `--approval-mode` | `ask`, `readonly`, `edits`, `allow-all` | `ask` | pin the [approval mode](#approval-modes) for every run this server starts (env `TWO_BROTHERS_APPROVAL_MODE`); the pin is in-memory only and never persisted — without it the saved `approval_policy` setting applies |
 
 Web runs also honor the shared compaction flags (`--compact`,
@@ -989,14 +1002,21 @@ but stores `meta.json` and `events.jsonl` inside
 version — or with a non-integer/negative one — is treated as legacy: it reads
 exactly as before and the next save normalizes it to version 1. `GET
 /api/settings` reports the additive `schema` object `{version, supported,
-writable}` where `version` is the stored integer (or `null` for a legacy or
-invalid file), `supported` is `1`, and `writable` is false only for a document
-from a newer release. Such a future-version document still reads its known
+writable}` where `version` is the stored integer (or `null` for a legacy,
+invalid or unreadable file), `supported` is `1`, and `writable` is false for a
+document from a newer release or one that exists but cannot be read. Such a
+future-version document still reads its known
 role/plugin/provider/approval/compaction sections and `GET` keeps working, but
 every settings write (role/plugin/provider saves, approval policy, compaction,
 session approvals, and session deletion's approval clear) is refused with HTTP
 409 and the typed `SettingsSchemaVersionError` detail instead of downgrading
-the file; upgrade Two Brothers or restore a backup. Unknown top-level sections
+the file; upgrade Two Brothers or restore a backup. An existing-but-unreadable
+file is reported with the additive `readable: false` and `reason` fields; its
+reads stay fail-soft, but every write is refused with HTTP 409 and
+`SettingsReadOnlyError` and its bytes are never replaced. Deleting a session
+under either read-only document is allowed when that session has no persisted
+approvals to clear (an unknown session stays 404); it is refused only when
+there is something the delete would have to write. Unknown top-level sections
 from a same-version extension survive a v0/v1 write.
 
 **Mid-run steering.** A steering text is not a queued task: it is appended to
@@ -1628,7 +1648,8 @@ model instead of blocking it:
   result before repeating the call.
 - **Later thresholds (default 5 and 8):** a detailed reminder naming the tool,
   the consecutive count and a head-truncated argument preview (500 characters
-  by default; non-printable characters are `\uXXXX`-escaped).
+  by default; every character outside printable ASCII — Unicode and control
+  characters alike — is `\uXXXX`-escaped).
 - **Placement:** the reminder is appended to the MODEL-FACING tool result only,
   after the normal result/spill preview and separated by a blank line. The
   runtime `tool_completed` record, the stream `tool_result` and the protocol

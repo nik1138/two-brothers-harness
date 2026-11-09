@@ -66,6 +66,12 @@ resolved, so a model can never turn an id into a traversal or an arbitrary read.
 The files are local trusted data (tool output); the directory is created with
 owner-only permissions where the platform honors them.
 
+The root must be either missing (it is created lazily by the first save) or an
+existing **real directory**. A symlink or junction at `<root>` is refused:
+`stats`/`prune` throw and `save`/`read` reject with
+`SpillRootUnsafeError`, so a store can never be redirected outside its
+configured path. A plain file at `<root>` is refused the same way.
+
 Retention is **opt-in**; nothing is deleted automatically by default.
 
 ### Inspect: `spill stats`
@@ -76,9 +82,11 @@ two-brothers spill stats [--sessions-dir <dir>] [--json]
 
 `stats` is read-only and reports the number of valid artifacts and their total
 size. It scans only regular files whose names are exactly `<valid-id>.txt`:
-symlinks are never followed, directories, `.tmp-*` writes and malformed ids are
-ignored, and a missing or unreadable root is an empty store (`0` files, `0`
-bytes) rather than an error.
+symlinks below the root are never followed, directories, `.tmp-*` writes and
+malformed ids are ignored, and a missing root is an empty store (`0` files, `0`
+bytes) rather than an error. An existing root that is a symlink/junction or not
+a real directory is rejected (exit 1), as are gc-only flags (`--older-than`,
+`--dry-run`, `--force`), which are a usage error (exit 2).
 
 ### Prune: `spill gc`
 
@@ -103,11 +111,16 @@ Only these entries can ever be deleted:
 
 - regular files directly under `<root>` whose name is `<id>.txt` with
   `id` matching `[a-f0-9]{16,64}` (lowercase hex);
+- stale regular `.tmp-<id>` save files (the same valid id shape) whose mtime is
+  strictly older than the cutoff. They are reported separately as
+  `temps_removed`/`temp_bytes` and never counted as artifacts.
 
 Everything else is never touched: symlinks (they are `lstat`ed, never followed),
-directories, temp `.tmp-*` files, malformed/uppercase ids, files outside the
-root, and other spill roots. An unlink failure is counted and reported as a
-warning; it does not abort the rest of the pass.
+directories, malformed/uppercase ids, temp names outside the exact
+`.tmp-<id>` shape, files outside the root, and other spill roots. An unlink
+failure is counted and reported as a warning; it does not abort the rest of the
+pass. The root safety check above is what makes "files outside the root" true
+even when `<root>` itself was replaced by a link.
 
 ### Server startup prune
 
@@ -116,11 +129,18 @@ two-brothers serve --spill-retention-days <n>
 ```
 
 When set to a positive number of days, `serve` prunes valid files under
-`<sessions-dir>/spill` older than `n` days once at startup (it already holds the
-writer lock). The default is off: without the flag no automatic deletion ever
-happens. A prune failure only logs one warning and never fails startup, and a
-missing spill root is an empty store. The count (removed/kept/bytes) is logged
-honestly.
+`<sessions-dir>/spill` older than `n` days once after the server successfully
+binds (it already holds the writer lock; the pass runs in the `listen()`
+success callback). A failed bind therefore deletes nothing. The default is off:
+without the flag no automatic deletion ever happens. A prune failure only logs
+one skip line (plus one line per failed unlink) and never fails startup, and a
+missing spill root is an empty store. The count (removed/kept/bytes, plus stale
+temp files) is logged honestly. A second server that cannot take the writer
+lock never reaches the retention pass.
+
+Only `serve`, the TUI, `sessions migrate` and `spill gc` participate in the
+single-writer lock; `run` and `chat` do not take it, so stop them before
+migrating or pruning (they may still be writing their own session files).
 
 Removing the directory is always safe; a later `spill_read` for a deleted id
 returns a normal tool-error string.

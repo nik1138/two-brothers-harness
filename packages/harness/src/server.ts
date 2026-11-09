@@ -323,8 +323,10 @@ import {
 import { computeRewindCut, rewindSession, validateRewindTurns } from "./sessionrewind.ts";
 import {
   PROVIDER_KIND_DEFAULT,
+  SettingsReadOnlyError,
   SettingsSchemaVersionError,
   SettingsStore,
+  SettingsWriteRefusedError,
   strictCompactionSettings,
   type PersistedCompactionSettings,
   type PluginSelection,
@@ -1022,9 +1024,10 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   const settingsStore = new SettingsStore(path.join(sessionsDir, "settings.json"));
   const settings = new RuntimeSettings(settingsStore);
   // The constructor already hydrated the saved roles. Re-save them only when
-  // this release may write the document: a future-version settings.json is
-  // read-only, and serve must still start so GET /api/settings can report its
-  // schema state (every write route then answers 409).
+  // this release may write the document: a future-version or unreadable
+  // settings.json is read-only, and serve must still start so GET
+  // /api/settings can report its schema state (every write route then answers
+  // 409).
   const settingsWritable = settingsStore.schemaState().writable;
   if (settingsWritable) {
     for (const role of ROLES) {
@@ -1057,19 +1060,29 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   const releaseWriterLock = layout.acquireWriterLock("serve");
   // Opt-in spill retention (default off): the server already owns the writer
   // lock, so prune valid <sessionsDir>/spill artifacts older than the
-  // configured age once at startup. Fail-soft: a broken store logs one line
-  // and startup continues; no other session data is touched.
+  // configured age once after a successful bind. Running it only on a
+  // successful listen() means a failed bind (port in use, invalid host) never
+  // deletes anything. Fail-soft: a broken store logs one line and startup
+  // continues; no other session data is touched.
   const spillRoot = path.join(sessionsDir, "spill");
-  if (options.spillRetentionDays !== undefined) {
+  let spillRetentionApplied = false;
+  function applySpillRetention(): void {
+    if (spillRetentionApplied) return;
+    spillRetentionApplied = true;
+    if (options.spillRetentionDays === undefined) return;
     const days = options.spillRetentionDays;
     if (typeof days === "number" && Number.isFinite(days) && days > 0) {
       try {
         const result = new SpillStore(spillRoot).prune({ olderThanMs: days * 86_400_000 });
         const failure = result.failed > 0 ? `; ${result.failed} failed` : "";
+        const temps =
+          result.tempsRemoved > 0
+            ? `; ${result.tempsRemoved} stale temp file(s) removed`
+            : "";
         console.log(
           `[two-brothers] spill retention: removed ${result.removed} of ` +
             `${result.filesBefore} file(s) older than ${days} day(s) ` +
-            `(${result.bytes} bytes) from ${spillRoot}; ${result.kept} kept${failure}`,
+            `(${result.bytes} bytes) from ${spillRoot}; ${result.kept} kept${failure}${temps}`,
         );
         for (const line of result.errors) {
           console.warn(`[two-brothers] spill retention: ${line}`);
@@ -1143,14 +1156,16 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
 
   /**
    * Refuse a settings write before any in-memory mutation when the document
-   * was written by a newer release. All settings write routes map the typed
-   * error to HTTP 409; reads keep working.
+   * was written by a newer release or exists but cannot be read. All settings
+   * write routes map the typed refusal to HTTP 409; reads keep working.
    */
   function requireWritableSettings(): void {
     const schema = state.settingsStore.schemaState();
-    if (!schema.writable && schema.version !== null) {
+    if (schema.writable) return;
+    if (schema.version !== null) {
       throw new SettingsSchemaVersionError(schema.version);
     }
+    throw new SettingsReadOnlyError(schema.reason ?? "the file could not be read");
   }
 
   /**
@@ -2737,9 +2752,6 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
 
   routes.push(
     compileRoute("DELETE", "/api/sessions/{name}", async (ctx) => {
-      // Deleting a session clears its persisted approvals; refuse up front on
-      // a future-version settings document instead of stopping runs first.
-      requireWritableSettings();
       const safe = sessionFileName(ctx.params.name);
       const store = storeFor(safe);
       let isFile = false;
@@ -2749,6 +2761,22 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         isFile = false;
       }
       if (!isFile) throw new HttpError(404, "not found");
+      // Deleting a session only writes settings.json when it must clear that
+      // session's persisted approvals. A future-version (or unreadable)
+      // document therefore blocks deletion only when there is something to
+      // clear; a session with no persisted approvals can still be deleted.
+      const schema = state.settingsStore.schemaState();
+      const persistedApprovals = state.settingsStore.readSessionApprovals(safe);
+      if (persistedApprovals.length > 0 && !schema.writable) {
+        if (schema.version !== null) throw new SettingsSchemaVersionError(schema.version);
+        throw new SettingsReadOnlyError(schema.reason ?? "the file could not be read");
+      }
+      if (persistedApprovals.length === 0 && schema.readable === false) {
+        // The document exists but cannot be read, so we cannot prove this
+        // session has no persisted allows. Deletion is destructive: fail closed
+        // rather than leave a reusable name with auto-allow entries.
+        throw new SettingsReadOnlyError(schema.reason ?? "the file could not be read");
+      }
       // A live run keeps its SessionStore handle and would re-append the next
       // envelope, resurrecting the file — stop it and let it unwind first.
       const activeFor = (): Array<Record<string, unknown>> =>
@@ -2767,11 +2795,13 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       // granted for. Clear them before the file disappears: a failed write
       // leaves the session in place rather than a deleted session whose auto-
       // allows could apply again if the name were reused.
-      try {
-        state.settingsStore.clearSessionApprovals(safe);
-      } catch (exc) {
-        if (exc instanceof SettingsSchemaVersionError) throw exc;
-        throw new HttpError(500, `could not clear the session approvals: ${errorDetail(exc)}`);
+      if (persistedApprovals.length > 0) {
+        try {
+          state.settingsStore.clearSessionApprovals(safe);
+        } catch (exc) {
+          if (exc instanceof SettingsWriteRefusedError) throw exc;
+          throw new HttpError(500, `could not clear the session approvals: ${errorDetail(exc)}`);
+        }
       }
       fs.unlinkSync(store.path);
       state.metadata.delete(safe);
@@ -2805,8 +2835,9 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         approval_policy: approvalPolicyView(),
         compaction: compactionView(),
         // Additive schema state: a legacy file reports version null, a current
-        // one 1, and a document from a newer release keeps reads working while
-        // writable is false (writes then answer 409).
+        // one 1, and a future-version or existing-but-unreadable document keeps
+        // reads working while writable is false (writes then answer 409; the
+        // unreadable case adds readable:false + reason).
         schema: state.settingsStore.schemaState(),
       };
     }),
@@ -2867,7 +2898,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       try {
         updated = state.settings.update(body);
       } catch (exc) {
-        if (exc instanceof SettingsSchemaVersionError) throw exc;
+        if (exc instanceof SettingsWriteRefusedError) throw exc;
         throw new HttpError(400, errorDetail(exc));
       }
       if (pluginsPatch !== null) {
@@ -2897,7 +2928,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         try {
           state.settingsStore.writeApprovalPolicy(approvalPatch);
         } catch (exc) {
-          if (exc instanceof SettingsSchemaVersionError) throw exc;
+          if (exc instanceof SettingsWriteRefusedError) throw exc;
           throw new HttpError(500, `could not persist the approval policy: ${errorDetail(exc)}`);
         }
       }
@@ -2909,7 +2940,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         try {
           state.settingsStore.writeCompaction(compactionPatch);
         } catch (exc) {
-          if (exc instanceof SettingsSchemaVersionError) throw exc;
+          if (exc instanceof SettingsWriteRefusedError) throw exc;
           throw new HttpError(500, `could not persist the compaction settings: ${errorDetail(exc)}`);
         }
       }
@@ -3607,7 +3638,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
             throw new Error("the approval target cannot be stored for this session");
           }
         } catch (exc) {
-          if (exc instanceof SettingsSchemaVersionError) throw exc;
+          if (exc instanceof SettingsWriteRefusedError) throw exc;
           throw new HttpError(500, `could not persist the session approval: ${errorDetail(exc)}`);
         }
         const decision = broker.allowForSession(ctx.params.approval_id);
@@ -3770,9 +3801,10 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       writeJson(res, 400, { detail: exc.message });
       return;
     }
-    // A settings document written by a newer release is read-only for this
-    // release: settings write routes answer 409, never a generic 500.
-    if (exc instanceof SettingsSchemaVersionError) {
+    // A settings document written by a newer release (or one that exists but
+    // cannot be read) is read-only for this release: settings write routes
+    // answer 409, never a generic 500.
+    if (exc instanceof SettingsWriteRefusedError) {
       writeJson(res, 409, { detail: exc.message });
       return;
     }
@@ -3922,7 +3954,12 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       server.on("close", () => servers.delete(server));
       return new Promise((resolve, reject) => {
         server.once("error", reject);
-        server.listen(port, host, () => resolve(server));
+        server.listen(port, host, () => {
+          // Retention is a startup side effect of a served process: run it
+          // after a successful bind, never when listen() failed.
+          applySpillRetention();
+          resolve(server);
+        });
       });
     },
     async close(): Promise<void> {

@@ -22,6 +22,8 @@ import {
   GLOBAL_PROJECT_KEY,
   SESSION_LAYOUT_FILE,
   SESSION_LAYOUT_VERSION,
+  SESSION_LOCK_FILE,
+  SESSION_LOCK_MALFORMED_GRACE_MS,
   SessionLayout,
   canonicalSessionName,
   migrateFlatSessions,
@@ -301,6 +303,64 @@ test("duplicate names across projects resolve deterministically (first sorted)",
     const layout = new SessionLayout(root);
     assert.equal(layout.list().find((item) => item.name === "same.jsonl")?.projectKey, "a-project");
     assert.equal(layout.resolve("same")?.projectKey, "a-project");
+  } finally {
+    cleanup(root);
+  }
+});
+
+test("a stale malformed writer lock is reclaimed after the grace", () => {
+  const root = tmpdir();
+  try {
+    const file = path.join(root, SESSION_LOCK_FILE);
+    fs.writeFileSync(file, "{not json", "utf-8");
+    const old = new Date(Date.now() - SESSION_LOCK_MALFORMED_GRACE_MS - 1_000);
+    fs.utimesSync(file, old, old);
+    const layout = new SessionLayout(root);
+    const release = layout.acquireWriterLock("recovered");
+    try {
+      assert.equal(layout.writerLock()?.owner, "recovered");
+      assert.equal(fs.existsSync(file), true);
+    } finally {
+      release();
+    }
+    assert.equal(fs.existsSync(file), false, "release removes the reclaimed lock");
+  } finally {
+    cleanup(root);
+  }
+});
+
+test("a fresh malformed writer lock still refuses (a concurrent writer may be mid-write)", () => {
+  const root = tmpdir();
+  try {
+    const file = path.join(root, SESSION_LOCK_FILE);
+    fs.writeFileSync(file, "", "utf-8");
+    const layout = new SessionLayout(root);
+    assert.throws(
+      () => layout.acquireWriterLock("late"),
+      /locked by an unknown writer/,
+    );
+    assert.equal(fs.existsSync(file), true, "the fresh lock is left alone");
+    assert.equal(fs.readFileSync(file, "utf-8"), "");
+  } finally {
+    cleanup(root);
+  }
+});
+
+test("a writer-lock record write failure removes the just-created lock", () => {
+  const root = tmpdir();
+  try {
+    const file = path.join(root, SESSION_LOCK_FILE);
+    const failing = new SessionLayout(root, {
+      lockWriteHook: () => {
+        throw new Error("simulated disk full");
+      },
+    });
+    assert.throws(() => failing.acquireWriterLock("test"), /simulated disk full/);
+    assert.equal(fs.existsSync(file), false, "no empty lock is left behind");
+    // The next acquisition is not wedged by the failed attempt.
+    const release = new SessionLayout(root).acquireWriterLock("test");
+    release();
+    assert.equal(fs.existsSync(file), false);
   } finally {
     cleanup(root);
   }

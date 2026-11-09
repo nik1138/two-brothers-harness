@@ -95,6 +95,62 @@ test("spill stats: human, JSON and a missing store", async () => {
   });
 });
 
+test("spill stats rejects gc-only flags (exit 2) and refuses an unsafe root (exit 1)", async (t) => {
+  await withTempDir(async (dir) => {
+    writeSpill(dir, spillId("a"), "abc");
+    for (const extra of [
+      ["--older-than", "1d"],
+      ["--dry-run"],
+      ["--force"],
+    ]) {
+      const io = makeIO();
+      assert.equal(
+        await main(["spill", "stats", "--sessions-dir", dir, ...extra], io),
+        2,
+        extra.join(" "),
+      );
+      assert.ok(
+        io.err.some((line) => line.includes("gc-only flag")),
+        io.err.join("\n"),
+      );
+    }
+    assert.equal(fs.existsSync(path.join(dir, "spill", `${spillId("a")}.txt`)), true);
+  });
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tb-spill-cli-link-"));
+  try {
+    const external = path.join(dir, "external");
+    fs.mkdirSync(external, { recursive: true });
+    const externalFile = path.join(external, `${spillId("b")}.txt`);
+    fs.writeFileSync(externalFile, "external");
+    const link = path.join(dir, "spill");
+    let linked = false;
+    try {
+      fs.symlinkSync(external, link, process.platform === "win32" ? "junction" : "dir");
+      linked = true;
+    } catch {
+      linked = false;
+    }
+    if (!linked) {
+      t.skip("host cannot create a directory symlink/junction; unsafe-root CLI case skipped");
+      return;
+    }
+    const stats = makeIO();
+    assert.equal(await main(["spill", "stats", "--sessions-dir", dir], stats), 1);
+    assert.ok(stats.err.some((line) => line.includes("spill stats refused")), stats.err.join("\n"));
+
+    const gc = makeIO();
+    assert.equal(
+      await main(["spill", "gc", "--sessions-dir", dir, "--older-than", "1d"], gc),
+      1,
+    );
+    assert.ok(gc.err.some((line) => line.includes("spill gc failed")), gc.err.join("\n"));
+    assert.equal(fs.readFileSync(externalFile, "utf8"), "external", "external artifact survives");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("spill gc: dry run is pure, then the real pass removes only old files", async () => {
   await withTempDir(async (dir) => {
     const now = Date.now();

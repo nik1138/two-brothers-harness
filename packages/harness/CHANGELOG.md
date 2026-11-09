@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Spill root can no longer be redirected outside the store:** `SpillStore`
+  now accepts only a missing root (created lazily) or an existing real
+  directory. A symlink/junction root makes `stats`/`prune` throw and
+  `save`/`read` reject with `SpillRootUnsafeError`, so a hostile or accidental
+  link can never make `spill gc` delete external files. Stale `.tmp-<id>` save
+  files older than the cutoff are pruned and reported separately
+  (`temps_removed`/`temp_bytes`); `spill stats` rejects gc-only flags with exit
+  2 and both CLI commands exit 1 with a clear message on an unsafe root.
+- **A failed writer-lock write no longer wedges the store:** a write/fsync
+  failure after `.writer.json` is created removes that just-created file before
+  rethrowing, and a malformed/empty lock is reclaimed only after a 5-second
+  grace based on its mtime (a fresh one still refuses, because a concurrent
+  writer may be mid-write). `SessionLayoutLockedError` messages are unchanged.
+- **An existing-but-unreadable `settings.json` is never overwritten:**
+  `readRaw()` distinguishes a missing file from a path that exists but cannot
+  be read. Reads stay fail-soft, while `schemaState()` reports
+  `writable: false` with additive `readable: false`/`reason`; every write path
+  throws `SettingsReadOnlyError` and leaves the bytes untouched (server write
+  routes answer 409). Missing and syntactically corrupt files keep their
+  existing fail-soft behavior.
+- **Character-clipped `workspace_read_file` lines are recoverable:**
+  range mode now returns `next_char_offset` and accepts `char_offset` when the
+  first requested line is clipped, keeping `next_offset` on that line until its
+  tail is delivered and then continuing into following lines. `eof` stays
+  false while any line or character tail remains, and a surrogate pair is
+  never split (`max_chars: 1` on an astral first character returns empty
+  content, `lines: 0` and no advance instead of skipping the line).
+- **Session deletion no longer requires a writable settings document unless it
+  must clear persisted approvals:** on a future-version (or unreadable)
+  settings file, a session with no persisted approvals is deleted normally
+  (unknown sessions stay 404); only a session whose approvals would need a
+  settings write is refused.
+- **Startup spill retention runs after a successful bind:** `serve
+  --spill-retention-days` no longer prunes when `listen()` fails (the pass runs
+  in the listen success callback while the writer lock is held).
 - **Session store hardening (review follow-up):** `serve`/TUI take a
   single-writer lock (`<sessions-dir>/.writer.json`) and `sessions migrate`
   refuses while a live writer holds it (`--force` is the explicit unsafe
