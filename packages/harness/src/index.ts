@@ -476,6 +476,8 @@ export {
 } from "./secretbox.ts";
 export {
   SettingsStore,
+  SettingsSchemaVersionError,
+  SETTINGS_SCHEMA_VERSION,
   envPinnedPairs,
   APPROVAL_POLICY_SECTION,
   COMPACTION_SECTION,
@@ -483,6 +485,7 @@ export {
   strictCompactionSettings,
   type PersistedCompactionSettings,
   type RoleSettings,
+  type SettingsSchemaState,
   type SettingsSnapshot,
   type PluginSelection,
   type ProviderPreset,

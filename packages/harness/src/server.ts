@@ -323,6 +323,7 @@ import {
 import { computeRewindCut, rewindSession, validateRewindTurns } from "./sessionrewind.ts";
 import {
   PROVIDER_KIND_DEFAULT,
+  SettingsSchemaVersionError,
   SettingsStore,
   strictCompactionSettings,
   type PersistedCompactionSettings,
@@ -656,8 +657,12 @@ function envPluginNames(): string[] {
   return out;
 }
 
-/** Overlay `TWO_BROTHERS_*` env vars on persisted settings (env wins). */
-function applyEnvOverrides(settings: RuntimeSettings): void {
+/**
+ * Overlay `TWO_BROTHERS_*` env vars on persisted settings (env wins). With
+ * `persist` false (a future-version settings.json) the overlay stays
+ * in-memory: reads/runs keep working and only writes are refused.
+ */
+function applyEnvOverrides(settings: RuntimeSettings, persist = true): void {
   const patch: Record<string, Record<string, string>> = {};
   const provider = process.env.TWO_BROTHERS_PROVIDER;
   if (provider === "openai" || provider === "mock") {
@@ -685,7 +690,9 @@ function applyEnvOverrides(settings: RuntimeSettings): void {
   if (seniorModel) (patch.senior ??= {}).model = seniorModel;
   const juniorModel = process.env.TWO_BROTHERS_JUNIOR_MODEL;
   if (juniorModel) (patch.junior ??= {}).model = juniorModel;
-  if (Object.keys(patch).length > 0) settings.update(patch);
+  if (Object.keys(patch).length === 0) return;
+  if (persist) settings.update(patch);
+  else settings.applyInMemory(patch);
 }
 
 /** Public preset view — key material is never echoed back. */
@@ -1012,15 +1019,22 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
 
   const settingsStore = new SettingsStore(path.join(sessionsDir, "settings.json"));
   const settings = new RuntimeSettings(settingsStore);
-  for (const role of ROLES) {
-    const saved = settingsStore.read()[role];
-    if (saved) settings.update({ [role]: saved });
+  // The constructor already hydrated the saved roles. Re-save them only when
+  // this release may write the document: a future-version settings.json is
+  // read-only, and serve must still start so GET /api/settings can report its
+  // schema state (every write route then answers 409).
+  const settingsWritable = settingsStore.schemaState().writable;
+  if (settingsWritable) {
+    for (const role of ROLES) {
+      const saved = settingsStore.read()[role];
+      if (saved) settings.update({ [role]: saved });
+    }
   }
   // Environment beats the persisted file where set — effective precedence
   // for the run config is: per-run flags > TWO_BROTHERS_* env vars >
   // persisted settings > defaults. (Persisted writes strip env-pinned
   // fields, so this overlay never reaches settings.json.)
-  applyEnvOverrides(settings);
+  applyEnvOverrides(settings, settingsWritable);
 
   // Operator approval mode: a serve CLI flag/env pin (never persisted) beats
   // the persisted `approval_policy` setting, which fails closed to `ask` when
@@ -1124,6 +1138,18 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   };
 
   // -- helpers ---------------------------------------------------------------
+
+  /**
+   * Refuse a settings write before any in-memory mutation when the document
+   * was written by a newer release. All settings write routes map the typed
+   * error to HTTP 409; reads keep working.
+   */
+  function requireWritableSettings(): void {
+    const schema = state.settingsStore.schemaState();
+    if (!schema.writable && schema.version !== null) {
+      throw new SettingsSchemaVersionError(schema.version);
+    }
+  }
 
   /**
    * Additive `compaction` view for `GET/PUT /api/settings` (wave 25): each
@@ -2694,6 +2720,9 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
 
   routes.push(
     compileRoute("DELETE", "/api/sessions/{name}", async (ctx) => {
+      // Deleting a session clears its persisted approvals; refuse up front on
+      // a future-version settings document instead of stopping runs first.
+      requireWritableSettings();
       const safe = sessionFileName(ctx.params.name);
       const store = storeFor(safe);
       let isFile = false;
@@ -2724,6 +2753,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       try {
         state.settingsStore.clearSessionApprovals(safe);
       } catch (exc) {
+        if (exc instanceof SettingsSchemaVersionError) throw exc;
         throw new HttpError(500, `could not clear the session approvals: ${errorDetail(exc)}`);
       }
       fs.unlinkSync(store.path);
@@ -2757,12 +2787,17 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         plugins: [...state.pluginSelection],
         approval_policy: approvalPolicyView(),
         compaction: compactionView(),
+        // Additive schema state: a legacy file reports version null, a current
+        // one 1, and a document from a newer release keeps reads working while
+        // writable is false (writes then answer 409).
+        schema: state.settingsStore.schemaState(),
       };
     }),
   );
 
   routes.push(
     compileRoute("PUT", "/api/settings", async (ctx) => {
+      requireWritableSettings();
       const body = await ctx.json();
       // Validate everything before mutating: a 400 must not leave a
       // half-applied update behind (the TS RuntimeSettings persists on
@@ -2815,6 +2850,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       try {
         updated = state.settings.update(body);
       } catch (exc) {
+        if (exc instanceof SettingsSchemaVersionError) throw exc;
         throw new HttpError(400, errorDetail(exc));
       }
       if (pluginsPatch !== null) {
@@ -2844,6 +2880,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         try {
           state.settingsStore.writeApprovalPolicy(approvalPatch);
         } catch (exc) {
+          if (exc instanceof SettingsSchemaVersionError) throw exc;
           throw new HttpError(500, `could not persist the approval policy: ${errorDetail(exc)}`);
         }
       }
@@ -2855,6 +2892,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         try {
           state.settingsStore.writeCompaction(compactionPatch);
         } catch (exc) {
+          if (exc instanceof SettingsSchemaVersionError) throw exc;
           throw new HttpError(500, `could not persist the compaction settings: ${errorDetail(exc)}`);
         }
       }
@@ -2954,6 +2992,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
 
   routes.push(
     compileRoute("POST", "/api/providers", async (ctx) => {
+      requireWritableSettings();
       const body = await ctx.json();
       if (typeof body.name !== "string" || typeof body.base_url !== "string") throw invalidBody();
       const name = body.name.trim();
@@ -2986,6 +3025,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
 
   routes.push(
     compileRoute("PUT", "/api/providers/{name}", async (ctx) => {
+      requireWritableSettings();
       const body = await ctx.json();
       const presets = state.settingsStore.readProviders();
       let index = presets.findIndex(
@@ -3049,6 +3089,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
 
   routes.push(
     compileRoute("POST", "/api/providers/{name}/reset", (ctx) => {
+      requireWritableSettings();
       const seed = presetById(ctx.params.name);
       const presets = state.settingsStore.readProviders();
       if (seed === undefined) {
@@ -3078,6 +3119,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
 
   routes.push(
     compileRoute("DELETE", "/api/providers/{name}", (ctx) => {
+      requireWritableSettings();
       const presets = state.settingsStore.readProviders();
       const remaining = presets.filter((p) => p.name.toLowerCase() !== ctx.params.name.toLowerCase());
       if (remaining.length === presets.length) throw new HttpError(404, "not found");
@@ -3523,6 +3565,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       if (record === null || record.approvals === null) throw new HttpError(404, "not found");
       const broker = record.approvals as RunApprovalBroker;
       if (scope === "session") {
+        requireWritableSettings();
         if (
           typeof broker.sessionPairKey !== "function" ||
           typeof broker.allowForSession !== "function"
@@ -3547,6 +3590,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
             throw new Error("the approval target cannot be stored for this session");
           }
         } catch (exc) {
+          if (exc instanceof SettingsSchemaVersionError) throw exc;
           throw new HttpError(500, `could not persist the session approval: ${errorDetail(exc)}`);
         }
         const decision = broker.allowForSession(ctx.params.approval_id);
@@ -3707,6 +3751,12 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     }
     if (exc instanceof WorkspaceError) {
       writeJson(res, 400, { detail: exc.message });
+      return;
+    }
+    // A settings document written by a newer release is read-only for this
+    // release: settings write routes answer 409, never a generic 500.
+    if (exc instanceof SettingsSchemaVersionError) {
+      writeJson(res, 409, { detail: exc.message });
       return;
     }
     writeJson(res, 500, { detail: errorDetail(exc) });

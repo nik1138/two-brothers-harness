@@ -53,6 +53,13 @@ Local map for the package sources. Project rules live in
   migrate` refuses while a live writer owns it (`--force` is unsafe/explicit).
   Read routes must use strict resolution and never materialize a directory for
   an unknown name.
+- `sessions/settings.json` is schema-versioned: every write stamps top-level
+  `version: 1` (`SETTINGS_SCHEMA_VERSION`). Reads stay tolerant (missing or
+  invalid version = legacy; a newer integer = read-only), unknown top-level
+  sections survive a v0/v1 write, and a newer-release document refuses every
+  write with `SettingsSchemaVersionError` (serve maps it to HTTP 409) instead
+  of downgrading it. `GET /api/settings` exposes `schema: {version, supported,
+  writable}`.
 - Oversized plain-text tool results spill under a private root; `spill_read`
   validates random-hex ids and must never gain arbitrary-path access. Storage
   failure falls back to clipped output with a warning.

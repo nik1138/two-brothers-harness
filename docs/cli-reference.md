@@ -984,6 +984,21 @@ but stores `meta.json` and `events.jsonl` inside
 | `POST /api/run` | legacy synchronous run (body `{"task", "mode"?, "session"?, "provider"?, "workspace_id"?}` → `{"session", "events", "decision"}`); an omitted `workspace_id` inherits the session's linked workspace exactly like `POST /api/runs` (an explicit value wins and must be registered), and the effective workspace supplies the tool belt; slash commands and mentions are expanded the same way, but there is no token streaming or approval channel, so a mode that still asks fails closed for mutating tools |
 | `GET /api/stream?session=<name>` | legacy SSE tail of a session file |
 
+**Settings file schema.** `sessions/settings.json` carries a top-level
+`"version": 1` on every write (`SETTINGS_SCHEMA_VERSION`). A file without a
+version — or with a non-integer/negative one — is treated as legacy: it reads
+exactly as before and the next save normalizes it to version 1. `GET
+/api/settings` reports the additive `schema` object `{version, supported,
+writable}` where `version` is the stored integer (or `null` for a legacy or
+invalid file), `supported` is `1`, and `writable` is false only for a document
+from a newer release. Such a future-version document still reads its known
+role/plugin/provider/approval/compaction sections and `GET` keeps working, but
+every settings write (role/plugin/provider saves, approval policy, compaction,
+session approvals, and session deletion's approval clear) is refused with HTTP
+409 and the typed `SettingsSchemaVersionError` detail instead of downgrading
+the file; upgrade Two Brothers or restore a backup. Unknown top-level sections
+from a same-version extension survive a v0/v1 write.
+
 **Mid-run steering.** A steering text is not a queued task: it is appended to
 the run's shared context as a normal `message` envelope from `user` to
 `senior` (the initial-task shape plus the documented `[[OPERATOR STEER]] `

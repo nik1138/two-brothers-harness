@@ -63,6 +63,18 @@ stay at the sessions root in both layouts.
 - API payloads and run records still expose the same `<name>.jsonl` name; the
   web client needs no change.
 
+## Settings file schema
+
+`sessions/settings.json` is versioned independently of the session layout:
+every write carries top-level `"version": 1`. A legacy file without a version
+(or with a non-integer/negative one) reads exactly as before and normalizes on
+its next save; unknown top-level sections survive a v0/v1 write. A document
+written by a newer release (an integer version above the supported `1`) still
+reads its known sections — `GET /api/settings` reports
+`schema: {version, supported: 1, writable: false}` — but every settings write
+is refused (`SettingsSchemaVersionError`, HTTP 409) rather than downgrading the
+document. Upgrade back to that release or restore a backup before downgrading.
+
 ## Migration
 
 ```powershell

@@ -22,6 +22,18 @@
  *     addSessionApproval(session, pairKey)                   // persist one pair
  *     clearSessionApprovals(session)                         // session delete
  *
+ * Schema versioning: every write adds a top-level `"version": 1`
+ * (`SETTINGS_SCHEMA_VERSION`). A file without a version is legacy v0 and reads
+ * exactly like before; its next write normalizes it to v1. A document written
+ * by a newer release (integer version > 1) still reads its known sections
+ * tolerantly, but every write refuses with `SettingsSchemaVersionError` rather
+ * than downgrading the document and dropping sections this release does not
+ * know. A non-integer/negative/string version is treated as legacy/unversioned
+ * for reads (fail-soft, never throwing) and normalizes to v1 on the next
+ * write. Unknown top-level sections on a v0/v1 document are preserved by
+ * `write()` so a same-version extension from a sibling build is never silently
+ * dropped.
+ *
  * The top-level `plugins` section (the active plugin list) lives in the same
  * file, unencrypted — plugin names are not secret. Entries are bare
  * name/path strings or `{path, options}` objects (per-plugin settings; both
@@ -152,6 +164,68 @@ export const APPROVAL_POLICY_SECTION = "approval_policy";
 
 /** Top-level settings section carrying the run-level compaction budgets. */
 export const COMPACTION_SECTION = "compaction";
+
+/** Schema version written by every settings write path. */
+export const SETTINGS_SCHEMA_VERSION = 1;
+
+/**
+ * Raised by every write path when `sessions/settings.json` carries a schema
+ * version newer than this release understands. Reads stay tolerant; writes
+ * refuse rather than downgrading the document (and dropping sections the newer
+ * release added).
+ */
+export class SettingsSchemaVersionError extends Error {
+  /** Stored schema version that this release cannot write. */
+  readonly version: number;
+  /** The schema version this release reads and writes. */
+  readonly supported: number;
+
+  constructor(version: number, supported: number = SETTINGS_SCHEMA_VERSION) {
+    super(
+      `settings.json schema version ${version} was written by a newer release ` +
+        `(this release supports version ${supported}); refusing to overwrite it ` +
+        `— upgrade Two Brothers or restore a backup`,
+    );
+    this.name = "SettingsSchemaVersionError";
+    this.version = version;
+    this.supported = supported;
+  }
+}
+
+/**
+ * One settings document's schema state (`GET /api/settings` exposes it
+ * additively as `schema`). `version` is the stored top-level integer, or
+ * `null` when the file is legacy/invalid; `writable` is false only for a
+ * version newer than this release.
+ */
+export interface SettingsSchemaState {
+  version: number | null;
+  supported: number;
+  writable: boolean;
+}
+
+/**
+ * Top-level sections this release owns. `write()` rebuilds these (dropping
+ * legacy plugin keys on purpose) and copies every other top-level section
+ * through unchanged, so a same-version extension survives a save.
+ */
+const KNOWN_SECTIONS = new Set<string>([
+  ...ROLES,
+  "plugins",
+  "plugins_senior",
+  "plugins_junior",
+  "providers",
+  "approvals",
+  APPROVAL_POLICY_SECTION,
+  COMPACTION_SECTION,
+  "version",
+]);
+
+/** The stored top-level schema version, or null when missing/invalid (legacy). */
+function storedSchemaVersion(raw: Record<string, unknown>): number | null {
+  const value = raw.version;
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+}
 
 /**
  * The persisted run-level auto-compaction budgets (snake_case, like the rest
@@ -403,6 +477,33 @@ export class SettingsStore {
     return isRecord(raw) ? raw : {};
   }
 
+  /**
+   * The document's schema state, read fail-soft: a missing/invalid version
+   * reports `null` (legacy) and is writable; only an integer newer than
+   * `SETTINGS_SCHEMA_VERSION` makes the document read-only. Never throws.
+   */
+  schemaState(): SettingsSchemaState {
+    const raw = this.readRaw();
+    const version = storedSchemaVersion(raw);
+    return {
+      version,
+      supported: SETTINGS_SCHEMA_VERSION,
+      writable: version === null || version <= SETTINGS_SCHEMA_VERSION,
+    };
+  }
+
+  /**
+   * Refuse a document written by a newer release. Every write path calls this
+   * after reading the current document and before writing, so a downgrade can
+   * never drop the newer release's sections.
+   */
+  private assertWritable(raw: Record<string, unknown>): void {
+    const version = storedSchemaVersion(raw);
+    if (version !== null && version > SETTINGS_SCHEMA_VERSION) {
+      throw new SettingsSchemaVersionError(version);
+    }
+  }
+
   /** Decrypted settings by role. Missing/corrupt file -> `{}`. */
   read(): SettingsSnapshot {
     const raw = this.readRaw();
@@ -524,6 +625,7 @@ export class SettingsStore {
       throw new TypeError(`invalid approval mode: ${String(mode)}`);
     }
     const raw = this.readRaw();
+    this.assertWritable(raw);
     raw[APPROVAL_POLICY_SECTION] = { mode: normalized };
     this.writeRaw(raw);
   }
@@ -550,6 +652,7 @@ export class SettingsStore {
   writeCompaction(settings: PersistedCompactionSettings): void {
     const normalized = strictCompactionSettings(settings);
     const raw = this.readRaw();
+    this.assertWritable(raw);
     if (Object.keys(normalized).length > 0) raw[COMPACTION_SECTION] = normalized;
     else delete raw[COMPACTION_SECTION];
     this.writeRaw(raw);
@@ -579,6 +682,7 @@ export class SettingsStore {
     const key = normalizeApprovalPairKey(pairKey);
     if (!session || key === null) return [];
     const raw = this.readRaw();
+    this.assertWritable(raw);
     const section = approvalSection(raw.approvals);
     const list = Object.hasOwn(section, session) ? [...section[session]] : [];
     if (!list.includes(key)) {
@@ -601,6 +705,7 @@ export class SettingsStore {
   clearSessionApprovals(session: string): boolean {
     if (typeof session !== "string" || !session) return false;
     const raw = this.readRaw();
+    this.assertWritable(raw);
     const section = approvalSection(raw.approvals);
     if (!Object.hasOwn(section, session)) return false;
     delete section[session];
@@ -638,7 +743,14 @@ export class SettingsStore {
     providers?: unknown[],
   ): void {
     const raw = this.readRaw();
+    this.assertWritable(raw);
+    // Same-version extensions: copy every top-level section this release does
+    // not own. Known sections are rebuilt below (legacy plugin keys are
+    // deliberately dropped by that rebuild).
     const payload: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(raw)) {
+      if (!KNOWN_SECTIONS.has(key)) payload[key] = value;
+    }
     const pinned = envPinnedPairs();
     const pending: Array<{ holder: Record<string, unknown> }> = [];
 
@@ -728,12 +840,17 @@ export class SettingsStore {
     this.writeRaw(payload);
   }
 
-  /** Atomic (temp file + rename) write of one settings document. */
+  /**
+   * Atomic (temp file + rename) write of one settings document. Every write
+   * carries the current schema version; a legacy/invalid stored value is
+   * normalized here rather than copied through.
+   */
   private writeRaw(payload: Record<string, unknown>): void {
+    const document = { ...payload, version: SETTINGS_SCHEMA_VERSION };
     fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
     // write-then-rename so a crash mid-write cannot corrupt the file
     const tmpPath = this.filePath + ".tmp";
-    fs.writeFileSync(tmpPath, JSON.stringify(payload, null, 2), "utf-8");
+    fs.writeFileSync(tmpPath, JSON.stringify(document, null, 2), "utf-8");
     fs.renameSync(tmpPath, this.filePath);
     if (process.platform !== "win32") {
       // no DPAPI off Windows — restrict file access instead (best effort)
