@@ -56,6 +56,7 @@ export {
   PROMPT_SECTION_TOOLS,
   PROMPT_SECTION_USING_TOOLS,
   PROMPT_SECTION_SKILLS,
+  PROMPT_SECTION_INSTRUCTIONS,
   type AssembledPrompt,
   type PromptAssemblyOptions,
   type HarnessOptions,
@@ -128,6 +129,22 @@ export {
   type RepeatToolGuardOptions,
   type RepeatToolObservation,
 } from "./repeatguard.ts";
+export {
+  PROJECT_INSTRUCTIONS_ENV,
+  WORKSPACE_INSTRUCTION_FILES,
+  WORKSPACE_INSTRUCTION_FILE_MAX_CHARS,
+  WORKSPACE_INSTRUCTION_SOURCE_MAX_BYTES,
+  WORKSPACE_INSTRUCTION_TOTAL_MAX_CHARS,
+  WORKSPACE_INSTRUCTIONS_HEADING,
+  WORKSPACE_INSTRUCTIONS_WARNING,
+  loadWorkspaceInstructions,
+  normalizeWorkspaceInstructionContent,
+  projectInstructionsFromEnv,
+  renderWorkspaceInstructions,
+  type WorkspaceInstructionFile,
+  type WorkspaceInstructionsOptions,
+  type WorkspaceInstructionsRenderOptions,
+} from "./instructions.ts";
 export {
   clipText,
   clipBlock,

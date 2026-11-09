@@ -62,6 +62,15 @@
  *   `## Using tools`. Every provider call appends a names-and-lengths
  *   `PromptAuditEntry` to `result.promptAudits` and emits the same entry as
  *   a `prompt_audit` runtime event.
+ * - A workspace-bound harness (`options.workspace`) appends a bounded
+ *   `## Workspace instructions` block LAST, built once in the constructor
+ *   from root-level `AGENTS.md` / `CLAUDE.md` (`instructions.ts`). This is
+ *   UNTRUSTED project guidance: it never overrides system/operator
+ *   instructions, cannot grant permissions, never reads outside the root, is
+ *   capped per file and in total, and is quote-neutralized so it cannot forge
+ *   prompt section headings. No files means no block and byte-identical
+ *   prompts; `projectInstructions: false` (or
+ *   `TWO_BROTHERS_PROJECT_INSTRUCTIONS=off`) disables it.
  * - Both brothers may use READ-ONLY tools in consult-mode nodes ("senior and
  *   junior must use tools"): `senior_open` (consult), the junior proposal
  *   (`junior_answer` / `junior_revise`) and `senior_review` each run the
@@ -179,6 +188,12 @@ import { nowIso, parseModelOutput, type Message } from "./protocol.ts";
 import type { RoleEndpoint } from "./runtime.ts";
 import type { HarnessResultSummary, StreamEvent, StreamToolStatus } from "./runstream.ts";
 import { renderSkillsSection, type SkillCatalog, type SkillRole } from "./skills.ts";
+import {
+  WORKSPACE_INSTRUCTIONS_HEADING,
+  loadWorkspaceInstructions,
+  renderWorkspaceInstructions,
+  type WorkspaceInstructionFile,
+} from "./instructions.ts";
 import type { Workspace } from "./workspace.ts";
 import {
   AnthropicProvider,
@@ -424,6 +439,12 @@ export const PROMPT_SECTION_BASE = "base";
 export const PROMPT_SECTION_TOOLS = "Available tools";
 export const PROMPT_SECTION_USING_TOOLS = "Using tools";
 export const PROMPT_SECTION_SKILLS = "Available skills";
+/**
+ * Audit identifier for the workspace-instructions block. The prompt heading is
+ * `## Workspace instructions`; the audit vocabulary uses the short stable
+ * section name `instructions`.
+ */
+export const PROMPT_SECTION_INSTRUCTIONS = "instructions";
 
 /** One-line tool description cap inside the `## Available tools` section. */
 const PROMPT_TOOL_DESCRIPTION_CHARS = 160;
@@ -468,9 +489,15 @@ function uniqueBelt(tools: Tool[]): Tool[] {
 /** Section names present in an assembled system prompt, in order. */
 function sectionNames(system: string): string[] {
   const names = [PROMPT_SECTION_BASE];
-  if (system.includes(`## ${PROMPT_SECTION_TOOLS}`)) names.push(PROMPT_SECTION_TOOLS);
-  if (system.includes(`## ${PROMPT_SECTION_USING_TOOLS}`)) names.push(PROMPT_SECTION_USING_TOOLS);
-  if (system.includes(`## ${PROMPT_SECTION_SKILLS}`)) names.push(PROMPT_SECTION_SKILLS);
+  // Anchor each heading to a whole line. An instruction file's source text is
+  // quote-prefixed, but this also keeps any inline mention (from a base prompt
+  // or a future section) from forging an audit entry.
+  const has = (name: string): boolean =>
+    new RegExp(`^## ${name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}$`, "m").test(system);
+  if (has(PROMPT_SECTION_TOOLS)) names.push(PROMPT_SECTION_TOOLS);
+  if (has(PROMPT_SECTION_USING_TOOLS)) names.push(PROMPT_SECTION_USING_TOOLS);
+  if (has(PROMPT_SECTION_SKILLS)) names.push(PROMPT_SECTION_SKILLS);
+  if (has(WORKSPACE_INSTRUCTIONS_HEADING)) names.push(PROMPT_SECTION_INSTRUCTIONS);
   return names;
 }
 
@@ -516,15 +543,18 @@ export interface AssembledPrompt {
 }
 
 /**
- * Optional extras for {@link assembleSystemPrompt}: the discovered skills and
- * the role the prompt is assembled for. The skills section is appended only
- * when the role actually has skills (`renderSkillsSection` returns null
- * otherwise), so a harness with no skills configured produces exactly the
- * pre-skills prompt bytes.
+ * Optional extras for {@link assembleSystemPrompt}: the discovered skills, the
+ * role the prompt is assembled for, and the already-rendered workspace
+ * instructions block. The skills section is appended only when the role
+ * actually has skills (`renderSkillsSection` returns null otherwise), and the
+ * instructions block only when it is non-empty, so a harness with neither
+ * produces exactly the pre-skills/pre-instructions prompt bytes.
  */
 export interface PromptAssemblyOptions {
   skills?: SkillCatalog;
   role?: SkillRole;
+  /** Rendered `## Workspace instructions` block; appended LAST. */
+  instructions?: string;
 }
 
 /**
@@ -574,6 +604,10 @@ function renderSkillLoaded(name: string, body: string): string {
  * section (shared scope plus the role's own) and the invocation guidance line;
  * a role without skills gets neither the section nor the sections-list entry,
  * keeping the prompt byte-identical to the pre-skills assembly.
+ *
+ * `options.instructions` appends the rendered workspace-instructions block
+ * after every other section (including the kind's payload example), so a
+ * workspace with no instruction files leaves the prompt bytes unchanged.
  */
 export function assembleSystemPrompt(
   base: string,
@@ -604,6 +638,10 @@ export function assembleSystemPrompt(
     }
   }
   if (example) parts.push(example);
+  if (options.instructions !== undefined && options.instructions !== "") {
+    parts.push(options.instructions);
+    sections.push(PROMPT_SECTION_INSTRUCTIONS);
+  }
   return { text: parts.join("\n\n"), sections };
 }
 
@@ -706,6 +744,25 @@ export interface HarnessOptions {
    * gets the read-only verify slice via SENIOR_VERIFY_TOOL_NAMES.
    */
   workspace?: Workspace;
+  /**
+   * Root-level workspace instructions (`AGENTS.md`, then `CLAUDE.md`) appended
+   * last to both roles' system prompts. Enabled by default for a
+   * workspace-bound harness (`workspace` set); `false` disables it. An options
+   * object overrides the candidate names and the per-file / aggregate
+   * character caps. The files are read once in the constructor, only as
+   * regular files directly under `workspace.root` (never symlinks or nested
+   * paths); text is capped, de-duplicated and rendered as UNTRUSTED project
+   * guidance — it never overrides the system/operator instructions or grants
+   * permissions. No files means no prompt section and byte-identical prompts.
+   */
+  projectInstructions?: false | {
+    /** Root-level file names in load order (default `AGENTS.md`, `CLAUDE.md`). */
+    files?: readonly string[];
+    /** Per-file character cap (default 16 Ki). */
+    maxChars?: number;
+    /** Aggregate character cap (default 32 Ki). */
+    maxTotalChars?: number;
+  };
   /**
    * Back-compat shorthand for `toolScopes.senior`: extra senior tools
    * joining the verify slice unfiltered — the analogue of Python's
@@ -840,6 +897,12 @@ export interface PromptAuditEntry {
   sections: string[];
   /** Model-facing tool names offered on this call (MCP namespacing applied). */
   tools: string[];
+  /**
+   * Workspace instruction sources represented in this call's system prompt:
+   * labels and included character counts only (never content). Absent when
+   * the prompt carries no workspace-instructions section.
+   */
+  instructions?: Array<{ label: string; chars: number }>;
   /** Characters in the assembled system prompt. */
   systemChars: number;
   /** Characters in the rendered user message (the shared context). */
@@ -1092,11 +1155,30 @@ export class TwoBrothersHarness {
   private steeringFailed = false;
   /** Steer envelopes appended this run (capped by MAX_STEERING_ENVELOPES_PER_RUN). */
   private steeringCount = 0;
+  /** Rendered root-level workspace instructions ("" when none or disabled). */
+  private readonly instructionBlock: string;
+  /** Labels/included lengths for the prompt audit (never instruction bodies). */
+  private readonly instructionAudit: Array<{ label: string; chars: number }>;
+  /** Fail-soft workspace-instruction warnings (folded into `result.warnings`). */
+  private readonly instructionWarnings: string[] = [];
 
   constructor(cfg: Config, options: HarnessOptions = {}) {
     this.cfg = cfg;
     this.options = options;
     this.spillStore = options.spill === undefined ? null : new SpillStore(options.spill.root);
+    let instructionBlock = "";
+    let instructionAudit: Array<{ label: string; chars: number }> = [];
+    try {
+      const loaded = this.readWorkspaceInstructions();
+      instructionBlock = loaded.text;
+      instructionAudit = loaded.summary;
+    } catch (error) {
+      this.instructionWarnings.push(
+        `workspace instructions failed: ${error instanceof Error ? error.message : String(error)}; continuing without them`,
+      );
+    }
+    this.instructionBlock = instructionBlock;
+    this.instructionAudit = instructionAudit;
     const warn = options.onProviderWarning;
     this.providers = {
       senior:
@@ -1107,6 +1189,35 @@ export class TwoBrothersHarness {
         options.junior ??
         providerFromEndpoint(cfg, "junior", options.endpoints?.junior, warn) ??
         buildProvider(warn ? { ...cfg, onWarning: warn } : cfg, "junior"),
+    };
+  }
+
+  /**
+   * Load the root-level workspace instructions once (constructor time).
+   * Default-off when there is no workspace or `projectInstructions: false`;
+   * every failure is fail-soft and only adds a warning. Returns the rendered
+   * block plus the names-and-lengths audit projection.
+   */
+  private readWorkspaceInstructions(): {
+    text: string;
+    summary: Array<{ label: string; chars: number }>;
+  } {
+    const root = this.options.workspace?.root;
+    if (root === undefined || this.options.projectInstructions === false) {
+      return { text: "", summary: [] };
+    }
+    const setting = this.options.projectInstructions ?? {};
+    const files: WorkspaceInstructionFile[] = loadWorkspaceInstructions(root, {
+      ...(setting.files !== undefined ? { files: setting.files } : {}),
+      ...(setting.maxChars !== undefined ? { maxChars: setting.maxChars } : {}),
+      ...(setting.maxTotalChars !== undefined ? { maxTotalChars: setting.maxTotalChars } : {}),
+      onWarning: (message) => {
+        this.instructionWarnings.push(message);
+      },
+    });
+    return {
+      text: renderWorkspaceInstructions(files),
+      summary: files.map((file) => ({ label: file.label, chars: file.chars })),
     };
   }
 
@@ -1129,6 +1240,7 @@ export class TwoBrothersHarness {
     return assembleSystemPrompt(base, tools, kind, {
       ...(this.options.skills !== undefined ? { skills: this.options.skills } : {}),
       role: role === "senior" ? "senior" : "junior",
+      ...(this.instructionBlock !== "" ? { instructions: this.instructionBlock } : {}),
     });
   }
 
@@ -1357,11 +1469,15 @@ export class TwoBrothersHarness {
   ): void {
     const system = messages.find((message) => message.role === "system")?.content ?? "";
     const user = messages.find((message) => message.role === "user")?.content ?? "";
+    const sections = sectionNames(system);
     const entry: PromptAuditEntry = {
       role,
       kind,
-      sections: sectionNames(system),
+      sections,
       tools: uniqueBelt(tools).map((tool) => tool.name),
+      ...(sections.includes(PROMPT_SECTION_INSTRUCTIONS) && this.instructionAudit.length > 0
+        ? { instructions: this.instructionAudit.map((item) => ({ ...item })) }
+        : {}),
       systemChars: system.length,
       userChars: user.length,
     };
@@ -2523,7 +2639,12 @@ export class TwoBrothersHarness {
         rounds: state.rounds,
         context: ctx,
         errors: [...state.errors, ...this.lastErrors],
-        warnings: [...this.compactionWarnings, ...this.steeringWarnings, ...this.spillWarnings],
+        warnings: [
+          ...this.compactionWarnings,
+          ...this.steeringWarnings,
+          ...this.spillWarnings,
+          ...this.instructionWarnings,
+        ],
         cancelled: false,
         usage: this.usageSnapshot(),
         promptAudits: state.promptAudits,
@@ -2547,7 +2668,12 @@ export class TwoBrothersHarness {
           rounds: 0,
           context: ctx,
           errors: [...state.errors, "stopped by operator"],
-          warnings: [...this.compactionWarnings, ...this.steeringWarnings, ...this.spillWarnings],
+          warnings: [
+            ...this.compactionWarnings,
+            ...this.steeringWarnings,
+            ...this.spillWarnings,
+            ...this.instructionWarnings,
+          ],
           cancelled: true,
           usage: this.usageSnapshot(),
           promptAudits: state.promptAudits,

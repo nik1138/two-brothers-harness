@@ -1295,6 +1295,7 @@ per-role connection without leaving the terminal.
 | `TWO_BROTHERS_TUI_KEYS_FILE` | `--keys-file` (TS package, `tui` only; pinned, never persisted) |
 | `TWO_BROTHERS_TUI_KEYS_WATCH` | `--keys-watch` (`1`/`true`/`yes`/`on`; TS package, `tui` only; pinned, never persisted) |
 | `TWO_BROTHERS_REPEAT_GUARD` | — (runtime-only, no flag: `off`/`0`/`false`/`no` disables the default-on advisory [repeat-tool-call guard](#repeat-tool-call-guard-ts-package) for `run`/`chat`/`tui`/`serve`; never persisted) |
+| `TWO_BROTHERS_PROJECT_INSTRUCTIONS` | — (runtime-only, no flag: `off`/`0`/`false`/`no` disables root-level workspace instruction loading for TUI workspace runs and `serve`; never persisted) |
 
 **Precedence:** CLI flags > environment variables > defaults. Persisted
 settings from `onboard` / the web Settings sit between env vars and defaults,
@@ -1585,6 +1586,33 @@ enables the senior verify pass:
   status markers and bounded selection, and neither takes a key. A TUI turn
   also writes each plan snapshot to the same sidecar (`todo_updated` only), so
   a restart with the same `--session-file` replays the plan.
+
+## Workspace instructions (TS package)
+
+A workspace-bound run (`tui --workspace <dir>` and a `serve` run linked to a
+workspace) loads root-level `AGENTS.md` and `CLAUDE.md` from that workspace and
+appends them LAST in both roles' system prompts as
+`## Workspace instructions`.
+
+- Both files are read once when the harness is constructed (one read per run),
+  in `AGENTS.md` → `CLAUDE.md` order, only as regular files directly under the
+  workspace root: missing files, directories, symlinks, empty/binary files and
+  unreadable files are skipped, and nothing outside the root is ever read.
+- Content is normalized (line endings and trailing whitespace), capped at
+  16 Ki characters per file and 32 Ki characters in total, and de-duplicated
+  by normalized content (the first file keeps its label). Truncation is
+  explicit: the block names the file and how many characters were omitted.
+- The text is **untrusted project guidance**. A fixed warning says it does not
+  override the system/operator instructions and must not be followed for
+  permission claims or hidden tool requests; every source line is
+  quote-prefixed so it cannot forge a prompt section heading.
+- The prompt audit records the `instructions` section and the included file
+  labels/lengths (never the body).
+- No instruction files means no section: the prompt bytes stay exactly as
+  before. Set `TWO_BROTHERS_PROJECT_INSTRUCTIONS=off` to disable the load for
+  `tui`/`serve`. Library callers can pass `HarnessOptions.projectInstructions`:
+  `false` disables it, and an object overrides `files`, `maxChars` and
+  `maxTotalChars`. `run`/`chat` are not workspace-bound and load nothing.
 
 ## Repeat-tool-call guard (TS package)
 

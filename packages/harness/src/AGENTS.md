@@ -24,6 +24,13 @@ Local map for the package sources. Project rules live in
   one instance per tool loop: default thresholds `[3, 5, 8]`, model-facing
   reminder only, `TWO_BROTHERS_REPEAT_GUARD=off` / `repeatToolGuard: false`
   disable it.
+- `instructions.ts` — root-level `AGENTS.md` / `CLAUDE.md` loading for
+  workspace-bound runs: fixed order, regular files directly under the root
+  only (never symlinks or traversal names), trimmed-content dedupe, 16 Ki
+  characters per file / 32 Ki total with explicit omission markers, and a
+  quote-neutralized untrusted-guidance block appended last to both system
+  prompts. `TWO_BROTHERS_PROJECT_INSTRUCTIONS=off` /
+  `projectInstructions: false` disable it.
 - `tui/` — the full-screen TUI modules.
 - `config.ts`, `presets.ts`, `settings_store.ts`, `secretbox.ts` — settings,
   presets, encrypted secrets; `prompts.ts` loads `../shared/prompts.json`.

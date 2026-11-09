@@ -60,6 +60,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `web/src/components/ChatView.vue`, `web/src/components/Composer.vue`,
   `web/src/App.vue`; tests `web/tests/messageQuote.test.ts`; E2E `chat`
   coverage.
+- **Workspace instructions:** a workspace-bound harness (`tui --workspace`,
+  `serve` runs linked to a workspace) now loads root-level `AGENTS.md` then
+  `CLAUDE.md` once in the constructor and appends a bounded
+  `## Workspace instructions` block LAST in both roles' system prompts. Only
+  regular files directly under the workspace root are read (missing,
+  directory, symlink, empty, binary and unreadable files are skipped; nothing
+  outside the root is ever read); normalized content is de-duplicated, capped
+  at 16 Ki characters per file and 32 Ki characters in total, and truncation
+  names the file and omitted-character count. The fixed warning marks the
+  text as untrusted project guidance that never overrides system/operator
+  instructions or grants permissions, and every source line is quote-prefixed
+  so it cannot forge a prompt section heading. The audit trail adds an
+  `instructions` section with labels/lengths only. No files leaves the prompt
+  bytes unchanged; `TWO_BROTHERS_PROJECT_INSTRUCTIONS=off` or
+  `HarnessOptions.projectInstructions: false` disables it, and an options
+  object overrides `files`, `maxChars` and `maxTotalChars`. Files:
+  `src/instructions.ts` (new), `src/harness.ts`, `src/index.ts`,
+  `src/tui/app.ts`, `src/server.ts`; tests `tests/instructions.test.ts` (new),
+  `tests/promptsections.test.ts`; docs `docs/cli-reference.md`,
+  `docs/quickstart.md`, `docs/attribution.md`.
 - **Spill retention (operator-managed):** `SpillStore.stats()` reports the
   number and total bytes of valid `<id>.txt` artifacts (regular files only,
   `lstat`, symlinks/temp files/malformed ids ignored, a missing root is an

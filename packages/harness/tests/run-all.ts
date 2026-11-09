@@ -15,6 +15,7 @@ import "./serverlayout.test.ts";
 import "./sessionsmigrate.test.ts";
 import "./prompts.test.ts";
 import "./promptsections.test.ts";
+import "./instructions.test.ts";
 import "./providers.test.ts";
 import "./adapters.test.ts";
 import "./anthropiccache.test.ts";

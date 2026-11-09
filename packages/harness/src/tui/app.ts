@@ -76,6 +76,7 @@ import {
   type WorkspaceFileEntry,
 } from "../workspacefiles.ts";
 import { repeatToolGuardFromEnv } from "../repeatguard.ts";
+import { projectInstructionsFromEnv } from "../instructions.ts";
 import type { StreamEvent } from "../runstream.ts";
 import {
   restoreContextResult,
@@ -1196,12 +1197,16 @@ async function buildTurnHarness(setup: TurnSetup): Promise<TurnHarness> {
   // Advisory repeat guard: default on; the process-wide
   // `TWO_BROTHERS_REPEAT_GUARD=off` escape hatch disables it for every turn.
   const repeatToolGuard = repeatToolGuardFromEnv();
+  // Root-level workspace instructions are on by default for a bound workspace;
+  // `TWO_BROTHERS_PROJECT_INSTRUCTIONS=off` disables them for this process.
+  const projectInstructions = projectInstructionsFromEnv();
   const harness = new TwoBrothersHarness(cfg, {
     ...(setup.workspace !== undefined ? { workspace: setup.workspace } : {}),
     ...(hasScopes ? { toolScopes } : {}),
     endpoints,
     ...(compaction ? { compaction } : {}),
     ...(repeatToolGuard !== undefined ? { repeatToolGuard } : {}),
+    ...(projectInstructions !== undefined ? { projectInstructions } : {}),
     ...(setup.spillRoot !== undefined ? { spill: { root: setup.spillRoot } } : {}),
     ...(bindings !== null ? { hooks: bindings.hooks } : {}),
     ...(setup.resources.skills.skills.length > 0 ? { skills: setup.resources.skills } : {}),
