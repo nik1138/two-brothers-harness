@@ -68,7 +68,8 @@ Workspace-bound runs (`tui --workspace <dir>` and `serve` runs linked to a
 workspace) also load root-level `AGENTS.md` and `CLAUDE.md` into both roles'
 system prompts. Only regular files directly under the workspace root are read;
 content is de-duplicated and capped at 16 Ki characters per file / 32 Ki
-characters in total, with an explicit truncation marker. The text is untrusted
+characters in total, with an explicit truncation marker; a candidate larger
+than 1 MiB is skipped entirely. The text is untrusted
 project guidance — it never overrides the system/operator instructions or
 grants permissions. Set `TWO_BROTHERS_PROJECT_INSTRUCTIONS=off` to disable it.
 See [Workspace instructions](cli-reference.md#workspace-instructions-ts-package).

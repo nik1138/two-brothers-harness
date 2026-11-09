@@ -29,7 +29,7 @@ import {
 } from '../steering'
 import { composerSeats } from '../composerStatus'
 import { clearDraft, getDraft, setDraft } from '../drafts'
-import { appendQuoteDraft } from '../messageQuote'
+import { appendQuoteDraft, quoteDraftBase } from '../messageQuote'
 import { createRecallState, loadRecall, recordRecall, saveRecall, stepRecall } from '../recall'
 import type { RecallState } from '../recall'
 import {
@@ -1496,7 +1496,7 @@ watch(
   () => {
     const quote = props.quote
     if (!quote || typeof quote.text !== 'string' || quote.text === '') return
-    const current = composerValue()
+    const current = quoteDraftBase(composerValue(), recallState)
     const next = appendQuoteDraft(current, quote.text)
     if (next === current) return
     cancelDraftSave()

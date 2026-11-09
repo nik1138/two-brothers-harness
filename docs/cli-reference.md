@@ -1597,7 +1597,9 @@ appends them LAST in both roles' system prompts as
 - Both files are read once when the harness is constructed (one read per run),
   in `AGENTS.md` → `CLAUDE.md` order, only as regular files directly under the
   workspace root: missing files, directories, symlinks, empty/binary files and
-  unreadable files are skipped, and nothing outside the root is ever read.
+  unreadable files are skipped, and nothing outside the root is ever read. A
+  candidate larger than 1 MiB is skipped entirely (the 16 Ki cap applies to
+  files at or below that source bound).
 - Content is normalized (line endings and trailing whitespace), capped at
   16 Ki characters per file and 32 Ki characters in total, and de-duplicated
   by normalized content (the first file keeps its label). Truncation is
