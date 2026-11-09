@@ -582,6 +582,21 @@ export class SessionLayout {
   }
 
   /**
+   * True when the path still names the exact file this acquisition created.
+   * A writer that stalled past the malformed grace can be reclaimed while its
+   * write is in flight; the success path checks this before reporting that it
+   * owns the store.
+   */
+  private lockStillOwned(file: string, ownStats: fs.Stats): boolean {
+    try {
+      const current = fs.lstatSync(file);
+      return current.dev === ownStats.dev && current.ino === ownStats.ino;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Take the single-writer lock for this store. `serve`/TUI callers hold it
    * for their lifetime; `sessions migrate` and `spill gc` take it briefly and
    * refuse to run while a live lock exists. A lock whose pid is dead is
@@ -660,6 +675,11 @@ export class SessionLayout {
         // the malformed grace may already own a fresh lock at this path.
         if (ownStats !== null) this.unlinkIfUnchanged(file, ownStats);
         throw failure;
+      }
+      // A successful but slow write can also lose the grace race. Do not
+      // report ownership when the path no longer resolves to our file.
+      if (ownStats === null || !this.lockStillOwned(file, ownStats)) {
+        throw new SessionLayoutLockedError(this.writerLock());
       }
       return () => {
         const snapshot = this.writerLockSnapshot();

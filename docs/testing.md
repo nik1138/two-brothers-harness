@@ -787,11 +787,13 @@ repeat-tool guard, workspace instruction loading and web message quotes. Tests:
 `tests/spillcli.test.ts`, `tests/readrange.test.ts`,
 `tests/settingsschema.test.ts`, `tests/repeatguard.test.ts`,
 `tests/instructions.test.ts` and `web/tests/messageQuote.test.ts`, plus
-extended session/server/workspace suites. Final measured totals: package suite
-**2 056 tests** (2 049 pass and 7 platform skips on Windows; the WSL Linux pass
-is 2 055 pass with 1 skip), web suite **481/481**, hermetic CLI E2E **19/19**
-on sources and `--dist`, browser E2E **23 PASS, 0 FAIL, 1 opt-in `real` skip**,
-`npm run typecheck` green.
+extended session/server/workspace suites. The review hardening adds concurrent
+lock-reclaim/stalled-write tests (`tests/sessionlayout.test.ts`) and multi-line
+astral continuation tests (`tests/readrange.test.ts`). Final measured totals:
+package suite **2 062 tests** (2 055 pass and 7 platform skips on Windows; the
+WSL Linux pass is 2 061 pass with 1 skip), web suite **481/481**, hermetic CLI
+E2E **19/19** on sources and `--dist`, browser E2E **23 PASS, 0 FAIL, 1 opt-in
+`real` skip**, `npm run typecheck` green.
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a

@@ -1498,8 +1498,9 @@ check); a failed writer-lock write removes only the file it created, and
 reclaim/release compare file identity plus a per-acquisition nonce so racing
 writers cannot delete each other's lock; an existing unreadable `settings.json`
 reads fail-soft but refuses writes with 409; a character-clipped
-`workspace_read_file` line continues through `next_char_offset`/`char_offset`
-and every page advances at least one whole code point; session deletion
+`workspace_read_file` line continues through `next_offset` plus a
+`next_char_offset` relative to it, and every page advances at least one whole
+code point; session deletion
 requires a writable settings document and refuses with 409 under a
 future-version or unreadable one (keeping the session); `spill stats` rejects
 gc-only flags; `spill gc` human output reports stale temp files with the

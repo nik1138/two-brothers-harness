@@ -481,6 +481,13 @@ test("max_chars 1 always advances a whole astral code point", async () => {
     assert.equal(after.content, "x");
     assert.equal(after.eof, true);
 
+    write(root, "one.txt", "😀\n");
+    const one = await ws.read_file("one.txt", { offset: 1, limit: 1, maxChars: 1 });
+    assert.equal(one.content, "😀", "a single astral line is delivered whole");
+    assert.equal(one.eof, true, "a completed line needs no empty continuation");
+    assert.equal(one.next_offset, undefined);
+    assert.equal(one.next_char_offset, undefined);
+
     const midPair = await ws.read_file("astral.txt", {
       offset: 1,
       limit: 1,
@@ -503,6 +510,77 @@ test("max_chars 1 always advances a whole astral code point", async () => {
       limit: 1,
       maxChars: 2,
       charOffset: 2,
+    });
+    assert.equal(rest.content, "x");
+    assert.equal(rest.eof, true);
+  } finally {
+    cleanup();
+  }
+});
+
+test("multi-line astral paging follows next_offset and never replays", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    write(root, "mixed-astral.txt", "😀\nabc\n");
+    const ws = new Workspace(root);
+    const first = await ws.read_file("mixed-astral.txt", { offset: 1, limit: 2, maxChars: 1 });
+    assert.equal(first.content, "😀");
+    assert.equal(first.eof, false);
+    assert.equal(first.next_offset, 2, "the completed offset line advances");
+    assert.equal(first.next_char_offset, undefined);
+
+    const second = await ws.read_file("mixed-astral.txt", {
+      offset: first.next_offset,
+      limit: 2,
+      maxChars: 1,
+    });
+    assert.equal(second.content, "a");
+    assert.equal(second.next_offset, 2);
+    assert.equal(second.next_char_offset, 1);
+
+    const third = await ws.read_file("mixed-astral.txt", {
+      offset: second.next_offset,
+      limit: 2,
+      maxChars: 1,
+      charOffset: second.next_char_offset,
+    });
+    assert.equal(third.content, "b");
+    assert.equal(third.next_offset, 2);
+    assert.equal(third.next_char_offset, 2);
+
+    const last = await ws.read_file("mixed-astral.txt", {
+      offset: third.next_offset,
+      limit: 2,
+      maxChars: 1,
+      charOffset: third.next_char_offset,
+    });
+    assert.equal(last.content, "c");
+    assert.equal(last.eof, true, "the following line completes without a replay");
+  } finally {
+    cleanup();
+  }
+});
+
+test("char_offset exactly at a line end resumes the next line without rewinding", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    write(root, "edge-astral.txt", "abcdef\n😀x\n");
+    const ws = new Workspace(root);
+    const first = await ws.read_file("edge-astral.txt", {
+      offset: 1,
+      limit: 2,
+      maxChars: 1,
+      charOffset: 6,
+    });
+    assert.equal(first.content, "😀");
+    assert.equal(first.next_offset, 2);
+    assert.equal(first.next_char_offset, 2, "the offset is relative to next_offset");
+
+    const rest = await ws.read_file("edge-astral.txt", {
+      offset: first.next_offset,
+      limit: 2,
+      maxChars: 1,
+      charOffset: first.next_char_offset,
     });
     assert.equal(rest.content, "x");
     assert.equal(rest.eof, true);

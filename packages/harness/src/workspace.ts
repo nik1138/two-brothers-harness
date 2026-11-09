@@ -971,13 +971,14 @@ function safeCharPrefix(text: string, maxChars: number): string {
  *
  * A page that fits keeps whole lines joined by `\n`. If the character budget
  * cuts a later line, only whole lines that fit are kept and `next_offset`
- * names that line. When the budget cuts the FIRST requested line, its safe
- * character prefix is returned and `next_offset` stays on that line while
- * `next_char_offset` names the undelivered tail; passing it back as
- * `charOffset` continues the tail and then the following lines. A page always
- * advances at least one whole code point, even when `maxChars` is 1 and the
- * next character is astral (the pair is delivered intact). `eof` is false
- * while either a line or a clipped character tail remains.
+ * names that line. When no whole line fits, the line's safe character prefix
+ * is returned, `next_offset` names that line, and `next_char_offset` (relative
+ * to `next_offset`) names the undelivered tail; passing both back continues
+ * the tail and then the following lines. A page always advances at least one
+ * whole code point, even when `maxChars` is 1 and the next character is astral
+ * (the pair is delivered intact); a line completed by that pair advances
+ * normally instead of asking for an empty continuation. `eof` is false while
+ * either a line or a clipped character tail remains.
  */
 async function readFilePage(
   target: string,
@@ -1046,8 +1047,9 @@ async function readFilePage(
         charClipped = true;
         stopped = true;
         if (page.length === 0) {
-          // The first requested line itself is clipped: deliver its safe
-          // prefix and point at the undelivered tail on the same line. The
+          // No whole line fits yet (the first requested line, or the first
+          // later line when the prior offset line was already consumed).
+          // Deliver its safe prefix and point at the undelivered tail. The
           // only zero-length prefix is a single astral code point wider than
           // the budget; deliver that whole code point anyway, so every
           // continuation is guaranteed to advance (never a permanent page).
@@ -1060,9 +1062,19 @@ async function readFilePage(
             page.push(delivered);
             pageChars += delivered.length;
           }
-          nextOffsetOverride = lineNumber;
-          nextCharOffset = start + delivered.length;
-          partialTail = true;
+          const deliveredEnd = start + delivered.length;
+          if (deliveredEnd < currentLength) {
+            // The line's tail remains: next_offset names this line and
+            // next_char_offset is relative to it.
+            nextOffsetOverride = lineNumber;
+            nextCharOffset = deliveredEnd;
+            partialTail = true;
+          } else {
+            // The delivered code point completed the line even though it
+            // exceeded the character budget: advance normally instead of
+            // asking for an empty continuation.
+            lastDelivered = lineNumber;
+          }
         } else {
           // A later line does not fit: the previous whole lines are the page
           // and the next call starts at this line's beginning.
@@ -1321,10 +1333,12 @@ export class Workspace {
    * Read a UTF-8 text file. Without `offset`/`limit`/`charOffset`, this is the
    * original whole-file read bounded by `maxChars` (head+tail window). With a
    * range field, it returns one 1-based line page plus `lines`, `total_lines`,
-   * `eof` and (when more remains) `next_offset`; `maxChars` still caps the
-   * page characters. A clipped first line additionally returns
-   * `next_char_offset`, which the caller passes back as `charOffset` to read
-   * the rest of that line and then the following lines.
+   * `eof` and (when more remains) `next_offset`; `maxChars` usually caps the
+   * page characters, except that one astral code point may exceed it by one
+   * UTF-16 unit so a page always advances. A clipped line additionally returns
+   * `next_char_offset` relative to `next_offset`; the caller resumes at
+   * `next_offset` with `charOffset: next_char_offset` to read the rest of that
+   * line and then the following lines.
    */
   async read_file(rel: string, maxChars?: number): Promise<WorkspaceResult>;
   async read_file(rel: string, options?: ReadFileOptions): Promise<WorkspaceResult>;
@@ -1697,7 +1711,7 @@ export class Workspace {
       {
         name: "workspace_read_file",
         description:
-          "Read a UTF-8 text file inside the workspace. Omit offset/limit for the whole file (bounded head+tail); pass either to page through a large file by lines. If a page clips the first line, continue with the returned next_char_offset as char_offset.",
+          "Read a UTF-8 text file inside the workspace. Omit offset/limit for the whole file (bounded head+tail); pass either to page through a large file by lines. A page that clips a line returns next_offset and, while that line's tail is undelivered, next_char_offset; continue at next_offset with char_offset=next_char_offset (next_char_offset is relative to next_offset). Every page advances at least one whole code point.",
         parameters: {
           type: "object",
           properties: {

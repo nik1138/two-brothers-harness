@@ -39,11 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Character-clipped `workspace_read_file` lines are recoverable:**
   range mode now returns `next_char_offset` and accepts `char_offset` when the
   first requested line is clipped, keeping `next_offset` on that line until its
-  tail is delivered and then continuing into following lines. `eof` stays
-  false while any line or character tail remains, and a surrogate pair is
-  never split; every page advances at least one whole code point, so
-  `max_chars: 1` on an astral first character delivers that pair (2 UTF-16
-  units) instead of returning an empty page forever.
+  tail is delivered and then continuing into following lines. `next_offset`
+  names the line and `next_char_offset` is relative to it; a line completed by
+  the delivered astral pair advances instead of asking for an empty
+  continuation. `eof` stays false while any line or character tail remains,
+  and a surrogate pair is never split; every page advances at least one whole
+  code point, so `max_chars: 1` on an astral first character delivers that
+  pair (2 UTF-16 units) instead of returning an empty page forever.
 - **Session deletion requires a writable settings document:** deleting a
   session clears its persisted approvals before the file disappears, so a
   future-version (or existing-but-unreadable) `settings.json` refuses the

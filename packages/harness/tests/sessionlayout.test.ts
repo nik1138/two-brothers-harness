@@ -406,6 +406,30 @@ test("a stale reclaim never removes the fresh lock another writer just took", ()
   }
 });
 
+test("a writer whose slow write lost the lock to a reclaim refuses", () => {
+  const root = tmpdir();
+  try {
+    const file = path.join(root, SESSION_LOCK_FILE);
+    const stalled = new SessionLayout(root, {
+      lockWriteHook: () => {
+        // The write stalled past the grace; a reclaimer replaced the path
+        // with its complete lock while our fd still names the old inode.
+        fs.unlinkSync(file);
+        writeLiveLock(file, "winner", "winner-nonce");
+      },
+    });
+    assert.throws(
+      () => stalled.acquireWriterLock("stalled"),
+      /in use by winner \(pid \d+\)/,
+    );
+    const onDisk = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, unknown>;
+    assert.equal(onDisk.owner, "winner");
+    assert.equal(onDisk.nonce, "winner-nonce");
+  } finally {
+    cleanup(root);
+  }
+});
+
 test("a release closure never removes a lock another writer replaced", () => {
   const root = tmpdir();
   try {

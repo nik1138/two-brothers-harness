@@ -316,19 +316,21 @@ workspace root:
   approval-brokered `run_shell`); plugin bindings see the same workspace.
 - `workspace_read_file` pages a large file by line: `offset` is the 1-based
   first line (default 1), `limit` the page size in lines (default 2 000,
-  clamped to 1–5 000), and `max_chars` (default 20 000) still bounds the page
-  characters. A ranged result carries `content`, `truncated`, `offset`,
-  `lines`, `total_lines`, `eof` and, when more remains, `next_offset`. If the
-  page clips the **first** requested line, `next_offset` stays on that line and
-  the result also carries `next_char_offset` (0-based UTF-16 offset into the
-  line); pass it back as `char_offset` with the same `offset`/`limit` to read
-  the undelivered tail and then continue into following lines. `eof` is false
-  while any line or character tail remains, and a surrogate pair is never
-  split; every page advances at least one whole code point, so a `max_chars: 1`
-  page whose next character is astral delivers that pair (2 UTF-16 units)
-  instead of returning an empty page. Without `offset`/`limit`/`char_offset`
-  the read is the historical whole-file head+tail window, byte-identical to
-  before.
+  clamped to 1–5 000), and `max_chars` (default 20 000) usually bounds the page
+  characters; one astral code point may exceed it by one UTF-16 unit so a page
+  always advances. A ranged result carries `content`, `truncated`, `offset`,
+  `lines`, `total_lines`, `eof` and, when more remains, `next_offset`. If no
+  whole line fits, the result delivers that line's safe prefix; `next_offset`
+  names the line and the result also carries `next_char_offset` (0-based UTF-16
+  offset **relative to `next_offset`**) for the undelivered tail. Continue at
+  `next_offset` with `char_offset: next_char_offset`: when `next_offset` stays
+  the same this reads the same line's tail, and when it advances it starts the
+  later line without replaying or skipping content. `eof` is false while any
+  line or character tail remains, and a surrogate pair is never split; a
+  `max_chars: 1` page whose next character is astral delivers that pair (2
+  UTF-16 units) instead of returning an empty page, and a line completed by
+  that pair advances normally. Without `offset`/`limit`/`char_offset` the read
+  is the historical whole-file head+tail window, byte-identical to before.
 - Reads auto-allow. Writes, edits, deletes and shell commands park the run on
   the [approval panel](#approvals-in-the-tui) instead of the composer — unless
   the effective [approval mode](#approval-modes) lets them run without asking
