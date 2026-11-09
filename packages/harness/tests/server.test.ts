@@ -876,7 +876,6 @@ test("settings: schema state is additive and future-version writes are 409", asy
         ["PUT", "/api/settings", { compaction: { threshold_chars: 1 } }],
         ["POST", "/api/providers", { name: "new", base_url: "https://new.example/v1" }],
         ["DELETE", "/api/providers/acme"],
-        ["DELETE", "/api/sessions/s.jsonl"],
       ];
       for (const [method, route, body] of writes) {
         const res = await api<Record<string, unknown>>(future.base, method, route, body);
@@ -890,8 +889,89 @@ test("settings: schema state is additive and future-version writes are 409", asy
         );
       }
       assert.equal(fs.existsSync(settingsPath + ".tmp"), false);
+
+      // An unknown session is still a 404, not a settings refusal.
+      const unknown = await api<Record<string, unknown>>(
+        future.base,
+        "DELETE",
+        "/api/sessions/s.jsonl",
+      );
+      assert.equal(unknown.status, 404);
+
+      // A session with no persisted approvals can be deleted even though the
+      // settings document is future-version read-only (deleting it needs no
+      // settings write). One with persisted approvals is refused and kept.
+      fs.writeFileSync(path.join(tmp.root, "plain.jsonl"), "{}\n", "utf-8");
+      const plain = await api<Record<string, unknown>>(
+        future.base,
+        "DELETE",
+        "/api/sessions/plain.jsonl",
+      );
+      assert.equal(plain.status, 200, String(plain.body.detail));
+      assert.equal(fs.existsSync(path.join(tmp.root, "plain.jsonl")), false);
+
+      const blockedDoc = { ...(JSON.parse(before) as Record<string, unknown>) };
+      blockedDoc.approvals = { "blocked.jsonl": ["write\u0000hello.txt"] };
+      fs.writeFileSync(settingsPath, JSON.stringify(blockedDoc), "utf-8");
+      const blockedBefore = fs.readFileSync(settingsPath, "utf-8");
+      fs.writeFileSync(path.join(tmp.root, "blocked.jsonl"), "{}\n", "utf-8");
+      const blocked = await api<Record<string, unknown>>(
+        future.base,
+        "DELETE",
+        "/api/sessions/blocked.jsonl",
+      );
+      assert.equal(blocked.status, 409);
+      assert.match(String(blocked.body.detail), /newer release/);
+      assert.equal(fs.existsSync(path.join(tmp.root, "blocked.jsonl")), true);
+      assert.equal(fs.readFileSync(settingsPath, "utf-8"), blockedBefore);
     } finally {
       await future.close();
+    }
+  } finally {
+    tmp.cleanup();
+  }
+});
+
+test("settings: an unreadable document serves reads but refuses writes with 409", async () => {
+  const tmp = tmpdir("tb-settings-unreadable-");
+  try {
+    const settingsPath = path.join(tmp.root, "settings.json");
+    fs.mkdirSync(settingsPath);
+    const sentinel = path.join(settingsPath, "keep.txt");
+    fs.writeFileSync(sentinel, "untouched", "utf-8");
+    const sessionFile = path.join(tmp.root, "session.jsonl");
+    fs.writeFileSync(sessionFile, "{}\n", "utf-8");
+
+    const server = await startServer({ sessionsDir: tmp.root });
+    try {
+      const view = await get<Record<string, any>>(server.base, "/api/settings");
+      assert.equal(view.status, 200);
+      assert.equal(view.body.schema.version, null);
+      assert.equal(view.body.schema.supported, 1);
+      assert.equal(view.body.schema.writable, false);
+      assert.equal(view.body.schema.readable, false);
+      assert.ok(String(view.body.schema.reason).length > 0);
+
+      const put = await api<Record<string, unknown>>(server.base, "PUT", "/api/settings", {
+        junior: { model: "must-not-write" },
+      });
+      assert.equal(put.status, 409);
+      assert.match(String(put.body.detail), /cannot be read/);
+
+      // The session delete would have to clear persisted approvals it cannot
+      // inspect, so the destructive route fails closed and keeps the file.
+      const del = await api<Record<string, unknown>>(
+        server.base,
+        "DELETE",
+        "/api/sessions/session.jsonl",
+      );
+      assert.equal(del.status, 409);
+      assert.equal(fs.existsSync(sessionFile), true);
+
+      assert.equal(fs.statSync(settingsPath).isDirectory(), true);
+      assert.equal(fs.readFileSync(sentinel, "utf-8"), "untouched");
+    } finally {
+      await server.close();
     }
   } finally {
     tmp.cleanup();
@@ -3626,16 +3706,18 @@ test("serve spill retention is opt-in and prunes only files older than the confi
     const oldDate = new Date(Date.now() - 3 * 86_400_000);
     fs.utimesSync(oldFile, oldDate, oldDate);
 
-    // Default off: a server start deletes nothing.
+    // Default off: a served process deletes nothing.
     const plain = createServer({
       sessionsDir: tmp.root,
       configFactory: mockConfig(),
       webDist: null,
     });
+    await plain.listen("127.0.0.1", 0);
     await plain.close();
     assert.equal(fs.existsSync(oldFile), true, "no retention without the option");
 
-    // Opt-in: the old file is removed, the fresh one kept.
+    // Opt-in: the old file is removed after a successful bind, the fresh one
+    // kept. A failed bind never prunes (the retention pass runs in listen()).
     const pruned = createServer({
       sessionsDir: tmp.root,
       configFactory: mockConfig(),
@@ -3643,12 +3725,35 @@ test("serve spill retention is opt-in and prunes only files older than the confi
       spillRetentionDays: 1,
     });
     try {
+      await pruned.listen("127.0.0.1", 0);
       assert.equal(fs.existsSync(oldFile), false, "old artifact pruned at startup");
       assert.equal(fs.existsSync(freshFile), true, "fresh artifact kept");
       assert.equal(fs.readFileSync(freshFile, "utf8"), "fresh artifact");
     } finally {
       await pruned.close();
     }
+
+    // A failed bind must not run the destructive startup pass.
+    const failingOld = path.join(spillRoot, `${"c".repeat(32)}.txt`);
+    fs.writeFileSync(failingOld, "keep on failed bind");
+    const oldDate2 = new Date(Date.now() - 3 * 86_400_000);
+    fs.utimesSync(failingOld, oldDate2, oldDate2);
+    const blocker = http.createServer(() => undefined);
+    await new Promise<void>((resolve) => blocker.listen(0, "127.0.0.1", () => resolve()));
+    const port = (blocker.address() as AddressInfo).port;
+    const failed = createServer({
+      sessionsDir: tmp.root,
+      configFactory: mockConfig(),
+      webDist: null,
+      spillRetentionDays: 1,
+    });
+    try {
+      await assert.rejects(failed.listen("127.0.0.1", port));
+    } finally {
+      await failed.close();
+      await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    }
+    assert.equal(fs.existsSync(failingOld), true, "failed bind must not delete spill files");
   } finally {
     tmp.cleanup();
   }

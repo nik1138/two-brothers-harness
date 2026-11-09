@@ -352,7 +352,7 @@ export const FLAGS: Record<string, FlagHelp> = {
     name: "spill-retention-days",
     value: "<n>",
     description:
-      "serve: prune spill files older than n days once at startup " +
+      "serve: prune spill files older than n days once after a successful bind " +
       "(default off; files are never deleted automatically without it)",
   },
   limit: {
@@ -948,15 +948,17 @@ defineCommand({
   description:
     "Operate the tool-output spill store at <sessions-dir>/spill (the same " +
     "root serve and the TUI use). `spill stats` is read-only and reports the " +
-    "number and total bytes of valid <id>.txt artifacts. `spill gc` deletes " +
-    "valid artifacts whose mtime is older than --older-than (strictly older " +
-    "than the cutoff); the age is required, so there is no accidental " +
+    "number and total bytes of valid <id>.txt artifacts (it rejects gc-only " +
+    "flags). `spill gc` deletes valid artifacts whose mtime is older than " +
+    "--older-than (strictly older than the cutoff) and stale .tmp-<id> save " +
+    "files of the same age; the age is required, so there is no accidental " +
     "delete-everything default. `--dry-run` reports the same counts without " +
     "deleting. `gc` takes the sessions-store single-writer lock and refuses " +
     "while serve/TUI holds it; --force bypasses the lock (unsafe). Only " +
     "regular files with a validated lowercase-hex id and a .txt suffix are " +
-    "ever candidates: symlinks, directories, temp files and malformed names " +
-    "are skipped, and a missing root is an empty store.",
+    "artifact candidates; symlinks, directories and malformed names are " +
+    "skipped, and a missing root is an empty store. A symlink/junction root " +
+    "(or any non-directory root) is refused instead of followed.",
   flags: ["sessions-dir", "older-than", "dry-run", "force", "json", "help"],
   acceptedFlags: ["sessions-dir", "older-than", "dry-run", "force", "json"],
   flagNotes: {
@@ -974,7 +976,7 @@ defineCommand({
     "Subcommands:",
     "  stats   report valid spill files and their total size (read-only, no lock)",
     "  gc      delete valid spill files older than the required --older-than age",
-    "Never deleted: symlinks, directories, .tmp-* files and malformed ids.",
+    "Never deleted: symlinks, directories, malformed ids and temp names outside .tmp-<id>.",
   ],
   examples: [
     "two-brothers spill stats",

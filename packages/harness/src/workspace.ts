@@ -905,6 +905,13 @@ export interface ReadFileOptions {
   offset?: number;
   /** Maximum lines in the page (default `DEFAULT_READ_LINES`, clamped to 1..`MAX_READ_LINES`). */
   limit?: number;
+  /**
+   * 0-based UTF-16 offset into the first requested line. A page that clips
+   * that line returns `next_char_offset`; pass it back with the same
+   * `offset`/`limit` to continue with the undelivered tail. Ignored unless
+   * range mode is active.
+   */
+  charOffset?: number;
 }
 
 /** One line page plus the bookkeeping a model needs to request the next one. */
@@ -915,6 +922,8 @@ interface FilePage {
   total_lines: number;
   eof: boolean;
   next_offset?: number;
+  /** Continuation offset inside the still-clipped first line (UTF-16 units). */
+  next_char_offset?: number;
   truncated: boolean;
 }
 
@@ -936,6 +945,12 @@ function clampRangeChars(value: unknown): number {
   return Math.max(1, Math.floor(value));
 }
 
+/** Optional 0-based character offset into the first requested line. */
+function clampCharOffset(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0;
+  return Math.max(0, Math.floor(value));
+}
+
 /** Slice a string to `maxChars` UTF-16 units without splitting a surrogate pair. */
 function safeCharPrefix(text: string, maxChars: number): string {
   if (maxChars <= 0) return "";
@@ -948,22 +963,25 @@ function safeCharPrefix(text: string, maxChars: number): string {
 
 /**
  * Stream a file line by line and return one 1-based line page. The whole file
- * is scanned (so `total_lines` is honest) but only the current line prefix and
+ * is scanned (so `total_lines` is honest) but only the current line suffix and
  * the page itself are retained: memory stays bounded by the character budget,
  * never by the file size. Lines end at `\n`, `\r\n` or `\r`; a trailing line
  * break does not create an extra empty line, matching `splitLinesKeepEnds`.
  *
  * A page that fits keeps whole lines joined by `\n`. If the character budget
- * cuts the page, only whole lines that fit are kept; when not even the first
- * line fits, its safe character prefix is returned (and counted as one line)
- * so the caller still makes progress. `truncated` reports that cut, `eof` is
- * false, and `next_offset` names the first line not delivered.
+ * cuts a later line, only whole lines that fit are kept and `next_offset`
+ * names that line. When the budget cuts the FIRST requested line, its safe
+ * character prefix is returned and `next_offset` stays on that line while
+ * `next_char_offset` names the undelivered tail; passing it back as
+ * `charOffset` continues the tail and then the following lines. `eof` is false
+ * while either a line or a clipped character tail remains.
  */
 async function readFilePage(
   target: string,
   offset: number,
   limit: number,
   maxChars: number,
+  charOffset = 0,
 ): Promise<FilePage> {
   const page: string[] = [];
   let pageChars = 0;
@@ -973,7 +991,13 @@ async function readFilePage(
   let pendingLine = false;
   let swallowLF = false;
   let charClipped = false;
-  let stopCollecting = false;
+  let stopped = false;
+  // Highest line fully delivered. A partially delivered first line leaves this
+  // at `offset - 1`, so `next_offset` stays on that line.
+  let lastDelivered = offset - 1;
+  let nextOffsetOverride: number | null = null;
+  let nextCharOffset: number | undefined;
+  let partialTail = false;
   // Enough to detect that a line overflows and to clip a safe prefix; keeping
   // more than the page budget would make a single giant line unbounded.
   const retentionCap = maxChars + 2;
@@ -982,21 +1006,60 @@ async function readFilePage(
     totalLines += 1;
     const lineNumber = totalLines;
     const inWindow = lineNumber >= offset && lineNumber < offset + limit;
-    if (inWindow && !stopCollecting) {
+    if (inWindow && !stopped) {
+      let start = lineNumber === offset ? Math.min(charOffset, currentLength) : 0;
+      // Retention starts one character before a non-zero char_offset so a
+      // caller offset that lands between a surrogate pair can include the
+      // high surrogate instead of emitting a lone low surrogate.
+      let tail = current;
+      if (lineNumber === offset && charOffset > 0 && start === charOffset && current.length > 0) {
+        const previous = current.charCodeAt(0);
+        const next = current.length > 1 ? current.charCodeAt(1) : -1;
+        if (previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) {
+          start = charOffset - 1; // deliver the whole code point, never half
+        } else {
+          tail = current.slice(1); // drop the extra retained character
+        }
+      }
+      // A non-zero char_offset at/after this line's end means the first line
+      // is already fully consumed; it contributes no page characters (but is
+      // counted as delivered, so next_offset advances past it).
+      if (lineNumber === offset && charOffset > 0 && start >= currentLength) {
+        lastDelivered = lineNumber;
+        current = "";
+        currentLength = 0;
+        pendingLine = false;
+        return;
+      }
       const separator = page.length > 0 ? 1 : 0;
       const available = maxChars - pageChars - separator;
-      const whole = currentLength === current.length;
-      if (whole && current.length <= available) {
-        page.push(current);
-        pageChars += separator + current.length;
+      const tailLength = currentLength - start;
+      const wholeTail = tail.length === tailLength;
+      if (wholeTail && tailLength <= available) {
+        page.push(tail);
+        pageChars += separator + tailLength;
+        lastDelivered = lineNumber;
       } else {
         charClipped = true;
-        const clipped = safeCharPrefix(current, Math.max(0, available));
+        stopped = true;
         if (page.length === 0) {
-          page.push(clipped);
-          pageChars += separator + clipped.length;
+          // The first requested line itself is clipped: deliver its safe
+          // prefix and point at the undelivered tail on the same line. A
+          // zero-length prefix (an astral code point that does not fit) keeps
+          // lines=0 and advances nothing.
+          const clipped = safeCharPrefix(tail, Math.max(0, available));
+          if (clipped.length > 0) {
+            page.push(clipped);
+            pageChars += clipped.length;
+          }
+          nextOffsetOverride = lineNumber;
+          nextCharOffset = start + clipped.length;
+          partialTail = true;
+        } else {
+          // A later line does not fit: the previous whole lines are the page
+          // and the next call starts at this line's beginning.
+          nextOffsetOverride = lineNumber;
         }
-        stopCollecting = true;
       }
     }
     current = "";
@@ -1022,11 +1085,11 @@ async function readFilePage(
         swallowLF = true;
         continue;
       }
+      const prospective = totalLines + 1;
+      const inWindow = prospective >= offset && prospective < offset + limit;
+      const retainFrom = prospective === offset && charOffset > 0 ? charOffset - 1 : 0;
       const retain =
-        !stopCollecting &&
-        totalLines + 1 >= offset &&
-        totalLines + 1 < offset + limit &&
-        current.length < retentionCap;
+        !stopped && inWindow && currentLength >= retainFrom && current.length < retentionCap;
       if (retain) current += ch;
       currentLength += 1;
       pendingLine = true;
@@ -1034,8 +1097,7 @@ async function readFilePage(
   }
   if (pendingLine) completeLine();
 
-  const eof =
-    !charClipped && (page.length === 0 || offset + page.length - 1 >= totalLines);
+  const eof = !partialTail && lastDelivered >= totalLines;
   const result: FilePage = {
     content: page.join("\n"),
     offset,
@@ -1044,7 +1106,10 @@ async function readFilePage(
     eof,
     truncated: charClipped,
   };
-  if (!eof) result.next_offset = offset + page.length;
+  if (!eof) {
+    result.next_offset = nextOffsetOverride ?? lastDelivered + 1;
+    if (nextCharOffset !== undefined) result.next_char_offset = nextCharOffset;
+  }
   return result;
 }
 
@@ -1245,11 +1310,13 @@ export class Workspace {
   // -- read-only tools (auto-allowed) ------------------------------------------
 
   /**
-   * Read a UTF-8 text file. Without an `offset`/`limit`, this is the original
-   * whole-file read bounded by `maxChars` (head+tail window). With either
+   * Read a UTF-8 text file. Without `offset`/`limit`/`charOffset`, this is the
+   * original whole-file read bounded by `maxChars` (head+tail window). With a
    * range field, it returns one 1-based line page plus `lines`, `total_lines`,
    * `eof` and (when more remains) `next_offset`; `maxChars` still caps the
-   * page characters.
+   * page characters. A clipped first line additionally returns
+   * `next_char_offset`, which the caller passes back as `charOffset` to read
+   * the rest of that line and then the following lines.
    */
   async read_file(rel: string, maxChars?: number): Promise<WorkspaceResult>;
   async read_file(rel: string, options?: ReadFileOptions): Promise<WorkspaceResult>;
@@ -1270,7 +1337,10 @@ export class Workspace {
           ? null
           : maxCharsOrOptions;
       const rangeRequested =
-        options !== null && (options.offset !== undefined || options.limit !== undefined);
+        options !== null &&
+        (options.offset !== undefined ||
+          options.limit !== undefined ||
+          options.charOffset !== undefined);
       if (!rangeRequested) {
         const maxChars =
           typeof maxCharsOrOptions === "number"
@@ -1285,6 +1355,7 @@ export class Workspace {
         clampLineOffset(options.offset),
         clampLineLimit(options.limit),
         clampRangeChars(options.maxChars),
+        clampCharOffset(options.charOffset),
       );
       return this.result(tool, p, "ok", {
         content: page.content,
@@ -1294,6 +1365,9 @@ export class Workspace {
         total_lines: page.total_lines,
         eof: page.eof,
         ...(page.next_offset !== undefined ? { next_offset: page.next_offset } : {}),
+        ...(page.next_char_offset !== undefined
+          ? { next_char_offset: page.next_char_offset }
+          : {}),
       });
     } catch (exc) {
       if (exc instanceof WorkspaceError || exc instanceof PermissionDenied) {
@@ -1615,7 +1689,7 @@ export class Workspace {
       {
         name: "workspace_read_file",
         description:
-          "Read a UTF-8 text file inside the workspace. Omit offset/limit for the whole file (bounded head+tail); pass either to page through a large file by lines.",
+          "Read a UTF-8 text file inside the workspace. Omit offset/limit for the whole file (bounded head+tail); pass either to page through a large file by lines. If a page clips the first line, continue with the returned next_char_offset as char_offset.",
         parameters: {
           type: "object",
           properties: {
@@ -1638,16 +1712,29 @@ export class Workspace {
               default: DEFAULT_READ_LINES,
               description: `maximum lines in one page (default ${DEFAULT_READ_LINES}, clamped to 1..${MAX_READ_LINES})`,
             },
+            char_offset: {
+              type: "integer",
+              minimum: 0,
+              default: 0,
+              description:
+                "0-based character offset into the first requested line (continue a clipped line's tail)",
+            },
           },
         },
         execute: async (args) => {
           const offset = numOrUndef(args.offset);
           const limit = numOrUndef(args.limit);
+          const charOffset = numOrUndef(args.char_offset);
           const maxChars = numOr(args.max_chars, DEFAULT_MAX_CHARS);
           const result =
-            offset === undefined && limit === undefined
+            offset === undefined && limit === undefined && charOffset === undefined
               ? await ws.read_file(String(args.path ?? "."), maxChars)
-              : await ws.read_file(String(args.path ?? "."), { maxChars, offset, limit });
+              : await ws.read_file(String(args.path ?? "."), {
+                  maxChars,
+                  offset,
+                  limit,
+                  charOffset,
+                });
           return json(result);
         },
       },

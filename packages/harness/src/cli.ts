@@ -149,6 +149,7 @@ import { discoverSkills, type SkillCatalog } from "./skills.ts";
 import {
   SpillStore,
   type SpillPruneResult,
+  type SpillStats,
 } from "./spill.ts";
 import { envPinnedPairs, SettingsStore } from "./settings_store.ts";
 import { WorkspaceRegistry } from "./workspace.ts";
@@ -3595,12 +3596,20 @@ function spillRootFor(sessionsDir: string): string {
 
 /**
  * `spill stats [--sessions-dir <dir>] [--json]`: read-only aggregate of the
- * valid spill artifacts. A missing root is an empty store (exit 0).
+ * valid spill artifacts. A missing root is an empty store (exit 0); an
+ * existing root that is a symlink/junction or not a real directory is refused
+ * (exit 1) instead of being followed.
  */
 function spillStatsCommand(sessionsDir: string, jsonMode: boolean, io: CliIO): number {
   const root = spillRootFor(sessionsDir);
-  const stats = new SpillStore(root).stats();
   const absoluteRoot = path.resolve(root);
+  let stats: SpillStats;
+  try {
+    stats = new SpillStore(root).stats();
+  } catch (exc) {
+    io.error(`[error] spill stats refused: ${exc instanceof Error ? exc.message : String(exc)}`);
+    return 1;
+  }
   if (jsonMode) {
     io.log(JSON.stringify({ root: absoluteRoot, files: stats.files, bytes: stats.bytes }));
     return 0;
@@ -3626,9 +3635,13 @@ function spillPruneSummary(
   const keptVerb = result.dryRun ? "would be kept" : "kept";
   const failure =
     result.failed > 0 ? `; ${result.failed} could not be removed` : "";
+  const temps =
+    result.tempsRemoved > 0
+      ? `; ${result.tempsRemoved} stale temp file(s) removed (${result.tempBytes} bytes)`
+      : "";
   return (
     `${verb} ${result.removed} of ${result.filesBefore} spill file(s) older than ` +
-    `${label} (${result.bytes} bytes); ${result.kept} ${keptVerb}${failure}`
+    `${label} (${result.bytes} bytes); ${result.kept} ${keptVerb}${failure}${temps}`
   );
 }
 
@@ -3657,6 +3670,8 @@ function spillGcCommand(
       failed: 0,
       filesBefore: 0,
       filesAfter: 0,
+      tempsRemoved: 0,
+      tempBytes: 0,
       dryRun,
       errors: [],
     };
@@ -3673,6 +3688,8 @@ function spillGcCommand(
           failed: 0,
           files_before: 0,
           files_after: 0,
+          temps_removed: 0,
+          temp_bytes: 0,
           errors: [],
         }),
       );
@@ -3727,6 +3744,8 @@ function spillGcCommand(
         failed: result.failed,
         files_before: result.filesBefore,
         files_after: result.filesAfter,
+        temps_removed: result.tempsRemoved,
+        temp_bytes: result.tempBytes,
         errors: result.errors,
       }),
     );
@@ -3765,6 +3784,21 @@ function doSpill(
     return spillUsageError(`unexpected argument: ${positionals.slice(1).join(" ")}`, io);
   }
   if (subcommand === "stats") {
+    // stats is read-only: gc's age/dry-run/force flags are usage errors here,
+    // not silently ignored options.
+    const gcOnly = argv.filter(
+      (arg) =>
+        arg === "--older-than" ||
+        arg.startsWith("--older-than=") ||
+        arg === "--dry-run" ||
+        arg === "--force",
+    );
+    if (gcOnly.length > 0) {
+      return spillUsageError(
+        `spill stats does not accept gc-only flag(s): ${[...new Set(gcOnly)].join(", ")}`,
+        io,
+      );
+    }
     return spillStatsCommand(sessionsDir, jsonMode, io);
   }
   if (subcommand === "gc") {

@@ -28,7 +28,10 @@
  * by a newer release (integer version > 1) still reads its known sections
  * tolerantly, but every write refuses with `SettingsSchemaVersionError` rather
  * than downgrading the document and dropping sections this release does not
- * know. A non-integer/negative/string version is treated as legacy/unversioned
+ * know. A file that exists but cannot be read (permission, sharing violation,
+ * I/O error) reads fail-soft as before, but every write refuses with
+ * `SettingsReadOnlyError` and never replaces bytes it could not inspect. A
+ * non-integer/negative/string version is treated as legacy/unversioned
  * for reads (fail-soft, never throwing) and normalizes to v1 on the next
  * write. Unknown top-level sections on a v0/v1 document are preserved by
  * `write()` so a same-version extension from a sibling build is never silently
@@ -169,12 +172,23 @@ export const COMPACTION_SECTION = "compaction";
 export const SETTINGS_SCHEMA_VERSION = 1;
 
 /**
+ * Base class for every typed settings-write refusal. The server maps it (and
+ * both subclasses) to HTTP 409 so a write never becomes a generic 500.
+ */
+export class SettingsWriteRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SettingsWriteRefusedError";
+  }
+}
+
+/**
  * Raised by every write path when `sessions/settings.json` carries a schema
  * version newer than this release understands. Reads stay tolerant; writes
  * refuse rather than downgrading the document (and dropping sections the newer
  * release added).
  */
-export class SettingsSchemaVersionError extends Error {
+export class SettingsSchemaVersionError extends SettingsWriteRefusedError {
   /** Stored schema version that this release cannot write. */
   readonly version: number;
   /** The schema version this release reads and writes. */
@@ -193,15 +207,39 @@ export class SettingsSchemaVersionError extends Error {
 }
 
 /**
+ * Raised by every write path when `sessions/settings.json` exists but cannot
+ * be read (permission, sharing violation, I/O error). Reads stay fail-soft;
+ * a write must never replace a document it could not inspect, because it could
+ * silently downgrade a newer version or drop sections.
+ */
+export class SettingsReadOnlyError extends SettingsWriteRefusedError {
+  /** Underlying read/stat failure description (path- and secret-free). */
+  readonly reason: string;
+
+  constructor(reason: string) {
+    super(
+      `settings.json exists but cannot be read (${reason}); refusing to overwrite it ` +
+        `— check file permissions/antivirus locking and retry`,
+    );
+    this.name = "SettingsReadOnlyError";
+    this.reason = reason;
+  }
+}
+
+/**
  * One settings document's schema state (`GET /api/settings` exposes it
  * additively as `schema`). `version` is the stored top-level integer, or
- * `null` when the file is legacy/invalid; `writable` is false only for a
- * version newer than this release.
+ * `null` when the file is legacy/invalid/unreadable; `writable` is false for a
+ * version newer than this release and for an existing-but-unreadable file.
+ * `readable: false` and `reason` are added only for the unreadable case, so the
+ * existing shape stays byte-compatible everywhere else.
  */
 export interface SettingsSchemaState {
   version: number | null;
   supported: number;
   writable: boolean;
+  readable?: boolean;
+  reason?: string;
 }
 
 /**
@@ -460,6 +498,8 @@ export function envPinnedPairs(env: NodeJS.ProcessEnv = process.env): Set<string
 export class SettingsStore {
   readonly filePath: string;
   private readonly secretBox: SecretBox;
+  /** Non-null after a read where the file exists but could not be read. */
+  private lastReadUnreadable: string | null = null;
 
   constructor(filePath: string, secretBox: SecretBox = defaultSecretBox()) {
     this.filePath = filePath;
@@ -467,24 +507,55 @@ export class SettingsStore {
   }
 
   private readRaw(): Record<string, unknown> {
-    if (!fs.existsSync(this.filePath)) return {};
+    this.lastReadUnreadable = null;
+    let text: string;
+    try {
+      text = fs.readFileSync(this.filePath, "utf-8");
+    } catch (exc) {
+      const code = (exc as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") return {}; // genuinely missing
+      // Existing but unreadable (EACCES, EBUSY, EISDIR, EIO, sharing
+      // violation/AV lock...). Distinguish it from a missing path so a write
+      // can fail closed; reads still return the fail-soft empty document.
+      try {
+        fs.statSync(this.filePath);
+      } catch (statExc) {
+        const statCode = (statExc as NodeJS.ErrnoException).code;
+        // A missing path is not an unreadable document. Any other stat
+        // failure leaves existence unproven, so writes stay fail-closed.
+        if (statCode === "ENOENT" || statCode === "ENOTDIR") return {};
+      }
+      this.lastReadUnreadable = exc instanceof Error ? exc.message : String(exc);
+      return {};
+    }
     let raw: unknown;
     try {
-      raw = JSON.parse(fs.readFileSync(this.filePath, "utf-8"));
+      raw = JSON.parse(text);
     } catch {
-      return {}; // missing/unreadable/corrupt file starts empty
+      return {}; // syntactically corrupt: fail-soft legacy behavior
     }
     return isRecord(raw) ? raw : {};
   }
 
   /**
    * The document's schema state, read fail-soft: a missing/invalid version
-   * reports `null` (legacy) and is writable; only an integer newer than
-   * `SETTINGS_SCHEMA_VERSION` makes the document read-only. Never throws.
+   * reports `null` (legacy) and is writable; an integer newer than
+   * `SETTINGS_SCHEMA_VERSION` makes the document read-only, and an existing
+   * file that cannot be read reports `writable: false` plus `readable: false`
+   * and a reason (never throwing).
    */
   schemaState(): SettingsSchemaState {
     const raw = this.readRaw();
     const version = storedSchemaVersion(raw);
+    if (this.lastReadUnreadable !== null) {
+      return {
+        version: null,
+        supported: SETTINGS_SCHEMA_VERSION,
+        writable: false,
+        readable: false,
+        reason: this.lastReadUnreadable,
+      };
+    }
     return {
       version,
       supported: SETTINGS_SCHEMA_VERSION,
@@ -493,11 +564,15 @@ export class SettingsStore {
   }
 
   /**
-   * Refuse a document written by a newer release. Every write path calls this
-   * after reading the current document and before writing, so a downgrade can
-   * never drop the newer release's sections.
+   * Refuse a document written by a newer release, or one that exists but could
+   * not be read. Every write path calls this after reading the current
+   * document and before writing, so a downgrade or a blind replacement can
+   * never drop the newer/unread bytes.
    */
   private assertWritable(raw: Record<string, unknown>): void {
+    if (this.lastReadUnreadable !== null) {
+      throw new SettingsReadOnlyError(this.lastReadUnreadable);
+    }
     const version = storedSchemaVersion(raw);
     if (version !== null && version > SETTINGS_SCHEMA_VERSION) {
       throw new SettingsSchemaVersionError(version);

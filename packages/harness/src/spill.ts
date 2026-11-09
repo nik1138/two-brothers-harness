@@ -18,14 +18,17 @@
  * Spill files are local trusted data (they are tool output, not secrets), but
  * the marker never carries a filesystem path. Retention is opt-in and
  * age-based: `stats()` inspects the store, `prune()` deletes old regular
- * `<id>.txt` files, and the server can enable a startup prune. Nothing scans,
- * follows links or reads anything except a validated `<root>/<id>.txt`.
+ * `<id>.txt` files, and the server can enable a startup prune. The root itself
+ * must be a missing path (created lazily) or a real directory: a symlink or
+ * junction root is refused, so a scan can never be redirected outside the
+ * store. Artifact scans use `lstat`, so a planted symlink below a safe root is
+ * never followed either.
  *
  * Everything here is dependency-free (Node built-ins only) and fail-soft at
  * the call site: `save` rejects on a real storage failure and the harness falls
- * back to its existing clipped result. Inspection and pruning are fail-soft
- * too: a missing/unreadable root is an empty store, and one unlink failure is
- * counted instead of aborting the pass.
+ * back to its existing clipped result. Inspection is fail-soft for a missing
+ * root (an empty store) and every read path refuses an unsafe root; pruning
+ * counts one failed unlink instead of aborting the pass.
  */
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
@@ -46,6 +49,27 @@ export const SPILL_ID_PATTERN = /^[a-f0-9]{16,64}$/;
  * never candidates.
  */
 export const SPILL_FILE_PATTERN = /^[a-f0-9]{16,64}\.txt$/;
+
+/**
+ * One in-progress save's temp file name (`.tmp-<id>`); `prune` may remove a
+ * stale one after the cutoff, but it is never counted as a valid artifact.
+ */
+export const SPILL_TEMP_PATTERN = /^\.tmp-[a-f0-9]{16,64}$/;
+
+/**
+ * Raised when the configured spill root is not a missing path or a real
+ * directory: a symlink/junction root could redirect scans outside the store,
+ * so save/read reject and stats/prune throw instead of following it.
+ */
+export class SpillRootUnsafeError extends Error {
+  readonly root: string;
+
+  constructor(root: string, detail: string) {
+    super(`spill root is not a safe directory: ${root} (${detail})`);
+    this.name = "SpillRootUnsafeError";
+    this.root = root;
+  }
+}
 
 /** Marker that replaces an oversized result's body in the model context. */
 export const SPILL_MARKER_PREFIX = "[[SPILL id=";
@@ -172,18 +196,22 @@ export interface SpillPruneOptions {
 
 /** Result of one {@link SpillStore.prune} pass. */
 export interface SpillPruneResult {
-  /** Files removed (or, on a dry run, that would be removed). */
+  /** Valid artifact files removed (or, on a dry run, that would be removed). */
   removed: number;
-  /** Valid artifacts kept (older than the cutoff, unlink failures, dry-run survivors). */
+  /** Valid artifacts kept (mtime >= the cutoff, unlink failures, dry-run survivors). */
   kept: number;
   /** Bytes removed (or, on a dry run, that would be removed). */
   bytes: number;
-  /** Valid artifacts whose unlink failed for a reason other than ENOENT. */
+  /** Files whose unlink failed for a reason other than ENOENT (artifacts or temp files). */
   failed: number;
   /** Valid artifacts present before the pass. */
   filesBefore: number;
   /** Valid artifacts expected after the pass (`filesBefore - removed`). */
   filesAfter: number;
+  /** Stale `.tmp-*` files removed (or, on a dry run, that would be removed). */
+  tempsRemoved: number;
+  /** Bytes of stale `.tmp-*` files removed (or, on a dry run, that would be). */
+  tempBytes: number;
   /** True for a dry run (nothing was unlinked). */
   dryRun: boolean;
   /** One line per failed unlink (already counted in `failed`). */
@@ -299,9 +327,10 @@ export function formatSpillRead(chunk: SpillChunk, maxReadChars: number = SPILL_
 /**
  * One private directory of spill files. The store is intentionally stateless:
  * every read validates the id and resolves it under the configured root, so a
- * model can never supply a path. `stats`/`prune` scan only validated
- * `<id>.txt` names with `lstat`, so a symlink, directory or temp file is never
- * counted, followed or deleted.
+ * model can never supply a path. The root must be a missing path (created
+ * lazily) or a real directory; a symlink/junction root is refused before any
+ * scan or write. `stats`/`prune` scan only validated `<id>.txt` names with
+ * `lstat`, so a symlink below the root is never counted, followed or deleted.
  */
 export class SpillStore {
   /** Absolute private root. Files are created lazily on the first save. */
@@ -309,6 +338,32 @@ export class SpillStore {
 
   constructor(root: string) {
     this.root = path.resolve(root);
+  }
+
+  /**
+   * The root is safe only when it does not exist yet (a future save creates
+   * it) or is an existing real directory. `lstat` rejects a symlink/junction
+   * root (Windows junctions report as symbolic links), and a plain file,
+   * device or socket root is refused too.
+   */
+  private assertSafeRoot(): void {
+    let entry: fs.Stats;
+    try {
+      entry = fs.lstatSync(this.root);
+    } catch (exc) {
+      const code = (exc as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") return;
+      throw new SpillRootUnsafeError(
+        this.root,
+        `cannot inspect it: ${exc instanceof Error ? exc.message : String(exc)}`,
+      );
+    }
+    if (entry.isSymbolicLink()) {
+      throw new SpillRootUnsafeError(this.root, "it is a symbolic link or junction");
+    }
+    if (!entry.isDirectory()) {
+      throw new SpillRootUnsafeError(this.root, "it is not a directory");
+    }
   }
 
   /** Resolve a validated id to its file path, refusing anything outside the root. */
@@ -323,14 +378,19 @@ export class SpillStore {
   }
 
   /**
-   * Persist `text` verbatim under a fresh random id. Writes a temp file with
-   * owner-only permissions, best-effort fsyncs it, then renames it into place.
-   * Rejects on a real storage failure (the harness then clips as before).
+   * Persist `text` verbatim under a fresh random id. Rejects when the root is
+   * unsafe (a symlink/junction, file or uninspectable path). Writes a temp file
+   * with owner-only permissions, best-effort fsyncs it, then renames it into
+   * place. Rejects on a real storage failure (the harness then clips as before).
    */
   async save(text: string, context: SpillContext = {}): Promise<SavedSpill> {
     void context; // descriptive only; the random id is the storage handle
     const content = String(text);
+    this.assertSafeRoot();
     await fs.promises.mkdir(this.root, { recursive: true, mode: 0o700 });
+    // Re-check after creation: mkdir can succeed through a link planted in a
+    // race, and every write must land in a real directory.
+    this.assertSafeRoot();
     for (let attempt = 0; attempt < 8; attempt += 1) {
       const id = randomBytes(16).toString("hex");
       const target = this.filePath(id);
@@ -363,6 +423,7 @@ export class SpillStore {
    */
   async read(id: string, options: SpillReadOptions = {}): Promise<SpillChunk> {
     const valid = assertSpillId(id);
+    this.assertSafeRoot();
     const file = this.filePath(valid);
     const full = await fs.promises.readFile(file, "utf8");
     const totalChars = full.length;
@@ -391,10 +452,12 @@ export class SpillStore {
   /**
    * Count the store's valid artifacts and their total size. Only regular files
    * named `<valid-id>.txt` count: symlinks are never followed, temp files and
-   * malformed names are ignored, and a missing/unreadable root is an empty
-   * store (zeros, never an error).
+   * malformed names are ignored, and a missing root is an empty store (zeros,
+   * never an error). An existing root that is a symlink/junction or not a real
+   * directory throws `SpillRootUnsafeError`.
    */
   stats(): SpillStats {
+    this.assertSafeRoot();
     let names: string[];
     try {
       names = fs.readdirSync(this.root);
@@ -422,12 +485,15 @@ export class SpillStore {
 
   /**
    * Delete valid artifacts whose mtime is strictly older than
-   * `now - olderThanMs`. Only regular `<valid-id>.txt` files are candidates:
-   * symlinks, directories, temp files and malformed names are skipped, and
-   * every path is rebuilt from a validated id inside the root. A dry run
-   * reports the same counts without deleting. A failed unlink is counted in
-   * `failed`/`errors`; it never aborts the pass. A missing/unreadable root is
-   * an empty store.
+   * `now - olderThanMs`, plus stale `.tmp-*` save files of the same age. Only
+   * regular `<valid-id>.txt` files count as artifacts and only regular
+   * `.tmp-<id>` names are temp candidates: symlinks, directories and malformed
+   * names are skipped, and every path is rebuilt from a validated id inside the
+   * root. A dry run reports the same counts without deleting. A failed unlink
+   * is counted in `failed`/`errors`; it never aborts the pass. A missing root
+   * is an empty store; an existing root that is a symlink/junction or not a
+   * real directory throws `SpillRootUnsafeError` (destructive paths fail
+   * closed).
    */
   prune(options: SpillPruneOptions): SpillPruneResult {
     if (
@@ -437,6 +503,7 @@ export class SpillStore {
     ) {
       throw new Error("olderThanMs must be a positive finite number");
     }
+    this.assertSafeRoot();
     const now =
       typeof options.now === "number" && Number.isFinite(options.now)
         ? options.now
@@ -450,6 +517,8 @@ export class SpillStore {
       failed: 0,
       filesBefore: 0,
       filesAfter: 0,
+      tempsRemoved: 0,
+      tempBytes: 0,
       dryRun,
       errors: [],
     };
@@ -460,6 +529,41 @@ export class SpillStore {
       return result;
     }
     for (const name of names) {
+      if (SPILL_TEMP_PATTERN.test(name)) {
+        // A crashed save can leave `.tmp-<id>` behind. It is not an artifact
+        // (never counted in filesBefore/filesAfter), but once it is older than
+        // the cutoff it is safe to remove with the same age rule.
+        const temp = path.join(this.root, name);
+        let entry: fs.Stats;
+        try {
+          entry = fs.lstatSync(temp);
+        } catch {
+          continue;
+        }
+        if (!entry.isFile() || entry.mtimeMs >= cutoff) continue;
+        if (dryRun) {
+          result.tempsRemoved += 1;
+          result.tempBytes += entry.size;
+          continue;
+        }
+        try {
+          fs.unlinkSync(temp);
+        } catch (exc) {
+          if ((exc as NodeJS.ErrnoException).code === "ENOENT") {
+            result.tempsRemoved += 1;
+            result.tempBytes += entry.size;
+            continue;
+          }
+          result.failed += 1;
+          result.errors.push(
+            `could not delete ${temp}: ${exc instanceof Error ? exc.message : String(exc)}`,
+          );
+          continue;
+        }
+        result.tempsRemoved += 1;
+        result.tempBytes += entry.size;
+        continue;
+      }
       if (!SPILL_FILE_PATTERN.test(name)) continue;
       const id = name.slice(0, -".txt".length);
       let file: string;

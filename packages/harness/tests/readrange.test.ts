@@ -331,8 +331,9 @@ test("a giant first line is safely head-clipped and never splits a surrogate pai
       lines: 1,
       total_lines: 2,
       eof: false,
-      next_offset: 2,
+      next_offset: 1,
     });
+    assert.equal(clipped.next_char_offset, 4);
     assert.equal(clipped.truncated, true);
     const content = String(clipped.content);
     for (let i = 0; i < content.length; i++) {
@@ -345,6 +346,156 @@ test("a giant first line is safely head-clipped and never splits a surrogate pai
         assert.ok(!(code >= 0xdc00 && code <= 0xdfff), "no lone low surrogate");
       }
     }
+  } finally {
+    cleanup();
+  }
+});
+
+test("a clipped minified line continues by char_offset and recovers the exact tail", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const text = "0123456789".repeat(5); // 50 chars, one line
+    write(root, "minified.txt", text);
+    const ws = new Workspace(root);
+
+    const first = await ws.read_file("minified.txt", { offset: 1, limit: 1, maxChars: 10 });
+    assert.equal(first.content, text.slice(0, 10));
+    assert.deepEqual(pageOf(first), {
+      offset: 1,
+      lines: 1,
+      total_lines: 1,
+      eof: false,
+      next_offset: 1,
+    });
+    assert.equal(first.next_char_offset, 10);
+    assert.equal(first.truncated, true);
+
+    let recovered = String(first.content);
+    let charOffset = Number(first.next_char_offset);
+    let page = first;
+    for (let guard = 0; guard < 20 && page.eof !== true; guard += 1) {
+      page = await ws.read_file("minified.txt", {
+        offset: 1,
+        limit: 1,
+        maxChars: 10,
+        charOffset,
+      });
+      recovered += String(page.content);
+      assert.equal(page.offset, 1, "next_offset stays on the clipped line");
+      if (page.eof !== true) {
+        assert.equal(page.next_offset, 1);
+        assert.equal(typeof page.next_char_offset, "number");
+        charOffset = Number(page.next_char_offset);
+      }
+    }
+    assert.equal(page.eof, true);
+    assert.equal(recovered, text, "every character recovered exactly once");
+  } finally {
+    cleanup();
+  }
+});
+
+test("a first-line tail continuation then delivers the following lines", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    write(root, "mixed.txt", "A".repeat(25) + "\nsecond\nthird\n");
+    const ws = new Workspace(root);
+    const first = await ws.read_file("mixed.txt", { offset: 1, limit: 3, maxChars: 20 });
+    assert.equal(first.content, "A".repeat(20));
+    assert.equal(first.next_offset, 1);
+    assert.equal(first.next_char_offset, 20);
+    assert.equal(first.eof, false);
+
+    const tail = await ws.read_file("mixed.txt", {
+      offset: 1,
+      limit: 3,
+      maxChars: 20,
+      charOffset: 20,
+    });
+    assert.equal(tail.content, "AAAAA\nsecond\nthird");
+    assert.equal(tail.lines, 3);
+    assert.equal(tail.eof, true);
+    assert.ok(!("next_offset" in tail));
+    assert.ok(!("next_char_offset" in tail));
+  } finally {
+    cleanup();
+  }
+});
+
+test("a clipped last line keeps eof false until its tail is delivered", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const finalLine = "B".repeat(25);
+    write(root, "last.txt", `first\n${finalLine}`);
+    const ws = new Workspace(root);
+    const first = await ws.read_file("last.txt", { offset: 2, limit: 1, maxChars: 10 });
+    assert.equal(first.content, finalLine.slice(0, 10));
+    assert.equal(first.total_lines, 2);
+    assert.equal(first.eof, false, "clipped final line still has content");
+    assert.equal(first.next_offset, 2);
+
+    const second = await ws.read_file("last.txt", {
+      offset: 2,
+      limit: 1,
+      maxChars: 10,
+      charOffset: 10,
+    });
+    assert.equal(second.content, finalLine.slice(10, 20));
+    assert.equal(second.eof, false);
+    assert.equal(second.next_offset, 2);
+
+    const last = await ws.read_file("last.txt", {
+      offset: 2,
+      limit: 1,
+      maxChars: 10,
+      charOffset: 20,
+    });
+    assert.equal(last.content, finalLine.slice(20));
+    assert.equal(last.eof, true, "the final tail completes the file");
+    assert.equal(last.next_offset, undefined);
+  } finally {
+    cleanup();
+  }
+});
+
+test("max_chars 1 never skips an astral first character", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    write(root, "astral.txt", "😀x\n");
+    const ws = new Workspace(root);
+    const tiny = await ws.read_file("astral.txt", { offset: 1, limit: 1, maxChars: 1 });
+    assert.equal(tiny.content, "", "no half surrogate is delivered");
+    assert.equal(tiny.lines, 0, "nothing is claimed as a delivered line");
+    assert.equal(tiny.eof, false);
+    assert.equal(tiny.next_offset, 1, "the line is not skipped");
+    assert.equal(tiny.next_char_offset, 0, "no character advance");
+    assert.equal(tiny.truncated, true);
+
+    const midPair = await ws.read_file("astral.txt", {
+      offset: 1,
+      limit: 1,
+      maxChars: 2,
+      charOffset: 1,
+    });
+    assert.equal(midPair.content, "😀", "a mid-pair offset rounds down, never emits a lone surrogate");
+    assert.equal(midPair.next_char_offset, 2);
+
+    const pair = await ws.read_file("astral.txt", {
+      offset: 1,
+      limit: 1,
+      maxChars: 2,
+      charOffset: 0,
+    });
+    assert.equal(pair.content, "😀");
+    assert.equal(pair.next_char_offset, 2);
+    const rest = await ws.read_file("astral.txt", {
+      offset: 1,
+      limit: 1,
+      maxChars: 2,
+      charOffset: 2,
+    });
+    assert.equal(rest.content, "x");
+    assert.equal(rest.eof, true);
   } finally {
     cleanup();
   }
@@ -425,6 +576,9 @@ test("workspace_read_file tool schema and JSON result carry the range fields", a
     assert.equal(properties.limit.maximum, MAX_READ_LINES);
     assert.equal(properties.limit.default, DEFAULT_READ_LINES);
     assert.equal(properties.max_chars.default, DEFAULT_MAX_CHARS);
+    assert.equal(properties.char_offset.type, "integer");
+    assert.equal(properties.char_offset.minimum, 0);
+    assert.equal(properties.char_offset.default, 0);
     assert.match(String(properties.offset.description), /1-based/);
     assert.match(String(properties.limit.description), new RegExp(String(MAX_READ_LINES)));
 
@@ -448,6 +602,26 @@ test("workspace_read_file tool schema and JSON result carry the range fields", a
     const plain = await tool.execute({ path: "tool.txt" });
     assert.deepEqual(JSON.parse(plain), await ws.read_file("tool.txt"));
     assert.ok(!("offset" in JSON.parse(plain)));
+
+    // The tool schema exposes the character continuation end to end.
+    write(root, "long-line.txt", "x".repeat(15));
+    const clipped = JSON.parse(
+      await tool.execute({ path: "long-line.txt", offset: 1, limit: 1, max_chars: 5 }),
+    ) as Record<string, any>;
+    assert.equal(clipped.content, "xxxxx");
+    assert.equal(clipped.next_offset, 1);
+    assert.equal(clipped.next_char_offset, 5);
+    const tail = JSON.parse(
+      await tool.execute({
+        path: "long-line.txt",
+        offset: 1,
+        limit: 1,
+        max_chars: 20,
+        char_offset: 5,
+      }),
+    ) as Record<string, any>;
+    assert.equal(tail.content, "x".repeat(10));
+    assert.equal(tail.eof, true);
   } finally {
     cleanup();
   }

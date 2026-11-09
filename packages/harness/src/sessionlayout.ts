@@ -42,6 +42,13 @@ export const GLOBAL_PROJECT_KEY = "_global";
 /** Marker file describing the process currently writing this store. */
 export const SESSION_LOCK_FILE = ".writer.json";
 
+/**
+ * A malformed/empty writer lock is treated as stale only after this grace, so
+ * a concurrent writer that has created the file but not finished writing its
+ * record is never mistaken for a crashed one.
+ */
+export const SESSION_LOCK_MALFORMED_GRACE_MS = 5_000;
+
 export type SessionLayoutMode = "flat" | "dirs";
 
 /** The writer lock record stored at `<root>/.writer.json`. */
@@ -127,6 +134,12 @@ export interface SessionLayoutOptions {
    * new sessions land under `_global` unless a caller names a project.
    */
   defaultProject?: string | null;
+  /**
+   * Test seam for the writer-lock record write (production leaves it unset).
+   * A throw here exercises the cleanup path that removes a just-created lock
+   * after a write/fsync failure.
+   */
+  lockWriteHook?: (fd: number, data: string) => void;
 }
 
 const JSONL_SUFFIX = ".jsonl";
@@ -265,6 +278,7 @@ function writeDurable(target: string, data: string | Buffer): void {
 export class SessionLayout {
   readonly root: string;
   private readonly defaultProject: string | null;
+  private readonly lockWriteHook: ((fd: number, data: string) => void) | null;
 
   constructor(root: string, options: SessionLayoutOptions = {}) {
     this.root = path.resolve(root);
@@ -272,6 +286,7 @@ export class SessionLayout {
       typeof options.defaultProject === "string" && options.defaultProject.trim()
         ? options.defaultProject.trim()
         : null;
+    this.lockWriteHook = options.lockWriteHook ?? null;
   }
 
   /** Current writer layout: the marker value, else `flat` (legacy default). */
@@ -493,40 +508,43 @@ export class SessionLayout {
   }
 
   /**
+   * True when a malformed/empty lock is old enough to be a crashed writer
+   * rather than one still between `open` and its first write. A vanished lock
+   * is stale too (another owner released it); an unreadable one is not.
+   */
+  private malformedLockIsStale(file: string, now: number): boolean {
+    try {
+      const entry = fs.lstatSync(file);
+      return entry.isFile() && now - entry.mtimeMs >= SESSION_LOCK_MALFORMED_GRACE_MS;
+    } catch (exc) {
+      return (exc as NodeJS.ErrnoException).code === "ENOENT";
+    }
+  }
+
+  /**
    * Take the single-writer lock for this store. `serve`/TUI callers hold it
-   * for their lifetime; `sessions migrate` refuses to run while a live lock
-   * exists. A lock whose pid is dead is removed and retried once.
+   * for their lifetime; `sessions migrate` and `spill gc` take it briefly and
+   * refuse to run while a live lock exists. A lock whose pid is dead is
+   * removed and retried once. A malformed/empty lock (a crashed writer, or a
+   * disk-full write failure in the previous owner) is reclaimed only once it
+   * is older than {@link SESSION_LOCK_MALFORMED_GRACE_MS}; a recent one still
+   * refuses, because a concurrent writer may be mid-write. Every failure after
+   * this call created the lock file removes that file before rethrowing.
    */
   acquireWriterLock(owner: string): () => void {
     ensureDir(this.root);
     const label = owner.trim() || "two-brothers";
     const file = path.join(this.root, SESSION_LOCK_FILE);
+    const body =
+      JSON.stringify(
+        { owner: label, pid: process.pid, created: new Date().toISOString() },
+        null,
+        2,
+      ) + "\n";
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      let fd: number;
       try {
-        const fd = fs.openSync(file, "wx");
-        try {
-          fs.writeFileSync(
-            fd,
-            JSON.stringify(
-              { owner: label, pid: process.pid, created: new Date().toISOString() },
-              null,
-              2,
-            ) + "\n",
-          );
-          fs.fsyncSync(fd);
-        } finally {
-          fs.closeSync(fd);
-        }
-        return () => {
-          const current = this.writerLock();
-          if (current !== null && current.pid === process.pid && current.owner === label) {
-            try {
-              fs.unlinkSync(file);
-            } catch {
-              // already gone
-            }
-          }
-        };
+        fd = fs.openSync(file, "wx");
       } catch (exc) {
         if ((exc as NodeJS.ErrnoException).code !== "EEXIST") throw exc;
         const holder = this.writerLock();
@@ -538,8 +556,52 @@ export class SessionLayout {
           }
           continue;
         }
+        if (holder === null && this.malformedLockIsStale(file, Date.now())) {
+          try {
+            fs.unlinkSync(file);
+          } catch {
+            // retry the exclusive create; a concurrent owner will win honestly
+          }
+          continue;
+        }
         throw new SessionLayoutLockedError(holder);
       }
+      let failure: unknown = null;
+      try {
+        try {
+          if (this.lockWriteHook !== null) this.lockWriteHook(fd, body);
+          else fs.writeFileSync(fd, body);
+          fs.fsyncSync(fd);
+        } catch (exc) {
+          failure = exc;
+        }
+      } finally {
+        try {
+          fs.closeSync(fd);
+        } catch (exc) {
+          if (failure === null) failure = exc;
+        }
+      }
+      if (failure !== null) {
+        // Never leave an empty/partial lock behind: this process owns the
+        // just-created file and no other writer can have written it yet.
+        try {
+          fs.unlinkSync(file);
+        } catch {
+          // best effort; a remaining malformed lock is reclaimed after grace
+        }
+        throw failure;
+      }
+      return () => {
+        const current = this.writerLock();
+        if (current !== null && current.pid === process.pid && current.owner === label) {
+          try {
+            fs.unlinkSync(file);
+          } catch {
+            // already gone
+          }
+        }
+      };
     }
     throw new SessionLayoutLockedError(this.writerLock());
   }
