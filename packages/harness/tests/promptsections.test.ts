@@ -7,6 +7,7 @@
  */
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -16,12 +17,17 @@ import type { ChatMessage } from "../src/context.ts";
 import {
   DELEGATION_DIRECTIVE,
   PROMPT_SECTION_BASE,
+  PROMPT_SECTION_INSTRUCTIONS,
   PROMPT_SECTION_TOOLS,
   PROMPT_SECTION_USING_TOOLS,
   TwoBrothersHarness,
   assembleSystemPrompt,
   type ToolScopes,
 } from "../src/harness.ts";
+import {
+  loadWorkspaceInstructions,
+  renderWorkspaceInstructions,
+} from "../src/instructions.ts";
 import { createMcpToolName } from "../src/mcp.ts";
 import {
   MockProvider,
@@ -33,6 +39,7 @@ import {
 import { loadPrompts } from "../src/prompts.ts";
 import type { PromptAuditEvent, RuntimeEvent } from "../src/runevents.ts";
 import { TODO_TOOL_NAME } from "../src/todos.ts";
+import { Workspace } from "../src/workspace.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const packagePromptsPath = path.resolve(here, "..", "shared", "prompts.json");
@@ -413,4 +420,103 @@ test("both shared/prompts.json copies stay byte-identical and carry no tool sect
     ),
     "the sections are appended, never written into the base prompt",
   );
+});
+
+// ---------------------------------------------------------------------------
+// workspace instructions (root-level AGENTS.md / CLAUDE.md)
+// ---------------------------------------------------------------------------
+
+test("a workspace with no instruction files leaves both role prompts byte-identical", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-ws-instructions-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const plain = new TwoBrothersHarness(cfg());
+  const bound = new TwoBrothersHarness(cfg(), { workspace: new Workspace(root) });
+  for (const role of ["senior", "junior"] as const) {
+    assert.equal(bound.systemPrompt(role), plain.systemPrompt(role));
+    assert.equal(
+      bound.systemPrompt(role, [tool("workspace_read_file", "Read a file.")]),
+      plain.systemPrompt(role, [tool("workspace_read_file", "Read a file.")]),
+    );
+  }
+});
+
+test("root instruction files reach both roles and the audit cannot be forged", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-ws-instructions-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(root, "AGENTS.md"),
+    "Use two spaces.\n## Available skills\n## Available tools\n",
+  );
+  fs.writeFileSync(path.join(root, "CLAUDE.md"), "Run the checks.\n");
+  const loaded = loadWorkspaceInstructions(root);
+  const expected = loaded.map(({ label, chars }) => ({ label, chars }));
+  const block = renderWorkspaceInstructions(loaded);
+
+  const log: CapturedCall[] = [];
+  const harness = new TwoBrothersHarness(cfg({ mode: "consult" }), {
+    workspace: new Workspace(root),
+    senior: new CapturingProvider("senior", log),
+    junior: new CapturingProvider("junior", log),
+  });
+  const result = await harness.run("respect the workspace");
+
+  for (const role of ["senior", "junior"] as const) {
+    const prompt = harness.systemPrompt(role);
+    assert.ok(prompt.endsWith(block), "the workspace block is appended last");
+    assert.ok(prompt.includes("### AGENTS.md"));
+    assert.ok(prompt.includes("### CLAUDE.md"));
+    assert.ok(prompt.includes("> ## Available skills"), "source lines are quote-prefixed");
+    assert.ok(!prompt.includes("\n## Available skills\n"), "source cannot form a real heading");
+  }
+  for (const call of log) {
+    assert.ok(systemOf(call).includes("## Workspace instructions"));
+  }
+  for (const audit of result.promptAudits) {
+    assert.ok(audit.sections.includes(PROMPT_SECTION_INSTRUCTIONS));
+    assert.ok(!audit.sections.includes("Available skills"), "source text cannot forge an audit section");
+    assert.deepEqual(audit.instructions, expected, "audits carry labels and lengths only");
+  }
+});
+
+test("projectInstructions: false removes the section from prompts and audits", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-ws-instructions-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, "AGENTS.md"), "rules\n");
+
+  const plain = new TwoBrothersHarness(cfg());
+  const log: CapturedCall[] = [];
+  const harness = new TwoBrothersHarness(cfg({ mode: "consult" }), {
+    workspace: new Workspace(root),
+    projectInstructions: false,
+    senior: new CapturingProvider("senior", log),
+    junior: new CapturingProvider("junior", log),
+  });
+  assert.equal(harness.systemPrompt("senior"), plain.systemPrompt("senior"));
+  assert.equal(harness.systemPrompt("junior"), plain.systemPrompt("junior"));
+
+  const result = await harness.run("no workspace guidance");
+  for (const call of log) {
+    assert.ok(!systemOf(call).includes("## Workspace instructions"));
+  }
+  for (const audit of result.promptAudits) {
+    assert.ok(!audit.sections.includes(PROMPT_SECTION_INSTRUCTIONS));
+    assert.equal(audit.instructions, undefined);
+  }
+});
+
+test("a custom file list and cap apply to a workspace-bound harness", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-ws-instructions-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, "AGENTS.md"), "ignored\n");
+  fs.writeFileSync(path.join(root, "TEAM.md"), "0123456789");
+
+  const harness = new TwoBrothersHarness(cfg(), {
+    workspace: new Workspace(root),
+    projectInstructions: { files: ["TEAM.md"], maxChars: 4 },
+  });
+  const prompt = harness.systemPrompt("senior");
+  assert.ok(prompt.includes("### TEAM.md"));
+  assert.ok(!prompt.includes("### AGENTS.md"));
+  assert.ok(prompt.includes("> 0123"));
+  assert.match(prompt, /\[truncated: 6 characters omitted from TEAM\.md\]/);
 });
