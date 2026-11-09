@@ -314,6 +314,13 @@ workspace root:
   `workspace_write_file`, `workspace_edit_file`, `workspace_delete_file`,
   `workspace_run_shell`) and the senior gets the read-only verify slice (plus
   approval-brokered `run_shell`); plugin bindings see the same workspace.
+- `workspace_read_file` pages a large file by line: `offset` is the 1-based
+  first line (default 1), `limit` the page size in lines (default 2 000,
+  clamped to 1–5 000), and `max_chars` (default 20 000) still bounds the page
+  characters. A ranged result carries `content`, `truncated`, `offset`,
+  `lines`, `total_lines`, `eof` and `next_offset` when more lines remain.
+  Without `offset`/`limit` the read is the historical whole-file head+tail
+  window, byte-identical to before.
 - Reads auto-allow. Writes, edits, deletes and shell commands park the run on
   the [approval panel](#approvals-in-the-tui) instead of the composer — unless
   the effective [approval mode](#approval-modes) lets them run without asking
@@ -1103,7 +1110,11 @@ In `work` mode, a run with a `workspace_id` gives the junior confined
 workspace tools (`workspace_read_file`, `workspace_list_dir`,
 `workspace_search_text`, `workspace_write_file`, `workspace_edit_file`,
 `workspace_delete_file`, `workspace_run_shell`) rooted at the registered
-directory. Reads auto-allow; mutations and shell commands pause the run on an
+directory. `workspace_read_file` takes the same optional line range described
+under [workspace-bound TUI runs](#workspace-bound-tui-runs---workspace):
+`offset` (1-based, default 1) and `limit` (default 2 000, max 5 000) page a
+large file while `max_chars` still bounds each page. Reads auto-allow;
+mutations and shell commands pause the run on an
 `approval_requested` event until the operator answers — once, or for the rest of
 the session (see the session-scope paragraph above) — unless the effective
 [approval mode](#approval-modes) allows them without asking (or denies them

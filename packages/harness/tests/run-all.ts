@@ -22,6 +22,7 @@ import "./usagecache.test.ts";
 import "./retryregistry.test.ts";
 import "./retryjitter.test.ts";
 import "./workspace.test.ts";
+import "./readrange.test.ts";
 import "./editqueue.test.ts";
 import "./output.test.ts";
 import "./shell.test.ts";

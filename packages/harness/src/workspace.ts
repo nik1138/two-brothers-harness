@@ -43,6 +43,10 @@ import type { Tool } from "./provider.ts";
 
 /** read_file content cap: head+tail window via `boundOutput`. */
 export const DEFAULT_MAX_CHARS = 20_000;
+/** read_file range mode: default page size in lines. */
+export const DEFAULT_READ_LINES = 2_000;
+/** read_file range mode: largest line window a model-supplied `limit` is clamped to. */
+export const MAX_READ_LINES = 5_000;
 /** search_text aggregate cap over the serialized match list. */
 export const MAX_SEARCH_RESULT_CHARS = 20_000;
 /** list_dir entry cap; the result carries `truncated` beyond it. */
@@ -885,6 +889,165 @@ function captureModeMeta(
   return { mode: stat.mode & 0o7777, uid: stat.uid, gid: stat.gid };
 }
 
+// ---------------------------------------------------------------------------
+// read_file line pages
+// ---------------------------------------------------------------------------
+
+/**
+ * Optional line-range read of a workspace text file. Supplying `offset` and/or
+ * `limit` switches `read_file` into range mode; `maxChars` alone keeps the
+ * historical whole-file head+tail read byte-identical.
+ */
+export interface ReadFileOptions {
+  /** Character cap for the returned content (default `DEFAULT_MAX_CHARS`). */
+  maxChars?: number;
+  /** First line of the page, 1-based (default 1). */
+  offset?: number;
+  /** Maximum lines in the page (default `DEFAULT_READ_LINES`, clamped to 1..`MAX_READ_LINES`). */
+  limit?: number;
+}
+
+/** One line page plus the bookkeeping a model needs to request the next one. */
+interface FilePage {
+  content: string;
+  offset: number;
+  lines: number;
+  total_lines: number;
+  eof: boolean;
+  next_offset?: number;
+  truncated: boolean;
+}
+
+/** Tolerant 1-based line offset: junk becomes 1, huge values stay safe integers. */
+function clampLineOffset(value: unknown): number {
+  if (typeof value !== "number" || Number.isNaN(value)) return 1;
+  return Math.min(Number.MAX_SAFE_INTEGER, Math.max(1, Math.floor(value)));
+}
+
+/** Tolerant line limit: junk gets the default, everything else clamps to 1..max. */
+function clampLineLimit(value: unknown): number {
+  if (typeof value !== "number" || Number.isNaN(value)) return DEFAULT_READ_LINES;
+  return Math.min(MAX_READ_LINES, Math.max(1, Math.floor(value)));
+}
+
+/** Range-mode character budget: a positive finite integer, default otherwise. */
+function clampRangeChars(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_MAX_CHARS;
+  return Math.max(1, Math.floor(value));
+}
+
+/** Slice a string to `maxChars` UTF-16 units without splitting a surrogate pair. */
+function safeCharPrefix(text: string, maxChars: number): string {
+  if (maxChars <= 0) return "";
+  if (text.length <= maxChars) return text;
+  let end = maxChars;
+  const code = text.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+  return text.slice(0, end);
+}
+
+/**
+ * Stream a file line by line and return one 1-based line page. The whole file
+ * is scanned (so `total_lines` is honest) but only the current line prefix and
+ * the page itself are retained: memory stays bounded by the character budget,
+ * never by the file size. Lines end at `\n`, `\r\n` or `\r`; a trailing line
+ * break does not create an extra empty line, matching `splitLinesKeepEnds`.
+ *
+ * A page that fits keeps whole lines joined by `\n`. If the character budget
+ * cuts the page, only whole lines that fit are kept; when not even the first
+ * line fits, its safe character prefix is returned (and counted as one line)
+ * so the caller still makes progress. `truncated` reports that cut, `eof` is
+ * false, and `next_offset` names the first line not delivered.
+ */
+async function readFilePage(
+  target: string,
+  offset: number,
+  limit: number,
+  maxChars: number,
+): Promise<FilePage> {
+  const page: string[] = [];
+  let pageChars = 0;
+  let totalLines = 0;
+  let current = "";
+  let currentLength = 0;
+  let pendingLine = false;
+  let swallowLF = false;
+  let charClipped = false;
+  let stopCollecting = false;
+  // Enough to detect that a line overflows and to clip a safe prefix; keeping
+  // more than the page budget would make a single giant line unbounded.
+  const retentionCap = maxChars + 2;
+
+  const completeLine = (): void => {
+    totalLines += 1;
+    const lineNumber = totalLines;
+    const inWindow = lineNumber >= offset && lineNumber < offset + limit;
+    if (inWindow && !stopCollecting) {
+      const separator = page.length > 0 ? 1 : 0;
+      const available = maxChars - pageChars - separator;
+      const whole = currentLength === current.length;
+      if (whole && current.length <= available) {
+        page.push(current);
+        pageChars += separator + current.length;
+      } else {
+        charClipped = true;
+        const clipped = safeCharPrefix(current, Math.max(0, available));
+        if (page.length === 0) {
+          page.push(clipped);
+          pageChars += separator + clipped.length;
+        }
+        stopCollecting = true;
+      }
+    }
+    current = "";
+    currentLength = 0;
+    pendingLine = false;
+  };
+
+  const stream = fs.createReadStream(target, { encoding: "utf8", highWaterMark: 64 * 1024 });
+  for await (const chunk of stream) {
+    const text = typeof chunk === "string" ? chunk : String(chunk);
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (swallowLF) {
+        swallowLF = false;
+        if (ch === "\n") continue;
+      }
+      if (ch === "\n") {
+        completeLine();
+        continue;
+      }
+      if (ch === "\r") {
+        completeLine();
+        swallowLF = true;
+        continue;
+      }
+      const retain =
+        !stopCollecting &&
+        totalLines + 1 >= offset &&
+        totalLines + 1 < offset + limit &&
+        current.length < retentionCap;
+      if (retain) current += ch;
+      currentLength += 1;
+      pendingLine = true;
+    }
+  }
+  if (pendingLine) completeLine();
+
+  const eof =
+    !charClipped && (page.length === 0 || offset + page.length - 1 >= totalLines);
+  const result: FilePage = {
+    content: page.join("\n"),
+    offset,
+    lines: page.length,
+    total_lines: totalLines,
+    eof,
+    truncated: charClipped,
+  };
+  if (!eof) result.next_offset = offset + page.length;
+  return result;
+}
+
 /** The only door between the models and the local filesystem. */
 export class Workspace {
   readonly root: string;
@@ -1081,17 +1244,57 @@ export class Workspace {
 
   // -- read-only tools (auto-allowed) ------------------------------------------
 
-  /** Read a UTF-8 text file, bounding the content beyond `maxChars`. */
-  async read_file(rel: string, maxChars: number = DEFAULT_MAX_CHARS): Promise<WorkspaceResult> {
+  /**
+   * Read a UTF-8 text file. Without an `offset`/`limit`, this is the original
+   * whole-file read bounded by `maxChars` (head+tail window). With either
+   * range field, it returns one 1-based line page plus `lines`, `total_lines`,
+   * `eof` and (when more remains) `next_offset`; `maxChars` still caps the
+   * page characters.
+   */
+  async read_file(rel: string, maxChars?: number): Promise<WorkspaceResult>;
+  async read_file(rel: string, options?: ReadFileOptions): Promise<WorkspaceResult>;
+  async read_file(
+    rel: string,
+    maxCharsOrOptions: number | ReadFileOptions = DEFAULT_MAX_CHARS,
+  ): Promise<WorkspaceResult> {
     const tool = "read_file";
     try {
       const p = this.resolve(rel);
       if (!fs.statSync(p).isFile()) {
         throw new WorkspaceError(`not a file: ${rel}`);
       }
-      const text = fs.readFileSync(p, "utf-8");
-      const bounded = boundOutput(text, maxChars);
-      return this.result(tool, p, "ok", { content: bounded.text, truncated: bounded.truncated });
+      const options =
+        typeof maxCharsOrOptions === "number" ||
+        maxCharsOrOptions === null ||
+        maxCharsOrOptions === undefined
+          ? null
+          : maxCharsOrOptions;
+      const rangeRequested =
+        options !== null && (options.offset !== undefined || options.limit !== undefined);
+      if (!rangeRequested) {
+        const maxChars =
+          typeof maxCharsOrOptions === "number"
+            ? maxCharsOrOptions
+            : options?.maxChars ?? DEFAULT_MAX_CHARS;
+        const text = fs.readFileSync(p, "utf-8");
+        const bounded = boundOutput(text, maxChars);
+        return this.result(tool, p, "ok", { content: bounded.text, truncated: bounded.truncated });
+      }
+      const page = await readFilePage(
+        p,
+        clampLineOffset(options.offset),
+        clampLineLimit(options.limit),
+        clampRangeChars(options.maxChars),
+      );
+      return this.result(tool, p, "ok", {
+        content: page.content,
+        truncated: page.truncated,
+        offset: page.offset,
+        lines: page.lines,
+        total_lines: page.total_lines,
+        eof: page.eof,
+        ...(page.next_offset !== undefined ? { next_offset: page.next_offset } : {}),
+      });
     } catch (exc) {
       if (exc instanceof WorkspaceError || exc instanceof PermissionDenied) {
         return this.errorResult(tool, null, exc);
@@ -1411,16 +1614,42 @@ export class Workspace {
     return [
       {
         name: "workspace_read_file",
-        description: "Read a UTF-8 text file inside the workspace.",
+        description:
+          "Read a UTF-8 text file inside the workspace. Omit offset/limit for the whole file (bounded head+tail); pass either to page through a large file by lines.",
         parameters: {
           type: "object",
           properties: {
             path: { ...pathProp, default: "." },
-            max_chars: { type: "integer", default: DEFAULT_MAX_CHARS },
+            max_chars: {
+              type: "integer",
+              default: DEFAULT_MAX_CHARS,
+              description: `maximum characters of content to return (default ${DEFAULT_MAX_CHARS})`,
+            },
+            offset: {
+              type: "integer",
+              minimum: 1,
+              default: 1,
+              description: "1-based line number of the first line to return (switches on line-range mode)",
+            },
+            limit: {
+              type: "integer",
+              minimum: 1,
+              maximum: MAX_READ_LINES,
+              default: DEFAULT_READ_LINES,
+              description: `maximum lines in one page (default ${DEFAULT_READ_LINES}, clamped to 1..${MAX_READ_LINES})`,
+            },
           },
         },
-        execute: async (args) =>
-          json(await ws.read_file(String(args.path ?? "."), numOr(args.max_chars, DEFAULT_MAX_CHARS))),
+        execute: async (args) => {
+          const offset = numOrUndef(args.offset);
+          const limit = numOrUndef(args.limit);
+          const maxChars = numOr(args.max_chars, DEFAULT_MAX_CHARS);
+          const result =
+            offset === undefined && limit === undefined
+              ? await ws.read_file(String(args.path ?? "."), maxChars)
+              : await ws.read_file(String(args.path ?? "."), { maxChars, offset, limit });
+          return json(result);
+        },
       },
       {
         name: "workspace_list_dir",

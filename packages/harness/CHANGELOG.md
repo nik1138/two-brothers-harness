@@ -64,6 +64,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `src/clihelp.ts`, `src/server.ts`, `src/index.ts`; tests
   `tests/spill.test.ts`, `tests/spillcli.test.ts`, `tests/server.test.ts`;
   docs `docs/spill.md`, `docs/cli-reference.md`.
+- **Line-ranged `workspace_read_file`:** the tool now accepts optional
+  `offset` (1-based first line, default 1) and `limit` (default 2 000, clamped
+  to 1–5 000) to page through a text file instead of seeing only the bounded
+  head+tail window. Range results additively carry `offset`, `lines`,
+  `total_lines`, `eof` and `next_offset`; `max_chars` still bounds the page,
+  a character-clipped page reports `truncated: true` with `eof: false` and the
+  next undelivered line, and a giant line is head-clipped on a code-point
+  boundary. The file is streamed line by line (only the page and current-line
+  prefix are retained) while the whole file is scanned to count lines. Calls
+  without `offset`/`limit` keep the historical byte-identical whole-file
+  result. Files: `src/workspace.ts`, `src/index.ts`; tests
+  `tests/readrange.test.ts`.
 - **Provider retries: `retry-after-ms` and bounded backoff jitter** (port of
   pi-ai's `utils/provider-retry.ts`, MIT): a retryable response's
   `retry-after-ms` header (finite milliseconds) now wins over `Retry-After`
