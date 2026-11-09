@@ -330,6 +330,7 @@ import {
   type ProviderPreset,
 } from "./settings_store.ts";
 import { discoverSkills, type SkillCatalog } from "./skills.ts";
+import { SpillStore } from "./spill.ts";
 import { RunApprovalBroker, RuntimeEventStore } from "./runevents.ts";
 import {
   ACTIVE_STATES,
@@ -875,6 +876,13 @@ export interface ServerOptions {
    * `ask`). Operators change the persisted mode through `PUT /api/settings`.
    */
   approvalPolicy?: ApprovalMode;
+  /**
+   * Opt-in startup retention for `<sessionsDir>/spill`: when set to a positive
+   * number of days, the server prunes valid spill files strictly older than
+   * that age once at startup (it already holds the writer lock). Absent means
+   * no automatic deletion. A prune failure is logged and never fails startup.
+   */
+  spillRetentionDays?: number;
 }
 
 export interface ServerState {
@@ -1031,6 +1039,37 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   // One writer per store: serve and the migration command share this lock, so
   // a live run can never keep appending to a file that is being moved.
   const releaseWriterLock = layout.acquireWriterLock("serve");
+  // Opt-in spill retention (default off): the server already owns the writer
+  // lock, so prune valid <sessionsDir>/spill artifacts older than the
+  // configured age once at startup. Fail-soft: a broken store logs one line
+  // and startup continues; no other session data is touched.
+  const spillRoot = path.join(sessionsDir, "spill");
+  if (options.spillRetentionDays !== undefined) {
+    const days = options.spillRetentionDays;
+    if (typeof days === "number" && Number.isFinite(days) && days > 0) {
+      try {
+        const result = new SpillStore(spillRoot).prune({ olderThanMs: days * 86_400_000 });
+        const failure = result.failed > 0 ? `; ${result.failed} failed` : "";
+        console.log(
+          `[two-brothers] spill retention: removed ${result.removed} of ` +
+            `${result.filesBefore} file(s) older than ${days} day(s) ` +
+            `(${result.bytes} bytes) from ${spillRoot}; ${result.kept} kept${failure}`,
+        );
+        for (const line of result.errors) {
+          console.warn(`[two-brothers] spill retention: ${line}`);
+        }
+      } catch (exc) {
+        console.warn(
+          `[two-brothers] spill retention skipped: ${exc instanceof Error ? exc.message : String(exc)}`,
+        );
+      }
+    } else {
+      console.warn(
+        `[two-brothers] spill retention ignored: expected a positive number of days, ` +
+          `got ${String(days)}`,
+      );
+    }
+  }
   const runtimeEvents = new RuntimeEventStore(path.join(sessionsDir, "runtime"), layout);
   // Run-scoped workspace edit undo (wave 23): one persisted, content-addressed
   // store for every workspace-bound run. It is a session side artifact (never
@@ -1596,9 +1635,8 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   ): Promise<HarnessResult> {
     const store = materializeStore(name, projectPath ?? workspace?.root ?? null);
     const context = store.exists() ? restoreContext(store) : new SharedContext(store);
-    // Tool-output spill lives beside the session files; files persist until the
-    // operator removes this directory (no automatic retention, documented).
-    const spillRoot = path.join(sessionsDir, "spill");
+    // Tool-output spill lives beside the session files (the same root the
+    // optional startup retention pass inspects).
     // Fail fast on an unusable model config before touching the network;
     // with per-role endpoints each role is checked against its own
     // effective settings and the message names the misconfigured role.

@@ -100,7 +100,11 @@ import {
   type McpToolSet,
 } from "./mcp.ts";
 import { SessionMetadataStore } from "./metadata.ts";
-import { migrateFlatSessions, SessionLayout } from "./sessionlayout.ts";
+import {
+  migrateFlatSessions,
+  SessionLayout,
+  SessionLayoutLockedError,
+} from "./sessionlayout.ts";
 import { mergeSeedPresets, presetById, presetIds, seedPresets } from "./presets.ts";
 import { toNdjsonLine, type StreamEvent } from "./runstream.ts";
 import {
@@ -141,6 +145,10 @@ import {
 } from "./sessionsearch.ts";
 import { rewindSession, validateRewindTurns } from "./sessionrewind.ts";
 import { discoverSkills, type SkillCatalog } from "./skills.ts";
+import {
+  SpillStore,
+  type SpillPruneResult,
+} from "./spill.ts";
 import { envPinnedPairs, SettingsStore } from "./settings_store.ts";
 import { WorkspaceRegistry } from "./workspace.ts";
 import {
@@ -3521,6 +3529,264 @@ function doSessions(
 }
 
 // --------------------------------------------------------------------------- //
+// spill: inspect and prune spilled tool-output files
+// --------------------------------------------------------------------------- //
+
+const SPILL_OPTIONS = {
+  "sessions-dir": { type: "string" as const },
+  "older-than": { type: "string" as const },
+  "dry-run": { type: "boolean" as const, default: false },
+  force: { type: "boolean" as const, default: false },
+  json: { type: "boolean" as const, default: false },
+  ...HELP_OPTIONS,
+} satisfies ParseArgsOptionsConfig;
+
+/** One parsed `--older-than` value: the millisecond age and its display form. */
+type SpillDuration = { ok: true; ms: number; label: string } | { ok: false; error: string };
+
+const SPILL_DURATION_UNITS: Record<string, number> = {
+  m: 60_000,
+  h: 3_600_000,
+  d: 86_400_000,
+};
+
+/**
+ * Parse the strict `spill gc --older-than` syntax: a positive integer plus one
+ * lowercase unit (`m` minutes, `h` hours, `d` days). Anything else is a usage
+ * error at the call site; there is no implicit/default age.
+ */
+function parseSpillDuration(raw: unknown): SpillDuration {
+  const text = typeof raw === "string" ? raw.trim() : "";
+  const match = /^([1-9]\d*)([mhd])$/.exec(text);
+  if (match === null) {
+    return {
+      ok: false,
+      error:
+        `invalid --older-than: ${String(raw)} ` +
+        "(use a positive integer with m, h or d, e.g. 30m, 24h, 7d)",
+    };
+  }
+  const amount = Number.parseInt(match[1], 10);
+  const unit = match[2];
+  const ms = amount * SPILL_DURATION_UNITS[unit];
+  if (!Number.isSafeInteger(ms) || ms <= 0) {
+    return { ok: false, error: `invalid --older-than: ${text} (duration is too large)` };
+  }
+  return { ok: true, ms, label: `${amount}${unit}` };
+}
+
+/** Shared `spill` subcommand usage diagnostic: exit 2. */
+function spillUsageError(message: string, io: CliIO): number {
+  io.error(`[error] ${message}`);
+  io.error(`Usage: ${commandUsage("spill")}`);
+  io.error("Run 'two-brothers spill --help'.");
+  return 2;
+}
+
+/** The spill root shared with serve/TUI: `<sessions-dir>/spill`. */
+function spillRootFor(sessionsDir: string): string {
+  return path.join(sessionsDir, "spill");
+}
+
+/**
+ * `spill stats [--sessions-dir <dir>] [--json]`: read-only aggregate of the
+ * valid spill artifacts. A missing root is an empty store (exit 0).
+ */
+function spillStatsCommand(sessionsDir: string, jsonMode: boolean, io: CliIO): number {
+  const root = spillRootFor(sessionsDir);
+  const stats = new SpillStore(root).stats();
+  const absoluteRoot = path.resolve(root);
+  if (jsonMode) {
+    io.log(JSON.stringify({ root: absoluteRoot, files: stats.files, bytes: stats.bytes }));
+    return 0;
+  }
+  if (stats.files === 0) {
+    io.log(`no spill files in ${absoluteRoot}`);
+    return 0;
+  }
+  io.log(`${stats.files} spill file(s), ${stats.bytes} bytes in ${absoluteRoot}`);
+  return 0;
+}
+
+/** Print the honest count line shared by the dry run and the real pass. */
+function spillPruneSummary(
+  result: SpillPruneResult,
+  label: string,
+  root: string,
+): string {
+  if (result.filesBefore === 0) {
+    return `no spill files older than ${label} in ${root}`;
+  }
+  const verb = result.dryRun ? "would remove" : "removed";
+  const keptVerb = result.dryRun ? "would be kept" : "kept";
+  const failure =
+    result.failed > 0 ? `; ${result.failed} could not be removed` : "";
+  return (
+    `${verb} ${result.removed} of ${result.filesBefore} spill file(s) older than ` +
+    `${label} (${result.bytes} bytes); ${result.kept} ${keptVerb}${failure}`
+  );
+}
+
+/**
+ * `spill gc --older-than <n>m|h|d [--dry-run] [--json] [--force]`: prune valid
+ * artifacts by mtime. The pass holds the sessions-store single-writer lock
+ * unless `--force`, so it refuses while serve/TUI is writing; a missing
+ * sessions directory is an empty store (nothing is created).
+ */
+function spillGcCommand(
+  sessionsDir: string,
+  duration: Extract<SpillDuration, { ok: true }>,
+  dryRun: boolean,
+  force: boolean,
+  jsonMode: boolean,
+  io: CliIO,
+): number {
+  const root = spillRootFor(sessionsDir);
+  const absoluteRoot = path.resolve(root);
+  // A missing store has nothing to prune; do not create it just to take a lock.
+  if (!fs.existsSync(path.resolve(sessionsDir))) {
+    const empty: SpillPruneResult = {
+      removed: 0,
+      kept: 0,
+      bytes: 0,
+      failed: 0,
+      filesBefore: 0,
+      filesAfter: 0,
+      dryRun,
+      errors: [],
+    };
+    if (jsonMode) {
+      io.log(
+        JSON.stringify({
+          root: absoluteRoot,
+          older_than_ms: duration.ms,
+          older_than: duration.label,
+          dry_run: dryRun,
+          removed: 0,
+          kept: 0,
+          bytes: 0,
+          failed: 0,
+          files_before: 0,
+          files_after: 0,
+          errors: [],
+        }),
+      );
+      return 0;
+    }
+    io.log(spillPruneSummary(empty, duration.label, absoluteRoot));
+    return 0;
+  }
+
+  let release: (() => void) | null = null;
+  if (!force) {
+    try {
+      release = new SessionLayout(sessionsDir).acquireWriterLock("spill gc");
+    } catch (exc) {
+      if (exc instanceof SessionLayoutLockedError) {
+        const holder = exc.holder;
+        io.error(
+          `[error] spill gc refused: ${holder === null ? "the sessions directory is locked by an unknown writer" : `the sessions directory is in use by ${holder.owner} (pid ${holder.pid})`}`,
+        );
+        io.error(
+          "Stop that writer (serve/TUI) first, or pass --force " +
+            "(unsafe while it is running).",
+        );
+        return 1;
+      }
+      io.error(`[error] cannot lock ${path.resolve(sessionsDir)}: ${exc instanceof Error ? exc.message : String(exc)}`);
+      return 1;
+    }
+  }
+
+  let result: SpillPruneResult;
+  try {
+    result = new SpillStore(root).prune({ olderThanMs: duration.ms, dryRun });
+  } catch (exc) {
+    io.error(`[error] spill gc failed: ${exc instanceof Error ? exc.message : String(exc)}`);
+    return 1;
+  } finally {
+    release?.();
+  }
+
+  for (const line of result.errors) io.error(`[warn] ${line}`);
+  if (jsonMode) {
+    io.log(
+      JSON.stringify({
+        root: absoluteRoot,
+        older_than_ms: duration.ms,
+        older_than: duration.label,
+        dry_run: result.dryRun,
+        removed: result.removed,
+        kept: result.kept,
+        bytes: result.bytes,
+        failed: result.failed,
+        files_before: result.filesBefore,
+        files_after: result.filesAfter,
+        errors: result.errors,
+      }),
+    );
+    return result.failed > 0 ? 1 : 0;
+  }
+  io.log(spillPruneSummary(result, duration.label, absoluteRoot));
+  return result.failed > 0 ? 1 : 0;
+}
+
+/**
+ * `two-brothers spill <stats|gc>`: the operator-facing retention surface. The
+ * root is always `<sessions-dir>/spill`, the same convention as serve/TUI.
+ */
+function doSpill(
+  argv: string[],
+  io: CliIO,
+  style: CliStyle = plainCliStyle,
+): number {
+  const parsed = parseCommandArgs(argv, SPILL_OPTIONS, "spill", io, true);
+  if (parsed === null) return 2;
+  const { values, positionals } = parsed;
+  if (isHelpRequested(values)) {
+    io.log(renderCommandHelp("spill", style));
+    return 0;
+  }
+  const sessionsDir =
+    typeof values["sessions-dir"] === "string" && values["sessions-dir"].trim()
+      ? values["sessions-dir"]
+      : "sessions";
+  const jsonMode = values.json === true;
+  const subcommand = positionals[0];
+  if (subcommand === undefined) {
+    return spillUsageError("no subcommand: spill <stats|gc> [flags]", io);
+  }
+  if (positionals.length > 1) {
+    return spillUsageError(`unexpected argument: ${positionals.slice(1).join(" ")}`, io);
+  }
+  if (subcommand === "stats") {
+    return spillStatsCommand(sessionsDir, jsonMode, io);
+  }
+  if (subcommand === "gc") {
+    if (values["older-than"] === undefined) {
+      return spillUsageError(
+        "missing --older-than: spill gc --older-than <n>m|h|d [--dry-run] [--json] [--force]",
+        io,
+      );
+    }
+    const duration = parseSpillDuration(values["older-than"]);
+    if (!duration.ok) return spillUsageError(duration.error, io);
+    return spillGcCommand(
+      sessionsDir,
+      duration,
+      values["dry-run"] === true,
+      values.force === true,
+      jsonMode,
+      io,
+    );
+  }
+  return spillUsageError(
+    `unexpected argument '${subcommand}' (spill takes 'stats' or 'gc')`,
+    io,
+  );
+}
+
+// --------------------------------------------------------------------------- //
 // doctor: local environment + provider diagnostics
 // --------------------------------------------------------------------------- //
 
@@ -3771,6 +4037,7 @@ async function doServe(
       port: { type: "string" as const },
       "sessions-dir": { type: "string" as const },
       workers: { type: "string" as const },
+      "spill-retention-days": { type: "string" as const },
       ...APPROVAL_MODE_OPTIONS,
       ...THINKING_BUDGET_OPTIONS,
       ...HELP_OPTIONS,
@@ -3791,6 +4058,29 @@ async function doServe(
     return 2;
   }
   const workers = values.workers !== undefined ? Number.parseInt(values.workers, 10) : undefined;
+  // Opt-in startup retention: absent means no automatic deletion. The value is
+  // a positive whole number of days; gc's duration syntax stays a CLI-only
+  // convenience for the manual command.
+  let spillRetentionDays: number | undefined;
+  if (values["spill-retention-days"] !== undefined) {
+    const raw = String(values["spill-retention-days"]).trim();
+    if (!/^[1-9]\d*$/.test(raw)) {
+      io.error(
+        `[error] invalid --spill-retention-days: ${String(values["spill-retention-days"])} ` +
+          "(use a positive integer number of days)",
+      );
+      io.error(`Usage: ${commandUsage("serve")}`);
+      io.error("Run 'two-brothers serve --help'.");
+      return 2;
+    }
+    const days = Number.parseInt(raw, 10);
+    if (!Number.isSafeInteger(days) || !Number.isSafeInteger(days * 86_400_000)) {
+      io.error(`[error] invalid --spill-retention-days: ${raw} (number of days is too large)`);
+      return 2;
+    }
+    spillRetentionDays = days;
+  }
+
   // Pinned approval mode: an explicit --approval-mode (or its env counterpart)
   // pins every run this server starts. The pin is in-memory only and never
   // reaches sessions/settings.json; without either, the persisted
@@ -3833,6 +4123,7 @@ async function doServe(
     commandsDirs: commandsRootsForCli(values),
     ...(mcpConfig !== undefined ? { mcpConfig } : {}),
     ...(approvalPolicy !== undefined ? { approvalPolicy } : {}),
+    ...(spillRetentionDays !== undefined ? { spillRetentionDays } : {}),
   });
   const server = await app.listen(host, port);
   io.log(
@@ -4329,6 +4620,7 @@ export async function main(
   }
   if (command === "selftest") return doSelftest(argv.slice(1), io, cliStyle);
   if (command === "sessions") return doSessions(argv.slice(1), io, cliStyle);
+  if (command === "spill") return doSpill(argv.slice(1), io, cliStyle);
   if (command === "run") return doRun(argv.slice(1), io, cliStyle);
   if (command === "chat") return doChat(argv.slice(1), io, cliStyle);
   if (command === "tui") return doTui(argv.slice(1), io, cliStyle);

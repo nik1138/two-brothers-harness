@@ -749,6 +749,43 @@ on a clean dry run) and each entry is
 `already`, `conflict` or `error`. See [Session storage](session-storage.md)
 for the two layouts, compatibility rules and the backup caveat.
 
+### `spill`
+
+Inspect and prune the tool-output spill store at `<sessions-dir>/spill` (the
+same root `serve` and the TUI use). Spilled files are described in
+[Tool-output spill](spill.md); nothing is deleted automatically by default.
+
+```powershell
+node dist/cli.js spill stats [--sessions-dir <dir>] [--json]
+node dist/cli.js spill gc [--sessions-dir <dir>] --older-than <n>m|h|d [--dry-run] [--json] [--force]
+```
+
+`spill stats` is read-only and prints the count and total bytes of valid
+`<id>.txt` artifacts (or `no spill files in <root>`); a missing root is an
+empty store (exit 0). `spill gc` deletes valid artifacts whose mtime is
+strictly older than `--older-than`, which is **required** and uses a positive
+integer with `m` (minutes), `h` (hours) or `d` (days) — a missing or malformed
+value is a usage error (exit 2), so there is no accidental delete-everything
+default. `--dry-run` reports the same counts and deletes nothing. `gc` takes
+the sessions-store single-writer lock and refuses while `serve`/the TUI holds
+it (the holder is named); `--force` bypasses the lock (unsafe while it runs). A
+missing sessions directory is an empty store and is not created.
+
+| Option | Default | Description |
+|---|---|---|
+| `--sessions-dir` | `sessions` | sessions directory whose `spill/` subdirectory is inspected |
+| `--older-than` | (required for `gc`) | positive age with a unit: `30m`, `24h`, `7d`; files strictly older than now minus this age are deleted |
+| `--dry-run` | off | `gc`: report what would be removed without deleting anything |
+| `--force` | off | `gc`: bypass the sessions-store single-writer lock (unsafe while `serve`/TUI is running) |
+| `--json` | off | `stats`: `{root, files, bytes}`; `gc`: the prune counts (`removed`, `kept`, `bytes`, `failed`, `files_before`, `files_after`, `dry_run`, `older_than_ms`, `root`, `errors`) |
+
+Only regular files directly under the root whose names are exactly
+`<valid-id>.txt` (lowercase hex id, 16–64 characters) are candidates. Symlinks
+are `lstat`ed and skipped (never followed), as are directories, temp `.tmp-*`
+files and malformed ids. An unlink failure is reported as a warning and counted
+(`failed`); the rest of the pass continues and the command exits 1 when any file
+could not be removed.
+
 ### `doctor`
 
 Local, read-only diagnostics: one `[pass]` / `[warn]` / `[fail]` / `[skip]`
@@ -884,6 +921,7 @@ node dist/cli.js serve --approval-mode readonly           # pin the mode for the
 | `--port` | `8600` | port |
 | `--sessions-dir` | `sessions` | directory of JSONL session files to expose |
 | `--workers` | (runtime default) | background run workers (env `TWO_BROTHERS_WORKERS`) |
+| `--spill-retention-days` | (off) | prune `<sessions-dir>/spill` files older than this many days once at startup; the server already holds the writer lock, a prune failure only logs a warning and never fails startup. Off by default: spill files are otherwise only deleted by an explicit `spill gc` |
 | `--approval-mode` | `ask`, `readonly`, `edits`, `allow-all` | `ask` | pin the [approval mode](#approval-modes) for every run this server starts (env `TWO_BROTHERS_APPROVAL_MODE`); the pin is in-memory only and never persisted — without it the saved `approval_policy` setting applies |
 
 Web runs also honor the shared compaction flags (`--compact`,

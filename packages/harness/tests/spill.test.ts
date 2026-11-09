@@ -279,6 +279,208 @@ test("write failure rejects so the caller can fall back", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// SpillStore: stats and age-based retention
+// ---------------------------------------------------------------------------
+
+/** A valid spill id (lowercase hex, 32 chars) derived from one digit. */
+function spillId(digit: string): string {
+  return digit.repeat(32);
+}
+
+/** Write one mock spill artifact, optionally backdating its mtime. */
+function writeSpill(root: string, name: string, content: string, mtimeMs?: number): string {
+  fs.mkdirSync(root, { recursive: true });
+  const file = path.join(root, name);
+  fs.writeFileSync(file, content);
+  if (mtimeMs !== undefined) {
+    const date = new Date(mtimeMs);
+    fs.utimesSync(file, date, date);
+  }
+  return file;
+}
+
+test("stats counts valid regular artifacts and their bytes only", async () => {
+  const tmp = tmpdir("tb-spill-stats-");
+  try {
+    const store = new SpillStore(tmp.root);
+    assert.deepEqual(store.stats(), { files: 0, bytes: 0 }, "missing root is empty");
+    fs.mkdirSync(tmp.root, { recursive: true });
+
+    writeSpill(tmp.root, `${spillId("a")}.txt`, "abc"); // 3 bytes
+    writeSpill(tmp.root, `${spillId("b")}.txt`, "12345"); // 5 bytes
+    writeSpill(tmp.root, `${spillId("c")}.TXT`, "ignored uppercase suffix");
+    writeSpill(tmp.root, `${spillId("d").toUpperCase()}.txt`, "ignored uppercase id");
+    writeSpill(tmp.root, ".tmp-1234567890abcdef", "ignored temp file");
+    writeSpill(tmp.root, "notes.txt", "ignored malformed id");
+    writeSpill(tmp.root, `${spillId("e")}.txt.bak`, "ignored other suffix");
+    fs.mkdirSync(path.join(tmp.root, `${spillId("f")}.txt`), { recursive: true });
+
+    // A symlink with a perfectly valid artifact name is not a regular file and
+    // must never be followed (or counted). Windows may refuse symlink creation
+    // without developer mode; that environment simply has no symlink case.
+    const outside = path.join(tmp.root, "outside.txt");
+    fs.writeFileSync(outside, "not a spill artifact");
+    const link = path.join(tmp.root, `${spillId("9")}.txt`);
+    let linked = false;
+    try {
+      fs.symlinkSync(outside, link, "file");
+      linked = true;
+    } catch {
+      linked = false;
+    }
+
+    assert.deepEqual(store.stats(), { files: 2, bytes: 8 });
+    if (linked) {
+      assert.equal(fs.readFileSync(outside, "utf8"), "not a spill artifact");
+    }
+  } finally {
+    tmp.cleanup();
+  }
+});
+
+test("stats is fail-soft when the root is not a readable directory", async () => {
+  const tmp = tmpdir("tb-spill-stats-fail-");
+  try {
+    const blocker = path.join(tmp.root, "blocker");
+    fs.writeFileSync(blocker, "a file, not a directory");
+    const notADir = new SpillStore(blocker);
+    assert.deepEqual(notADir.stats(), { files: 0, bytes: 0 });
+    const missing = new SpillStore(path.join(tmp.root, "missing", "spill"));
+    assert.deepEqual(missing.stats(), { files: 0, bytes: 0 });
+  } finally {
+    tmp.cleanup();
+  }
+});
+
+test("prune uses a strict age boundary and a dry run is pure", async () => {
+  const tmp = tmpdir("tb-spill-prune-");
+  try {
+    const store = new SpillStore(tmp.root);
+    const now = Date.UTC(2026, 0, 2, 3, 4, 5);
+    const age = 60_000;
+    const cutoff = now - age;
+    const oldText = "old artifact";
+    const boundaryText = "boundary artifact";
+    const freshText = "fresh artifact";
+    const oldFile = writeSpill(tmp.root, `${spillId("a")}.txt`, oldText, cutoff - 1);
+    const boundaryFile = writeSpill(tmp.root, `${spillId("b")}.txt`, boundaryText, cutoff);
+    const freshFile = writeSpill(tmp.root, `${spillId("c")}.txt`, freshText, now);
+
+    const dry = store.prune({ olderThanMs: age, now, dryRun: true });
+    assert.equal(dry.dryRun, true);
+    assert.equal(dry.filesBefore, 3);
+    assert.equal(dry.removed, 1, "only the strictly older file would go");
+    assert.equal(dry.kept, 2);
+    assert.equal(dry.bytes, Buffer.byteLength(oldText));
+    assert.equal(dry.filesAfter, 2);
+    assert.equal(dry.failed, 0);
+    assert.deepEqual(dry.errors, []);
+    for (const file of [oldFile, boundaryFile, freshFile]) {
+      assert.equal(fs.existsSync(file), true, `dry run kept ${file}`);
+    }
+
+    const real = store.prune({ olderThanMs: age, now });
+    assert.equal(real.dryRun, false);
+    assert.equal(real.filesBefore, 3);
+    assert.equal(real.removed, 1);
+    assert.equal(real.kept, 2);
+    assert.equal(real.bytes, Buffer.byteLength(oldText));
+    assert.equal(real.filesAfter, 2);
+    assert.equal(fs.existsSync(oldFile), false, "old artifact removed");
+    assert.equal(fs.existsSync(boundaryFile), true, "boundary artifact kept");
+    assert.equal(fs.existsSync(freshFile), true, "fresh artifact kept");
+    assert.deepEqual(store.stats(), {
+      files: 2,
+      bytes: Buffer.byteLength(boundaryText) + Buffer.byteLength(freshText),
+    });
+  } finally {
+    tmp.cleanup();
+  }
+});
+
+test("prune ignores malformed names, temp files, directories and symlinks", async () => {
+  const tmp = tmpdir("tb-spill-prune-skip-");
+  try {
+    const store = new SpillStore(tmp.root);
+    const now = Date.UTC(2026, 0, 2);
+    const old = now - 86_400_000;
+    const validName = `${spillId("a")}.txt`;
+    const tempFile = writeSpill(tmp.root, ".tmp-0123456789abcdef", "temp", old);
+    const malformed = writeSpill(tmp.root, "notes.txt", "malformed", old);
+    const uppercase = writeSpill(
+      tmp.root,
+      `${spillId("b").toUpperCase()}.txt`,
+      "uppercase id",
+      old,
+    );
+    const wrongSuffix = writeSpill(tmp.root, `${spillId("c")}.log`, "log", old);
+    const shortId = writeSpill(tmp.root, "abc.txt", "short", old);
+    const directory = path.join(tmp.root, validName);
+    fs.mkdirSync(directory);
+
+    const outside = path.join(tmp.root, "outside-target.txt");
+    fs.writeFileSync(outside, "outside");
+    const link = path.join(tmp.root, `${spillId("d")}.txt`);
+    let linked = false;
+    try {
+      fs.symlinkSync(outside, link, "file");
+      linked = true;
+    } catch {
+      linked = false;
+    }
+
+    const result = store.prune({ olderThanMs: 60_000, now });
+    assert.equal(result.filesBefore, 0, "no skip target counts as an artifact");
+    assert.equal(result.removed, 0);
+    assert.equal(result.kept, 0);
+    assert.equal(result.bytes, 0);
+    assert.equal(result.failed, 0);
+    for (const file of [tempFile, malformed, uppercase, wrongSuffix, shortId]) {
+      assert.equal(fs.existsSync(file), true, `kept ${path.basename(file)}`);
+    }
+    assert.equal(fs.existsSync(directory), true, "directory kept");
+    assert.equal(fs.readFileSync(outside, "utf8"), "outside");
+    if (linked) {
+      assert.equal(fs.lstatSync(link).isSymbolicLink(), true);
+      assert.equal(fs.existsSync(link), true, "symlink kept");
+    }
+  } finally {
+    tmp.cleanup();
+  }
+});
+
+test("prune rejects a non-positive or non-finite age and misses fail-soft", async () => {
+  const tmp = tmpdir("tb-spill-prune-bad-");
+  try {
+    const store = new SpillStore(tmp.root);
+    for (const olderThanMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      assert.throws(
+        () => store.prune({ olderThanMs }),
+        /positive finite number/,
+        String(olderThanMs),
+      );
+    }
+    // A missing root is an empty store for pruning too; nothing is created.
+    const missing = new SpillStore(path.join(tmp.root, "missing", "spill"));
+    const result = missing.prune({ olderThanMs: 1_000 });
+    assert.deepEqual(
+      {
+        removed: result.removed,
+        kept: result.kept,
+        bytes: result.bytes,
+        failed: result.failed,
+        filesBefore: result.filesBefore,
+        filesAfter: result.filesAfter,
+      },
+      { removed: 0, kept: 0, bytes: 0, failed: 0, filesBefore: 0, filesAfter: 0 },
+    );
+    assert.equal(fs.existsSync(path.join(tmp.root, "missing", "spill")), false);
+  } finally {
+    tmp.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // harness wiring
 // ---------------------------------------------------------------------------
 

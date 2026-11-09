@@ -90,6 +90,7 @@ export * from "./commands.ts";
 export {
   SpillStore,
   SPILL_DEFAULT_MAX_INLINE_CHARS,
+  SPILL_FILE_PATTERN,
   SPILL_ID_PATTERN,
   SPILL_MARKER_PREFIX,
   SPILL_READ_MAX_CHARS,
@@ -110,7 +111,10 @@ export {
   type SpillOptions,
   type SpillPreview,
   type SpillPreviewOptions,
+  type SpillPruneOptions,
+  type SpillPruneResult,
   type SpillReadOptions,
+  type SpillStats,
 } from "./spill.ts";
 export {
   clipText,

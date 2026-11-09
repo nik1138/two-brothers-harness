@@ -3506,3 +3506,45 @@ test("a pinned server approval mode wins over the persisted setting and is never
     wsDir.cleanup();
   }
 });
+
+test("serve spill retention is opt-in and prunes only files older than the configured days", async () => {
+  const tmp = tmpdir("tb-srv-spill-retention-");
+  try {
+    const spillRoot = path.join(tmp.root, "spill");
+    fs.mkdirSync(spillRoot, { recursive: true });
+    const oldId = "a".repeat(32);
+    const freshId = "b".repeat(32);
+    const oldFile = path.join(spillRoot, `${oldId}.txt`);
+    const freshFile = path.join(spillRoot, `${freshId}.txt`);
+    fs.writeFileSync(oldFile, "old artifact");
+    fs.writeFileSync(freshFile, "fresh artifact");
+    const oldDate = new Date(Date.now() - 3 * 86_400_000);
+    fs.utimesSync(oldFile, oldDate, oldDate);
+
+    // Default off: a server start deletes nothing.
+    const plain = createServer({
+      sessionsDir: tmp.root,
+      configFactory: mockConfig(),
+      webDist: null,
+    });
+    await plain.close();
+    assert.equal(fs.existsSync(oldFile), true, "no retention without the option");
+
+    // Opt-in: the old file is removed, the fresh one kept.
+    const pruned = createServer({
+      sessionsDir: tmp.root,
+      configFactory: mockConfig(),
+      webDist: null,
+      spillRetentionDays: 1,
+    });
+    try {
+      assert.equal(fs.existsSync(oldFile), false, "old artifact pruned at startup");
+      assert.equal(fs.existsSync(freshFile), true, "fresh artifact kept");
+      assert.equal(fs.readFileSync(freshFile, "utf8"), "fresh artifact");
+    } finally {
+      await pruned.close();
+    }
+  } finally {
+    tmp.cleanup();
+  }
+});
