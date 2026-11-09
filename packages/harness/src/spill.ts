@@ -16,13 +16,16 @@
  *   `[[SPILL id=… chars=…]]` marker and one `spill_read` instruction line.
  *
  * Spill files are local trusted data (they are tool output, not secrets), but
- * the marker never carries a filesystem path. Retention is the operator's:
- * files persist until `<root>` is deleted. This module does not scan, follow
- * links or read anything except a validated `<root>/<id>.txt`.
+ * the marker never carries a filesystem path. Retention is opt-in and
+ * age-based: `stats()` inspects the store, `prune()` deletes old regular
+ * `<id>.txt` files, and the server can enable a startup prune. Nothing scans,
+ * follows links or reads anything except a validated `<root>/<id>.txt`.
  *
  * Everything here is dependency-free (Node built-ins only) and fail-soft at
  * the call site: `save` rejects on a real storage failure and the harness falls
- * back to its existing clipped result.
+ * back to its existing clipped result. Inspection and pruning are fail-soft
+ * too: a missing/unreadable root is an empty store, and one unlink failure is
+ * counted instead of aborting the pass.
  */
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
@@ -36,6 +39,13 @@ export const SPILL_READ_MAX_CHARS = 16 * 1024;
 
 /** A spill id is random lowercase hex; anything else is rejected before use. */
 export const SPILL_ID_PATTERN = /^[a-f0-9]{16,64}$/;
+
+/**
+ * One valid on-disk artifact name: a validated id plus `.txt`. Retention
+ * scans use this exact shape; temp files, malformed ids and directories are
+ * never candidates.
+ */
+export const SPILL_FILE_PATTERN = /^[a-f0-9]{16,64}\.txt$/;
 
 /** Marker that replaces an oversized result's body in the model context. */
 export const SPILL_MARKER_PREFIX = "[[SPILL id=";
@@ -137,6 +147,47 @@ export interface SpillChunk {
   totalChars: number;
   /** True when `nextOffset >= totalChars`. */
   eof: boolean;
+}
+
+/** Aggregate size of the store's valid artifacts. */
+export interface SpillStats {
+  /** Regular files whose names match {@link SPILL_FILE_PATTERN}. */
+  files: number;
+  /** Sum of those files' sizes in bytes. */
+  bytes: number;
+}
+
+/** Options for {@link SpillStore.prune}. */
+export interface SpillPruneOptions {
+  /**
+   * Age threshold in milliseconds. Must be a positive finite number; a
+   * non-positive/non-finite value is rejected instead of deleting everything.
+   */
+  olderThanMs: number;
+  /** Clock override for tests (epoch milliseconds). Defaults to `Date.now()`. */
+  now?: number;
+  /** Report the same counts without deleting anything. */
+  dryRun?: boolean;
+}
+
+/** Result of one {@link SpillStore.prune} pass. */
+export interface SpillPruneResult {
+  /** Files removed (or, on a dry run, that would be removed). */
+  removed: number;
+  /** Valid artifacts kept (older than the cutoff, unlink failures, dry-run survivors). */
+  kept: number;
+  /** Bytes removed (or, on a dry run, that would be removed). */
+  bytes: number;
+  /** Valid artifacts whose unlink failed for a reason other than ENOENT. */
+  failed: number;
+  /** Valid artifacts present before the pass. */
+  filesBefore: number;
+  /** Valid artifacts expected after the pass (`filesBefore - removed`). */
+  filesAfter: number;
+  /** True for a dry run (nothing was unlinked). */
+  dryRun: boolean;
+  /** One line per failed unlink (already counted in `failed`). */
+  errors: string[];
 }
 
 /** Result of {@link spillPreview}. */
@@ -248,7 +299,9 @@ export function formatSpillRead(chunk: SpillChunk, maxReadChars: number = SPILL_
 /**
  * One private directory of spill files. The store is intentionally stateless:
  * every read validates the id and resolves it under the configured root, so a
- * model can never supply a path.
+ * model can never supply a path. `stats`/`prune` scan only validated
+ * `<id>.txt` names with `lstat`, so a symlink, directory or temp file is never
+ * counted, followed or deleted.
  */
 export class SpillStore {
   /** Absolute private root. Files are created lazily on the first save. */
@@ -333,5 +386,127 @@ export class SpillStore {
       totalChars,
       eof: end >= totalChars,
     };
+  }
+
+  /**
+   * Count the store's valid artifacts and their total size. Only regular files
+   * named `<valid-id>.txt` count: symlinks are never followed, temp files and
+   * malformed names are ignored, and a missing/unreadable root is an empty
+   * store (zeros, never an error).
+   */
+  stats(): SpillStats {
+    let names: string[];
+    try {
+      names = fs.readdirSync(this.root);
+    } catch {
+      return { files: 0, bytes: 0 };
+    }
+    let files = 0;
+    let bytes = 0;
+    for (const name of names) {
+      if (!SPILL_FILE_PATTERN.test(name)) continue;
+      const file = path.join(this.root, name);
+      let entry: fs.Stats;
+      try {
+        // lstat, not stat: a planted symlink must not be followed or counted.
+        entry = fs.lstatSync(file);
+      } catch {
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      files += 1;
+      bytes += entry.size;
+    }
+    return { files, bytes };
+  }
+
+  /**
+   * Delete valid artifacts whose mtime is strictly older than
+   * `now - olderThanMs`. Only regular `<valid-id>.txt` files are candidates:
+   * symlinks, directories, temp files and malformed names are skipped, and
+   * every path is rebuilt from a validated id inside the root. A dry run
+   * reports the same counts without deleting. A failed unlink is counted in
+   * `failed`/`errors`; it never aborts the pass. A missing/unreadable root is
+   * an empty store.
+   */
+  prune(options: SpillPruneOptions): SpillPruneResult {
+    if (
+      typeof options.olderThanMs !== "number" ||
+      !Number.isFinite(options.olderThanMs) ||
+      options.olderThanMs <= 0
+    ) {
+      throw new Error("olderThanMs must be a positive finite number");
+    }
+    const now =
+      typeof options.now === "number" && Number.isFinite(options.now)
+        ? options.now
+        : Date.now();
+    const cutoff = now - options.olderThanMs;
+    const dryRun = options.dryRun === true;
+    const result: SpillPruneResult = {
+      removed: 0,
+      kept: 0,
+      bytes: 0,
+      failed: 0,
+      filesBefore: 0,
+      filesAfter: 0,
+      dryRun,
+      errors: [],
+    };
+    let names: string[];
+    try {
+      names = fs.readdirSync(this.root);
+    } catch {
+      return result;
+    }
+    for (const name of names) {
+      if (!SPILL_FILE_PATTERN.test(name)) continue;
+      const id = name.slice(0, -".txt".length);
+      let file: string;
+      try {
+        file = this.filePath(id);
+      } catch {
+        continue;
+      }
+      let entry: fs.Stats;
+      try {
+        entry = fs.lstatSync(file);
+      } catch {
+        continue;
+      }
+      // Directories, symlinks (lstat never follows them), sockets and every
+      // other non-regular entry are not artifacts and are never touched.
+      if (!entry.isFile()) continue;
+      result.filesBefore += 1;
+      if (entry.mtimeMs >= cutoff) {
+        result.kept += 1;
+        continue;
+      }
+      if (dryRun) {
+        result.removed += 1;
+        result.bytes += entry.size;
+        continue;
+      }
+      try {
+        fs.unlinkSync(file);
+      } catch (exc) {
+        // A concurrent pass may have removed it already: the goal holds.
+        if ((exc as NodeJS.ErrnoException).code === "ENOENT") {
+          result.removed += 1;
+          result.bytes += entry.size;
+          continue;
+        }
+        result.failed += 1;
+        result.kept += 1;
+        result.errors.push(
+          `could not delete ${file}: ${exc instanceof Error ? exc.message : String(exc)}`,
+        );
+        continue;
+      }
+      result.removed += 1;
+      result.bytes += entry.size;
+    }
+    result.filesAfter = result.filesBefore - result.removed;
+    return result;
   }
 }

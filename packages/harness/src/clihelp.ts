@@ -236,7 +236,7 @@ export const FLAGS: Record<string, FlagHelp> = {
   force: {
     name: "force",
     description:
-      "bypass the sessions-store single-writer lock (migrate; unsafe while serve/TUI is running)",
+      "bypass the sessions-store single-writer lock (migrate; spill gc; unsafe while serve/TUI is running)",
   },
   "task-file": {
     name: "task-file",
@@ -340,6 +340,20 @@ export const FLAGS: Record<string, FlagHelp> = {
     name: "sessions-dir",
     value: "<dir>",
     description: "sessions directory (default sessions)",
+  },
+  "older-than": {
+    name: "older-than",
+    value: "<n>m|h|d",
+    description:
+      "spill gc: required age threshold as a positive integer with m (minutes), " +
+      "h (hours) or d (days)",
+  },
+  "spill-retention-days": {
+    name: "spill-retention-days",
+    value: "<n>",
+    description:
+      "serve: prune spill files older than n days once at startup " +
+      "(default off; files are never deleted automatically without it)",
   },
   limit: {
     name: "limit",
@@ -769,6 +783,7 @@ defineCommand({
     "port",
     "workers",
     "sessions-dir",
+    "spill-retention-days",
     "timeout",
     "provider",
     "base-url",
@@ -794,7 +809,7 @@ defineCommand({
     "verbose",
     "help",
   ],
-  acceptedFlags: [...SHARED_FLAGS, "host", "port", "sessions-dir", "workers", "thinking-budget", "approval-mode"],
+  acceptedFlags: [...SHARED_FLAGS, "host", "port", "sessions-dir", "workers", "thinking-budget", "approval-mode", "spill-retention-days"],
   flagNotes: {
     timeout:
       "per-provider-attempt timeout in seconds (default 120; env TWO_BROTHERS_TIMEOUT); " +
@@ -809,11 +824,16 @@ defineCommand({
     "approval-mode":
       "pin the approval mode for every web run of this server (never persisted); " +
       "without the flag/env the saved approval_policy setting (or ask) applies",
+    "spill-retention-days":
+      "prune <sessions-dir>/spill files older than n days once at startup " +
+      "(the server already holds the writer lock); default off, so spill files " +
+      "are only ever deleted by an explicit retention setting or `spill gc`",
   },
   examples: [
     "two-brothers serve",
     "two-brothers serve --host 127.0.0.1 --port 8600 --sessions-dir sessions",
     "two-brothers serve --approval-mode readonly",
+    "two-brothers serve --spill-retention-days 7",
   ],
 });
 
@@ -913,6 +933,55 @@ defineCommand({
     "two-brothers sessions undo s --run run-1 --discard",
     "two-brothers sessions migrate --dry-run",
     "two-brothers sessions migrate --json",
+  ],
+});
+
+defineCommand({
+  name: "spill",
+  summary: "inspect and prune spilled tool-output files",
+  commandLine: "two-brothers spill <stats|gc> [flags]",
+  usage: [
+    "spill <stats|gc> [flags]",
+    "spill stats [--sessions-dir <dir>] [--json]",
+    "spill gc [--sessions-dir <dir>] --older-than <n>m|h|d [--dry-run] [--json] [--force]",
+  ],
+  description:
+    "Operate the tool-output spill store at <sessions-dir>/spill (the same " +
+    "root serve and the TUI use). `spill stats` is read-only and reports the " +
+    "number and total bytes of valid <id>.txt artifacts. `spill gc` deletes " +
+    "valid artifacts whose mtime is older than --older-than (strictly older " +
+    "than the cutoff); the age is required, so there is no accidental " +
+    "delete-everything default. `--dry-run` reports the same counts without " +
+    "deleting. `gc` takes the sessions-store single-writer lock and refuses " +
+    "while serve/TUI holds it; --force bypasses the lock (unsafe). Only " +
+    "regular files with a validated lowercase-hex id and a .txt suffix are " +
+    "ever candidates: symlinks, directories, temp files and malformed names " +
+    "are skipped, and a missing root is an empty store.",
+  flags: ["sessions-dir", "older-than", "dry-run", "force", "json", "help"],
+  acceptedFlags: ["sessions-dir", "older-than", "dry-run", "force", "json"],
+  flagNotes: {
+    "sessions-dir": "sessions directory whose spill/ subdirectory is inspected (default sessions)",
+    "older-than":
+      "gc: required positive age with a unit: 30m (minutes), 24h (hours), 7d (days); " +
+      "files strictly older than now minus this age are deleted",
+    "dry-run": "gc: print what would be removed without deleting anything",
+    force:
+      "gc: bypass the sessions-store single-writer lock (unsafe while serve/TUI is running)",
+    json:
+      "print one JSON object (stats: {root, files, bytes}; gc: the prune counts) instead of human text",
+  },
+  details: [
+    "Subcommands:",
+    "  stats   report valid spill files and their total size (read-only, no lock)",
+    "  gc      delete valid spill files older than the required --older-than age",
+    "Never deleted: symlinks, directories, .tmp-* files and malformed ids.",
+  ],
+  examples: [
+    "two-brothers spill stats",
+    "two-brothers spill stats --sessions-dir ./sessions --json",
+    "two-brothers spill gc --older-than 7d --dry-run",
+    "two-brothers spill gc --older-than 24h --json",
+    "two-brothers spill gc --older-than 30m --force",
   ],
 });
 
@@ -1161,6 +1230,7 @@ export const COMMAND_ORDER: readonly string[] = [
   "tui",
   "serve",
   "sessions",
+  "spill",
   "models",
   "onboard",
   "doctor",

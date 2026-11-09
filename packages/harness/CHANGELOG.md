@@ -48,6 +48,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Spill retention (operator-managed):** `SpillStore.stats()` reports the
+  number and total bytes of valid `<id>.txt` artifacts (regular files only,
+  `lstat`, symlinks/temp files/malformed ids ignored, a missing root is an
+  empty store), and `SpillStore.prune({olderThanMs, now?, dryRun?})` deletes
+  valid artifacts strictly older than the cutoff and returns honest
+  removed/kept/bytes/failed counts; a non-positive/non-finite age is rejected,
+  a dry run deletes nothing, and an unlink failure is counted instead of
+  aborting the pass. New CLI: `two-brothers spill stats [--json]` and
+  `two-brothers spill gc --older-than <n>m|h|d [--dry-run] [--json] [--force]`
+  over `<sessions-dir>/spill`; `gc` requires the age, takes the store's
+  single-writer lock (naming the holder when refused) and `--force` bypasses
+  it. New opt-in `serve --spill-retention-days <n>` prunes at startup (default
+  off, fail-soft, count logged). Files: `src/spill.ts`, `src/cli.ts`,
+  `src/clihelp.ts`, `src/server.ts`, `src/index.ts`; tests
+  `tests/spill.test.ts`, `tests/spillcli.test.ts`, `tests/server.test.ts`;
+  docs `docs/spill.md`, `docs/cli-reference.md`.
 - **Provider retries: `retry-after-ms` and bounded backoff jitter** (port of
   pi-ai's `utils/provider-retry.ts`, MIT): a retryable response's
   `retry-after-ms` header (finite milliseconds) now wins over `Retry-After`
@@ -91,8 +107,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unbounded when spill is on and keep the existing 20 KiB clip when it is not.
   Storage failure is fail-soft: the result falls back to the existing
   `...[truncated N chars]...` marker and the run records one warning. Spill
-  files persist until the operator removes the directory; no new runtime
-  dependency.
+  files persist until the operator deletes them or enables the opt-in
+  retention above; no new runtime dependency.
 - **Wave 26: browser coverage for the wave-25 web surfaces, TUI clipboard and
   attention, an external editor, the undo lifecycle, fork-from-here, session
   hardening, a doctor MCP check and per-preset context windows:**

@@ -66,9 +66,65 @@ resolved, so a model can never turn an id into a traversal or an arbitrary read.
 The files are local trusted data (tool output); the directory is created with
 owner-only permissions where the platform honors them.
 
-There is no automatic retention: files remain until the operator deletes
-`<root>`. Removing the directory is always safe; a later `spill_read` for a
-deleted id returns a normal tool-error string.
+Retention is **opt-in**; nothing is deleted automatically by default.
+
+### Inspect: `spill stats`
+
+```powershell
+two-brothers spill stats [--sessions-dir <dir>] [--json]
+```
+
+`stats` is read-only and reports the number of valid artifacts and their total
+size. It scans only regular files whose names are exactly `<valid-id>.txt`:
+symlinks are never followed, directories, `.tmp-*` writes and malformed ids are
+ignored, and a missing or unreadable root is an empty store (`0` files, `0`
+bytes) rather than an error.
+
+### Prune: `spill gc`
+
+```powershell
+two-brothers spill gc [--sessions-dir <dir>] --older-than <n>m|h|d [--dry-run] [--json] [--force]
+```
+
+`--older-than` is required and uses the strict `<positive-integer><unit>` form:
+`m` minutes, `h` hours, `d` days (for example `30m`, `24h`, `7d`). There is no
+default age, so a bare `spill gc` is a usage error (exit 2) and can never delete
+everything by accident. A file is removed only when its mtime is **strictly
+older** than `now - older-than`; a file exactly at the boundary is kept.
+
+`--dry-run` reports the same `removed`/`kept`/`bytes` counts without deleting
+anything. `gc` takes the sessions-store single-writer lock
+(`<sessions-dir>/.writer.json`) and refuses while `serve` or the TUI holds it;
+stop the writer first, or pass `--force` to bypass the lock (unsafe while a
+writer is live). A missing sessions directory is an empty store: nothing is
+created and the command exits 0.
+
+Only these entries can ever be deleted:
+
+- regular files directly under `<root>` whose name is `<id>.txt` with
+  `id` matching `[a-f0-9]{16,64}` (lowercase hex);
+
+Everything else is never touched: symlinks (they are `lstat`ed, never followed),
+directories, temp `.tmp-*` files, malformed/uppercase ids, files outside the
+root, and other spill roots. An unlink failure is counted and reported as a
+warning; it does not abort the rest of the pass.
+
+### Server startup prune
+
+```powershell
+two-brothers serve --spill-retention-days <n>
+```
+
+When set to a positive number of days, `serve` prunes valid files under
+`<sessions-dir>/spill` older than `n` days once at startup (it already holds the
+writer lock). The default is off: without the flag no automatic deletion ever
+happens. A prune failure only logs one warning and never fails startup, and a
+missing spill root is an empty store. The count (removed/kept/bytes) is logged
+honestly.
+
+Removing the directory is always safe; a later `spill_read` for a deleted id
+returns a normal tool-error string.
+
 
 ## MCP results
 
@@ -87,5 +143,7 @@ MCP clip is unchanged.
 - Spill is per run: the marker is delivered in the live tool conversation, not
   in protocol envelopes or the session JSONL, so a resumed session does not
   advertise old spill ids.
-- Cleanup is manual. There is no age-based or per-session deletion in this
-  version.
+- Cleanup is operator-driven: `spill gc` by age, or the opt-in
+  `serve --spill-retention-days <n>` startup pass. There is no per-session
+  deletion and no deletion while a writer runs unless `spill gc --force` is
+  passed.
