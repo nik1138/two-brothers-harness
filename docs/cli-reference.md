@@ -324,10 +324,11 @@ workspace root:
   line); pass it back as `char_offset` with the same `offset`/`limit` to read
   the undelivered tail and then continue into following lines. `eof` is false
   while any line or character tail remains, and a surrogate pair is never
-  split (a `max_chars: 1` astral first character returns empty `content`,
-  `lines: 0` and no advance instead of skipping it). Without
-  `offset`/`limit`/`char_offset` the read is the historical whole-file
-  head+tail window, byte-identical to before.
+  split; every page advances at least one whole code point, so a `max_chars: 1`
+  page whose next character is astral delivers that pair (2 UTF-16 units)
+  instead of returning an empty page. Without `offset`/`limit`/`char_offset`
+  the read is the historical whole-file head+tail window, byte-identical to
+  before.
 - Reads auto-allow. Writes, edits, deletes and shell commands park the run on
   the [approval panel](#approvals-in-the-tui) instead of the composer — unless
   the effective [approval mode](#approval-modes) lets them run without asking
@@ -1014,10 +1015,11 @@ the file; upgrade Two Brothers or restore a backup. An existing-but-unreadable
 file is reported with the additive `readable: false` and `reason` fields; its
 reads stay fail-soft, but every write is refused with HTTP 409 and
 `SettingsReadOnlyError` and its bytes are never replaced. Deleting a session
-under either read-only document is allowed when that session has no persisted
-approvals to clear (an unknown session stays 404); it is refused only when
-there is something the delete would have to write. Unknown top-level sections
-from a same-version extension survive a v0/v1 write.
+clears that session's persisted approvals before the file disappears, so it
+needs a writable document: under either read-only document the delete is
+refused with HTTP 409 and the session is kept (an unknown session is still
+404). Unknown top-level sections from a same-version extension survive a v0/v1
+write.
 
 **Mid-run steering.** A steering text is not a queued task: it is appended to
 the run's shared context as a normal `message` envelope from `user` to

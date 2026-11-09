@@ -1493,14 +1493,18 @@ Also shipped in wave 28:
   unsent composer draft, never replacing it or submitting.
 
 Wave 28 review hardening (same release): a symlink/junction spill root is
-refused instead of followed; a failed writer-lock write removes its just-created
-`.writer.json` and an old malformed lock is reclaimed after a grace; an existing
-unreadable `settings.json` reads fail-soft but refuses writes with 409; a
-character-clipped `workspace_read_file` line continues through
-`next_char_offset`/`char_offset`; session deletion no longer requires a writable
-settings document when the session has no persisted approvals; `spill stats`
-rejects gc-only flags; and the startup spill retention runs after a successful
-bind.
+refused instead of followed (a same-user swap during a pass is outside the
+check); a failed writer-lock write removes only the file it created, and
+reclaim/release compare file identity plus a per-acquisition nonce so racing
+writers cannot delete each other's lock; an existing unreadable `settings.json`
+reads fail-soft but refuses writes with 409; a character-clipped
+`workspace_read_file` line continues through `next_char_offset`/`char_offset`
+and every page advances at least one whole code point; session deletion
+requires a writable settings document and refuses with 409 under a
+future-version or unreadable one (keeping the session); `spill stats` rejects
+gc-only flags; `spill gc` human output reports stale temp files with the
+correct dry-run wording; and the startup spill retention runs after a
+successful bind.
 
 Deferred follow-ups: a settings backend choice (JSON now, optional
 `node:sqlite`), session-format version headers plus frozen adjacent

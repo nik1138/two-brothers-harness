@@ -57,6 +57,24 @@ function writeSpill(
   return file;
 }
 
+/** Write one in-progress save file (`.tmp-<id>`) under the spill store. */
+function writeSpillTemp(
+  sessionsDir: string,
+  id: string,
+  content: string,
+  mtimeMs?: number,
+): string {
+  const root = path.join(sessionsDir, "spill");
+  fs.mkdirSync(root, { recursive: true });
+  const file = path.join(root, `.tmp-${id}`);
+  fs.writeFileSync(file, content);
+  if (mtimeMs !== undefined) {
+    const date = new Date(mtimeMs);
+    fs.utimesSync(file, date, date);
+  }
+  return file;
+}
+
 test("spill stats: human, JSON and a missing store", async () => {
   await withTempDir(async (dir) => {
     writeSpill(dir, spillId("a"), "abc");
@@ -214,6 +232,40 @@ test("spill gc: dry run is pure, then the real pass removes only old files", asy
     assert.equal(fs.existsSync(freshFile), true);
     assert.match(real.out[0], /removed 1 of 2 spill file\(s\) older than 1d \(12 bytes\); 1 kept/);
     assert.equal(fs.existsSync(path.join(dir, ".writer.json")), false, "lock released");
+  });
+});
+
+test("spill gc reports stale temp files, including a temp-only pass and dry runs", async () => {
+  await withTempDir(async (dir) => {
+    const now = Date.now();
+    const tempFile = writeSpillTemp(dir, spillId("c"), "crashed save", now - 2 * 86_400_000);
+
+    const dry = makeIO();
+    assert.equal(
+      await main(
+        ["spill", "gc", "--sessions-dir", dir, "--older-than", "1d", "--dry-run"],
+        dry,
+      ),
+      0,
+      dry.err.join("\n"),
+    );
+    assert.match(
+      dry.out[0],
+      /no spill files older than 1d .*; 1 stale temp file\(s\) would be removed \(12 bytes\)/,
+    );
+    assert.equal(fs.existsSync(tempFile), true, "dry run leaves the temp file");
+
+    const real = makeIO();
+    assert.equal(
+      await main(["spill", "gc", "--sessions-dir", dir, "--older-than", "1d"], real),
+      0,
+      real.err.join("\n"),
+    );
+    assert.match(
+      real.out[0],
+      /no spill files older than 1d .*; 1 stale temp file\(s\) removed \(12 bytes\)/,
+    );
+    assert.equal(fs.existsSync(tempFile), false, "the stale temp file is gone");
   });
 });
 

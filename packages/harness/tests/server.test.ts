@@ -898,17 +898,18 @@ test("settings: schema state is additive and future-version writes are 409", asy
       );
       assert.equal(unknown.status, 404);
 
-      // A session with no persisted approvals can be deleted even though the
-      // settings document is future-version read-only (deleting it needs no
-      // settings write). One with persisted approvals is refused and kept.
+      // Deleting a session clears its persisted approvals, so a read-only
+      // document refuses even a session with no known approvals and keeps the
+      // file: this release cannot prove a future shape has nothing to clear.
       fs.writeFileSync(path.join(tmp.root, "plain.jsonl"), "{}\n", "utf-8");
       const plain = await api<Record<string, unknown>>(
         future.base,
         "DELETE",
         "/api/sessions/plain.jsonl",
       );
-      assert.equal(plain.status, 200, String(plain.body.detail));
-      assert.equal(fs.existsSync(path.join(tmp.root, "plain.jsonl")), false);
+      assert.equal(plain.status, 409);
+      assert.match(String(plain.body.detail), /newer release/);
+      assert.equal(fs.existsSync(path.join(tmp.root, "plain.jsonl")), true);
 
       const blockedDoc = { ...(JSON.parse(before) as Record<string, unknown>) };
       blockedDoc.approvals = { "blocked.jsonl": ["write\u0000hello.txt"] };

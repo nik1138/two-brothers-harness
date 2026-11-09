@@ -213,7 +213,11 @@ export class SettingsSchemaVersionError extends SettingsWriteRefusedError {
  * silently downgrade a newer version or drop sections.
  */
 export class SettingsReadOnlyError extends SettingsWriteRefusedError {
-  /** Underlying read/stat failure description (path- and secret-free). */
+  /**
+   * Underlying read/stat failure description. Node error messages may name
+   * the absolute settings path; they never include key material or file
+   * contents, and the reason is diagnostics only.
+   */
   readonly reason: string;
 
   constructor(reason: string) {

@@ -3628,17 +3628,18 @@ function spillPruneSummary(
   label: string,
   root: string,
 ): string {
+  const tempVerb = result.dryRun ? "would be removed" : "removed";
+  const temps =
+    result.tempsRemoved > 0
+      ? `; ${result.tempsRemoved} stale temp file(s) ${tempVerb} (${result.tempBytes} bytes)`
+      : "";
   if (result.filesBefore === 0) {
-    return `no spill files older than ${label} in ${root}`;
+    return `no spill files older than ${label} in ${root}${temps}`;
   }
   const verb = result.dryRun ? "would remove" : "removed";
   const keptVerb = result.dryRun ? "would be kept" : "kept";
   const failure =
     result.failed > 0 ? `; ${result.failed} could not be removed` : "";
-  const temps =
-    result.tempsRemoved > 0
-      ? `; ${result.tempsRemoved} stale temp file(s) removed (${result.tempBytes} bytes)`
-      : "";
   return (
     `${verb} ${result.removed} of ${result.filesBefore} spill file(s) older than ` +
     `${label} (${result.bytes} bytes); ${result.kept} ${keptVerb}${failure}${temps}`

@@ -2761,22 +2761,13 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         isFile = false;
       }
       if (!isFile) throw new HttpError(404, "not found");
-      // Deleting a session only writes settings.json when it must clear that
-      // session's persisted approvals. A future-version (or unreadable)
-      // document therefore blocks deletion only when there is something to
-      // clear; a session with no persisted approvals can still be deleted.
-      const schema = state.settingsStore.schemaState();
-      const persistedApprovals = state.settingsStore.readSessionApprovals(safe);
-      if (persistedApprovals.length > 0 && !schema.writable) {
-        if (schema.version !== null) throw new SettingsSchemaVersionError(schema.version);
-        throw new SettingsReadOnlyError(schema.reason ?? "the file could not be read");
-      }
-      if (persistedApprovals.length === 0 && schema.readable === false) {
-        // The document exists but cannot be read, so we cannot prove this
-        // session has no persisted allows. Deletion is destructive: fail closed
-        // rather than leave a reusable name with auto-allow entries.
-        throw new SettingsReadOnlyError(schema.reason ?? "the file could not be read");
-      }
+      // Deleting a session clears that session's persisted approvals before
+      // the file disappears, so it is a settings write and needs a writable
+      // document. A future-version or existing-but-unreadable settings file
+      // refuses up front (409) and keeps the session, rather than leaving
+      // approvals whose shape this release cannot fully inspect for a reused
+      // name. The existence check stays first so an unknown name is a 404.
+      requireWritableSettings();
       // A live run keeps its SessionStore handle and would re-append the next
       // envelope, resurrecting the file — stop it and let it unwind first.
       const activeFor = (): Array<Record<string, unknown>> =>
@@ -2795,13 +2786,11 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       // granted for. Clear them before the file disappears: a failed write
       // leaves the session in place rather than a deleted session whose auto-
       // allows could apply again if the name were reused.
-      if (persistedApprovals.length > 0) {
-        try {
-          state.settingsStore.clearSessionApprovals(safe);
-        } catch (exc) {
-          if (exc instanceof SettingsWriteRefusedError) throw exc;
-          throw new HttpError(500, `could not clear the session approvals: ${errorDetail(exc)}`);
-        }
+      try {
+        state.settingsStore.clearSessionApprovals(safe);
+      } catch (exc) {
+        if (exc instanceof SettingsWriteRefusedError) throw exc;
+        throw new HttpError(500, `could not clear the session approvals: ${errorDetail(exc)}`);
       }
       fs.unlinkSync(store.path);
       state.metadata.delete(safe);

@@ -908,8 +908,9 @@ export interface ReadFileOptions {
   /**
    * 0-based UTF-16 offset into the first requested line. A page that clips
    * that line returns `next_char_offset`; pass it back with the same
-   * `offset`/`limit` to continue with the undelivered tail. Ignored unless
-   * range mode is active.
+   * `offset`/`limit` to continue with the undelivered tail. Supplying this
+   * field alone also activates range mode (like `offset`/`limit`); omit all
+   * three for the historical whole-file head+tail read.
    */
   charOffset?: number;
 }
@@ -973,7 +974,9 @@ function safeCharPrefix(text: string, maxChars: number): string {
  * names that line. When the budget cuts the FIRST requested line, its safe
  * character prefix is returned and `next_offset` stays on that line while
  * `next_char_offset` names the undelivered tail; passing it back as
- * `charOffset` continues the tail and then the following lines. `eof` is false
+ * `charOffset` continues the tail and then the following lines. A page always
+ * advances at least one whole code point, even when `maxChars` is 1 and the
+ * next character is astral (the pair is delivered intact). `eof` is false
  * while either a line or a clipped character tail remains.
  */
 async function readFilePage(
@@ -1044,16 +1047,21 @@ async function readFilePage(
         stopped = true;
         if (page.length === 0) {
           // The first requested line itself is clipped: deliver its safe
-          // prefix and point at the undelivered tail on the same line. A
-          // zero-length prefix (an astral code point that does not fit) keeps
-          // lines=0 and advances nothing.
+          // prefix and point at the undelivered tail on the same line. The
+          // only zero-length prefix is a single astral code point wider than
+          // the budget; deliver that whole code point anyway, so every
+          // continuation is guaranteed to advance (never a permanent page).
           const clipped = safeCharPrefix(tail, Math.max(0, available));
-          if (clipped.length > 0) {
-            page.push(clipped);
-            pageChars += clipped.length;
+          const delivered =
+            clipped.length > 0
+              ? clipped
+              : tail.slice(0, (tail.codePointAt(0) ?? 0) > 0xffff ? 2 : 1);
+          if (delivered.length > 0) {
+            page.push(delivered);
+            pageChars += delivered.length;
           }
           nextOffsetOverride = lineNumber;
-          nextCharOffset = start + clipped.length;
+          nextCharOffset = start + delivered.length;
           partialTail = true;
         } else {
           // A later line does not fit: the previous whole lines are the page

@@ -56,6 +56,11 @@ export interface SessionWriterLock {
   owner: string;
   pid: number;
   created: string;
+  /**
+   * Random per-acquisition token. A release closure only removes the exact
+   * lock it created (older records may omit it). Additive and optional.
+   */
+  nonce?: string;
 }
 
 /** Raised when a writer (serve/TUI) already owns the store. */
@@ -140,6 +145,13 @@ export interface SessionLayoutOptions {
    * after a write/fsync failure.
    */
   lockWriteHook?: (fd: number, data: string) => void;
+  /**
+   * Test seam invoked after a stale lock's identity snapshot is taken and
+   * before its identity-checked unlink (production leaves it unset). A test
+   * can replace the path here to prove a concurrent writer's fresh lock is
+   * never removed by mistake.
+   */
+  lockReclaimHook?: (file: string, stats: fs.Stats) => void;
 }
 
 const JSONL_SUFFIX = ".jsonl";
@@ -279,6 +291,7 @@ export class SessionLayout {
   readonly root: string;
   private readonly defaultProject: string | null;
   private readonly lockWriteHook: ((fd: number, data: string) => void) | null;
+  private readonly lockReclaimHook: ((file: string, stats: fs.Stats) => void) | null;
 
   constructor(root: string, options: SessionLayoutOptions = {}) {
     this.root = path.resolve(root);
@@ -287,6 +300,7 @@ export class SessionLayout {
         ? options.defaultProject.trim()
         : null;
     this.lockWriteHook = options.lockWriteHook ?? null;
+    this.lockReclaimHook = options.lockReclaimHook ?? null;
   }
 
   /** Current writer layout: the marker value, else `flat` (legacy default). */
@@ -493,29 +507,75 @@ export class SessionLayout {
    * reported here for diagnostics.
    */
   writerLock(): SessionWriterLock | null {
-    const file = path.join(this.root, SESSION_LOCK_FILE);
-    try {
-      const raw: unknown = JSON.parse(fs.readFileSync(file, "utf-8"));
-      if (!isRecord(raw)) return null;
-      const owner = typeof raw.owner === "string" ? raw.owner.trim() : "";
-      const pid = typeof raw.pid === "number" ? raw.pid : Number.NaN;
-      const created = typeof raw.created === "string" ? raw.created : "";
-      if (!owner || !Number.isInteger(pid) || pid <= 0 || !created) return null;
-      return { owner, pid, created };
-    } catch {
-      return null;
-    }
+    return this.writerLockSnapshot().holder;
   }
 
   /**
-   * True when a malformed/empty lock is old enough to be a crashed writer
-   * rather than one still between `open` and its first write. A vanished lock
-   * is stale too (another owner released it); an unreadable one is not.
+   * Read the lock record and the identity (`dev`/`ino`/size/mtime) of the
+   * exact file the record came from. Reclaim paths compare a later `lstat`
+   * against this snapshot before unlinking, so a lock another writer replaced
+   * in the meantime is never deleted. A vanished lock is `{null, null}`.
    */
-  private malformedLockIsStale(file: string, now: number): boolean {
+  private writerLockSnapshot(): { holder: SessionWriterLock | null; stats: fs.Stats | null } {
+    const file = path.join(this.root, SESSION_LOCK_FILE);
+    let fd: number;
     try {
-      const entry = fs.lstatSync(file);
-      return entry.isFile() && now - entry.mtimeMs >= SESSION_LOCK_MALFORMED_GRACE_MS;
+      fd = fs.openSync(file, "r");
+    } catch {
+      return { holder: null, stats: null };
+    }
+    let holder: SessionWriterLock | null = null;
+    let stats: fs.Stats | null = null;
+    try {
+      stats = fs.fstatSync(fd);
+      const raw: unknown = JSON.parse(fs.readFileSync(fd, "utf-8"));
+      if (isRecord(raw)) {
+        const owner = typeof raw.owner === "string" ? raw.owner.trim() : "";
+        const pid = typeof raw.pid === "number" ? raw.pid : Number.NaN;
+        const created = typeof raw.created === "string" ? raw.created : "";
+        const nonce = typeof raw.nonce === "string" ? raw.nonce : undefined;
+        if (owner && Number.isInteger(pid) && pid > 0 && created) {
+          holder = { owner, pid, created, ...(nonce !== undefined ? { nonce } : {}) };
+        }
+      }
+    } catch {
+      // unreadable/malformed/partial: the identity snapshot still lets a
+      // stale reclaim prove it is removing the file it inspected
+    } finally {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // already closed
+      }
+    }
+    return { holder, stats };
+  }
+
+  /**
+   * Delete `file` only when it still is the exact file described by
+   * `expected`. The pre-unlink `lstat` narrows the reclaim race to the
+   * lstat/unlink window; a replaced lock (new inode, size or mtime) survives
+   * and the caller retries, which then sees the new owner. Tests can widen the
+   * race with {@link SessionLayoutOptions.lockReclaimHook}.
+   */
+  private unlinkIfUnchanged(file: string, expected: fs.Stats): boolean {
+    let current: fs.Stats;
+    try {
+      current = fs.lstatSync(file);
+    } catch (exc) {
+      return (exc as NodeJS.ErrnoException).code === "ENOENT";
+    }
+    if (
+      current.dev !== expected.dev ||
+      current.ino !== expected.ino ||
+      current.size !== expected.size ||
+      current.mtimeMs !== expected.mtimeMs
+    ) {
+      return false;
+    }
+    try {
+      fs.unlinkSync(file);
+      return true;
     } catch (exc) {
       return (exc as NodeJS.ErrnoException).code === "ENOENT";
     }
@@ -528,16 +588,20 @@ export class SessionLayout {
    * removed and retried once. A malformed/empty lock (a crashed writer, or a
    * disk-full write failure in the previous owner) is reclaimed only once it
    * is older than {@link SESSION_LOCK_MALFORMED_GRACE_MS}; a recent one still
-   * refuses, because a concurrent writer may be mid-write. Every failure after
-   * this call created the lock file removes that file before rethrowing.
+   * refuses, because a concurrent writer may be mid-write. Reclaim and
+   * failed-write cleanup only unlink the exact file they inspected, so two
+   * processes racing over one stale lock cannot delete each other's fresh
+   * lock. Every failure after this call created the lock file removes that
+   * file before rethrowing.
    */
   acquireWriterLock(owner: string): () => void {
     ensureDir(this.root);
     const label = owner.trim() || "two-brothers";
     const file = path.join(this.root, SESSION_LOCK_FILE);
+    const nonce = randomBytes(8).toString("hex");
     const body =
       JSON.stringify(
-        { owner: label, pid: process.pid, created: new Date().toISOString() },
+        { owner: label, pid: process.pid, created: new Date().toISOString(), nonce },
         null,
         2,
       ) + "\n";
@@ -547,26 +611,30 @@ export class SessionLayout {
         fd = fs.openSync(file, "wx");
       } catch (exc) {
         if ((exc as NodeJS.ErrnoException).code !== "EEXIST") throw exc;
-        const holder = this.writerLock();
+        const snapshot = this.writerLockSnapshot();
+        const holder = snapshot.holder;
         if (holder !== null && !pidAlive(holder.pid)) {
-          try {
-            fs.unlinkSync(file);
-          } catch {
-            // retry the exclusive create; a concurrent owner will win honestly
+          if (snapshot.stats !== null) {
+            this.lockReclaimHook?.(file, snapshot.stats);
+            this.unlinkIfUnchanged(file, snapshot.stats);
           }
           continue;
         }
-        if (holder === null && this.malformedLockIsStale(file, Date.now())) {
-          try {
-            fs.unlinkSync(file);
-          } catch {
-            // retry the exclusive create; a concurrent owner will win honestly
+        if (holder === null) {
+          if (snapshot.stats === null) continue; // vanished; retry the create
+          if (
+            snapshot.stats.isFile() &&
+            Date.now() - snapshot.stats.mtimeMs >= SESSION_LOCK_MALFORMED_GRACE_MS
+          ) {
+            this.lockReclaimHook?.(file, snapshot.stats);
+            this.unlinkIfUnchanged(file, snapshot.stats);
+            continue;
           }
-          continue;
         }
         throw new SessionLayoutLockedError(holder);
       }
       let failure: unknown = null;
+      let ownStats: fs.Stats | null = null;
       try {
         try {
           if (this.lockWriteHook !== null) this.lockWriteHook(fd, body);
@@ -577,29 +645,33 @@ export class SessionLayout {
         }
       } finally {
         try {
+          ownStats = fs.fstatSync(fd);
+        } catch {
+          // no identity to prove ownership; leave cleanup to the grace path
+        }
+        try {
           fs.closeSync(fd);
         } catch (exc) {
           if (failure === null) failure = exc;
         }
       }
       if (failure !== null) {
-        // Never leave an empty/partial lock behind: this process owns the
-        // just-created file and no other writer can have written it yet.
-        try {
-          fs.unlinkSync(file);
-        } catch {
-          // best effort; a remaining malformed lock is reclaimed after grace
-        }
+        // Remove only the inode this call created: a reclaim that raced past
+        // the malformed grace may already own a fresh lock at this path.
+        if (ownStats !== null) this.unlinkIfUnchanged(file, ownStats);
         throw failure;
       }
       return () => {
-        const current = this.writerLock();
-        if (current !== null && current.pid === process.pid && current.owner === label) {
-          try {
-            fs.unlinkSync(file);
-          } catch {
-            // already gone
-          }
+        const snapshot = this.writerLockSnapshot();
+        const current = snapshot.holder;
+        if (
+          current !== null &&
+          current.pid === process.pid &&
+          current.owner === label &&
+          current.nonce === nonce &&
+          snapshot.stats !== null
+        ) {
+          this.unlinkIfUnchanged(file, snapshot.stats);
         }
       };
     }

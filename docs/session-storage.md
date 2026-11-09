@@ -125,11 +125,13 @@ keep the backup or move the sessions back before downgrading.
   `run` and `chat` do not take the store lock, so stop them before migrating
   or pruning. A crash leaves a stale lock that the next writer reclaims
   automatically. If a lock-write/fsync failure leaves an empty or partial
-  `.writer.json` (for example a full disk), the failed acquisition removes its
-  own just-created file; a crash between create and write leaves a malformed
-  lock that is reclaimed only after a 5-second grace (a fresh malformed lock
-  still refuses, because a concurrent writer may be mid-write). `--force` is
-  the explicit unsafe override for migration.
+  `.writer.json` (for example a full disk), the failed acquisition removes only
+  the exact file it created. Reclaim and release compare the inspected file's
+  identity (and the per-acquisition `nonce`), so a concurrent writer's fresh
+  lock is never removed by mistake; a crash between create and write leaves a
+  malformed lock that is reclaimed only after a 5-second grace (a fresh
+  malformed lock still refuses, because a concurrent writer may be mid-write).
+  `--force` is the explicit unsafe override for migration.
 - After migration, `<project>/<stem>/session.jsonl` is the durable transcript;
   `meta.json` carries the title/workspace link and `events.jsonl` the runtime
   evidence (tool calls, approvals, reasoning, plan snapshots).

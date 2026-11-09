@@ -12,16 +12,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Spill root can no longer be redirected outside the store:** `SpillStore`
   now accepts only a missing root (created lazily) or an existing real
   directory. A symlink/junction root makes `stats`/`prune` throw and
-  `save`/`read` reject with `SpillRootUnsafeError`, so a hostile or accidental
-  link can never make `spill gc` delete external files. Stale `.tmp-<id>` save
-  files older than the cutoff are pruned and reported separately
+  `save`/`read` reject with `SpillRootUnsafeError` before any scan or write, so
+  a link present when the store is entered cannot redirect a pass (a same-user
+  root swap during an in-flight pass is outside this check). Stale `.tmp-<id>`
+  save files older than the cutoff are pruned and reported separately
   (`temps_removed`/`temp_bytes`); `spill stats` rejects gc-only flags with exit
   2 and both CLI commands exit 1 with a clear message on an unsafe root.
+- **`spill gc` human output reports stale temp files honestly:** a temp-only
+  pass says what was removed instead of "no spill files", and a dry run says
+  "would be removed" rather than claiming a deletion.
 - **A failed writer-lock write no longer wedges the store:** a write/fsync
-  failure after `.writer.json` is created removes that just-created file before
-  rethrowing, and a malformed/empty lock is reclaimed only after a 5-second
-  grace based on its mtime (a fresh one still refuses, because a concurrent
-  writer may be mid-write). `SessionLayoutLockedError` messages are unchanged.
+  failure after `.writer.json` is created removes only the exact file that
+  attempt created (identity-checked), and a malformed/empty lock is reclaimed
+  only after a 5-second grace based on its mtime (a fresh one still refuses,
+  because a concurrent writer may be mid-write). Reclaim and release compare the
+  inspected file identity plus a per-acquisition `nonce`, so two processes
+  racing over one stale lock cannot delete each other's fresh lock.
+  `SessionLayoutLockedError` messages are unchanged.
 - **An existing-but-unreadable `settings.json` is never overwritten:**
   `readRaw()` distinguishes a missing file from a path that exists but cannot
   be read. Reads stay fail-soft, while `schemaState()` reports
@@ -34,13 +41,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first requested line is clipped, keeping `next_offset` on that line until its
   tail is delivered and then continuing into following lines. `eof` stays
   false while any line or character tail remains, and a surrogate pair is
-  never split (`max_chars: 1` on an astral first character returns empty
-  content, `lines: 0` and no advance instead of skipping the line).
-- **Session deletion no longer requires a writable settings document unless it
-  must clear persisted approvals:** on a future-version (or unreadable)
-  settings file, a session with no persisted approvals is deleted normally
-  (unknown sessions stay 404); only a session whose approvals would need a
-  settings write is refused.
+  never split; every page advances at least one whole code point, so
+  `max_chars: 1` on an astral first character delivers that pair (2 UTF-16
+  units) instead of returning an empty page forever.
+- **Session deletion requires a writable settings document:** deleting a
+  session clears its persisted approvals before the file disappears, so a
+  future-version (or existing-but-unreadable) `settings.json` refuses the
+  delete with HTTP 409 and keeps the session (unknown sessions stay 404).
+  This also covers approval shapes a newer release may add, which this release
+  cannot fully inspect.
 - **Startup spill retention runs after a successful bind:** `serve
   --spill-retention-days` no longer prunes when `listen()` fails (the pass runs
   in the listen success callback while the writer lock is held).

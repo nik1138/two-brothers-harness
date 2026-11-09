@@ -458,18 +458,28 @@ test("a clipped last line keeps eof false until its tail is delivered", async ()
   }
 });
 
-test("max_chars 1 never skips an astral first character", async () => {
+test("max_chars 1 always advances a whole astral code point", async () => {
   const { root, cleanup } = tmpdir();
   try {
     write(root, "astral.txt", "😀x\n");
     const ws = new Workspace(root);
     const tiny = await ws.read_file("astral.txt", { offset: 1, limit: 1, maxChars: 1 });
-    assert.equal(tiny.content, "", "no half surrogate is delivered");
-    assert.equal(tiny.lines, 0, "nothing is claimed as a delivered line");
+    assert.equal(tiny.content, "😀", "the whole pair is delivered, never a half surrogate");
+    assert.equal(tiny.lines, 1);
     assert.equal(tiny.eof, false);
     assert.equal(tiny.next_offset, 1, "the line is not skipped");
-    assert.equal(tiny.next_char_offset, 0, "no character advance");
+    assert.equal(tiny.next_char_offset, 2, "continuation advances past the whole pair");
     assert.equal(tiny.truncated, true);
+
+    // The documented continuation must make progress even at this tiny cap.
+    const after = await ws.read_file("astral.txt", {
+      offset: 1,
+      limit: 1,
+      maxChars: 1,
+      charOffset: tiny.next_char_offset,
+    });
+    assert.equal(after.content, "x");
+    assert.equal(after.eof, true);
 
     const midPair = await ws.read_file("astral.txt", {
       offset: 1,

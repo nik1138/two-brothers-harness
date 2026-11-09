@@ -44,6 +44,16 @@ function cleanup(root: string): void {
   fs.rmSync(root, { recursive: true, force: true });
 }
 
+/** Write a valid live lock record (this test process is the owner). */
+function writeLiveLock(file: string, owner: string, nonce: string): void {
+  fs.writeFileSync(
+    file,
+    JSON.stringify({ owner, pid: process.pid, created: new Date().toISOString(), nonce }, null, 2) +
+      "\n",
+    "utf-8",
+  );
+}
+
 function writeFlat(root: string, name: string, raw = RAW): string {
   const file = path.join(root, name);
   fs.writeFileSync(file, raw, "utf-8");
@@ -361,6 +371,56 @@ test("a writer-lock record write failure removes the just-created lock", () => {
     const release = new SessionLayout(root).acquireWriterLock("test");
     release();
     assert.equal(fs.existsSync(file), false);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test("a stale reclaim never removes the fresh lock another writer just took", () => {
+  const root = tmpdir();
+  try {
+    const file = path.join(root, SESSION_LOCK_FILE);
+    fs.writeFileSync(file, "{not json", "utf-8");
+    const old = new Date(Date.now() - SESSION_LOCK_MALFORMED_GRACE_MS - 1_000);
+    fs.utimesSync(file, old, old);
+    let replaced = false;
+    const racing = new SessionLayout(root, {
+      lockReclaimHook: (lockFile) => {
+        if (replaced) return;
+        replaced = true;
+        // A second process wins the reclaim and writes its complete lock
+        // between this process's snapshot and its unlink.
+        writeLiveLock(lockFile, "winner", "winner-nonce");
+      },
+    });
+    assert.throws(
+      () => racing.acquireWriterLock("loser"),
+      /in use by winner \(pid \d+\)/,
+    );
+    assert.equal(replaced, true);
+    const onDisk = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, unknown>;
+    assert.equal(onDisk.owner, "winner");
+    assert.equal(onDisk.nonce, "winner-nonce");
+  } finally {
+    cleanup(root);
+  }
+});
+
+test("a release closure never removes a lock another writer replaced", () => {
+  const root = tmpdir();
+  try {
+    const file = path.join(root, SESSION_LOCK_FILE);
+    const release = new SessionLayout(root).acquireWriterLock("first");
+    try {
+      writeLiveLock(file, "second", "second-nonce");
+      release();
+      assert.equal(fs.existsSync(file), true, "the replacement lock survives");
+      const onDisk = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, unknown>;
+      assert.equal(onDisk.owner, "second");
+      assert.equal(onDisk.nonce, "second-nonce");
+    } finally {
+      fs.rmSync(file, { force: true });
+    }
   } finally {
     cleanup(root);
   }

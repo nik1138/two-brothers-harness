@@ -20,9 +20,10 @@
  * age-based: `stats()` inspects the store, `prune()` deletes old regular
  * `<id>.txt` files, and the server can enable a startup prune. The root itself
  * must be a missing path (created lazily) or a real directory: a symlink or
- * junction root is refused, so a scan can never be redirected outside the
- * store. Artifact scans use `lstat`, so a planted symlink below a safe root is
- * never followed either.
+ * junction root is refused at every entry point, before a scan or write. (A
+ * same-user swap of the root during an in-flight pass is outside that check.)
+ * Artifact scans use `lstat`, so a planted symlink below a safe root is never
+ * followed either.
  *
  * Everything here is dependency-free (Node built-ins only) and fail-soft at
  * the call site: `save` rejects on a real storage failure and the harness falls

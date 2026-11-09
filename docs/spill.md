@@ -67,10 +67,12 @@ The files are local trusted data (tool output); the directory is created with
 owner-only permissions where the platform honors them.
 
 The root must be either missing (it is created lazily by the first save) or an
-existing **real directory**. A symlink or junction at `<root>` is refused:
-`stats`/`prune` throw and `save`/`read` reject with
-`SpillRootUnsafeError`, so a store can never be redirected outside its
-configured path. A plain file at `<root>` is refused the same way.
+existing **real directory**. A symlink or junction at `<root>` is refused at
+every entry point: `stats`/`prune` throw and `save`/`read` reject with
+`SpillRootUnsafeError` before they scan or write. A plain file at `<root>` is
+refused the same way. The check is identity-at-entry, not a kernel-handle
+guarantee: a same-user process that replaces the root mid-pass is outside the
+threat model.
 
 Retention is **opt-in**; nothing is deleted automatically by default.
 
@@ -117,10 +119,11 @@ Only these entries can ever be deleted:
 
 Everything else is never touched: symlinks (they are `lstat`ed, never followed),
 directories, malformed/uppercase ids, temp names outside the exact
-`.tmp-<id>` shape, files outside the root, and other spill roots. An unlink
-failure is counted and reported as a warning; it does not abort the rest of the
-pass. The root safety check above is what makes "files outside the root" true
-even when `<root>` itself was replaced by a link.
+`.tmp-<id>` shape, paths resolved outside the configured root, and other spill
+roots. An unlink failure is counted and reported as a warning; it does not
+abort the rest of the pass. The root is re-checked when the store is entered,
+but a same-user swap of `<root>` during an in-flight pass is outside this
+guarantee.
 
 ### Server startup prune
 
