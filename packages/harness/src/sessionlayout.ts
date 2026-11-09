@@ -582,18 +582,20 @@ export class SessionLayout {
   }
 
   /**
-   * True when the path still names the exact file this acquisition created.
-   * A writer that stalled past the malformed grace can be reclaimed while its
-   * write is in flight; the success path checks this before reporting that it
-   * owns the store.
+   * True when the path still names the exact file this acquisition created,
+   * including its per-acquisition nonce. A writer that stalled past the
+   * malformed grace can be reclaimed while its write is in flight; the success
+   * path checks this before reporting that it owns the store. The nonce also
+   * protects against an immediate inode reuse by the reclaimer's new file.
    */
-  private lockStillOwned(file: string, ownStats: fs.Stats): boolean {
-    try {
-      const current = fs.lstatSync(file);
-      return current.dev === ownStats.dev && current.ino === ownStats.ino;
-    } catch {
-      return false;
-    }
+  private lockStillOwned(file: string, ownStats: fs.Stats, nonce: string): boolean {
+    const snapshot = this.writerLockSnapshot();
+    if (snapshot.stats === null || snapshot.holder === null) return false;
+    return (
+      snapshot.stats.dev === ownStats.dev &&
+      snapshot.stats.ino === ownStats.ino &&
+      snapshot.holder.nonce === nonce
+    );
   }
 
   /**
@@ -678,7 +680,7 @@ export class SessionLayout {
       }
       // A successful but slow write can also lose the grace race. Do not
       // report ownership when the path no longer resolves to our file.
-      if (ownStats === null || !this.lockStillOwned(file, ownStats)) {
+      if (ownStats === null || !this.lockStillOwned(file, ownStats, nonce)) {
         throw new SessionLayoutLockedError(this.writerLock());
       }
       return () => {

@@ -906,11 +906,12 @@ export interface ReadFileOptions {
   /** Maximum lines in the page (default `DEFAULT_READ_LINES`, clamped to 1..`MAX_READ_LINES`). */
   limit?: number;
   /**
-   * 0-based UTF-16 offset into the first requested line. A page that clips
-   * that line returns `next_char_offset`; pass it back with the same
-   * `offset`/`limit` to continue with the undelivered tail. Supplying this
-   * field alone also activates range mode (like `offset`/`limit`); omit all
-   * three for the historical whole-file head+tail read.
+   * 0-based UTF-16 offset into the first requested line. A page that clips a
+   * line returns `next_offset` plus `next_char_offset`; resume at `next_offset`
+   * with `charOffset: next_char_offset` (when `next_offset` stays on the same
+   * line this continues that tail). Supplying this field alone also activates
+   * range mode (like `offset`/`limit`); omit all three for the historical
+   * whole-file head+tail read.
    */
   charOffset?: number;
 }
@@ -923,7 +924,7 @@ interface FilePage {
   total_lines: number;
   eof: boolean;
   next_offset?: number;
-  /** Continuation offset inside the still-clipped first line (UTF-16 units). */
+  /** Continuation offset inside the clipped line named by `next_offset` (UTF-16 units). */
   next_char_offset?: number;
   truncated: boolean;
 }
