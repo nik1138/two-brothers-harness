@@ -48,6 +48,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Settings schema versioning and downgrade safety:** `sessions/settings.json`
+  now carries top-level `"version": 1` on every write
+  (`SETTINGS_SCHEMA_VERSION`). A legacy file without a version reads exactly
+  as before and normalizes on its next save; an invalid/negative/string
+  version also reads fail-soft and normalizes to 1. Unknown top-level sections
+  survive a v0/v1 write, while a document written by a newer release stays
+  readable (known role/plugin/provider/approval/compaction sections, `GET
+  /api/settings` with additive `schema: {version, supported, writable}`) but
+  refuses every write with the typed `SettingsSchemaVersionError` — served as
+  HTTP 409 by settings write routes — instead of downgrading the file. Files:
+  `src/settings_store.ts`, `src/server.ts`, `src/runtime.ts`, `src/index.ts`;
+  tests `tests/settingsschema.test.ts` (new) and `tests/server.test.ts`.
 - **Provider retries: `retry-after-ms` and bounded backoff jitter** (port of
   pi-ai's `utils/provider-retry.ts`, MIT): a retryable response's
   `retry-after-ms` header (finite milliseconds) now wins over `Retry-After`

@@ -1448,11 +1448,26 @@ all follow both layouts. Flat stores remain the default until migrated; the
 public session name and envelope bytes are unchanged. Tests:
 `sessionlayout`, `serverlayout`, `sessionsmigrate`.
 
-Deferred follow-ups: settings schema versioning and a backend choice
-(JSON now, optional `node:sqlite`), session-format version headers plus frozen
-adjacent migrations, optional compression, projection caches for large
-corpora, optional per-cwd grouping for unlinked sessions (the current
-directory layout uses `_global`), and a migration backup/rollback helper.
+## Shipped 2026-11-09 (wave 28: settings schema versioning)
+
+`sessions/settings.json` now carries a top-level `"version": 1` on every write
+(`SETTINGS_SCHEMA_VERSION`) and exposes `GET /api/settings.schema` as
+`{version, supported, writable}`. A legacy v0 file reads exactly as before and
+normalizes on its next save; invalid/negative/string versions read fail-soft
+and normalize too; unknown top-level sections survive a v0/v1 write. A
+document from a newer release stays readable (known sections and `GET` keep
+working) but every settings write refuses with `SettingsSchemaVersionError`
+(HTTP 409 from the server's settings write routes) instead of downgrading it.
+Tests: `tests/settingsschema.test.ts` (new), `tests/settings.test.ts` and
+`tests/server.test.ts`. See `docs/cli-reference.md` → `GET/PUT
+/api/settings`, `docs/session-storage.md` → "Settings file schema" and
+`docs/troubleshooting.md`.
+
+Deferred follow-ups: a settings backend choice (JSON now, optional
+`node:sqlite`), session-format version headers plus frozen adjacent
+migrations, optional compression, projection caches for large corpora,
+optional per-cwd grouping for unlinked sessions (the current directory layout
+uses `_global`), and a migration backup/rollback helper.
 
 ## Open items (deferred)
 

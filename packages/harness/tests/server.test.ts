@@ -795,6 +795,109 @@ test("settings: env-pinned values win at startup and are never persisted", async
   }
 });
 
+test("settings: schema state is additive and future-version writes are 409", async () => {
+  const tmp = tmpdir("tb-settings-schema-");
+  const settingsPath = path.join(tmp.root, "settings.json");
+  try {
+    // No file: a legacy/unversioned store is writable and reports null; the
+    // first save creates a v1 document.
+    const empty = await startServer({ sessionsDir: tmp.root });
+    try {
+      const view = await get<Record<string, any>>(empty.base, "/api/settings");
+      assert.equal(view.status, 200);
+      assert.deepEqual(view.body.schema, { version: null, supported: 1, writable: true });
+      const put = await api<Record<string, any>>(empty.base, "PUT", "/api/settings", {
+        junior: { model: "first-model" },
+      });
+      assert.equal(put.status, 200);
+      assert.deepEqual((await get<Record<string, any>>(empty.base, "/api/settings")).body.schema, {
+        version: 1,
+        supported: 1,
+        writable: true,
+      });
+      assert.equal(
+        (JSON.parse(fs.readFileSync(settingsPath, "utf-8")) as Record<string, unknown>).version,
+        1,
+      );
+    } finally {
+      await empty.close();
+    }
+
+    // A legacy file keeps reading its known sections; the startup normalization
+    // (and any later write) stamps v1 while preserving a same-version extension.
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({ senior: { model: "legacy-model" }, future_extension: { keep: true } }),
+      "utf-8",
+    );
+    const legacy = await startServer({ sessionsDir: tmp.root });
+    try {
+      const view = await get<Record<string, any>>(legacy.base, "/api/settings");
+      assert.equal(view.status, 200);
+      assert.deepEqual(view.body.schema, { version: 1, supported: 1, writable: true });
+      assert.equal(view.body.senior.model, "legacy-model");
+      const put = await api<Record<string, any>>(legacy.base, "PUT", "/api/settings", {
+        junior: { model: "junior-model" },
+      });
+      assert.equal(put.status, 200);
+      assert.deepEqual((await get<Record<string, any>>(legacy.base, "/api/settings")).body.schema, {
+        version: 1,
+        supported: 1,
+        writable: true,
+      });
+      const onDisk = JSON.parse(fs.readFileSync(settingsPath, "utf-8")) as Record<string, any>;
+      assert.equal(onDisk.version, 1);
+      assert.deepEqual(onDisk.future_extension, { keep: true });
+    } finally {
+      await legacy.close();
+    }
+
+    // A newer release's document: reads work, every settings write is a 409.
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        version: 2,
+        senior: { model: "future-model" },
+        future_extension: { from: "newer-release" },
+      }),
+      "utf-8",
+    );
+    const future = await startServer({ sessionsDir: tmp.root });
+    try {
+      const view = await get<Record<string, any>>(future.base, "/api/settings");
+      assert.equal(view.status, 200);
+      assert.deepEqual(view.body.schema, { version: 2, supported: 1, writable: false });
+      assert.equal(view.body.senior.model, "future-model");
+
+      const before = fs.readFileSync(settingsPath, "utf-8");
+      const writes: Array<[string, string, unknown?]> = [
+        ["PUT", "/api/settings", { senior: { model: "downgraded" } }],
+        ["PUT", "/api/settings", { approval_policy: { mode: "allow-all" } }],
+        ["PUT", "/api/settings", { compaction: { threshold_chars: 1 } }],
+        ["POST", "/api/providers", { name: "new", base_url: "https://new.example/v1" }],
+        ["DELETE", "/api/providers/acme"],
+        ["DELETE", "/api/sessions/s.jsonl"],
+      ];
+      for (const [method, route, body] of writes) {
+        const res = await api<Record<string, unknown>>(future.base, method, route, body);
+        assert.equal(res.status, 409, `${method} ${route} must refuse a future document`);
+        assert.match(String(res.body.detail), /newer release/);
+        assert.match(String(res.body.detail), /version 2/);
+        assert.equal(
+          fs.readFileSync(settingsPath, "utf-8"),
+          before,
+          `${method} ${route} must leave the newer document byte-identical`,
+        );
+      }
+      assert.equal(fs.existsSync(settingsPath + ".tmp"), false);
+    } finally {
+      await future.close();
+    }
+  } finally {
+    tmp.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Background runs + SSE
 // ---------------------------------------------------------------------------
@@ -2408,6 +2511,8 @@ test("provider presets: reset restores the canonical seed and preserves refs/set
       expectedSettings = configured.body;
       assert.equal(expectedSettings.senior.provider_ref, "deepseek");
       assert.equal(expectedSettings.junior.provider_ref, "deepseek");
+      // GET adds the additive schema view on top of the PUT response shape.
+      expectedSettings.schema = { version: 1, supported: 1, writable: true };
 
       const customized = await api<Record<string, any>>(first.base, "PUT", "/api/providers/deepseek", {
         base_url: "https://proxy.example/v1",

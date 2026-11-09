@@ -750,8 +750,8 @@ test("approval policy roundtrip, strict write validation and atomic secret-free 
       assert.equal(new SettingsStore(file).readApprovalPolicy(), mode);
       const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, unknown>;
       assert.deepEqual(raw.approval_policy, { mode });
-      // exactly the documented section: no extra fields, no key material
-      assert.deepEqual(Object.keys(raw), ["approval_policy"]);
+      // exactly the documented sections: schema version + approval policy
+      assert.deepEqual(Object.keys(raw), ["approval_policy", "version"]);
       assert.ok(!fs.existsSync(file + ".tmp"), "atomic temp-file write leaves no artifact");
     }
 
@@ -958,7 +958,11 @@ test("compaction: roundtrip, wholesale replace, atomic and secret-free storage",
       keep_recent_chars: 300,
       context_window: 8000,
     });
-    assert.deepEqual(Object.keys(raw), [COMPACTION_SECTION], "exactly the documented section");
+    assert.deepEqual(
+      Object.keys(raw),
+      [COMPACTION_SECTION, "version"],
+      "exactly the documented section plus the schema version",
+    );
     assert.ok(!fs.existsSync(file + ".tmp"), "atomic temp-file write leaves no artifact");
 
     // A later write replaces the whole section (a dropped field is gone, not

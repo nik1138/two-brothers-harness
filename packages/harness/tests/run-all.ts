@@ -27,6 +27,7 @@ import "./output.test.ts";
 import "./shell.test.ts";
 import "./spill.test.ts";
 import "./settings.test.ts";
+import "./settingsschema.test.ts";
 import "./runtime.test.ts";
 import "./runevents.test.ts";
 import "./server.test.ts";

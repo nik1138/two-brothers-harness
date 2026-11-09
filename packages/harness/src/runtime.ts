@@ -417,8 +417,12 @@ export class RuntimeSettings {
     return { senior: copy(this.senior), junior: copy(this.junior) };
   }
 
-  /** Patch role fields; invalid providers are rejected; persists when backed. */
-  update(data: unknown): PublicRuntimeSettings {
+  /**
+   * Patch role fields in memory only; invalid providers are rejected exactly
+   * like `update()`. Used for the startup env overlay when the persisted store
+   * was written by a newer release and is read-only for this one.
+   */
+  applyInMemory(data: unknown): void {
     if (isRecord(data)) {
       for (const role of ["senior", "junior"] as const) {
         const patch = data[role];
@@ -433,6 +437,11 @@ export class RuntimeSettings {
         }
       }
     }
+  }
+
+  /** Patch role fields; invalid providers are rejected; persists when backed. */
+  update(data: unknown): PublicRuntimeSettings {
+    this.applyInMemory(data);
     this.store?.write(this.snapshot());
     return this.public();
   }
