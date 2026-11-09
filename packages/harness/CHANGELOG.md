@@ -88,6 +88,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   HTTP 409 by settings write routes — instead of downgrading the file. Files:
   `src/settings_store.ts`, `src/server.ts`, `src/runtime.ts`, `src/index.ts`;
   tests `tests/settingsschema.test.ts` (new) and `tests/server.test.ts`.
+- **Advisory repeat-tool-call guard** (port of deepseek-harness's
+  `packages/guard/repeat-tool-reminder`, MIT): every tool loop counts
+  consecutive identical calls (tool name + deep-key-sorted canonical
+  arguments) and appends a gentle reminder to the model-facing tool result at
+  3 repeats, then detailed reminders at 5 and 8. It never blocks a call;
+  unknown tools and denied calls count, untracked tools (`include`/`exclude`
+  `*`-wildcard patterns) are transparent, and a new node or user message starts
+  a fresh chain. Runtime `tool_completed`, stream `tool_result` and protocol
+  envelopes keep the tool's own output. Enabled by default;
+  `TWO_BROTHERS_REPEAT_GUARD=off` (`run`/`chat`/`tui`/`serve`) or
+  `HarnessOptions.repeatToolGuard: false` disables it. Files:
+  `src/repeatguard.ts`, `src/harness.ts`, `src/cli.ts`, `src/server.ts`,
+  `src/tui/app.ts`, `src/index.ts`; tests `tests/repeatguard.test.ts`.
 - **Provider retries: `retry-after-ms` and bounded backoff jitter** (port of
   pi-ai's `utils/provider-retry.ts`, MIT): a retryable response's
   `retry-after-ms` header (finite milliseconds) now wins over `Retry-After`

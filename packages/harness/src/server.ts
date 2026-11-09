@@ -349,6 +349,7 @@ import {
   type RunJob,
   type RunRecord,
 } from "./runtime.ts";
+import { repeatToolGuardFromEnv } from "./repeatguard.ts";
 import type { StreamEvent, TokenStreamEvent } from "./runstream.ts";
 import {
   Workspace,
@@ -1762,6 +1763,9 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       options.compaction,
       presetContextWindow(endpoints),
     );
+    // Advisory repeat guard: default on for every web run; the same
+    // `TWO_BROTHERS_REPEAT_GUARD=off` escape hatch as the CLI disables it.
+    const repeatToolGuard = repeatToolGuardFromEnv();
     const harness = new TwoBrothersHarness(cfg, {
       workspace,
       signal,
@@ -1772,6 +1776,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       endpoints,
       skills: skillCatalog(),
       ...(compaction ? { compaction } : {}),
+      ...(repeatToolGuard !== undefined ? { repeatToolGuard } : {}),
       spill: { root: spillRoot },
       ...(toolScopes ? { toolScopes } : {}),
       ...(hooks ? { hooks } : {}),

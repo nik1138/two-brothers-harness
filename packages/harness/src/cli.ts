@@ -106,6 +106,7 @@ import {
   SessionLayoutLockedError,
 } from "./sessionlayout.ts";
 import { mergeSeedPresets, presetById, presetIds, seedPresets } from "./presets.ts";
+import { repeatToolGuardFromEnv } from "./repeatguard.ts";
 import { toNdjsonLine, type StreamEvent } from "./runstream.ts";
 import {
   PluginManager,
@@ -1327,6 +1328,9 @@ async function runOnce(
     const compaction = compactionSettingsFromConfig(cfg);
     const providerWarnings = providerWarningSink(io, 3, textStyle);
     const native = nativeProviders(cfg, endpoints, providerWarnings);
+    // Advisory repeat guard: default on; `TWO_BROTHERS_REPEAT_GUARD=off`
+    // disables it for this invocation (run and every chat REPL turn).
+    const repeatToolGuard = repeatToolGuardFromEnv();
     const harness = new TwoBrothersHarness(cfg, {
       signal: controller.signal,
       onProviderWarning: providerWarnings,
@@ -1334,6 +1338,7 @@ async function runOnce(
       ...(endpoints ? { endpoints } : {}),
       ...native,
       ...(compaction ? { compaction } : {}),
+      ...(repeatToolGuard !== undefined ? { repeatToolGuard } : {}),
       ...(spillRoot ? { spill: { root: spillRoot } } : {}),
       ...(bindings ? { hooks: bindings.hooks } : {}),
       ...(resources?.skills ? { skills: resources.skills } : {}),

@@ -20,6 +20,10 @@ Local map for the package sources. Project rules live in
   `completions.ts`, `doctor.ts` — CLI surface.
 - Tool-facing modules: `workspace*.ts`, `shell.ts`, `mcp.ts`, `plugins.ts`,
   `skills.ts`, `commands.ts`, `toolschema.ts`, `permissions.ts`, `spill.ts`.
+- `repeatguard.ts` — advisory repeat-tool-call guard (deepseek-harness port),
+  one instance per tool loop: default thresholds `[3, 5, 8]`, model-facing
+  reminder only, `TWO_BROTHERS_REPEAT_GUARD=off` / `repeatToolGuard: false`
+  disable it.
 - `tui/` — the full-screen TUI modules.
 - `config.ts`, `presets.ts`, `settings_store.ts`, `secretbox.ts` — settings,
   presets, encrypted secrets; `prompts.ts` loads `../shared/prompts.json`.
@@ -63,6 +67,9 @@ Local map for the package sources. Project rules live in
 - Oversized plain-text tool results spill under a private root; `spill_read`
   validates random-hex ids and must never gain arbitrary-path access. Storage
   failure falls back to clipped output with a warning.
+- The repeat guard is advisory: its reminder may ride only the model-facing
+  tool result. Runtime `tool_completed`, stream `tool_result` and protocol
+  envelopes keep the tool's own output byte-for-byte.
 - Runtime dependencies are curated and exact-pinned (`zod`,
   `@earendil-works/pi-mcp`). A new runtime import needs a ledger entry in
   `docs/history/ts-rewrite-plan.md` and an owner decision.

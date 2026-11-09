@@ -1294,6 +1294,7 @@ per-role connection without leaving the terminal.
 | `TWO_BROTHERS_SHELL_PATH_EXTRA` | — (path-separated dirs prepended to the confined workspace-shell `PATH`, e.g. the directory holding the binaries your tool proofs call) |
 | `TWO_BROTHERS_TUI_KEYS_FILE` | `--keys-file` (TS package, `tui` only; pinned, never persisted) |
 | `TWO_BROTHERS_TUI_KEYS_WATCH` | `--keys-watch` (`1`/`true`/`yes`/`on`; TS package, `tui` only; pinned, never persisted) |
+| `TWO_BROTHERS_REPEAT_GUARD` | — (runtime-only, no flag: `off`/`0`/`false`/`no` disables the default-on advisory [repeat-tool-call guard](#repeat-tool-call-guard-ts-package) for `run`/`chat`/`tui`/`serve`; never persisted) |
 
 **Precedence:** CLI flags > environment variables > defaults. Persisted
 settings from `onboard` / the web Settings sit between env vars and defaults,
@@ -1584,6 +1585,35 @@ enables the senior verify pass:
   status markers and bounded selection, and neither takes a key. A TUI turn
   also writes each plan snapshot to the same sidecar (`todo_updated` only), so
   a restart with the same `--session-file` replays the plan.
+
+## Repeat-tool-call guard (TS package)
+
+Every tool loop carries an advisory loop-hygiene guard (port of
+deepseek-harness's `repeat-tool-reminder`, MIT). It counts consecutive
+attempts of the same tool with canonically identical arguments — deep key sort
+then `JSON.stringify`, so property order does not matter — and reminds the
+model instead of blocking it:
+
+- **First threshold (default 3):** a short reminder to analyze the previous
+  result before repeating the call.
+- **Later thresholds (default 5 and 8):** a detailed reminder naming the tool,
+  the consecutive count and a head-truncated argument preview (500 characters
+  by default; non-printable characters are `\uXXXX`-escaped).
+- **Placement:** the reminder is appended to the MODEL-FACING tool result only,
+  after the normal result/spill preview and separated by a blank line. The
+  runtime `tool_completed` record, the stream `tool_result` and the protocol
+  transcript keep the tool's own output.
+- **Chain rules:** every attempted call counts — unknown tools and calls
+  denied by a hook or approval included. A different tracked call restarts the
+  count, untracked tools are transparent (neither count nor reset), and a new
+  node or user message starts a fresh chain. There is no blocking threshold.
+
+The guard is on by default with thresholds `[3, 5, 8]`. Set
+`TWO_BROTHERS_REPEAT_GUARD=off` (`0`/`false`/`no` also work) for `run`,
+`chat`, `tui` or `serve` to disable it for that process. Library callers can
+pass `HarnessOptions.repeatToolGuard`: `false` disables it, while an options
+object overrides `thresholds`, `include`/`exclude` (`*`-wildcard tool-name
+patterns) and `argumentsPreviewChars`.
 
 ## Automation output (TS package)
 
