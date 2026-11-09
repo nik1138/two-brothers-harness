@@ -762,6 +762,21 @@ function prefillComposer(text: string): void {
 }
 
 /**
+ * A transcript bubble asked to quote itself. ChatView captured the selection
+ * (or fell back to the whole message) and formatted the Markdown blockquote;
+ * the composer appends it to the unsent draft without replacing or sending it.
+ */
+const composerQuote = ref<{ token: number; text: string } | null>(null)
+let composerQuoteToken = 0
+
+function appendQuoteToComposer(quote: string): void {
+  const value = typeof quote === 'string' ? quote : ''
+  if (value.trim() === '') return
+  composerQuoteToken += 1
+  composerQuote.value = { token: composerQuoteToken, text: value }
+}
+
+/**
  * One row state per session, derived from state the shell already owns: the
  * live-run pool, the newest run record, in-memory errors/retries, and the
  * persisted last-open stamps. Pure — `deriveSessionStatus` owns the precedence.
@@ -2665,6 +2680,7 @@ onUnmounted(() => {
         :on-rewind="requestRewind"
         :fork-from-here-for="forkFromHereFor"
         :on-fork-from-here="requestForkFromHere"
+        :on-quote="appendQuoteToComposer"
         :live-run-id="activeRun?.run_id ?? null"
         :resolve-approval="resolveApproval"
         :docked-approval-id="pendingApproval?.approvalId ?? null"
@@ -2786,6 +2802,7 @@ onUnmounted(() => {
         :steer-result="steerResult"
         :latest-audit="latestPromptAudit"
         :prefill="composerPrefill"
+        :quote="composerQuote"
         @submit="startNewRun"
         @steer="steerActiveRun"
         @stop="requestStop"
