@@ -778,6 +778,21 @@ matrix is **22 hermetic scenario blocks** (23 PASS lines — the `chat/resume`
 block reports chat and resume separately) plus the opt-in `real` skip
 (**23 PASS, 0 FAIL, 1 SKIP**).
 
+Wave 27–28 add the opt-in session directory layout and its migration, spill
+retention with root safety, line-ranged reads with `char_offset` continuation,
+settings schema v1 (including the unreadable-file write refusal), the advisory
+repeat-tool guard, workspace instruction loading and web message quotes. Tests:
+`tests/sessionlayout.test.ts`, `tests/serverlayout.test.ts`,
+`tests/sessionsmigrate.test.ts`, `tests/spill.test.ts`,
+`tests/spillcli.test.ts`, `tests/readrange.test.ts`,
+`tests/settingsschema.test.ts`, `tests/repeatguard.test.ts`,
+`tests/instructions.test.ts` and `web/tests/messageQuote.test.ts`, plus
+extended session/server/workspace suites. Final measured totals: package suite
+**2 056 tests** (2 049 pass and 7 platform skips on Windows; the WSL Linux pass
+is 2 055 pass with 1 skip), web suite **481/481**, hermetic CLI E2E **19/19**
+on sources and `--dist`, browser E2E **23 PASS, 0 FAIL, 1 opt-in `real` skip**,
+`npm run typecheck` green.
+
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
 subprocess against the mock provider — **19 scenarios**: consult, chat-repl,
