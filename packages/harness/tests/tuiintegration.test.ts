@@ -252,8 +252,8 @@ test("slash commands: /mode, /theme, /settings dialog and retry guard", async ()
   input.type("/settings");
   input.enter();
   assert.ok(
-    await waitFor(() => textOf(output).includes("PROVIDER SETTINGS")),
-    "provider settings dialog opens",
+    await waitFor(() => textOf(output).includes("SETTINGS")),
+    "settings dialog opens",
   );
   assert.ok(
     textOf(output).includes("API key: not set"),

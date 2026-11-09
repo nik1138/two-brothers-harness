@@ -2,6 +2,7 @@
 import { computed, onUnmounted, ref, watch } from 'vue'
 import type { RunCost, RunUsage } from '../types'
 import { costLabel, costTitle } from '../usageCost'
+import { cacheHitPercent, promptTokensOf } from '../usageCache'
 
 const props = defineProps<{
   /** A run this app follows is actively working on the selected session. */
@@ -58,11 +59,8 @@ const elapsed = computed(() => {
   return h ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`
 })
 
-const cachePct = computed(() => {
-  const u = props.usage
-  if (!u || u.input_tokens <= 0) return null
-  return Math.round((u.cached_tokens / u.input_tokens) * 100)
-})
+const promptTokens = computed(() => promptTokensOf(props.usage))
+const cachePct = computed(() => cacheHitPercent(props.usage))
 
 /** `~$0.0312 est.`, or null when the backend could not attribute a cost. */
 const costText = computed(() => costLabel(props.cost))
@@ -86,27 +84,36 @@ const visible = computed(() => ticking.value || props.usage !== null || props.tu
     </template>
     <template v-else>
       <span>{{ turns }} {{ turns === 1 ? 'turn' : 'turns' }}</span>
-      <template v-if="usage">
+    </template>
+    <!-- Counters appear as soon as the backend reports them (now live, after
+         each cooperation node), not only at run_end. -->
+    <template v-if="usage">
+      <span class="usage-sep" aria-hidden="true">·</span>
+      <span
+        >in {{ promptTokens.toLocaleString('en-US') }} / out
+        {{ usage.output_tokens.toLocaleString('en-US') }} tok</span
+      >
+      <template v-if="cachePct !== null">
         <span class="usage-sep" aria-hidden="true">·</span>
         <span
-          >in {{ usage.input_tokens.toLocaleString('en-US') }} / out
-          {{ usage.output_tokens.toLocaleString('en-US') }} tok</span
+          :title="`cached ${usage.cached_tokens.toLocaleString('en-US')} of ${promptTokens.toLocaleString('en-US')} prompt tokens`"
+          >cache {{ cachePct }}%</span
         >
-        <template v-if="cachePct !== null">
-          <span class="usage-sep" aria-hidden="true">·</span>
-          <span>cache {{ cachePct }}%</span>
-        </template>
-        <template v-if="usage.model_calls > 0">
-          <span class="usage-sep" aria-hidden="true">·</span>
-          <span
-            >{{ usage.model_calls }}
-            {{ usage.model_calls === 1 ? 'model call' : 'model calls' }}</span
-          >
-        </template>
-        <template v-if="costText !== null">
-          <span class="usage-sep" aria-hidden="true">·</span>
-          <span class="usage-cost" :title="costTitleText ?? undefined">{{ costText }}</span>
-        </template>
+      </template>
+      <template v-if="(usage.cache_write_tokens ?? 0) > 0">
+        <span class="usage-sep" aria-hidden="true">·</span>
+        <span>write {{ (usage.cache_write_tokens ?? 0).toLocaleString('en-US') }} tok</span>
+      </template>
+      <template v-if="usage.model_calls > 0">
+        <span class="usage-sep" aria-hidden="true">·</span>
+        <span
+          >{{ usage.model_calls }}
+          {{ usage.model_calls === 1 ? 'model call' : 'model calls' }}</span
+        >
+      </template>
+      <template v-if="costText !== null">
+        <span class="usage-sep" aria-hidden="true">·</span>
+        <span class="usage-cost" :title="costTitleText ?? undefined">{{ costText }}</span>
       </template>
     </template>
   </footer>

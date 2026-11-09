@@ -3,9 +3,10 @@ import { NButton } from 'naive-ui'
 import AppDialog from './AppDialog.vue'
 
 /**
- * `/permission` informational overlay: the approval model and where tool scopes
- * live. It reports the fixed policy only — it never invents current state and
- * changes nothing (settings stay in Settings).
+ * `/permission` informational overlay: the named permission presets, the
+ * approval model and where tool scopes live. It reports the fixed policy only —
+ * it never invents current state and changes nothing (the selector stays in
+ * Settings → Permissions, which the footer deep-links to).
  */
 
 const emit = defineEmits<{
@@ -18,7 +19,7 @@ const emit = defineEmits<{
   <AppDialog
     :show="true"
     size="md"
-    title="Permissions &amp; approvals"
+    title="Permissions"
     description="How privileged tool calls are approved in this workspace."
     @close="emit('close')"
   >
@@ -28,6 +29,16 @@ const emit = defineEmits<{
         <p>
           Tools that can change files or run commands are privileged. When the brothers need one,
           the run pauses and you get an approval prompt; nothing privileged runs until you allow it.
+        </p>
+      </section>
+
+      <section class="permission-section">
+        <h3>Permission presets</h3>
+        <p>
+          Settings → Permissions offers four named presets — Read only, Always ask, Workspace write
+          and Full access. Each one stores exactly one approval mode (readonly, ask, edits or
+          allow-all), so switching a preset never invents a second enforcement layer. Full access
+          is an explicit opt-in with a visible warning.
         </p>
       </section>
 
@@ -65,7 +76,7 @@ const emit = defineEmits<{
       <div class="permission-actions">
         <n-button attr-type="button" @click="emit('close')">Close</n-button>
         <n-button attr-type="button" type="primary" @click="emit('openSettings')">
-          Open settings
+          Open Permissions
         </n-button>
       </div>
     </template>

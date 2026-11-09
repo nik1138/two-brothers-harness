@@ -1008,6 +1008,7 @@ interface UsageView {
   output_tokens?: unknown;
   cached_tokens?: unknown;
   cache_write_tokens?: unknown;
+  prompt_tokens?: unknown;
   model_calls?: unknown;
 }
 
@@ -1019,13 +1020,17 @@ function usageInt(value: unknown): number {
 /** The token-usage footer: `tokens: in/out (cache N%, M model calls)`. */
 export function usageLine(usage: UsageView, style: CliStyle = plainCliStyle): string {
   const inp = usageInt(usage.input_tokens);
+  const prompt = usage.prompt_tokens === undefined ? inp : usageInt(usage.prompt_tokens);
   const out = usageInt(usage.output_tokens);
   const cached = usageInt(usage.cached_tokens);
+  const written = usageInt(usage.cache_write_tokens);
   const calls = usageInt(usage.model_calls);
-  const pct = inp ? Math.min(100, Math.round((cached * 100) / inp)) : 0;
+  const pct =
+    prompt > 0 ? Math.min(100, Math.round((cached * 100) / prompt)) : cached > 0 ? 100 : 0;
+  const write = written > 0 ? `, ${written} written` : "";
   return (
     `${style.paint("muted", "tokens:")} ` +
-    `${inp}/${out} (cache ${pct}%, ${calls} model calls)`
+    `${prompt}/${out} (cache ${pct}%${write}, ${calls} model calls)`
   );
 }
 

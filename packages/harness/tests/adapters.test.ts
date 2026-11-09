@@ -253,6 +253,7 @@ test("anthropic: text and tool_use blocks round-trip with usage", async () => {
     output_tokens: 30,
     cached_tokens: 40,
     cache_write_tokens: 10,
+    prompt_tokens: 170,
   });
 });
 
@@ -497,6 +498,7 @@ test("google: text skips thought parts, functionCall parses, usage subtracts cac
     output_tokens: 30,
     cached_tokens: 40,
     cache_write_tokens: 0,
+    prompt_tokens: 120,
   });
 });
 

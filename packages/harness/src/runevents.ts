@@ -224,6 +224,18 @@ export interface RunErrorEvent extends RuntimeEventMeta {
   message: string;
 }
 
+/**
+ * Additive live usage snapshot: emitted after a cooperation node finishes its
+ * provider calls, before the next node starts. Mirrors `run_end.usage` so a
+ * client can show tokens and the cache-hit percentage while the run works;
+ * the RunManager also folds it into the live run record. Consumers that do not
+ * know the type can ignore it safely.
+ */
+export interface UsageEvent extends RuntimeEventMeta {
+  type: "usage";
+  usage: Record<string, unknown>;
+}
+
 /** Terminal event: carries the final status and the per-run usage totals. */
 export interface RunEndEvent extends RuntimeEventMeta {
   type: "run_end";
@@ -246,6 +258,7 @@ export type RuntimeEvent =
   | PromptAuditEvent
   | ReasoningEvent
   | SteeringDroppedEvent
+  | UsageEvent
   | RunErrorEvent
   | RunEndEvent;
 

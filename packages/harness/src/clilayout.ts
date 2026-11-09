@@ -258,6 +258,10 @@ export interface FooterUsage {
   input_tokens?: unknown;
   output_tokens?: unknown;
   cached_tokens?: unknown;
+  /** Total prompt tokens when the family's input is uncached-only (Anthropic). */
+  prompt_tokens?: unknown;
+  /** Cache-write tokens (billed at the write premium, never a hit). */
+  cache_write_tokens?: unknown;
   model_calls?: unknown;
 }
 
@@ -286,13 +290,19 @@ export function humanFooter(
   const input = usageInt(usage.input_tokens);
   const output = usageInt(usage.output_tokens);
   const cached = usageInt(usage.cached_tokens);
+  const written = usageInt(usage.cache_write_tokens);
   const calls = usageInt(usage.model_calls);
-  if (input === 0 && output === 0 && cached === 0 && calls === 0) return null;
-  const percent = input > 0 ? Math.min(100, Math.round((cached * 100) / input)) : 0;
+  if (input === 0 && output === 0 && cached === 0 && written === 0 && calls === 0) return null;
+  // Anthropic/Gemini report uncached input; prompt_tokens is their honest total.
+  // OpenAI-compatible runs omit it, so input_tokens is already the prompt total.
+  const prompt = usage.prompt_tokens === undefined ? input : usageInt(usage.prompt_tokens);
+  const percent =
+    prompt > 0 ? Math.min(100, Math.round((cached * 100) / prompt)) : cached > 0 ? 100 : 0;
   const parts: string[] = [
-    `${style.paint("muted", "tokens")} ${input} in / ${output} out`,
+    `${style.paint("muted", "tokens")} ${prompt} in / ${output} out`,
   ];
   if (cached > 0) parts.push(`${style.paint("muted", "cache")} ${percent}%`);
+  if (written > 0) parts.push(`${style.paint("muted", "write")} ${written}`);
   parts.push(`${calls} ${calls === 1 ? "call" : "calls"}`);
   if (cost !== null) {
     parts.push(`${style.paint("muted", "cost")} ${style.paint("strong", `$${cost.toFixed(4)}`)}`);

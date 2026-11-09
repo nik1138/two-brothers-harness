@@ -1,13 +1,14 @@
-// Pure model for Settings → Approvals: the operator approval modes, their
-// honest copy, fail-closed normalization of the backend payload, and the save
-// helper. No DOM and no Vue imports, so `tests/approvalPolicy.test.ts` covers
-// it directly:
+// Pure model for Settings → Permissions: the named permission presets, the
+// operator approval modes they apply, their honest copy, fail-closed
+// normalization of the backend payload, and the save helper. No DOM and no Vue
+// imports, so `tests/approvalPolicy.test.ts` covers it directly:
 //   node --import ./tests/register-ts.mjs --test tests/approvalPolicy.test.ts
 //
-// The mode vocabulary mirrors `packages/harness/src/permissions.ts`
-// (`ApprovalMode` / `APPROVAL_MODE_INFO`). It is duplicated here because the
-// web workspace is a separate Vite app that never imports backend sources;
-// keep the names and the truthful copy in sync when the server enum changes.
+// The preset/mode vocabulary mirrors `packages/harness/src/permissions.ts`
+// (`PermissionPreset` / `PERMISSION_PRESET_INFO` / `ApprovalMode`). It is
+// duplicated here because the web workspace is a separate Vite app that never
+// imports backend sources; keep the names and the truthful copy in sync when
+// the server enum changes.
 
 import type { ApprovalMode, ApprovalPolicyView } from './types'
 
@@ -77,6 +78,124 @@ export function approvalModeCopy(mode: ApprovalMode): ApprovalModeCopy {
 /** The visible destructive warning for a mode, or null when it keeps asking. */
 export function approvalModeDanger(mode: ApprovalMode): string | null {
   return approvalModeCopy(mode).danger ?? null
+}
+
+// ---------------------------------------------------------------------------
+// Named permission presets (deepseek-harness style)
+// ---------------------------------------------------------------------------
+
+/** Every selectable preset, most restrictive first. */
+export const PERMISSION_PRESETS = [
+  'read-only',
+  'ask',
+  'workspace-write',
+  'danger-full-access',
+] as const
+export type PermissionPreset = (typeof PERMISSION_PRESETS)[number]
+
+/** Reserved presentation value for a stored mode that matches no preset. */
+export const CUSTOM_PERMISSION_PRESET = 'custom'
+
+/** One preset's truthful presentation and the mode it selects. */
+export interface PermissionPresetCopy {
+  preset: PermissionPreset
+  /** The persisted `approval_policy.mode` this preset applies. */
+  mode: ApprovalMode
+  label: string
+  /** One truthful sentence about what runs without asking. */
+  description: string
+  /** Destructive warning; present only for the fully permissive preset. */
+  danger?: string
+}
+
+export const PERMISSION_PRESET_COPY: Readonly<Record<PermissionPreset, PermissionPresetCopy>> = {
+  'read-only': {
+    preset: 'read-only',
+    mode: 'readonly',
+    label: 'Read only',
+    description:
+      'Reads run freely. Writes, edits, deletes and shell commands are denied without asking.',
+  },
+  ask: {
+    preset: 'ask',
+    mode: 'ask',
+    label: 'Always ask',
+    description:
+      'Reads run freely. Writes, edits, deletes and shell commands ask before they run.',
+  },
+  'workspace-write': {
+    preset: 'workspace-write',
+    mode: 'edits',
+    label: 'Workspace write',
+    description:
+      'Reads, writes and edits run freely inside the workspace. Deletes and shell commands ask before they run.',
+  },
+  'danger-full-access': {
+    preset: 'danger-full-access',
+    mode: 'allow-all',
+    label: 'Full access',
+    description: 'Everything runs without asking, including deletes and shell commands.',
+    danger:
+      'Use only in a workspace you trust: a mistaken model step becomes an irreversible change.',
+  },
+}
+
+/** Canonical comparison key for a preset/mode spelling. */
+function presetKey(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+}
+
+const PRESET_ALIASES: Readonly<Record<string, PermissionPreset>> = {
+  'read-only': 'read-only',
+  readonly: 'read-only',
+  'readonly-mode': 'read-only',
+  ask: 'ask',
+  'workspace-write': 'workspace-write',
+  workspacewrite: 'workspace-write',
+  edits: 'workspace-write',
+  edit: 'workspace-write',
+  'workspace-edits': 'workspace-write',
+  'danger-full-access': 'danger-full-access',
+  'full-access': 'danger-full-access',
+  fullaccess: 'danger-full-access',
+  'allow-all': 'danger-full-access',
+  allowall: 'danger-full-access',
+}
+
+/** Strict preset lookup for command input; `null` for anything else. */
+export function normalizePermissionPreset(value: unknown): PermissionPreset | null {
+  if (typeof value !== 'string') return null
+  const key = presetKey(value)
+  // Guard inherited keys ("constructor", "__proto__", …): a bare lookup would
+  // return a function and violate the PermissionPreset | null contract.
+  return Object.prototype.hasOwnProperty.call(PRESET_ALIASES, key) ? PRESET_ALIASES[key]! : null
+}
+
+/** The preset copy that presents one stored mode (every current mode maps). */
+export function permissionPresetOf(mode: ApprovalMode): PermissionPresetCopy {
+  const id = permissionPresetId(mode)
+  // Fail closed to the asking preset for a future/unknown mode rather than
+  // inventing a permissive label.
+  return id === CUSTOM_PERMISSION_PRESET ? PERMISSION_PRESET_COPY.ask : PERMISSION_PRESET_COPY[id]
+}
+
+/** The preset id that presents one stored mode, or `custom` if none matches. */
+export function permissionPresetId(mode: unknown): PermissionPreset | typeof CUSTOM_PERMISSION_PRESET {
+  if (!isApprovalMode(mode)) return CUSTOM_PERMISSION_PRESET
+  for (const preset of PERMISSION_PRESETS) {
+    if (PERMISSION_PRESET_COPY[preset].mode === mode) return preset
+  }
+  return CUSTOM_PERMISSION_PRESET
+}
+
+/** The visible destructive warning for a preset, or null when it keeps asking. */
+export function permissionPresetDanger(preset: PermissionPreset): string | null {
+  return PERMISSION_PRESET_COPY[preset].danger ?? null
 }
 
 /** What the settings dialog knows about the server's approval policy. */

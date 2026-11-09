@@ -309,12 +309,13 @@ flag/env/help/warning/invalid-exit-2 cases; the persisted section's
 fail-closed/corrupt round-trip and other-section preservation live in
 `tests/settings.test.ts`, while the `GET`/`PUT /api/settings` round-trip with
 an invalid mode as 400 and the run path honoring the mode live in
-`tests/server.test.ts`); `tests/tuiapprovalmodes.test.ts` (6 tests: the default
-dialog states `ask` and offers the four persisted modes, a chosen mode is
-written through the settings store, Enter on a freshly opened dialog only
-closes it without persisting, a persisted `allow-all` shows its danger
-warning, a pinned mode offers only Close, and typed `/permission <mode>`
-applies valid modes while refusing unknown ones); `tests/tuirecall.test.ts` (3 tests through
+`tests/server.test.ts`); `tests/tuiapprovalmodes.test.ts` (7 tests: the default
+dialog states the Always ask preset and offers the four presets, a chosen
+preset is written through the settings store, `/settings` states the effective
+preset and links to the Permissions dialog, Enter on a freshly opened dialog
+only closes it without persisting, a persisted Full access shows its danger
+warning, a pinned mode offers only Close, and typed `/permission <preset|mode>`
+applies valid values while refusing unknown ones); `tests/tuirecall.test.ts` (3 tests through
 the assembled fake-TTY app: loaded history recall, byte-exact draft
 stash/restore, history file never appended by navigation, only accepted
 submissions recorded, and the multiline only-at-the-edges rule);
@@ -669,7 +670,17 @@ caching:** `tests/anthropiccache.test.ts` (9: exact breakpoint placement,
 plain vs tool-loop, newest-turn marker movement, no empty system block,
 streaming parity, cached-read vs cache-write accounting, OpenAI/Google body
 byte identity), with the intentional Anthropic wire change pinned in
-`tests/adapters.test.ts` and `tests/thinkingpassback.test.ts`. **Session fork
+`tests/adapters.test.ts` and `tests/thinkingpassback.test.ts`. **Wave 29
+permission presets, prompt contract and live cache:** `tests/approvalmodes.test.ts`
+(+3: preset catalog/mode mapping, aliases, fail-closed unknown), the TUI suite
+above, `tests/prompts.test.ts` (+1: one JSON-object contract, no literal
+example fence, no code-owned tool headings), `tests/harness.test.ts` (+1:
+`usage` events precede the result and match the final counters),
+`tests/runtime.test.ts` (+1: the live record updates before `run_end`), the
+web preset/composer tests above, `web/tests/permissionsUi.test.ts` and
+`web/tests/usageCache.test.ts` (4: OpenAI fallback, Anthropic/Gemini
+prompt-total denominator, fully cached 100%, malformed/clamped counters).
+**Session fork
 and self-contained HTML export:** `tests/sessionfork.test.ts` (20: verbatim
 prefix copy, dense-`seq`/resume, generated and explicit names/titles, the
 `parent` sidecar link, typed errors, metadata-write rollback, empty-session
@@ -789,11 +800,13 @@ repeat-tool guard, workspace instruction loading and web message quotes. Tests:
 `tests/instructions.test.ts` and `web/tests/messageQuote.test.ts`, plus
 extended session/server/workspace suites. The review hardening adds concurrent
 lock-reclaim/stalled-write tests (`tests/sessionlayout.test.ts`) and multi-line
-astral continuation tests (`tests/readrange.test.ts`). Final measured totals:
-package suite **2 063 tests** (2 056 pass and 7 platform skips on Windows; the
-WSL Linux pass is 2 062 pass with 1 skip), web suite **481/481**, hermetic CLI
-E2E **19/19** on sources and `--dist`, browser E2E **23 PASS, 0 FAIL, 1 opt-in
-`real` skip**, `npm run typecheck` green.
+astral continuation tests (`tests/readrange.test.ts`). Wave 29 adds the
+permission presets, prompt-contract tests and live usage/cache coverage; final
+measured totals for that tree: package suite **2 072 tests** (2 065 pass and 7
+platform skips on Windows), web suite **493/493**, hermetic CLI E2E **19/19**
+on sources and `--dist`, browser E2E **23 PASS, 0 FAIL, 1 opt-in `real` skip**,
+`npm run typecheck` green. The Wave 29 WSL Linux pass is **2 071 pass with 1
+POSIX-specific skip** (Windows reports 2 065 pass with 7 platform skips).
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
@@ -893,13 +906,18 @@ recall (`tests/recall.test.ts`, 7 tests: the versioned bounded store with
 consecutive dedupe, the fail-soft read of corrupt/wrong-version/blocked
 storage, record-only-on-acceptance, the newest-first browsing state machine
 with byte-exact draft stash/restore, and the caret/IME/repeat/modifier-safe
-key classifier), the Settings → Approvals model
-(`tests/approvalPolicy.test.ts`, 12 tests: the honest copy per mode, the
-`allow-all` danger warning, strict mode normalization, the fail-soft
+key classifier), the Settings → Permissions model
+(`tests/approvalPolicy.test.ts`, 16 tests: the four-preset catalog and its
+stored-mode mapping, the honest copy per preset, the Full access danger
+warning, strict preset/mode alias normalization, the fail-soft
 `GET /api/settings` section (old backend = unsupported + Ask), the save
 patch omitted for an unsupported backend and for a server-pinned mode (a
 pin is never persisted by a normal save), and the pinned/unsupported
-read-only reasons), the keybinding store/model (`tests/keybindings.test.ts`,
+read-only reasons), the source-level Permissions wiring
+(`tests/permissionsUi.test.ts`, 4 tests: renamed Settings section +
+initial-section prop, preset cards with stored mode/danger, App/Composer
+deep-links, and the live `usage` frame updating the footer rather than the
+timeline), the keybinding store/model (`tests/keybindings.test.ts`,
 13 tests: defaults and canonical chords, validation (Mod required, printable
 key, Alt/duplicate/reserved refusal with the complete documented reserved set
 pinned by a table-driven test), the versioned bounded fail-soft store and its

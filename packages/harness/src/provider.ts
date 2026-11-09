@@ -368,6 +368,18 @@ export interface UsageTotals {
    * always emits it.
    */
   cache_write_tokens?: number;
+  /**
+   * TOTAL prompt tokens for families whose `input_tokens` is only the uncached
+   * part (Anthropic: `input + cached + write`; Gemini: `input + cached`).
+   * OpenAI-compatible payloads already make `input_tokens` the prompt total, so
+   * they deliberately omit this field and a display falls back to
+   * `input_tokens`.
+   *
+   * Optional: pre-fix records and OpenAI-compatible runs omit it. This is the
+   * honest denominator for a cache-hit percentage across families:
+   * `cached_tokens / prompt_tokens`.
+   */
+  prompt_tokens?: number;
 }
 
 /** The zero usage aggregate: every `USAGE_KEYS` counter at 0. */
@@ -421,11 +433,25 @@ export function extractUsage(data: unknown): Omit<UsageTotals, "model_calls"> {
 /** Sum usage dicts (e.g. the senior's and junior's snapshots) into one. */
 export function mergeUsage(...usages: Array<Partial<UsageTotals> | null | undefined>): UsageTotals {
   const total = emptyUsage();
+  // Mixed families: an OpenAI-compatible role omits prompt_tokens because its
+  // input_tokens already is the prompt total, while an Anthropic/Gemini role
+  // sends the explicit total. Once any role provides the normalized counter,
+  // use input_tokens as the fallback for the others so the merged denominator
+  // still covers both roles instead of silently dropping the OpenAI half.
+  const normalized = usages.some((usage) => usage?.prompt_tokens !== undefined);
+  let promptTokens = 0;
   for (const usage of usages) {
     for (const key of USAGE_KEYS) {
       total[key] = (total[key] ?? 0) + coerceInt(usage?.[key]);
     }
+    if (normalized) {
+      promptTokens +=
+        usage?.prompt_tokens !== undefined
+          ? coerceInt(usage.prompt_tokens)
+          : coerceInt(usage?.input_tokens);
+    }
   }
+  if (normalized) total.prompt_tokens = promptTokens;
   return total;
 }
 
@@ -433,13 +459,22 @@ export function mergeUsage(...usages: Array<Partial<UsageTotals> | null | undefi
 export class UsageTracker {
   private totals = emptyUsage();
 
-  record(inputTokens = 0, outputTokens = 0, cachedTokens = 0, cacheWriteTokens = 0): void {
+  record(
+    inputTokens = 0,
+    outputTokens = 0,
+    cachedTokens = 0,
+    cacheWriteTokens = 0,
+    promptTokens?: number,
+  ): void {
     this.totals.model_calls += 1;
     this.totals.input_tokens += coerceInt(inputTokens);
     this.totals.output_tokens += coerceInt(outputTokens);
     this.totals.cached_tokens += coerceInt(cachedTokens);
     this.totals.cache_write_tokens =
       (this.totals.cache_write_tokens ?? 0) + coerceInt(cacheWriteTokens);
+    if (promptTokens !== undefined) {
+      this.totals.prompt_tokens = (this.totals.prompt_tokens ?? 0) + coerceInt(promptTokens);
+    }
   }
 
   /** Record one call's usage straight from an OpenAI-compatible response JSON. */
@@ -1920,11 +1955,16 @@ function anthropicCompletion(data: unknown, url: string): ToolChatResponse {
  */
 function anthropicUsage(data: unknown): Omit<UsageTotals, "model_calls"> {
   const usage = isRecord(data) && isRecord(data.usage) ? data.usage : {};
+  const input = coerceInt(usage.input_tokens);
+  const cached = coerceInt(usage.cache_read_input_tokens);
+  const written = coerceInt(usage.cache_creation_input_tokens);
   return {
-    input_tokens: coerceInt(usage.input_tokens),
+    input_tokens: input,
     output_tokens: coerceInt(usage.output_tokens),
-    cached_tokens: coerceInt(usage.cache_read_input_tokens),
-    cache_write_tokens: coerceInt(usage.cache_creation_input_tokens),
+    cached_tokens: cached,
+    cache_write_tokens: written,
+    // Anthropic's input_tokens is uncached only; the prompt total is all three.
+    prompt_tokens: input + cached + written,
   };
 }
 
@@ -2249,6 +2289,7 @@ export class AnthropicProvider extends BaseHttpProvider {
       usage.output_tokens,
       usage.cached_tokens,
       usage.cache_write_tokens,
+      usage.prompt_tokens,
     );
   }
 
@@ -2387,12 +2428,15 @@ function googleCompletion(data: unknown, url: string): ToolChatResponse {
  */
 function googleUsage(data: unknown): Omit<UsageTotals, "model_calls"> {
   const meta = isRecord(data) && isRecord(data.usageMetadata) ? data.usageMetadata : {};
+  const prompt = Math.max(0, coerceInt(meta.promptTokenCount));
   const cached = coerceInt(meta.cachedContentTokenCount);
   return {
-    input_tokens: Math.max(0, coerceInt(meta.promptTokenCount) - cached),
+    input_tokens: Math.max(0, prompt - cached),
     output_tokens: coerceInt(meta.candidatesTokenCount) + coerceInt(meta.thoughtsTokenCount),
     cached_tokens: cached,
     cache_write_tokens: 0,
+    // Gemini's promptTokenCount already includes the cached content.
+    prompt_tokens: prompt,
   };
 }
 
@@ -2536,7 +2580,13 @@ export class GoogleProvider extends BaseHttpProvider {
 
   protected recordUsage(data: unknown): void {
     const usage = googleUsage(data);
-    this.usage.record(usage.input_tokens, usage.output_tokens, usage.cached_tokens, 0);
+    this.usage.record(
+      usage.input_tokens,
+      usage.output_tokens,
+      usage.cached_tokens,
+      0,
+      usage.prompt_tokens,
+    );
   }
 
   protected describeError(status: number, detail: string, statusText: string): ProviderErrorDetail {

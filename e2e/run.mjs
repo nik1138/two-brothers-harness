@@ -2529,7 +2529,7 @@ async function scenarioComposerSeats(runner) {
     assert.ok(modelsText.includes(`J ${SEAT_JUNIOR}`), `junior model missing from seats: ${modelsText}`)
     assert.equal(
       (await permission.innerText()).replace(/\s+/g, ' ').trim(),
-      'Permissions Ask in app',
+      'Permissions Always ask',
     )
     // no audited provider call yet: the context seat has no data and must hide
     assert.equal(await contextSeat.count(), 0, 'the context seat must hide without an audit')

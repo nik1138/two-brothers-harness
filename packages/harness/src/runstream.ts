@@ -144,6 +144,19 @@ export interface ResultStreamEvent {
   at: string;
 }
 
+/**
+ * Additive live usage snapshot: emitted after a cooperation node finishes its
+ * provider calls, before the next node starts. It carries the same counters as
+ * `result.usage`/`run_end.usage`, so a TUI or web consumer can show tokens and
+ * the cache-hit percentage while the run is still working. Consumers that do
+ * not know the type can ignore it safely.
+ */
+export interface UsageStreamEvent {
+  type: "usage";
+  usage: Record<string, unknown>;
+  at: string;
+}
+
 /** One record of the in-process run stream (`run --stream` = these as NDJSON). */
 export type StreamEvent =
   | RunStatusStreamEvent
@@ -152,6 +165,7 @@ export type StreamEvent =
   | TokenStreamEvent
   | ToolCallStreamEvent
   | ToolResultStreamEvent
+  | UsageStreamEvent
   | ResultStreamEvent;
 
 /** Cap for one string field, in characters (dsh: 8 KiB). */

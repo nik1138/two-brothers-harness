@@ -930,13 +930,22 @@ export function reduceModelEvent(
       }
       return { model: clearLiveThinking(model), status: "running…" };
     }
+    case "usage":
+      // Live counters are projected by the app into the side panel/status bar;
+      // the reducer itself has no chat row to add. Keeping the case explicit
+      // documents that the event is known and intentionally display-only.
+      return { model };
     case "result": {
       const usage = event.result.usage ?? {};
       const input = Number(usage.input_tokens ?? 0) || 0;
+      const prompt = Number(usage.prompt_tokens ?? input) || input;
       const output = Number(usage.output_tokens ?? 0) || 0;
+      const cached = Number(usage.cached_tokens ?? 0) || 0;
+      const percent =
+        prompt > 0 ? Math.min(100, Math.round((cached * 100) / prompt)) : cached > 0 ? 100 : 0;
       return {
         model: finalizeStreamingDrafts(clearLiveThinking(model)),
-        status: `ready — ${input}/${output} tokens (in/out)`,
+        status: `ready — ${prompt}/${output} tokens (in/out) · cache ${percent}%`,
       };
     }
     default:

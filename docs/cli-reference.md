@@ -209,8 +209,10 @@ as a compact display-only panel (✓/▸/○ markers, at most four rows plus an
 honest `+N more` tail — see
 [Plan and todo function](#plan-and-todo-function-ts-package));
 it takes no keys. Slash input: `/mode consult|work`, `/models`,
-`/sessions`, `/theme dark|light|system`, `/settings`, `/provider` (the provider
-connect surface — see [Provider connection](#provider-connection-provider)),
+`/sessions`, `/theme dark|light|system`, `/settings` (provider summary,
+effective permission preset and the **Connect provider…** / **Permissions…**
+actions), `/provider` (the provider connect surface — see
+[Provider connection](#provider-connection-provider)),
 `/retry`, `/help`,
 `/commands`, `/exit`, plus discovered `<name>.md` templates (unknown names are
 never submitted as tasks). The built-in prompts `/plan <objective>`,
@@ -218,9 +220,10 @@ never submitted as tasks). The built-in prompts `/plan <objective>`,
 built-in actions `/compact` (between turns — compacts through the configured
 senior endpoint and rewrites the session file, the visible transcript is
 unchanged), `/export [path]` (Markdown; in-memory sessions need a path),
-`/status`, `/permission` (the effective approval mode with its description, the
-bound workspace, the decision keys and this process's session allows — see
-[Approvals in the TUI](#approvals-in-the-tui); an unbound run says so plainly)
+`/status`, `/permission` (the effective permission preset, its stored mode and
+description, the bound workspace, the decision keys and this process's session
+allows — see [Approvals in the TUI](#approvals-in-the-tui); an unbound run
+says so plainly)
 and `/new` (in-memory session; on-disk sessions are refused
 honestly) are
 performed locally and never submitted as tasks — see
@@ -350,15 +353,17 @@ workspace root:
 - An invalid root is a startup error: exit `2` before the alternate screen
   opens, with an `[error]` line naming the problem — `workspace root does not
   exist: <dir>` or `workspace root is not a directory: <dir>`.
-- `/permission` states the effective [approval mode](#approval-modes) and its
-  description (with the `allow-all` danger warning), the bound root, the
-  decision keys and the in-memory session allows — or says the run has no
-  workspace and no approval broker. Without a `--approval-mode` pin its
-  buttons persist one of the four modes to `sessions/settings.json` (it
-  applies from the next workspace turn); with a pin it states that the mode is
-  pinned for this process, offers only Close, and a typed change is refused
-  with that same honest reason. `/permission <mode>` applies one directly
-  (unknown values are refused with the allowed list).
+- `/permission` states the effective permission preset, the stored
+  [approval mode](#approval-modes) it applies and its description (with the
+  Full access danger warning), the bound root, the decision keys and the
+  in-memory session allows — or says the run has no workspace and no approval
+  broker. Without a `--approval-mode` pin its buttons persist one of the four
+  presets to `sessions/settings.json` (it applies from the next workspace
+  turn); with a pin it states that the mode is pinned for this process, offers
+  only Close, and a typed change is refused with that same honest reason.
+  `/permission <preset|mode>` applies one directly (unknown values are refused
+  with the allowed list). `/settings` shows the same effective preset and has
+  a **Permissions…** action that opens this dialog.
 
 #### Approvals in the TUI
 
@@ -987,10 +992,10 @@ but stores `meta.json` and `events.jsonl` inside
 | `GET/POST/DELETE /api/sessions/{name}/undo/{run_id}` | run-scoped workspace edit undo (wave 23) over the persisted `<sessions>/undo` side artifact (survives a backend restart). `GET` previews every file the run mutated against the LIVE workspace as `{session, run_id, statuses, counts, workspace_root, created_at, omitted?}` with per-file status `applicable` / `created` / `deleted` / `changed-since` / `skipped` / `missing`; `POST` applies only the reversible entries (each file is re-classified immediately before it is touched, so a file changed after the preview is refused, never overwritten) and returns `{session, run_id, workspace_root, applied, refused, failed, files, counts, omitted?}` with per-file `applied`/`refused`/`failed` + the driving `preview_status`; a restored POSIX file also regains its captured mode (and ownership only where the process may set it) with `mode_restored`/`ownership_restored` disclosed per file — a best-effort failure keeps the byte restore `applied`; `DELETE` discards the record and collects blobs no surviving record references, returning the additive `blobs_removed?` count and `gc_diagnostics?` (a shared content-addressed blob survives until its last record is gone). Records are bounded: the newest 20 per session and records older than 30 days are pruned when a capture closes, and active runs are never pruned. Only workspace-bound `serve` runs capture (recorder fail-soft and closed in the run's `finally`); shell-made changes and untracked files are out of scope. Errors: 404 unknown session or no undo record for the run, 409 while a run for that id is still active in memory or the record is unusable (corrupt/oversized/unsupported version, or its recorded workspace is no longer registered — the record is matched to a registered workspace by canonical path on every request), 422 unexpected store IO |
 | `GET /PUT /api/settings` | per-role Senior/Junior provider/model/base URL/API key (keys are write-only; responses show `api_key_set` only). Both carry the additive top-level `approval_policy` section for the [approval mode](#approval-modes): `GET` returns `{mode, pinned}` (the effective mode, and whether a `serve` flag/env pin overrides the persisted one), `PUT` accepts `{"approval_policy": {"mode": "ask\|readonly\|edits\|allow-all"}}` — a strict enum (400 for an unknown mode, 500 if the atomic settings write fails, absent leaves the persisted mode untouched) and returns the same view. The mode is stored in `sessions/settings.json`; a per-run flag/env pin is never written there. Both directions also carry the additive top-level `compaction` section: `GET` returns `{threshold_chars, threshold_tokens, keep_recent_chars, context_window}` as per-field `{persisted, effective, source}` (`source` is `options`/`flag`/`persisted`/`preset`/`absent`; `effective` 0 means not configured, so the harness default still applies) plus `force` (the config/options one-shot `--compact`; a persisted force is deliberately out of scope) and `pinned` (a flag/env or `ServerOptions` owns at least one field); `PUT` accepts the budget object (non-negative integers; `0` means off for a threshold and unknown for the context window; unknown keys, non-integers and negatives are a `400` before any mutation, a failed atomic write is a `500`, a present section replaces the stored section wholesale and `{}` clears it, and an absent section leaves it untouched), returning the refreshed view. The persisted section is one layer of the run's compaction precedence: an explicit `ServerOptions.compaction` wins wholesale, then an explicitly-set non-zero `--compact*` / `--context-window` flag or `TWO_BROTHERS_COMPACT*` / `TWO_BROTHERS_CONTEXT_WINDOW` env field (provenance-tracked, so the 40 000 keep-recent default never shadows a saved value), then the saved section, then the smaller of the two resolved provider-preset `context_window` values (only for `context_window`; `source: "preset"`), then absent. A per-run flag/env pin is never written to the file; the view reports it instead of pretending a save took effect |
 | `POST /api/runs` | start a background run (`{"task", "mode"?, "session"?, "provider"?, "workspace_id"?, "stream_tokens"?}` → `202 {"run_id", "session", "status"}`); an omitted `workspace_id` inherits the session's linked workspace from its metadata sidecar (an explicit value wins, and either id must be registered); a leading `/name` command is expanded and `@skill:`/`@file` mentions are attached before the run (see [Composer mentions and slash commands](#composer-mentions-and-slash-commands)); `stream_tokens: true` additionally streams live `token` frames on the run SSE endpoint (strict boolean, default off); runs are FIFO — one active, the rest `queued`, so a submission for a session that already has a live run is still accepted (`202` with `status: "queued"`) and starts after the earlier one finishes |
-| `GET /api/runs`, `GET /api/runs/{run_id}` | list runs / run status (`queued`/`running`/`waiting`/`completed`/`failed`/`cancelled`); records carry a per-run `usage` object (`model_calls`, `input_tokens`, `output_tokens`, `cached_tokens`, `cache_write_tokens`; zeros while running) plus an additive `cost` object (`{currency: "USD", total, model}` or `null` — computed at run completion, recomputed from the persisted usage for sidecar-rebuilt terminal records, and `null` when the usage cannot be attributed to one priced model). Records also carry, additively, `steering_pending` (steering texts waiting for the run's next step, present only while live and non-empty) and `steering_dropped` (`dropped` texts discarded at the per-run envelope cap; present only when > 0) |
+| `GET /api/runs`, `GET /api/runs/{run_id}` | list runs / run status (`queued`/`running`/`waiting`/`completed`/`failed`/`cancelled`); records carry a per-run `usage` object (`model_calls`, `input_tokens`, `output_tokens`, `cached_tokens`, `cache_write_tokens`, and the optional normalized `prompt_tokens` for Anthropic/Gemini; live counters update after each cooperation node, zeros only before the first call) plus an additive `cost` object (`{currency: "USD", total, model}` or `null` — computed at run completion, recomputed from the persisted usage for sidecar-rebuilt terminal records, and `null` when the usage cannot be attributed to one priced model). Records also carry, additively, `steering_pending` (steering texts waiting for the run's next step, present only while live and non-empty) and `steering_dropped` (`dropped` texts discarded at the per-run envelope cap; present only when > 0) |
 | `POST /api/runs/{run_id}/stop` | cooperative stop (pending approvals are denied); a `queued` run is marked cancelled immediately, without waiting for a worker |
 | `POST /api/runs/{run_id}/steer` | mid-run operator steering: queue `{"text": "..."}` for an ACTIVE run — `running`, or `waiting` on an approval (applied at the next step after it resolves). Accepted `200 {"run_id", "status", "pending"}` (`pending` = steering texts now waiting, 1–8); the text is trimmed, must be non-empty and at most 4 000 characters (`400` otherwise; a non-string `text` is the standard `400 invalid request body`), an unknown run is `404`, and a queued/terminal run or a full pending queue is an honest `409` (the detail names the run's status, or `steering queue is full …`). Acceptance emits **no** event: the steer is appended to the shared context as an ordinary `user`→`senior` `message` envelope (payload text prefixed `[[OPERATOR STEER]] `) when the harness reaches the next node boundary/tool-loop iteration, so SSE consumers see the normal `envelope` frame with its dense `seq` at that moment. Pending steering is in-memory only: a stopped run appends nothing more and drops what was queued, and a backend restart loses the queue (`404` for the run id) |
-| `GET /api/runs/{run_id}/events?after=N` | SSE of typed runtime events (`run_status`, `envelope`, `tool_started`, `tool_completed`, `approval_requested`, `approval_resolved`, `approval_auto_allowed`, `approval_auto_denied`, `todo_updated`, `prompt_audit`, `reasoning`, `steering_dropped`, `run_error`, `run_end`); reconnectable via `after`. `approval_requested` additively carries `reason` and a bounded `detail` (`{kind, diff?, addedLines?, removedLines?, command?, truncated?}` preview) when the request has one; `todo_updated` carries the model's complete sanitized plan snapshot; `steering_dropped` carries `{dropped, applied, limit}` when a 200-accepted steer later hit the per-run envelope cap. When the run was started with `stream_tokens`, the same stream additionally carries ephemeral named `token` frames (`event: token`, data `{type, run_id, role, kind: "text"\\|"thinking", delta, at}`) with no SSE id — they are live-only, never persisted and never replayed |
+| `GET /api/runs/{run_id}/events?after=N` | SSE of typed runtime events (`run_status`, `envelope`, `tool_started`, `tool_completed`, `approval_requested`, `approval_resolved`, `approval_auto_allowed`, `approval_auto_denied`, `todo_updated`, `prompt_audit`, `reasoning`, `usage`, `steering_dropped`, `run_error`, `run_end`); reconnectable via `after`. `approval_requested` additively carries `reason` and a bounded `detail` (`{kind, diff?, addedLines?, removedLines?, command?, truncated?}` preview) when the request has one; `todo_updated` carries the model's complete sanitized plan snapshot; `steering_dropped` carries `{dropped, applied, limit}` when a 200-accepted steer later hit the per-run envelope cap. When the run was started with `stream_tokens`, the same stream additionally carries ephemeral named `token` frames (`event: token`, data `{type, run_id, role, kind: "text"\\|"thinking", delta, at}`) with no SSE id — they are live-only, never persisted and never replayed |
 | `GET /api/runs/{run_id}/approvals`, `POST /api/runs/{run_id}/approvals/{id}` | list/answer pending operator approvals (`{"allow": bool, "scope"?: "once" \| "session"}` → `{approval_id, decision, scope}`; `scope` defaults to `once`, an invalid value or `session` with a deny is a 400, an unknown/already-resolved approval id is a 404). See the session-scope paragraph below |
 | `GET /api/providers`, `POST /api/providers`, `PUT /api/providers/{seed}`, `POST /api/providers/{name}/reset`, `POST /api/providers/{name}/discover`, `DELETE /api/providers/{name}` | provider presets (seeded: openai, deepseek, anthropic, gemini, openrouter, lmstudio, custom). `GET` returns `{name, base_url, api_key_set, kind, models}` plus additive `seed` (the name comes from the built-in seed table) and `customized` (a stored override of that name exists), so a client can tell a pristine seed from an edited/custom entry; a positive preset `context_window` (tokens, used only as a compaction fallback) is exposed additively, while `0`/absent stays unknown and omitted so pre-wave presets keep the exact old shape. `POST` creates a custom provider (409 on a duplicate name, including a seed name); `PUT` updates it, and on a seed name materializes a stored override (blank `base_url` is a 400); both accept `context_window` as a positive safe integer; an explicit `0` clears it, an absent/null field on an update leaves the stored value untouched (a create starts without one), and negative/float/string/boolean/unsafe values are a `400` before any write; `DELETE` removes a stored preset/override and clears any role `provider_ref` that pointed at it (a pristine seed is a 404); `POST /api/providers/{name}/reset` restores a customized built-in seed without clearing role references (see below); `POST /api/providers/{name}/discover` probes a draft endpoint for its model list without saving (see the discovery paragraph below). Keys are never returned — responses carry `api_key_set` only. The Settings → Providers tab is the operator UI for these routes |
 | `GET /api/plugins` | discovered plugins (`name`, `description`, `roles`, load `errors`, `diagnostics`) |
@@ -1250,7 +1255,7 @@ per-role connection without leaving the terminal.
 | `--mode` | `consult`, `work`, `auto` | `consult` | cooperation mode |
 | `--mode` | `print`, `json` | — | (TS package, `run` and each `chat` REPL turn) non-interactive automation output — see [Automation output](#automation-output-ts-package); `--mode work --json-events` stays possible because `print`/`json` are output modes, not cooperation modes |
 | `--json-events` | flag | off | (TS package, `run` and each `chat` REPL turn) alias for `--mode json` |
-| `--stream` | flag | off | (TS package, `run` and each `chat` REPL turn) NDJSON run events on stdout as they happen: one JSON object per line from `run_status`, `envelope`, `repair`, `tool_call`, `tool_result`, `result`. Its own output mode — on `run` it cannot combine with `--json`/`--json-events`/`--mode print|json` (usage error, exit 2); the human summary and cost line are suppressed |
+| `--stream` | flag | off | (TS package, `run` and each `chat` REPL turn) NDJSON run events on stdout as they happen: one JSON object per line from `run_status`, `envelope`, `repair`, `tool_call`, `tool_result`, `usage` (one live snapshot per cooperation node, carrying the normalized prompt/cache counters), `result`. Its own output mode — on `run` it cannot combine with `--json`/`--json-events`/`--mode print|json` (usage error, exit 2); the human summary and cost line are suppressed |
 | `--live` | flag | off (on for a TTY) | (TS package, `run`/`chat` only) stream the human transcript live on an interactive stdout: one envelope block as produced, dim `· …` activity rows between blocks, the decision rule and compact footer still once at the end. Never applies to a pipe, a machine output mode, or a sink without a TTY signal |
 | `--no-live` | flag | off | (TS package, `run`/`chat` only) disable live streaming and print the finished transcript once (the piped behavior); wins when both `--live` and `--no-live` are given |
 | `--verbose` | flag | off | print the full payload of every message |
@@ -1485,12 +1490,33 @@ honest decision table — the model and any tool call can never set or widen it:
 | `edits` | run freely | run freely | ask | ask |
 | `allow-all` | run freely | run freely | run freely | run freely |
 
+### Permission presets
+
+The operator surfaces present four named presets (deepseek-harness style).
+Each preset is a presentation alias for exactly one stored mode — the mode is
+still the only persistence/enforcement value, so an older client or script
+keeps working:
+
+| Preset | Stored mode | Reads | Writes / edits | Deletes | Shell commands |
+|---|---|---|---|---|---|
+| Read only | `readonly` | run freely | **denied** without asking | **denied** without asking | **denied** without asking |
+| Always ask (default) | `ask` | run freely | ask | ask | ask |
+| Workspace write | `edits` | run freely | run freely | ask | ask |
+| Full access | `allow-all` | run freely | run freely | run freely | run freely |
+
+Full access is the only preset with a destructive warning, and it is an
+explicit opt-in. The legacy mode names (`ask`, `readonly`, `edits`,
+`allow-all`) remain accepted everywhere a preset is accepted.
+
 - **Sources.** Persisted top-level in `sessions/settings.json` as
-  `{"approval_policy": {"mode": "ask"}}`; the web Settings → **Approvals**
-  section and the TUI `/permission` dialog write it through the validated
-  store. `--approval-mode <mode>` / `TWO_BROTHERS_APPROVAL_MODE` **pin** a mode
-  for `serve`'s web runs or the TUI process (in-memory only, never persisted:
-  the saved setting applies again after a restart without the pin). `run` and
+  `{"approval_policy": {"mode": "ask"}}`; the web Settings → **Permissions**
+  section and the TUI `/settings` → **Permissions…** / `/permission` dialog
+  write it through the validated store. `/permission <preset>` accepts both
+  preset ids and legacy mode names; a bare `/permission` shows the effective
+  preset, the stored mode it applies, and the configured tool scopes.
+  `--approval-mode <mode>` / `TWO_BROTHERS_APPROVAL_MODE` **pin** a mode for
+  `serve`'s web runs or the TUI process (in-memory only, never persisted: the
+  saved setting applies again after a restart without the pin). `run` and
   `chat` accept the flag for symmetry but bind no workspace, so it changes
   nothing there.
 - **Reads are always free.** A mode only decides the mutating actions; the
@@ -1543,13 +1569,16 @@ stable, width-safe layout:
   drive the terminal. Titles, numbers and verdicts stay single-line values.
 - **Compact footer.** When the run reports usage, one blank line then a compact
   footer ends the transcript:
-  `tokens 40 in / 20 out · cache 25% · 4 calls · cost $0.0300`. Segments appear
-  only when known — `cache` only with a recorded cache hit, `cost` only when
-  both roles resolve to one priced model **and** one prompt-cache family (the
-  three wire families report cache tokens against different prompt bases, so a
-  cached run is priced with its family's mapping; an ambiguous mixed-family run
-  shows no cost rather than a double- or under-counted number), and no footer at
-  all when the run reported no usage. The legacy `tokens:` / `cost:` diagnostic lines are the
+  `tokens 40 in / 20 out · cache 25% · 4 calls · cost $0.0300`. `in` is the
+  normalized **prompt** total (OpenAI-compatible input already includes cache
+  reads; Anthropic adds uncached + read + written; Gemini uses its prompt
+  count), so `cache` is `cached / prompt` and stays honest across mixed
+  families. Segments appear only when known — `cache` only with a recorded
+  cache hit, `write` only when cache-write tokens were billed (Anthropic),
+  `cost` only when both roles resolve to one priced model **and** one
+  prompt-cache family (an ambiguous mixed-family run shows no cost rather than
+  a double- or under-counted number), and no footer at all when the run
+  reported no usage. The legacy `tokens:` / `cost:` diagnostic lines are the
   print-mode format and stay on stderr there (see
   [Automation output](#automation-output-ts-package)); the human transcript does
   not print them.
@@ -1859,12 +1888,14 @@ them):
   tool-less configuration or a provider without `chatWithTools` keeps the
   exact pre-tools request path. Work mode is unchanged (junior mutating
   deliverable loop, senior read-only verify slice).
-- **Approval modes** — `ask` (default), `readonly`, `edits` and `allow-all`,
-  persisted in `sessions/settings.json`, pinned per process with
-  `--approval-mode`/env, edited from the web Settings → Approvals section and
-  the TUI `/permission` dialog; workspace confinement and the
-  sensitive-path refusal apply in every mode and a mode can never be set by
-  the model (see [Approval modes](#approval-modes)).
+- **Permission presets and approval modes** — four named presets (Read only,
+  Always ask, Workspace write, Full access) alias the persisted modes
+  `readonly`, `ask`, `edits` and `allow-all`; edited from the web Settings →
+  Permissions section, the TUI `/settings` → Permissions action and the TUI
+  `/permission` dialog, with the legacy mode names still accepted. Pinned per
+  process with `--approval-mode`/env; workspace confinement and the
+  sensitive-path refusal apply in every preset and a preset can never be set
+  by the model (see [Approval modes](#approval-modes)).
 - **Prompt recall** — `Up`/`Down` walk earlier accepted tasks in both
   composers, preserving and restoring the live draft exactly. The TUI uses
   its persisted prompt history (single-line drafts recall immediately;

@@ -55,15 +55,19 @@ import {
 } from "../mcp.ts";
 import { PluginManager, type PluginBindings } from "../plugins.ts";
 import {
-  APPROVAL_MODE_INFO,
-  APPROVAL_MODES,
   DEFAULT_APPROVAL_MODE,
   Decision,
+  PERMISSION_PRESETS,
+  PERMISSION_PRESET_INFO,
   PermissionManager,
   PermissionPolicy,
   approvalModeWarning,
-  normalizeApprovalMode,
+  currentPermissionPreset,
+  normalizePermissionPreset,
+  permissionPresetOf,
+  permissionPresetWarning,
   type ApprovalMode,
+  type PermissionPreset,
 } from "../permissions.ts";
 import type { Message } from "../protocol.ts";
 import { RunApprovalBroker, RuntimeEventStore } from "../runevents.ts";
@@ -634,10 +638,14 @@ export function reduceStreamEvent(
     case "result": {
       const usage = event.result.usage ?? {};
       const input = Number(usage.input_tokens ?? 0) || 0;
+      const prompt = Number(usage.prompt_tokens ?? input) || input;
       const output = Number(usage.output_tokens ?? 0) || 0;
+      const cached = Number(usage.cached_tokens ?? 0) || 0;
+      const percent =
+        prompt > 0 ? Math.min(100, Math.round((cached * 100) / prompt)) : cached > 0 ? 100 : 0;
       return {
         buffer: { lines, pending: null },
-        status: `ready — ${input}/${output} tokens (in/out)`,
+        status: `ready — ${prompt}/${output} tokens (in/out) · cache ${percent}%`,
       };
     }
     default:
@@ -1256,6 +1264,8 @@ interface UsageSnapshot {
   output: number;
   cached: number;
   cacheWrite: number;
+  /** Total prompt tokens when the family's input is uncached-only; 0 = fall back. */
+  prompt: number;
   calls: number;
 }
 
@@ -1391,16 +1401,20 @@ export function seedEditorHistory(
   return state;
 }
 
-function usageOf(value: unknown): UsageSnapshot {  const record = (value ?? {}) as Record<string, unknown>;
+function usageOf(value: unknown): UsageSnapshot {
+  const record = (value ?? {}) as Record<string, unknown>;
   const num = (key: string): number => {
     const n = Number(record[key]);
     return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
   };
+  const input = num("input_tokens");
+  const prompt = num("prompt_tokens");
   return {
-    input: num("input_tokens"),
+    input,
     output: num("output_tokens"),
     cached: num("cached_tokens"),
     cacheWrite: num("cache_write_tokens"),
+    prompt: prompt > 0 ? prompt : input,
     calls: num("model_calls"),
   };
 }
@@ -2112,9 +2126,11 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
       ...(sessionCfg.contextWindow > 0 ? { contextWindow: sessionCfg.contextWindow } : {}),
       ...(usage !== null
         ? {
-            inputTokens: usage.input,
+            inputTokens: usage.prompt,
             outputTokens: usage.output,
             cachedTokens: usage.cached,
+            cacheWriteTokens: usage.cacheWrite,
+            promptTokens: usage.prompt,
           }
         : {}),
       cost,
@@ -2199,9 +2215,11 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
       ...(sessionCfg.contextWindow > 0 ? { contextWindow: sessionCfg.contextWindow } : {}),
       ...(usage !== null
         ? {
-            inputTokens: usage.input,
+            inputTokens: usage.prompt,
             outputTokens: usage.output,
             cachedTokens: usage.cached,
+            cacheWriteTokens: usage.cacheWrite,
+            promptTokens: usage.prompt,
           }
         : {}),
       cost,
@@ -2382,6 +2400,9 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
   }
 
   const onStreamEvent = (event: StreamEvent): void => {
+    // Live usage arrives once per cooperation node; project it immediately so
+    // the status bar/side panel show the cache percentage while the run works.
+    if (event.type === "usage") usage = usageOf(event.usage);
     const previousThinking = model.liveThinking;
     const reduced = reduceModelEvent(model, event);
     model = reduced.model;
@@ -2610,6 +2631,11 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
     if (prompt !== undefined) rememberPrompt(prompt);
     model = addUserBlock(model, task);
     scroll = latestTranscriptScroll();
+    // A new turn starts with unknown usage: showing the previous turn's
+    // tokens/cache as if they were current would be worse than showing none.
+    // The first live `usage` event (node boundary) fills the real counters.
+    usage = null;
+    cost = null;
     running = true;
     updateAttentionTitle("working");
     // A new turn starts with an empty steer queue: the previous turn cleared
@@ -3426,27 +3452,40 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
   };
 
   /**
-   * `/settings`: the effective, key-free provider summary for both roles plus
-   * the real connect action (the old copy only said to leave the TUI and run
-   * `onboard`).
+   * `/settings`: the effective, key-free provider summary for both roles, the
+   * effective permission preset, the real connect action and the Permissions
+   * editor. One settings surface now owns both operator knobs; `/permission`
+   * remains the direct preset dialog and `/settings` links to it.
    */
   const openSettingsDialog = (): void => {
     refreshProviderState();
     showProviderWarnings();
+    const mode = currentApprovalMode();
+    const preset = currentPermissionPreset(mode);
+    const presetInfo = permissionPresetOf(mode);
+    const lines = [
+      ...providerSummaryLines(providerState, sessionCfg),
+      "",
+      `permissions: ${preset} (${mode}) — ${presetInfo.description}`,
+    ];
+    const actions = [
+      { id: "provider", label: "Connect provider…" },
+      { id: "permissions", label: "Permissions…" },
+      { id: "close", label: "Close" },
+    ];
     overlay = {
       kind: "dialog",
       state: createDialog({
-        title: "PROVIDER SETTINGS",
+        title: "SETTINGS",
         // The effective summary is the message (visible immediately); there is
         // no secret detail to hide behind "d".
-        message: providerSummaryLines(providerState, sessionCfg).join("\n"),
-        actions: [
-          { id: "provider", label: "Connect provider…" },
-          { id: "close", label: "Close" },
-        ],
+        message: lines.join("\n"),
+        actions,
+        selected: actions.length - 1,
       }),
       onAction: (id) => {
         if (id === "provider") openProviderSurface();
+        else if (id === "permissions") openPermissionDialog();
       },
     };
     render();
@@ -3633,12 +3672,14 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
   };
 
   /**
-   * Apply one operator approval mode to the persisted settings and report the
-   * outcome honestly: a success toast, plus the mode's destructive warning
-   * when it weakens a guardrail; a failed save keeps the previous mode. Shared
-   * by the `/permission` dialog buttons and the `/permission <mode>` form.
+   * Apply one named permission preset to the persisted settings and report the
+   * outcome honestly: a success toast naming both the preset and the concrete
+   * mode it stores, plus the preset's destructive warning when it weakens a
+   * guardrail; a failed save keeps the previous mode. Shared by the
+   * `/permission` dialog buttons and the `/permission <preset>` form.
    */
-  const applyApprovalMode = (next: ApprovalMode): boolean => {
+  const applyPermissionPreset = (preset: PermissionPreset): boolean => {
+    const info = PERMISSION_PRESET_INFO[preset];
     if (pinnedApprovalMode !== undefined) {
       pushToast(
         "warn",
@@ -3646,38 +3687,44 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
       );
       return false;
     }
-    const error = saveApprovalMode(next);
+    const error = saveApprovalMode(info.mode);
     if (error !== null) {
-      pushToast("warn", `approval mode not saved: ${error}`);
+      pushToast("warn", `permission preset not saved: ${error}`);
       return false;
     }
-    pushToast("info", `approval mode: ${next} — the next workspace turn uses it`);
-    const warning = approvalModeWarning(next);
+    pushToast(
+      "info",
+      `permission preset: ${info.label} (${info.mode}) — the next workspace turn uses it`,
+    );
+    const warning = permissionPresetWarning(preset);
     if (warning !== null) pushToast("warn", warning);
     return true;
   };
 
   /**
-   * `/permission`: state the persisted approval mode, the bound workspace and
-   * the session allows from what this TUI actually knows — never implying a
-   * policy that does not exist. The dialog buttons change the persisted mode
-   * (`allow-all` is tone-warned; a write failure keeps the old mode);
-   * `/permission <mode>` applies one directly. A change applies from the next
-   * workspace turn, and the mode never relaxes workspace confinement or the
-   * sensitive-path refusal, which run before permission checks.
+   * `/permission`: state the effective named preset, the persisted mode it
+   * applies, the bound workspace and the session allows from what this TUI
+   * actually knows — never implying a policy that does not exist. The dialog
+   * buttons change the persisted preset (`danger-full-access` is tone-warned; a
+   * write failure keeps the old mode); `/permission <preset>` applies one
+   * directly and the legacy mode names remain accepted aliases. A change
+   * applies from the next workspace turn, and the preset never relaxes
+   * workspace confinement or the sensitive-path refusal, which run before
+   * permission checks.
    */
   const openPermissionDialog = (args = ""): void => {
     const requested = args.trim();
     if (requested !== "") {
-      const next = normalizeApprovalMode(requested);
-      if (next === null) {
+      const preset = normalizePermissionPreset(requested);
+      if (preset === null) {
         baseNotice(
           "warn",
-          `unknown approval mode "${requested}" — use ${APPROVAL_MODES.join(" | ")}`,
+          `unknown permission preset "${requested}" — use ${PERMISSION_PRESETS.join(" | ")} ` +
+            "(the mode names ask | readonly | edits | allow-all are accepted too)",
         );
         return;
       }
-      applyApprovalMode(next);
+      applyPermissionPreset(preset);
       return;
     }
     const plugins = resources.plugins;
@@ -3694,16 +3741,18 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
         : [...plugins.plugins.values()].reduce((total, plugin) => total + plugin.tools.length, 0);
     const skills = resources.skills.skills;
     const mode = currentApprovalMode();
-    const modeInfo = APPROVAL_MODE_INFO[mode];
+    const preset = currentPermissionPreset(mode);
+    const presetInfo = permissionPresetOf(mode);
     const modeLines = [
-      `approval mode: ${mode} — ${modeInfo.description}`,
-      ...(modeInfo.danger !== undefined ? [`warning: ${modeInfo.danger}`] : []),
+      `permission preset: ${preset} — ${presetInfo.description}`,
+      `approval mode: ${mode} (the persisted value this preset applies)`,
+      ...(presetInfo.danger !== undefined ? [`warning: ${presetInfo.danger}`] : []),
       ...(pinnedApprovalMode !== undefined
         ? [
             "pinned by --approval-mode / TWO_BROTHERS_APPROVAL_MODE for this TUI process (never persisted); the saved approval_policy applies again after a restart without the pin",
           ]
         : [
-            "the buttons below persist the mode (sessions/settings.json); it applies from the next workspace turn",
+            "the buttons below persist the preset (sessions/settings.json); it applies from the next workspace turn",
           ]),
     ];
     const approvalLines =
@@ -3740,18 +3789,18 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
         "(only shared skills are operator-attachable)",
     ];
     // Close is listed last and is the default selection: opening /permission
-    // and pressing Enter must never persist a mode change (a no-op close is the
-    // safe default; the operator moves the selection to choose a mode).
+    // and pressing Enter must never persist a preset change (a no-op close is
+    // the safe default; the operator moves the selection to choose a preset).
     const modeActions =
       pinnedApprovalMode !== undefined
         ? [{ id: "close", label: "Close" }]
         : [
-            ...APPROVAL_MODES.map((candidate) => ({
+            ...PERMISSION_PRESETS.map((candidate) => ({
               id: candidate,
               label:
-                candidate === mode
-                  ? `${APPROVAL_MODE_INFO[candidate].label} (current)`
-                  : APPROVAL_MODE_INFO[candidate].label,
+                candidate === preset
+                  ? `${PERMISSION_PRESET_INFO[candidate].label} (current)`
+                  : PERMISSION_PRESET_INFO[candidate].label,
             })),
             { id: "close", label: "Close" },
           ];
@@ -3759,15 +3808,15 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
       kind: "dialog",
       state: createDialog({
         title: "PERMISSIONS",
-        message: "Approval policy and configured tool scopes",
+        message: "Permission preset and configured tool scopes",
         details: lines.join("\n"),
         ...(mode === "allow-all" ? { tone: "warning" as const } : {}),
         actions: modeActions,
         selected: modeActions.length - 1,
       }),
       onAction: (id) => {
-        const next = normalizeApprovalMode(id);
-        if (next !== null) applyApprovalMode(next);
+        const next = normalizePermissionPreset(id);
+        if (next !== null) applyPermissionPreset(next);
         render();
       },
     };

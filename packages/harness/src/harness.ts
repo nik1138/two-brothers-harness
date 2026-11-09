@@ -2622,6 +2622,27 @@ export class TwoBrothersHarness {
       }
 
       let node: NodeResult = "senior_open";
+      // Live usage: one additive snapshot after each node's provider calls.
+      // The cache percentage is only knowable from the provider's reported
+      // counters, and emitting at node boundaries keeps the stream honest
+      // without pretending a partial in-flight call already has usage.
+      let lastUsage = emptyUsage();
+      const emitUsageIfChanged = (): void => {
+        const current = this.usageSnapshot();
+        if (
+          current.model_calls === lastUsage.model_calls &&
+          current.input_tokens === lastUsage.input_tokens &&
+          current.output_tokens === lastUsage.output_tokens &&
+          current.cached_tokens === lastUsage.cached_tokens &&
+          current.cache_write_tokens === lastUsage.cache_write_tokens
+        ) {
+          return;
+        }
+        lastUsage = current;
+        const usage = { ...current };
+        this.emitRuntime({ type: "usage", usage });
+        this.emitStream({ type: "usage", usage, at: nowIso() });
+      };
       while (node !== "END") {
         await this.maybeCompact(state);
         // Operator steering lands at the state-machine node boundary. Draining
@@ -2630,6 +2651,7 @@ export class TwoBrothersHarness {
         // normal context envelope from here on. A stopped run drains nothing.
         this.drainSteering(state);
         node = await this.nodes[node](state);
+        emitUsageIfChanged();
       }
 
       const result: HarnessResult = {

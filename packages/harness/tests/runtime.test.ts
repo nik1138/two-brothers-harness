@@ -200,6 +200,36 @@ test("run_end carries per-run usage", async () => {
   assert.deepEqual(end.usage, record.usage);
 });
 
+test("live usage event updates the record before run_end", async () => {
+  const manager = new RunManager();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const live = {
+    model_calls: 1,
+    input_tokens: 100,
+    output_tokens: 10,
+    cached_tokens: 40,
+    cache_write_tokens: 0,
+  };
+  const job: RunJob = async (_signal, onEnvelope) => {
+    onEnvelope({ type: "usage", usage: live });
+    await gate;
+    return { cancelled: false, decision: {}, errors: [], usage: live };
+  };
+  const record = manager.submit("task", "s.jsonl", job);
+  await waitFor(() => record.usage.cached_tokens === 40, "live usage on the record");
+  assert.deepEqual(record.usage, live);
+  // The event is on the stream (and sidecar projection) before the terminal end.
+  const frames = record.events.filter((event) => event.type === "usage");
+  assert.equal(frames.length, 1);
+  assert.equal(record.events.at(-1)?.type, "usage");
+  release();
+  assert.equal(await manager.wait(record.runId), true);
+  assert.equal(record.events.at(-1)?.type, "run_end");
+});
+
 test("active/terminal state sets cover the lifecycle", () => {
   assert.ok(ACTIVE_STATES.has("queued") && ACTIVE_STATES.has("running") && ACTIVE_STATES.has("waiting"));
   for (const terminal of ["completed", "failed", "cancelled"]) {

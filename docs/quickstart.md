@@ -328,12 +328,14 @@ the same hero appears inside a selected session that has no transcript yet.
    progress, ○ pending — at most four rows plus a `+N more` tail, a real
    expand button and a live announcement). The composer's status-seat row
    states what the next run will use: the Senior and Junior models, the
-   effective workspace approval mode (`Ask in app` in the default `ask` mode;
-   `Read only`, `Edits auto` or `Allow all` mirror Settings → Approvals, and
-   an older backend with no saved-policy field reads as the fail-closed `ask`
-   it applies), and the
-   latest prompt audit's exact system/context character counts plus the
-   offered-tool count. A seat whose data is unknown is simply absent — no
+   effective workspace permission preset (`Always ask` in the default `ask`
+   mode; `Read only`, `Workspace write` or `Full access` mirror Settings →
+   Permissions, and an older backend with no saved-policy field reads as the
+   fail-closed `ask` it applies). Clicking that seat opens Settings directly on
+   Permissions. The row also shows the latest prompt audit's exact
+   system/context character counts plus the offered-tool count; the usage
+   footer shows tokens and the live cache-hit percentage after every
+   cooperation node. A seat whose data is unknown is simply absent — no
    token counts or other numbers are invented. The browser tab title follows
    the selected session and its run state: `▶ …` while a run works or is
    queued, `! …` while it waits for an approval, `… (failed)` for a failed run,
@@ -354,18 +356,21 @@ the same hero appears inside a selected session that has no transcript yet.
    backend without session scope answers honestly: "Allowed once — this
    backend does not support session scope."
 
-   **Approval modes.** How much runs without asking is an explicit operator
-   choice, set in Settings → **Approvals** (or with `--approval-mode` on the
-   server / TUI process, never persisted): **Ask** (the default — reads free,
-   everything mutating asks), **Read only** (only reads run; every mutation
-   and shell command is denied without asking), **Edits** (writes/edits run
-   freely; deletes and shell still ask) and **Allow all** (everything runs
-   without asking — explicit opt-in, shown with a destructive warning
-   inline). The mode is stored in `sessions/settings.json` and applies to new
-   workspace runs; it never bypasses workspace confinement or the
-   sensitive-path refusal, and an older backend that does not report the
-   setting shows Ask without sending it. See
-   [Approval modes](cli-reference.md#approval-modes) for the decision table.
+   **Permissions.** How much runs without asking is an explicit operator
+   choice, set in Settings → **Permissions** (or the TUI `/settings` →
+   Permissions action / `/permission`, and with `--approval-mode` on the
+   server or TUI process, never persisted). Four named presets each store one
+   approval mode: **Read only** (`readonly`: only reads run; every mutation
+   and shell command is denied without asking), **Always ask** (`ask`, the
+   default: reads free, everything mutating asks), **Workspace write**
+   (`edits`: writes/edits run freely; deletes and shell still ask) and **Full
+   access** (`allow-all`: everything runs without asking — explicit opt-in,
+   shown with a destructive warning inline). The mode is stored in
+   `sessions/settings.json` and applies to new workspace runs; it never
+   bypasses workspace confinement or the sensitive-path refusal, and an older
+   backend that does not report the setting shows Always ask without sending
+   it. See [Approval modes](cli-reference.md#approval-modes) for the decision
+   table and preset mapping.
 
    The card explains what is being approved. Shell and delete requests carry a
    fixed honest reason (shell: effects cannot be previewed and may change any
@@ -471,9 +476,10 @@ context before the turn starts (without `--workspace`, `@path` stays literal
 text). A built-in action like `/compact`, `/export [path]`, `/status` or
 `/permission` is performed by the TUI and never submitted as a task;
 `/plan <objective>` expands and runs that turn. `/permission` states the
-effective approval mode; without a `--approval-mode` pin its buttons save one
-of the four modes to `sessions/settings.json`, and with a pin it says so and
-offers only Close (a typed `/permission <mode>` change is refused with the
+effective permission preset and the stored mode it applies; without a
+`--approval-mode` pin its buttons save one of the four presets to
+`sessions/settings.json`, and with a pin it says so and
+offers only Close (a typed `/permission <preset>` change is refused with the
 pin reason; without a pin it applies the mode directly). A plan
 written through the
 model's `todo_write` tool docks above the composer as a compact display-only
@@ -530,10 +536,12 @@ senior and junior can actually read, search, edit and run commands inside it:
   sensitive paths refuse the whole task with an honest notice).
 - An invalid root (`workspace root does not exist:` /
   `workspace root is not a directory:`) exits 2 before the screen opens.
-  `/permission` states the effective approval mode and its description (plus
-  the `allow-all` warning), the bound root, the decision keys and any
-  in-memory session allows; without a pin its buttons persist a mode, and
-  `/permission <mode>` applies one directly. Pass
+  `/permission` states the effective preset, its stored mode and description
+  (plus the full-access warning), the bound root, the decision keys and any
+  in-memory session allows; without a pin its buttons persist a preset, and
+  `/permission <preset>` applies one directly (legacy mode names still work).
+  `/settings` shows the same effective preset and links to the Permissions
+  dialog. Pass
   `--approval-mode <ask|readonly|edits|allow-all>` to pin the mode for this
   TUI process only (never persisted).
 

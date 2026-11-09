@@ -102,6 +102,33 @@ test("usage aggregate: cache_write_tokens is a zeroed key and merge sums it", ()
   );
 });
 
+test("mixed families: an OpenAI half contributes its input to the prompt total", () => {
+  const merged = mergeUsage(
+    {
+      model_calls: 1,
+      input_tokens: 4_000,
+      prompt_tokens: 7_600,
+      output_tokens: 100,
+      cached_tokens: 3_200,
+      cache_write_tokens: 400,
+    },
+    // OpenAI-compatible: input_tokens already includes cache reads; no
+    // prompt_tokens field is emitted.
+    { model_calls: 1, input_tokens: 100, output_tokens: 10, cached_tokens: 20 },
+  );
+  assert.deepEqual(merged, {
+    model_calls: 2,
+    input_tokens: 4_100,
+    output_tokens: 110,
+    cached_tokens: 3_220,
+    cache_write_tokens: 400,
+    prompt_tokens: 7_700,
+  });
+  // The display denominator covers both roles instead of dropping the OpenAI
+  // input and clamping the percentage to 100%.
+  assert.equal(Math.round((merged.cached_tokens * 100) / merged.prompt_tokens!), 42);
+});
+
 test("extractUsage: OpenAI cache reads map, cache writes stay 0 (no guessed equivalent)", () => {
   assert.deepEqual(
     extractUsage({
@@ -167,6 +194,7 @@ test("anthropic: cache_creation_input_tokens maps to cache_write_tokens", async 
     output_tokens: 30,
     cached_tokens: 40,
     cache_write_tokens: 10,
+    prompt_tokens: 170,
   });
 });
 
@@ -210,6 +238,7 @@ test("anthropic: streamed cache reads and writes reach the same counters", async
     output_tokens: 7,
     cached_tokens: 25,
     cache_write_tokens: 7,
+    prompt_tokens: 82,
   });
 });
 
@@ -234,6 +263,7 @@ test("google: cached reads are unchanged and cache writes stay 0", async () => {
     output_tokens: 30,
     cached_tokens: 40,
     cache_write_tokens: 0,
+    prompt_tokens: 120,
   });
 });
 

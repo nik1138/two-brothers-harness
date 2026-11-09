@@ -270,6 +270,7 @@ test("anthropic: content_block_delta text + message_start/message_delta usage", 
       output_tokens: 9,
       cached_tokens: 3,
       cache_write_tokens: 0,
+      prompt_tokens: 24,
     });
   } finally {
     await stub.close();
@@ -304,6 +305,7 @@ test("gemini: :streamGenerateContent?alt=sse text parts + usageMetadata", async 
       output_tokens: 10, // candidatesTokenCount + thoughtsTokenCount
       cached_tokens: 3,
       cache_write_tokens: 0,
+      prompt_tokens: 13,
     });
   } finally {
     await stub.close();
@@ -428,6 +430,7 @@ test("anthropic: tool_use input_json_delta fragments reassemble", async () => {
       output_tokens: 5,
       cached_tokens: 0,
       cache_write_tokens: 0,
+      prompt_tokens: 4,
     });
   } finally {
     await stub.close();

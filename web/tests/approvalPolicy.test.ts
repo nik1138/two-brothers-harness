@@ -1,6 +1,6 @@
-// Focused tests for src/approvalPolicy.ts — the pure Settings → Approvals
-// model (mode copy, fail-closed normalization, old-backend fail-soft, save
-// payload, pinned/read-only explanations). No DOM:
+// Focused tests for src/approvalPolicy.ts — the pure Settings → Permissions
+// model (preset/mode copy, fail-closed normalization, old-backend fail-soft,
+// save payload, pinned/read-only explanations). No DOM:
 //   node --import ./tests/register-ts.mjs --test tests/approvalPolicy.test.ts
 
 import assert from 'node:assert/strict'
@@ -8,7 +8,10 @@ import { test } from 'node:test'
 
 import {
   APPROVAL_MODES,
+  CUSTOM_PERMISSION_PRESET,
   DEFAULT_APPROVAL_MODE,
+  PERMISSION_PRESETS,
+  PERMISSION_PRESET_COPY,
   approvalModeCopy,
   approvalModeDanger,
   approvalPolicyDisabledReason,
@@ -16,6 +19,10 @@ import {
   approvalPolicyPatch,
   isApprovalMode,
   normalizeApprovalMode,
+  normalizePermissionPreset,
+  permissionPresetDanger,
+  permissionPresetId,
+  permissionPresetOf,
 } from '../src/approvalPolicy.ts'
 
 // ---------------------------------------------------------------------------
@@ -45,6 +52,87 @@ test('the copy states the real decision table per mode', () => {
   assert.match(approvalModeCopy('edits').description, /Deletes and shell commands/)
   assert.match(approvalModeCopy('allow-all').description, /without asking/)
   assert.match(approvalModeDanger('allow-all') ?? '', /irreversible change/)
+})
+
+// ---------------------------------------------------------------------------
+// named permission presets
+// ---------------------------------------------------------------------------
+
+test('PERMISSION_PRESETS is the exact four-preset catalog in restrictive order', () => {
+  assert.deepEqual(PERMISSION_PRESETS, [
+    'read-only',
+    'ask',
+    'workspace-write',
+    'danger-full-access',
+  ])
+  for (const preset of PERMISSION_PRESETS) {
+    const copy = PERMISSION_PRESET_COPY[preset]
+    assert.equal(copy.preset, preset)
+    assert.ok(APPROVAL_MODES.includes(copy.mode), `${preset} stores a real mode`)
+    assert.ok(copy.label.length > 0)
+    assert.ok(copy.description.length > 0)
+    assert.equal(permissionPresetDanger(preset) !== null, preset === 'danger-full-access')
+  }
+  assert.deepEqual(
+    PERMISSION_PRESETS.map((preset) => PERMISSION_PRESET_COPY[preset].mode),
+    ['readonly', 'ask', 'edits', 'allow-all'],
+  )
+})
+
+test('the preset copy states the real decision table', () => {
+  assert.match(PERMISSION_PRESET_COPY['read-only'].description, /denied without asking/)
+  assert.match(PERMISSION_PRESET_COPY.ask.description, /Writes, edits, deletes/)
+  assert.match(PERMISSION_PRESET_COPY.ask.description, /ask before they run/)
+  assert.match(PERMISSION_PRESET_COPY['workspace-write'].description, /writes and edits run freely/)
+  assert.match(PERMISSION_PRESET_COPY['workspace-write'].description, /Deletes and shell commands ask/)
+  assert.match(PERMISSION_PRESET_COPY['danger-full-access'].description, /without asking/)
+  assert.match(permissionPresetDanger('danger-full-access') ?? '', /irreversible change/)
+})
+
+test('normalizePermissionPreset accepts preset ids, legacy modes and aliases', () => {
+  assert.equal(normalizePermissionPreset('read-only'), 'read-only')
+  assert.equal(normalizePermissionPreset('readonly'), 'read-only')
+  assert.equal(normalizePermissionPreset(' Read Only '), 'read-only')
+  assert.equal(normalizePermissionPreset('ask'), 'ask')
+  assert.equal(normalizePermissionPreset('workspace-write'), 'workspace-write')
+  assert.equal(normalizePermissionPreset('edits'), 'workspace-write')
+  assert.equal(normalizePermissionPreset('workspace_edits'), 'workspace-write')
+  assert.equal(normalizePermissionPreset('danger-full-access'), 'danger-full-access')
+  assert.equal(normalizePermissionPreset('full access'), 'danger-full-access')
+  assert.equal(normalizePermissionPreset('allow-all'), 'danger-full-access')
+  for (const bad of [
+    'custom',
+    'auto',
+    'never',
+    'yolo',
+    '',
+    '  ',
+    'constructor',
+    '__proto__',
+    'toString',
+    null,
+    undefined,
+    42,
+    {},
+  ]) {
+    assert.equal(normalizePermissionPreset(bad), null, JSON.stringify(bad))
+  }
+})
+
+test('every mode maps to exactly one preset; unknown values derive custom', () => {
+  const expected = {
+    ask: 'ask',
+    readonly: 'read-only',
+    edits: 'workspace-write',
+    'allow-all': 'danger-full-access',
+  } as const
+  for (const mode of APPROVAL_MODES) {
+    assert.equal(permissionPresetId(mode), expected[mode])
+    assert.equal(permissionPresetOf(mode).mode, mode)
+  }
+  assert.equal(permissionPresetId('auto'), CUSTOM_PERMISSION_PRESET)
+  // fail closed: an unknown mode presents as the asking preset, never full access
+  assert.equal(permissionPresetOf('auto' as never).mode, 'ask')
 })
 
 test('normalizeApprovalMode never upgrades an unknown value', () => {

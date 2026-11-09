@@ -105,12 +105,14 @@ turn** row): the text is queued for that turn at its next step, bounded to
 eight pending texts of 4 000 characters, with queued/applied/leftover copy and
 the draft cleared only on acceptance; `Enter` still refuses while a turn runs.
 `/permission` states
-the effective approval mode and its honest description (with the `allow-all`
-warning), the bound-root policy and this process's session allows; without a
-`--approval-mode`/env pin its buttons persist one of the four modes — `ask`,
-`readonly`, `edits`, `allow-all` — to `sessions/settings.json`, with a pin it
-says so and offers only Close, and `/permission <mode>` applies one directly.
-An invalid root exits 2 before the screen opens.
+the effective preset, its stored mode and honest description (with the Full
+access warning), the bound-root policy and this process's session allows;
+without a `--approval-mode`/env pin its buttons persist one of the four presets
+— Read only, Always ask, Workspace write, Full access — to
+`sessions/settings.json`, with a pin it says so and offers only Close, and
+`/permission <preset|mode>` applies one directly. `/settings` shows the same
+preset and has a **Permissions…** action. An invalid root exits 2 before the
+screen opens.
 
 `Ctrl+X` copies the last completed reply (the newest decision, or the newest
 completed senior reply) as plain text: the platform clipboard is tried first,
@@ -151,7 +153,7 @@ per-row Stop cancels a queued run immediately and the next queued run is
 followed automatically), changed-file diff review, and a bottom-left Settings
 dialog for the per-role provider presets with sealed API keys. Completed runs'
 tool rows fold into a disclosure summary, the composer carries truthful status
-seats (models, permission expectation, latest prompt-audit context sizes), a
+seats (models, permission preset, latest prompt-audit context sizes), a
 welcome hero greets an empty session (context, actions and editable starter
 suggestions), and a **Plan** dock mirrors the model's todo list. A customized
 built-in seed has **Reset to default**, which clears the stored override
@@ -161,12 +163,13 @@ OpenAI-compatible endpoint (`POST /api/providers/{name}/discover`; an empty
 answer is valid and a typed key is one-shot). An approval card can
 **Always allow this session**, remembering an `(action, target)` pair in the
 session settings while one-shot allow/deny, the denial cap and the fail-closed
-default are unchanged. Settings → **Approvals** selects the workspace
-approval mode (Ask / Read only / Edits / Allow all) with honest copy and an
-inline destructive warning for `allow-all`; the mode is stored in
-`sessions/settings.json`, a flag/env pin is reported read-only, an older
-backend without the field shows Ask and never receives a patch, and the mode
-never bypasses workspace confinement. `Up`/`Down` in the composer recall
+default are unchanged. Settings → **Permissions** selects the workspace
+preset (Read only / Always ask / Workspace write / Full access) with honest
+copy and an inline destructive warning for Full access (`allow-all`); the
+preset stores one mode in `sessions/settings.json`, a flag/env pin is reported
+read-only, an older backend without the field shows Always ask and never
+receives a patch, and the mode never bypasses workspace confinement. The
+composer permissions seat opens that section directly. `Up`/`Down` in the composer recall
 earlier accepted tasks at the draft edges and restore the live draft exactly.
 Runs use the configured models — the UI has no separate
 "mock" switch. The browser tab title tracks the selected session and run state

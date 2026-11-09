@@ -1061,7 +1061,7 @@ test("run events SSE reconnect with after=N replays only the tail", async () => 
     const tail = await runUntilEnd(srv.base, started.body.run_id, full.length - 2);
     assert.deepEqual(tail, full.slice(-2));
     assert.equal(tail.at(-1)?.type, "run_end");
-    assert.equal(tail[0]?.type, "envelope");
+    assert.equal(tail[0]?.type, "usage", "the live usage frame precedes run_end");
   } finally {
     await srv.close();
   }

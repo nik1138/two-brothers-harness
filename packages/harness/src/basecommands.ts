@@ -192,9 +192,9 @@ export const BASE_COMMANDS: readonly BaseCommand[] = Object.freeze(
       },
       {
         name: "permission",
-        aliases: ["权限"],
-        description: "Show the approval policy and the configured tool scopes",
-        argumentHint: "",
+        aliases: ["permissions", "权限"],
+        description: "Choose a permission preset and show the configured tool scopes",
+        argumentHint: "[read-only|ask|workspace-write|danger-full-access]",
         kind: "action",
         action: "permission",
         requiresArguments: false,

@@ -22,7 +22,7 @@ import type { AccentTheme, RoleTheme } from '../uiPrefs'
 import ModelsRolesSection from './settings/ModelsRolesSection.vue'
 import ProvidersSection from './settings/ProvidersSection.vue'
 import PluginsSection from './settings/PluginsSection.vue'
-import ApprovalPolicySection from './settings/ApprovalPolicySection.vue'
+import PermissionsSection from './settings/PermissionsSection.vue'
 import AppearanceSection from './settings/AppearanceSection.vue'
 import KeyboardSection from './settings/KeyboardSection.vue'
 import AdvancedSection from './settings/AdvancedSection.vue'
@@ -57,6 +57,8 @@ const props = defineProps<{
   showPromptAudits?: boolean
   /** Current rebindable key bindings; omitted = the panel reads the device store. */
   keybindings?: Keybindings
+  /** Section shown when the dialog opens (defaults to Models & roles). */
+  initialSection?: SectionId
 }>()
 
 const emit = defineEmits<{
@@ -170,7 +172,7 @@ type SectionId =
   | 'models'
   | 'providers'
   | 'plugins'
-  | 'approvals'
+  | 'permissions'
   | 'appearance'
   | 'keyboard'
   | 'advanced'
@@ -196,8 +198,8 @@ const sections: {
     description: 'Tools both brothers can use; the enabled list is shared.',
   },
   {
-    id: 'approvals',
-    label: 'Approvals',
+    id: 'permissions',
+    label: 'Permissions',
     description: 'What a model may do in a workspace without asking you.',
   },
   {
@@ -217,9 +219,19 @@ const sections: {
   },
 ]
 
-const activeId = ref<SectionId>('models')
+const activeId = ref<SectionId>(props.initialSection ?? 'models')
 const activeSection = computed(
   () => sections.find((section) => section.id === activeId.value) ?? sections[0]!,
+)
+
+// The dialog is remounted per open in App.vue, so the prop is normally the
+// initial value only. Watching also keeps a host that reuses the instance able
+// to deep-link ("/permission" → Open settings) without a stale pane.
+watch(
+  () => props.initialSection,
+  (section) => {
+    if (section !== undefined) activeId.value = section
+  },
 )
 
 const navRefs = ref<HTMLButtonElement[]>([])
@@ -538,7 +550,7 @@ async function save() {
               <rect x="9" y="9" width="4.5" height="4.5" rx="1" />
             </svg>
             <svg
-              v-else-if="section.id === 'approvals'"
+              v-else-if="section.id === 'permissions'"
               class="settings-nav-icon"
               viewBox="0 0 16 16"
               width="16"
@@ -691,12 +703,12 @@ async function save() {
             </div>
 
             <div
-              v-show="activeId === 'approvals'"
+              v-show="activeId === 'permissions'"
               class="settings-pane"
               role="region"
-              aria-label="Approvals"
+              aria-label="Permissions"
             >
-              <ApprovalPolicySection
+              <PermissionsSection
                 :mode="approvalPolicy.mode"
                 :supported="approvalPolicy.supported"
                 :pinned="approvalPolicy.pinned"

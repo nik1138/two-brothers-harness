@@ -423,6 +423,7 @@ test("anthropic: thinking_delta goes to thinking, text_delta to text, signature 
       output_tokens: 9,
       cached_tokens: 3,
       cache_write_tokens: 0,
+      prompt_tokens: 24,
     });
   } finally {
     await stub.close();
@@ -457,6 +458,7 @@ test("gemini: thought parts go to thinking, visible parts to text", async () => 
       output_tokens: 10, // candidatesTokenCount + thoughtsTokenCount
       cached_tokens: 3,
       cache_write_tokens: 0,
+      prompt_tokens: 13,
     });
   } finally {
     await stub.close();

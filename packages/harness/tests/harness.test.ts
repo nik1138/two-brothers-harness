@@ -51,6 +51,26 @@ test("shared context is identical for both roles", async () => {
   assert.notEqual(seniorView[0].content, juniorView[0].content);
 });
 
+test("live usage events precede the result and match the final totals", async () => {
+  const runtime: Array<Record<string, unknown>> = [];
+  const stream: Array<Record<string, unknown>> = [];
+  const harness = new TwoBrothersHarness(resolveConfig({ provider: "mock", mode: "consult" }), {
+    onEvent: (event) => runtime.push(event as unknown as Record<string, unknown>),
+    onStreamEvent: (event) => stream.push(event as unknown as Record<string, unknown>),
+  });
+  const result = await harness.run("cache me");
+  const live = runtime.filter((event) => event.type === "usage");
+  assert.ok(live.length > 0, "at least one node reports live usage");
+  const last = live.at(-1) as { usage: Record<string, number> };
+  assert.deepEqual(last.usage, result.usage);
+  assert.ok(
+    stream.some((event) => event.type === "usage"),
+    "the in-process stream carries the same live usage",
+  );
+  // The terminal result remains the authority; the live frames are additive.
+  assert.equal(stream.at(-1)?.type, "result");
+});
+
 test("mock reads task from context", async () => {
   const harness = new TwoBrothersHarness(resolveConfig({ provider: "mock", mode: "consult" }));
   const result = await harness.run("unique-task-marker-123");

@@ -937,6 +937,14 @@ export class RunManager {
         // second). An already-aborted wait resolves immediately, so it never
         // counts as a park and emits no `waiting`.
         const type = msg.type;
+        if (type === "usage") {
+          // Live usage belongs on the record too, so a client that polls the
+          // run (or reloads mid-run) sees the same counters as the SSE stream.
+          const usage = (msg as { usage?: unknown }).usage;
+          if (isRecord(usage)) {
+            record.usage = { ...emptyUsage(), ...(usage as Partial<UsageTotals>) };
+          }
+        }
         this._emit(record, msg as unknown as RuntimeEvent);
         if (type === "approval_requested") {
           if (!record.signal.aborted && (record.status === "queued" || record.status === "running")) {

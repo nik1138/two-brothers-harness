@@ -41,6 +41,8 @@ export interface StatusBarState {
   contextTokens?: number;
   contextWindow?: number;
   inputTokens?: number;
+  /** Total prompt tokens when the provider reports uncached-only input. */
+  promptTokens?: number;
   outputTokens?: number;
   cachedTokens?: number;
   /** Null is an honest unknown price; undefined omits the cost segment. */
@@ -153,13 +155,25 @@ export function statusBarSegments(
     second.push({ text: `context ${used}/${total}`, tone: "muted" });
   }
   if (state.inputTokens !== undefined || state.outputTokens !== undefined) {
+    const prompt = state.promptTokens ?? state.inputTokens ?? 0;
     second.push({
-      text: `tokens ${formatCount(state.inputTokens ?? 0)} in · ${formatCount(state.outputTokens ?? 0)} out`,
+      text: `tokens ${formatCount(prompt)} in · ${formatCount(state.outputTokens ?? 0)} out`,
       tone: "muted",
     });
   }
   if (state.cachedTokens !== undefined) {
-    second.push({ text: `cache ${formatCount(state.cachedTokens)}`, tone: "muted" });
+    // The operator asked for the share, not just the raw counter. Use the
+    // family-normalized prompt total when present: Anthropic/Gemini
+    // input_tokens is uncached-only, so dividing by it would inflate the hit
+    // rate (and can exceed 100% on a fully cached call).
+    const prompt = state.promptTokens ?? state.inputTokens ?? 0;
+    const percent =
+      prompt > 0
+        ? Math.min(100, Math.round(((state.cachedTokens ?? 0) * 100) / prompt))
+        : (state.cachedTokens ?? 0) > 0
+          ? 100
+          : 0;
+    second.push({ text: `cache ${percent}%`, tone: "muted" });
   }
   if (state.cost !== undefined) {
     const amount = state.cost === null ? null : formatCost(state.cost);

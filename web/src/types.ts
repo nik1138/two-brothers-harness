@@ -153,7 +153,11 @@ export interface RunRequest {
  */
 export type RunStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled'
 
-/** Per-run model usage counters; null/absent while running or for pre-upgrade runs. */
+/**
+ * Per-run model usage counters. Pre-upgrade runs and the first moments of a
+ * live run may omit them; a current backend updates the run record after each
+ * cooperation node, so a live stream can show them before `run_end`.
+ */
 export interface RunUsage {
   model_calls: number
   input_tokens: number
@@ -165,6 +169,13 @@ export interface RunUsage {
    * render/read code must treat a missing value as 0.
    */
   cache_write_tokens?: number
+  /**
+   * Total prompt tokens when `input_tokens` is uncached-only (Anthropic:
+   * input + cached + write; Gemini: input + cached). OpenAI-compatible runs
+   * omit it because `input_tokens` is already the prompt total. Use this as
+   * the cache-hit denominator when present.
+   */
+  prompt_tokens?: number
 }
 
 /**
@@ -495,6 +506,19 @@ export interface ReasoningEvent {
   at: number
 }
 
+/**
+ * Additive live usage snapshot: one per cooperation node, before `run_end`.
+ * The same counters as `run_end.usage`, so the footer can show tokens and the
+ * cache-hit percentage while the run is still working. Older clients that do
+ * not know the frame can ignore it.
+ */
+export interface UsageEvent {
+  type: 'usage'
+  usage: RunUsage
+  run_id: string
+  at: number
+}
+
 /** Typed runtime events streamed from GET /api/runs/{id}/events. */
 export type RunEvent =
   | { type: 'run_status'; status: 'queued' | 'running' | 'waiting'; run_id: string; at: number }
@@ -518,6 +542,7 @@ export type RunEvent =
   | TodoUpdatedEvent
   | PromptAuditEvent
   | ReasoningEvent
+  | UsageEvent
 
 /** Response of GET /api/sessions/{name}/events — the runtime sidecar. */
 export interface SessionRuntimeEvents {

@@ -261,6 +261,26 @@ const runUsageBySession = ref<Record<string, RunUsage | null>>({})
  * record after a terminal event.
  */
 const runCostBySession = ref<Record<string, RunCost | null>>({})
+
+/**
+ * A new followed run must not inherit the previous run's counters: the live
+ * footer now renders usage while working/waiting, so stale tokens/cache/cost
+ * would claim the new run already spent them. The first `usage` event fills the
+ * real values; until then the segments are absent.
+ */
+function forgetSessionUsage(session: string) {
+  if (session in runUsageBySession.value) {
+    const next = { ...runUsageBySession.value }
+    delete next[session]
+    runUsageBySession.value = next
+  }
+  if (session in runCostBySession.value) {
+    const next = { ...runCostBySession.value }
+    delete next[session]
+    runCostBySession.value = next
+  }
+}
+
 /** Newest known run record per session; terminal state survives a reload via the 5 s pool poll. */
 interface LastRunInfo {
   status: RunStatus
@@ -302,6 +322,20 @@ const runStartedAt = ref<number | null>(null)
 /** Provider override actually used for sessions started from this app (only known truth). */
 const providerBySession = ref<Record<string, RunProvider>>({})
 const settingsOpen = ref(false)
+/** Section a fresh Settings mount opens on; `/permission` deep-links here. */
+type SettingsSection =
+  | 'models'
+  | 'providers'
+  | 'plugins'
+  | 'permissions'
+  | 'appearance'
+  | 'keyboard'
+  | 'advanced'
+const settingsSection = ref<SettingsSection>('models')
+function openSettings(section: SettingsSection = 'models') {
+  settingsSection.value = section
+  settingsOpen.value = true
+}
 /** `/help` overlay (also `?` or the rebindable shortcut-reference chord). */
 const helpOpen = ref(false)
 /** `/status` overlay. */
@@ -1088,7 +1122,7 @@ function runPaletteAction(id: string) {
       workspaceDialogOpen.value = true
       break
     case 'action:settings':
-      settingsOpen.value = true
+      openSettings()
       break
     case 'action:focus-composer':
       skipToComposer()
@@ -1493,6 +1527,12 @@ function handleRunEvent(runId: string, raw: string, eventId: string) {
       // per-call audit row; cheap, and it pairs with nothing
       ingestRuntimeEvent(data)
       break
+    case 'usage':
+      // Live counters: update the footer without inventing a timeline row.
+      if (data.usage) {
+        runUsageBySession.value = { ...runUsageBySession.value, [run.session]: data.usage }
+      }
+      break
     case 'todo_updated':
       // display-only plan snapshot: the projection keeps the latest write
       ingestRuntimeEvent(data)
@@ -1657,6 +1697,7 @@ async function refreshLiveRuns() {
     if (!current || current.run_id !== row.run_id) {
       // a new head run (the one before it finished): follow it, so the next
       // queued run's stream, transcript and Stop control take over
+      forgetSessionUsage(session)
       liveRuns.value = {
         ...liveRuns.value,
         [session]: { run_id: row.run_id, session, status: row.status },
@@ -1877,6 +1918,7 @@ async function startNewRun(payload: {
     // being followed and streamed.
     if (!liveRuns.value[res.session]) {
       resetStreamingDraft()
+      forgetSessionUsage(res.session)
       liveRuns.value = {
         ...liveRuns.value,
         [res.session]: { run_id: res.run_id, session: res.session, status: res.status },
@@ -2583,7 +2625,7 @@ onUnmounted(() => {
       @rename-workspace="openWorkspaceRename"
       @move-workspace="onMoveWorkspace"
       :theme-mode="themeMode"
-      @open-settings="settingsOpen = true"
+      @open-settings="openSettings()"
       @theme-change="onThemeChange"
     />
     <button
@@ -2651,7 +2693,7 @@ onUnmounted(() => {
         <button
           type="button"
           class="onboarding-hint-action"
-          @click="settingsOpen = true"
+          @click="openSettings()"
         >
           Open Models &amp; roles
         </button>
@@ -2701,7 +2743,7 @@ onUnmounted(() => {
             @new-session="newSessionOpen = true"
             @add-workspace="workspaceDialogOpen = true"
             @open-help="openShortcutHelp()"
-            @open-settings="settingsOpen = true"
+            @open-settings="openSettings()"
             :palette-label="paletteShortcut"
           />
         </template>
@@ -2717,7 +2759,7 @@ onUnmounted(() => {
           @new-session="newSessionOpen = true"
           @add-workspace="workspaceDialogOpen = true"
           @open-help="openShortcutHelp()"
-          @open-settings="settingsOpen = true"
+          @open-settings="openSettings()"
           :palette-label="paletteShortcut"
         />
       </div>
@@ -2806,7 +2848,8 @@ onUnmounted(() => {
         @submit="startNewRun"
         @steer="steerActiveRun"
         @stop="requestStop"
-        @open-settings="settingsOpen = true"
+        @open-settings="openSettings()"
+        @open-permissions="openSettings('permissions')"
         @command="onComposerCommand"
         @notice="showNotice"
       />
@@ -2829,6 +2872,7 @@ onUnmounted(() => {
 
     <SettingsDialog
       v-if="settingsOpen"
+      :initial-section="settingsSection"
       :theme-mode="themeMode"
       :density="density"
       :accent="accent"
@@ -2950,7 +2994,7 @@ onUnmounted(() => {
     <PermissionInfoDialog
       v-if="permissionOpen"
       @close="permissionOpen = false"
-      @open-settings="permissionOpen = false; settingsOpen = true"
+      @open-settings="permissionOpen = false; openSettings('permissions')"
     />
     </div>
     </n-message-provider>

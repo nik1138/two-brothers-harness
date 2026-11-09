@@ -158,19 +158,43 @@ async function quit(input: FakeInput, app: Promise<number>): Promise<number> {
   return code;
 }
 
-test("default /permission dialog states ask and offers all four persisted modes", async () => {
+test("default /permission dialog states the always-ask preset and offers all four", async () => {
   const h = startApp();
   try {
     assert.ok(await waitFor(() => textOf(h.output).includes("Two Brothers")), "welcome renders");
     const text = await openPermissionDetails(h);
     assert.match(text, /PERMISSIONS/);
-    assert.match(text, /approval mode: ask — Reads run freely\./);
-    assert.match(text, /the buttons below persist the mode/);
-    // The dialog selection, not just the details text, offers every mode.
-    assert.match(text, /Ask \(current\)/);
+    assert.match(text, /permission preset: ask — Reads run freely\./);
+    assert.match(text, /approval mode: ask \(the persisted value this preset applies\)/);
+    assert.match(text, /the buttons below persist the preset/);
+    // The dialog selection, not just the details text, offers every preset.
     assert.match(text, /Read only/);
-    assert.match(text, /Edits/);
-    assert.match(text, /Allow all/);
+    assert.match(text, /Always ask \(current\)/);
+    assert.match(text, /Workspace write/);
+    assert.match(text, /Full access/);
+    assert.equal(await quit(h.input, h.app), 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("/settings states the effective preset and links to the Permissions dialog", async () => {
+  const h = startApp();
+  try {
+    assert.ok(await waitFor(() => textOf(h.output).includes("Two Brothers")));
+    h.input.type("/settings");
+    h.input.enter();
+    assert.ok(await waitFor(() => textOf(h.output).includes("SETTINGS")), "settings opened");
+    const text = textOf(h.output);
+    assert.match(text, /permissions: ask \(ask\) — Reads run freely/);
+    assert.match(text, /Permissions…/);
+    // Close is selected; one Up lands on Permissions, Enter opens that editor.
+    h.input.key("up");
+    h.input.enter();
+    assert.ok(
+      await waitFor(() => lastFrameText(h.output).includes("PERMISSIONS")),
+      "the Permissions action opens the preset dialog",
+    );
     assert.equal(await quit(h.input, h.app), 0);
   } finally {
     h.cleanup();
@@ -184,19 +208,20 @@ test("/permission dialog persists the selected mode through the settings store",
     h.input.type("/permission");
     h.input.enter();
     assert.ok(await waitFor(() => textOf(h.output).includes("PERMISSIONS")));
-    // Actions are ordered ask, readonly, edits, allow-all, close and Close is
-    // selected by default: two Downs from Close wrap to ask then readonly.
-    h.input.key("down");
+    // Actions are ordered read-only, workspace-write, edits, full-access,
+    // close and Close is selected by default: one Down from Close wraps to
+    // read-only, which stores the readonly mode.
     h.input.key("down");
     h.input.enter();
     assert.ok(
-      await waitFor(() => textOf(h.output).includes("approval mode: readonly")),
+      await waitFor(() => textOf(h.output).includes("permission preset: Read only (readonly)")),
       "the success toast confirms the persisted change",
     );
     const store = new SettingsStore(settingsFile(h.sessionsDir));
     assert.equal(store.readApprovalPolicy(), "readonly", "the mode is persisted");
     // A second open reads the persisted value (per-turn/per-dialog freshness).
     const text = await openPermissionDetails(h);
+    assert.match(text, /permission preset: read-only/);
     assert.match(text, /approval mode: readonly/);
     assert.equal(await quit(h.input, h.app), 0);
   } finally {
@@ -236,9 +261,10 @@ test("a persisted allow-all mode is stated with its visible danger warning", asy
     new SettingsStore(settingsFile(h.sessionsDir)).writeApprovalPolicy("allow-all");
     assert.ok(await waitFor(() => textOf(h.output).includes("Two Brothers")));
     const text = await openPermissionDetails(h);
+    assert.match(text, /permission preset: danger-full-access/);
     assert.match(text, /approval mode: allow-all/);
     assert.match(text, /warning: Use only in a workspace you trust/);
-    assert.match(text, /Allow all \(current\)/);
+    assert.match(text, /Full access \(current\)/);
     assert.equal(await quit(h.input, h.app), 0);
   } finally {
     h.cleanup();
@@ -250,11 +276,12 @@ test("a pinned approval mode is stated and the dialog offers no save buttons", a
   try {
     assert.ok(await waitFor(() => textOf(h.output).includes("Two Brothers")));
     const text = await openPermissionDetails(h);
+    assert.match(text, /permission preset: read-only/);
     assert.match(text, /approval mode: readonly/);
     assert.match(text, /pinned by --approval-mode \/ TWO_BROTHERS_APPROVAL_MODE/);
     // No save buttons: the pin would win until restart, so a silent write would
     // be dishonest. Only Close remains.
-    assert.ok(!text.includes("Allow all"), "no mode buttons while pinned");
+    assert.ok(!text.includes("Full access"), "no preset buttons while pinned");
     assert.ok(text.includes("Close"));
     h.input.key("escape");
     assert.ok(await waitFor(() => !lastFrameText(h.output).includes("PERMISSIONS")));
@@ -283,19 +310,35 @@ test("typed /permission <mode> applies valid modes and refuses unknown ones", as
     h.input.type("/permission readonly");
     h.input.enter();
     assert.ok(
-      await waitFor(() => textOf(h.output).includes("approval mode: readonly")),
-      "a typed valid mode is applied",
+      await waitFor(() => textOf(h.output).includes("permission preset: Read only (readonly)")),
+      "the legacy mode alias is applied as its preset",
     );
     assert.equal(new SettingsStore(settingsFile(h.sessionsDir)).readApprovalPolicy(), "readonly");
+    h.input.type("/permission edits");
+    h.input.enter();
+    assert.ok(
+      await waitFor(() =>
+        textOf(h.output).includes("permission preset: Workspace write (edits)"),
+      ),
+      "the legacy edits mode is the workspace-write preset",
+    );
+    assert.equal(new SettingsStore(settingsFile(h.sessionsDir)).readApprovalPolicy(), "edits");
+    h.input.type("/permission danger-full-access");
+    h.input.enter();
+    assert.ok(
+      await waitFor(() => textOf(h.output).includes("permission preset: Full access (allow-all)")),
+      "a deepseek-style preset id is applied",
+    );
+    assert.equal(new SettingsStore(settingsFile(h.sessionsDir)).readApprovalPolicy(), "allow-all");
     h.input.type("/permission bogus");
     h.input.enter();
     assert.ok(
-      await waitFor(() => textOf(h.output).includes('unknown approval mode "bogus"')),
-      "an unknown mode is refused with the allowed values",
+      await waitFor(() => textOf(h.output).includes('unknown permission preset "bogus"')),
+      "an unknown preset is refused with the allowed values",
     );
     assert.equal(
       new SettingsStore(settingsFile(h.sessionsDir)).readApprovalPolicy(),
-      "readonly",
+      "allow-all",
       "a refused value never changes the persisted mode",
     );
     assert.equal(await quit(h.input, h.app), 0);

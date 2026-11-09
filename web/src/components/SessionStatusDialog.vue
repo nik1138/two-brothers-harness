@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { NButton } from 'naive-ui'
 import type { RunMode, RunStatus, RunUsage, SettingsView } from '../types'
+import { cacheHitPercent, promptTokensOf } from '../usageCache'
 import AppDialog from './AppDialog.vue'
 
 /**
@@ -41,6 +42,11 @@ const RUN_LABELS: Record<RunStatus, string> = {
 const runLabel = computed(() =>
   props.runStatus ? RUN_LABELS[props.runStatus] : 'Idle (no live run for this session)',
 )
+
+/** Family-normalized prompt total; OpenAI-compatible runs omit prompt_tokens. */
+const promptTokens = computed(() => promptTokensOf(props.usage))
+/** `cached / prompt`, clamped; null only when there is no counter to show. */
+const cachePct = computed(() => cacheHitPercent(props.usage))
 const sessionTitle = computed(
   () => props.session?.title || props.session?.name || 'No session selected',
 )
@@ -109,8 +115,13 @@ function roleLine(role: 'senior' | 'junior'): string | null {
         <div class="status-row">
           <dt>Tokens</dt>
           <dd>
-            {{ usage.input_tokens }} in · {{ usage.output_tokens }} out
-            <template v-if="usage.cached_tokens > 0"> · {{ usage.cached_tokens }} cached</template>
+            {{ promptTokens }} in · {{ usage.output_tokens }} out
+            <template v-if="cachePct !== null">
+              · cache {{ cachePct }}% ({{ usage.cached_tokens }} cached)
+            </template>
+            <template v-if="(usage.cache_write_tokens ?? 0) > 0">
+              · {{ usage.cache_write_tokens }} written
+            </template>
           </dd>
         </div>
       </template>

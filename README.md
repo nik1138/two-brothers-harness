@@ -128,7 +128,7 @@ server then serves (the npm tarball ships its own copy of that build).
   `seq`. Interior corruption still fails loudly, and read-only listing/search
   never rewrite.
 - **Streaming.** `run --stream` emits one bounded NDJSON record per run event
-  (status, envelopes, repairs, tool calls, terminal result);
+  (status, envelopes, repairs, tool calls, live `usage`, terminal result);
   `run --stream --stream-tokens` adds a `token` record per provider text delta,
   and the TUI renders those deltas in place.
 - **Reasoning capture and replay.** With token streaming active, each provider
@@ -200,13 +200,16 @@ server then serves (the npm tarball ships its own copy of that build).
   `(action, target)` pair for that session (persisted in the session settings,
   removed with the session) while the fail-closed default and denial cap stay
   unchanged.
-- **Approval modes and guardrails.** An operator-selected policy — **Ask**
-  (the default), **Read only**, **Edits** or **Allow all** — selects a fixed,
-  honest decision table for workspace actions. It is persisted in
-  `sessions/settings.json`, can be pinned per server/TUI process with
-  `--approval-mode` (never persisted), and is editable from Settings →
-  Approvals in the web workspace and the TUI `/permission` dialog; `allow-all`
-  is explicit opt-in and always shows a destructive warning. A mode never
+- **Permission presets and guardrails.** Four named presets — **Read only**
+  (`readonly`), **Always ask** (`ask`, the default), **Workspace write**
+  (`edits`) and **Full access** (`allow-all`) — select the fixed, honest
+  decision table for workspace actions. The preset is a presentation alias for
+  the persisted mode in `sessions/settings.json`, can be pinned per server/TUI
+  process with `--approval-mode` (never persisted), and is editable from
+  Settings → Permissions in the web workspace, the TUI `/settings` →
+  Permissions action and `/permission` (`/permission <preset|mode>` still
+  accepts the legacy names); Full access is explicit opt-in and always shows a
+  destructive warning. A mode never
   bypasses workspace confinement or the sensitive-path refusal, `readonly`
   denies without asking, and neither a model reply nor a tool call can change
   it. The TUI `/permission` dialog also states the effective mode and accepts
@@ -249,7 +252,7 @@ server then serves (the npm tarball ships its own copy of that build).
   the next queued run is followed automatically. Older completed-run tool rows
   fold into one disclosure summary (`… N tool calls`, plus `in M runs` when a
   group spans several runs), the composer has a truthful status-seat row
-  (models, permission expectation, latest prompt-audit context sizes), and with
+  (models, permission preset, latest prompt-audit context sizes), and with
   no session open — or an empty one — a welcome hero offers workspace context,
   actions and starter suggestions that only prefill the composer. A **Plan**
   dock mirrors the model's todo list. The composer has a `@` mention picker and
@@ -257,9 +260,10 @@ server then serves (the npm tarball ships its own copy of that build).
   actions run locally (`/compact`, `/export`, `/help`, `/status`, `/permission`,
   …), and `?`/`Ctrl+/` opens the commands-and-shortcuts overlay. `Up`/`Down` in
   the composer recall earlier accepted tasks (multiline drafts only at their
-  edges, the live draft restored exactly), and Settings → **Approvals** picks
-  the workspace approval mode with honest copy and an inline warning for
-  `allow-all`. An operator message bubble's **Fork from here…** branches the
+  edges, the live draft restored exactly), and Settings → **Permissions** picks
+  one of four named presets (Read only / Always ask / Workspace write / Full
+  access) with honest copy and an inline warning for full access. An operator
+  message bubble's **Fork from here…** branches the
   conversation at that message through the existing fork route (`{seq}`) and
   opens the copy; the source stays untouched.
 - **TUI.** A bare interactive `two-brothers` (or `tui [task]`) is a
@@ -280,9 +284,9 @@ server then serves (the npm tarball ships its own copy of that build).
   settings the web workspace and `onboard` write (preset or manual endpoint,
   key masked and encrypted at rest). `Up`/`Down` recall earlier submitted tasks
   at the draft edges (the live draft is restored exactly), `/permission` states
-  the effective approval mode and persists a new one (a `--approval-mode`/env
-  pin states itself and offers only Close), and `/permission <mode>` applies
-  one directly. The `/` picker lists the built-in commands
+  the effective preset and persists a new one (a `--approval-mode`/env pin
+  states itself and offers only Close), `/permission <preset|mode>` applies one
+  directly, and `/settings` links to the same dialog. The `/` picker lists the built-in commands
   (badged) plus discovered templates, Tab/Shift+Tab accept/dismiss, and actions
   like `/compact`/`/export` are performed in the TUI rather than submitted.
   Overlay lists follow the theme, the composer leaves mode/models to the status
@@ -510,10 +514,11 @@ What the workspace gives you:
   may use their read-only belts before replying. Reads auto-allow; by default
   every write, edit, delete, or shell command docks an approval card in the
   chat — allow or deny there to resume the run (or stop it — pending
-  approvals are then denied). Settings → **Approvals** selects the workspace
-  approval mode (Ask / Read only / Edits / Allow all, with an inline warning
-  for the permissive one), so an operator can also deny all mutations without
-  asking or, explicitly, let edits run unattended. Shell/delete requests state
+  approvals are then denied). Settings → **Permissions** selects the workspace
+  permission preset (Read only / Always ask / Workspace write / Full access,
+  with an inline warning for the permissive one), so an operator can also deny
+  all mutations without asking or, explicitly, let edits run unattended. The
+  TUI exposes the same presets through `/permission` and `/settings`. Shell/delete requests state
   their honest reason (write/edit show their diff) and the card can expand a
   bounded diff/command preview. The senior additionally gets read-only
   workspace checks (including approval-brokered `run_shell`) to verify the

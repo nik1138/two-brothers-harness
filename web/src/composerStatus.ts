@@ -120,33 +120,33 @@ function permissionsSeat(input: ComposerStatusInput): ComposerSeat | null {
         label: 'Permissions',
         value: 'Read only',
         title:
-          'Approval mode is read only: writes, edits, deletes and shell commands are denied without asking. Change it in Settings → Approvals.',
+          'Permission preset "Read only": writes, edits, deletes and shell commands are denied without asking. Change it in Settings → Permissions.',
       }
     }
     if (input.approvalMode === 'edits') {
       return {
         id: 'permissions',
         label: 'Permissions',
-        value: 'Edits auto',
+        value: 'Workspace write',
         title:
-          'Approval mode is edits: writes and edits run without asking; deletes and shell commands pause the run and ask here. Change it in Settings → Approvals.',
+          'Permission preset "Workspace write": writes and edits run without asking; deletes and shell commands pause the run and ask here. Change it in Settings → Permissions.',
       }
     }
     if (input.approvalMode === 'allow-all') {
       return {
         id: 'permissions',
         label: 'Permissions',
-        value: 'Allow all',
+        value: 'Full access',
         title:
-          'Approval mode is allow all: every action runs without asking, including deletes and shell commands. Change it in Settings → Approvals.',
+          'Permission preset "Full access": every action runs without asking, including deletes and shell commands. Change it in Settings → Permissions.',
       }
     }
     return {
       id: 'permissions',
       label: 'Permissions',
-      value: 'Ask in app',
+      value: 'Always ask',
       title:
-        'Workspace tools that need permission pause the run and ask here before running.',
+        'Permission preset "Always ask": reads run freely; writes, edits, deletes and shell commands pause the run and ask here. Change it in Settings → Permissions.',
     }
   }
   if (input.workspaceLinked === false) {

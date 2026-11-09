@@ -135,7 +135,7 @@ test("status bar: exactly two semantic lines with usage, cache, cost and elapsed
     contextWindow: 200_000,
     inputTokens: 1_200,
     outputTokens: 300,
-    cachedTokens: 50,
+    cachedTokens: 600,
     cost: 0.0123,
     elapsedMs: 65_000,
     hints: "keys",
@@ -143,9 +143,23 @@ test("status bar: exactly two semantic lines with usage, cache, cost and elapsed
   assert.equal(rows.length, 2);
   assertRows(rows, 300);
   const text = rows.join("\n");
-  for (const expected of ["consult", "SENIOR s", "JUNIOR j", "context 12.5k/200k", "tokens 1.2k in · 300 out", "cache 50", "cost $0.0123", "1m 5s", "keys"]) {
+  for (const expected of ["consult", "SENIOR s", "JUNIOR j", "context 12.5k/200k", "tokens 1.2k in · 300 out", "cache 50%", "cost $0.0123", "1m 5s", "keys"]) {
     assert.ok(text.includes(expected), expected);
   }
+});
+
+test("status bar: prompt_tokens is the honest cache denominator (Anthropic)", () => {
+  const [, second] = statusBarSegments({
+    mode: "consult",
+    inputTokens: 4_000,
+    promptTokens: 7_600,
+    outputTokens: 100,
+    cachedTokens: 3_200,
+  });
+  const text = second.map((segment) => segment.text).join(" · ");
+  // 3 200 / 7 600 = 42%, not 3 200 / 4 000 = 80% and never >100%.
+  assert.ok(text.includes("tokens 7.6k in · 100 out"), text);
+  assert.ok(text.includes("cache 42%"), text);
 });
 
 test("status bar: unknown cost and missing models are honest and actionable", () => {
@@ -305,14 +319,14 @@ test("status bar: hint priority fits the fold hint at ordinary widths, before op
     contextWindow: 200_000,
     inputTokens: 1_200,
     outputTokens: 300,
-    cachedTokens: 50,
+    cachedTokens: 600,
     cost: 0.0123,
     elapsedMs: 65_000,
   };
   const collapsed = `${chord("tool-expand")} expand tool · Ctrl+P commands · ? / F1 help`;
   assert.equal(
     (renderStatusBar({ ...metrics, hints: collapsed }, { width: 120 })[1] ?? "").trimEnd(),
-    `${collapsed} · context 12.5k/200k · tokens 1.2k in · 300 out · cache 50 · 1m 5s`,
+    `${collapsed} · context 12.5k/200k · tokens 1.2k in · 300 out · cache 50% · 1m 5s`,
     "at 120 columns the fold hint wins a seat; cost is the first low-value metric dropped",
   );
   assert.equal(
@@ -328,7 +342,7 @@ test("status bar: hint priority fits the fold hint at ordinary widths, before op
   // still appear — the hint itself is never cut into a false label.
   assert.equal(
     (renderStatusBar({ ...metrics, hints: collapsed }, { width: 40 })[1] ?? "").trimEnd(),
-    "context 12.5k/200k · cache 50 · 1m 5s",
+    "context 12.5k/200k · cache 50% · 1m 5s",
   );
 
   // A long activity line is the highest-priority segment; the hint yields only
@@ -650,7 +664,7 @@ const PANEL_STATE: SidePanelState = {
   contextWindow: 200_000,
   inputTokens: 1_200,
   outputTokens: 300,
-  cachedTokens: 50,
+  cachedTokens: 600,
   cost: 0.0123,
   elapsedMs: 65_000,
   compaction: { mode: "tokens", threshold: 120_000, keepRecent: 10_000 },
@@ -751,7 +765,7 @@ test("side panel: known values reuse the status formatters", () => {
   assert.equal(values.get("CWD"), "C:/code/project");
   assert.equal(values.get("CONTEXT"), "12.5k / 200k");
   assert.equal(values.get("TOKENS"), "in 1.2k · out 300");
-  assert.equal(values.get("CACHE"), "50");
+  assert.equal(values.get("CACHE"), "50%");
   assert.equal(values.get("COST"), "$0.0123");
   assert.equal(values.get("ELAPSED"), "1m 5s");
   assert.equal(values.get("COMPACT"), "auto 120k tok · keep 10.0k");

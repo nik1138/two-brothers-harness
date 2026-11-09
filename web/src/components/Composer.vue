@@ -139,6 +139,8 @@ const emit = defineEmits<{
   ]
   stop: []
   openSettings: []
+  /** Open Settings directly on the Permissions section. */
+  openPermissions: []
   /** A first-party base action chosen from the `/` menu or typed directly. */
   command: [request: ComposerCommandRequest]
   /** Neutral, composer-local notice for the shell to surface (usage errors…). */
@@ -1861,8 +1863,9 @@ onBeforeUnmount(() => {
         </n-button>
       </div>
 
-      <!-- Truthful run status seats (models · permission expectation · latest
-           prompt-audit context). Unknown seats hide themselves. -->
+      <!-- Truthful run status seats (models · permission preset · latest
+           prompt-audit context). Unknown seats hide themselves. The
+           permissions seat is a button that deep-links to its settings. -->
       <ul v-if="statusSeats.length" class="composer-seats" aria-label="Run status">
         <li
           v-for="seat in statusSeats"
@@ -1871,8 +1874,21 @@ onBeforeUnmount(() => {
           :class="`is-${seat.id}`"
           :title="seat.title"
         >
-          <span class="seat-label">{{ seat.label }}</span>
-          <span class="seat-value">{{ seat.value }}</span>
+          <button
+            v-if="seat.id === 'permissions'"
+            type="button"
+            class="seat-button"
+            :title="seat.title"
+            :aria-label="`${seat.label}: ${seat.value}. Open permission settings.`"
+            @click="emit('openPermissions')"
+          >
+            <span class="seat-label">{{ seat.label }}</span>
+            <span class="seat-value">{{ seat.value }}</span>
+          </button>
+          <template v-else>
+            <span class="seat-label">{{ seat.label }}</span>
+            <span class="seat-value">{{ seat.value }}</span>
+          </template>
         </li>
       </ul>
 
@@ -2012,6 +2028,27 @@ onBeforeUnmount(() => {
   content: '·';
   margin-right: 0.3rem;
   opacity: 0.6;
+}
+
+.seat-button {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.28rem;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.seat-button:hover .seat-value,
+.seat-button:focus-visible .seat-value {
+  text-decoration: underline;
 }
 
 .seat-label {

@@ -51,7 +51,7 @@ test('the permission seat states the real approval model per workspace context',
   const linked = composerSeats({ workspaceLinked: true })
   assert.equal(linked.length, 1)
   assert.equal(linked[0].id, 'permissions')
-  assert.equal(linked[0].value, 'Ask in app')
+  assert.equal(linked[0].value, 'Always ask')
   assert.match(linked[0].title, /pause the run and ask here/)
 
   const unlinked = composerSeats({ workspaceLinked: false })
@@ -67,21 +67,23 @@ test('the permission seat names the effective approval mode', () => {
     composerSeats({ workspaceLinked: true, approvalMode: mode })[0]
 
   const ask = seatOf('ask')
-  assert.equal(ask.value, 'Ask in app')
-  assert.match(ask.title, /ask here before running/)
+  assert.equal(ask.value, 'Always ask')
+  assert.match(ask.title, /always ask/i)
+  assert.match(ask.title, /ask here/)
 
   const readonly = seatOf('readonly')
   assert.equal(readonly.value, 'Read only')
   assert.match(readonly.title, /denied without asking/)
-  assert.match(readonly.title, /Settings → Approvals/)
+  assert.match(readonly.title, /Settings → Permissions/)
 
   const edits = seatOf('edits')
-  assert.equal(edits.value, 'Edits auto')
+  assert.equal(edits.value, 'Workspace write')
+  assert.match(edits.title, /workspace write/i)
   assert.match(edits.title, /writes and edits run without asking/)
   assert.match(edits.title, /deletes and shell commands pause the run/)
 
   const allowAll = seatOf('allow-all')
-  assert.equal(allowAll.value, 'Allow all')
+  assert.equal(allowAll.value, 'Full access')
   assert.match(allowAll.title, /every action runs without asking/)
   assert.match(allowAll.title, /including deletes and shell commands/)
 

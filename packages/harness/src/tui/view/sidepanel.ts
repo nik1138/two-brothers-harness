@@ -199,8 +199,11 @@ export interface SidePanelState {
   contextTokens?: number;
   contextWindow?: number;
   inputTokens?: number;
+  /** Total prompt tokens when the provider reports uncached-only input. */
+  promptTokens?: number;
   outputTokens?: number;
   cachedTokens?: number;
+  cacheWriteTokens?: number;
   /** Null is the honest unknown price; undefined means "not measured yet". */
   cost?: number | null;
   elapsedMs?: number;
@@ -233,7 +236,21 @@ function contextValue(state: SidePanelState): string {
 
 function tokenValue(state: SidePanelState): string {
   if (state.inputTokens === undefined && state.outputTokens === undefined) return "unknown";
-  return `in ${formatCount(state.inputTokens ?? 0)} · out ${formatCount(state.outputTokens ?? 0)}`;
+  const prompt = state.promptTokens ?? state.inputTokens ?? 0;
+  return `in ${formatCount(prompt)} · out ${formatCount(state.outputTokens ?? 0)}`;
+}
+
+function cacheValue(state: SidePanelState): string {
+  if (state.cachedTokens === undefined) return "unknown";
+  const prompt = state.promptTokens ?? state.inputTokens ?? 0;
+  const percent =
+    prompt > 0
+      ? Math.min(100, Math.round((state.cachedTokens * 100) / prompt))
+      : state.cachedTokens > 0
+        ? 100
+        : 0;
+  const written = state.cacheWriteTokens ?? 0;
+  return written > 0 ? `${percent}% · ${formatCount(written)} written` : `${percent}%`;
 }
 
 function costValue(cost: number | null | undefined): string {
@@ -339,11 +356,7 @@ export function sidePanelEntries(
     },
     { label: "CONTEXT", value: contextValue(state), tone: "muted" },
     { label: "TOKENS", value: tokenValue(state), tone: "muted" },
-    {
-      label: "CACHE",
-      value: state.cachedTokens === undefined ? "unknown" : formatCount(state.cachedTokens),
-      tone: "muted",
-    },
+    { label: "CACHE", value: cacheValue(state), tone: "muted" },
     {
       label: "COST",
       value: costValue(state.cost),

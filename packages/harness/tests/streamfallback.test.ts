@@ -266,6 +266,7 @@ test("anthropic: a streamed request accepts the normal JSON messages shape", asy
       output_tokens: 2,
       cached_tokens: 1,
       cache_write_tokens: 0,
+      prompt_tokens: 5,
     });
   } finally {
     await stub.close();
@@ -305,6 +306,7 @@ test("gemini: a streamed request accepts the normal JSON candidates shape", asyn
       output_tokens: 4, // candidatesTokenCount + thoughtsTokenCount
       cached_tokens: 2,
       cache_write_tokens: 0,
+      prompt_tokens: 7,
     });
   } finally {
     await stub.close();

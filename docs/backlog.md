@@ -1513,8 +1513,69 @@ migrations, optional compression, projection caches for large corpora,
 optional per-cwd grouping for unlinked sessions (the current directory layout
 uses `_global`), and a migration backup/rollback helper.
 
+## Shipped 2026-11-10 (wave 29: permission presets, prompt rewrite, live cache)
+
+- **Permission presets in TUI and Web** — deepseek-harness-style named presets
+  now sit over the existing persisted `approval_policy.mode`; the mode remains
+  the only enforcement/wire value. `read-only` → `readonly`, `ask` (Always
+  ask) → `ask`, `workspace-write` → `edits`, `danger-full-access` → `allow-all`;
+  `custom` is derived-only for a future unmatched value. `PermissionPreset` /
+  `PERMISSION_PRESET_INFO` / `normalizePermissionPreset` live in
+  `packages/harness/src/permissions.ts`; the web mirror is
+  `web/src/approvalPolicy.ts`. The TUI `/permission` dialog and buttons now
+  speak presets (legacy mode names stay accepted), `/settings` shows the
+  effective preset and gains a **Permissions…** action, and the web Settings
+  section is renamed **Permissions** with preset cards, the stored mode named
+  on each card, the inline full-access warning, an `initialSection` deep-link,
+  and a clickable composer permissions seat. No protocol/PUT change: the API
+  still accepts the four modes only.
+- **System prompts optimized** — `shared/prompts.json` (and the packaged copy,
+  byte-identical) now states the actual fixed cycle (consult/delegation →
+  proposal/deliverable → review → decision), the payload-only contract, the
+  required numeric `confidence`/array types, the review `points` revision
+  path, decision `dissent`/`accepted_proposals`, and one coherent reply
+  format: one JSON object, a fenced JSON block accepted (removing the old
+  "no markdown wrappers" vs fenced-example contradiction). Tool headings and
+  payload examples stay code-owned; the base file intentionally contains no
+  literal fenced JSON block because `e2e/faults.ts` identifies node kinds from
+  the last appended example.
+- **Live cache percentage** — an additive `usage` runtime/stream event is
+  emitted after every cooperation node, before `run_end` (same counters as the
+  terminal event). `RunManager` folds it into the live run record, the web
+  footer shows tokens/cache % while a run works or waits, and the TUI status
+  bar/side panel/result line show `cache N%` (clamped; writes are never
+  counted as hits). `usage.prompt_tokens` is the family-normalized prompt
+  total (Anthropic: uncached + read + written; Gemini: prompt count;
+  OpenAI-compatible omits it because input already includes cache reads), so
+  the percentage is `cached / prompt_tokens` rather than the old
+  `cached / input_tokens` that inflated Anthropic/Gemini and could exceed
+  100%; `cache_write_tokens` is shown as `write N` when billed. Anthropic's
+  three `cache_control` breakpoints and the provider-family cache accounting
+  are unchanged.
+
+Tests: `tests/approvalmodes.test.ts` (+3 preset tests),
+`tests/tuiapprovalmodes.test.ts` (7, presets + `/settings` link),
+`tests/harness.test.ts` (live usage event), `tests/runtime.test.ts` (live
+record usage), `tests/prompts.test.ts` (payload-format/no-fence contract),
+`web/tests/approvalPolicy.test.ts` (+4 preset tests),
+`web/tests/composerStatus.test.ts`, `web/tests/permissionsUi.test.ts` (4
+source-level wiring assertions), `web/tests/usageCache.test.ts` (4
+family-normalized percentage tests). See `docs/cli-reference.md` → Approval modes,
+`docs/quickstart.md`, `docs/troubleshooting.md` → Permissions/Tokens and
+prompt cache, and `docs/keyboard.md`.
+
 ## Open items (deferred)
 
+- **Prompt-prefix cache stability across cooperation nodes (medium)** — the
+  assembled system prompt still appends the current node's few-shot payload
+  example, so a consult → review → decision sequence changes the system prefix
+  and pays a fresh cache write. DeepSeek/OpenAI implicit caching and Anthropic's
+  system breakpoint only hit within a node or tool loop. The next step is to
+  move the kind example to the tail of the request (the
+  `DELEGATION_DIRECTIVE`/`VERIFY_INSTRUCTION` pattern) or keep a role-stable
+  example set, and update `e2e/faults.ts` to identify the requested node from
+  the user-message marker instead of the last system fence. Do not do this
+  without re-running the live cache evidence.
 - **Remaining key-binding surfaces** — wave 16 shipped the web's three
   modifier global chords (command palette, find, shortcut reference) with the
   Settings → Keyboard capture UI, and wave 19 shipped the TUI's three global

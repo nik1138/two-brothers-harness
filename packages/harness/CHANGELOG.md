@@ -94,6 +94,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Permission presets in the TUI and web Settings:** four named presets
+  (`read-only`, `ask` / Always ask, `workspace-write`, `danger-full-access` /
+  Full access) now alias the existing persisted `approval_policy.mode` values
+  (`readonly`, `ask`, `edits`, `allow-all`); the mode remains the only wire and
+  enforcement value. `PermissionPreset`, `PERMISSION_PRESETS`,
+  `PERMISSION_PRESET_INFO`, `normalizePermissionPreset` (preset ids + legacy
+  mode aliases), `permissionPresetOf`, `currentPermissionPreset` and
+  `permissionPresetWarning` are exported from `src/permissions.ts`.
+  `/permission <preset>` and the dialog buttons apply a preset, `/settings`
+  shows the effective preset and gains a **Permissions…** action, and the web
+  Settings section is renamed **Permissions** with preset cards, a stored-mode
+  label and an `initialSection` deep-link. Files: `src/permissions.ts`,
+  `src/index.ts`, `src/basecommands.ts`, `src/tui/app.ts`; web
+  `src/approvalPolicy.ts`, `src/components/SettingsDialog.vue`,
+  `src/components/settings/PermissionsSection.vue` (renamed),
+  `src/components/PermissionInfoDialog.vue`, `src/components/Composer.vue`,
+  `src/composerStatus.ts`, `src/App.vue`; tests
+  `tests/approvalmodes.test.ts`, `tests/tuiapprovalmodes.test.ts`,
+  `web/tests/approvalPolicy.test.ts`, `web/tests/composerStatus.test.ts`,
+  `web/tests/permissionsUi.test.ts`.
+- **Live usage/cache events:** the harness emits an additive `usage` runtime
+  and stream event after each cooperation node, before `run_end`.
+  `RunManager` folds it into the live run record, so the web footer shows
+  tokens and the cache-hit percentage while a run works or waits, and the TUI
+  status bar/side panel/result line show `cache N%` (writes never count as
+  hits). The optional `usage.prompt_tokens` counter is the family-normalized
+  prompt total (Anthropic: uncached + read + written; Gemini: prompt count;
+  OpenAI-compatible omits it because input is already the total), so
+  `cached / prompt_tokens` no longer inflates or exceeds 100% on
+  Anthropic/Gemini. `cache_write_tokens` is rendered as `write N` when billed.
+  Files: `src/provider.ts`, `src/runstream.ts`, `src/runevents.ts`,
+  `src/harness.ts`, `src/runtime.ts`, `src/cli.ts`, `src/clilayout.ts`,
+  `src/tui/app.ts`, `src/tui/model.ts`, `src/tui/view/statusbar.ts`,
+  `src/tui/view/sidepanel.ts`; web `src/types.ts`, `src/App.vue`,
+  `src/components/UsageFooter.vue`, `src/components/SessionStatusDialog.vue`,
+  `src/usageCache.ts` (new); tests `tests/harness.test.ts`,
+  `tests/runtime.test.ts`, `tests/anthropiccache.test.ts`,
+  `tests/usagecache.test.ts`, `tests/adapters.test.ts`,
+  `tests/streamingtokens.test.ts`, `tests/thinkingstream.test.ts`,
+  `tests/streamfallback.test.ts`, `web/tests/usageCache.test.ts` (new),
+  `web/tests/permissionsUi.test.ts`.
+- **Optimized senior/junior system prompts:** `shared/prompts.json` now names
+  the real fixed cycle, the payload-only reply contract, the numeric
+  `confidence`/array field rules, the review `points` revision path and the
+  decision `dissent`/`accepted_proposals` fields, and uses one coherent reply
+  format (one JSON object; a fenced JSON block accepted) instead of the old
+  "no markdown wrappers" contradiction with the code-appended fenced example.
+  Both prompt copies stay byte-identical and the base file contains no literal
+  fenced JSON block (the offline fault suite identifies node kinds by the last
+  example). Files: `shared/prompts.json`,
+  `packages/harness/shared/prompts.json`, `packages/harness/tests/prompts.test.ts`,
+  `shared/AGENTS.md`; docs `docs/backlog.md`.
 - **Quote a message into the composer (web):** assistant and operator bubbles
   expose a hover/focus `quote` action beside `copy`. A selection that
   intersects the bubble body is quoted as-is; otherwise the whole message uses

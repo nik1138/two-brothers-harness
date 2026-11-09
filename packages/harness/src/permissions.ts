@@ -120,6 +120,175 @@ export const APPROVAL_MODE_INFO: Readonly<Record<ApprovalMode, ApprovalModeInfo>
   },
 };
 
+// ---------------------------------------------------------------------------
+// Named permission presets (deepseek-harness style)
+// ---------------------------------------------------------------------------
+
+/**
+ * The operator-facing names a surface offers as one Permissions selector.
+ *
+ * deepseek-harness bundles a sandbox mode and an approval policy into named
+ * presets; Two Brothers has one effective enforcement knob (`approval_policy
+ * .mode`), so a preset is a presentation alias for one mode. The persisted
+ * wire contract is still the mode — presets never widen what a mode permits
+ * and an older client/backend keeps working unchanged.
+ *
+ * `custom` is derived-only: a stored mode that matches no preset (a future
+ * value, or a hand-built document) renders as custom and can never be
+ * selected or persisted through this catalog.
+ * (const-object, not a TS enum — node strip-only mode must load this file.)
+ */
+export const PermissionPreset = {
+  READ_ONLY: "read-only",
+  ASK: "ask",
+  WORKSPACE_WRITE: "workspace-write",
+  DANGER_FULL_ACCESS: "danger-full-access",
+} as const;
+export type PermissionPreset = (typeof PermissionPreset)[keyof typeof PermissionPreset];
+
+/** Reserved presentation value for a stored mode that matches no preset. */
+export const CUSTOM_PERMISSION_PRESET = "custom" as const;
+
+/** Every selectable preset, ordered from the most restrictive to the most open. */
+export const PERMISSION_PRESETS: readonly PermissionPreset[] = [
+  PermissionPreset.READ_ONLY,
+  PermissionPreset.ASK,
+  PermissionPreset.WORKSPACE_WRITE,
+  PermissionPreset.DANGER_FULL_ACCESS,
+];
+
+/** One preset's truthful presentation and the mode it selects. */
+export interface PermissionPresetInfo {
+  preset: PermissionPreset;
+  /** The persisted `approval_policy.mode` this preset applies. */
+  mode: ApprovalMode;
+  label: string;
+  /** One truthful sentence about what runs without asking. */
+  description: string;
+  /** Destructive warning; present only for the fully permissive preset. */
+  danger?: string;
+}
+
+export const PERMISSION_PRESET_INFO: Readonly<Record<PermissionPreset, PermissionPresetInfo>> = {
+  [PermissionPreset.READ_ONLY]: {
+    preset: PermissionPreset.READ_ONLY,
+    mode: ApprovalMode.READONLY,
+    label: "Read only",
+    description:
+      "Reads run freely. Writes, edits, deletes and shell commands are denied without asking.",
+  },
+  [PermissionPreset.ASK]: {
+    preset: PermissionPreset.ASK,
+    mode: ApprovalMode.ASK,
+    label: "Always ask",
+    description:
+      "Reads run freely. Writes, edits, deletes and shell commands ask before they run.",
+  },
+  [PermissionPreset.WORKSPACE_WRITE]: {
+    preset: PermissionPreset.WORKSPACE_WRITE,
+    mode: ApprovalMode.EDITS,
+    label: "Workspace write",
+    description:
+      "Reads, writes and edits run freely inside the workspace. Deletes and shell commands ask before they run.",
+  },
+  [PermissionPreset.DANGER_FULL_ACCESS]: {
+    preset: PermissionPreset.DANGER_FULL_ACCESS,
+    mode: ApprovalMode.ALLOW_ALL,
+    label: "Full access",
+    description: "Everything runs without asking, including deletes and shell commands.",
+    danger:
+      "Use only in a workspace you trust: a mistaken model step becomes an irreversible change.",
+  },
+};
+
+/**
+ * Accepted spellings for `/permission <name>`, `--approval-mode`-adjacent
+ * surfaces and old links. The four mode names remain aliases, so every value
+ * that worked before this catalog existed keeps its exact meaning.
+ */
+const PERMISSION_PRESET_ALIASES: Readonly<Record<string, PermissionPreset>> = {
+  "read-only": PermissionPreset.READ_ONLY,
+  readonly: PermissionPreset.READ_ONLY,
+  "readonly-mode": PermissionPreset.READ_ONLY,
+  ask: PermissionPreset.ASK,
+  "workspace-write": PermissionPreset.WORKSPACE_WRITE,
+  "workspacewrite": PermissionPreset.WORKSPACE_WRITE,
+  edits: PermissionPreset.WORKSPACE_WRITE,
+  edit: PermissionPreset.WORKSPACE_WRITE,
+  "workspace-edits": PermissionPreset.WORKSPACE_WRITE,
+  "danger-full-access": PermissionPreset.DANGER_FULL_ACCESS,
+  "full-access": PermissionPreset.DANGER_FULL_ACCESS,
+  "fullaccess": PermissionPreset.DANGER_FULL_ACCESS,
+  "allow-all": PermissionPreset.DANGER_FULL_ACCESS,
+  allowall: PermissionPreset.DANGER_FULL_ACCESS,
+};
+
+/** Canonical comparison key for a preset/mode spelling. */
+function presetKey(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s]+/gu, "-")
+    .replace(/-+/gu, "-")
+    .replace(/^-|-$/gu, "");
+}
+
+/**
+ * Strict preset lookup for operator input: a preset id, the legacy mode name,
+ * or a case/space-insensitive alias; `null` for anything else. `custom` is
+ * deliberately not selectable.
+ */
+export function normalizePermissionPreset(value: unknown): PermissionPreset | null {
+  if (typeof value !== "string") return null;
+  const key = presetKey(value);
+  // A plain-object bracket lookup would resolve inherited keys such as
+  // "constructor" to Object.prototype and later crash PERMISSION_PRESET_INFO.
+  return Object.prototype.hasOwnProperty.call(PERMISSION_PRESET_ALIASES, key)
+    ? PERMISSION_PRESET_ALIASES[key]!
+    : null;
+}
+
+export function isPermissionPreset(value: unknown): value is PermissionPreset {
+  return normalizePermissionPreset(value) !== null;
+}
+
+/** The preset that presents one stored mode (every current mode maps). */
+export function permissionPresetOf(mode: ApprovalMode): PermissionPresetInfo {
+  const resolved = resolveApprovalMode(mode);
+  for (const preset of PERMISSION_PRESETS) {
+    const info = PERMISSION_PRESET_INFO[preset];
+    if (info.mode === resolved) return info;
+  }
+  // Unreachable for the current enum; keeps a future mode fail-closed in the
+  // presentation layer instead of inventing a permissive label.
+  return PERMISSION_PRESET_INFO[PermissionPreset.ASK];
+}
+
+/** The preset id that presents one stored mode, or `custom` if none matches. */
+export function currentPermissionPreset(
+  mode: ApprovalMode,
+): PermissionPreset | typeof CUSTOM_PERMISSION_PRESET {
+  const normalized = normalizeApprovalMode(mode);
+  if (normalized === null) return CUSTOM_PERMISSION_PRESET;
+  for (const preset of PERMISSION_PRESETS) {
+    if (PERMISSION_PRESET_INFO[preset].mode === normalized) return preset;
+  }
+  return CUSTOM_PERMISSION_PRESET;
+}
+
+/** Resolve a selectable preset to the mode it persists. */
+export function permissionPresetMode(preset: PermissionPreset): ApprovalMode {
+  return PERMISSION_PRESET_INFO[preset].mode;
+}
+
+/** The destructive warning for a preset, or null when it keeps asking. */
+export function permissionPresetWarning(preset: PermissionPreset): string | null {
+  const info = PERMISSION_PRESET_INFO[preset];
+  return info.danger === undefined
+    ? null
+    : `permission preset "${info.preset}": ${info.description} ${info.danger}`;
+}
+
 /**
  * Strict mode normalization for untrusted sources (settings file, HTTP body,
  * CLI flag/env): trim surrounding whitespace, accept only the four exact

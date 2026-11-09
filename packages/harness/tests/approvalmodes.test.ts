@@ -29,15 +29,24 @@ import {
   APPROVAL_MODE_INFO,
   APPROVAL_MODES,
   ApprovalMode,
+  CUSTOM_PERMISSION_PRESET,
   DEFAULT_APPROVAL_MODE,
   Decision,
+  PERMISSION_PRESETS,
+  PERMISSION_PRESET_INFO,
   PermissionDenied,
   PermissionManager,
   PermissionPolicy,
+  PermissionPreset,
   StaticBroker,
   approvalModeWarning,
+  currentPermissionPreset,
   isApprovalMode,
   normalizeApprovalMode,
+  normalizePermissionPreset,
+  permissionPresetMode,
+  permissionPresetOf,
+  permissionPresetWarning,
   resolveApprovalMode,
   type ApprovalRequest,
   type ApprovalBroker,
@@ -169,6 +178,79 @@ test("APPROVAL_MODES is the exact four-mode enum with ask as the fail-closed def
   assert.ok(warning !== null);
   assert.match(warning!, /^approval mode "allow-all":/);
   assert.match(warning!, /irreversible change/);
+});
+
+// ---------------------------------------------------------------------------
+// named permission presets
+// ---------------------------------------------------------------------------
+
+test("permission presets are one truthful alias per mode, restrictive first", () => {
+  assert.deepEqual(PERMISSION_PRESETS, [
+    "read-only",
+    "ask",
+    "workspace-write",
+    "danger-full-access",
+  ]);
+  assert.deepEqual(
+    PERMISSION_PRESETS.map((preset) => PERMISSION_PRESET_INFO[preset].mode),
+    ["readonly", "ask", "edits", "allow-all"],
+  );
+  for (const preset of PERMISSION_PRESETS) {
+    const info = PERMISSION_PRESET_INFO[preset];
+    assert.equal(info.preset, preset);
+    assert.ok(info.label.length > 0);
+    assert.ok(info.description.length > 0);
+    assert.equal(info.danger !== undefined, preset === PermissionPreset.DANGER_FULL_ACCESS);
+  }
+  assert.match(PERMISSION_PRESET_INFO["workspace-write"].description, /writes and edits run freely/);
+  assert.match(PERMISSION_PRESET_INFO.ask.description, /ask before they run/);
+  assert.match(
+    permissionPresetWarning(PermissionPreset.DANGER_FULL_ACCESS) ?? "",
+    /irreversible change/,
+  );
+  assert.equal(permissionPresetWarning(PermissionPreset.WORKSPACE_WRITE), null);
+});
+
+test("normalizePermissionPreset accepts preset ids, legacy modes and aliases", () => {
+  assert.equal(normalizePermissionPreset("read-only"), "read-only");
+  assert.equal(normalizePermissionPreset("readonly"), "read-only");
+  assert.equal(normalizePermissionPreset(" Read Only "), "read-only");
+  assert.equal(normalizePermissionPreset("ask"), "ask");
+  assert.equal(normalizePermissionPreset("workspace-write"), "workspace-write");
+  assert.equal(normalizePermissionPreset("edits"), "workspace-write");
+  assert.equal(normalizePermissionPreset("workspace_edits"), "workspace-write");
+  assert.equal(normalizePermissionPreset("danger-full-access"), "danger-full-access");
+  assert.equal(normalizePermissionPreset("full access"), "danger-full-access");
+  assert.equal(normalizePermissionPreset("allow-all"), "danger-full-access");
+  for (const bad of [
+    "custom",
+    "auto",
+    "never",
+    "yolo",
+    "",
+    "  ",
+    "constructor",
+    "__proto__",
+    "toString",
+    null,
+    undefined,
+    42,
+    {},
+  ]) {
+    assert.equal(normalizePermissionPreset(bad), null, JSON.stringify(bad));
+  }
+});
+
+test("every mode maps to one preset and the display fails closed", () => {
+  for (const mode of APPROVAL_MODES) {
+    const preset = currentPermissionPreset(mode);
+    assert.notEqual(preset, CUSTOM_PERMISSION_PRESET, mode);
+    assert.equal(permissionPresetMode(preset as PermissionPreset), mode);
+    assert.equal(permissionPresetOf(mode).mode, mode);
+  }
+  assert.equal(currentPermissionPreset("auto" as never), CUSTOM_PERMISSION_PRESET);
+  // A future/unknown mode presents as the asking preset, never full access.
+  assert.equal(permissionPresetOf("auto" as never).mode, ApprovalMode.ASK);
 });
 
 test("normalizeApprovalMode is a strict enum; resolveApprovalMode fails closed to ask", () => {

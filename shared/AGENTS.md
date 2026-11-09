@@ -21,6 +21,9 @@ Local map for the canonical shared contract files. Root rules:
 
 - Prompt sections (`## Available tools`, skills, payload examples) are
   assembled in code; do not add them to `prompts.json`.
+- Do not put a literal fenced JSON block in `prompts.json`:
+  `packages/harness/e2e/faults.ts` identifies the requested node by parsing the
+  last such block in the assembled system prompt.
 - Keep JSON key order and whitespace stable to avoid noisy diffs.
 - Both implementations and both prompt copies are checked by their suites; a
   schema-only edit with no code/tests is incomplete.

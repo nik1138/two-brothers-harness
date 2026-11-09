@@ -388,6 +388,7 @@ test("anthropic: streaming requests carry the same breakpoints and read cache us
     output_tokens: 7,
     cached_tokens: 25,
     cache_write_tokens: 0,
+    prompt_tokens: 75,
   });
 });
 
@@ -416,6 +417,7 @@ test("anthropic: cache reads map to cached_tokens and cache writes to cache_writ
     output_tokens: 30,
     cached_tokens: 40,
     cache_write_tokens: 10,
+    prompt_tokens: 170,
   });
 
   await provider.chat(PLAIN_MESSAGES);
@@ -427,6 +429,7 @@ test("anthropic: cache reads map to cached_tokens and cache writes to cache_writ
     output_tokens: 32,
     cached_tokens: 40,
     cache_write_tokens: 10,
+    prompt_tokens: 181,
   });
 
   await provider.chat(PLAIN_MESSAGES);
@@ -440,6 +443,7 @@ test("anthropic: cache reads map to cached_tokens and cache writes to cache_writ
     output_tokens: 33,
     cached_tokens: 40,
     cache_write_tokens: 110,
+    prompt_tokens: 286,
   });
 });
 
@@ -466,10 +470,26 @@ test("usage: the run aggregate keeps the cached portion and display shows it onl
 
   const withCache = humanFooter(merged, null);
   assert.ok(withCache, "a run with usage renders a footer");
-  // The footer computes the share from the normalized counters (cached/input),
-  // which is the existing cross-family convention; the segment appears only
-  // because the provider reported 40 cached tokens.
+  // OpenAI-compatible records omit prompt_tokens (input is already the total);
+  // the fallback keeps the historical cached/input convention.
   assert.ok(withCache.includes("cache 31%"), `footer must show the cached hit: ${withCache}`);
+
+  // Anthropic/Gemini carry the normalized prompt total: cached / prompt, not
+  // cached / uncached-input (which would inflate 42% into 80%).
+  const anthropic = humanFooter(
+    {
+      model_calls: 1,
+      input_tokens: 4_000,
+      prompt_tokens: 7_600,
+      output_tokens: 100,
+      cached_tokens: 3_200,
+      cache_write_tokens: 400,
+    },
+    null,
+  );
+  assert.ok(anthropic?.includes("cache 42%"), `normalized prompt denominator: ${anthropic}`);
+  assert.ok(anthropic?.includes("tokens 7600 in"), `prompt total is the in count: ${anthropic}`);
+  assert.ok(anthropic?.includes("write 400"), `cache writes are visible: ${anthropic}`);
 
   const withoutCache = humanFooter(
     { model_calls: 1, input_tokens: 100, output_tokens: 10, cached_tokens: 0 },

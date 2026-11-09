@@ -651,7 +651,7 @@ test("/status and /permission open honest dialogs; /new resets memory but refuse
     input.type("/permission");
     input.enter();
     assert.ok(await waitFor(() => lastFrameText(output).includes("PERMISSIONS")));
-    assert.ok(lastFrameText(output).includes("Approval policy"));
+    assert.ok(lastFrameText(output).includes("Permission preset"));
     input.type("d"); // show details
     assert.ok(
       await waitFor(() => lastFrameText(output).includes("approvals: none")),

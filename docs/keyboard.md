@@ -433,14 +433,16 @@ a turn/compaction runs or an overlay, find bar or approval owns the keyboard.
 | (plan dock) | A model-written plan shows above the composer (`✓` completed / `▸` in progress / `○` pending, at most four rows plus a `+N more` tail). Display-only: no key answers it and the composer keeps its normal keys. |
 | (status bar) | The second status row rotates one registry-derived discoverability tip per accepted turn (`Ctrl+T fold tool output`, `Ctrl+F find in transcript`, `Ctrl+P commands`, …) and can briefly show a transient hint instead. Tips and hints only describe existing bindings — they add none. |
 
-### Approvals (workspace-bound runs)
+### Permissions and approvals (workspace-bound runs)
 
 A run started with `tui --workspace <dir>` pauses on a workspace mutation or
 shell command and replaces the composer with the approval panel. The effective
-approval mode decides whether the panel appears at all: `readonly` denies
-mutations and shell commands before a card can park, `edits` lets writes and
-edits run, and `allow-all` runs everything without asking (with a warning
-toast each turn). The mode is set from `/permission` or
+permission preset decides whether the panel appears at all: Read only
+(`readonly`) denies mutations and shell commands before a card can park,
+Workspace write (`edits`) lets writes and edits run, Always ask (`ask`) asks
+for every mutation, and Full access (`allow-all`) runs everything without
+asking (with a warning toast each turn). The preset is set from
+`/permission`, `/settings` → Permissions, or
 `--approval-mode`/`TWO_BROTHERS_APPROVAL_MODE`; see
 [Approval modes](cli-reference.md#approval-modes). These keys
 belong to the panel while it is open (the checked `approval` key scope — they
@@ -490,8 +492,9 @@ Every registry command also has a typed slash form — even when it has no
 chord — and all are searchable in `Ctrl+P`: `/palette`, `/help` (`/h`),
 `/commands`, `/find [query]`, `/retry`, `/stash`, `/exit` (`/quit`, `/q`),
 `/mode consult|work`, `/models`, `/sessions`, `/theme dark|light|system`,
-`/settings`, `/provider` (the provider connect surface; `/settings` also has a
-**Connect provider…** action in its dialog), plus discovered `<name>.md`
+`/settings` (provider summary, effective permission preset, and **Connect
+provider…** / **Permissions…** actions), `/provider` (the provider connect
+surface), plus discovered `<name>.md`
 templates. `/models` and `/sessions`
 refuse while a turn runs. The find bar is an inline input, not a modal: while
 it is open it owns printable keys and the app chords (`Ctrl+P`, `?`, slash
@@ -511,14 +514,15 @@ template shadows a same-named built-in):
   configured senior endpoint and rewrites the session file; the visible
   transcript is unchanged), `/export [path]` (Markdown export; in-memory
   sessions need an explicit path), `/status` (session/context/panel details),
-  `/permission` (the effective approval mode with its honest description and
-  the `allow-all` warning, the bound workspace root, the decision keys and
+  `/permission` (the effective preset, its stored mode and honest description,
+  the full-access warning, the bound workspace root, the decision keys and
   this process's in-memory session allows; without a `--approval-mode` pin
-  its buttons persist one of the four modes — `ask`, `readonly`, `edits`,
-  `allow-all` — to `sessions/settings.json`, with a pin it says so and offers
-  only Close, and `/permission <mode>` applies one directly — a pinned
-  process refuses that change with the pin reason; an unbound TUI
-  still states the mode and that it has no approval broker), and `/new` (a
+  its buttons persist one of the four presets — Read only, Always ask,
+  Workspace write, Full access — to `sessions/settings.json`, with a pin it
+  says so and offers only Close, and `/permission <preset|mode>` applies one
+  directly — a pinned process refuses that change with the pin reason; an
+  unbound TUI still states the preset and that it has no approval broker), and
+  `/new` (a
   fresh in-memory session; on-disk sessions are refused honestly). Actions never
   become tasks; a refusal says why.
 
