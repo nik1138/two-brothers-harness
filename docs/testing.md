@@ -772,8 +772,8 @@ deterministic order, additive `--json`); the MCP env wiring adds those cases to
 `tests/serverbase.test.ts` (143 focused: schema/validation, stored-override
 preservation, run-level > persisted > smaller-preset precedence, old presets
 byte-compatible) and the web provider/compaction suites (45 focused).
-Package suite **1 979 tests** (1 973 pass and 6 platform skips on Windows; the
-WSL Linux pass is 1 978 pass with 1 skip); web suite **469/469**; the browser
+Package suite **2 043 tests** (2 036 pass and 7 platform skips on Windows; the
+WSL Linux pass is 2 042 pass with 1 skip); web suite **478/478**; the browser
 matrix is **22 hermetic scenario blocks** (23 PASS lines — the `chat/resume`
 block reports chat and resume separately) plus the opt-in `real` skip
 (**23 PASS, 0 FAIL, 1 SKIP**).

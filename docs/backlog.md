@@ -1463,6 +1463,29 @@ Tests: `tests/settingsschema.test.ts` (new), `tests/settings.test.ts` and
 /api/settings`, `docs/session-storage.md` → "Settings file schema" and
 `docs/troubleshooting.md`.
 
+Also shipped in wave 28:
+
+- **Spill retention** — `SpillStore.stats()`/`prune()`, `two-brothers spill
+  stats|gc --older-than <n>m|h|d [--dry-run] [--json] [--force]`, and the
+  opt-in `serve --spill-retention-days <n>` startup pass. The gc pass takes
+  the store's single-writer lock and deletes only validated regular spill
+  files strictly older than the cutoff.
+- **Line-ranged `workspace_read_file`** — optional 1-based `offset` and
+  `limit` page through a large file with bounded memory; results add
+  `lines`/`total_lines`/`eof`/`next_offset`, while calls without either keep
+  the historical byte-identical head+tail result.
+- **Advisory repeat-tool guard** — ported from deepseek-harness's
+  `repeat-tool-reminder` (MIT); identical consecutive calls get a gentle
+  reminder at 3 and detailed reminders at 5/8, appended only to the
+  model-facing tool result. `TWO_BROTHERS_REPEAT_GUARD=off` disables it.
+- **Workspace instructions** — workspace-bound runs load root-level
+  `AGENTS.md` then `CLAUDE.md` (bounded, deduped, quote-neutralized, framed as
+  untrusted project guidance) into a `## Workspace instructions` prompt
+  section; `TWO_BROTHERS_PROJECT_INSTRUCTIONS=off` disables it.
+- **Web message quotes** — assistant/operator bubbles gain a selection-aware
+  `quote` action that appends a capped Markdown blockquote to the current
+  unsent composer draft, never replacing it or submitting.
+
 Deferred follow-ups: a settings backend choice (JSON now, optional
 `node:sqlite`), session-format version headers plus frozen adjacent
 migrations, optional compression, projection caches for large corpora,
