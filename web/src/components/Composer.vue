@@ -1880,10 +1880,12 @@ onBeforeUnmount(() => {
             class="seat-button"
             :title="seat.title"
             :aria-label="`${seat.label}: ${seat.value}. Open permission settings.`"
+            aria-haspopup="dialog"
             @click="emit('openPermissions')"
           >
             <span class="seat-label">{{ seat.label }}</span>
             <span class="seat-value">{{ seat.value }}</span>
+            <span class="seat-chevron" aria-hidden="true">›</span>
           </button>
           <template v-else>
             <span class="seat-label">{{ seat.label }}</span>
@@ -2049,6 +2051,44 @@ onBeforeUnmount(() => {
 .seat-button:hover .seat-value,
 .seat-button:focus-visible .seat-value {
   text-decoration: underline;
+}
+
+/* The permissions seat is the one actionable seat: give it a visible pill so
+   the current preset reads as a control, not as passive run metadata. */
+.composer-seat.is-permissions .seat-button {
+  align-items: center;
+  gap: 0.34rem;
+  padding: 0.1rem 0.46rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  background: var(--surface-panel);
+  color: var(--text-primary);
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease;
+}
+
+.composer-seat.is-permissions .seat-button:hover,
+.composer-seat.is-permissions .seat-button:focus-visible {
+  border-color: var(--accent);
+  background: var(--surface-hover);
+}
+
+.seat-chevron {
+  flex: none;
+  font-size: 1rem;
+  line-height: 1;
+  color: var(--text-secondary);
+  transform: translateY(-0.02em);
+  transition:
+    color 120ms ease,
+    transform 120ms ease;
+}
+
+.seat-button:hover .seat-chevron,
+.seat-button:focus-visible .seat-chevron {
+  color: var(--accent);
+  transform: translateX(1px);
 }
 
 .seat-label {

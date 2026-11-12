@@ -94,6 +94,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Visible permissions control in the web composer:** the permission seat now
+  renders as a bordered pill — `Permissions · Always ask ›` — with an explicit
+  chevron, hover/focus accent and `aria-haspopup="dialog"`, so the current
+  preset reads as an actionable control instead of passive run metadata. It
+  still deep-links to Settings → Permissions, keeps every preset/tooltip
+  truthful, and uses the shared `--radius-pill` token. Files:
+  `web/src/components/Composer.vue`, `web/tests/permissionsUi.test.ts`.
 - **Kind-stable system prompts for prompt-cache reuse:** the per-node
   few-shot payload block (`PAYLOAD_EXAMPLES`) moved out of the system prompt
   and onto the request's transcript user turn via the exported

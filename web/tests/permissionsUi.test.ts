@@ -59,6 +59,12 @@ test('App deep-links /permission and the composer seat to the Permissions pane',
   assert.ok(composer.includes('openPermissions: []'))
   assert.ok(composer.includes("seat.id === 'permissions'"))
   assert.ok(composer.includes("emit('openPermissions')"))
+  // The permission seat reads as a control: a visible pill and a chevron.
+  assert.ok(composer.includes('class="seat-chevron"'))
+  assert.ok(composer.includes('aria-haspopup="dialog"'))
+  assert.ok(composer.includes('.composer-seat.is-permissions .seat-button'))
+  assert.ok(composer.includes('border-radius: var(--radius-pill)'))
+  assert.ok(composer.includes('.composer-seat.is-permissions .seat-button:hover'))
 
   const info = read('components/PermissionInfoDialog.vue')
   assert.ok(info.includes('Open Permissions'))
