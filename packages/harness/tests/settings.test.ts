@@ -470,6 +470,27 @@ test("provider_ref round-trips through disk", () => {
   }
 });
 
+test("effort round-trips and only model-safe tokens survive a read", () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const file = path.join(root, "settings.json");
+    new SettingsStore(file).write({ senior: { effort: "xhigh" }, junior: { effort: "" } });
+    const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, Record<string, string>>;
+    assert.equal(raw.senior.effort, "xhigh");
+    assert.equal("effort" in raw.junior, false, "Default (empty) is omitted");
+    assert.equal(new SettingsStore(file).read().senior?.effort, "xhigh");
+    assert.equal(new SettingsStore(file).public().senior.effort, "xhigh");
+    assert.equal(new SettingsStore(file).public().junior.effort, null);
+
+    // A hand-edited invalid token is ignored (tolerant boundary), never sent.
+    fs.writeFileSync(file, JSON.stringify({ senior: { effort: "high effort" } }));
+    assert.equal(new SettingsStore(file).read().senior?.effort, undefined);
+    assert.equal(new SettingsStore(file).public().senior.effort, null);
+  } finally {
+    cleanup();
+  }
+});
+
 test("public view never leaks keys", () => {
   const { root, cleanup } = tmpdir();
   try {

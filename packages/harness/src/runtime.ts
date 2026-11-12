@@ -37,6 +37,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { Config } from "./config.ts";
+import { normalizeEffortValue, type EffortValue } from "./effort.ts";
 import { runFailureUsage } from "./harness.ts";
 import { emptyUsage, ProviderAbortError, type UsageTotals } from "./provider.ts";
 import type { ApprovalBroker } from "./permissions.ts";
@@ -140,10 +141,12 @@ export interface RuntimeRoleSettings {
   base_url: string;
   api_key: string;
   provider_ref: string;
+  /** `""` = provider default; otherwise a model-declared effort token. */
+  effort?: string;
 }
 
 function emptyRole(): RuntimeRoleSettings {
-  return { provider: "", model: "", base_url: "", api_key: "", provider_ref: "" };
+  return { provider: "", model: "", base_url: "", api_key: "", provider_ref: "", effort: "" };
 }
 
 /** Operator-facing role view — no API key material, only whether one is set. */
@@ -153,12 +156,14 @@ export interface PublicRuntimeRoleSettings {
   base_url: string | null;
   api_key_set: boolean;
   provider_ref: string | null;
+  /** null = provider default (no reasoning-effort control is sent). */
+  effort: EffortValue | null;
 }
 
 export type PublicRuntimeSettings = Record<"senior" | "junior", PublicRuntimeRoleSettings>;
 export type RuntimeSettingsSnapshot = Record<"senior" | "junior", RuntimeRoleSettings>;
 
-const ROLE_FIELDS = ["provider", "model", "base_url", "api_key", "provider_ref"] as const;
+const ROLE_FIELDS = ["provider", "model", "base_url", "api_key", "provider_ref", "effort"] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -193,6 +198,8 @@ export interface RoleEndpoint {
    * only feeds compaction — provider wire requests are unchanged.
    */
   contextWindow?: number;
+  /** Per-role reasoning effort; absent = provider default (no control sent). */
+  effort?: EffortValue;
 }
 
 /** Named provider preset shape the resolver needs (SettingsStore presets qualify). */
@@ -309,11 +316,13 @@ export function resolveRoleEndpoints(
     );
     const provider = (roleProviders ? roleData.provider : "") || defaults.provider || "";
     const model = roleData.model || (role === "senior" ? defaults.seniorModel : defaults.juniorModel) || "";
+    const effort = normalizeEffortValue(roleData.effort);
     return {
       provider,
       baseUrl,
       apiKey,
       model,
+      ...(effort ? { effort } : {}),
       ...(kind ? { kind } : {}),
       ...(contextWindow !== undefined ? { contextWindow } : {}),
     };
@@ -405,6 +414,7 @@ export class RuntimeSettings {
       base_url: rs.base_url || null,
       api_key_set: Boolean(rs.api_key),
       provider_ref: rs.provider_ref || null,
+      effort: normalizeEffortValue(rs.effort),
     });
     return { senior: view(this.senior), junior: view(this.junior) };
   }
@@ -433,6 +443,16 @@ export class RuntimeSettings {
           if (value === undefined || value === null) continue;
           if (field === "provider" && !VALID_PROVIDERS.has(String(value))) {
             throw new Error(`invalid provider: ${String(value)} (use openai|mock)`);
+          }
+          if (field === "effort") {
+            const effort = normalizeEffortValue(value);
+            if (String(value) !== "" && effort === null) {
+              throw new Error(
+                `invalid effort: ${String(value)} (use the model's reported level, or empty for the provider default)`,
+              );
+            }
+            this[role].effort = effort ?? "";
+            continue;
           }
           this[role][field] = String(value);
         }

@@ -104,11 +104,12 @@ import {
   normalizeApprovalMode,
   type ApprovalMode,
 } from "./permissions.ts";
+import { normalizeEffortValue, type EffortValue } from "./effort.ts";
 import { defaultSecretBox, type SecretBox } from "./secretbox.ts";
 
 const ROLES = ["senior", "junior"] as const;
 type Role = (typeof ROLES)[number];
-const ROLE_FIELDS = ["provider", "model", "base_url", "api_key"] as const;
+const ROLE_FIELDS = ["provider", "model", "base_url", "api_key", "effort"] as const;
 type RoleField = (typeof ROLE_FIELDS)[number];
 
 export type RoleSettings = Partial<Record<RoleField | "provider_ref", string>>;
@@ -449,6 +450,7 @@ export interface PublicRoleSettings {
   base_url: string | null;
   api_key_set: boolean;
   provider_ref: string | null;
+  effort: EffortValue | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -593,6 +595,11 @@ export class SettingsStore {
       if (!isRecord(data)) continue;
       const entry: RoleSettings = {};
       for (const field of ROLE_FIELDS) {
+        if (field === "effort") {
+          const effort = normalizeEffortValue(data[field]);
+          if (effort !== null) entry.effort = effort;
+          continue;
+        }
         const value = asNonEmptyString(data[field]);
         if (value !== undefined && field !== "api_key") entry[field] = value;
         else if (value !== undefined) {
@@ -838,6 +845,11 @@ export class SettingsStore {
       if (!isRecord(data)) continue;
       const entry: Record<string, string> = {};
       for (const field of ROLE_FIELDS) {
+        if (field === "effort") {
+          const effort = normalizeEffortValue(data[field]);
+          if (effort !== null) entry.effort = effort;
+          continue;
+        }
         const value = asNonEmptyString(data[field]);
         if (value === undefined || pinned.has(`${role}:${field}`)) continue;
         if (field === "api_key") {
@@ -955,6 +967,7 @@ export class SettingsStore {
         base_url: entry.base_url ?? null,
         api_key_set: Boolean(entry.api_key),
         provider_ref: entry.provider_ref ?? null,
+        effort: normalizeEffortValue(entry.effort),
       };
     };
     return { senior: view("senior"), junior: view("junior") };

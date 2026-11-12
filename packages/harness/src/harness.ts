@@ -1242,6 +1242,7 @@ function providerFromEndpoint(
       model: endpoint.model || (role === "senior" ? cfg.seniorModel : cfg.juniorModel),
       sessionId: cfg.sessionId,
       sessionFile: cfg.sessionFile,
+      effort: endpoint.effort,
       ...(onWarning ? { onWarning } : {}),
     };
     if (kind === "anthropic") return new AnthropicProvider(config);

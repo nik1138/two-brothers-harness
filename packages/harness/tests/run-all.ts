@@ -18,6 +18,8 @@ import "./promptsections.test.ts";
 import "./instructions.test.ts";
 import "./providers.test.ts";
 import "./adapters.test.ts";
+import "./effort.test.ts";
+import "./modelcatalog.test.ts";
 import "./anthropiccache.test.ts";
 import "./usagecache.test.ts";
 import "./retryregistry.test.ts";

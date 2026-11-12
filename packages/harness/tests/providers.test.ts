@@ -175,6 +175,31 @@ test("a non-OpenCode request keeps its exact header set", async () => {
   assert.equal(captured?.["User-Agent"], undefined);
 });
 
+test("a model-declared effort is sent as reasoning_effort, exactly as reported", async () => {
+  let body: Record<string, unknown> | undefined;
+  const provider = makeProvider({
+    effort: "xhigh",
+    fetchImpl: async (_url, init) => {
+      body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return jsonResponse(usageBody(1, 1, 0));
+    },
+  });
+  await provider.chat([{ role: "user", content: "hi" }], "message");
+  assert.equal(body?.reasoning_effort, "xhigh");
+});
+
+test("no effort leaves the OpenAI-compatible body byte-identical", async () => {
+  let body: Record<string, unknown> | undefined;
+  const provider = makeProvider({
+    fetchImpl: async (_url, init) => {
+      body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return jsonResponse(usageBody(1, 1, 0));
+    },
+  });
+  await provider.chat([{ role: "user", content: "hi" }], "message");
+  assert.equal("reasoning_effort" in (body ?? {}), false);
+});
+
 test("default backoff table is capped exponential", () => {
   assert.deepEqual(backoffDelays(6), [2, 4, 8, 16, 30, 30]);
 });

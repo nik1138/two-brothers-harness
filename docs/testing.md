@@ -813,13 +813,15 @@ partial usage (`tests/graph.test.ts`, `tests/runtime.test.ts`,
 (`web/tests/permissionsUi.test.ts`). Wave 30 also hardens the prompt block
 (marker collisions, repair tails, verify kind; `tests/promptsections.test.ts`
 pins belt-stable prefixes). Latest measured totals for the merged tree:
-package suite **2 089 tests** (2 082 pass and 7 platform skips on Windows), web
-suite **505/505**, hermetic CLI E2E **19/19** on sources and `--dist`, fault
+package suite **2 105 tests** (2 098 pass and 7 platform skips on Windows), web
+suite **511/511**, hermetic CLI E2E **19/19** on sources and `--dist`, fault
 injection **7/7**, browser E2E **24 PASS, 0 FAIL, 1 opt-in `real` skip**,
 `npm run typecheck` green. The composer model switch adds
 `web/tests/modelSwitch.test.ts` and a `model-switch` browser scenario; the
 OpenCode session-header fix adds five provider tests
-(`tests/providers.test.ts`, `tests/adapters.test.ts`). The Wave 30 WSL Linux
+(`tests/providers.test.ts`, `tests/adapters.test.ts`); model-declared effort
+adds `tests/effort.test.ts`, `tests/modelcatalog.test.ts` and
+`web/tests/modelEfforts.test.ts`. The Wave 30 WSL Linux
 pass was **2 082 pass with 1 POSIX-specific skip** before these additions
 (Windows reported 2 076 pass with 7 platform skips then).
 

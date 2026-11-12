@@ -74,6 +74,7 @@ import { randomUUID } from "node:crypto";
 
 import type { ChatMessage, ToolCall } from "./context.ts";
 import { extractTask } from "./context.ts";
+import { effortThinkingBudget, type EffortValue } from "./effort.ts";
 
 export type { ToolCall } from "./context.ts";
 
@@ -264,6 +265,11 @@ export interface ProviderConfig {
   juniorModel: string;
   /** Explicit model override (per-role endpoint resolution). */
   model?: string;
+  /**
+   * Per-role reasoning effort. Absent/undefined leaves the provider's own
+   * default untouched (the request gains no effort/thinking control).
+   */
+  effort?: EffortValue;
   /**
    * Stable per-conversation id for endpoints that route by session (OpenCode).
    * When unset, a session file stem is used as the fallback.
@@ -1258,6 +1264,8 @@ export abstract class BaseHttpProvider implements Provider {
   readonly usage = new UsageTracker();
   /** Stable per-conversation id used by OpenCode's routing header. */
   readonly sessionId?: string;
+  /** Per-role reasoning effort; undefined = provider default. */
+  readonly effort?: EffortValue;
   /** Output-token cap (`--max-tokens`); undefined keeps the provider default. */
   readonly maxTokens?: number;
 
@@ -1273,6 +1281,7 @@ export abstract class BaseHttpProvider implements Provider {
     this.baseUrl = cfg.baseUrl.replace(/\/+$/, "");
     this.apiKey = cfg.apiKey ?? "";
     this.model = cfg.model;
+    this.effort = cfg.effort;
     // A stable id is preferred (session name/file stem); OpenCode still needs
     // a header on in-memory runs, so fall back to one id per provider instance.
     this.sessionId =
@@ -1747,6 +1756,7 @@ export class OpenAICompatibleProvider extends BaseHttpProvider {
     };
     // Only when configured: the OpenAI default stays the endpoint's own.
     if (this.maxTokens !== undefined) body.max_tokens = this.maxTokens;
+    if (this.effort !== undefined) body.reasoning_effort = this.effort;
     if (tools && tools.length > 0) body.tools = toolDefinitions(tools);
     return body;
   }
@@ -2123,9 +2133,11 @@ export class AnthropicProvider extends BaseHttpProvider {
     super(cfg);
     this.maxTokens = Math.max(1, Math.trunc(cfg.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS));
     const requested = cfg.thinkingBudgetTokens;
+    const mapped = cfg.effort === undefined ? undefined : effortThinkingBudget(cfg.effort);
+    const budget = requested !== undefined ? requested : mapped;
     const normalized =
-      requested !== undefined && Number.isFinite(requested) && requested > 0
-        ? Math.trunc(requested)
+      budget !== undefined && Number.isFinite(budget) && budget > 0
+        ? Math.trunc(budget)
         : undefined;
     if (normalized !== undefined && normalized < ANTHROPIC_MIN_THINKING_BUDGET) {
       throw new Error(
@@ -2660,6 +2672,10 @@ export class GoogleProvider extends BaseHttpProvider {
     const generationConfig: Record<string, unknown> = {};
     if (Number.isFinite(this.temperature)) generationConfig.temperature = this.temperature;
     if (this.maxTokens !== undefined) generationConfig.maxOutputTokens = this.maxTokens;
+    if (this.effort !== undefined) {
+      const budget = effortThinkingBudget(this.effort);
+      if (budget !== undefined) generationConfig.thinkingConfig = { thinkingBudget: budget };
+    }
     if (Object.keys(generationConfig).length > 0) body.generationConfig = generationConfig;
     if (tools && tools.length > 0) body.tools = googleToolDefinitions(tools);
     return body;

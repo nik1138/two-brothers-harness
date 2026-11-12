@@ -407,7 +407,7 @@ function tsEnv(overrides = {}) {
   for (const key of Object.keys(env)) {
     if (key.startsWith('TWO_BROTHERS_')) delete env[key]
   }
-  return { ...env, ...overrides }
+  return { ...env, TWO_BROTHERS_MODEL_EFFORTS: 'off', ...overrides }
 }
 
 /**

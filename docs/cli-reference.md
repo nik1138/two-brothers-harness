@@ -478,6 +478,9 @@ lists only include IDs on the seeded endpoint. Requests to `opencode.ai` carry
 the required `x-opencode-session` routing header (a stable per-conversation id
 taken from the session name/file stem) and a `two-brothers-harness` client user
 agent for every wire family; requests to other endpoints are unchanged.
+Reasoning effort is model-declared: `GET /api/model-efforts?provider=…&model=…`
+returns the models.dev `reasoning_options` values (cached, fail-soft), and a
+role's saved `effort` is sent only for those declared levels.
 
 `/provider` is the in-TUI connect surface (also reached through `/settings` →
 **Connect provider…**; `/settings` is in the Ctrl+P palette). It opens a

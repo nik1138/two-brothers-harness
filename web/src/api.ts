@@ -8,6 +8,7 @@ import type {
   CompactionSettingsView,
   Envelope,
   FsBrowseResult,
+  ModelEffortInfo,
   ProviderPreset,
   RunApprovalsView,
   RunEvent,
@@ -320,6 +321,8 @@ export interface RoleSettingsPatch {
   api_key?: string
   /** Provider preset name supplying base_url/api_key; "" clears it. */
   provider_ref?: string
+  /** Model-declared effort token; "" clears it to the provider default. */
+  effort?: string
 }
 
 /**
@@ -767,6 +770,28 @@ export interface ProviderPatchRequest {
 export async function listProviders(): Promise<ProviderPreset[]> {
   const res = await request<{ providers: ProviderPreset[] }>('/api/providers')
   return res.providers
+}
+
+/**
+ * The model's own reasoning-effort levels, fetched from the backend catalog
+ * (models.dev, cached). A failed/offline lookup returns no efforts — the UI
+ * then offers no effort control instead of inventing levels.
+ */
+export async function getModelEfforts(
+  provider: string,
+  model: string,
+): Promise<ModelEffortInfo> {
+  const query = new URLSearchParams({ provider, model }).toString()
+  const body = await request<Partial<ModelEffortInfo>>(`/api/model-efforts?${query}`)
+  return {
+    provider: typeof body?.provider === 'string' ? body.provider : provider,
+    model: typeof body?.model === 'string' ? body.model : model,
+    reasoning: body?.reasoning === true,
+    efforts: Array.isArray(body?.efforts)
+      ? body.efforts.filter((value): value is string => typeof value === 'string' && value !== '')
+      : [],
+    source: typeof body?.source === 'string' ? body.source : 'unavailable',
+  }
 }
 
 export async function createProvider(body: ProviderCreateRequest): Promise<ProviderPreset> {

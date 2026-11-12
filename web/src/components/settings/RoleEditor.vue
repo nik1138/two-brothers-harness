@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { NForm, NFormItem, NInput, NSelect } from 'naive-ui'
+import { effortLabel } from '../../modelEfforts'
 
 interface RoleForm {
   provider: string
@@ -8,6 +9,7 @@ interface RoleForm {
   base_url: string
   api_key: string
   providerRef: string
+  effort: string
 }
 
 const props = defineProps<{
@@ -15,6 +17,10 @@ const props = defineProps<{
   form: RoleForm
   keySet: boolean
   connectionOptions: { label: string; value: string }[]
+  /** Model-declared levels (`GET /api/model-efforts`); empty = no control. */
+  effortOptions: string[]
+  effortLoading?: boolean
+  effortError?: string
 }>()
 
 const emit = defineEmits<{ 'update:form': [Partial<RoleForm>] }>()
@@ -26,6 +32,20 @@ const description = computed(() =>
     : 'Explores, implements, and reports back to the Senior.',
 )
 const presetActive = computed(() => Boolean(props.form.providerRef))
+const showEffort = computed(
+  () => props.effortOptions.length > 0 || props.form.effort !== '' || props.effortLoading === true,
+)
+const effortSelectOptions = computed(() => {
+  const options = [
+    { label: 'Default', value: '' },
+    ...props.effortOptions.map((level) => ({ label: effortLabel(level), value: level })),
+  ]
+  const current = props.form.effort
+  if (current !== '' && !props.effortOptions.includes(current)) {
+    options.push({ label: `${effortLabel(current)} (saved, not reported)`, value: current })
+  }
+  return options
+})
 
 function patch(change: Partial<RoleForm>) {
   emit('update:form', change)
@@ -45,6 +65,10 @@ function onBaseUrl(value: string) {
 
 function onApiKey(value: string) {
   patch({ api_key: value })
+}
+
+function onEffort(value: string) {
+  patch({ effort: value })
 }
 </script>
 
@@ -74,6 +98,23 @@ function onApiKey(value: string) {
           placeholder="e.g. spark-x2.6-4b@q4_k_m"
           @update:value="onModel"
         />
+      </n-form-item>
+      <n-form-item v-if="showEffort" label="Effort">
+        <n-select
+          :value="form.effort"
+          :options="effortSelectOptions"
+          :loading="effortLoading === true"
+          :consistent-menu-width="false"
+          @update:value="onEffort"
+        />
+        <template #feedback>
+          <span v-if="effortError">{{ effortError }}</span>
+          <span v-else-if="effortLoading">Loading model-reported levels…</span>
+          <span v-else-if="effortOptions.length === 0">
+            This model reports no selectable effort levels; Default sends no reasoning control.
+          </span>
+          <span v-else>Levels reported by the selected model.</span>
+        </template>
       </n-form-item>
       <n-form-item label="Base URL">
         <n-input

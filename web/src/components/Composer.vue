@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { NButton, NPopover } from 'naive-ui'
 import {
   ApiError,
+  getModelEfforts,
   getSettings,
   listCommands,
   listProviders,
@@ -11,6 +12,14 @@ import {
   updateSettings,
 } from '../api'
 import type { SettingsResponse } from '../api'
+import {
+  effortChoices,
+  effortLabel,
+  effortSupported,
+  modelEffortKey,
+  withModelEfforts,
+} from '../modelEfforts'
+import type { ModelEffortInfo } from '../types'
 import {
   filterModelGroups,
   hiddenKeylessGroupCount,
@@ -222,6 +231,7 @@ interface RoleRoute {
   providerRef: string | null
   baseUrl: string | null
   apiKeySet: boolean
+  effort: string
 }
 
 const settings = ref<SettingsResponse | null>(null)
@@ -238,6 +248,7 @@ function routeFor(role: 'senior' | 'junior'): RoleRoute | null {
     providerRef: view.provider_ref?.trim() || null,
     baseUrl: view.base_url?.trim() || null,
     apiKeySet: view.api_key_set === true,
+    effort: view.effort?.trim().toLowerCase() ?? '',
   }
 }
 
@@ -277,7 +288,8 @@ const routeAriaLabel = computed(() => {
   const describe = (role: string, route: RoleRoute | null): string => {
     const model = route?.model || (route?.provider === 'mock' ? 'built-in model' : 'no model set')
     const source = route?.providerRef ? `, ${route.providerRef} preset` : ''
-    return `${role}: ${model}${source}`
+    const effort = route?.effort ? `, ${effortLabel(route.effort)} effort` : ''
+    return `${role}: ${model}${source}${effort}`
   }
   return `Model switch — ${describe('Senior', seniorRoute.value)}; ${describe(
     'Junior',
@@ -1430,20 +1442,55 @@ const modelTrigger = ref<HTMLButtonElement | null>(null)
 const modelRoot = ref<HTMLElement | null>(null)
 const modelList = ref<HTMLElement | null>(null)
 const modelSearch = ref<HTMLInputElement | null>(null)
-const modelPane = ref<'root' | ModelRole>('root')
+const modelPane = ref<'root' | ModelRole | 'effort'>('root')
+const effortRole = ref<ModelRole>('senior')
 const modelQuery = ref('')
 const modelSaving = ref(false)
 const modelSaveError = ref<string | null>(null)
 const modelProviders = ref<ProviderView[]>([])
 const modelProvidersState = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
 const modelProvidersError = ref('')
+const effortInfo = ref<Record<string, ModelEffortInfo>>({})
+const effortLoading = ref(false)
+const effortError = ref('')
 let modelProvidersRequest = 0
+let effortRequest = 0
 
-const activeModelRole = computed<ModelRole>(() =>
-  modelPane.value === 'junior' ? 'junior' : 'senior',
-)
+const activeModelRole = computed<ModelRole>(() => {
+  if (modelPane.value === 'effort') return effortRole.value
+  return modelPane.value === 'junior' ? 'junior' : 'senior'
+})
 const activeModelRoleLabel = computed(() =>
   activeModelRole.value === 'junior' ? 'Junior' : 'Senior',
+)
+/** The current route of the role shown in the model/effort pane. */
+const activeRoleRoute = computed(() =>
+  activeModelRole.value === 'junior' ? juniorRoute.value : seniorRoute.value,
+)
+const activeEffortInfo = computed<ModelEffortInfo | null>(() => {
+  const route = activeRoleRoute.value
+  if (!route?.providerRef || !route.model) return null
+  return effortInfo.value[modelEffortKey(route.providerRef, route.model)] ?? null
+})
+const activeEffort = computed(() => activeRoleRoute.value?.effort ?? '')
+const activeEffortChoices = computed(() => {
+  const choices = effortChoices(activeEffortInfo.value)
+  const current = activeEffort.value
+  if (current !== '' && !choices.some((choice) => choice.value === current)) {
+    choices.push({ value: current, label: `${effortLabel(current)} (saved)` })
+  }
+  return choices
+})
+const activeEffortUnsupported = computed(
+  () =>
+    activeEffort.value !== '' &&
+    activeEffortInfo.value !== null &&
+    !effortSupported(activeEffortInfo.value, activeEffort.value),
+)
+const showEffortRow = computed(
+  () =>
+    activeEffort.value !== '' ||
+    (activeEffortInfo.value?.efforts.length ?? 0) > 0,
 )
 const modelGroups = computed(() =>
   modelPane.value === 'root'
@@ -1497,7 +1544,24 @@ function modelSourceLabel(route: RoleRoute | null): string {
 /** Source text for accessible names; the visual row adds a `no key` badge. */
 function modelSourceText(route: RoleRoute | null): string {
   const source = modelSourceLabel(route)
-  return routeNeedsKey(route) ? `${source}, no key configured` : source
+  return routeNeedsKeyFor(route) ? `${source}, no key configured` : source
+}
+
+/**
+ * The role view's `api_key_set` describes the role's own manual key, not a
+ * preset's stored/env key. Use the loaded preset's flag when available; while
+ * the provider list is still loading, do not flash a false `no key` warning.
+ */
+function routeNeedsKeyFor(route: RoleRoute | null): boolean {
+  if (!route || !route.providerRef) return routeNeedsKey(route)
+  if (modelProvidersState.value === 'loading') return false
+  const preset = modelProviders.value.find(
+    (provider) =>
+      provider.name.trim().toLowerCase() === route.providerRef!.trim().toLowerCase(),
+  )
+  return routeNeedsKey(
+    preset ? { ...route, apiKeySet: preset.api_key_set === true } : route,
+  )
 }
 
 async function loadModelProviders(force = false): Promise<void> {
@@ -1518,6 +1582,33 @@ async function loadModelProviders(force = false): Promise<void> {
   }
 }
 
+/**
+ * Load the model-declared effort levels for one role's current model. The
+ * backend serves models.dev metadata (cached); a failed/offline lookup leaves
+ * the control hidden rather than inventing levels.
+ */
+async function ensureModelEfforts(role: ModelRole, force = false): Promise<void> {
+  const route = role === 'senior' ? seniorRoute.value : juniorRoute.value
+  const provider = route?.providerRef
+  const model = route?.model
+  if (!provider || !model) return
+  const key = modelEffortKey(provider, model)
+  if (!force && effortInfo.value[key] !== undefined) return
+  const request = ++effortRequest
+  effortLoading.value = true
+  effortError.value = ''
+  try {
+    const info = await getModelEfforts(provider, model)
+    if (request !== effortRequest) return
+    effortInfo.value = withModelEfforts(effortInfo.value, info)
+  } catch (e) {
+    if (request !== effortRequest) return
+    effortError.value = errorText(e)
+  } finally {
+    if (request === effortRequest) effortLoading.value = false
+  }
+}
+
 function onModelShow(show: boolean) {
   modelOpen.value = show
   if (!show) return
@@ -1535,7 +1626,8 @@ function onModelKeydown(e: KeyboardEvent) {
   if (e.key !== 'Escape') return
   e.preventDefault()
   e.stopPropagation()
-  if (modelPane.value !== 'root') backToModelRoot()
+  if (modelPane.value === 'effort') backToRoleModels()
+  else if (modelPane.value !== 'root') backToModelRoot()
   else closeModels(true)
 }
 
@@ -1556,6 +1648,7 @@ function openRoleModels(role: ModelRole) {
   modelQuery.value = ''
   modelSaveError.value = null
   void loadModelProviders()
+  void ensureModelEfforts(role)
   void nextTick(() => {
     if (showModelSearch.value) {
       modelSearch.value?.focus()
@@ -1566,6 +1659,31 @@ function openRoleModels(role: ModelRole) {
       list?.querySelector<HTMLButtonElement>('.model-choice.is-current:not(:disabled)') ??
       list?.querySelector<HTMLButtonElement>('.model-choice:not(:disabled)')
     target?.focus()
+  })
+}
+
+/** Drill from a role's model list into its model-declared effort levels. */
+function openRoleEffort(role: ModelRole) {
+  effortRole.value = role
+  modelPane.value = 'effort'
+  modelQuery.value = ''
+  modelSaveError.value = null
+  effortError.value = ''
+  void ensureModelEfforts(role)
+  void nextTick(() => {
+    const list = modelRoot.value?.querySelector<HTMLElement>('.model-effort-list')
+    const checked = list?.querySelector<HTMLButtonElement>('.model-effort-choice.is-current')
+    ;(checked ?? list?.querySelector<HTMLButtonElement>('.model-effort-choice'))?.focus()
+  })
+}
+
+/** Back from the effort pane to that role's model list. */
+function backToRoleModels() {
+  modelPane.value = effortRole.value
+  modelQuery.value = ''
+  modelSaveError.value = null
+  void nextTick(() => {
+    modelRoot.value?.querySelector<HTMLButtonElement>('.model-effort-row')?.focus()
   })
 }
 
@@ -1604,7 +1722,7 @@ function focusFirstModel() {
 }
 
 async function chooseModel(choice: ModelChoice) {
-  if (modelSaving.value || modelPane.value === 'root') return
+  if (modelSaving.value || modelPane.value !== 'senior' && modelPane.value !== 'junior') return
   const role = activeModelRole.value
   if (isCurrentModelChoice(settings.value?.[role], choice)) {
     closeModels(true)
@@ -1615,6 +1733,10 @@ async function chooseModel(choice: ModelChoice) {
     closeModels(true)
     return
   }
+  // A different model can declare different effort levels; never carry a
+  // value the new model may not accept. The effort row then starts at Default.
+  const hadEffort = (settings.value?.[role]?.effort?.trim() ?? '') !== ''
+  if (hadEffort) patch[role] = { ...patch[role], effort: '' }
   modelSaving.value = true
   modelSaveError.value = null
   try {
@@ -1624,7 +1746,38 @@ async function chooseModel(choice: ModelChoice) {
     emit('modelsChanged')
     emit(
       'notice',
-      `${role === 'senior' ? 'Senior' : 'Junior'} model set to ${choice.model} — saved for new runs.`,
+      `${role === 'senior' ? 'Senior' : 'Junior'} model set to ${choice.model} — saved for new runs.` +
+        (hadEffort ? ' Effort reset to Default.' : ''),
+    )
+    modelSaving.value = false
+    closeModels(true)
+  } catch (e) {
+    modelSaving.value = false
+    modelSaveError.value = errorText(e)
+  }
+}
+
+/** Persist one model-declared effort level (`""` = provider default). */
+async function chooseEffort(value: string) {
+  if (modelSaving.value || modelPane.value !== 'effort') return
+  const role = activeModelRole.value
+  const current = settings.value?.[role]?.effort?.trim().toLowerCase() ?? ''
+  if (current === value) {
+    closeModels(true)
+    return
+  }
+  modelSaving.value = true
+  modelSaveError.value = null
+  try {
+    const next = await updateSettings({ [role]: { effort: value } })
+    settings.value = next
+    settingsState.value = 'ready'
+    emit('modelsChanged')
+    emit(
+      'notice',
+      value === ''
+        ? `${role === 'senior' ? 'Senior' : 'Junior'} effort uses the provider default — saved for new runs.`
+        : `${role === 'senior' ? 'Senior' : 'Junior'} effort set to ${effortLabel(value)} — saved for new runs.`,
     )
     modelSaving.value = false
     closeModels(true)
@@ -1976,9 +2129,15 @@ onBeforeUnmount(() => {
                 <span v-if="settings" class="chip-value route-pair">
                   <span class="route-role is-senior">S</span>
                   <span class="route-model">{{ modelLabel(seniorRoute) }}</span>
+                  <span v-if="seniorRoute?.effort" class="route-effort">{{
+                    effortLabel(seniorRoute.effort)
+                  }}</span>
                   <span class="route-sep" aria-hidden="true">·</span>
                   <span class="route-role is-junior">J</span>
                   <span class="route-model">{{ modelLabel(juniorRoute) }}</span>
+                  <span v-if="juniorRoute?.effort" class="route-effort">{{
+                    effortLabel(juniorRoute.effort)
+                  }}</span>
                 </span>
                 <span v-else class="chip-value">
                   {{ settingsState === 'loading' ? 'Loading models…' : 'Models from settings' }}
@@ -2026,8 +2185,11 @@ onBeforeUnmount(() => {
                       <span class="model-name">{{ modelLabel(seniorRoute) }}</span>
                       <span class="model-source-row">
                         <span class="model-source">{{ modelSourceLabel(seniorRoute) }}</span>
+                        <span v-if="seniorRoute?.effort" class="model-effort-badge">
+                          {{ effortLabel(seniorRoute.effort) }} effort
+                        </span>
                         <span
-                          v-if="routeNeedsKey(seniorRoute)"
+                          v-if="routeNeedsKeyFor(seniorRoute)"
                           class="model-key-warn"
                           title="No usable API key for this preset; runs will fail until one is added."
                         >
@@ -2057,8 +2219,11 @@ onBeforeUnmount(() => {
                       <span class="model-name">{{ modelLabel(juniorRoute) }}</span>
                       <span class="model-source-row">
                         <span class="model-source">{{ modelSourceLabel(juniorRoute) }}</span>
+                        <span v-if="juniorRoute?.effort" class="model-effort-badge">
+                          {{ effortLabel(juniorRoute.effort) }} effort
+                        </span>
                         <span
-                          v-if="routeNeedsKey(juniorRoute)"
+                          v-if="routeNeedsKeyFor(juniorRoute)"
                           class="model-key-warn"
                           title="No usable API key for this preset; runs will fail until one is added."
                         >
@@ -2103,7 +2268,7 @@ onBeforeUnmount(() => {
                 </button>
               </template>
 
-              <template v-else>
+              <template v-else-if="modelPane !== 'effort'">
                 <div class="model-pane-head">
                   <button
                     type="button"
@@ -2116,6 +2281,33 @@ onBeforeUnmount(() => {
                   </button>
                   <p class="menu-heading">{{ activeModelRoleLabel }} model</p>
                 </div>
+
+                <button
+                  v-if="showEffortRow"
+                  type="button"
+                  class="model-effort-row"
+                  :aria-label="`Choose the ${activeModelRoleLabel} effort. Current: ${effortLabel(activeEffort)}.`"
+                  @click="openRoleEffort(activeModelRole)"
+                >
+                  <span class="model-effort-caption">Effort</span>
+                  <span class="model-effort-current">{{ effortLabel(activeEffort) }}</span>
+                  <svg class="model-role-chevron" viewBox="0 0 16 16" aria-hidden="true">
+                    <path
+                      d="m6 3 5 5-5 5"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                  </svg>
+                </button>
+                <p v-else-if="effortLoading" class="model-effort-note">
+                  Loading effort levels…
+                </p>
+                <p v-else-if="effortError" class="model-effort-note">
+                  Effort levels unavailable.
+                </p>
 
                 <input
                   v-if="showModelSearch"
@@ -2190,6 +2382,71 @@ onBeforeUnmount(() => {
                 <p v-if="modelProvidersError" class="model-error" role="alert">
                   {{ modelProvidersError }}
                 </p>
+
+                <div class="menu-divider" role="presentation"></div>
+                <button
+                  type="button"
+                  class="menu-action"
+                  @click="configureModels"
+                >
+                  Configure providers
+                </button>
+              </template>
+
+              <template v-else>
+                <div class="model-pane-head">
+                  <button
+                    type="button"
+                    class="model-back"
+                    aria-label="Back to models"
+                    title="Back to models"
+                    @click="backToRoleModels"
+                  >
+                    ‹
+                  </button>
+                  <p class="menu-heading">{{ activeModelRoleLabel }} effort</p>
+                </div>
+
+                <p class="model-effort-note">
+                  Levels reported by {{ modelLabel(activeRoleRoute) }}; Default sends no
+                  effort control.
+                </p>
+
+                <p v-if="effortLoading" class="menu-empty">Loading effort levels…</p>
+                <p v-else-if="effortError" class="model-error" role="alert">{{ effortError }}</p>
+                <div
+                  v-else
+                  class="model-effort-list"
+                  role="radiogroup"
+                  :aria-label="`${activeModelRoleLabel} effort`"
+                >
+                  <button
+                    v-for="choice in activeEffortChoices"
+                    :key="choice.value || 'default'"
+                    type="button"
+                    class="model-effort-choice"
+                    :class="{ 'is-current': choice.value === activeEffort }"
+                    role="radio"
+                    :aria-checked="choice.value === activeEffort"
+                    :disabled="modelSaving"
+                    @click="chooseEffort(choice.value)"
+                  >
+                    <span>{{ choice.label }}</span>
+                    <span
+                      v-if="choice.value === activeEffort"
+                      class="model-check"
+                      aria-hidden="true"
+                    >
+                      ✓
+                    </span>
+                  </button>
+                  <p v-if="activeEffortUnsupported" class="model-error" role="alert">
+                    The saved effort “{{ effortLabel(activeEffort) }}” is not reported by this
+                    model. Choose a level or Default.
+                  </p>
+                </div>
+
+                <p v-if="modelSaveError" class="model-error" role="alert">{{ modelSaveError }}</p>
 
                 <div class="menu-divider" role="presentation"></div>
                 <button
@@ -2594,6 +2851,12 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
+.route-effort {
+  flex: none;
+  font-size: 0.68rem;
+  color: var(--text-tertiary, var(--text-secondary));
+}
+
 .route-sep {
   flex: none;
   color: var(--text-tertiary, var(--text-secondary));
@@ -2959,6 +3222,103 @@ onBeforeUnmount(() => {
 
 .model-source-row .model-key-warn {
   flex: none;
+}
+
+.model-effort-badge {
+  flex: none;
+  padding: 0 0.3rem;
+  font-size: 0.65rem;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+}
+
+.model-effort-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  margin: 0.15rem 0;
+  padding: 0.35rem var(--space-2);
+  font: inherit;
+  font-size: 0.78rem;
+  color: var(--text-primary);
+  text-align: left;
+  background: var(--surface-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.model-effort-row:hover {
+  background: var(--surface-hover);
+}
+
+.model-effort-row:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -1px;
+}
+
+.model-effort-caption {
+  color: var(--text-secondary);
+}
+
+.model-effort-current {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-effort-note {
+  margin: 0.15rem 0;
+  padding: 0 var(--space-2);
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+.model-effort-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.model-effort-choice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 0.4rem var(--space-2);
+  font: inherit;
+  font-size: 0.8rem;
+  color: var(--text-primary);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.model-effort-choice:hover {
+  background: var(--surface-hover);
+}
+
+.model-effort-choice:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--focus-ring);
+}
+
+.model-effort-choice.is-current {
+  background: var(--surface-highlight);
+}
+
+.model-effort-choice:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 .model-role-chevron {

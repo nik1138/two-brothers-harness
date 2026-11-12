@@ -230,6 +230,17 @@ export interface RunRecord {
   cost?: RunCost | null
 }
 
+/** One model's model-declared reasoning effort levels (`GET /api/model-efforts`). */
+export interface ModelEffortInfo {
+  provider: string
+  model: string
+  reasoning: boolean
+  /** The exact tokens the model reports (low, high, max, …); empty = no control. */
+  efforts: string[]
+  /** `models.dev` when the lookup succeeded, `unavailable` otherwise. */
+  source: 'models.dev' | 'unavailable' | string
+}
+
 /** Operator-facing role settings — never contains API key material. */
 export interface RoleSettingsView {
   provider: string | null
@@ -238,6 +249,8 @@ export interface RoleSettingsView {
   api_key_set: boolean
   /** Provider preset name driving this role's base_url/api_key; null/"" = manual. */
   provider_ref?: string | null
+  /** Model-declared effort token; null/"" = provider default. */
+  effort?: string | null
 }
 
 export type SettingsView = Record<'senior' | 'junior', RoleSettingsView>

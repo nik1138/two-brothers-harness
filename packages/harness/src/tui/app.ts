@@ -1094,6 +1094,7 @@ function tuiRoleProvider(
     model: endpoint.model || (role === "senior" ? cfg.seniorModel : cfg.juniorModel),
     sessionId: cfg.sessionId,
     sessionFile: cfg.sessionFile,
+    effort: endpoint.effort,
     ...(onWarning !== undefined ? { onWarning } : {}),
   };
   return buildProvider(config, role);

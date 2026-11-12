@@ -239,7 +239,11 @@ the same hero appears inside a selected session that has no transcript yet.
    writes that role's provider preset + model (saved for new runs) so the base
    URL, wire kind and key follow the preset; a role still on a keyless preset
    shows **no key** on its row, and a manual connection keeps its
-   **Current connection** row. Settings → **Providers** lists the provider
+   **Current connection** row. When the selected model reports reasoning
+   levels (models.dev metadata, fetched by the backend), the model pane adds an
+   **Effort** row with Default plus exactly those levels; Settings → **Models &
+   roles** has the same select. Default sends no reasoning control. Settings →
+   **Providers** lists the provider
    presets by name and opens the selected
    provider's settings right below it (base URL, masked API key, model ids,
    advanced wire kind, add/delete). A customized built-in seed also shows

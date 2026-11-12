@@ -867,6 +867,38 @@ test("OpenCode identity headers reach the Anthropic and Google adapters", async 
   assert.equal(google.requests[0]?.headers["x-opencode-session"], "conv-google");
 });
 
+test("Anthropic maps a model effort level to its thinking budget", async () => {
+  const stub = stubFetch(() => jsonResponse({ content: [], usage: {} }));
+  await anthropicProvider(stub.fetchImpl, { effort: "high" }).chat([
+    { role: "user", content: "hi" },
+  ]);
+  assert.deepEqual(stub.requests[0]?.body.thinking, {
+    type: "enabled",
+    budget_tokens: 16384,
+  });
+});
+
+test("an explicit thinking budget wins over a model effort", async () => {
+  const stub = stubFetch(() => jsonResponse({ content: [], usage: {} }));
+  await anthropicProvider(stub.fetchImpl, {
+    effort: "high",
+    thinkingBudgetTokens: 2048,
+  }).chat([{ role: "user", content: "hi" }]);
+  assert.equal(stub.requests[0]?.body.thinking.budget_tokens, 2048);
+});
+
+test("Google maps a model effort level to thinkingConfig.thinkingBudget", async () => {
+  const stub = stubFetch(() =>
+    jsonResponse({ candidates: [{ content: { parts: [{ text: "ok" }] } }] }),
+  );
+  await googleProvider(stub.fetchImpl, { effort: "medium" }).chat([
+    { role: "user", content: "hi" },
+  ]);
+  assert.deepEqual(stub.requests[0]?.body.generationConfig.thinkingConfig, {
+    thinkingBudget: 4096,
+  });
+});
+
 test("CLI: kind flags parse (mock run stays offline)", async () => {
   const out: string[] = [];
   const code = await main(

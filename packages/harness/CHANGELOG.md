@@ -120,6 +120,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for new runs" (a persisted setting, not a one-shot override). Files:
   `web/src/modelSwitch.ts`, `web/src/components/Composer.vue`,
   `web/src/App.vue`; tests `web/tests/modelSwitch.test.ts`.
+- **Model-declared reasoning effort per role (web/Settings):** effort levels
+  are a property of the model, not a fixed product list. The server lazily
+  fetches models.dev `reasoning_options`, caches them in memory and serves
+  `GET /api/model-efforts`; a failed/offline lookup returns no levels and the
+  UI then offers no effort control instead of inventing one. The composer's
+  model pane gains an **Effort** row and a Default/Low/High/... list only for
+  models that report levels; Settings → Models & roles gets the same select.
+  Default sends no control (requests stay byte-identical). OpenAI-compatible
+  requests send `reasoning_effort`; Anthropic maps known levels to a thinking
+  budget (an explicit `--thinking-budget` still wins); Google maps to
+  `generationConfig.thinkingConfig.thinkingBudget`. Selecting a different
+  model clears a stale effort. Files: `src/effort.ts`, `src/modelcatalog.ts`,
+  settings/runtime/provider/server wiring, `web/src/modelEfforts.ts`,
+  `web/src/components/Composer.vue`, Settings role editor; tests
+  `tests/effort.test.ts`, `tests/modelcatalog.test.ts`, provider/adapter and
+  `web/tests/modelEfforts.test.ts`.
 - **Subscription provider presets:** the seed table now includes OpenCode
   Zen/Go, Kimi For Coding, the Z.AI coding plans, the Qwen and Xiaomi token
   plans, Moonshot and MiniMax, using the endpoint/environment-key pairs from

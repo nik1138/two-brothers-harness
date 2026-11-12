@@ -253,6 +253,8 @@ import {
 import { compactContext, type CompactionSettings } from "./compaction.ts";
 import { discoverCommands, expandCommand, matchCommand, type CommandCatalog } from "./commands.ts";
 import { SharedContext } from "./context.ts";
+import { normalizeEffortValue } from "./effort.ts";
+import { ModelEffortCatalog } from "./modelcatalog.ts";
 import { estimateRunCostFromUsage } from "./cost.ts";
 import { TwoBrothersHarness, type HarnessResult, type ToolScopes } from "./harness.ts";
 import {
@@ -894,6 +896,12 @@ export interface ServerOptions {
    * no automatic deletion. A prune failure is logged and never fails startup.
    */
   spillRetentionDays?: number;
+  /**
+   * Test/integration hook: model reasoning metadata source. Defaults to a
+   * lazily fetched, in-memory models.dev catalog; tests inject a fixture so
+   * the provider list never touches the network.
+   */
+  modelEfforts?: ModelEffortCatalog;
 }
 
 export interface ServerState {
@@ -1133,6 +1141,11 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   // `<name>.md` needs no server restart. A missing root is skipped silently.
   const commandsDirs = options.commandsDirs ?? defaultCommandsRoots();
   const commandCatalog = (): CommandCatalog => discoverCommands(commandsDirs);
+  // Model effort metadata is lazy and cached; the provider-list route awaits
+  // it, and a failed fetch leaves `model_efforts` absent on every provider.
+  const modelEfforts =
+    options.modelEfforts ??
+    new ModelEffortCatalog({ enabled: process.env.TWO_BROTHERS_MODEL_EFFORTS !== "off" });
 
   const state: ServerState = {
     sessionsDir,
@@ -2852,6 +2865,15 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         if (typeof ref === "string" && ref && !knownPresets.has(ref)) {
           throw new HttpError(400, `unknown provider preset: ${ref}`);
         }
+        const effort = patch.effort;
+        if (effort !== undefined && effort !== null && effort !== "") {
+          if (normalizeEffortValue(effort) === null) {
+            throw new HttpError(
+              400,
+              `invalid effort: ${String(effort)} (use the model's reported level, or "" for the provider default)`,
+            );
+          }
+        }
       }
       let pluginsPatch: PluginSelection | null = null;
       if (body.plugins !== undefined && body.plugins !== null) {
@@ -3028,6 +3050,20 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
           customized: storedNames.has(preset.name.trim().toLowerCase()),
         })),
       };
+    }),
+  );
+
+  routes.push(
+    compileRoute("GET", "/api/model-efforts", async (ctx) => {
+      // Model-declared reasoning levels from models.dev (cached in memory).
+      // A failed/offline fetch returns `{reasoning:false, efforts:[]}`; the
+      // UI then offers no effort control rather than inventing one.
+      const provider = (ctx.query.get("provider") ?? "").trim();
+      const model = (ctx.query.get("model") ?? "").trim();
+      if (!provider || !model) {
+        throw new HttpError(400, "provider and model are required");
+      }
+      return { provider, model, ...(await modelEfforts.efforts(provider, model)) };
     }),
   );
 

@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import type { ComponentPublicInstance } from 'vue'
 import { NButton, NModal } from 'naive-ui'
 import {
   ApiError,
+  getModelEfforts,
   getSettings,
   listPlugins,
   listProviders,
@@ -11,6 +12,7 @@ import {
   updateSettingsWithPlugins,
 } from '../api'
 import type { PluginLoadError, RoleSettingsPatch, SettingsPatch } from '../api'
+import { effortSupported } from '../modelEfforts'
 import type { ProviderPreset, RoleSettingsView } from '../types'
 import { clickInModalBody } from '../modal'
 import { applyThemeAttribute, readThemeMode, resolveDark, saveThemeMode } from '../themeMode'
@@ -83,6 +85,7 @@ interface RoleForm {
   base_url: string
   api_key: string
   providerRef: string
+  effort: string
 }
 
 const loading = ref(true)
@@ -97,6 +100,7 @@ const senior = reactive<RoleForm>({
   base_url: '',
   api_key: '',
   providerRef: '',
+  effort: '',
 })
 const junior = reactive<RoleForm>({
   provider: '',
@@ -104,6 +108,7 @@ const junior = reactive<RoleForm>({
   base_url: '',
   api_key: '',
   providerRef: '',
+  effort: '',
 })
 const keySet = reactive({ senior: false, junior: false })
 
@@ -342,15 +347,84 @@ function fill(role: 'senior' | 'junior', view: RoleSettingsView) {
   form.model = view.model ?? ''
   form.base_url = view.base_url ?? ''
   form.providerRef = view.provider_ref ?? ''
+  form.effort = view.effort ?? ''
   keySet[role] = view.api_key_set
 }
 
+// Model-declared effort levels: fetched per provider/model, debounced while the
+// operator types a model id. Unknown/unavailable metadata offers no control.
+const effortOptions = reactive<Record<'senior' | 'junior', string[]>>({
+  senior: [],
+  junior: [],
+})
+const effortLoading = reactive<Record<'senior' | 'junior', boolean>>({
+  senior: false,
+  junior: false,
+})
+const effortErrors = reactive<Record<'senior' | 'junior', string>>({
+  senior: '',
+  junior: '',
+})
+const effortRequests = { senior: 0, junior: 0 }
+const effortTimers: Record<'senior' | 'junior', ReturnType<typeof setTimeout> | null> = {
+  senior: null,
+  junior: null,
+}
+
+async function refreshEffortOptions(role: 'senior' | 'junior'): Promise<void> {
+  const form = roleForm(role)
+  const provider = form.providerRef
+  const model = form.model.trim()
+  const request = ++effortRequests[role]
+  effortErrors[role] = ''
+  if (provider === '' || model === '') {
+    effortOptions[role] = []
+    effortLoading[role] = false
+    return
+  }
+  effortLoading[role] = true
+  try {
+    const info = await getModelEfforts(provider, model)
+    if (request !== effortRequests[role]) return
+    effortOptions[role] = [...info.efforts]
+    // The catalog answered: a saved level the model does not report is no
+    // longer safe to send, so clear it (an offline lookup never clears).
+    if (info.source === 'models.dev' && !effortSupported(info, form.effort)) {
+      form.effort = ''
+    }
+  } catch (e) {
+    if (request !== effortRequests[role]) return
+    effortOptions[role] = []
+    effortErrors[role] = errText(e)
+  } finally {
+    if (request === effortRequests[role]) effortLoading[role] = false
+  }
+}
+
+function scheduleEffortOptions(role: 'senior' | 'junior'): void {
+  const timer = effortTimers[role]
+  if (timer !== null) clearTimeout(timer)
+  effortTimers[role] = setTimeout(() => {
+    effortTimers[role] = null
+    void refreshEffortOptions(role)
+  }, 250)
+}
+
+onBeforeUnmount(() => {
+  for (const role of ['senior', 'junior'] as const) {
+    if (effortTimers[role] !== null) clearTimeout(effortTimers[role])
+    effortTimers[role] = null
+  }
+})
+
 function updateSenior(patch: Partial<RoleForm>) {
   Object.assign(senior, patch)
+  if ('providerRef' in patch || 'model' in patch) scheduleEffortOptions('senior')
 }
 
 function updateJunior(patch: Partial<RoleForm>) {
   Object.assign(junior, patch)
+  if ('providerRef' in patch || 'model' in patch) scheduleEffortOptions('junior')
 }
 
 async function refreshProviders() {
@@ -392,6 +466,8 @@ onMounted(async () => {
     }))
     pluginErrors.value = discovered.errors
     settingsLoaded.value = true
+    void refreshEffortOptions('senior')
+    void refreshEffortOptions('junior')
   } catch (e) {
     error.value = errText(e)
   } finally {
@@ -428,6 +504,7 @@ async function save() {
       model: form.model.trim(),
       base_url: form.base_url.trim(),
       provider_ref: form.providerRef,
+      effort: form.effort,
     }
     if (form.provider) entry.provider = form.provider
     // send the key only when the operator typed one; the response never
@@ -666,6 +743,9 @@ async function save() {
                 :junior="junior"
                 :key-set="keySet"
                 :connection-options="connectionOptions"
+                :effort-options="{ senior: effortOptions.senior, junior: effortOptions.junior }"
+                :effort-loading="{ senior: effortLoading.senior, junior: effortLoading.junior }"
+                :effort-errors="{ senior: effortErrors.senior, junior: effortErrors.junior }"
                 @update:senior="updateSenior"
                 @update:junior="updateJunior"
               />

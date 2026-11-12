@@ -7,6 +7,7 @@ interface RoleForm {
   base_url: string
   api_key: string
   providerRef: string
+  effort: string
 }
 
 defineProps<{
@@ -14,6 +15,9 @@ defineProps<{
   junior: RoleForm
   keySet: { senior: boolean; junior: boolean }
   connectionOptions: { label: string; value: string }[]
+  effortOptions: { senior: string[]; junior: string[] }
+  effortLoading: { senior: boolean; junior: boolean }
+  effortErrors: { senior: string; junior: string }
 }>()
 
 const emit = defineEmits<{
@@ -43,6 +47,9 @@ function updateJunior(patch: Partial<RoleForm>) {
         :form="senior"
         :key-set="keySet.senior"
         :connection-options="connectionOptions"
+        :effort-options="effortOptions.senior"
+        :effort-loading="effortLoading.senior"
+        :effort-error="effortErrors.senior"
         @update:form="updateSenior"
       />
       <RoleEditor
@@ -50,6 +57,9 @@ function updateJunior(patch: Partial<RoleForm>) {
         :form="junior"
         :key-set="keySet.junior"
         :connection-options="connectionOptions"
+        :effort-options="effortOptions.junior"
+        :effort-loading="effortLoading.junior"
+        :effort-error="effortErrors.junior"
         @update:form="updateJunior"
       />
     </div>

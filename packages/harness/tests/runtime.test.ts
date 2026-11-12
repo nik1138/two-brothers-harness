@@ -763,6 +763,17 @@ test("invalid provider rejected on update", () => {
   assert.throws(() => settings.update({ senior: { provider: "bad" } }), /invalid provider/);
 });
 
+test("effort accepts model tokens and rejects unsafe values", () => {
+  const settings = new RuntimeSettings();
+  assert.equal(settings.update({ senior: { effort: "XHIGH" } }).senior.effort, "xhigh");
+  assert.equal(settings.update({ senior: { effort: "xhigh" } }).senior.effort, "xhigh");
+  assert.equal(settings.update({ senior: { effort: "" } }).senior.effort, null);
+  assert.throws(
+    () => settings.update({ senior: { effort: "high effort" } }),
+    /invalid effort/,
+  );
+});
+
 test("RuntimeSettings hydrates from and writes through a SettingsStore", () => {
   const { root, cleanup } = tmpdir();
   try {

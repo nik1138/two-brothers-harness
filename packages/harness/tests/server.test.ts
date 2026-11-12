@@ -22,6 +22,7 @@ import { pathToFileURL } from "node:url";
 import { isCompactionSummary } from "../src/compaction.ts";
 import { resolveConfig, type Config } from "../src/config.ts";
 import type { ChatMessage } from "../src/context.ts";
+import { ModelEffortCatalog } from "../src/modelcatalog.ts";
 import {
   MockProvider,
   UsageTracker,
@@ -731,6 +732,59 @@ test("settings: never expose the api key", async () => {
     assert.ok(!JSON.stringify((await get(srv.base, "/api/runs")).body).includes("secret-key"));
     assert.equal(
       (await api(srv.base, "PUT", "/api/settings", { senior: { provider: "bad" } })).status,
+      400,
+    );
+  } finally {
+    await srv.close();
+  }
+});
+
+test("settings: effort is validated and model levels come from the catalog", async () => {
+  const modelEfforts = new ModelEffortCatalog({
+    fetchImpl: (async () =>
+      new Response(
+        JSON.stringify({
+          "opencode-go": {
+            models: {
+              "deepseek-v4.1-flash": {
+                reasoning: true,
+                reasoning_options: [{ type: "effort", values: ["low", "high", "max"] }],
+              },
+            },
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )) as typeof fetch,
+    now: () => 1_000,
+  });
+  const srv = await startServer({ modelEfforts });
+  try {
+    const put = await api<Record<string, any>>(srv.base, "PUT", "/api/settings", {
+      senior: { effort: "XHIGH" },
+    });
+    assert.equal(put.status, 200);
+    assert.equal(put.body.senior.effort, "xhigh");
+    assert.equal(
+      (await api(srv.base, "PUT", "/api/settings", { senior: { effort: "high effort" } })).status,
+      400,
+    );
+
+    const info = await get<Record<string, any>>(
+      srv.base,
+      "/api/model-efforts?provider=opencode-go&model=deepseek-v4.1-flash",
+    );
+    assert.equal(info.status, 200);
+    assert.deepEqual(info.body.efforts, ["low", "high", "max"]);
+    assert.equal(info.body.source, "models.dev");
+    assert.deepEqual(
+      (await get<Record<string, any>>(
+        srv.base,
+        "/api/model-efforts?provider=opencode-go&model=not-a-model",
+      )).body.efforts,
+      [],
+    );
+    assert.equal(
+      (await get(srv.base, "/api/model-efforts?provider=opencode-go")).status,
       400,
     );
   } finally {
