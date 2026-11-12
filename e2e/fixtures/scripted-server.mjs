@@ -27,7 +27,7 @@
 //
 //   --port PORT            (required) TCP port to listen on
 //   --scenario NAME        approval | slow | plan | folding | delete | reasoning
-//                          | cooperation | title | list (default: approval)
+//                          | cooperation | title | list | helper-write (default: approval)
 //                          approval: one workspace_write_file call, then the
 //                                    deliverable after the tool result; the first
 //                                    senior opening reply is deliberately
@@ -78,8 +78,17 @@
 //                                    abortable slow senior opening instead, so
 //                                    the browser can steer a still-running run
 //                                    without waiting for a model reply.
+//                          helper-write: work-mode run whose junior delivers a
+//                                    report without tools, then the senior
+//                                    verify call asks for one `subagent`
+//                                    delegation; requests carrying the helper
+//                                    model (`--helper-model`) are the child and
+//                                    write `e2e-helper.txt` before their final
+//                                    report, so the operator approval is a real
+//                                    child-tagged request.
 //   --senior-model NAME    default: e2e-senior
 //   --junior-model NAME    default: e2e-junior
+//   --helper-model NAME    default: e2e-helper (the helper route's model)
 //   --linger-ms MS         slow: how long the senior's first answer takes
 //                          (default 30000); folding: the second run's
 //                          deliverable delay; cooperation: the senior's
@@ -103,6 +112,9 @@ import http from 'node:http'
 
 const HELLO_FILE = 'e2e-hello.txt'
 const HELLO_CONTENT = 'Hello from the Two Brothers E2E harness.\n'
+/** The file the `helper-write` scenario's child writes. */
+const HELPER_FILE = 'e2e-helper.txt'
+const HELPER_CONTENT = 'Hello from the isolated helper.\n'
 /** The file the `delete` scenario asks the junior to remove. */
 const DELETE_TARGET_FILE = 'e2e-approval-reason.txt'
 /** The created-then-undone file of the `cooperation` scenario. */
@@ -118,6 +130,7 @@ function parseArgs(argv) {
     scenario: 'approval',
     seniorModel: 'e2e-senior',
     juniorModel: 'e2e-junior',
+    helperModel: 'e2e-helper',
     lingerMs: 30000,
     port: null,
   }
@@ -128,6 +141,7 @@ function parseArgs(argv) {
     else if (key === '--scenario') opts.scenario = value
     else if (key === '--senior-model') opts.seniorModel = value
     else if (key === '--junior-model') opts.juniorModel = value
+    else if (key === '--helper-model') opts.helperModel = value
     else if (key === '--linger-ms') opts.lingerMs = Number.parseInt(value, 10)
     else {
       process.stderr.write(`unknown argument: ${key}\n`)
@@ -226,7 +240,7 @@ function parseEvents(messages) {
 let callCounter = 0
 
 /** Scenarios whose runs are started in work mode (the senior delegates). */
-const WORK_SCENARIOS = new Set(['approval', 'plan', 'folding', 'delete', 'cooperation', 'title', 'list'])
+const WORK_SCENARIOS = new Set(['approval', 'plan', 'folding', 'delete', 'cooperation', 'title', 'list', 'helper-write'])
 
 /**
  * Plan snapshots the `plan` scenario writes, one whole-list snapshot per run:
@@ -421,6 +435,20 @@ function decide(body) {
   const wantsTools = Array.isArray(body.tools) && body.tools.length > 0
   const toolResults = messages.filter((m) => m.role === 'tool').length
 
+  // The isolated helper route has its own model id; its request is the child
+  // conversation, not a brother turn. First round: the workspace write that
+  // becomes a child-tagged operator approval. After its tool result: the
+  // bounded child report.
+  if (body.model === OPTS.helperModel) {
+    if (toolResults === 0) {
+      return toolCall('workspace_write_file', { path: HELPER_FILE, content: HELPER_CONTENT })
+    }
+    return {
+      content: `Wrote ${HELPER_FILE} through the operator approval.`,
+      toolCalls: [],
+    }
+  }
+
   if (wantsTools) {
     const events = parseEvents(messages)
     // finished cooperation cycles so far: each completed run ends with a
@@ -429,6 +457,19 @@ function decide(body) {
       (e) => e.from === 'senior' && e.kind === 'decision',
     ).length
     if (role === 'junior') {
+      if (OPTS.scenario === 'helper-write') {
+        // deliver a report without tools; the senior verify node delegates the
+        // actual write to an isolated helper
+        return {
+          content: JSON.stringify({
+            result: 'Inspected the workspace; delegated the write to an isolated helper.',
+            artifacts: [],
+            notes: 'Helper write delegated.',
+            confidence: 0.9,
+          }),
+          toolCalls: [],
+        }
+      }
       if (OPTS.scenario === 'list') {
         // one directory listing (auto-allowed, no approval), then deliver
         if (toolResults === 0) return toolCall('workspace_list_dir', { path: '.' })
@@ -474,6 +515,20 @@ function decide(body) {
     }
     // senior verify slice: claim verification in plain text, call nothing,
     // so the harness' tool loop ends and the review step begins
+    if (OPTS.scenario === 'helper-write') {
+      // First verify round: spawn exactly one helper (the child write parks on
+      // the operator). After its tool result the loop gets a plain summary.
+      if (toolResults === 0) {
+        return toolCall('subagent', {
+          task: `Write ${HELPER_FILE} with a short greeting.`,
+          label: 'Write helper file',
+        })
+      }
+      return {
+        content: 'Verification: the helper wrote the file through the operator approval.',
+        toolCalls: [],
+      }
+    }
     const verifiedFile = OPTS.scenario === 'cooperation' ? COOPERATION_FILE : HELLO_FILE
     return {
       content:
@@ -682,7 +737,7 @@ const server = http.createServer(async (req, res) => {
       res.end(
         JSON.stringify({
           object: 'list',
-          data: [OPTS.seniorModel, OPTS.juniorModel].map((id) => ({
+          data: [OPTS.seniorModel, OPTS.juniorModel, OPTS.helperModel].map((id) => ({
             id,
             object: 'model',
             created: 0,

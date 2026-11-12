@@ -54,6 +54,16 @@
 //                  preview toggle expands the diff as plain text (aria-expanded,
 //                  no HTML injection) and collapses again; the allow path still
 //                  removes the file
+//   subagents      mock provider: a seeded parent session's helper chip/tree
+//                  opens the isolated child drawer (task, tool rows, final
+//                  report, usage) and the parent composer is inert while open
+//   subagent-mutation scripted fixture: the Senior delegates to the `subagent`
+//                  tool, the helper's workspace write parks a child-tagged
+//                  approval (helper row + note on the card, "waiting for
+//                  approval" in the tree), Allow once writes the file, the
+//                  drawer keeps the allowed approval row + the real tool row,
+//                  the run's undo preview lists the child-created file, and a
+//                  reload replays the approval row from the child store
 //   tool-preview  scripted fixture: a workspace_list_dir result's additive
 //                  bounded `preview` makes the completed tool card expandable;
 //                  its toggle is keyboard-operable (aria-expanded), the plain-
@@ -424,12 +434,14 @@ function tsEnv(overrides = {}) {
  *            answer delay; folding's second-run deliverable delay; cooperation's
  *            `e2e-steer` opening delay)
  * The returned handle may carry a `modelServer` (fixture runs) that
- * killBackend() tears down with the backend itself.
+ * killBackend() tears down with the backend itself, plus its `modelBase`
+ * (the OpenAI-compatible `/v1` URL a helper route can point at).
  */
 async function startBackend({ kind, scenario, lingerMs }) {
   const port = await freePort()
   const dir = tmpDir('tb-e2e-ts')
   let modelServer = null
+  let modelBase = null
   let env
   if (kind === 'mock') {
     env = tsEnv({ TWO_BROTHERS_PROVIDER: 'mock' })
@@ -439,9 +451,10 @@ async function startBackend({ kind, scenario, lingerMs }) {
     if (Number.isFinite(lingerMs)) modelArgs.push('--linger-ms', String(lingerMs))
     modelServer = spawnServer(modelArgs, 'ts-model')
     await waitForModelServer(modelPort)
+    modelBase = `http://127.0.0.1:${modelPort}/v1`
     env = tsEnv({
       TWO_BROTHERS_PROVIDER: 'openai',
-      TWO_BROTHERS_BASE_URL: `http://127.0.0.1:${modelPort}/v1`,
+      TWO_BROTHERS_BASE_URL: modelBase,
       TWO_BROTHERS_SENIOR_MODEL: 'e2e-senior',
       TWO_BROTHERS_JUNIOR_MODEL: 'e2e-junior',
     })
@@ -452,7 +465,7 @@ async function startBackend({ kind, scenario, lingerMs }) {
     { env },
   )
   await waitForServer(port)
-  return { port, dir, server, modelServer, base: `http://127.0.0.1:${port}` }
+  return { port, dir, server, modelServer, modelBase, base: `http://127.0.0.1:${port}` }
 }
 
 async function killBackend(be) {
@@ -2491,11 +2504,11 @@ async function scenarioPlanDock(runner) {
   }
 }
 
-// -- scenario: read-only helper subagents ----------------------------------------------
+// -- scenario: helper subagents -------------------------------------------------------
 //
 // The model-facing tool and the child runner are covered by the package suite;
 // this scenario owns the browser surface: the parent header chip, the live tree,
-// and the read-only child drawer. The child log is seeded through the same
+// and the isolated child drawer. The child log is seeded through the same
 // on-disk store the backend serves, so the scenario stays hermetic and does not
 // depend on a model choosing to delegate.
 
@@ -2603,7 +2616,7 @@ async function scenarioSubagents(runner) {
         el.closest('.composer-inert')?.hasAttribute('inert') ?? false,
       ),
       true,
-      'the parent composer is inert while a read-only child is open',
+      'the parent composer is inert while a helper drawer is open',
     )
 
     await page.keyboard.press('Escape')
@@ -2621,6 +2634,177 @@ async function scenarioSubagents(runner) {
   } finally {
     await context.close().catch(() => {})
     await killBackend(be)
+    rmTree(be.dir)
+  }
+}
+
+// -- scenario: mutating helper subagents with child-tagged approvals -------------------
+//
+// The package suites own the tool/permission matrix; this scenario owns the
+// browser surface end to end. The scripted fixture (`helper-write`) drives a
+// real cooperation cycle: the Senior delegates to the `subagent` tool, the
+// helper's `workspace_write_file` parks a child-tagged approval on the parent
+// run, and the operator answers it in the docked card. Asserted here: the card
+// identity, the tree's "waiting for approval" state, the drawer's approval +
+// tool rows, the run-scoped undo preview, and the append-only store after a
+// reload.
+
+async function scenarioSubagentMutation(runner) {
+  const HELPER_FILE = 'e2e-helper.txt'
+  const HELPER_LABEL = 'Write helper file'
+  const SESSION_TITLE = 'E2E helper mutation'
+  const wsDir = tmpDir('tb-e2e-ws-submut')
+  const wsName = path.basename(wsDir)
+  const be = await startBackend({ kind: 'fixture', scenario: 'helper-write' })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  const helperPath = path.join(wsDir, HELPER_FILE)
+  try {
+    // The helper route is configured before the run, through the settings API
+    // (the same manual fields Settings → Models & roles → Subagent writes).
+    const put = await apiCall(be.base, 'PUT', '/api/settings', {
+      subagent: {
+        provider: 'openai',
+        base_url: be.modelBase,
+        api_key: 'e2e-helper-key',
+        model: 'e2e-helper',
+      },
+    })
+    assert.equal(put.status, 200, `PUT /api/settings -> HTTP ${put.status}`)
+
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await ensureWorkspace(page, wsDir, wsName)
+    await selectWorkspaceFilter(page, wsName)
+    await createSession(page, SESSION_TITLE)
+    await sendTask(page, 'Write the helper file in the workspace', { mode: 'work' })
+
+    // -- 1. the run parks on a card that names the helper
+    const card = page.locator('.approval-dock article.approval', { hasText: 'awaiting you' })
+    await card.first().waitFor({ timeout: 60000 })
+    const cardText = (await card.first().innerText()).replace(/\s+/g, ' ')
+    assert.match(cardText, /helper/i)
+    assert.ok(cardText.includes(HELPER_LABEL), `the card must name the helper (got "${cardText}")`)
+    assert.match(cardText, /write/)
+    assert.ok(cardText.includes(HELPER_FILE), `the card must name the target (got "${cardText}")`)
+    assert.match(cardText, /Requested by an isolated helper on behalf of the Senior\./)
+    assert.match(
+      (await card.first().getAttribute('aria-label')) ?? '',
+      new RegExp(`by helper ${HELPER_LABEL}`),
+    )
+    assert.equal(
+      await card.first().locator('.approval-preview-toggle').count(),
+      1,
+      'the helper write keeps the standard diff preview',
+    )
+
+    // -- 2. the helper tree shows the child waiting for approval
+    const chip = page.locator('.subagent-chip')
+    await chip.waitFor({ state: 'visible', timeout: 20000 })
+    assert.match((await chip.innerText()).replace(/\s+/g, ' '), /Subagents · 1/)
+    await chip.click()
+    const tree = page.locator('#subagent-tree')
+    await tree.waitFor({ state: 'visible' })
+    const rowText = (await tree.locator('.subagent-tree-row').first().innerText()).replace(/\s+/g, ' ')
+    assert.match(rowText, /waiting for approval/)
+    await chip.click()
+    await tree.waitFor({ state: 'hidden' })
+
+    // -- 3. allow once: the child write runs and the run completes
+    await page
+      .locator('.approval-dock')
+      .locator('button.approval-btn', { hasText: 'Allow once' })
+      .click()
+    await waitForRunEnd(page)
+    assert.ok(fs.existsSync(helperPath), `${helperPath} missing after the helper approval`)
+    assert.equal(fs.readFileSync(helperPath, 'utf-8'), 'Hello from the isolated helper.\n')
+    // The child never joins the brothers' transcript, so the chat's "Changed
+    // files" review (parent tool_completed rows only) deliberately does not
+    // list the child write; the file and the run-scoped undo preview below are
+    // its evidence.
+
+    // -- 4. the child drawer: an `allowed` approval row and the real tool row
+    await chip.click()
+    await tree.waitFor({ state: 'visible' })
+    await tree.locator('.subagent-tree-row').first().click()
+    const drawer = page.locator('.subagent-view')
+    await drawer.waitFor({ state: 'visible', timeout: 15000 })
+    const approvalRow = drawer.locator('.subagent-approval.is-allowed')
+    await approvalRow.first().waitFor({ timeout: 15000 })
+    const approvalText = (await approvalRow.first().innerText()).replace(/\s+/g, ' ')
+    assert.match(approvalText, /allowed/i)
+    assert.match(approvalText, /write/i)
+    assert.ok(approvalText.includes(HELPER_FILE), `the approval row must name the target (got "${approvalText}")`)
+    // The log is append-only: the original pending row stays above the outcome.
+    assert.equal(
+      await drawer.locator('.subagent-approval.is-pending').count(),
+      1,
+      'the child log keeps its pending approval row',
+    )
+    await drawer
+      .locator('.subagent-tool', { hasText: 'workspace_write_file' })
+      .first()
+      .waitFor({ timeout: 15000 })
+    await page.keyboard.press('Escape')
+    await drawer.waitFor({ state: 'hidden', timeout: 10000 })
+
+    // -- 5. the run-scoped undo preview lists the child-created file
+    const sessionName = await sessionNameByTitle(be.base, SESSION_TITLE)
+    await waitFor(
+      async () => {
+        const runs = await (
+          await fetch(`${be.base}/api/runs?session=${encodeURIComponent(sessionName)}`)
+        ).json()
+        const completed = runs.find((run) => run.status === 'completed')
+        if (!completed) return false
+        const res = await fetch(
+          `${be.base}/api/sessions/${encodeURIComponent(sessionName)}/undo/${encodeURIComponent(completed.run_id)}`,
+        )
+        return res.ok
+      },
+      { desc: 'the completed helper run and its undo preview' },
+    )
+    const undoBar = page.locator('.run-undo-bar')
+    await undoBar.waitFor({ state: 'visible', timeout: 15000 })
+    await undoBar.locator('button.run-undo-open').click()
+    const undoDialog = page.locator('.app-dialog')
+    await undoDialog.waitFor({ state: 'visible', timeout: 10000 })
+    assert.equal(
+      (await undoDialog.locator('.app-dialog__title').innerText()).trim(),
+      "Undo this run's file changes",
+    )
+    const undoRows = undoDialog.locator('.run-undo-row')
+    assert.equal(await undoRows.count(), 1, 'the helper write is one undoable file')
+    assert.equal((await undoRows.locator('.run-undo-path').innerText()).trim(), HELPER_FILE)
+    assert.equal(
+      (await undoRows.locator('.run-undo-what').innerText()).trim(),
+      'Delete the file the run created',
+    )
+    await undoDialog.locator('button.undo-cancel').click()
+    await undoDialog.waitFor({ state: 'hidden' })
+
+    // -- 6. reload: the append-only child store still shows the approval rows
+    await page.reload()
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await page.locator('.session-item', { hasText: SESSION_TITLE }).first().click()
+    const chipAfter = page.locator('.subagent-chip')
+    await chipAfter.waitFor({ state: 'visible', timeout: 20000 })
+    await chipAfter.click()
+    const treeAfter = page.locator('#subagent-tree')
+    await treeAfter.waitFor({ state: 'visible' })
+    await treeAfter.locator('.subagent-tree-row').first().click()
+    const drawerAfter = page.locator('.subagent-view')
+    await drawerAfter.waitFor({ state: 'visible', timeout: 15000 })
+    const rowsAfter = drawerAfter.locator('.subagent-approval.is-allowed')
+    await rowsAfter.first().waitFor({ timeout: 15000 })
+    assert.match((await rowsAfter.first().innerText()).replace(/\s+/g, ' '), /allowed/)
+    assert.equal(await page.locator('.approval-dock').count(), 0, 'the card stays resolved after reload')
+
+    consoleGuard.assertClean()
+    runner.pass('subagent-mutation')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(wsDir)
     rmTree(be.dir)
   }
 }
@@ -4605,7 +4789,8 @@ async function scenarioSettingsSubagent(runner) {
     const card = dialog.locator('.role-card--subagent')
     await card.waitFor({ state: 'visible' })
     assert.match(await card.innerText(), /Subagent/)
-    assert.match(await card.innerText(), /Read-only helper/)
+    assert.match(await card.innerText(), /Isolated helper spawned by the Senior/)
+    assert.match(await card.innerText(), /approved workspace changes/)
     const model = card.locator('input[placeholder="e.g. spark-x2.6-4b@q4_k_m"]')
     const base = card.locator('input[placeholder="http://127.0.0.1:1234/v1"]')
     const key = card.locator('input[type="password"]')
@@ -4897,6 +5082,13 @@ async function main() {
         run: () => (
           (currentRunner = makeRunner('subagents')),
           scenarioSubagents(currentRunner)
+        ),
+      },
+      {
+        label: 'subagent-mutation',
+        run: () => (
+          (currentRunner = makeRunner('subagent-mutation')),
+          scenarioSubagentMutation(currentRunner)
         ),
       },
       {

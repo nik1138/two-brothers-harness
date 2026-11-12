@@ -1,15 +1,16 @@
 # E2E fixtures
 
 The `approval-*`, `stop`, `folding`, `plan-dock`, `approval-reason`,
-`reasoning-replay`, `cooperation-surfaces` and `tab-title` scenarios in
-`../run.mjs` need scripted, deterministic model responses. Every scenario runs
-against the TypeScript server (`packages/harness/dist/cli.js serve`). That
-server has no responder-monkeypatching hook, so the fixture is a scripted
+`reasoning-replay`, `cooperation-surfaces`, `tab-title` and `subagent-mutation`
+scenarios in `../run.mjs` need scripted, deterministic model responses. Every
+scenario runs against the TypeScript server
+(`packages/harness/dist/cli.js serve`). That server has no
+responder-monkeypatching hook, so the fixture is a scripted
 **OpenAI-compatible model server**:
 
 ```
-node scripted-server.mjs --port P --scenario approval|slow|plan|folding|delete|reasoning|cooperation|title \
-  [--senior-model e2e-senior] [--junior-model e2e-junior] [--linger-ms 30000]
+node scripted-server.mjs --port P --scenario approval|slow|plan|folding|delete|reasoning|cooperation|title|helper-write \
+  [--senior-model e2e-senior] [--junior-model e2e-junior] [--helper-model e2e-helper] [--linger-ms 30000]
 ```
 
 Endpoints: `GET /v1/models`, `POST /v1/chat/completions` (queued,
@@ -75,6 +76,13 @@ run's decision starts the next run):
   to observe the running tab title (`▶ …`) before the run parks on the real
   approval broker (`! …`) and completes; the linger delay is dropped when the
   harness stops the run, exactly like `slow`.
+- `helper-write` — work-mode run whose junior delivers a report **without
+  tools**, then the senior verify call (which offers the `subagent` tool) asks
+  for one delegation; the child request carries the helper model id and answers
+  a first `workspace_write_file` call (`e2e-helper.txt`), then a short report
+  after its tool result. The `subagent-mutation` browser scenario configures
+  the helper route through `PUT /api/settings` with `base_url` pointing at this
+  fixture, so the child write parks a real child-tagged operator approval.
 
 `../run.mjs` starts it automatically next to the server, which is
 spawned as:
