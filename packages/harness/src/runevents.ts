@@ -90,7 +90,7 @@ export interface EnvelopeEvent extends RuntimeEventMeta {
 }
 
 /**
- * Additive tree event: the Senior started one isolated read-only helper. The
+ * Additive tree event: the Senior started one isolated helper. The
  * task is bounded for the tree; the full task lives in the child transcript
  * store. Older consumers can ignore the type.
  */

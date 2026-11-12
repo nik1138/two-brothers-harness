@@ -439,7 +439,7 @@ export function presetContextWindow(
 export class RuntimeSettings {
   private senior: RuntimeRoleSettings = emptyRole();
   private junior: RuntimeRoleSettings = emptyRole();
-  /** Dedicated read-only helper route; empty = the tool's role fallback. */
+  /** Dedicated helper route; empty = the tool's role fallback. */
   private subagent: RuntimeRoleSettings = emptyRole();
   private readonly store: SettingsStore | null;
 

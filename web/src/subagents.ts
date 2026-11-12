@@ -1,5 +1,5 @@
 /**
- * Read-only helper subagents in the parent view (pure, no DOM/Vue).
+ * Helper subagents in the parent view (pure, no DOM/Vue).
  *
  * The parent session's runtime sidecar carries live `subagent_started`,
  * `subagent_activity` and `subagent_completed` events. The same tree can be

@@ -1112,7 +1112,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     }
   }
   const runtimeEvents = new RuntimeEventStore(path.join(sessionsDir, "runtime"), layout);
-  // Read-only helper transcripts live in a reserved directory, never in the
+  // Helper transcripts live in a reserved directory, never in the
   // session list. The parent's runtime sidecar carries the live tree events.
   const subagents = new SubagentStore(path.join(sessionsDir, "subagents"));
   // Run-scoped workspace edit undo (wave 23): one persisted, content-addressed
@@ -2289,7 +2289,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     }),
   );
 
-  // Read-only helper subagents: the parent session's tree plus one child's
+  // Helper subagents: the parent session's tree plus one child's
   // transcript. The child logs are a reserved store, not sessions, so they
   // never appear in `GET /api/sessions` or the sidebar.
   routes.push(
