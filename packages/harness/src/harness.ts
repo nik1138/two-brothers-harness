@@ -2461,7 +2461,8 @@ export class TwoBrothersHarness {
       parentSignal === undefined
         ? control.controller.signal
         : AbortSignal.any([parentSignal, control.controller.signal]);
-    settings.controls?.register(this.childControlHandle(control));    this.subagentRuns += 1;
+    settings.controls?.register(this.childControlHandle(control));
+    this.subagentRuns += 1;
     this.subagentActive += 1;
     let storeFailed = false;
     try {
@@ -2700,7 +2701,7 @@ export class TwoBrothersHarness {
       });
     } finally {
       // Release the control on every settle path (including a parent unwind):
-      // a route can never poke a dead child, and the map stays balanced.
+      // a route can never poke a dead child, and the server registry is balanced.
       if (control.status === "running") control.status = "cancelled";
       settings.controls?.release(id);
       this.subagentActive -= 1;
