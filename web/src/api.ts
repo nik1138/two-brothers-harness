@@ -28,6 +28,8 @@ import type {
   SettingsView,
   SkillInfo,
   SkillListResponse,
+  SubagentDetail,
+  SubagentInfo,
   TokenEvent,
   Workspace,
   WorkspaceCreateRequest,
@@ -37,6 +39,7 @@ import type {
 import { clampSearchLimit } from './search'
 import { clampFileQueryLimit } from './mentions'
 import { isTokenEvent } from './streaming'
+import { normalizeSubagentDetail, normalizeSubagentList } from './subagents'
 import { normalizeUndoApplyResult, normalizeUndoPreview } from './runUndo'
 import type {
   RunUndoApplyResult,
@@ -100,6 +103,22 @@ export async function getSession(name: string): Promise<SessionDetail> {
 /** Runtime sidecar (tool/approval/run events) for a session; empty for legacy sessions. */
 export async function getSessionRuntimeEvents(name: string): Promise<SessionRuntimeEvents> {
   return request<SessionRuntimeEvents>(`/api/sessions/${encodeURIComponent(name)}/events`)
+}
+
+/** Read-only helper children recorded for one parent session, newest first. */
+export async function listSessionSubagents(name: string): Promise<SubagentInfo[]> {
+  const body = await request<unknown>(
+    `/api/sessions/${encodeURIComponent(name)}/subagents`,
+  )
+  return normalizeSubagentList(body)
+}
+
+/** One child's bounded transcript; null for an unknown/invalid id. */
+export async function getSubagent(id: string): Promise<SubagentDetail | null> {
+  const body = await request<{ subagent?: unknown }>(
+    `/api/subagents/${encodeURIComponent(id)}`,
+  )
+  return normalizeSubagentDetail(body?.subagent)
 }
 
 export async function createSession(body: SessionCreateRequest): Promise<SessionInfo> {

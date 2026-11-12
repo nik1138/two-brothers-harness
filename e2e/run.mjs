@@ -2491,6 +2491,140 @@ async function scenarioPlanDock(runner) {
   }
 }
 
+// -- scenario: read-only helper subagents ----------------------------------------------
+//
+// The model-facing tool and the child runner are covered by the package suite;
+// this scenario owns the browser surface: the parent header chip, the live tree,
+// and the read-only child drawer. The child log is seeded through the same
+// on-disk store the backend serves, so the scenario stays hermetic and does not
+// depend on a model choosing to delegate.
+
+async function scenarioSubagents(runner) {
+  const CHILD = 'sub-12345678'
+  const be = await startBackend({ kind: 'mock' })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  try {
+    const created = await apiCall(be.base, 'POST', '/api/sessions', {
+      title: 'E2E subagent session',
+    })
+    assert.ok(created.json?.name, `create session -> HTTP ${created.status}`)
+    const session = created.json.name
+    const now = Date.now()
+    const rows = [
+      {
+        type: 'meta',
+        id: CHILD,
+        parent_session: session,
+        label: 'Read auth',
+        role: 'junior',
+        model: 'e2e-junior',
+        task: 'Inspect src/auth.ts and report the exported functions.',
+        started_at: now - 5_000,
+      },
+      {
+        type: 'message',
+        role: 'user',
+        text: 'Inspect src/auth.ts and report the exported functions.',
+        at: now - 5_000,
+      },
+      {
+        type: 'tool',
+        tool: 'workspace_read_file',
+        status: 'started',
+        args: { path: 'src/auth.ts' },
+        at: now - 4_500,
+      },
+      {
+        type: 'tool',
+        tool: 'workspace_read_file',
+        status: 'completed',
+        result: 'export function login() {}',
+        at: now - 4_000,
+      },
+      {
+        type: 'message',
+        role: 'assistant',
+        text: 'It exports login().',
+        at: now - 3_500,
+      },
+      {
+        type: 'end',
+        status: 'completed',
+        ended_at: now - 3_000,
+        result: 'It exports login().',
+        usage: {
+          model_calls: 2,
+          input_tokens: 1_200,
+          output_tokens: 300,
+          cached_tokens: 600,
+          cache_write_tokens: 0,
+        },
+      },
+    ]
+    const storeDir = path.join(be.dir, 'subagents')
+    fs.mkdirSync(storeDir, { recursive: true })
+    fs.writeFileSync(
+      path.join(storeDir, `${CHILD}.jsonl`),
+      rows.map((row) => JSON.stringify(row)).join('\n') + '\n',
+      'utf-8',
+    )
+
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await page
+      .locator('nav[aria-label="Sessions"]')
+      .getByText('E2E subagent session', { exact: true })
+      .click()
+
+    const chip = page.locator('.subagent-chip')
+    await chip.waitFor({ state: 'visible', timeout: 10000 })
+    assert.match((await chip.innerText()).replace(/\s+/g, ' '), /Subagents · 1/)
+    await chip.click()
+    const tree = page.locator('#subagent-tree')
+    await tree.waitFor({ state: 'visible' })
+    const treeRows = tree.locator('.subagent-tree-row')
+    assert.equal(await treeRows.count(), 1)
+    const rowText = (await treeRows.first().innerText()).replace(/\s+/g, ' ')
+    assert.match(rowText, /Read auth/)
+    assert.match(rowText, /completed/)
+    assert.match(rowText, /1\.5k tok/)
+
+    await treeRows.first().click()
+    const drawer = page.locator('.subagent-view')
+    await drawer.waitFor({ state: 'visible', timeout: 10000 })
+    await drawer.locator('.subagent-report').waitFor({ state: 'visible', timeout: 10000 })
+    const drawerText = (await drawer.innerText()).replace(/\s+/g, ' ')
+    assert.match(drawerText, /Final report/)
+    assert.match(drawerText, /It exports login\(\)/)
+    assert.match(drawerText, /workspace_read_file/)
+    assert.match(drawerText, /cache 50%/)
+    assert.equal(
+      await page.locator('#composer-input').evaluate((el) =>
+        el.closest('.composer-inert')?.hasAttribute('inert') ?? false,
+      ),
+      true,
+      'the parent composer is inert while a read-only child is open',
+    )
+
+    await page.keyboard.press('Escape')
+    await drawer.waitFor({ state: 'hidden', timeout: 10000 })
+    assert.equal(
+      await page.locator('#composer-input').evaluate((el) =>
+        el.closest('.composer-inert')?.hasAttribute('inert') ?? false,
+      ),
+      false,
+      'closing the child restores the parent composer',
+    )
+
+    consoleGuard.assertClean()
+    runner.pass('subagents')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(be.dir)
+  }
+}
+
 // -- scenario: composer status seats ---------------------------------------------------
 //
 // Role models are written through the settings API before the page loads, so the
@@ -4676,6 +4810,13 @@ async function main() {
         run: () => (
           (currentRunner = makeRunner('plan-dock')),
           scenarioPlanDock(currentRunner)
+        ),
+      },
+      {
+        label: 'subagents',
+        run: () => (
+          (currentRunner = makeRunner('subagents')),
+          scenarioSubagents(currentRunner)
         ),
       },
       {

@@ -216,6 +216,7 @@ import {
 import {
   APPROVAL_DENY_LIMIT,
   clipArgs,
+  clipBlock,
   clipText,
   compactToolResult,
   normalizeApprovalTarget,
@@ -246,6 +247,22 @@ import {
   TODO_TOOL_PARAMETERS,
   type TodoItem,
 } from "./todos.ts";
+import {
+  deriveSubagentLabel,
+  newSubagentId,
+  runSubagent,
+  SUBAGENT_DEFAULT_MAX_ACTIVE,
+  SUBAGENT_DEFAULT_MAX_PER_RUN,
+  SUBAGENT_MAX_LABEL_CHARS,
+  SUBAGENT_MAX_TASK_CHARS,
+  SUBAGENT_RESULT_MAX_CHARS,
+  SUBAGENT_SYSTEM_PROMPT,
+  SUBAGENT_TOOL_DESCRIPTION,
+  SUBAGENT_TOOL_NAME,
+  SUBAGENT_TOOL_PARAMETERS,
+  type SubagentSettings,
+  type SubagentTranscriptEntry,
+} from "./subagent.ts";
 
 const FALLBACK_TEXT = "The model did not return a structured reply; using the text as is.";
 
@@ -870,6 +887,17 @@ export interface HarnessOptions {
    */
   spill?: SpillOptions;
   /**
+   * Read-only helper subagents (`src/subagent.ts`): when configured, the Senior
+   * gains the model-facing `subagent` tool. A child is a single-role worker
+   * with isolated context, its own fresh provider instance, read-only workspace
+   * tools, a bounded task/report and a durable child transcript under
+   * `settings.store.directory`. The parent's runtime stream carries
+   * `subagent_started` / `subagent_activity` / `subagent_completed` events for
+   * the live tree. The child never gets mutating tools and cannot spawn another
+   * child. `serve`/web enables it; other surfaces opt in.
+   */
+  subagents?: SubagentSettings;
+  /**
    * Advisory repeat-tool-call guard (`repeatguard.ts`): one instance per
    * tool-loop invocation counts consecutive calls with the same tool name and
    * canonically identical arguments, and appends a gentle reminder to the
@@ -1277,6 +1305,12 @@ export class TwoBrothersHarness {
   private compactionWarnings: string[] = [];
   /** Fail-soft tool-output spill warnings (folded into `result.warnings`). */
   private spillWarnings: string[] = [];
+  /** Fail-soft subagent store/runtime warnings (folded into `result.warnings`). */
+  private subagentWarnings: string[] = [];
+  /** Children started this run (the per-run delegation budget). */
+  private subagentRuns = 0;
+  /** Children currently executing (a guard for a future parallel path). */
+  private subagentActive = 0;
   /** Spill storage, or null when `options.spill` is unset (current clipping). */
   private readonly spillStore: SpillStore | null;
   /** Fail-soft operator-steering warnings (folded into `result.warnings`). */
@@ -2031,6 +2065,7 @@ export class TwoBrothersHarness {
       ...(this.options.tools ?? []).filter(verifyName),
       ...(this.options.seniorTools ?? []),
       ...(this.spillReadOffered() ? [this.spillReadTool()] : []),
+      ...(this.options.subagents !== undefined ? [this.subagentTool(state)] : []),
       this.todoWriteTool(state),
     ];
   }
@@ -2104,6 +2139,282 @@ export class TwoBrothersHarness {
         return todoResultText(todos);
       },
     };
+  }
+
+  /**
+   * The model-facing `subagent` tool: spawn one isolated read-only helper,
+   * wait for its bounded report, and return it as this tool's result. The child
+   * gets a fresh provider instance (so its usage is not folded into the
+   * parent's footer), a read-only workspace slice, and its own transcript
+   * store. Live progress is emitted as `subagent_*` runtime events; the parent
+   * context/protocol envelopes are untouched.
+   */
+  private subagentTool(state: CooperationState): Tool {
+    return {
+      name: SUBAGENT_TOOL_NAME,
+      description: SUBAGENT_TOOL_DESCRIPTION,
+      parameters: SUBAGENT_TOOL_PARAMETERS,
+      execute: async (args, signal) => this.runSubagentTool(state, args, signal),
+    };
+  }
+
+  /** The child's read-only belt: workspace reads plus spill retrieval only. */
+  private subagentToolSet(state: CooperationState, role: "senior" | "junior"): Tool[] {
+    const belt = role === "senior" ? this.verificationToolSet(state) : this.toolSet(state);
+    const allowed = new Set([
+      "workspace_read_file",
+      "workspace_list_dir",
+      "workspace_search_text",
+      SPILL_READ_TOOL_NAME,
+    ]);
+    return belt.filter(
+      (tool) =>
+        allowed.has(tool.name) &&
+        tool.name !== SUBAGENT_TOOL_NAME &&
+        tool.name !== TODO_TOOL_NAME,
+    );
+  }
+
+  /** A fresh provider for one child; keeps child usage out of the parent total. */
+  private buildSubagentProvider(role: "senior" | "junior"): Provider {
+    const warn = this.options.onProviderWarning;
+    const endpoint = this.options.endpoints?.[role];
+    if (endpoint !== undefined) {
+      const built = providerFromEndpoint(this.cfg, role, endpoint, warn);
+      if (built !== null) return built;
+    }
+    return buildProvider(warn ? { ...this.cfg, onWarning: warn } : this.cfg, role);
+  }
+
+  /** The role's model id, for the tree row (display only). */
+  private subagentModel(role: "senior" | "junior"): string {
+    const endpoint = this.options.endpoints?.[role];
+    const configured =
+      endpoint?.model || (role === "senior" ? this.cfg.seniorModel : this.cfg.juniorModel);
+    return configured || (role === "senior" ? "senior" : "junior");
+  }
+
+  /**
+   * Start, await, persist and report one child. Validation errors and child
+   * failures are returned as a JSON tool result (the parent model can react);
+   * an aborted parent signal is re-thrown after the child settles so the parent
+   * unwinds through the shared cancellation path.
+   */
+  private async runSubagentTool(
+    state: CooperationState,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const settings = this.options.subagents;
+    if (settings === undefined) {
+      return JSON.stringify({
+        tool: SUBAGENT_TOOL_NAME,
+        status: "error",
+        error: "subagent delegation is not enabled on this surface",
+      });
+    }
+    const task = typeof args.task === "string" ? args.task.trim() : "";
+    if (task === "") {
+      return JSON.stringify({
+        tool: SUBAGENT_TOOL_NAME,
+        status: "error",
+        error: "subagent: `task` must be a non-empty string",
+      });
+    }
+    if (task.length > SUBAGENT_MAX_TASK_CHARS) {
+      return JSON.stringify({
+        tool: SUBAGENT_TOOL_NAME,
+        status: "error",
+        error: `subagent: task is too long (${task.length} > ${SUBAGENT_MAX_TASK_CHARS} chars); send a tighter brief`,
+      });
+    }
+    const rawLabel = typeof args.label === "string" ? args.label.trim() : "";
+    const label = (rawLabel || deriveSubagentLabel(task)).slice(0, SUBAGENT_MAX_LABEL_CHARS);
+    const role: "senior" | "junior" = args.role === "senior" ? "senior" : "junior";
+    const maxPerRun = settings.maxPerRun ?? SUBAGENT_DEFAULT_MAX_PER_RUN;
+    const maxActive = settings.maxActive ?? SUBAGENT_DEFAULT_MAX_ACTIVE;
+    if (this.subagentRuns >= maxPerRun) {
+      return JSON.stringify({
+        tool: SUBAGENT_TOOL_NAME,
+        status: "error",
+        error: `subagent: per-run limit reached (${maxPerRun}); finish the existing reports instead`,
+      });
+    }
+    if (this.subagentActive >= maxActive) {
+      return JSON.stringify({
+        tool: SUBAGENT_TOOL_NAME,
+        status: "error",
+        error: `subagent: too many active helpers (${maxActive}); wait for one to finish`,
+      });
+    }
+
+    const id = newSubagentId();
+    const model = this.subagentModel(role);
+    const provider = settings.providerFactory?.(role) ?? this.buildSubagentProvider(role);
+    const tools = this.subagentToolSet(state, role);
+    const childTools = provider.chatWithTools === undefined ? [] : tools;
+    const systemPrompt = assembleSystemPrompt(SUBAGENT_SYSTEM_PROMPT, childTools, "subagent", {
+      role,
+      ...(this.instructionBlock !== "" ? { instructions: this.instructionBlock } : {}),
+    }).text;
+    const startedAt = Date.now();
+    this.subagentRuns += 1;
+    this.subagentActive += 1;
+    let storeFailed = false;
+    try {
+      settings.store.begin({
+        id,
+        parent_session: settings.parentSession,
+        label,
+        role,
+        model,
+        task,
+        started_at: startedAt,
+      });
+    } catch (exc) {
+      storeFailed = true;
+      this.subagentWarnings.push(
+        `subagent transcript store failed for ${id}: ${exc instanceof Error ? exc.message : String(exc)}; continuing without persistence`,
+      );
+    }
+    this.emitRuntime({
+      type: "subagent_started",
+      subagent_id: id,
+      label,
+      role,
+      model,
+      task: clipText(sanitizeOutput(task), 500),
+      started_at: startedAt,
+    });
+
+    try {
+      const result = await runSubagent({
+        id,
+        task,
+        role,
+        provider,
+        tools: childTools,
+        systemPrompt,
+        signal,
+        ...(storeFailed
+          ? {}
+          : {
+              onTranscript: (entry: SubagentTranscriptEntry) => settings.store.append(id, entry),
+            }),
+        onEvent: (event) => {
+          if (event.kind === "message") {
+            this.emitRuntime({
+              type: "subagent_activity",
+              subagent_id: id,
+              label,
+              activity: "message",
+              text: clipBlock(sanitizeOutput(event.text), 1_000),
+            });
+          } else if (event.kind === "tool") {
+            this.emitRuntime({
+              type: "subagent_activity",
+              subagent_id: id,
+              label,
+              activity: "tool",
+              tool: event.tool,
+              status: event.status,
+              ...(event.args !== undefined ? { args: clipArgs(event.args) } : {}),
+              ...(event.result !== undefined
+                ? { result: clipBlock(sanitizeOutput(event.result), 500) }
+                : {}),
+            });
+          } else {
+            this.emitRuntime({
+              type: "subagent_activity",
+              subagent_id: id,
+              label,
+              activity: "status",
+              status: event.status,
+            });
+          }
+        },
+      });
+      const endedAt = Date.now();
+      const report = result.text.slice(0, SUBAGENT_RESULT_MAX_CHARS);
+      if (!storeFailed) {
+        try {
+          settings.store.finish(id, {
+            status: result.status,
+            ended_at: endedAt,
+            ...(result.status === "completed" ? { result: report } : {}),
+            ...(result.error !== undefined ? { error: sanitizeOutput(result.error) } : {}),
+            usage: result.usage,
+          });
+        } catch (exc) {
+          this.subagentWarnings.push(
+            `subagent transcript store finish failed for ${id}: ${exc instanceof Error ? exc.message : String(exc)}`,
+          );
+        }
+      }
+      this.emitRuntime({
+        type: "subagent_completed",
+        subagent_id: id,
+        label,
+        status: result.status,
+        ...(result.status === "completed" ? { result: clipBlock(report, 2_000) } : {}),
+        ...(result.error !== undefined ? { error: sanitizeOutput(result.error) } : {}),
+        usage: { ...result.usage },
+        duration_ms: result.durationMs,
+        ended_at: endedAt,
+      });
+      const payload = {
+        tool: SUBAGENT_TOOL_NAME,
+        subagent_id: id,
+        label,
+        role,
+        model,
+        status: result.status,
+        ...(result.status === "completed"
+          ? { report: report.slice(0, SUBAGENT_RESULT_MAX_CHARS) }
+          : {}),
+        ...(result.error !== undefined ? { error: sanitizeOutput(result.error) } : {}),
+        usage: result.usage,
+        duration_ms: result.durationMs,
+        tool_calls: result.toolCalls,
+      };
+      if (signal?.aborted) throw new ProviderAbortError();
+      return JSON.stringify(payload);
+    } catch (exc) {
+      if (exc instanceof ProviderAbortError) throw exc;
+      const message = exc instanceof Error ? exc.message : String(exc);
+      const endedAt = Date.now();
+      if (!storeFailed) {
+        try {
+          settings.store.finish(id, {
+            status: "failed",
+            ended_at: endedAt,
+            error: message,
+          });
+        } catch {
+          // the warning was already recorded on begin failure; never mask the child error
+        }
+      }
+      this.emitRuntime({
+        type: "subagent_completed",
+        subagent_id: id,
+        label,
+        status: "failed",
+        error: clipBlock(message, 2_000),
+        duration_ms: Math.max(0, endedAt - startedAt),
+        ended_at: endedAt,
+      });
+      return JSON.stringify({
+        tool: SUBAGENT_TOOL_NAME,
+        subagent_id: id,
+        label,
+        role,
+        model,
+        status: "failed",
+        error: message,
+      });
+    } finally {
+      this.subagentActive -= 1;
+    }
   }
 
   /**
@@ -2750,6 +3061,9 @@ export class TwoBrothersHarness {
     this.compactionFailed = false;
     this.compactionWarnings = [];
     this.spillWarnings = [];
+    this.subagentWarnings = [];
+    this.subagentRuns = 0;
+    this.subagentActive = 0;
     this.steeringWarnings = [];
     this.steeringFailed = false;
     this.steeringCount = 0;
@@ -2835,6 +3149,7 @@ export class TwoBrothersHarness {
           ...this.compactionWarnings,
           ...this.steeringWarnings,
           ...this.spillWarnings,
+          ...this.subagentWarnings,
           ...this.instructionWarnings,
         ],
         cancelled: false,
@@ -2864,6 +3179,7 @@ export class TwoBrothersHarness {
             ...this.compactionWarnings,
             ...this.steeringWarnings,
             ...this.spillWarnings,
+            ...this.subagentWarnings,
             ...this.instructionWarnings,
           ],
           cancelled: true,

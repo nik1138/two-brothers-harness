@@ -20,6 +20,7 @@ import "./providers.test.ts";
 import "./adapters.test.ts";
 import "./effort.test.ts";
 import "./modelcatalog.test.ts";
+import "./subagent.test.ts";
 import "./anthropiccache.test.ts";
 import "./usagecache.test.ts";
 import "./retryregistry.test.ts";

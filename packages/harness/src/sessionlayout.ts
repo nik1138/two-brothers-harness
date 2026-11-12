@@ -164,7 +164,7 @@ const UNDO_DIR = "undo";
  * runtime sidecars (flat layout), undo images, spill files, and hidden
  * temp/marker files.
  */
-const RESERVED_DIRS = new Set([RUNTIME_DIR, UNDO_DIR, "spill"]);
+const RESERVED_DIRS = new Set([RUNTIME_DIR, UNDO_DIR, "spill", "subagents"]);
 
 /** True when `value` is a plain object. */
 function isRecord(value: unknown): value is Record<string, unknown> {

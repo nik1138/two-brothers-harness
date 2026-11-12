@@ -104,6 +104,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Read-only helper subagents (serve/web):** the Senior can now call a
+  model-facing `subagent` tool to spawn one isolated single-role helper for a
+  focused side task. The child has its own context and a fresh provider
+  instance (so its usage is not folded into the parent footer), receives only
+  `workspace_read_file` / `workspace_list_dir` / `workspace_search_text` (plus
+  `spill_read` when configured), cannot mutate, run shell, or spawn another
+  child, and returns a bounded report as the tool result. Tasks are capped at
+  4 000 chars, the child loop at six steps, and a parent run at eight children
+  (four active), with a 12 000-char report cap. The child transcript is
+  persisted under `<sessions-dir>/subagents/<id>.jsonl` with a torn-tail-
+  tolerant reader; `GET /api/sessions/{name}/subagents` serves the tree and
+  `GET /api/subagents/{id}` one transcript. The parent runtime stream carries
+  additive `subagent_started` / `subagent_activity` / `subagent_completed`
+  events (persisted in the session sidecar), and the web header gains a
+  `Subagents · N` chip: a live tree with status, current activity, elapsed time
+  and tokens, and a read-only child drawer (the parent composer is inert while
+  it is open). Children never appear in the session sidebar, and deleting the
+  parent removes its child logs. Files: `src/subagent.ts`,
+  `src/harness.ts`, `src/runevents.ts`, `src/server.ts`,
+  `src/sessionlayout.ts`, `web/src/subagents.ts`,
+  `web/src/components/SubagentView.vue`, `web/src/App.vue`, `web/src/api.ts`,
+  `web/src/types.ts`; tests `tests/subagent.test.ts`,
+  `web/tests/subagents.test.ts`, server route/delete coverage and the
+  `subagents` browser scenario. Scope: `serve`/web only in this slice; mutating
+  child tools, follow-up messages, async completion/wake, a TUI tree and
+  forked-context children remain later phases.
 - **Model switch in the message input (web):** the composer's Models chip now
   opens a two-level switch instead of a read-only summary. The root lists the
   Senior and Junior routes; each drills into a searchable, provider-grouped

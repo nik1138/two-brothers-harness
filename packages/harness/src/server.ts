@@ -337,6 +337,7 @@ import {
 import { discoverSkills, type SkillCatalog } from "./skills.ts";
 import { SpillStore } from "./spill.ts";
 import { RunApprovalBroker, RuntimeEventStore } from "./runevents.ts";
+import { SubagentStore } from "./subagent.ts";
 import {
   ACTIVE_STATES,
   STEERABLE_STATES,
@@ -912,6 +913,7 @@ export interface ServerState {
   settings: RuntimeSettings;
   settingsStore: SettingsStore;
   runtimeEvents: RuntimeEventStore;
+  subagents: SubagentStore;
   runs: RunManager;
   plugins: PluginManager;
   /** Resolves once the startup plugin load finishes (fail-soft by design). */
@@ -1108,6 +1110,9 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     }
   }
   const runtimeEvents = new RuntimeEventStore(path.join(sessionsDir, "runtime"), layout);
+  // Read-only helper transcripts live in a reserved directory, never in the
+  // session list. The parent's runtime sidecar carries the live tree events.
+  const subagents = new SubagentStore(path.join(sessionsDir, "subagents"));
   // Run-scoped workspace edit undo (wave 23): one persisted, content-addressed
   // store for every workspace-bound run. It is a session side artifact (never
   // a protocol/session record); the store creates its directories lazily.
@@ -1155,6 +1160,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     settings,
     settingsStore,
     runtimeEvents,
+    subagents,
     runs,
     plugins,
     pluginsReady,
@@ -1814,6 +1820,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       ...(repeatToolGuard !== undefined ? { repeatToolGuard } : {}),
       ...(projectInstructions !== undefined ? { projectInstructions } : {}),
       spill: { root: spillRoot },
+      subagents: { store: state.subagents, parentSession: name },
       ...(toolScopes ? { toolScopes } : {}),
       ...(hooks ? { hooks } : {}),
       // Mid-run operator steering (wave 23): the run job hands the record's
@@ -2253,6 +2260,24 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         name,
         events: state.runtimeEvents.load(name),
       };
+    }),
+  );
+
+  // Read-only helper subagents: the parent session's tree plus one child's
+  // transcript. The child logs are a reserved store, not sessions, so they
+  // never appear in `GET /api/sessions` or the sidebar.
+  routes.push(
+    compileRoute("GET", "/api/sessions/{name}/subagents", (ctx) => {
+      const name = sessionFileName(ctx.params.name);
+      return { name, subagents: state.subagents.list(name) };
+    }),
+  );
+
+  routes.push(
+    compileRoute("GET", "/api/subagents/{id}", (ctx) => {
+      const detail = state.subagents.get(ctx.params.id);
+      if (detail === null) throw new HttpError(404, "not found");
+      return { subagent: detail };
     }),
   );
 
@@ -2812,6 +2837,9 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       fs.unlinkSync(store.path);
       state.metadata.delete(safe);
       state.runtimeEvents.delete(safe);
+      // Child helper transcripts belong to the parent session; they must not
+      // survive its deletion (and a reused name must not inherit them).
+      state.subagents.deleteForSession(safe);
       // A directory-layout session owns its directory; remove it when empty so
       // the name is fully released. `resolveForWrite` also finds the now-empty
       // directory after the artifacts were unlinked.

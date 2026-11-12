@@ -1004,6 +1004,8 @@ but stores `meta.json` and `events.jsonl` inside
 | `DELETE /api/sessions/{name}` | delete a session — the JSONL, its `<name>.meta.json` and the runtime sidecar (`200 {"deleted": name}`; 404 on unknown) |
 | `GET /api/sessions/{name}` | all protocol envelopes of one session |
 | `GET /api/sessions/{name}/events` | runtime sidecar events (tool calls, approvals) for browser reload |
+| `GET /api/sessions/{name}/subagents` | read-only helper tree for one parent session (newest first, no transcripts); child logs live under `<sessions-dir>/subagents/` and never appear in the session list |
+| `GET /api/subagents/{id}` | one child's bounded transcript and usage; 404 for an unknown or invalid id |
 | `POST /api/sessions/{name}/compact` | compact the session in place on demand: the older context is summarized by the configured summarizer role (senior by default) and the session JSONL is rewritten with dense `seq`, so a reload shows the summary. `200 {"compacted": true, "before_events": N, "after_events": M}`; `200 {"compacted": false, "reason": "nothing to compact"}` when there is nothing to cut; 404 unknown session, 400 invalid session name, 409 while a run for that session is active or another compaction is already running, 422 when the session file is unreadable/corrupt, and 502 with the provider message (nothing written) when summarization fails. A run submitted for a session while it is being compacted is a 409 (`a compaction is in progress for this session; retry in a moment`) — the two operations are mutually exclusive so a run's envelopes can never be lost to the rewrite. The summarizer budgets follow the resolved run config (`--compact-*`/`TWO_BROTHERS_COMPACT*`), an explicit `ServerOptions.compaction` still wins, and a client disconnect aborts the provider call and releases the session |
 | `POST /api/sessions/{name}/fork` | copy a session (or its first `seq` envelopes) into a NEW session file, for "what-if" branches. Body `{seq?: integer, name?: string}` (both optional; `seq` defaults to the whole session). `201 {name, title, events, forked_from: {name, seq}}`; the copy is a byte-exact prefix (dense `seq` preserved), the new sidecar gets `forked_from`'s `parent` lineage link and a `<source title> (fork)` title, and the source is never modified. Errors: 400 invalid `seq`/`name`, 404 unknown source, 409 name taken or a live run/manual compaction on the session (`a run is active for this session; stop it before forking it` / `a compaction is in progress for this session; retry in a moment`), 422 corrupt source, 500 unwritable sessions directory (a partial file is rolled back) |
 | `POST /api/sessions/{name}/rewind` | drop the last `turns` operator turns (each task plus every envelope produced for it) from a persisted session. Body `{turns}` strict integer 1–100. `200 {name, rewritten, kept, removed, turns, requested_turns, stopped_at_compaction, stops_before, reason, runtime_events_cleared, runtime_events_clear_error?}` — `rewritten: false` with a `reason` when there is nothing to cut (not an error). The kept prefix is rewritten atomically with dense `seq` intact, and a successful rewrite clears the session's runtime-event sidecar (`sessions/runtime/<name>.jsonl.events.jsonl`): tool/approval history for the removed runs is gone, while the kept transcript remains (`runtime_events_cleared` says whether the sidecar was cleared; a clear failure is disclosed instead of pretending success). Harness-generated context (compaction summaries, repair requests, operator steers, skill/file blocks) is never counted as a turn, and a compaction summary is a hard floor (`stopped_at_compaction`/`stops_before` report an honest clamp). Errors: 400 non-integer/out-of-range depth, 404 unknown session, 409 a live run/manual compaction or a session changed during the read+rewrite CAS, 422 corrupt session, 500 failed rewrite |
@@ -1013,7 +1015,7 @@ but stores `meta.json` and `events.jsonl` inside
 | `GET /api/runs`, `GET /api/runs/{run_id}` | list runs / run status (`queued`/`running`/`waiting`/`completed`/`failed`/`cancelled`); records carry a per-run `usage` object (`model_calls`, `input_tokens`, `output_tokens`, `cached_tokens`, `cache_write_tokens`, and the optional normalized `prompt_tokens` for Anthropic/Gemini; live counters update after each cooperation node, zeros only before the first call) plus an additive `cost` object (`{currency: "USD", total, model}` or `null` — computed at run completion, recomputed from the persisted usage for sidecar-rebuilt terminal records, and `null` when the usage cannot be attributed to one priced model). Records also carry, additively, `steering_pending` (steering texts waiting for the run's next step, present only while live and non-empty) and `steering_dropped` (`dropped` texts discarded at the per-run envelope cap; present only when > 0) |
 | `POST /api/runs/{run_id}/stop` | cooperative stop (pending approvals are denied); a `queued` run is marked cancelled immediately, without waiting for a worker |
 | `POST /api/runs/{run_id}/steer` | mid-run operator steering: queue `{"text": "..."}` for an ACTIVE run — `running`, or `waiting` on an approval (applied at the next step after it resolves). Accepted `200 {"run_id", "status", "pending"}` (`pending` = steering texts now waiting, 1–8); the text is trimmed, must be non-empty and at most 4 000 characters (`400` otherwise; a non-string `text` is the standard `400 invalid request body`), an unknown run is `404`, and a queued/terminal run or a full pending queue is an honest `409` (the detail names the run's status, or `steering queue is full …`). Acceptance emits **no** event: the steer is appended to the shared context as an ordinary `user`→`senior` `message` envelope (payload text prefixed `[[OPERATOR STEER]] `) when the harness reaches the next node boundary/tool-loop iteration, so SSE consumers see the normal `envelope` frame with its dense `seq` at that moment. Pending steering is in-memory only: a stopped run appends nothing more and drops what was queued, and a backend restart loses the queue (`404` for the run id) |
-| `GET /api/runs/{run_id}/events?after=N` | SSE of typed runtime events (`run_status`, `envelope`, `tool_started`, `tool_completed`, `approval_requested`, `approval_resolved`, `approval_auto_allowed`, `approval_auto_denied`, `todo_updated`, `prompt_audit`, `reasoning`, `usage`, `steering_dropped`, `run_error`, `run_end`); reconnectable via `after`. `approval_requested` additively carries `reason` and a bounded `detail` (`{kind, diff?, addedLines?, removedLines?, command?, truncated?}` preview) when the request has one; `todo_updated` carries the model's complete sanitized plan snapshot; `steering_dropped` carries `{dropped, applied, limit}` when a 200-accepted steer later hit the per-run envelope cap. When the run was started with `stream_tokens`, the same stream additionally carries ephemeral named `token` frames (`event: token`, data `{type, run_id, role, kind: "text"\\|"thinking", delta, at}`) with no SSE id — they are live-only, never persisted and never replayed |
+| `GET /api/runs/{run_id}/events?after=N` | SSE of typed runtime events (`run_status`, `envelope`, `tool_started`, `tool_completed`, `approval_requested`, `approval_resolved`, `approval_auto_allowed`, `approval_auto_denied`, `todo_updated`, `prompt_audit`, `reasoning`, `usage`, `subagent_started`, `subagent_activity`, `subagent_completed`, `steering_dropped`, `run_error`, `run_end`); reconnectable via `after`. `approval_requested` additively carries `reason` and a bounded `detail` (`{kind, diff?, addedLines?, removedLines?, command?, truncated?}` preview) when the request has one; `todo_updated` carries the model's complete sanitized plan snapshot; `steering_dropped` carries `{dropped, applied, limit}` when a 200-accepted steer later hit the per-run envelope cap. When the run was started with `stream_tokens`, the same stream additionally carries ephemeral named `token` frames (`event: token`, data `{type, run_id, role, kind: "text"\\|"thinking", delta, at}`) with no SSE id — they are live-only, never persisted and never replayed |
 | `GET /api/runs/{run_id}/approvals`, `POST /api/runs/{run_id}/approvals/{id}` | list/answer pending operator approvals (`{"allow": bool, "scope"?: "once" \| "session"}` → `{approval_id, decision, scope}`; `scope` defaults to `once`, an invalid value or `session` with a deny is a 400, an unknown/already-resolved approval id is a 404). See the session-scope paragraph below |
 | `GET /api/providers`, `POST /api/providers`, `PUT /api/providers/{seed}`, `POST /api/providers/{name}/reset`, `POST /api/providers/{name}/discover`, `DELETE /api/providers/{name}` | provider presets (the curated seed table: hosted providers, subscription plans, LM Studio, custom). `GET` returns `{name, base_url, api_key_set, kind, models}` plus additive `seed` (the name comes from the built-in seed table) and `customized` (a stored override of that name exists), so a client can tell a pristine seed from an edited/custom entry; a positive preset `context_window` (tokens, used only as a compaction fallback) is exposed additively, while `0`/absent stays unknown and omitted so pre-wave presets keep the exact old shape. `POST` creates a custom provider (409 on a duplicate name, including a seed name); `PUT` updates it, and on a seed name materializes a stored override (blank `base_url` is a 400); both accept `context_window` as a positive safe integer; an explicit `0` clears it, an absent/null field on an update leaves the stored value untouched (a create starts without one), and negative/float/string/boolean/unsafe values are a `400` before any write; `DELETE` removes a stored preset/override and clears any role `provider_ref` that pointed at it (a pristine seed is a 404); `POST /api/providers/{name}/reset` restores a customized built-in seed without clearing role references (see below); `POST /api/providers/{name}/discover` probes a draft endpoint for its model list without saving (see the discovery paragraph below). Keys are never returned — responses carry `api_key_set` only. The Settings → Providers tab is the operator UI for these routes |
 | `GET /api/plugins` | discovered plugins (`name`, `description`, `roles`, load `errors`, `diagnostics`) |
@@ -1662,6 +1664,50 @@ enables the senior verify pass:
   status markers and bounded selection, and neither takes a key. A TUI turn
   also writes each plan snapshot to the same sidecar (`todo_updated` only), so
   a restart with the same `--session-file` replays the plan.
+
+## Subagents (serve/web, TS package)
+
+A `serve`/web run enables one read-only helper tier below the brothers. The
+Senior's tool belt gains a `subagent` tool; the Junior never receives it, and a
+child cannot receive it either (no recursion).
+
+- **What the child is:** one isolated single-role helper with its own
+  conversation and a fresh provider instance, so its usage never enters the
+  parent run's footer. It gets only `workspace_read_file`,
+  `workspace_list_dir`, `workspace_search_text` and (when configured)
+  `spill_read`; it cannot write, edit, delete, run shell, or ask the operator a
+  question. It returns a bounded report as the tool result; the full bounded
+  transcript is persisted for the UI.
+- **Arguments:** `{"task": "self-contained brief", "label?": "short tree
+  label", "role?": "senior" | "junior"}`. `task` is required and capped at
+  4 000 chars; the label defaults to the task's first line; `role` defaults to
+  `junior` (cheaper) and `role: "senior"` uses the stronger Senior model.
+- **Limits:** six child tool-loop steps, eight children per parent run, four
+  active children, and a 12 000-char report cap. Exceeding a limit is a normal
+  JSON tool error, never a parent crash.
+- **Events:** the parent runtime stream gains additive `subagent_started`,
+  `subagent_activity` and `subagent_completed` events (persisted in the run
+  sidecar). `subagent_activity` carries `activity: "message" | "tool" |
+  "status"` plus a bounded text/tool preview; the terminal event carries
+  `status`, `result`, `error`, `usage`, `duration_ms` and `ended_at`.
+- **Routes:** `GET /api/sessions/{name}/subagents` returns
+  `{name, subagents: [...]}` (newest first, no transcripts) and
+  `GET /api/subagents/{id}` returns `{subagent: {...transcript}}`; an unknown
+  or invalid id is 404. Child logs live under
+  `<sessions-dir>/subagents/<id>.jsonl` and are removed when the parent session
+  is deleted. They are not sessions: `GET /api/sessions`, search, export and
+  the sidebar never list them.
+- **Web:** the chat header shows `Subagents · N` after the first helper. The
+  chip opens a live tree with status, current activity, elapsed time and
+  tokens; clicking a row opens a read-only child drawer with the task, tool
+  calls and final report. The parent composer is inert while the drawer is
+  open; **← Parent** or `Esc` closes it. The tree is reloaded from the routes
+  after a restart, so completed helpers remain inspectable.
+- **Not in this slice:** mutating child tools (no child approval routing yet),
+  follow-up messages or interruption, a TUI tree, async completion/wake (the
+  parent waits for the bounded report), forked-context children, deeper
+  nesting, per-child model/effort selection and cost/cache roll-up into the
+  parent footer. `run`/`chat`/`tui` do not expose the tool in this slice.
 
 ## Workspace instructions (TS package)
 

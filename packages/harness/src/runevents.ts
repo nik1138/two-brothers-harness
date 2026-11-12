@@ -13,7 +13,8 @@
  * envelope log. Events are the typed runtime events (run_status / envelope /
  * tool_started / tool_completed / approval_requested / approval_resolved /
  * approval_auto_denied / approval_auto_allowed / todo_updated / prompt_audit /
- * reasoning / run_error / run_end) plus `run_id`
+ * reasoning / subagent_started / subagent_activity / subagent_completed /
+ * run_error / run_end) plus `run_id`
  * and `at` (epoch seconds). Event JSON keeps the Python field names
  * (`run_id`, `approval_id`) so sidecar files stay interchangeable with the
  * Python implementation; `prompt_audit` keeps its camelCase payload
@@ -86,6 +87,51 @@ export interface EnvelopeEvent extends RuntimeEventMeta {
   type: "envelope";
   seq: number;
   envelope: unknown;
+}
+
+/**
+ * Additive tree event: the Senior started one isolated read-only helper. The
+ * task is bounded for the tree; the full task lives in the child transcript
+ * store. Older consumers can ignore the type.
+ */
+export interface SubagentStartedEvent extends RuntimeEventMeta {
+  type: "subagent_started";
+  subagent_id: string;
+  label: string;
+  role: "senior" | "junior";
+  /** Role model resolved at spawn time (display only). */
+  model: string;
+  /** Bounded task preview (the child log carries the full brief). */
+  task: string;
+  /** Epoch milliseconds, for a stable duration across reloads. */
+  started_at: number;
+}
+
+/** Additive tree event: one child message/tool/status step completed. */
+export interface SubagentActivityEvent extends RuntimeEventMeta {
+  type: "subagent_activity";
+  subagent_id: string;
+  label: string;
+  activity: "message" | "tool" | "status";
+  /** Bounded message text or tool preview. */
+  text?: string;
+  tool?: string;
+  status?: string;
+  args?: Record<string, unknown>;
+  result?: unknown;
+}
+
+/** Additive tree event: the child settled (terminal for this activation). */
+export interface SubagentCompletedEvent extends RuntimeEventMeta {
+  type: "subagent_completed";
+  subagent_id: string;
+  label: string;
+  status: "completed" | "failed" | "cancelled";
+  result?: string;
+  error?: string;
+  usage?: Record<string, unknown>;
+  duration_ms: number;
+  ended_at: number;
 }
 
 /** An approval wait was parked; the operator must answer (or the run stops). */
@@ -259,6 +305,9 @@ export type RuntimeEvent =
   | ReasoningEvent
   | SteeringDroppedEvent
   | UsageEvent
+  | SubagentStartedEvent
+  | SubagentActivityEvent
+  | SubagentCompletedEvent
   | RunErrorEvent
   | RunEndEvent;
 

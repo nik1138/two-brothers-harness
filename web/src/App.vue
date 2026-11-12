@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { NButton, NConfigProvider, NMessageProvider, darkTheme, lightTheme } from 'naive-ui'
+import { NButton, NConfigProvider, NMessageProvider, NPopover, darkTheme, lightTheme } from 'naive-ui'
 import { accentThemeOverrides, darkThemeOverrides, themeOverrides } from './theme'
 import {
   applyThemeAttribute,
@@ -24,9 +24,11 @@ import {
   getRun,
   getSession,
   getSessionRuntimeEvents,
+  getSubagent,
   getSettings,
   listCommands,
   listRuns,
+  listSessionSubagents,
   listSessions,
   listWorkspaces,
   previewRunUndo,
@@ -51,6 +53,8 @@ import type {
   SessionInfo,
   SessionRewindResult,
   SettingsView,
+  SubagentDetail,
+  SubagentInfo,
   TokenEvent,
   Workspace,
 } from './types'
@@ -166,6 +170,16 @@ import PermissionInfoDialog from './components/PermissionInfoDialog.vue'
 import AppIcon from './components/AppIcon.vue'
 import WelcomeHero from './components/WelcomeHero.vue'
 import type { HeroStarter } from './components/WelcomeHero.vue'
+import SubagentView from './components/SubagentView.vue'
+import {
+  applySubagentDetailEvent,
+  applySubagentEvent,
+  runningSubagentCount,
+  subagentActivityText,
+  subagentElapsed,
+  subagentStatusLabel,
+  subagentTokenLabel,
+} from './subagents'
 
 const sessions = ref<SessionInfo[]>([])
 const workspaces = ref<Workspace[]>([])
@@ -174,6 +188,33 @@ const selected = ref<string | null>(null)
 const events = ref<Envelope[]>([])
 /** Runtime sidecar events (tool calls, approvals) for the selected session. */
 const runtimeEvents = ref<RunEvent[]>([])
+/** Read-only helper subagents for the selected session (remote + live tree). */
+const subagents = ref<SubagentInfo[]>([])
+const subagentsOpen = ref(false)
+/** The child transcript currently open in the drawer, if any. */
+const viewedSubagent = ref<SubagentDetail | null>(null)
+const subagentLoading = ref(false)
+const subagentError = ref('')
+const runningSubagents = computed(() => runningSubagentCount(subagents.value))
+/** One-second clock while a child runs, so its duration stays truthful. */
+const subagentClock = ref(Date.now())
+let subagentTimer: ReturnType<typeof setInterval> | null = null
+watch(
+  runningSubagents,
+  (count) => {
+    if (subagentTimer !== null) {
+      clearInterval(subagentTimer)
+      subagentTimer = null
+    }
+    if (count > 0) {
+      subagentClock.value = Date.now()
+      subagentTimer = setInterval(() => {
+        subagentClock.value = Date.now()
+      }, 1_000)
+    }
+  },
+  { immediate: true },
+)
 const loading = ref(false)
 interface LiveRun {
   run_id: string
@@ -1401,6 +1442,84 @@ function setRuntimeHistory(list: RunEvent[]) {
   runtimeEvents.value = list
 }
 
+/** Replace the helper tree from the backend (session load/reload). */
+function setSubagentHistory(list: SubagentInfo[]) {
+  subagents.value = list
+  if (viewedSubagent.value && !list.some((row) => row.id === viewedSubagent.value?.id)) {
+    closeSubagent()
+  }
+}
+
+/** One tree row's elapsed clock (touches the ticker so a running child counts up). */
+function subagentElapsedText(row: SubagentInfo): string {
+  void subagentClock.value
+  return subagentElapsed(row.started_at, row.ended_at)
+}
+
+function subagentActivityLabel(row: SubagentInfo): string {
+  return subagentActivityText(row.last_activity, row.status)
+}
+
+/** Open one child's read-only transcript; the tree panel closes first. */
+async function openSubagent(id: string) {
+  subagentsOpen.value = false
+  subagentError.value = ''
+  subagentLoading.value = true
+  viewedSubagent.value = null
+  try {
+    const detail = await getSubagent(id)
+    if (detail === null) {
+      subagentError.value = 'Subagent transcript not found.'
+      return
+    }
+    viewedSubagent.value = detail
+  } catch (e) {
+    subagentError.value = errText(e)
+  } finally {
+    subagentLoading.value = false
+  }
+}
+
+function closeSubagent() {
+  viewedSubagent.value = null
+  subagentLoading.value = false
+  subagentError.value = ''
+}
+
+function onSubagentEscape(e: KeyboardEvent) {
+  if (e.key !== 'Escape' || e.defaultPrevented) return
+  if (!viewedSubagent.value && !subagentLoading.value) return
+  e.stopPropagation()
+  closeSubagent()
+}
+
+/** Fold one live helper event into the tree and the open child drawer. */
+function ingestSubagentEvent(ev: RunEvent) {
+  if (
+    ev.type !== 'subagent_started' &&
+    ev.type !== 'subagent_activity' &&
+    ev.type !== 'subagent_completed'
+  ) {
+    return
+  }
+  subagents.value = applySubagentEvent(subagents.value, ev)
+  if (viewedSubagent.value?.id === ev.subagent_id) {
+    viewedSubagent.value = applySubagentDetailEvent(viewedSubagent.value, ev)
+    if (ev.type === 'subagent_completed') {
+      // The terminal event carries a bounded preview; replace it with the
+      // persisted transcript so the drawer's final report is complete.
+      const id = ev.subagent_id
+      void getSubagent(id)
+        .then((detail) => {
+          if (detail !== null && viewedSubagent.value?.id === id) {
+            viewedSubagent.value = detail
+          }
+        })
+        .catch(() => undefined)
+    }
+  }
+}
+
 /** Update one live run in place (immutable write-through to the map). */
 function patchLiveRun(runId: string, patch: Partial<LiveRun>) {
   for (const [session, run] of Object.entries(liveRuns.value)) {
@@ -1492,7 +1611,22 @@ function finalizeRun(runId: string, status: RunStatus, error: string | null) {
     // merge the persisted runtime sidecar; dedupe skips events we already saw live
     getSessionRuntimeEvents(entry.session)
       .then((r) => {
-        for (const ev of r.events) ingestRuntimeEvent(ev)
+        for (const ev of r.events) {
+          if (
+            ev.type === 'subagent_started' ||
+            ev.type === 'subagent_activity' ||
+            ev.type === 'subagent_completed'
+          ) {
+            continue // the dedicated tree API is authoritative after settle
+          }
+          ingestRuntimeEvent(ev)
+        }
+      })
+      .catch(() => undefined)
+    // the persisted child tree is authoritative once the run settles
+    listSessionSubagents(entry.session)
+      .then((list) => {
+        if (selected.value === entry.session) setSubagentHistory(list)
       })
       .catch(() => undefined)
   }
@@ -1539,6 +1673,11 @@ function handleRunEvent(runId: string, raw: string, eventId: string) {
       if (data.usage) {
         runUsageBySession.value = { ...runUsageBySession.value, [run.session]: data.usage }
       }
+      break
+    case 'subagent_started':
+    case 'subagent_activity':
+    case 'subagent_completed':
+      ingestSubagentEvent(data)
       break
     case 'todo_updated':
       // display-only plan snapshot: the projection keeps the latest write
@@ -1857,14 +1996,17 @@ async function loadSession(name: string) {
   // never show the previous session's live draft while this one loads
   resetStreamingDraft()
   loading.value = true
+  closeSubagent()
   try {
-    const [detail, runtime] = await Promise.all([
+    const [detail, runtime, helpers] = await Promise.all([
       getSession(name),
       getSessionRuntimeEvents(name).catch(() => ({ name, events: [] as RunEvent[] })),
+      listSessionSubagents(name).catch(() => [] as SubagentInfo[]),
     ])
     events.value = detail.events
     maxSeq = detail.events.reduce((m, e) => Math.max(m, e.seq), 0)
     setRuntimeHistory(runtime.events)
+    setSubagentHistory(helpers)
     selected.value = name
     // opening a session consumes its unread dot (persisted for the next reload)
     markSeen(name)
@@ -2381,6 +2523,8 @@ function onSessionDeleted(name: string) {
     selected.value = null
     events.value = []
     setRuntimeHistory([])
+    setSubagentHistory([])
+    closeSubagent()
   }
   if (queueBySession.value[name]) {
     const queues = { ...queueBySession.value }
@@ -2569,6 +2713,7 @@ syncDensity()
 
 onMounted(() => {
   schemeQuery.addEventListener('change', onSchemeChange)
+  window.addEventListener('keydown', onSubagentEscape)
   window.addEventListener('keydown', onDrawerEscape)
   window.addEventListener('keydown', onPaletteShortcut)
   window.addEventListener('keydown', onHelpShortcut)
@@ -2586,11 +2731,13 @@ onMounted(() => {
 
 onUnmounted(() => {
   schemeQuery.removeEventListener('change', onSchemeChange)
+  window.removeEventListener('keydown', onSubagentEscape)
   window.removeEventListener('keydown', onDrawerEscape)
   window.removeEventListener('keydown', onPaletteShortcut)
   window.removeEventListener('keydown', onHelpShortcut)
   window.removeEventListener('keydown', onStopShortcut)
   if (sidebarTimer) clearInterval(sidebarTimer)
+  if (subagentTimer) clearInterval(subagentTimer)
   if (reconnectTimer) clearTimeout(reconnectTimer)
   if (commandNoticeTimer) clearTimeout(commandNoticeTimer)
   settingsRequest++
@@ -2677,6 +2824,72 @@ onUnmounted(() => {
             <span class="participant-sep" aria-hidden="true">×</span>
             <span class="participant"><span class="dot dot-junior" aria-hidden="true"></span>Junior</span>
           </div>
+          <n-popover
+            v-if="selected && subagents.length > 0"
+            v-model:show="subagentsOpen"
+            trigger="click"
+            placement="bottom-end"
+            :content-style="{ maxWidth: '420px' }"
+          >
+            <template #trigger>
+              <button
+                type="button"
+                class="subagent-chip"
+                aria-haspopup="true"
+                aria-controls="subagent-tree"
+                :aria-expanded="subagentsOpen"
+                :aria-label="`Subagents: ${subagents.length} total, ${runningSubagents} running`"
+              >
+                <span
+                  class="subagent-chip-dot"
+                  :class="{ 'is-running': runningSubagents > 0 }"
+                  aria-hidden="true"
+                ></span>
+                Subagents · {{ subagents.length }}
+                <span v-if="runningSubagents" class="subagent-chip-running">
+                  {{ runningSubagents }} running
+                </span>
+              </button>
+            </template>
+            <section id="subagent-tree" class="subagent-tree" aria-label="Subagents">
+              <header class="subagent-tree-head">
+                <p class="subagent-tree-title">Read-only helpers</p>
+                <p class="subagent-tree-sub">
+                  {{ subagents.length }} total<template v-if="runningSubagents"> ·
+                    {{ runningSubagents }} running</template>
+                </p>
+              </header>
+              <ul class="subagent-tree-list">
+                <li v-for="row in subagents" :key="row.id">
+                  <button
+                    type="button"
+                    class="subagent-tree-row"
+                    :aria-label="`Open subagent ${row.label}`"
+                    @click="openSubagent(row.id)"
+                  >
+                    <span
+                      class="subagent-tree-dot"
+                      :class="`is-${row.status}`"
+                      aria-hidden="true"
+                    ></span>
+                    <span class="subagent-tree-main">
+                      <span class="subagent-tree-label">{{ row.label }}</span>
+                      <span class="subagent-tree-activity">
+                        {{ subagentActivityLabel(row) }}
+                      </span>
+                    </span>
+                    <span class="subagent-tree-side">
+                      <span class="subagent-tree-status">{{ subagentStatusLabel(row.status) }}</span>
+                      <span v-if="subagentElapsedText(row)">{{ subagentElapsedText(row) }}</span>
+                      <span v-if="subagentTokenLabel(row.usage)">{{
+                        subagentTokenLabel(row.usage)
+                      }}</span>
+                    </span>
+                  </button>
+                </li>
+              </ul>
+            </section>
+          </n-popover>
           <span v-if="activeProvider" class="provider-chip">{{ activeProvider }}</span>
           <span v-if="live && activeRun?.status === 'queued'" class="provider-chip">queued</span>
           <span v-if="queuedCount > 0" class="provider-chip">
@@ -2835,31 +3048,43 @@ onUnmounted(() => {
         :usage="usageForSelected"
         :cost="costForSelected"
       />
-      <Composer
-        :session-id="selected"
-        :workspace-id="composerWorkspaceId"
-        :busy="live"
-        :queued-count="queuedCount"
-        :waiting="waiting"
-        :compacting="compactBusy"
-        :stopping="stopping"
-        :settings-version="settingsVersion"
-        :submit-result="submitResult"
-        :steerable="steerable"
-        :steer-help="steerView.help"
-        :steer-pending="steerPending"
-        :steer-result="steerResult"
-        :latest-audit="latestPromptAudit"
-        :prefill="composerPrefill"
-        :quote="composerQuote"
-        @submit="startNewRun"
-        @steer="steerActiveRun"
-        @stop="requestStop"
-        @open-settings="openSettings()"
-        @open-permissions="openSettings('permissions')"
-        @models-changed="onComposerModelsChanged"
-        @command="onComposerCommand"
-        @notice="showNotice"
+      <div class="composer-inert" :inert="viewedSubagent !== null || subagentLoading">
+        <Composer
+          :session-id="selected"
+          :workspace-id="composerWorkspaceId"
+          :busy="live"
+          :queued-count="queuedCount"
+          :waiting="waiting"
+          :compacting="compactBusy"
+          :stopping="stopping"
+          :settings-version="settingsVersion"
+          :submit-result="submitResult"
+          :steerable="steerable"
+          :steer-help="steerView.help"
+          :steer-pending="steerPending"
+          :steer-result="steerResult"
+          :latest-audit="latestPromptAudit"
+          :prefill="composerPrefill"
+          :quote="composerQuote"
+          @submit="startNewRun"
+          @steer="steerActiveRun"
+          @stop="requestStop"
+          @open-settings="openSettings()"
+          @open-permissions="openSettings('permissions')"
+          @models-changed="onComposerModelsChanged"
+          @command="onComposerCommand"
+          @notice="showNotice"
+        />
+      </div>
+
+      <!-- Read-only helper transcript: covers the chat body/composer so the
+           open child can never accidentally receive a submission. -->
+      <SubagentView
+        v-if="viewedSubagent || subagentLoading || subagentError"
+        :detail="viewedSubagent"
+        :loading="subagentLoading"
+        :error="subagentError"
+        @back="closeSubagent"
       />
     </div>
 
@@ -3033,6 +3258,189 @@ onUnmounted(() => {
   transform: translateY(0);
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
+}
+
+/* The read-only child drawer is absolutely positioned inside this shell. */
+.chat-shell {
+  position: relative;
+}
+
+/* Keep the composer in the layout but remove it from the focus/click order
+   while a read-only child transcript covers the chat. */
+.composer-inert {
+  display: contents;
+}
+
+/* Subagent tree trigger: a quiet header chip that only appears after the
+   Senior has spawned at least one helper in this session. */
+.subagent-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.12rem var(--space-2);
+  font: inherit;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  background: var(--surface-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+}
+
+.subagent-chip:hover {
+  color: var(--text-primary);
+  background: var(--surface-hover);
+}
+
+.subagent-chip:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+.subagent-chip-dot,
+.subagent-tree-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+}
+
+.subagent-chip-dot.is-running,
+.subagent-tree-dot.is-running {
+  background: var(--accent);
+  animation: subagent-chip-pulse 1.4s ease-in-out infinite;
+}
+
+.subagent-tree-dot.is-completed {
+  background: var(--ok);
+}
+
+.subagent-tree-dot.is-failed {
+  background: var(--danger);
+}
+
+.subagent-chip-running {
+  padding-left: 0.3rem;
+  color: var(--accent);
+  border-left: 1px solid var(--border-subtle);
+}
+
+.subagent-tree {
+  width: 360px;
+  max-width: min(420px, 92vw);
+}
+
+.subagent-tree-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.subagent-tree-title {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.subagent-tree-sub {
+  margin: 0;
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+}
+
+.subagent-tree-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  max-height: 46vh;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.subagent-tree-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 0.4rem 0.35rem;
+  font: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.subagent-tree-row:hover {
+  background: var(--surface-hover);
+}
+
+.subagent-tree-row:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--focus-ring);
+}
+
+.subagent-tree-row > .subagent-tree-dot {
+  margin-top: 0.35rem;
+}
+
+.subagent-tree-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  gap: 0.1rem;
+}
+
+.subagent-tree-label {
+  overflow: hidden;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-tree-activity {
+  overflow: hidden;
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-tree-side {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.1rem;
+  font-size: 0.66rem;
+  color: var(--text-tertiary);
+}
+
+.subagent-tree-status {
+  color: var(--text-secondary);
+}
+
+@keyframes subagent-chip-pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .subagent-chip-dot.is-running,
+  .subagent-tree-dot.is-running {
+    animation: none;
+  }
 }
 
 /* First-run model hint: one compact inline row above the transcript. */

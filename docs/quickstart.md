@@ -296,6 +296,19 @@ the same hero appears inside a selected session that has no transcript yet.
    in the transcript (a `You` message marked as an operator steer) once the run
    reaches that step. Stop the active run, or reload the page (progress is
    recovered from the runtime sidecar), at any time.
+   **Subagents.** While a run has a linked workspace, the Senior can hand a
+   focused side task to a read-only helper through the `subagent` tool. The
+   helper gets a fresh context and only the workspace read/list/search tools;
+   it cannot edit, run shell or spawn another helper, and it returns a bounded
+   report. When one has been spawned, the chat header shows **Subagents · N**:
+   the chip opens a live tree with each helper's status, current activity,
+   elapsed time and tokens, and clicking a row opens a read-only transcript
+   drawer with the task, tool calls and final report. The parent composer is
+   inert while that drawer is open; **← Parent** or `Esc` closes it. Helper
+   transcripts live under `sessions/subagents/` and never appear in the
+   sidebar; their usage is shown in the tree/drawer, not added to the parent
+   footer. The first slice is `serve`/web only — the mutating-tool,
+   follow-up and TUI phases are still on the backlog.
    In the composer, `@` opens a picker over shared skills and workspace files
    and `/` at the start of a line opens the command menu — built-in commands
    first (`plan`, `goal`, `feedback`, then the actions `compact`, `export`,

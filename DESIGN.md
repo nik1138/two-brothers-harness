@@ -29,6 +29,11 @@ second voice that the senior must hear and take into account. If the junior
 sees a problem, it says so directly; the senior either accepts the argument
 or rejects it and records the reason.
 
+> The optional read-only helper subagents in `serve`/web are a separate tier
+> below this pair, not a replacement for the shared-context cooperation
+> described here. A helper gets an isolated brief and returns a report; it
+> never joins the brothers' transcript or decision protocol.
+
 ## 3. Shared context
 
 `SharedContext` is an append-only list of events. Every model call receives

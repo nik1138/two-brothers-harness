@@ -9,9 +9,9 @@ experienced, level-headed, the arbiter) and a **junior** (the younger brother �
 brave, determined, the challenger). Both work with **one shared context**, have
 **different system prompts**, and exchange **structured protocol messages**: the
 senior consults the junior, may delegate part of the work to it, reviews what
-comes back, and makes the final decision. This is not subagents in the usual
-sense — it is parallel models with explicit roles advising each other as peers
-within a single context.
+comes back, and makes the final decision. The brothers are peers, not a
+subagent hierarchy — `serve` runs may additionally let the Senior spawn
+read-only helper subagents, a separate tier described below.
 
 The implementation is the TypeScript package in
 [`packages/harness/`](packages/harness/) (`@two-brothers/harness`, written in
@@ -87,6 +87,16 @@ server then serves (the npm tarball ships its own copy of that build).
   reply, with a bounded loop; a tool-less configuration keeps the exact
   pre-tools request path. Work mode keeps its mutating junior deliverable loop
   and the senior's read-only verify slice unchanged.
+- **Read-only helper subagents (`serve`/web).** The Senior can spawn one
+  isolated single-role helper through the `subagent` tool: its own context, a
+  fresh provider (usage stays out of the parent footer), and only workspace
+  read/list/search (plus `spill_read`). It cannot mutate, run shell, recurse,
+  or receive follow-ups; it returns a bounded report. The web header shows a
+  live `Subagents · N` tree with status, activity, elapsed time and tokens;
+  clicking a child opens a read-only transcript drawer while the parent
+  composer is inert. Child logs live under `<sessions-dir>/subagents/` and
+  never appear in the session list. Mutating children, follow-up/interrupt,
+  async completion and a TUI tree remain later phases.
 - **Payload repair + few-shot exemplars.** Model output goes through a
   tolerant parse, a strict schema check, exactly one repair re-ask with a
   byte-stable `[[REPAIR_REQUEST]]` turn, and finally a sanitize-plus-defaults

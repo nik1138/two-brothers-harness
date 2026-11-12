@@ -532,6 +532,99 @@ export interface UsageEvent {
   at: number
 }
 
+/** One read-only helper started by the Senior (`subagent_started`). */
+export interface SubagentStartedEvent {
+  type: 'subagent_started'
+  subagent_id: string
+  label: string
+  role: 'senior' | 'junior'
+  model: string
+  /** Bounded task preview; the full brief lives in the child transcript. */
+  task: string
+  /** Epoch milliseconds, for a stable elapsed time across reloads. */
+  started_at: number
+  run_id: string
+  at: number
+}
+
+/** One live child message/tool/status step (`subagent_activity`). */
+export interface SubagentActivityEvent {
+  type: 'subagent_activity'
+  subagent_id: string
+  label: string
+  activity: 'message' | 'tool' | 'status'
+  text?: string
+  tool?: string
+  status?: string
+  args?: Record<string, unknown>
+  result?: unknown
+  run_id: string
+  at: number
+}
+
+/** One child settled (`subagent_completed`). */
+export interface SubagentCompletedEvent {
+  type: 'subagent_completed'
+  subagent_id: string
+  label: string
+  status: 'completed' | 'failed' | 'cancelled'
+  result?: string
+  error?: string
+  usage?: RunUsage | null
+  duration_ms: number
+  /** Epoch milliseconds. */
+  ended_at: number
+  run_id: string
+  at: number
+}
+
+export type SubagentStatus = 'running' | 'completed' | 'failed' | 'cancelled'
+export type SubagentRole = 'senior' | 'junior'
+
+/** One display-only activity row in the parent tree / child header. */
+export interface SubagentActivity {
+  kind: 'message' | 'tool' | 'status'
+  text?: string
+  tool?: string
+  status?: string
+  at: number
+}
+
+/** One bounded row in the child transcript. */
+export interface SubagentTranscriptEntry {
+  type: 'message' | 'tool'
+  role?: 'user' | 'assistant'
+  text?: string
+  tool?: string
+  status?: 'started' | 'completed' | 'error'
+  args?: Record<string, unknown>
+  result?: string
+  at: number
+}
+
+/** `GET /api/sessions/{name}/subagents` row (no transcript). */
+export interface SubagentInfo {
+  id: string
+  parent_session: string
+  label: string
+  role: SubagentRole
+  model: string
+  task: string
+  status: SubagentStatus
+  started_at: number
+  ended_at?: number
+  duration_ms?: number
+  last_activity?: SubagentActivity | null
+  usage?: RunUsage | null
+  result?: string | null
+  error?: string | null
+}
+
+/** `GET /api/subagents/{id}` detail (the full bounded transcript). */
+export interface SubagentDetail extends SubagentInfo {
+  transcript: SubagentTranscriptEntry[]
+}
+
 /** Typed runtime events streamed from GET /api/runs/{id}/events. */
 export type RunEvent =
   | { type: 'run_status'; status: 'queued' | 'running' | 'waiting'; run_id: string; at: number }
@@ -556,6 +649,9 @@ export type RunEvent =
   | PromptAuditEvent
   | ReasoningEvent
   | UsageEvent
+  | SubagentStartedEvent
+  | SubagentActivityEvent
+  | SubagentCompletedEvent
 
 /** Response of GET /api/sessions/{name}/events — the runtime sidecar. */
 export interface SessionRuntimeEvents {

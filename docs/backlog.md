@@ -1690,9 +1690,19 @@ Also shipped in wave 30:
   belt (`shared` + `junior`) is empty — a senior-only tool does not suppress
   it — while stdout, exit codes and `--json` output stay unchanged. Tests:
   `packages/harness/tests/cli.test.ts`; docs: `docs/cli-reference.md` §Modes.
-- **Subagents** — spawning nested cooperation runs (and likely child
-  sessions) beyond the two-brother senior/junior pair. The context and
-  approval machinery are the prerequisites; not started.
+- **Subagents** — **phase 1 shipped 2026-11-12 for `serve`/web:** the Senior
+  can spawn one isolated read-only single-role helper through the `subagent`
+  tool. The child has its own context, a fresh provider instance, read-only
+  workspace tools, a bounded task/report and a durable transcript under
+  `<sessions-dir>/subagents/`; the parent stream carries `subagent_*` events
+  and the web header shows a live tree with a read-only child drawer. The
+  child cannot mutate, run shell, recurse, or receive follow-ups. Remaining
+  phases: mutating child tools with child-tagged approvals, `send_message` /
+  `interrupt_agent` / `list_agents` controls, async completion/wake (the
+  parent currently waits for the bounded report), a TUI tree, forked-context
+  children, deeper nesting, per-child model/effort selection and cost/cache
+  roll-up into the parent view. The protocol stays unchanged; children are
+  internal executions, not second protocol peers.
 - **Stacked-dialog mask-click (web, non-blocker)** — **blocked on upstream**
   (evidence updated 2026-11-08): naive-ui fires `mask-click` for clicks that
   land inside a stacked second dialog, so every dialog's handler must ignore

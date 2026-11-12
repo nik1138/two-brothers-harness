@@ -614,6 +614,7 @@ export {
   type ServerHandle,
 } from "./server.ts";
 export * from "./sessionsearch.ts";
+export * from "./subagent.ts";
 export * from "./mentions.ts";
 export * from "./workspacefiles.ts";
 export {

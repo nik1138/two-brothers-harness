@@ -41,6 +41,7 @@ import {
   type ServerOptions,
 } from "../src/server.ts";
 import type { RunCost } from "../src/runtime.ts";
+import { newSubagentId, SUBAGENT_TOOL_NAME, SubagentStore } from "../src/subagent.ts";
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -1166,11 +1167,17 @@ test("prompt_audit event rides the run SSE stream, one frame per provider call",
       audits.map((audit) => `${audit.role}/${audit.kind}`),
       ["senior/consult", "junior/proposal", "senior/review", "senior/decision"],
     );
-    for (const audit of audits) {
+    for (const [index, audit] of audits.entries()) {
       assert.equal(audit.run_id, started.body.run_id);
       assert.equal(typeof audit.at, "number");
       assert.ok(Array.isArray(audit.sections) && audit.sections.includes("base"));
-      assert.deepEqual(audit.tools, []);
+      // A serve/web run enables the read-only helper tool, so the Senior's
+      // consult/review calls now justify a tool loop; the Junior proposal and
+      // the final decision stay plain. The audit reports the exact belt offered.
+      assert.deepEqual(
+        audit.tools,
+        index === 0 || index === 2 ? ["spill_read", SUBAGENT_TOOL_NAME] : [],
+      );
       assert.ok(Number(audit.systemChars) > 0 && Number(audit.userChars) > 0);
       // names and lengths only — the prompt bodies never cross the wire
       assert.deepEqual(Object.keys(audit).sort(), [
@@ -1921,6 +1928,74 @@ test("newSessionName: unique, filesystem-safe, short", () => {
 // Delete session (all traces)
 // ---------------------------------------------------------------------------
 
+test("subagent routes: parent tree and one child transcript", async () => {
+  const srv = await startServer();
+  try {
+    const store = new SubagentStore(path.join(srv.dir, "subagents"));
+    const id = newSubagentId();
+    store.begin({
+      id,
+      parent_session: "parent.jsonl",
+      label: "Read auth",
+      role: "junior",
+      model: "lfm3-1.7b",
+      task: "Inspect src/auth.ts.",
+      started_at: 1_000,
+    });
+    store.append(id, {
+      type: "message",
+      role: "user",
+      text: "Inspect src/auth.ts.",
+      at: 1_000,
+    });
+    store.append(id, {
+      type: "message",
+      role: "assistant",
+      text: "It exports login().",
+      at: 1_020,
+    });
+    store.finish(id, {
+      status: "completed",
+      ended_at: 1_030,
+      result: "It exports login().",
+      usage: {
+        model_calls: 1,
+        input_tokens: 20,
+        output_tokens: 8,
+        cached_tokens: 4,
+        cache_write_tokens: 0,
+      },
+    });
+
+    const list = await get<Record<string, any>>(
+      srv.base,
+      "/api/sessions/parent.jsonl/subagents",
+    );
+    assert.equal(list.status, 200);
+    assert.equal(list.body.subagents.length, 1);
+    assert.equal(list.body.subagents[0].id, id);
+    assert.equal(list.body.subagents[0].status, "completed");
+    assert.equal(list.body.subagents[0].result, "It exports login().");
+    assert.equal("transcript" in list.body.subagents[0], false);
+
+    const detail = await get<Record<string, any>>(srv.base, `/api/subagents/${id}`);
+    assert.equal(detail.status, 200);
+    assert.equal(detail.body.subagent.label, "Read auth");
+    assert.equal(detail.body.subagent.transcript.length, 2);
+    assert.equal(detail.body.subagent.usage.cached_tokens, 4);
+
+    assert.equal((await get(srv.base, "/api/subagents/sub-00000000")).status, 404);
+    assert.equal((await get(srv.base, "/api/subagents/not-an-id")).status, 404);
+    assert.equal(
+      (await get<Record<string, any>>(srv.base, "/api/sessions/other.jsonl/subagents")).body
+        .subagents.length,
+      0,
+    );
+  } finally {
+    await srv.close();
+  }
+});
+
 test("delete session removes jsonl, metadata and runtime sidecar", async () => {
   const srv = await startServer();
   try {
@@ -1928,10 +2003,22 @@ test("delete session removes jsonl, metadata and runtime sidecar", async () => {
     await waitTerminal(srv.base, started.body.run_id);
     const name = started.body.session as string;
     const stem = name.replace(/\.jsonl$/, "");
+    const subStore = new SubagentStore(path.join(srv.dir, "subagents"));
+    const childId = newSubagentId();
+    subStore.begin({
+      id: childId,
+      parent_session: name,
+      label: "Child",
+      role: "junior",
+      model: "m",
+      task: "Check deletion.",
+      started_at: 1,
+    });
     const traces = () => ({
       jsonl: fs.existsSync(path.join(srv.dir, name)),
       meta: fs.existsSync(path.join(srv.dir, `${stem}.meta.json`)),
       runtime: fs.existsSync(path.join(srv.dir, "runtime", `${name}.events.jsonl`)),
+      subagent: subStore.get(childId) !== null,
     });
     assert.ok(Object.values(traces()).every(Boolean));
 
@@ -1939,6 +2026,7 @@ test("delete session removes jsonl, metadata and runtime sidecar", async () => {
     assert.equal(res.status, 200);
     assert.deepEqual(res.body, { deleted: name });
     assert.ok(!Object.values(traces()).some(Boolean));
+    assert.equal(subStore.get(childId), null);
     assert.equal((await get(srv.base, `/api/sessions/${name}`)).status, 404);
     assert.deepEqual((await get(srv.base, "/api/sessions")).body, []);
   } finally {
