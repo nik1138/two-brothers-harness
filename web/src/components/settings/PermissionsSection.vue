@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 import {
   PERMISSION_PRESETS,
@@ -47,9 +47,35 @@ const selectedDanger = computed(() =>
   selectedPreset.value === 'custom' ? null : permissionPresetDanger(selectedPreset.value),
 )
 
+// Full access is the deepseek-style risk-gated choice: the card alone does not
+// switch the mode. An explicit confirmation with an acknowledgement checkbox
+// is required before the setting is emitted (the dialog still saves it only
+// with the rest of the form).
+const pendingFullAccess = ref(false)
+const acknowledged = ref(false)
+
 function select(preset: PermissionPreset) {
   if (readonly.value) return
-  emit('update:mode', PERMISSION_PRESET_COPY[preset].mode)
+  if (preset !== 'danger-full-access') {
+    pendingFullAccess.value = false
+    acknowledged.value = false
+    emit('update:mode', PERMISSION_PRESET_COPY[preset].mode)
+    return
+  }
+  if (selectedPreset.value === 'danger-full-access') return
+  pendingFullAccess.value = true
+  acknowledged.value = false
+}
+
+function cancelFullAccess() {
+  pendingFullAccess.value = false
+  acknowledged.value = false
+}
+
+function confirmFullAccess() {
+  if (!acknowledged.value) return
+  pendingFullAccess.value = false
+  emit('update:mode', 'allow-all')
 }
 </script>
 
@@ -101,6 +127,36 @@ function select(preset: PermissionPreset) {
         </span>
       </label>
     </div>
+
+    <section
+      v-if="pendingFullAccess"
+      class="permission-confirm"
+      role="alertdialog"
+      aria-labelledby="permission-confirm-title"
+      aria-describedby="permission-confirm-description"
+    >
+      <h4 id="permission-confirm-title">Enable Full access?</h4>
+      <p id="permission-confirm-description">
+        Full access reduces confirmation steps and lets the brothers perform more actions directly,
+        including sensitive operations, file changes and external commands. Only use it when you
+        trust the workspaces and tasks this setting will cover.
+      </p>
+      <label class="permission-ack">
+        <input v-model="acknowledged" type="checkbox" />
+        <span>I understand the risks and want to continue</span>
+      </label>
+      <div class="permission-confirm-actions">
+        <button type="button" class="permission-btn" @click="cancelFullAccess">Cancel</button>
+        <button
+          type="button"
+          class="permission-btn permission-btn--danger"
+          :disabled="!acknowledged"
+          @click="confirmFullAccess"
+        >
+          Enable Full access
+        </button>
+      </div>
+    </section>
 
     <p v-if="selectedDanger" class="permission-danger" role="alert">
       <strong>{{ selectedCopy.label }}:</strong> {{ selectedDanger }}
@@ -223,6 +279,77 @@ function select(preset: PermissionPreset) {
   line-height: 1.4;
   color: var(--text-muted, var(--text-secondary));
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.permission-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-md);
+  padding: 11px;
+  background: var(--surface-panel);
+}
+
+.permission-confirm h4 {
+  margin: 0;
+  font-size: 0.86rem;
+  font-weight: 650;
+  color: var(--danger);
+}
+
+.permission-confirm p {
+  margin: 0;
+  font-size: 0.76rem;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.permission-ack {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: 0.76rem;
+  line-height: 1.4;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.permission-ack input {
+  margin: 2px 0 0;
+  accent-color: var(--danger);
+}
+
+.permission-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.permission-btn {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 5px 10px;
+  background: var(--surface-panel);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+
+.permission-btn:hover {
+  background: var(--surface-hover);
+}
+
+.permission-btn--danger {
+  border-color: var(--danger);
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.permission-btn:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 
 .permission-danger {

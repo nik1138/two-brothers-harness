@@ -37,6 +37,14 @@ test('PermissionsSection renders the preset catalog with its stored mode and dan
   assert.ok(source.includes('stores mode:'))
   assert.ok(source.includes('danger-full-access'))
   assert.ok(source.includes('role="radiogroup"'))
+  // Full access is risk-gated: selecting the card opens a checkbox
+  // confirmation instead of emitting the mode immediately.
+  assert.ok(source.includes('pendingFullAccess'))
+  assert.ok(source.includes('acknowledged'))
+  assert.ok(source.includes('permission-confirm'))
+  assert.ok(source.includes('I understand the risks and want to continue'))
+  assert.ok(source.includes('Enable Full access'))
+  assert.ok(source.includes(':disabled="!acknowledged"'))
 })
 
 test('App deep-links /permission and the composer seat to the Permissions pane', () => {
