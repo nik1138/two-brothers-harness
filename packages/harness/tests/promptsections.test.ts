@@ -20,6 +20,7 @@ import {
   PROMPT_SECTION_INSTRUCTIONS,
   PROMPT_SECTION_TOOLS,
   PROMPT_SECTION_USING_TOOLS,
+  REPLY_FORMAT_MARKER,
   TwoBrothersHarness,
   assembleSystemPrompt,
   type ToolScopes,
@@ -254,6 +255,54 @@ test("work mode: the junior deliverable message carries the delegation directive
   assert.ok(user.includes(DELEGATION_DIRECTIVE), "the directive is appended after the transcript");
   assert.ok(user.includes("Perform it now with your tools"));
   assert.ok(user.endsWith(DELEGATION_DIRECTIVE), "the byte-stable transcript stays the prefix");
+});
+
+test("work mode: the deliverable exemplar sits before the directive, never in the system prompt", async () => {
+  const { harness, log } = workRunWithScopes();
+  await harness.run("write the notes file");
+  const deliverable = log.find((call) => call.role === "junior" && call.kind === "deliverable");
+  assert.ok(deliverable);
+  const system = systemOf(deliverable);
+  const user = userOf(deliverable);
+  const marker = `${REPLY_FORMAT_MARKER} deliverable`;
+  assert.ok(!system.includes("```json"), "the system prompt carries no payload example");
+  assert.ok(user.includes(marker), "the deliverable block rides on the transcript turn");
+  assert.ok(
+    user.indexOf(marker) < user.indexOf(DELEGATION_DIRECTIVE),
+    "the format block comes before the directive",
+  );
+  assert.ok(user.endsWith(DELEGATION_DIRECTIVE), "the directive stays the final suffix");
+});
+
+test("work mode: the senior verify request carries no payload example", async () => {
+  const { harness, log } = workRunWithScopes();
+  await harness.run("verify the deliverable");
+  const verify = log.find((call) => call.role === "senior" && call.tools.length > 0);
+  assert.ok(verify, "the senior verified with the read-only slice");
+  assert.ok(!systemOf(verify).includes("```json"), "no fence in the verify system prompt");
+  assert.ok(
+    !userOf(verify).includes(REPLY_FORMAT_MARKER),
+    "no reply-format marker on the verify request tail",
+  );
+  assert.ok(
+    userOf(verify).includes("Before reviewing, verify the junior's deliverable yourself"),
+    "the verify instruction still rides the request",
+  );
+});
+
+test("with tools, one belt means one system prefix; another belt means another", async () => {
+  const { harness, log } = workRunWithScopes();
+  await harness.run("pin the cache prefixes");
+  const emptyBelt = log.filter((call) => call.role === "senior" && call.tools.length === 0);
+  const verifyBelt = log.filter((call) => call.role === "senior" && call.tools.length > 0);
+  assert.ok(emptyBelt.length >= 2, "delegation, review and decision run without a belt");
+  assert.equal(verifyBelt.length, 1, "one senior verify call");
+  const emptySystems = new Set(emptyBelt.map(systemOf));
+  assert.equal(emptySystems.size, 1, "the same empty belt sends one system prompt");
+  assert.notEqual(systemOf(verifyBelt[0]!), [...emptySystems][0]!, "the verify slice differs");
+  for (const call of log) {
+    assert.ok(!systemOf(call).includes("```json"), `${call.role}/${call.kind}: no example in system`);
+  }
 });
 
 // ---------------------------------------------------------------------------

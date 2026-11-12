@@ -22,6 +22,7 @@ import { test } from "node:test";
 import { resolveConfig } from "../src/config.ts";
 import { SharedContext, type ChatMessage } from "../src/context.ts";
 import {
+  DELEGATION_DIRECTIVE,
   PROMPT_SECTION_BASE,
   PROMPT_SECTION_TOOLS,
   REPLY_FORMAT_MARKER,
@@ -133,7 +134,14 @@ test("a prose reply is re-asked once and the strict payload is used", async () =
   const before = repairCall.messages[repairCall.messages.length - 2];
   assert.equal(last.role, "user");
   assert.ok(last.content.startsWith(REPAIR_REQUEST_PREFIX));
-  assert.ok(last.content.includes("```json"));
+  // buildRepairRequest mentions a fence inline; the exemplar itself rides in
+  // the trailing block the harness appends to this same repair turn.
+  assert.ok(
+    last.content.includes(`${REPLY_FORMAT_MARKER} consult`),
+    "the repair re-ask carries the kind's reply-format block",
+  );
+  assert.equal(last.content.split("```json").length - 1, 2, "repair instruction + exemplar");
+  assert.ok(last.content.endsWith(replyFormatBlock("consult")), "the exemplar is the tail");
   assert.equal(before.role, "assistant");
   assert.equal(before.content, PROSE);
 
@@ -332,6 +340,11 @@ test("a prose deliverable after a tool loop repairs once and keeps the tool evid
   const last = repairCall.messages[repairCall.messages.length - 1];
   const before = repairCall.messages[repairCall.messages.length - 2];
   assert.ok(last.content.startsWith(REPAIR_REQUEST_PREFIX));
+  assert.ok(
+    last.content.includes(`${REPLY_FORMAT_MARKER} deliverable`),
+    "the repair turn carries the deliverable exemplar",
+  );
+  assert.ok(last.content.endsWith(replyFormatBlock("deliverable")));
   assert.equal(before.role, "assistant");
   assert.equal(before.content, PROSE, "the model's own final reply is what gets repaired");
 
@@ -401,6 +414,44 @@ test("withReplyFormat mutates neither the input nor an already-correct block", (
   assert.ok(decision[1]!.content.includes(`${REPLY_FORMAT_MARKER} decision`));
   assert.ok(!decision[1]!.content.includes(`${REPLY_FORMAT_MARKER} consult`));
   assert.equal(decision[1]!.content.split("```json").length - 1, 1);
+});
+
+test("withReplyFormat never truncates marker-like text or the delegation directive", () => {
+  // A task that merely mentions the marker must survive byte-for-byte.
+  const asked: ChatMessage[] = [
+    { role: "system", content: "SYSTEM" },
+    { role: "user", content: "what does Requested payload: consult mean?" },
+  ];
+  const answered = withReplyFormat(asked, "consult");
+  assert.equal(
+    answered[1]!.content,
+    `what does Requested payload: consult mean?\n\n${replyFormatBlock("consult")}`,
+    "ordinary text containing the marker is preserved",
+  );
+
+  // Replacing a trailing block preserves a following directive.
+  const deliverable = withReplyFormat(
+    [
+      { role: "system", content: "SYSTEM" },
+      { role: "user", content: "task" },
+    ],
+    "deliverable",
+  );
+  const directed: ChatMessage[] = [
+    deliverable[0]!,
+    { ...deliverable[1]!, content: deliverable[1]!.content + DELEGATION_DIRECTIVE },
+  ];
+  const replaced = withReplyFormat(directed, "review");
+  const content = replaced[1]!.content;
+  assert.ok(content.includes(`${REPLY_FORMAT_MARKER} review`), "newest kind wins");
+  assert.ok(!content.includes(`${REPLY_FORMAT_MARKER} deliverable`), "old block is removed");
+  assert.ok(content.endsWith(DELEGATION_DIRECTIVE), "the directive stays the final suffix");
+  assert.equal(content.split("```json").length - 1, 1, "one exemplar, not two");
+});
+
+test("withReplyFormat is a no-op without a user message", () => {
+  const systemOnly: ChatMessage[] = [{ role: "system", content: "SYSTEM" }];
+  assert.equal(withReplyFormat(systemOnly, "consult"), systemOnly);
 });
 
 test("node calls keep one system prompt per role and put the exemplar in the user tail", async () => {

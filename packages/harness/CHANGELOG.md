@@ -96,16 +96,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Kind-stable system prompts for prompt-cache reuse:** the per-node
   few-shot payload block (`PAYLOAD_EXAMPLES`) moved out of the system prompt
-  and onto the request's last user message via the exported
+  and onto the request's transcript user turn via the exported
   `replyFormatBlock` / `withReplyFormat` helpers, prefixed with the stable
   `Requested payload: <kind>` marker. Consult → review → decision now send a
   byte-identical system prefix (same role, tool belt, skills and workspace
   instructions), so OpenAI/DeepSeek implicit caching and Anthropic's system
-  breakpoint can reuse it; the in-process repair request still asks for the
-  fenced shape and the offline fault suite parses the new marker first.
+  breakpoint can reuse it. `withReplyFormat` replaces only a genuine trailing
+  block — a task or tool result mentioning the marker is never truncated — and
+  keeps a trailing `DELEGATION_DIRECTIVE`. The repair re-ask carries the block
+  on its own last user turn; the senior verify loop keeps its historical
+  `deliverable` provider response kind while its format kind (`verify`) adds
+  no example. The offline fault suite parses the last structural marker first.
   Files: `src/harness.ts`, `src/index.ts`, `e2e/faults.ts`; tests
-  `tests/payloadrepair.test.ts`; docs `docs/cli-reference.md`,
-  `README.md`, `packages/harness/README.md`, `packages/harness/AGENTS.md`.
+  `tests/payloadrepair.test.ts`, `tests/promptsections.test.ts`; docs
+  `docs/cli-reference.md`, `README.md`, `packages/harness/README.md`,
+  `packages/harness/AGENTS.md`, `shared/AGENTS.md`,
+  `docs/troubleshooting.md`.
 - **Failed-run partial usage:** a non-abort harness failure now keeps the
   merged usage from the provider calls that already succeeded. The error
   carries a non-enumerable `usage` (`HarnessRunFailure`, read via

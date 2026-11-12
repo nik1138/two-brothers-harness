@@ -232,10 +232,11 @@ the original and its sidecar stay byte-identical.
   three `cache_control:{type:"ephemeral"}` breakpoints (merged system prompt,
   last tool definition, newest conversation turn), so the repeated prefix of a
   cooperation cycle is read from the 5-minute cache on the 2nd..Nth call. The
-  system prompt is kind-stable: the per-node few-shot block rides in the last
-  user message, so consult → review → decision can reuse the same prefix.
-  Usage reports real cached tokens and the OpenAI-compatible/Gemini request
-  bodies are unchanged.
+  system prompt is kind-stable: the per-node few-shot block rides on the
+  transcript user turn, so nodes with the same role and tool belt share a
+  prefix (the senior's verify slice and empty-belt decision call still differ,
+  and their tool schemas differ too). Usage reports real cached tokens and the
+  OpenAI-compatible/Gemini request bodies are unchanged.
 - **MCP tool loading** (stdio + streamable HTTP) with role scoping,
   `mcp__server__tool` namespacing, result caps, and per-call timeouts.
 - **Session persistence** as JSONL transcripts (dense `seq`, `--resume`),

@@ -269,10 +269,13 @@ the protocol reference and is not modified by work here either.
    "unstructured model reply" warning — the tolerant boundary never throws
    and `--max-rounds` is untouched. The kind-specific block
    (`PAYLOAD_EXAMPLES`, `harness.ts`, code only — `shared/prompts.json` stays
-   byte-identical) rides at the tail of the request's last user message via
-   `withReplyFormat`, not in the system prompt, so consult → review → decision
-   keeps one cacheable system prefix. The block starts with
-   `Requested payload: <kind>`, which `e2e/faults.ts` parses first.
+   byte-identical) rides on the request's transcript user turn via
+   `withReplyFormat`, not in the system prompt, so nodes with the same role and
+   tool belt share one cacheable system prefix (a different belt — the verify
+   slice vs. the empty-belt decision call — still starts a new one). The block
+   starts with `Requested payload: <kind>`, which `e2e/faults.ts` parses first
+   (last structural match; legacy fence/transcript fallbacks remain). A repair
+   re-ask appends the block to the repair instruction itself.
    Tests: `tests/payloadrepair.test.ts`. **Relaxed strict parse is shipped
    (same lane, fix 2):** `payloads.ts::relaxedStrictPayload` accepts any JSON
    object in a raw node reply — bare, fenced, prose-wrapped, after a non-JSON

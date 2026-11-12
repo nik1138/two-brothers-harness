@@ -262,9 +262,10 @@ Design anchors that already exist:
   zod issue paths/messages clipped to ~500 chars. A still-bad reply falls
   back to sanitize + defaults + the one existing "unstructured model reply"
   warning — the tolerant boundary never throws, and the repair never touches
-  `--max-rounds`. Each role's kind-specific system-prompt assembly also
-  appends one tiny, strict-valid fenced payload example per kind (the audit
-  section names stay stable). Adjacent fix needed by the repair path:
+  `--max-rounds`. Each role's kind-specific prompt assembly also appends one
+  tiny, strict-valid fenced payload example per kind (wave 30 moved this block
+  from the system prompt to the transcript user turn; the audit section names
+  stay stable). Adjacent fix needed by the repair path:
   `toolLoop` now returns the model's final reply — it used to return the
   last conversation message (the last tool result, or the prompt itself), so
   a structured deliverable was discarded whenever a tool ran. Tests:
@@ -1537,8 +1538,10 @@ uses `_global`), and a migration backup/rollback helper.
   format: one JSON object, a fenced JSON block accepted (removing the old
   "no markdown wrappers" vs fenced-example contradiction). Tool headings and
   payload examples stay code-owned; the base file intentionally contains no
-  literal fenced JSON block because `e2e/faults.ts` identifies node kinds from
-  the last appended example.
+  literal fenced JSON block so node-kind inference cannot confuse a
+  file-provided block with the generated example (wave 30 moved the example to
+  the user turn; `e2e/faults.ts` reads the structural `Requested payload:`
+  marker first).
 - **Live cache percentage** — an additive `usage` runtime/stream event is
   emitted after every cooperation node, before `run_end` (same counters as the
   terminal event). `RunManager` folds it into the live run record, the web
@@ -1566,19 +1569,24 @@ prompt cache, and `docs/keyboard.md`.
 
 ## Shipped 2026-11-12 (wave 30: kind-stable system prompts for cache reuse)
 
-The per-node few-shot payload block moved from the system prompt to the tail of
-the request's last user message. `REPLY_FORMAT_MARKER` (`Requested payload:
+The per-node few-shot payload block moved from the system prompt onto the
+request's transcript user turn. `REPLY_FORMAT_MARKER` (`Requested payload:
 <kind>`), `replyFormatBlock` and `withReplyFormat` live in
 `packages/harness/src/harness.ts` and are exported for embedders. With the same
 role, tool belt, skills and workspace instructions, consult → review → decision
 now sends a byte-identical system prompt, so OpenAI/DeepSeek implicit caching
-and Anthropic's system breakpoint can reuse the prefix. The block still sits
-closest to the reply; `DELEGATION_DIRECTIVE` remains the final suffix of the
-junior work request. `e2e/faults.ts` parses the marker first and keeps the old
+and Anthropic's system breakpoint can reuse the prefix. A different belt (the
+senior's verify slice vs. its empty-belt decision call) still starts a new
+prefix. The block rides on the opening transcript turn; in tool loops it stays
+there while tool results follow, and `DELEGATION_DIRECTIVE` remains the final
+suffix of the junior work request. On a repair re-ask the block is appended to
+the repair instruction itself, closest to the requested reply. `e2e/faults.ts`
+parses the last structural marker first and keeps the old
 system-fence/transcript fallbacks. Tests:
 `tests/payloadrepair.test.ts` (strict-valid block, no system fence,
-non-mutating/replacing helper, one system prompt per role across node calls);
-focused suites plus the full package suite, CLI E2E and fault injection.
+non-mutating/replacing helper, marker-collision and directive preservation,
+one system prompt per role with the same belt, repair-tail coverage); focused
+suites plus the full package suite, CLI E2E and fault injection.
 
 Also shipped in wave 30:
 

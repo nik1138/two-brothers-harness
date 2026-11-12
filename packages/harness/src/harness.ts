@@ -124,9 +124,10 @@
  *   bad reply as an assistant turn, the repair instruction as a user turn.
  *   A still-bad reply falls back to the tolerant pipeline (sanitize +
  *   defaults + one warning) — the tolerant boundary never throws. Each
- *   role's kind-specific prompt assembly also appends one tiny fenced,
- *   strict-valid payload example per structured kind (never into
- *   `shared/prompts.json`).
+ *   role's kind-specific reply formatting also places one tiny fenced,
+ *   strict-valid payload example per structured kind on the request's
+ *   transcript user turn (never into `shared/prompts.json` and never into the
+ *   system prompt).
  * - Plugin lifecycle hooks (`plugins.ts` `dispatchHook`) bracket the run —
  *   `session_start` with the session id and workspace, `session_end` with
  *   `completed` / `cancelled` / `failed` — and every tool execution:
@@ -526,11 +527,12 @@ export const REPLY_FORMAT_MARKER = "Requested payload:";
 
 /**
  * The few-shot block for one structured node kind, or "" for a kind without an
- * example (`message`, `verify`). It rides at the tail of the request's last
- * user message, not in the system prompt: the system prefix must stay stable
- * across consult → review → decision so implicit (OpenAI/DeepSeek) and explicit
- * (Anthropic) prompt caching can reuse it. The marker is intentionally plain
- * text so the fault suite can parse the kind without relying on the fence.
+ * example (`message`, `verify`). It rides on the request's transcript user
+ * turn (the last user message for plain calls, the opening user turn for tool
+ * loops), not in the system prompt: the system prefix must stay stable for
+ * implicit (OpenAI/DeepSeek) and explicit (Anthropic) prompt caching. The
+ * marker is intentionally plain text so the fault suite can parse the kind
+ * without relying on the fence.
  */
 export function replyFormatBlock(kind: string): string {
   const example = PAYLOAD_EXAMPLES[kind];
@@ -545,12 +547,42 @@ export function replyFormatBlock(kind: string): string {
   ].join("\n");
 }
 
+const REPLY_FORMAT_KINDS = Object.keys(PAYLOAD_EXAMPLES);
+
+/**
+ * Find a reply-format block only when it is genuinely trailing (optionally
+ * followed by the delegation directive). This deliberately does NOT search for
+ * the marker anywhere in the text: a user task, pasted log, model field or
+ * steering note can contain `Requested payload:` and must never be truncated.
+ */
+function trailingReplyFormat(
+  content: string,
+): { base: string; block: string; suffix: string } | null {
+  for (const kind of REPLY_FORMAT_KINDS) {
+    const block = replyFormatBlock(kind);
+    if (block === "") continue;
+    if (content.endsWith(block)) {
+      return { base: content.slice(0, -block.length).replace(/\s+$/u, ""), block, suffix: "" };
+    }
+    const withDirective = block + DELEGATION_DIRECTIVE;
+    if (content.endsWith(withDirective)) {
+      return {
+        base: content.slice(0, -withDirective.length).replace(/\s+$/u, ""),
+        block,
+        suffix: DELEGATION_DIRECTIVE,
+      };
+    }
+  }
+  return null;
+}
+
 /**
  * Append (or replace) the current kind's reply-format block on the last user
  * message. The input is never mutated: the returned array is a copy when a
- * change is needed. An existing block for the same kind is a no-op, so callers
- * can apply this at every provider-call seam without duplicating the fence.
- * A different earlier block is removed first — the newest kind wins.
+ * change is needed. An existing trailing block for the same kind is a no-op.
+ * A different *trailing* block is replaced (preserving a trailing
+ * `DELEGATION_DIRECTIVE`); a marker-like occurrence in ordinary text is left
+ * untouched, and the correct block is appended after it.
  */
 export function withReplyFormat(messages: ChatMessage[], kind: string): ChatMessage[] {
   const block = replyFormatBlock(kind);
@@ -564,11 +596,12 @@ export function withReplyFormat(messages: ChatMessage[], kind: string): ChatMess
   }
   if (index < 0) return messages;
   const content = messages[index]!.content;
-  if (content.includes(block)) return messages;
-  const markerAt = content.lastIndexOf(`${REPLY_FORMAT_MARKER} `);
-  const base = markerAt >= 0 ? content.slice(0, markerAt).replace(/\s+$/u, "") : content;
+  const trailing = trailingReplyFormat(content);
+  if (trailing?.block === block) return messages;
+  const base = trailing?.base ?? content;
+  const suffix = trailing?.suffix ?? "";
   const next = messages.slice();
-  next[index] = { ...messages[index]!, content: `${base}\n\n${block}` };
+  next[index] = { ...messages[index]!, content: `${base}\n\n${block}${suffix}` };
   return next;
 }
 
@@ -635,10 +668,12 @@ function renderSkillLoaded(name: string, body: string): string {
  * by `mcp.ts`) plus the use-these-tools directive.
  *
  * The `kind` argument is kept for API compatibility but no longer changes the
- * system prompt: the kind-specific few-shot block rides at the tail of the
- * request's last user message (`withReplyFormat`). That keeps the system
- * prefix stable across consult → review → decision, which is what provider
- * prompt caching can actually reuse.
+ * system prompt: the kind-specific few-shot block rides on the request's
+ * transcript user turn (`withReplyFormat`). For one role with the same tool
+ * belt, skills and workspace instructions, the system prefix is therefore
+ * byte-identical across nodes — what provider prompt caching can actually
+ * reuse. A different belt (e.g. the senior's verify slice vs. its empty
+ * decision call) still starts a different prefix.
  *
  * `options.skills` + `options.role` append the pi-style `## Available skills`
  * section (shared scope plus the role's own) and the invocation guidance line;
@@ -1318,8 +1353,8 @@ export class TwoBrothersHarness {
    * role's tool sections. `tools` is the belt the call actually offers (empty
    * for a plain text-only call), so the `## Available tools` section always
    * matches what the request carries. `kind` is accepted for compatibility but
-   * deliberately does NOT change this text; the kind's few-shot block rides in
-   * the request tail so the cached system prefix stays stable.
+   * deliberately does NOT change this text; the kind's few-shot block rides on
+   * the transcript user turn so the cached system prefix stays stable.
    */
   systemPrompt(role: string, tools: Tool[] = [], kind?: string): string {
     return this.assemblePrompt(role, tools, kind).text;
@@ -1759,11 +1794,19 @@ export class TwoBrothersHarness {
   ): Promise<string | null> {
     this.emitStream({ type: "repair", role, kind, at: nowIso() });
     this.append(state, "user", role, "message", { text: request });
-    const repaired: ChatMessage[] = [
-      ...messages,
-      { role: "assistant", content: badReply },
-      { role: "user", content: request },
-    ];
+    // The repair instruction is the last user turn of this request, so the
+    // kind's reply-format block rides there too: format compliance just failed,
+    // and the exemplar must sit closest to the reply being requested. The
+    // shared-context copy above stays block-free (every later render rebuilds
+    // its own tail).
+    const repaired = withReplyFormat(
+      [
+        ...messages,
+        { role: "assistant", content: badReply },
+        { role: "user", content: request },
+      ],
+      kind,
+    );
     // The repair re-ask streams too: token events are additive to `repair`
     // and to the repair envelope, and its thinking gets its own reasoning record.
     const capture = this.reasoningCapture(role, kind);
@@ -2252,7 +2295,11 @@ export class TwoBrothersHarness {
    * not resend the oversized request. `auditKind` names the node in the prompt
    * audit trail; `wireKind` is the `responseKind` handed to the provider (the
    * work loops pass `"deliverable"`; the consult loops pass their own node
-   * kind so mock/scripted providers can vary the reply shape).
+   * kind so mock/scripted providers can vary the reply shape). `formatKind`
+   * names the reply-format block appended to the request tail and defaults to
+   * `wireKind`; the senior verify loop keeps `"deliverable"` on the wire (its
+   * historical response kind) while passing `"verify"` here, so a rebuild adds
+   * no payload example.
    *
    * Returns the model's FINAL reply text (the response without tool calls),
    * the tool conversation built so far (the repair pass needs it), and the
@@ -2269,6 +2316,7 @@ export class TwoBrothersHarness {
     maxIterations: number,
     rebuild: () => ChatMessage[],
     wireKind = "deliverable",
+    formatKind = wireKind,
   ): Promise<{ evidence: string[]; text: string; messages: ChatMessage[] }> {
     const provider = this.providers[role];
     const chatWithTools = provider.chatWithTools?.bind(provider);
@@ -2301,7 +2349,7 @@ export class TwoBrothersHarness {
       const steered = this.drainSteering(state);
       if (steered.length > 0) {
         repeatGuard?.reset();
-        messages = withReplyFormat([...rebuild(), ...messages.slice(2)], wireKind);
+        messages = withReplyFormat([...rebuild(), ...messages.slice(2)], formatKind);
       }
       let response: ToolChatResponse;
       const capture = this.reasoningCapture(role, auditKind);
@@ -2314,7 +2362,7 @@ export class TwoBrothersHarness {
         } catch (err) {
           if (!(err instanceof ProviderContextOverflowError)) throw err;
           if (!(await this.compactAfterOverflow(state))) throw err;
-          messages = withReplyFormat(rebuild(), wireKind);
+          messages = withReplyFormat(rebuild(), formatKind);
           this.auditPrompt(state, role, auditKind, messages, tools);
           response = await chatWithTools(messages, tools, callOptions);
         }
@@ -2552,6 +2600,9 @@ export class TwoBrothersHarness {
       build(),
       MAX_SENIOR_VERIFY_ITERATIONS,
       build,
+      // Keep the historical provider response kind ("deliverable") while the
+      // reply-format tail stays empty for verify.
+      "deliverable",
       "verify",
     );
     state.verifyEvidence = evidence;

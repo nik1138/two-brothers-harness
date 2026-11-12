@@ -311,13 +311,30 @@ function kindOfPayload(payload: Record<string, unknown>): string | null {
 }
 
 /**
+ * The exact two-line header + fence `replyFormatBlock` emits. Requiring the
+ * whole structure (not just the marker) keeps prose or pasted text that
+ * happens to mention `Requested payload:` from steering the scripted reply.
+ */
+const REPLY_FORMAT_RE =
+  /Requested payload: ([a-z]+)\nReply with exactly one fenced json block of this shape, with your own values:\n\n```json\n/gu;
+
+/** The request's reply-format kind; the LAST structural block wins. */
+function markedKind(text: string): string | null {
+  let kind: string | null = null;
+  for (const match of text.matchAll(REPLY_FORMAT_RE)) {
+    if (match[1] !== undefined) kind = match[1];
+  }
+  return kind;
+}
+
+/**
  * The structured node kind a role call answers. The harness appends that kind's
- * few-shot block to the request's last user message (so the system prefix stays
- * kind-stable for caching) and prefixes it with `Requested payload: <kind>`.
- * Parse that marker first; fall back to the legacy system fence and then to the
- * transcript for older/hand-built requests. The recovery scenario needs the
- * marker because its seeded history ends in archived `consult` envelopes
- * regardless of the node being retried.
+ * few-shot block to the request's transcript user turn (so the system prefix
+ * stays kind-stable for caching) and prefixes it with `Requested payload:
+ * <kind>`. Parse the last structural marker first; fall back to the legacy
+ * system fence and then to the transcript for older/hand-built requests. The
+ * recovery scenario needs the marker because its seeded history ends in
+ * archived `consult` envelopes regardless of the node being retried.
  */
 function requestedNodeKind(body: Record<string, unknown>): string | null {
   const messages = Array.isArray(body.messages) ? body.messages : [];
@@ -328,10 +345,12 @@ function requestedNodeKind(body: Record<string, unknown>): string | null {
     }
   }
   // Tool loops end with a tool-result user turn; the marker lives on the
-  // opening user turn, so scan every user message newest-first.
+  // opening user turn, so scan every user message newest-first. Within one
+  // text, the last match wins: a marker pasted into the task precedes the
+  // block the harness appends after it.
   for (const text of [...userTexts.reverse(), systemText(body)]) {
-    const marker = /(?:^|\n)Requested payload: ([a-z]+)(?:\n|$)/u.exec(text);
-    if (marker?.[1] !== undefined) return marker[1];
+    const kind = markedKind(text);
+    if (kind !== null) return kind;
   }
   const system = systemText(body);
   const marker = system.lastIndexOf("```json");
@@ -886,11 +905,51 @@ async function runScenario(name: string, run: () => Promise<string>): Promise<vo
   }
 }
 
+/**
+ * Offline self-check for {@link requestedNodeKind}: proves the structural
+ * marker wins over prose collisions, the last block wins, and a marker on an
+ * older user turn survives the trailing tool-result turn. Runs before the
+ * socket scenarios; a failure aborts the suite.
+ */
+function selfCheckMarkerParser(): void {
+  const block = (kind: string): string =>
+    `Requested payload: ${kind}\n` +
+    "Reply with exactly one fenced json block of this shape, with your own values:\n\n" +
+    "```json\n{}\n```";
+  const withUsers = (...contents: string[]) => ({
+    messages: contents.map((content) => ({ role: "user", content })),
+  });
+
+  const prose = requestedNodeKind(
+    withUsers("what does Requested payload: consult mean?"),
+  );
+  if (prose !== null) throw new Error(`marker prose was mistaken for a block: ${prose}`);
+
+  const collision = requestedNodeKind(
+    withUsers(`log line: Requested payload: consult\nnot a block`, block("review")),
+  );
+  if (collision !== "review") {
+    throw new Error(`last structural block must win, got ${String(collision)}`);
+  }
+
+  const toolLoop = requestedNodeKind(withUsers(`task\n\n${block("deliverable")}`, "tool result"));
+  if (toolLoop !== "deliverable") {
+    throw new Error(`opening-turn marker lost after a tool result, got ${String(toolLoop)}`);
+  }
+}
+
 async function main(): Promise<number> {
   const started = Date.now();
   log("Two Brothers — real-socket fault-injection E2E (offline, localhost only)");
   log("  endpoint: scripted node:http server on 127.0.0.1:<ephemeral> (real fetch/TCP)");
   log("");
+
+  try {
+    selfCheckMarkerParser();
+  } catch (err) {
+    log(`  FAIL  marker-parser self-check — ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  }
 
   await runScenario("429-retry-after", scenario429RetryAfter);
   await runScenario("5xx-transient", scenarioTransientServerErrors);
