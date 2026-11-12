@@ -20,6 +20,10 @@ const props = defineProps<{
   usage: RunUsage | null
   turns: number
   events: number
+  /** Additive auto-mode routing decision of the newest known run (null when
+   *  the run did not route or the backend predates the feature). */
+  route?: 'solo' | 'consult' | 'work' | null
+  routeReason?: string | null
 }>()
 
 const emit = defineEmits<{ close: [] }>()
@@ -88,6 +92,12 @@ function roleLine(role: 'senior' | 'junior'): string | null {
       <div class="status-row">
         <dt>Mode</dt>
         <dd>{{ MODE_LABELS[mode] }}</dd>
+      </div>
+      <div v-if="route" class="status-row">
+        <dt>Route</dt>
+        <dd>
+          {{ route }}<template v-if="routeReason"> — {{ routeReason }}</template>
+        </dd>
       </div>
       <div class="status-row">
         <dt>Run</dt>

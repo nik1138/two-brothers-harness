@@ -61,7 +61,7 @@ export type BaseCommandKind = "prompt" | "action";
  * - `permission`— show the approval policy and the configured tool scopes.
  * - `help`      — show commands and keyboard shortcuts.
  * - `status`    — show run, context and session status.
- * - `mode`      — switch the cooperation mode (`consult` / `work`).
+ * - `mode`      — switch the cooperation mode (`consult` / `work` / `auto`).
  * - `new`       — start a fresh session/context in the current workspace.
  */
 export type BaseCommandAction =
@@ -183,8 +183,8 @@ export const BASE_COMMANDS: readonly BaseCommand[] = Object.freeze(
       {
         name: "mode",
         aliases: [],
-        description: "Switch the cooperation mode (consult or work)",
-        argumentHint: "[consult|work]",
+        description: "Switch the cooperation mode (consult, work or auto)",
+        argumentHint: "[consult|work|auto]",
         kind: "action",
         action: "mode",
         requiresArguments: false,

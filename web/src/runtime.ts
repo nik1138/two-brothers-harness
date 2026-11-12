@@ -7,6 +7,9 @@ import type { ApprovalDetail, RunEvent, TodoItem, TodoStatus, ToolResultCompact 
 // TimelineEntry and never touch raw runtime events. Envelope handling stays in
 // chat.ts.
 
+/** Cap on the rendered auto-route reason (mirrors chat.ts; backend clips at 500). */
+const AUTO_ROUTE_BODY_MAX_CHARS = 500
+
 export interface ToolActivityItem {
   type: 'tool'
   id: string
@@ -85,7 +88,27 @@ export interface ReasoningItem {
   runId: string
 }
 
-export type RuntimeItem = ToolActivityItem | ApprovalItem | PromptAuditItem | ReasoningItem
+export type RuntimeItem = ToolActivityItem | ApprovalItem | PromptAuditItem | ReasoningItem | AutoRouteItem
+
+/**
+ * The auto-mode routing decision (`auto_route` event), projected as the same
+ * neutral "Auto · Senior chose …" activity the `[[AUTO ROUTE]]` marker
+ * envelope produces in chat.ts. It covers the live window before the envelope
+ * arrives and sidecar replay; once the marker envelope is projected,
+ * mergeTimeline drops this row so the decision renders exactly once.
+ */
+export interface AutoRouteItem {
+  type: 'auto_route'
+  id: string
+  /** Effective route after the harness guardrails. */
+  route: 'solo' | 'consult' | 'work'
+  /** Honest "Auto · Senior chose …" label (downgrade wording included). */
+  label: string
+  /** The Senior's clipped reason, or null when empty. */
+  body: string | null
+  at: number
+  runId: string
+}
 
 export interface TimelineEntry {
   time: number
@@ -321,6 +344,31 @@ function appendToRuntimeProjection(state: RuntimeProjectionState, ev: RunEvent) 
       })
       break
     }
+    case 'auto_route': {
+      // The routing pre-decision: honest "Senior chose …" copy, only after the
+      // route exists. A malformed row (unknown route) is dropped, never faked.
+      if (ev.route !== 'solo' && ev.route !== 'consult' && ev.route !== 'work') break
+      const downgraded = ev.downgraded_from === 'work'
+      const label = downgraded
+        ? `Auto · Senior chose ${ev.route} (work unavailable: no workspace bound)`
+        : `Auto · Senior chose ${ev.route}`
+      const reason = typeof ev.reason === 'string' ? ev.reason : ''
+      const body = reason
+        ? reason.length <= AUTO_ROUTE_BODY_MAX_CHARS
+          ? reason
+          : `${reason.slice(0, AUTO_ROUTE_BODY_MAX_CHARS - 1)}…`
+        : null
+      state.items.push({
+        type: 'auto_route',
+        id: `${ev.run_id}:auto_route:${state.n++}`,
+        route: ev.route,
+        label,
+        body,
+        at: ev.at,
+        runId: ev.run_id,
+      })
+      break
+    }
   }
 }
 
@@ -437,7 +485,8 @@ function entrySource(entry: TimelineEntry['entry']): 0 | 1 {
   return entry.type === 'tool' ||
     entry.type === 'approval' ||
     entry.type === 'prompt_audit' ||
-    entry.type === 'reasoning'
+    entry.type === 'reasoning' ||
+    entry.type === 'auto_route'
     ? 1
     : 0
 }
@@ -470,8 +519,24 @@ function rebuildTimeline(items: ChatItem[], runtime: RuntimeItem[]): TimelineEnt
   return merged
 }
 
+/** Drop runtime auto_route rows once the marker envelope owns the decision.
+ *  Returns the same array reference when nothing is shadowed, so the merge
+ *  cache's identity checks stay cheap in the common case. */
+function shadowedAutoRoute(items: ChatItem[], runtime: RuntimeItem[]): RuntimeItem[] {
+  if (!runtime.some((item) => item.type === 'auto_route')) return runtime
+  const chatOwnsRoute = items.some(
+    (item) => item.type === 'system' && item.activity.label.startsWith('Auto ·'),
+  )
+  return chatOwnsRoute ? runtime.filter((item) => item.type !== 'auto_route') : runtime
+}
+
 /** Interleave projected envelopes and runtime items chronologically. */
 export function mergeTimeline(items: ChatItem[], runtime: RuntimeItem[]): TimelineEntry[] {
+  // The auto_route event and the [[AUTO ROUTE]] marker envelope describe the
+  // same decision: once the envelope is projected as a chat activity, the
+  // runtime row is shadowed (it only covers the live window before the
+  // envelope arrives, and sidecar replay without the envelope).
+  runtime = shadowedAutoRoute(items, runtime)
   const prev = mergeState
   const chatGen = chatProjectionGeneration()
   const runtimeGen = runtimeProjectionGeneration()

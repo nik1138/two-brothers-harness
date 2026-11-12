@@ -228,6 +228,13 @@ export interface RunRecord {
   usage?: RunUsage | null
   /** Additive run cost estimate; `null`/absent = unknown (omit the segment). */
   cost?: RunCost | null
+  /**
+   * Additive auto-mode routing fields, derived from the persisted `auto_route`
+   * event (present only on auto runs; absent on pre-feature sidecars). `mode`
+   * keeps the REQUESTED mode; `route` is the effective decision.
+   */
+  route?: 'solo' | 'consult' | 'work'
+  route_reason?: string
 }
 
 /** One model's model-declared reasoning effort levels (`GET /api/model-efforts`). */
@@ -540,6 +547,24 @@ export interface UsageEvent {
   at: number
 }
 
+/**
+ * Additive auto-mode routing pre-decision (`auto_route`): the EFFECTIVE route
+ * after the harness guardrails, the Senior's one-sentence reason, and the
+ * requested mode (always 'auto'). `downgraded_from` is present only when the
+ * work→consult guardrail fired (no workspace bound). Emitted once per auto
+ * run before the `[[AUTO ROUTE]]` marker envelope; older clients ignore it.
+ * Mirrors `packages/harness/src/runevents.ts::AutoRouteEvent`.
+ */
+export interface AutoRouteEvent {
+  type: 'auto_route'
+  route: 'solo' | 'consult' | 'work'
+  reason: string
+  requested: 'auto'
+  downgraded_from?: 'work'
+  run_id: string
+  at: number
+}
+
 /** One helper started by the Senior (`subagent_started`). */
 export interface SubagentStartedEvent {
   type: 'subagent_started'
@@ -678,6 +703,7 @@ export type RunEvent =
   | PromptAuditEvent
   | ReasoningEvent
   | UsageEvent
+  | AutoRouteEvent
   | SubagentStartedEvent
   | SubagentActivityEvent
   | SubagentCompletedEvent
@@ -756,7 +782,7 @@ export interface SkillListResponse {
 }
 
 /** Cooperation mode a slash command can pin for its turn. */
-export type CommandMode = 'consult' | 'work'
+export type CommandMode = 'consult' | 'work' | 'auto'
 
 /** One discovered slash command from GET /api/commands (metadata only). */
 export interface CommandInfo {

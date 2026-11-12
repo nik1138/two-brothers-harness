@@ -20,6 +20,8 @@
  *   (`payloads.ts::REPAIR_REQUEST_PREFIX`; a repair turn belongs to the task
  *   that already started, not to a new one);
  * - mid-run operator steering — `harness.ts::STEERING_PREFIX`;
+ * - the auto-mode routing marker — `harness.ts::AUTO_ROUTE_PREFIX` (the route
+ *   WHY follows its task envelope; it is generated context, not a new task);
  * - attached-context blocks injected *before* a task by the server/TUI
  *   `@skill:` / `@file` mentions — the `<skill-loaded …>` and `<file …>` opening
  *   tags `mentions.ts::renderSkillLoadedBlock` / `renderFileBlock` render (a
@@ -67,7 +69,7 @@
  * Here the anchors and markers are the Two Brothers protocol envelopes.
  */
 import { isCompactionSummary } from "./compaction.ts";
-import { STEERING_PREFIX } from "./harness.ts";
+import { AUTO_ROUTE_PREFIX, STEERING_PREFIX } from "./harness.ts";
 import { REPAIR_REQUEST_PREFIX } from "./payloads.ts";
 import type { Message } from "./protocol.ts";
 import { SessionError, type SessionStore } from "./session.ts";
@@ -162,6 +164,9 @@ function isRealOperatorTask(event: unknown): boolean {
   if (isCompactionSummary(event as Message)) return false;
   if (text.startsWith(REPAIR_REQUEST_PREFIX)) return false;
   if (text.startsWith(STEERING_PREFIX)) return false;
+  // The auto-mode routing marker belongs to the task that already started
+  // (it follows the task envelope); counting it would cut mid-cycle.
+  if (text.startsWith(AUTO_ROUTE_PREFIX)) return false;
   if (text.startsWith(ATTACHED_SKILL_TAG) || text.startsWith(ATTACHED_FILE_TAG)) return false;
   return true;
 }

@@ -85,7 +85,7 @@ export interface TuiCommand {
   slash?: string;
   /** Extra typed slash names (`/q` for exit). */
   slashAliases?: readonly string[];
-  /** Argument hint shown beside the slash name (`consult|work`). */
+  /** Argument hint shown beside the slash name (`consult|work|auto`). */
   argumentHint?: string;
   /** Chords, primary first. Matching and documentation use the same specs. */
   keys?: readonly KeyChord[];
@@ -447,10 +447,10 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
   {
     id: "mode",
     title: "Cooperation mode",
-    description: "Switch between consult and work for the next turn.",
+    description: "Switch between consult, work and auto for the next turn.",
     group: "Cooperation",
     slash: "mode",
-    argumentHint: "consult|work",
+    argumentHint: "consult|work|auto",
     keys: [],
     when: "always",
   },

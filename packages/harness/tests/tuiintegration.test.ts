@@ -267,6 +267,33 @@ test("slash commands: /mode, /theme, /settings dialog and retry guard", async ()
   assert.equal(code, 0);
 });
 
+test("slash commands: /mode auto applies; the picker offers auto; bad modes warn", async () => {
+  const { app, input, output } = startApp();
+  assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+  input.type("/mode auto");
+  input.enter();
+  assert.ok(await waitFor(() => textOf(output).includes("mode: auto")));
+  // The status bar shows the REQUESTED mode; no fabricated route badge.
+  assert.ok(textOf(output).includes("auto"));
+  input.type("/mode solo");
+  input.enter();
+  assert.ok(
+    await waitFor(() => textOf(output).includes("usage: /mode consult|work|auto")),
+    "solo is not an operator mode (the enum stays consult|work|auto)",
+  );
+  // The chordless picker lists all three modes.
+  input.type("/mode");
+  input.enter();
+  assert.ok(await waitFor(() => textOf(output).includes("COOPERATION MODE")));
+  const pickerText = textOf(output);
+  assert.ok(pickerText.includes("consult"));
+  assert.ok(pickerText.includes("work"));
+  assert.ok(pickerText.includes("auto"));
+  input.key("escape");
+  const code = await quit(input, app);
+  assert.equal(code, 0);
+});
+
 test("safe key precedence: Esc arms quit, typing disarms, Esc Esc quits; Esc clears a draft", async () => {
   const { app, input, output } = startApp();
   assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));

@@ -9,8 +9,8 @@
  * (`packages/harness/src/sessionrewind.ts`) so the UI can:
  *
  * - find the REAL operator turns (harness-generated context — compaction
- *   summaries, repair requests, mid-run steer texts and attached
- *   `@skill:`/`@file` blocks — is never a task boundary);
+ *   summaries, repair requests, mid-run steer texts, the auto-mode routing
+ *   marker and attached `@skill:`/`@file` blocks — is never a task boundary);
  * - derive the turn depth from the clicked message (the backend takes a depth,
  *   not an index);
  * - state exactly what the destructive confirmation will remove;
@@ -42,6 +42,9 @@ export const REPAIR_REQUEST_PREFIX = '[[REPAIR_REQUEST]]'
 
 /** Marker of a mid-run operator steer (`harness.ts::STEERING_PREFIX`). */
 export const STEERING_PREFIX = '[[OPERATOR STEER]] '
+
+/** Marker of the auto-mode routing decision (`harness.ts::AUTO_ROUTE_PREFIX`). */
+export const AUTO_ROUTE_PREFIX = '[[AUTO ROUTE]] '
 
 /** Opening tag of an attached skill block (`mentions.ts::renderSkillLoadedBlock`). */
 export const ATTACHED_SKILL_TAG = '<skill-loaded'
@@ -97,6 +100,7 @@ export function isOperatorTurn(event: unknown): boolean {
   if (isCompactionSummaryEnvelope(event)) return false
   if (text.startsWith(REPAIR_REQUEST_PREFIX)) return false
   if (text.startsWith(STEERING_PREFIX)) return false
+  if (text.startsWith(AUTO_ROUTE_PREFIX)) return false
   if (text.startsWith(ATTACHED_SKILL_TAG) || text.startsWith(ATTACHED_FILE_TAG)) return false
   return true
 }

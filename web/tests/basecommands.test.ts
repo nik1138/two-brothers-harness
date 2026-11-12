@@ -193,10 +193,12 @@ test('resolveModeCommandArg: empty opens the control, valid applies, invalid is 
   assert.deepEqual(resolveModeCommandArg(7), { kind: 'open' })
   assert.deepEqual(resolveModeCommandArg('work'), { kind: 'apply', mode: 'work' })
   assert.deepEqual(resolveModeCommandArg(' CONSULT '), { kind: 'apply', mode: 'consult' })
-  // `auto` is a composer mode but not a valid typed /mode argument
-  assert.deepEqual(resolveModeCommandArg('auto'), { kind: 'invalid' })
+  // auto is a real cooperation mode now: the Senior routes at run time
+  assert.deepEqual(resolveModeCommandArg('auto'), { kind: 'apply', mode: 'auto' })
+  assert.deepEqual(resolveModeCommandArg(' AUTO '), { kind: 'apply', mode: 'auto' })
+  assert.deepEqual(resolveModeCommandArg('solo'), { kind: 'invalid' }, 'solo is not an operator mode')
   assert.deepEqual(resolveModeCommandArg('work extra'), { kind: 'invalid' })
-  assert.equal(MODE_COMMAND_USAGE, '/mode [consult|work]')
+  assert.equal(MODE_COMMAND_USAGE, '/mode [consult|work|auto]')
 })
 
 test('parseSubmittedCommand recognises only one leading /command line', () => {

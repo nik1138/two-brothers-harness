@@ -144,7 +144,7 @@ const contextCount = computed(() => {
   for (const row of props.timeline) {
     const e = row.entry
     if (e.type === 'group') n += e.group.messages.length
-    else if (e.type === 'system' || e.type === 'tool' || e.type === 'approval') n += 1
+    else if (e.type === 'system' || e.type === 'tool' || e.type === 'approval' || e.type === 'auto_route') n += 1
   }
   return n
 })
@@ -1182,6 +1182,20 @@ watch(
           <span v-else-if="row.entry.activity.body" class="system-activity-body">{{
             row.entry.activity.body
           }}</span>
+        </div>
+
+        <!-- Auto-mode routing decision from the runtime sidecar/live stream:
+             the same neutral activity row the [[AUTO ROUTE]] marker envelope
+             produces (mergeTimeline drops this row once the envelope lands). -->
+        <div
+          v-else-if="row.entry.type === 'auto_route'"
+          class="system-activity"
+          role="note"
+          data-find-skip="true"
+        >
+          <span class="system-activity-dot" aria-hidden="true"></span>
+          <span class="system-activity-label">{{ row.entry.label }}</span>
+          <span v-if="row.entry.body" class="system-activity-body">{{ row.entry.body }}</span>
         </div>
 
         <ToolActivity v-else-if="row.entry.type === 'tool'" :item="row.entry" />

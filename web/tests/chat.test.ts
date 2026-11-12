@@ -7,14 +7,17 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import {
+  AUTO_ROUTE_PREFIX,
   COMPACTION_SUMMARY_PREFIX,
   COMPACTION_SUMMARY_SUFFIX,
   SPEAKER_LABELS,
   appendEnvelope,
   compactionSummaryBody,
   currentChatItems,
+  isAutoRouteText,
   isCompactionSummaryText,
   isRepairRequestText,
+  parseAutoRouteText,
   resetChatProjection,
   speakerActivityLabel,
   speakerInitial,
@@ -177,4 +180,101 @@ test('projection: long compaction summaries are clipped, not rendered unbounded'
   assert.ok(body.length < long.length)
   assert.match(body, /… \[summary clipped\]$/)
   assert.ok(body.startsWith('x'))
+})
+
+// -- auto-mode routing marker projection --------------------------------------
+
+const AUTO_ROUTE_TEXT = '[[AUTO ROUTE]] solo — I can answer this from knowledge'
+const AUTO_ROUTE_DOWNGRADE_TEXT =
+  '[[AUTO ROUTE]] consult — downgraded from work (no workspace bound): files must change'
+
+test('auto-route marker mirrors the harness and is anchored, not operator speech', () => {
+  // Mirrored byte-for-byte from packages/harness/src/harness.ts AUTO_ROUTE_PREFIX.
+  assert.equal(AUTO_ROUTE_PREFIX, '[[AUTO ROUTE]] ')
+  assert.equal(isAutoRouteText(AUTO_ROUTE_TEXT), true)
+  assert.equal(isAutoRouteText('please use the [[AUTO ROUTE]] marker'), false)
+  assert.equal(isAutoRouteText('note: [[AUTO ROUTE]] solo — x'), false)
+  assert.equal(isAutoRouteText(null), false)
+  assert.equal(isAutoRouteText(42), false)
+})
+
+test('parseAutoRouteText: route, reason and the G1 downgrade prefix', () => {
+  assert.deepEqual(parseAutoRouteText(AUTO_ROUTE_TEXT), {
+    route: 'solo',
+    reason: 'I can answer this from knowledge',
+    downgraded: false,
+  })
+  assert.deepEqual(parseAutoRouteText(AUTO_ROUTE_DOWNGRADE_TEXT), {
+    route: 'consult',
+    reason: 'files must change',
+    downgraded: true,
+  })
+  assert.equal(parseAutoRouteText('[[AUTO ROUTE]] bogus — x'), null, 'unknown route is not faked')
+  assert.equal(parseAutoRouteText('[[AUTO ROUTE]] no separator'), null)
+  assert.equal(parseAutoRouteText('not a marker'), null)
+})
+
+test('projection: the route marker becomes a neutral "Auto · Senior chose …" activity', () => {
+  resetChatProjection([])
+  appendEnvelope(env(1, 'do the thing'))
+  appendEnvelope(env(2, AUTO_ROUTE_TEXT))
+  const items: ChatItem[] = currentChatItems()
+  const system = items.find((item) => item.type === 'system')
+  assert.ok(system, 'route marker projected as a system activity')
+  if (system?.type === 'system') {
+    assert.equal(system.activity.label, 'Auto · Senior chose solo')
+    assert.equal(system.activity.body, 'I can answer this from knowledge')
+    assert.equal(system.activity.quiet, true)
+    assert.ok(!(system.activity.body ?? '').includes('[[AUTO ROUTE]]'))
+  }
+  // the marker is not operator speech: the task is the only operator group
+  const operatorGroups = items.filter(
+    (item) => item.type === 'group' && item.group.author === 'operator',
+  )
+  assert.equal(operatorGroups.length, 1)
+  // the title derivation skips the marker
+  assert.equal(taskOf([env(1, AUTO_ROUTE_TEXT), env(2, 'real task')]), 'real task')
+  assert.equal(taskOf([env(1, 'real task'), env(2, AUTO_ROUTE_TEXT)]), 'real task')
+})
+
+test('projection: a G1 downgrade renders the honest work-unavailable wording', () => {
+  resetChatProjection([])
+  appendEnvelope(env(1, 'change the files'))
+  appendEnvelope(env(2, AUTO_ROUTE_DOWNGRADE_TEXT))
+  const items: ChatItem[] = currentChatItems()
+  const system = items.find((item) => item.type === 'system')
+  assert.ok(system)
+  if (system?.type === 'system') {
+    assert.equal(
+      system.activity.label,
+      'Auto · Senior chose consult (work unavailable: no workspace bound)',
+    )
+    assert.equal(system.activity.body, 'files must change')
+  }
+})
+
+test('projection: the solo decision envelope keeps the highlighted decision row', () => {
+  resetChatProjection([])
+  appendEnvelope(env(1, 'do the thing'))
+  appendEnvelope(env(2, AUTO_ROUTE_TEXT))
+  appendEnvelope({
+    v: 1,
+    id: 'e3',
+    seq: 3,
+    ts: '2026-11-04T00:00:01Z',
+    from: 'senior',
+    to: 'user',
+    kind: 'decision',
+    payload: { decision: 'Use dual-write.', rationale: 'r', confidence: 0.8, dissent: null, accepted_proposals: [] },
+  } as unknown as Envelope)
+  const items: ChatItem[] = currentChatItems()
+  const decisionGroup = items.find(
+    (item) => item.type === 'group' && item.group.messages.some((message) => message.highlight),
+  )
+  assert.ok(decisionGroup, 'the solo decision renders through the existing decision case')
+  // no junior rows exist on a solo transcript
+  assert.ok(
+    !items.some((item) => item.type === 'group' && item.group.author === 'junior'),
+    'no junior rows on a solo run',
+  )
 })

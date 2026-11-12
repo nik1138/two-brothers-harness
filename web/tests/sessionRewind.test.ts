@@ -12,6 +12,7 @@ import { test } from 'node:test'
 import {
   ATTACHED_FILE_TAG,
   ATTACHED_SKILL_TAG,
+  AUTO_ROUTE_PREFIX,
   COMPACTION_SUMMARY_PREFIX,
   MAX_REWIND_TURNS,
   MIN_REWIND_TURNS,
@@ -76,6 +77,7 @@ test('the mirrored marker constants match the backend literals', () => {
   // packages/harness/src/payloads.ts / harness.ts / mentions.ts
   assert.equal(REPAIR_REQUEST_PREFIX, '[[REPAIR_REQUEST]]')
   assert.equal(STEERING_PREFIX, '[[OPERATOR STEER]] ')
+  assert.equal(AUTO_ROUTE_PREFIX, '[[AUTO ROUTE]] ')
   assert.equal(ATTACHED_SKILL_TAG, '<skill-loaded')
   assert.equal(ATTACHED_FILE_TAG, '<file ')
 })
@@ -86,6 +88,7 @@ test('only real operator tasks are turn boundaries', () => {
   assert.equal(isOperatorTurn(task(`${COMPACTION_SUMMARY_PREFIX}sum</summary>`)), false)
   assert.equal(isOperatorTurn(task(`${REPAIR_REQUEST_PREFIX} fix the JSON`)), false)
   assert.equal(isOperatorTurn(task(`${STEERING_PREFIX}use Postgres`)), false)
+  assert.equal(isOperatorTurn(task(`${AUTO_ROUTE_PREFIX}solo — knowledge is enough`)), false)
   assert.equal(isOperatorTurn(task(`${ATTACHED_SKILL_TAG} name="x">body</skill-loaded>`)), false)
   assert.equal(isOperatorTurn(task('<file path="a.ts">\nbody\n</file>')), false)
   // not addressed to the senior / not a message / blank text / malformed
@@ -143,6 +146,30 @@ test('rewindTurnsForIndex derives the depth the backend expects', () => {
   assert.equal(rewindTurnsForIndex(events, 1), 0)
   assert.equal(rewindTurnsForIndex(events, -1), 0)
   assert.equal(rewindTurnsForIndex(events, events.length), 0)
+})
+
+test('a solo session: the route marker never inflates the turn depth', () => {
+  // task1, marker, decision, task2, marker, decision — two operator turns
+  const events = [
+    task('first solo task'),
+    task(`${AUTO_ROUTE_PREFIX}solo — knowledge is enough`),
+    reply('decision'),
+    task('second solo task'),
+    task(`${AUTO_ROUTE_PREFIX}consult — advice helps`),
+    reply('decision'),
+  ]
+  assert.deepEqual(operatorTurnIndexes(events), [0, 3])
+  assert.equal(rewindTurnsForIndex(events, 0), 2)
+  assert.equal(rewindTurnsForIndex(events, 3), 1)
+  // the marker itself offers no rewind action (it is not an operator turn)
+  assert.equal(rewindActionFor(events, 1), null)
+  assert.equal(rewindTurnsForIndex(events, 1), 0)
+  // rewinding the second task removes task+marker+decision together
+  const preview = rewindPreview(events, 3)
+  assert.ok(preview)
+  assert.equal(preview!.turns, 1)
+  assert.equal(preview!.removedMessages, 3)
+  assert.equal(preview!.keptMessages, 3)
 })
 
 // ---------------------------------------------------------------------------

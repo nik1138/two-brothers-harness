@@ -242,6 +242,10 @@ const streamingView = computed(() => streamingBlocks(streamingState.value))
 const activeRun = computed<LiveRun | null>(() =>
   selected.value ? (liveRuns.value[selected.value] ?? null) : null,
 )
+/** Newest known run record of the selected session (the /status route line). */
+const selectedLastRun = computed<LastRunInfo | null>(() =>
+  selected.value ? (lastRunBySession.value[selected.value] ?? null) : null,
+)
 /** Selected session's live queue: current run + rows queued behind it. */
 const queueView = computed<SessionQueueView>(() =>
   selected.value
@@ -330,6 +334,9 @@ interface LastRunInfo {
   created: number
   finished: number
   error?: string
+  /** Additive auto-mode routing fields (absent on non-auto runs/old backends). */
+  route?: 'solo' | 'consult' | 'work'
+  route_reason?: string
 }
 const lastRunBySession = ref<Record<string, LastRunInfo>>({})
 /**
@@ -1910,6 +1917,8 @@ function recordLastRun(run: RunRecord) {
       created: run.created,
       finished: run.finished,
       error: run.error,
+      ...(run.route !== undefined ? { route: run.route } : {}),
+      ...(run.route_reason !== undefined ? { route_reason: run.route_reason } : {}),
     },
   }
   if (run.status === 'completed') {
@@ -3238,6 +3247,8 @@ onUnmounted(() => {
       :usage="usageForSelected"
       :turns="turns"
       :events="events.length"
+      :route="selectedLastRun?.route ?? null"
+      :route-reason="selectedLastRun?.route_reason ?? null"
       @close="statusOpen = false"
     />
     <PermissionInfoDialog

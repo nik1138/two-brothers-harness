@@ -200,7 +200,7 @@ const MODE_OPTIONS: readonly ModeOption[] = [
   {
     value: 'auto',
     label: 'Auto',
-    description: 'The Senior chooses how to proceed (currently consult).',
+    description: 'The Senior chooses solo, consult or work at run time.',
   },
 ]
 
@@ -1258,7 +1258,9 @@ function interceptCommandSubmit(): boolean {
         consumeComposerText()
         if (modeArg.kind === 'apply') {
           mode.value = modeArg.mode
-          emit('notice', `Cooperation mode: ${modeArg.mode === 'work' ? 'Work' : 'Consult'}`)
+          const modeLabel =
+            modeArg.mode === 'work' ? 'Work' : modeArg.mode === 'auto' ? 'Auto' : 'Consult'
+          emit('notice', `Cooperation mode: ${modeLabel}`)
         } else {
           openModePicker()
         }

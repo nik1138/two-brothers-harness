@@ -464,7 +464,7 @@ test("baseCommandUsage renders both the hint and the no-hint form", () => {
   assert.equal(baseCommandUsage(byName("goal")), "/goal <objective>");
   assert.equal(baseCommandUsage(byName("feedback")), "/feedback [notes]");
   assert.equal(baseCommandUsage(byName("export")), "/export [path]");
-  assert.equal(baseCommandUsage(byName("mode")), "/mode [consult|work]");
+  assert.equal(baseCommandUsage(byName("mode")), "/mode [consult|work|auto]");
   assert.equal(baseCommandUsage(byName("status")), "/status");
   assert.equal(baseCommandUsage(byName("help")), "/help");
 });

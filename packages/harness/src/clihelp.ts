@@ -650,7 +650,7 @@ defineCommand({
     "  /help, /h        this list (built-in and discovered commands)",
     "  /commands        list built-in and discovered slash commands",
     "  /config          resolved provider/model/base-url per role",
-    "  /mode [consult|work]  show or set the cooperation mode for following turns",
+    "  /mode [consult|work|auto]  show or set the cooperation mode for following turns",
     "  /exit, /quit     leave (empty line, exit, quit, q also work)",
     "built-in commands:",
     "  prompt   /plan <objective>, /goal <objective>, /feedback [notes]",

@@ -78,7 +78,8 @@ function isRuntimeEntry(entry: Entry): entry is RuntimeItem {
   return (
     entry.type === 'tool' ||
     entry.type === 'approval' ||
-    entry.type === 'prompt_audit'
+    entry.type === 'prompt_audit' ||
+    entry.type === 'auto_route'
   )
 }
 
@@ -89,6 +90,7 @@ export function foldEntryId(entry: Entry): string {
   if (entry.type === 'system') return entry.activity.id
   if (entry.type === 'tool' || entry.type === 'prompt_audit') return entry.id
   if (entry.type === 'reasoning') return entry.id
+  if (entry.type === 'auto_route') return entry.id
   return `approval-${entry.approvalId}`
 }
 

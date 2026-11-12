@@ -179,6 +179,7 @@ test("mode is optional; an invalid value is diagnosed and omitted", (t) => {
   t.after(cleanup);
 
   writeFile(root, "consult.md", commandDoc("description: Consult.\nmode: consult"));
+  writeFile(root, "auto.md", commandDoc("description: Auto.\nmode: auto"));
   writeFile(
     root,
     "bad-mode.md",
@@ -190,6 +191,7 @@ test("mode is optional; an invalid value is diagnosed and omitted", (t) => {
   const byName = new Map(catalog.commands.map((command) => [command.name, command]));
 
   assert.equal(byName.get("consult")?.mode, "consult");
+  assert.equal(byName.get("auto")?.mode, "auto", "discovered templates may pin auto");
   assert.equal(byName.get("bad-mode")?.mode, undefined);
   assert.equal(byName.get("empty-mode")?.mode, undefined);
 

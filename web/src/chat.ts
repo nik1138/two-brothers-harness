@@ -194,6 +194,67 @@ function compactionActivityOf(env: Envelope): SystemActivity {
   }
 }
 
+// -- auto-mode routing marker (AUTO ROUTE) ------------------------------------
+// In auto mode the Senior declares the route (solo/consult/work) before the
+// cycle; the WHY rides a `message` envelope from "user" whose text starts with
+// `[[AUTO ROUTE]] ` (harness.ts AUTO_ROUTE_PREFIX, the compaction/steer
+// convention). It is generated context, never operator speech: the projection
+// renders a neutral "Auto · Senior chose …" activity. The marker constant is
+// mirrored from `packages/harness/src/harness.ts` (web cannot import package
+// sources); keep it byte-identical. Exported so tests assert the mirror.
+
+export const AUTO_ROUTE_PREFIX = '[[AUTO ROUTE]] '
+
+/** Cap on the rendered route reason (the backend already clips at 500). */
+const AUTO_ROUTE_ACTIVITY_MAX_CHARS = 500
+
+/** G1 downgrade prefix inside the marker reason (harness.ts seniorRoute). */
+const AUTO_ROUTE_DOWNGRADE_PREFIX = 'downgraded from work (no workspace bound): '
+
+/** True when a user message text is the auto-mode routing marker envelope.
+ *  Prefix-anchored like the compaction mirror: a mention of the marker inside
+ *  an operator message stays operator text. */
+export function isAutoRouteText(text: unknown): text is string {
+  return typeof text === 'string' && text.startsWith(AUTO_ROUTE_PREFIX)
+}
+
+/** The parsed route marker: effective route + display reason (null when the
+ *  text is not a well-formed marker — the projection then keeps the raw text
+ *  out of the title and shows a generic activity, never a fabricated route). */
+export function parseAutoRouteText(text: unknown): { route: string; reason: string; downgraded: boolean } | null {
+  if (!isAutoRouteText(text)) return null
+  const inner = text.slice(AUTO_ROUTE_PREFIX.length)
+  const sep = inner.indexOf(' — ')
+  if (sep <= 0) return null
+  const route = inner.slice(0, sep)
+  if (route !== 'solo' && route !== 'consult' && route !== 'work') return null
+  let reason = inner.slice(sep + 3)
+  let downgraded = false
+  if (reason.startsWith(AUTO_ROUTE_DOWNGRADE_PREFIX)) {
+    downgraded = true
+    reason = reason.slice(AUTO_ROUTE_DOWNGRADE_PREFIX.length)
+  }
+  return { route, reason, downgraded }
+}
+
+/** Neutral system activity for the routing marker (honest "Senior chose …"). */
+function autoRouteActivityOf(env: Envelope): SystemActivity {
+  const raw = str((env.payload ?? {})['text']) ?? ''
+  const parsed = parseAutoRouteText(raw)
+  const label = parsed
+    ? parsed.downgraded
+      ? `Auto · Senior chose ${parsed.route} (work unavailable: no workspace bound)`
+      : `Auto · Senior chose ${parsed.route}`
+    : 'Auto · routing decision'
+  const reason = parsed?.reason ?? ''
+  const body = reason
+    ? reason.length <= AUTO_ROUTE_ACTIVITY_MAX_CHARS
+      ? reason
+      : `${reason.slice(0, AUTO_ROUTE_ACTIVITY_MAX_CHARS - 1)}…`
+    : null
+  return { id: env.id || `auto-route-${env.seq}`, seq: env.seq, ts: env.ts, label, body, quiet: true }
+}
+
 function toMessage(env: Envelope): ChatMessage {
   const p = (env.payload ?? {}) as Record<string, unknown>
   let title: string | null = null
@@ -315,6 +376,11 @@ function appendToProjection(state: ChatProjectionState, env: Envelope) {
     if (isCompactionSummaryText(text)) {
       state.group = null
       state.items.push({ type: 'system', activity: compactionActivityOf(env) })
+      return
+    }
+    if (isAutoRouteText(text)) {
+      state.group = null
+      state.items.push({ type: 'system', activity: autoRouteActivityOf(env) })
       return
     }
   }
@@ -447,7 +513,7 @@ export function taskOf(events: Envelope[]): string | null {
     if (env.from === 'user' && env.kind === 'message') {
       const text = str((env.payload as Record<string, unknown>).text)
       // internal context envelopes never become the visible task line
-      if (text && !isRepairRequestText(text) && !isCompactionSummaryText(text)) return text
+      if (text && !isRepairRequestText(text) && !isCompactionSummaryText(text) && !isAutoRouteText(text)) return text
     }
     if (env.kind === 'consult') {
       const task = str((env.payload as Record<string, unknown>).task)

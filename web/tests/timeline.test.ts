@@ -34,6 +34,7 @@ const VALID_TYPES = new Set([
   'approval',
   'prompt_audit',
   'reasoning',
+  'auto_route',
 ])
 
 /** Assert the contract every consumer relies on: no undefined rows, no
@@ -56,7 +57,8 @@ function assertTimelineWellFormed(merged: TimelineEntry[], where: string) {
       e.entry.type === 'tool' ||
       e.entry.type === 'approval' ||
       e.entry.type === 'prompt_audit' ||
-      e.entry.type === 'reasoning'
+      e.entry.type === 'reasoning' ||
+      e.entry.type === 'auto_route'
         ? 1
         : 0
     const cmp = a.time - b.time || src(a) - src(b) || a.order - b.order
@@ -319,4 +321,101 @@ test('reasoningTextOf: tolerant sanitize + head/tail bound', () => {
   assert.match(bounded?.text ?? '', /\.\.\.\[truncated 100 chars\]\.\.\./)
   assert.ok(bounded?.text.startsWith('y'.repeat(100)))
   assert.ok(bounded?.text.endsWith('y'.repeat(100)))
+})
+
+// ---------------------------------------------------------------------------
+// auto_route: the routing pre-decision projects as the same neutral activity
+// the marker envelope produces, and is shadowed once the envelope lands.
+// ---------------------------------------------------------------------------
+
+function autoRouteEvent(overrides: Record<string, unknown> = {}): RunEvent {
+  return {
+    type: 'auto_route',
+    route: 'solo',
+    reason: 'I can answer this from knowledge',
+    requested: 'auto',
+    run_id: 'r1',
+    at: 1793823644,
+    ...overrides,
+  } as unknown as RunEvent
+}
+
+test('auto_route: the event projects to one honest "Senior chose …" row', () => {
+  resetRuntimeProjection([])
+  const runtime = projectRuntimeEvents([autoRouteEvent()])
+  assert.equal(runtime.length, 1)
+  const item = runtime[0]
+  assert.equal(item?.type, 'auto_route')
+  if (item?.type !== 'auto_route') return
+  assert.equal(item.route, 'solo')
+  assert.equal(item.label, 'Auto · Senior chose solo')
+  assert.equal(item.body, 'I can answer this from knowledge')
+  assert.equal(item.runId, 'r1')
+  assert.match(item.id, /^r1:auto_route:/)
+})
+
+test('auto_route: the G1 downgrade renders the work-unavailable wording', () => {
+  resetRuntimeProjection([])
+  const runtime = projectRuntimeEvents([
+    autoRouteEvent({
+      route: 'consult',
+      reason: 'files must change',
+      downgraded_from: 'work',
+    }),
+  ])
+  const item = runtime[0]
+  assert.equal(item?.type, 'auto_route')
+  if (item?.type !== 'auto_route') return
+  assert.equal(
+    item.label,
+    'Auto · Senior chose consult (work unavailable: no workspace bound)',
+  )
+  assert.equal(item.body, 'files must change')
+})
+
+test('auto_route: malformed rows are dropped, never a fabricated route', () => {
+  resetRuntimeProjection([])
+  const runtime = projectRuntimeEvents([
+    autoRouteEvent({ route: 'bogus' }),
+    autoRouteEvent({ route: undefined }),
+  ])
+  assert.equal(runtime.length, 0)
+})
+
+test('auto_route: the live row shows before the envelope, then is shadowed by it', () => {
+  resetChatProjection([])
+  resetRuntimeProjection([])
+  const runtime = projectRuntimeEvents([autoRouteEvent()])
+  // Live window: only the task envelope has landed; the runtime row carries
+  // the decision until the marker envelope arrives.
+  const taskOnly = projectEnvelopes([
+    {
+      v: 1, id: 'e1', seq: 1, ts: '2026-11-04T20:19:28Z',
+      from: 'user', to: 'senior', kind: 'message', payload: { text: 'task' },
+    },
+  ] as never[])
+  const live = mergeTimeline(taskOnly, runtime)
+  assertTimelineWellFormed(live, 'auto_route live window')
+  assert.ok(live.some((row) => row.entry.type === 'auto_route'))
+
+  // The marker envelope lands: the chat activity owns the decision and the
+  // runtime row is dropped (exactly one route row in the timeline).
+  const withMarker = projectEnvelopes([
+    {
+      v: 1, id: 'e1', seq: 1, ts: '2026-11-04T20:19:28Z',
+      from: 'user', to: 'senior', kind: 'message', payload: { text: 'task' },
+    },
+    {
+      v: 1, id: 'e2', seq: 2, ts: '2026-11-04T20:19:29Z',
+      from: 'user', to: 'senior', kind: 'message',
+      payload: { text: '[[AUTO ROUTE]] solo — I can answer this from knowledge' },
+    },
+  ] as never[])
+  const settled = mergeTimeline(withMarker, runtime)
+  assertTimelineWellFormed(settled, 'auto_route shadowed')
+  assert.ok(!settled.some((row) => row.entry.type === 'auto_route'))
+  const activities = settled.filter(
+    (row) => row.entry.type === 'system' && row.entry.activity.label.startsWith('Auto ·'),
+  )
+  assert.equal(activities.length, 1, 'the decision renders exactly once')
 })

@@ -662,10 +662,10 @@ export type TuiAction =
   | { type: "none" }
   | { type: "run"; task: string; mode?: "consult" | "work" | "auto" }
   | { type: "lines"; lines: TuiLine[]; status?: string }
-  | { type: "mode"; mode: "consult" | "work" }
+  | { type: "mode"; mode: "consult" | "work" | "auto" }
   | { type: "exit" };
 
-const MODES: ReadonlySet<string> = new Set(["consult", "work"]);
+const MODES: ReadonlySet<string> = new Set(["consult", "work", "auto"]);
 
 function commandLines(commands: CommandCatalog): TuiLine[] {
   if (commands.commands.length === 0) {
@@ -689,7 +689,7 @@ function helpLines(commands: CommandCatalog): TuiLine[] {
     { kind: "system", text: "tui commands:" },
     { kind: "system", text: "  /help      this list" },
     { kind: "system", text: "  /commands  list discovered slash commands" },
-    { kind: "system", text: "  /mode consult|work  switch the cooperation mode" },
+    { kind: "system", text: "  /mode consult|work|auto  switch the cooperation mode" },
     { kind: "system", text: "  /exit      leave (Ctrl+C or Esc twice also quits)" },
     { kind: "system", text: "slash commands:" },
     ...commandLines(commands),
@@ -720,10 +720,10 @@ export function resolveTuiInput(input: string, commands: CommandCatalog): TuiAct
     if (!MODES.has(requested)) {
       return {
         type: "lines",
-        lines: [{ kind: "error", text: "usage: /mode consult|work" }],
+        lines: [{ kind: "error", text: "usage: /mode consult|work|auto" }],
       };
     }
-    return { type: "mode", mode: requested as "consult" | "work" };
+    return { type: "mode", mode: requested as "consult" | "work" | "auto" };
   }
   if (matched !== null) {
     const found = commands.commands.find((command) => command.name === matched.name);
@@ -3186,6 +3186,12 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
         description: "the junior may use its tool belt and workspace",
         keywords: ["mode"],
       },
+      {
+        id: "auto",
+        label: "auto",
+        description: "the senior chooses solo, consult or work at run time",
+        keywords: ["mode"],
+      },
     ];
     overlay = {
       kind: "picker",
@@ -3193,7 +3199,7 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
       items,
       state: createPickerState(),
       onAccept: (item) => {
-        mode = item.id === "work" ? "work" : "consult";
+        mode = item.id === "work" ? "work" : item.id === "auto" ? "auto" : "consult";
         pushToast("info", `mode: ${mode} — the next turn uses it`);
       },
     };
@@ -4243,12 +4249,12 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
           openModePicker();
           return true;
         }
-        if (requested === "consult" || requested === "work") {
+        if (requested === "consult" || requested === "work" || requested === "auto") {
           mode = requested;
           pushToast("info", `mode: ${mode} — the next turn uses it`);
           return true;
         }
-        model = addNotice(model, "warn", "usage: /mode consult|work");
+        model = addNotice(model, "warn", "usage: /mode consult|work|auto");
         return true;
       }
       case "models": {

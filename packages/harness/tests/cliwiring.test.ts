@@ -356,7 +356,7 @@ test("chat REPL: /mode switches the following turns; prompt commands keep their 
     // `/mode work` applies to the plain line (work-mode envelopes) ...
     assert.equal((run.stdout.match(/mode: work/g) ?? []).length, 2, run.stdout);
     // ... and then /mode with no argument reports it unchanged.
-    assert.match(run.stderr, /usage: \/mode \[consult\|work\]/);
+    assert.match(run.stderr, /usage: \/mode \[consult\|work\|auto\]/);
 
     const tasks = userMessages(sessionFile);
     assert.equal(tasks[0], "Do the work-mode task");
@@ -376,6 +376,40 @@ test("chat REPL: /mode switches the following turns; prompt commands keep their 
       "review",
       "decision",
     ]);
+  } finally {
+    dir.cleanup();
+  }
+});
+
+test("chat REPL: /mode auto routes the following turns (mock fails closed to consult)", () => {
+  const dir = tmpdir("tb-cli-automode-");
+  const sessionFile = path.join(dir.root, "s.jsonl");
+  try {
+    const run = runChat(
+      ["--provider", "mock", "--session-file", sessionFile],
+      ["/mode auto", "An auto-mode task", "/mode", ""].join("\n"),
+      dir.root,
+    );
+    assert.equal(run.status, 0, `exit ${run.status}: ${run.stderr.slice(-500)}`);
+    assert.equal((run.stdout.match(/mode: auto/g) ?? []).length, 2, run.stdout);
+    // The mock cannot produce a route payload: the honest degradation warning
+    // reaches stderr and the run still completes (exit 0).
+    assert.match(run.stderr, /auto routing degraded to consult: unstructured model reply for route/);
+    const kinds = eventKinds(sessionFile);
+    assert.deepEqual(kinds, [
+      "message", // task
+      "message", // repair re-ask for the route payload
+      "message", // [[AUTO ROUTE]] marker
+      "consult",
+      "proposal",
+      "review",
+      "decision",
+    ]);
+    const events = sessionEvents(sessionFile);
+    assert.ok(
+      String(events[2]?.payload?.text ?? "").startsWith("[[AUTO ROUTE]] consult — "),
+      "the marker envelope rides the session log",
+    );
   } finally {
     dir.cleanup();
   }

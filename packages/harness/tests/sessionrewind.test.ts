@@ -20,7 +20,7 @@ import {
   isCompactionSummary,
 } from "../src/compaction.ts";
 import { SharedContext } from "../src/context.ts";
-import { TwoBrothersHarness, STEERING_PREFIX } from "../src/harness.ts";
+import { TwoBrothersHarness, AUTO_ROUTE_PREFIX, STEERING_PREFIX } from "../src/harness.ts";
 import { renderFileBlock, renderSkillLoadedBlock } from "../src/mentions.ts";
 import { SessionMetadataStore } from "../src/metadata.ts";
 import {
@@ -507,6 +507,78 @@ test("rewindSession: parseable non-turn records are tolerated and preserved in k
     const kept = new SessionStore(file).load();
     assert.deepEqual(kept, events.slice(0, 2));
     assert.equal((kept[1] as unknown as Record<string, unknown>).extra, "kept");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --------------------------------------------------------------------------- //
+// the auto-mode routing marker is generated context, never an operator turn
+// ---------------------------------------------------------------------------
+
+function autoRouteEvent(seq: number, route = "solo", reason = "knowledge is enough"): Message {
+  return createMessage(seq, "user", "senior", "message", {
+    text: `${AUTO_ROUTE_PREFIX}${route} — ${reason}`,
+  });
+}
+
+/** One solo turn: task + route marker + decision (dense within the turn). */
+function soloTurn(startSeq: number, task: string): Message[] {
+  return [
+    createMessage(startSeq, "user", "senior", "message", { text: task }),
+    autoRouteEvent(startSeq + 1),
+    createMessage(startSeq + 2, "senior", "user", "decision", { decision: "solo final" }),
+  ];
+}
+
+test("findOperatorTurns: the [[AUTO ROUTE]] marker is not an operator turn", () => {
+  const events = seqd([
+    ...soloTurn(1, "first solo task"),
+    ...turn(4, "second consult task"),
+  ]);
+  const turns = findOperatorTurns(events);
+  assert.deepEqual(turns.map((turn) => turn.text), ["first solo task", "second consult task"]);
+  assert.deepEqual(turns.map((turn) => turn.index), [0, 3]);
+});
+
+test("computeRewindCut: rewinding a solo task removes task+marker+decision together", () => {
+  const events = seqd([...soloTurn(1, "first solo task"), ...soloTurn(4, "second solo task")]);
+  const cut = computeRewindCut(events, 1);
+  assert.equal(cut.turns, 1);
+  assert.equal(cut.cutIndex, 3, "the cut lands on the second task, not on its marker");
+  assert.equal(cut.removedCount, 3);
+  assert.deepEqual(events.slice(0, cut.cutIndex).map((event) => event.kind), [
+    "message", "message", "decision",
+  ]);
+});
+
+test("computeRewindCut: a marker between turns never inflates the turn count", () => {
+  const events = seqd([
+    ...turn(1, "consult task"),
+    ...soloTurn(6, "solo task"),
+  ]);
+  assert.equal(findOperatorTurns(events).length, 2);
+  const cut = computeRewindCut(events, 2);
+  assert.equal(cut.cutIndex, 0);
+  assert.equal(cut.removedCount, events.length);
+});
+
+test("rewindSession: a persisted solo session rewinds without a dangling marker", () => {
+  const dir = tmpdir();
+  try {
+    const file = path.join(dir, "solo.jsonl");
+    const events = seqd([...soloTurn(1, "first solo task"), ...soloTurn(4, "second solo task")]);
+    fs.writeFileSync(file, events.map((event) => JSON.stringify(event)).join("\n") + "\n", "utf-8");
+    const result = rewindSession(new SessionStore(file), 1);
+    assert.equal(result.rewritten, true);
+    const kept = new SessionStore(file).loadStrict();
+    assert.equal(kept.length, 3);
+    assert.equal(kept[0]!.payload.text, "first solo task");
+    assert.ok(String(kept[1]!.payload.text).startsWith(AUTO_ROUTE_PREFIX));
+    assert.equal(kept[2]!.kind, "decision");
+    // Resume over the kept prefix stays dense and valid.
+    const restored = restoreContext(new SessionStore(file));
+    assert.deepEqual(restored.events.map((event) => event.seq), [1, 2, 3]);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

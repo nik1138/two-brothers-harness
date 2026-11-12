@@ -147,22 +147,22 @@ export function typedCommandNotice(resolution: TypedCommandResolution | null): s
 
 /** How a typed `/mode` argument is handled. */
 export type ModeArgumentResolution =
-  | { kind: 'apply'; mode: 'consult' | 'work' }
+  | { kind: 'apply'; mode: 'consult' | 'work' | 'auto' }
   | { kind: 'open' }
   | { kind: 'invalid' }
 
 /** Usage line for the `/mode` action. */
-export const MODE_COMMAND_USAGE = '/mode [consult|work]'
+export const MODE_COMMAND_USAGE = '/mode [consult|work|auto]'
 
 /**
- * `/mode` with no argument opens the mode control; a valid `consult`/`work`
- * argument applies it directly; anything else is a usage error (never applied,
- * never submitted).
+ * `/mode` with no argument opens the mode control; a valid `consult`/`work`/
+ * `auto` argument applies it directly; anything else is a usage error (never
+ * applied, never submitted).
  */
 export function resolveModeCommandArg(args: unknown): ModeArgumentResolution {
   const value = typeof args === 'string' ? args.trim().toLowerCase() : ''
   if (!value) return { kind: 'open' }
-  if (value === 'consult' || value === 'work') return { kind: 'apply', mode: value }
+  if (value === 'consult' || value === 'work' || value === 'auto') return { kind: 'apply', mode: value }
   return { kind: 'invalid' }
 }
 

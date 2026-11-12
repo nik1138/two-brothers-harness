@@ -2132,7 +2132,7 @@ async function doChat(
         `  ${style.paint("accent", "/commands")}      list built-in and discovered slash commands\n` +
         `  ${style.paint("accent", "/config")}        resolved provider/model/base-url per role\n` +
         `  ${style.paint("accent", "/help")}, ${style.paint("accent", "/h")}      this list\n` +
-        `  ${style.paint("accent", "/mode")} [consult|work]  show or set the cooperation mode for following turns\n` +
+        `  ${style.paint("accent", "/mode")} [consult|work|auto]  show or set the cooperation mode for following turns\n` +
         `  ${style.paint("accent", "/exit")}, ${style.paint("accent", "/quit")}   leave (empty line, exit, quit, q also work)\n` +
         `${style.paint("strong", "built-in commands:")}\n` +
         baseCommandListLines(style).join("\n") +
@@ -2259,8 +2259,8 @@ async function doChat(
           io.log(`mode: ${replMode}`);
           return;
         }
-        if (next !== "consult" && next !== "work") {
-          io.error("usage: /mode [consult|work]");
+        if (next !== "consult" && next !== "work" && next !== "auto") {
+          io.error("usage: /mode [consult|work|auto]");
           return;
         }
         replMode = next;
