@@ -1771,7 +1771,15 @@ Tests: `tests/autoroute.test.ts` (31), `tests/solo.test.ts` (24),
   the denial cap stay shared with the brothers. Child writes land in the
   run-scoped undo record through a shared capture seam, the child transcript
   carries bounded approval rows (`pending` → `allowed`/`denied`/`cancelled`),
-  and the web approval card, tree and child drawer name the helper. The child
+  and the web approval card, tree and child drawer name the helper.
+  **Slice A1 (operator child interrupt) shipped 2026-11-13 for `serve`/web:**
+  each helper runs on its own `AbortController` composed with the parent run
+  signal, so `POST /api/subagents/{id}/interrupt` and the drawer-only **Stop
+  helper** cancel exactly one helper without touching the parent run (a parked
+  child approval is withdrawn as `deny`/`interrupted`); the terminal event and
+  the child log's `end` row carry the additive `cancelled_by`
+  (`operator`/`parent_run`/`restart`), and a log a crash left without an `end`
+  row is reconciled to `cancelled`/`restart` at the next `serve` startup. The child
   still cannot recurse or receive follow-ups. Remaining phases: `send_message` /
   `interrupt_agent` / `list_agents` controls (in progress), async
   completion/wake (the parent currently waits for the bounded report), a TUI
