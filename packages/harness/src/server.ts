@@ -337,7 +337,12 @@ import {
 import { discoverSkills, type SkillCatalog } from "./skills.ts";
 import { SpillStore } from "./spill.ts";
 import { RunApprovalBroker, RuntimeEventStore } from "./runevents.ts";
-import { SubagentStore } from "./subagent.ts";
+import {
+  isSubagentId,
+  SubagentStore,
+  type SubagentControlHandle,
+  type SubagentControlSink,
+} from "./subagent.ts";
 import {
   ACTIVE_STATES,
   STEERABLE_STATES,
@@ -916,6 +921,12 @@ export interface ServerState {
   settingsStore: SettingsStore;
   runtimeEvents: RuntimeEventStore;
   subagents: SubagentStore;
+  /**
+   * Live child controls for `POST /api/subagents/{id}/interrupt`: the harness
+   * registers a handle when a child spawns and releases it when it settles, so
+   * the map holds only children that can still be interrupted.
+   */
+  childControls: Map<string, SubagentControlHandle>;
   runs: RunManager;
   plugins: PluginManager;
   /** Resolves once the startup plugin load finishes (fail-soft by design). */
@@ -1115,6 +1126,33 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   // Helper transcripts live in a reserved directory, never in the
   // session list. The parent's runtime sidecar carries the live tree events.
   const subagents = new SubagentStore(path.join(sessionsDir, "subagents"));
+  // Live child controls (operator interrupt): the harness registers on spawn
+  // and releases on settle. An unregistered id is a 404; a recorded but
+  // settled child is an idempotent `already_finished`.
+  const childControls = new Map<string, SubagentControlHandle>();
+  const subagentControls: SubagentControlSink = {
+    register(handle) {
+      childControls.set(handle.id, handle);
+    },
+    release(id) {
+      childControls.delete(id);
+    },
+  };
+  // A crash can leave a child log without its terminal row. Reconcile once,
+  // after the single-writer lock (acquired above) and before serving, so no
+  // phantom "running" helper survives a restart. Idempotent, bounded to the
+  // same 200-file scan as `list`, per-file fail-soft; a graceful shutdown wrote
+  // every end row, so the normal case appends nothing.
+  try {
+    const reconciled = subagents.reconcileOrphans();
+    if (reconciled > 0) {
+      console.warn(
+        `[two-brothers] reconciled ${reconciled} orphaned helper log(s) to cancelled`,
+      );
+    }
+  } catch (exc) {
+    console.warn(`[two-brothers] helper log reconciliation skipped: ${errorDetail(exc)}`);
+  }
   // Run-scoped workspace edit undo (wave 23): one persisted, content-addressed
   // store for every workspace-bound run. It is a session side artifact (never
   // a protocol/session record); the store creates its directories lazily.
@@ -1163,6 +1201,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     settingsStore,
     runtimeEvents,
     subagents,
+    childControls,
     runs,
     plugins,
     pluginsReady,
@@ -1854,6 +1893,8 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       subagents: {
         store: state.subagents,
         parentSession: name,
+        controls: subagentControls,
+        runId: runIdOf?.() ?? null,
         ...(subagentEndpoint ? { endpoint: subagentEndpoint } : {}),
       },
       ...(toolScopes ? { toolScopes } : {}),
@@ -2315,6 +2356,32 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       const detail = state.subagents.get(ctx.params.id);
       if (detail === null) throw new HttpError(404, "not found");
       return { subagent: detail };
+    }),
+  );
+
+  /**
+   * Operator interrupt for one live helper (A1). The id is the child id, not a
+   * run id: the drawer can be opened from a reloaded tree that knows no run id.
+   * 200 `{subagent_id, status}` — "interrupting" for a live child,
+   * "already_finished" for a settled one (idempotent); 404 for an invalid or
+   * entirely unknown id. It aborts the child only; the parent run continues.
+   */
+  routes.push(
+    compileRoute("POST", "/api/subagents/{id}/interrupt", (ctx) => {
+      const id = ctx.params.id;
+      if (!isSubagentId(id)) throw new HttpError(404, "not found");
+      const control = state.childControls.get(id);
+      if (control !== undefined) {
+        const interrupted = control.interrupt("operator");
+        return {
+          subagent_id: id,
+          status: interrupted ? "interrupting" : "already_finished",
+        };
+      }
+      // No live control: only a durable child log makes this a recognized but
+      // settled child. An id the store never saw stays an honest 404.
+      if (state.subagents.get(id) === null) throw new HttpError(404, "not found");
+      return { subagent_id: id, status: "already_finished" };
     }),
   );
 

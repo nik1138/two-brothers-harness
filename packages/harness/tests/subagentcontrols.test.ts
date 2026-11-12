@@ -9,11 +9,13 @@
  */
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
+import * as http from "node:http";
+import type { AddressInfo } from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 
-import { resolveConfig } from "../src/config.ts";
+import { resolveConfig, type Config } from "../src/config.ts";
 import { SharedContext, type ChatMessage } from "../src/context.ts";
 import { TwoBrothersHarness } from "../src/harness.ts";
 import {
@@ -32,6 +34,11 @@ import {
   type Tool,
 } from "../src/provider.ts";
 import { RunApprovalBroker } from "../src/runevents.ts";
+import {
+  createServer,
+  type ServerHandle,
+  type ServerOptions,
+} from "../src/server.ts";
 import { SessionStore } from "../src/session.ts";
 import {
   SUBAGENT_TOOL_NAME,
@@ -668,5 +675,377 @@ test("reconcileOrphans tolerates a torn tail and skips an unreadable entry fail-
     assert.equal(logRows(store, valid).filter((row) => row.type === "end").length, 1);
   } finally {
     tmp.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// serve: operator interrupt route + startup reconciliation
+// ---------------------------------------------------------------------------
+
+interface RunningServer {
+  base: string;
+  handle: ServerHandle;
+  dir: string;
+  sessionsDir: string;
+  close(): Promise<void>;
+}
+
+async function startServer(options: ServerOptions = {}): Promise<RunningServer> {
+  const tmp = tmpdir("tb-subcontrols-serve-");
+  const sessionsDir = options.sessionsDir ? path.resolve(options.sessionsDir) : tmp.root;
+  const effective: ServerOptions = {
+    configFactory: (): Config => mockConfig(),
+    webDist: null,
+    ...options,
+    sessionsDir,
+  };
+  const handle = createServer(effective);
+  const server = await handle.listen("127.0.0.1", 0);
+  const port = (server.address() as AddressInfo).port;
+  return {
+    base: `http://127.0.0.1:${port}`,
+    handle,
+    dir: sessionsDir,
+    sessionsDir,
+    close: async () => {
+      await handle.close();
+      tmp.cleanup();
+    },
+  };
+}
+
+async function api(
+  base: string,
+  method: string,
+  route: string,
+  body?: unknown,
+): Promise<{ status: number; body: AnyRecord }> {
+  const init: RequestInit = { method };
+  if (body !== undefined) {
+    init.headers = { "Content-Type": "application/json" };
+    init.body = JSON.stringify(body);
+  }
+  const res = await fetch(base + route, init);
+  const text = await res.text();
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = text;
+  }
+  return { status: res.status, body: parsed as AnyRecord };
+}
+
+const post = (base: string, route: string, body?: unknown) =>
+  api(base, "POST", route, body);
+const get = (base: string, route: string) => api(base, "GET", route);
+
+/** SSE reader: collects `data:` events until `stop` holds or the stream ends. */
+function sseEvents(
+  base: string,
+  route: string,
+  stop: (events: AnyRecord[]) => boolean = () => false,
+  timeoutMs = 20000,
+): Promise<AnyRecord[]> {
+  return new Promise((resolve, reject) => {
+    const events: AnyRecord[] = [];
+    const req = http.get(base + route, (res) => {
+      if (res.statusCode !== 200) {
+        reject(new Error(`SSE GET ${route} -> HTTP ${res.statusCode}`));
+        res.resume();
+        return;
+      }
+      let buf = "";
+      let done = false;
+      const finish = (): void => {
+        if (!done) {
+          done = true;
+          resolve(events);
+        }
+      };
+      res.on("data", (chunk: Buffer) => {
+        buf += chunk.toString("utf-8");
+        let idx: number;
+        while ((idx = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, idx);
+          buf = buf.slice(idx + 1);
+          if (line.startsWith("data: ")) {
+            events.push(JSON.parse(line.slice(6)) as AnyRecord);
+            if (stop(events)) {
+              res.destroy();
+              finish();
+              return;
+            }
+          }
+        }
+      });
+      res.on("end", finish);
+      res.on("error", finish);
+    });
+    req.on("error", (exc) => {
+      if (events.length > 0 && stop(events)) resolve(events);
+      else reject(exc);
+    });
+    setTimeout(() => {
+      req.destroy();
+      reject(new Error(`SSE ${route} timed out; last events: ${JSON.stringify(events.slice(-3))}`));
+    }, timeoutMs).unref();
+  });
+}
+
+function runUntilEnd(base: string, runId: string, after = 0): Promise<AnyRecord[]> {
+  return sseEvents(base, `/api/runs/${runId}/events?after=${after}`, (events) =>
+    events.some((event) => event.type === "run_end"),
+  );
+}
+
+/**
+ * A scripted OpenAI-compatible helper route: the first call asks for one
+ * workspace write (which parks), the call after its tool result reports. The
+ * interrupt test stops the child at the parked write, so the second call never
+ * happens there.
+ */
+async function startHelperModel(): Promise<{ baseUrl: string; close(): Promise<void> }> {
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      let body: Record<string, any> = {};
+      try {
+        body = JSON.parse(Buffer.concat(chunks).toString("utf-8")) as Record<string, any>;
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "invalid JSON" } }));
+        return;
+      }
+      const messages = Array.isArray(body.messages) ? body.messages : [];
+      const hasToolResult = messages.some(
+        (message: Record<string, unknown>) => message.role === "tool",
+      );
+      const toolCalls = hasToolResult
+        ? []
+        : [
+            {
+              id: "helper-call-1",
+              type: "function",
+              function: {
+                name: "workspace_write_file",
+                arguments: JSON.stringify({
+                  path: "e2e-helper.txt",
+                  content: "hello from the helper\n",
+                }),
+              },
+            },
+          ];
+      const content = hasToolResult ? "Wrote e2e-helper.txt." : "";
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          id: "chatcmpl-helper",
+          object: "chat.completion",
+          created: Math.floor(Date.now() / 1000),
+          model: String(body.model ?? "e2e-helper"),
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content, tool_calls: toolCalls },
+              finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop",
+            },
+          ],
+          usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+        }),
+      );
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const port = (server.address() as AddressInfo).port;
+  return {
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
+async function configureHelper(
+  srv: RunningServer,
+  model: { baseUrl: string },
+): Promise<void> {
+  const put = await api(srv.base, "PUT", "/api/settings", {
+    subagent: {
+      provider: "openai",
+      base_url: model.baseUrl,
+      api_key: "helper-test-key",
+      model: "e2e-helper",
+    },
+  });
+  assert.equal(put.status, 200);
+}
+
+async function registerWorkspace(srv: RunningServer, root: string): Promise<string> {
+  const ws = await post(srv.base, "/api/workspaces", { path: root, name: "e2e-helper" });
+  assert.equal(ws.status, 201);
+  return String(ws.body.id);
+}
+
+async function startRun(
+  srv: RunningServer,
+  workspaceId: string,
+  session: string,
+): Promise<string> {
+  const started = await post(srv.base, "/api/runs", {
+    task: "Do the scripted E2E task",
+    mode: "consult",
+    provider: "mock",
+    workspace_id: workspaceId,
+    session,
+  });
+  assert.equal(started.status, 202);
+  return String(started.body.run_id);
+}
+
+test("serve: interrupt cancels only the helper, the parent run still completes", async () => {
+  const model = await startHelperModel();
+  const srv = await startServer({
+    providerOverrides: {
+      senior: new RecordingSenior([
+        { tool: SUBAGENT_TOOL_NAME, args: { task: "Write the helper note." } },
+      ]),
+      junior: new MockProvider(),
+    },
+  });
+  const wsDir = tmpdir("tb-subcontrols-serve-ws-");
+  try {
+    await configureHelper(srv, model);
+    const wsId = await registerWorkspace(srv, wsDir.root);
+    const runId = await startRun(srv, wsId, "controls-interrupt");
+    const events = await sseEvents(
+      srv.base,
+      `/api/runs/${runId}/events?after=0`,
+      (all) => all.some((event) => event.type === "approval_requested"),
+      15000,
+    );
+    const requested = events.find((event) => event.type === "approval_requested") as AnyRecord;
+    assert.ok(requested);
+    const childId = String(requested.subagent_id);
+    assert.match(childId, /^sub-[a-f0-9]{8,32}$/);
+
+    const first = await post(srv.base, `/api/subagents/${childId}/interrupt`);
+    assert.equal(first.status, 200);
+    assert.equal(first.body.status, "interrupting");
+
+    const rest = await runUntilEnd(srv.base, runId, events.length);
+    const all = [...events, ...rest];
+    assert.equal(rest.at(-1)?.type, "run_end");
+    // R1 over HTTP: stopping the helper never stops the parent run.
+    assert.equal(rest.at(-1)?.status, "completed");
+    const completedIndex = all.findIndex((event) => event.type === "subagent_completed");
+    assert.ok(completedIndex >= 0);
+    const completed = all[completedIndex] as AnyRecord;
+    assert.equal(completed.status, "cancelled");
+    assert.equal(completed.cancelled_by, "operator");
+    assert.ok(completedIndex < all.findIndex((event) => event.type === "run_end"));
+    const resolved = all.find(
+      (event) =>
+        event.type === "approval_resolved" && event.approval_id === requested.approval_id,
+    ) as AnyRecord;
+    assert.equal(resolved.reason, "interrupted");
+    assert.equal(resolved.subagent_id, childId);
+    assert.equal(fs.existsSync(path.join(wsDir.root, "e2e-helper.txt")), false);
+
+    // The drawer's reload reflects the durable terminal row.
+    const detail = await get(srv.base, `/api/subagents/${childId}`);
+    assert.equal(detail.status, 200);
+    assert.equal(detail.body.subagent.status, "cancelled");
+    assert.equal(detail.body.subagent.error, "interrupted by the operator");
+
+    // Idempotent for a settled child; 404 for an unknown or malformed id.
+    const second = await post(srv.base, `/api/subagents/${childId}/interrupt`);
+    assert.equal(second.status, 200);
+    assert.equal(second.body.status, "already_finished");
+    const unknown = await post(srv.base, "/api/subagents/sub-0000000000000000/interrupt");
+    assert.equal(unknown.status, 404);
+    const malformed = await post(srv.base, "/api/subagents/not-an-id/interrupt");
+    assert.equal(malformed.status, 404);
+
+    const pending = await get(srv.base, `/api/runs/${runId}/approvals`);
+    assert.deepEqual(pending.body.pending, []);
+
+    // The sidecar (what a reload replays) carries the cause too.
+    const sidecar = path.join(srv.dir, "runtime", "controls-interrupt.jsonl.events.jsonl");
+    const persisted = fs
+      .readFileSync(sidecar, "utf-8")
+      .split(/\r?\n/)
+      .filter((line) => line.trim() !== "")
+      .map((line) => JSON.parse(line) as AnyRecord);
+    assert.equal(
+      persisted.find((event) => event.type === "subagent_completed")?.cancelled_by,
+      "operator",
+    );
+  } finally {
+    await srv.close();
+    await model.close();
+    wsDir.cleanup();
+  }
+});
+
+test("serve: startup reconciliation turns an orphaned child log into cancelled/restart", async () => {
+  const srv = await startServer();
+  const srvDir = srv.sessionsDir;
+  try {
+    const id = "sub-1234567890abcdef";
+    const subdir = path.join(srvDir, "subagents");
+    fs.mkdirSync(subdir, { recursive: true });
+    const logFile = path.join(subdir, `${id}.jsonl`);
+    fs.writeFileSync(
+      logFile,
+      [
+        {
+          type: "meta",
+          id,
+          parent_session: "orphan-parent.jsonl",
+          label: "Orphaned helper",
+          role: "junior",
+          model: "m",
+          task: "finish before the crash",
+          started_at: 1,
+        },
+        { type: "message", role: "user", text: "finish before the crash", at: 2 },
+      ]
+        .map((row) => JSON.stringify(row))
+        .join("\n") + "\n",
+      "utf-8",
+    );
+    await srv.handle.close();
+
+    const second = await startServer({ sessionsDir: srvDir, webDist: null });
+    try {
+      const detail = await get(second.base, `/api/subagents/${id}`);
+      assert.equal(detail.status, 200);
+      assert.equal(detail.body.subagent.status, "cancelled");
+      assert.equal(
+        detail.body.subagent.error,
+        "backend restarted before the helper finished",
+      );
+      const rows = logRows(new SubagentStore(subdir), id);
+      const ends = rows.filter((row) => row.type === "end");
+      assert.equal(ends.length, 1);
+      assert.equal(ends[0]?.cancelled_by, "restart");
+    } finally {
+      await second.handle.close();
+    }
+
+    // Idempotent: a third start appends nothing to the already-reconciled log.
+    const third = await startServer({ sessionsDir: srvDir, webDist: null });
+    try {
+      const rows = logRows(new SubagentStore(subdir), id);
+      assert.equal(rows.filter((row) => row.type === "end").length, 1);
+    } finally {
+      await third.close();
+    }
+  } finally {
+    try {
+      await srv.close();
+    } catch {
+      // the handle was already closed above; cleanup is still owed
+    }
   }
 });
