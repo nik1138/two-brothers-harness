@@ -34,8 +34,10 @@ import {
   APPROVAL_DETAIL_MAX_CHARS,
   PermissionDenied,
   PermissionManager,
+  type ApprovalChildIdentity,
   type ApprovalDetail,
   type ApprovalRequest,
+  type ChildApprovalObserver,
 } from "./permissions.ts";
 import { ShellRunner } from "./shell.ts";
 import { boundOutput, resultSize } from "./output.ts";
@@ -878,6 +880,16 @@ export interface WorkspaceOptions {
   readonly onCaptureDiagnostic?: ((message: string) => void) | null;
 }
 
+/**
+ * The undo-capture hook shared by a parent `Workspace` and every child view of
+ * it. Both read the same object, so a recorder installed (or replaced) after a
+ * child view was created still captures that child's mutations.
+ */
+export interface WorkspaceCaptureSeam {
+  recorder: WorkspaceMutationRecorder | null;
+  diagnostic: ((line: string) => void) | null;
+}
+
 /** One captured side of a mutation is skipped beyond this size (the undo store's bound). */
 export const MAX_MUTATION_CAPTURE_BYTES = 2 * 1024 * 1024;
 
@@ -1140,8 +1152,11 @@ export class Workspace {
   readonly permissions: PermissionManager;
   readonly shell: ShellRunner;
 
-  private mutationRecorder: WorkspaceMutationRecorder | null;
-  private captureDiagnosticSink: ((message: string) => void) | null;
+  /**
+   * Shared capture seam: child views hold this same object, so the server can
+   * install the run's undo recorder before or after a child view exists.
+   */
+  private readonly captureSeam: WorkspaceCaptureSeam;
 
   constructor(
     root: string,
@@ -1159,20 +1174,48 @@ export class Workspace {
     this.root = fs.realpathSync(rootPath);
     this.permissions = permissions ?? new PermissionManager();
     this.shell = shell ?? new ShellRunner({ cwd: this.root });
-    this.mutationRecorder = options.mutationRecorder ?? null;
-    this.captureDiagnosticSink = options.onCaptureDiagnostic ?? null;
+    this.captureSeam = {
+      recorder: options.mutationRecorder ?? null,
+      diagnostic: options.onCaptureDiagnostic ?? null,
+    };
+  }
+
+  /**
+   * A child (subagent) view of this workspace: the same confined root and
+   * shell runner, with a `PermissionManager` view that snapshots the run's
+   * policy and tags every parked approval with the child's identity, and with
+   * the parent's capture seam shared by reference (so child writes land in the
+   * same run-scoped undo record).
+   *
+   * Confinement, sensitive-path refusal and the per-file mutation queue are
+   * inherited unchanged: they live in `resolve`/`withFileMutationQueue` and are
+   * keyed by the same canonical root.
+   */
+  childView(child: ApprovalChildIdentity, observer?: ChildApprovalObserver): Workspace {
+    return new Workspace(
+      this.root,
+      this.permissions.childView(child, observer),
+      this.shell, // same shell runner/cwd
+      {
+        // Closures read the SHARED seam, so a recorder installed by the server
+        // before harness.run also reaches children spawned later.
+        mutationRecorder: (record) => this.captureSeam.recorder?.(record),
+        onCaptureDiagnostic: (line) => this.captureSeam.diagnostic?.(line),
+      },
+    );
   }
 
   /**
    * Install or clear the run-scoped undo capture hook (tests and the server's
    * per-run wiring). Passing no diagnostic sink keeps the current one.
+   * Child views share the seam, so this also applies to them.
    */
   setMutationRecorder(
     recorder: WorkspaceMutationRecorder | null,
     onDiagnostic?: ((message: string) => void) | null,
   ): void {
-    this.mutationRecorder = recorder;
-    if (onDiagnostic !== undefined) this.captureDiagnosticSink = onDiagnostic;
+    this.captureSeam.recorder = recorder;
+    if (onDiagnostic !== undefined) this.captureSeam.diagnostic = onDiagnostic;
   }
 
   // -- path handling ---------------------------------------------------------
@@ -1289,7 +1332,7 @@ export class Workspace {
     pre: WorkspaceMutationImage,
     post: WorkspaceMutationImage,
   ): void {
-    const recorder = this.mutationRecorder;
+    const recorder = this.captureSeam.recorder;
     if (recorder === null) return;
     try {
       recorder({ action, path: this.display(target), root: this.root, pre, post });
@@ -1302,7 +1345,7 @@ export class Workspace {
 
   /** One bounded diagnostic per failed capture; a broken sink is ignored. */
   private captureDiagnostic(line: string): void {
-    const sink = this.captureDiagnosticSink;
+    const sink = this.captureSeam.diagnostic;
     if (sink === null) return;
     try {
       sink(line);
@@ -1553,7 +1596,7 @@ export class Workspace {
           "",
           diffDetail("write", this.display(target), oldText ?? "", content),
         );
-        const pre = this.mutationRecorder === null ? null : this.captureImage(target);
+        const pre = this.captureSeam.recorder === null ? null : this.captureImage(target);
         fs.mkdirSync(path.dirname(target), { recursive: true });
         fs.writeFileSync(target, content, "utf-8");
         const result = this.result(tool, target, "ok");
@@ -1606,7 +1649,7 @@ export class Workspace {
           "",
           diffDetail("edit", this.display(target), raw, updated),
         );
-        const pre = this.mutationRecorder === null ? null : this.captureImage(target);
+        const pre = this.captureSeam.recorder === null ? null : this.captureImage(target);
         fs.writeFileSync(target, updated, "utf-8");
         const result = this.result(tool, target, "ok", {
           replaced: plan.replaced,
@@ -1652,7 +1695,7 @@ export class Workspace {
           // unreadable stat/read: the approval still names the target
         }
         await this.authorize(Action.DELETE, target, "", DELETE_APPROVAL_REASON, detail);
-        const pre = this.mutationRecorder === null ? null : this.captureImage(target);
+        const pre = this.captureSeam.recorder === null ? null : this.captureImage(target);
         fs.unlinkSync(target);
         const result = this.result(tool, target, "ok", { deleted: true });
         if (pre !== null) this.recordMutation("delete", target, pre, this.captureImage(target));

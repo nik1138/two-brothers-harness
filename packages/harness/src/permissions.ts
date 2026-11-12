@@ -363,6 +363,33 @@ export interface ApprovalRequest {
   context?: Record<string, unknown>;
   /** Additive bounded preview (diff/command) for the operator UI. */
   detail?: ApprovalDetail;
+  /**
+   * Additive: the isolated helper (subagent) whose tool call asked, when the
+   * request comes from a child. Display/routing identity only — it is never
+   * part of the `(action, target)` pair a session allow persists, and an older
+   * consumer ignores it.
+   */
+  subagent_id?: string;
+  /** Additive: the helper's bounded label, for the approval card. */
+  subagent_label?: string;
+}
+
+/**
+ * The identity a child `PermissionManager` view is tagged with. The parent
+ * approval broker receives it on every parked child request so the operator
+ * sees which helper asked.
+ */
+export interface ApprovalChildIdentity {
+  id: string;
+  label: string;
+}
+
+/** Observer for one child view's approval lifecycle (the child store rows). */
+export interface ChildApprovalObserver {
+  /** Called before the parent broker is consulted (the pending child row). */
+  onRequest?(request: ApprovalRequest): void;
+  /** Called exactly once when the wait settles (allowed/denied/cancelled). */
+  onResolved?(request: ApprovalRequest, decision: Decision): void;
 }
 
 /**
@@ -496,6 +523,57 @@ export class PermissionManager {
     if (decision !== Decision.ASK) return decision;
     if (this.broker === null) return Decision.DENY;
     return normalizeDecision(await this.broker.approve(request));
+  }
+
+  /**
+   * A child (subagent) view of this manager: the same workspace root, but a
+   * **snapshot** of this policy taken now and a tagging broker that forwards
+   * parked requests to this manager's broker with `subagent_id` /
+   * `subagent_label` added.
+   *
+   * Fixed scope: the snapshot copies both policy fields, so a later settings
+   * change or a replacement parent manager cannot widen (or narrow) the child
+   * for its whole life. The tagging broker calls the parent **broker**
+   * directly, not `this.check`: the parent policy was already applied once at
+   * spawn, and a custom manager overriding `check` with extra logic
+   * deliberately does not run for child requests — it should supply its own
+   * broker instead.
+   *
+   * Fail closed: a parent with no broker yields a child with no broker, so
+   * `ASK` resolves to `DENY` exactly like a parent tool on a broker-less
+   * surface (the sync run route), and the observer is never called.
+   */
+  childView(child: ApprovalChildIdentity, observer?: ChildApprovalObserver): PermissionManager {
+    const policy = this.policy;
+    // Snapshot BOTH fields: a legacy boolean-constructed policy has
+    // autoAllowRead=false (reads ask), which must not be lost.
+    const snapshot = policy.autoAllowRead
+      ? new PermissionPolicy(policy.mode)
+      : new PermissionPolicy(false);
+    const parentBroker = this.broker;
+    if (parentBroker === null) {
+      return new PermissionManager(snapshot, null);
+    }
+    const taggingBroker: ApprovalBroker = {
+      async approve(request) {
+        const tagged: ApprovalRequest = {
+          ...request,
+          subagent_id: child.id,
+          subagent_label: child.label,
+        };
+        observer?.onRequest?.(tagged);
+        let decision: Decision = Decision.DENY;
+        try {
+          decision = normalizeDecision(await parentBroker.approve(tagged));
+          return decision;
+        } finally {
+          // Runs even when the parent broker throws or the wait is cancelled,
+          // so the child transcript keeps an honest outcome row.
+          observer?.onResolved?.(tagged, decision);
+        }
+      },
+    };
+    return new PermissionManager(snapshot, taggingBroker);
   }
 
   /** Raise PermissionDenied unless the action is allowed. */
