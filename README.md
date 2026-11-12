@@ -90,8 +90,9 @@ server then serves (the npm tarball ships its own copy of that build).
 - **Payload repair + few-shot exemplars.** Model output goes through a
   tolerant parse, a strict schema check, exactly one repair re-ask with a
   byte-stable `[[REPAIR_REQUEST]]` turn, and finally a sanitize-plus-defaults
-  fallback: the boundary never throws. Each structured node's prompt carries
-  one tiny, strict-valid fenced example of its payload kind.
+  fallback: the boundary never throws. Each structured node's request tail
+  carries one tiny, strict-valid fenced example of its payload kind, leaving the
+  system prompt kind-stable for prompt caching.
 - **Plugins v2.** ES-module plugins exposing `register(ctx)`: tools (with an
   optional JSON-Schema argument spec validated at dispatch), typed lifecycle
   hooks (`session_start`, `session_end`, `before_tool_call` — which may rewrite

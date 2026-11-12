@@ -267,9 +267,12 @@ the protocol reference and is not modified by work here either.
    OpenAI-style (bad reply as an assistant turn, repair instruction as a
    user turn). A still-bad reply falls back to sanitize + defaults + one
    "unstructured model reply" warning — the tolerant boundary never throws
-   and `--max-rounds` is untouched. Kind-specific prompt assembly appends
-   one tiny, strict-valid fenced example per kind (`PAYLOAD_EXAMPLES`,
-   `harness.ts`, code only — `shared/prompts.json` stays byte-identical).
+   and `--max-rounds` is untouched. The kind-specific block
+   (`PAYLOAD_EXAMPLES`, `harness.ts`, code only — `shared/prompts.json` stays
+   byte-identical) rides at the tail of the request's last user message via
+   `withReplyFormat`, not in the system prompt, so consult → review → decision
+   keeps one cacheable system prefix. The block starts with
+   `Requested payload: <kind>`, which `e2e/faults.ts` parses first.
    Tests: `tests/payloadrepair.test.ts`. **Relaxed strict parse is shipped
    (same lane, fix 2):** `payloads.ts::relaxedStrictPayload` accepts any JSON
    object in a raw node reply — bare, fenced, prose-wrapped, after a non-JSON

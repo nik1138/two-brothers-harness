@@ -518,22 +518,58 @@ export const PAYLOAD_EXAMPLES: Record<string, Record<string, unknown>> = {
 };
 
 /**
- * The few-shot block appended after the tool sections of a kind-specific
- * system prompt, or "" for a kind without an example (`message`, `verify`).
- * It deliberately carries no `##` heading: the audit trail's section names
- * keep their stable `base` / `Available tools` / `Using tools` entries, and
- * the block is an inline format instruction rather than a prompt section.
+ * Stable marker the few-shot block carries in the request tail. The offline
+ * fault suite uses it to identify the requested node without reading the system
+ * prompt (which is now kind-stable for cache reuse).
  */
-function payloadExampleBlock(kind: string): string {
+export const REPLY_FORMAT_MARKER = "Requested payload:";
+
+/**
+ * The few-shot block for one structured node kind, or "" for a kind without an
+ * example (`message`, `verify`). It rides at the tail of the request's last
+ * user message, not in the system prompt: the system prefix must stay stable
+ * across consult → review → decision so implicit (OpenAI/DeepSeek) and explicit
+ * (Anthropic) prompt caching can reuse it. The marker is intentionally plain
+ * text so the fault suite can parse the kind without relying on the fence.
+ */
+export function replyFormatBlock(kind: string): string {
   const example = PAYLOAD_EXAMPLES[kind];
   if (example === undefined) return "";
   return [
+    `${REPLY_FORMAT_MARKER} ${kind}`,
     "Reply with exactly one fenced json block of this shape, with your own values:",
     "",
     "```json",
     JSON.stringify(example),
     "```",
   ].join("\n");
+}
+
+/**
+ * Append (or replace) the current kind's reply-format block on the last user
+ * message. The input is never mutated: the returned array is a copy when a
+ * change is needed. An existing block for the same kind is a no-op, so callers
+ * can apply this at every provider-call seam without duplicating the fence.
+ * A different earlier block is removed first — the newest kind wins.
+ */
+export function withReplyFormat(messages: ChatMessage[], kind: string): ChatMessage[] {
+  const block = replyFormatBlock(kind);
+  if (block === "") return messages;
+  let index = -1;
+  for (let cursor = messages.length - 1; cursor >= 0; cursor -= 1) {
+    if (messages[cursor]!.role === "user") {
+      index = cursor;
+      break;
+    }
+  }
+  if (index < 0) return messages;
+  const content = messages[index]!.content;
+  if (content.includes(block)) return messages;
+  const markerAt = content.lastIndexOf(`${REPLY_FORMAT_MARKER} `);
+  const base = markerAt >= 0 ? content.slice(0, markerAt).replace(/\s+$/u, "") : content;
+  const next = messages.slice();
+  next[index] = { ...messages[index]!, content: `${base}\n\n${block}` };
+  return next;
 }
 
 export interface AssembledPrompt {
@@ -596,9 +632,13 @@ function renderSkillLoaded(name: string, body: string): string {
  * Append pi-style tool sections to a role's base system prompt. With an empty
  * belt the model is told so explicitly instead of being left to guess; with a
  * belt it gets the exact model-facing names (MCP namespacing already applied
- * by `mcp.ts`) plus the use-these-tools directive. `kind` (when given) is the
- * structured node kind the call answers and appends that kind's few-shot
- * payload example last, so the format sits closest to the reply.
+ * by `mcp.ts`) plus the use-these-tools directive.
+ *
+ * The `kind` argument is kept for API compatibility but no longer changes the
+ * system prompt: the kind-specific few-shot block rides at the tail of the
+ * request's last user message (`withReplyFormat`). That keeps the system
+ * prefix stable across consult → review → decision, which is what provider
+ * prompt caching can actually reuse.
  *
  * `options.skills` + `options.role` append the pi-style `## Available skills`
  * section (shared scope plus the role's own) and the invocation guidance line;
@@ -606,17 +646,16 @@ function renderSkillLoaded(name: string, body: string): string {
  * keeping the prompt byte-identical to the pre-skills assembly.
  *
  * `options.instructions` appends the rendered workspace-instructions block
- * after every other section (including the kind's payload example), so a
- * workspace with no instruction files leaves the prompt bytes unchanged.
+ * after every other section, so a workspace with no instruction files leaves
+ * the prompt bytes unchanged.
  */
 export function assembleSystemPrompt(
   base: string,
   tools: Tool[],
-  kind?: string,
+  _kind?: string,
   options: PromptAssemblyOptions = {},
 ): AssembledPrompt {
   const belt = uniqueBelt(tools);
-  const example = kind === undefined ? "" : payloadExampleBlock(kind);
   const parts = [base];
   const sections = [PROMPT_SECTION_BASE];
   if (belt.length === 0) {
@@ -637,7 +676,6 @@ export function assembleSystemPrompt(
       sections.push(PROMPT_SECTION_SKILLS);
     }
   }
-  if (example) parts.push(example);
   if (options.instructions !== undefined && options.instructions !== "") {
     parts.push(options.instructions);
     sections.push(PROMPT_SECTION_INSTRUCTIONS);
@@ -1225,8 +1263,9 @@ export class TwoBrothersHarness {
    * The assembled system prompt for one role: the base prompt text plus the
    * role's tool sections. `tools` is the belt the call actually offers (empty
    * for a plain text-only call), so the `## Available tools` section always
-   * matches what the request carries. `kind` is the structured node kind the
-   * call answers; when given, its few-shot payload example is appended.
+   * matches what the request carries. `kind` is accepted for compatibility but
+   * deliberately does NOT change this text; the kind's few-shot block rides in
+   * the request tail so the cached system prefix stays stable.
    */
   systemPrompt(role: string, tools: Tool[] = [], kind?: string): string {
     return this.assemblePrompt(role, tools, kind).text;
@@ -1492,7 +1531,10 @@ export class TwoBrothersHarness {
     responseKind: string,
   ): Promise<Record<string, unknown>> {
     const build = (): ChatMessage[] =>
-      state.ctx.renderForRole(role, this.systemPrompt(role, [], responseKind));
+      withReplyFormat(
+        state.ctx.renderForRole(role, this.systemPrompt(role, [], responseKind)),
+        responseKind,
+      );
     return this.askWithMessages(state, role, responseKind, build(), build);
   }
 
@@ -1504,6 +1546,7 @@ export class TwoBrothersHarness {
     rebuild?: () => ChatMessage[],
   ): Promise<Record<string, unknown>> {
     this.checkCancel();
+    messages = withReplyFormat(messages, responseKind);
     let text: string;
     // One reasoning record for this node call (streaming-only; a no-op when
     // token streaming is off or the call produced no thinking deltas).
@@ -1517,7 +1560,7 @@ export class TwoBrothersHarness {
         // pi's overflow recovery: compact once and retry the same node against
         // the compacted context. A second overflow surfaces to the caller.
         if (!(await this.compactAfterOverflow(state))) throw err;
-        const retry = rebuild === undefined ? messages : rebuild();
+        const retry = withReplyFormat(rebuild === undefined ? messages : rebuild(), responseKind);
         this.auditPrompt(state, role, responseKind, retry, []);
         text = await this.providers[role].chat(retry, responseKind, this.options.signal, capture.options);
       }
@@ -1678,7 +1721,7 @@ export class TwoBrothersHarness {
         if (!(err instanceof ProviderContextOverflowError)) throw err;
         if (!(await this.compactAfterOverflow(state))) return null;
         // the repair turn already rides in the shared context; rebuild from it
-        const retry = rebuild === undefined ? repaired : rebuild();
+        const retry = withReplyFormat(rebuild === undefined ? repaired : rebuild(), kind);
         this.auditPrompt(state, role, kind, retry, []);
         return await this.providers[role].chat(retry, kind, this.options.signal, capture.options);
       }
@@ -2204,7 +2247,7 @@ export class TwoBrothersHarness {
       const steered = this.drainSteering(state);
       if (steered.length > 0) {
         repeatGuard?.reset();
-        messages = [...rebuild(), ...messages.slice(2)];
+        messages = withReplyFormat([...rebuild(), ...messages.slice(2)], wireKind);
       }
       let response: ToolChatResponse;
       const capture = this.reasoningCapture(role, auditKind);
@@ -2217,7 +2260,7 @@ export class TwoBrothersHarness {
         } catch (err) {
           if (!(err instanceof ProviderContextOverflowError)) throw err;
           if (!(await this.compactAfterOverflow(state))) throw err;
-          messages = rebuild();
+          messages = withReplyFormat(rebuild(), wireKind);
           this.auditPrompt(state, role, auditKind, messages, tools);
           response = await chatWithTools(messages, tools, callOptions);
         }
@@ -2317,7 +2360,10 @@ export class TwoBrothersHarness {
     tools: Tool[],
   ): Promise<{ payload: Record<string, unknown>; evidence: string[] }> {
     const build = (): ChatMessage[] =>
-      state.ctx.renderForRole(role, this.systemPrompt(role, tools, kind));
+      withReplyFormat(
+        state.ctx.renderForRole(role, this.systemPrompt(role, tools, kind)),
+        kind,
+      );
     const { evidence, text, messages } = await this.toolLoop(
       state,
       role,
@@ -2381,12 +2427,21 @@ export class TwoBrothersHarness {
     state: CooperationState,
     tools: Tool[],
   ): Promise<Record<string, unknown>> {
-    const build = (): ChatMessage[] => [
-      { role: "system", content: this.systemPrompt("junior", tools, "deliverable") },
-      // the transcript render stays byte-stable; the delegation directive rides
-      // after it in this request only (the VERIFY_INSTRUCTION pattern)
-      { role: "user", content: state.ctx.renderTranscript() + DELEGATION_DIRECTIVE },
-    ];
+    const build = (): ChatMessage[] => {
+      const messages = withReplyFormat(
+        [
+          { role: "system", content: this.systemPrompt("junior", tools, "deliverable") },
+          { role: "user", content: state.ctx.renderTranscript() },
+        ],
+        "deliverable",
+      );
+      // The transcript render stays byte-stable; the format block sits before
+      // the delegation directive so the request still ends with the directive
+      // (the VERIFY_INSTRUCTION pattern).
+      const last = messages[messages.length - 1]!;
+      messages[messages.length - 1] = { ...last, content: last.content + DELEGATION_DIRECTIVE };
+      return messages;
+    };
     const { evidence, text, messages } = await this.toolLoop(
       state,
       "junior",
@@ -2443,6 +2498,7 @@ export class TwoBrothersHarness {
       build(),
       MAX_SENIOR_VERIFY_ITERATIONS,
       build,
+      "verify",
     );
     state.verifyEvidence = evidence;
     state.verifySummary = text ? clipText(text, CLIP_EVIDENCE_CHARS) : "";
@@ -2465,7 +2521,7 @@ export class TwoBrothersHarness {
       const build = (): ChatMessage[] => {
         const messages = state.ctx.renderForRole("senior", this.systemPrompt("senior", [], "review"));
         messages[messages.length - 1]!.content += block.join("\n");
-        return messages;
+        return withReplyFormat(messages, "review");
       };
       payload = await this.askWithMessages(state, "senior", "review", build(), build);
     } else if (state.mode !== "work") {

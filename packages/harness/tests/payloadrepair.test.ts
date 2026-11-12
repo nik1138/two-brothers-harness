@@ -24,8 +24,11 @@ import { SharedContext, type ChatMessage } from "../src/context.ts";
 import {
   PROMPT_SECTION_BASE,
   PROMPT_SECTION_TOOLS,
+  REPLY_FORMAT_MARKER,
   TwoBrothersHarness,
   assembleSystemPrompt,
+  replyFormatBlock,
+  withReplyFormat,
 } from "../src/harness.ts";
 import {
   REPAIR_ISSUE_CHARS,
@@ -350,7 +353,7 @@ function fencedJson(text: string): string {
   return match[1];
 }
 
-test("every structured kind's assembly carries one strict-valid fenced example", () => {
+test("the kind-specific reply block is strict-valid and never enters the system prompt", () => {
   const cases: Array<[string, string]> = [
     ["consult", "expect"],
     ["proposal", "title"],
@@ -360,25 +363,53 @@ test("every structured kind's assembly carries one strict-valid fenced example",
     ["decision", "decision"],
   ];
   for (const [kind, field] of cases) {
+    const block = replyFormatBlock(kind);
+    assert.ok(block.startsWith(`${REPLY_FORMAT_MARKER} ${kind}`), `${kind}: stable marker`);
+    assert.ok(block.includes(`"${field}"`), `${kind}: example names the field`);
+    const parsed = parsePayload(kind, JSON.parse(fencedJson(block)));
+    assert.equal(parsed.ok, true, `${kind}: the exemplar must pass the strict schema`);
+    assert.equal(block.split("```json").length - 1, 1, `${kind}: exactly one example`);
+
+    // The system prompt is deliberately kind-stable: only the base and tool
+    // sections, no fence. This is what lets prompt caching reuse the prefix.
     const assembled = assembleSystemPrompt("SYSTEM BASE", [], kind);
     assert.ok(assembled.text.startsWith("SYSTEM BASE"), "the base prompt stays the prefix");
-    assert.ok(assembled.text.includes(`"${field}"`), `${kind}: example names the field`);
-    const parsed = parsePayload(kind, JSON.parse(fencedJson(assembled.text)));
-    assert.equal(parsed.ok, true, `${kind}: the exemplar must pass the strict schema`);
-    assert.equal(
-      assembled.text.split("```json").length - 1,
-      1,
-      `${kind}: exactly one example`,
-    );
-    // the audit's stable section names are untouched by the exemplar
+    assert.ok(!assembled.text.includes("```json"), `${kind}: no fence in the system prompt`);
     assert.deepEqual(assembled.sections, [PROMPT_SECTION_BASE, PROMPT_SECTION_TOOLS]);
   }
-  assert.ok(!assembleSystemPrompt("BASE", [], "message").text.includes("```json"));
-  assert.ok(!assembleSystemPrompt("BASE", []).text.includes("```json"));
+  assert.equal(
+    assembleSystemPrompt("BASE", [], "consult").text,
+    assembleSystemPrompt("BASE", [], "decision").text,
+    "the system prompt is byte-identical across node kinds",
+  );
+  assert.equal(replyFormatBlock("message"), "");
+  assert.equal(replyFormatBlock("verify"), "");
 });
 
-test("node calls assemble the role prompt with that node's exemplar", async () => {
-  const seen: Array<{ role: string; kind: string; system: string }> = [];
+test("withReplyFormat mutates neither the input nor an already-correct block", () => {
+  const base: ChatMessage[] = [
+    { role: "system", content: "SYSTEM" },
+    { role: "user", content: "task" },
+  ];
+  const once = withReplyFormat(base, "consult");
+  assert.equal(base[1]!.content, "task", "the input is not mutated");
+  assert.ok(once[1]!.content.includes(`${REPLY_FORMAT_MARKER} consult`));
+  assert.ok(once[1]!.content.includes("```json"));
+  assert.equal(withReplyFormat(once, "consult"), once, "same-kind application is a no-op");
+
+  const decision = withReplyFormat(once, "decision");
+  assert.ok(decision[1]!.content.includes(`${REPLY_FORMAT_MARKER} decision`));
+  assert.ok(!decision[1]!.content.includes(`${REPLY_FORMAT_MARKER} consult`));
+  assert.equal(decision[1]!.content.split("```json").length - 1, 1);
+});
+
+test("node calls keep one system prompt per role and put the exemplar in the user tail", async () => {
+  const seen: Array<{
+    role: string;
+    kind: string;
+    system: string;
+    lastUser: string;
+  }> = [];
   class CapturingScripted extends ScriptedProvider {
     private readonly role: string;
 
@@ -391,6 +422,7 @@ test("node calls assemble the role prompt with that node's exemplar", async () =
         role: this.role,
         kind: responseKind,
         system: messages.find((message) => message.role === "system")?.content ?? "",
+        lastUser: [...messages].reverse().find((message) => message.role === "user")?.content ?? "",
       });
       return super.chat(messages, responseKind);
     }
@@ -401,11 +433,23 @@ test("node calls assemble the role prompt with that node's exemplar", async () =
   });
   await harness.run("build a catalog");
 
-  const byNode = new Map(seen.map((call) => [`${call.role}/${call.kind}`, call.system]));
+  const byNode = new Map(seen.map((call) => [`${call.role}/${call.kind}`, call]));
   for (const node of ["senior/consult", "junior/proposal", "senior/review", "senior/decision"]) {
-    const system = byNode.get(node);
-    assert.ok(system, `${node} was called`);
-    assert.ok(system.includes("```json"), `${node}: carries its kind's exemplar`);
+    const call = byNode.get(node);
+    assert.ok(call, `${node} was called`);
+    assert.ok(
+      call.lastUser.includes(`${REPLY_FORMAT_MARKER} ${call.kind}`),
+      `${node}: the user tail carries its kind's marker`,
+    );
+    assert.ok(call.lastUser.includes("```json"), `${node}: the user tail carries the exemplar`);
+    assert.ok(!call.system.includes("```json"), `${node}: the system prompt has no example`);
+  }
+
+  // The cache-prefix assertion: with the same belt/skills/instructions, every
+  // node for one role sends byte-identical system text.
+  for (const role of ["senior", "junior"] as const) {
+    const systems = new Set(seen.filter((call) => call.role === role).map((call) => call.system));
+    assert.equal(systems.size, 1, `${role}: system prompt is stable across node kinds`);
   }
 });
 

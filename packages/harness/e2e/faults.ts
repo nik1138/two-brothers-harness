@@ -311,13 +311,19 @@ function kindOfPayload(payload: Record<string, unknown>): string | null {
 }
 
 /**
- * The structured node kind a role call answers. The assembled system prompt
- * appends that kind's few-shot payload example (`PAYLOAD_EXAMPLES`), so the
- * scripted model can answer by kind instead of guessing from the transcript —
- * required for the recovery scenario, whose seeded history ends in archived
- * `consult` envelopes regardless of the node being retried.
+ * The structured node kind a role call answers. The harness appends that kind's
+ * few-shot block to the request's last user message (so the system prefix stays
+ * kind-stable for caching) and prefixes it with `Requested payload: <kind>`.
+ * Parse that marker first; fall back to the legacy system fence and then to the
+ * transcript for older/hand-built requests. The recovery scenario needs the
+ * marker because its seeded history ends in archived `consult` envelopes
+ * regardless of the node being retried.
  */
 function requestedNodeKind(body: Record<string, unknown>): string | null {
+  for (const text of [lastUserText(body), systemText(body)]) {
+    const marker = /(?:^|\n)Requested payload: ([a-z]+)(?:\n|$)/u.exec(text);
+    if (marker?.[1] !== undefined) return marker[1];
+  }
   const system = systemText(body);
   const marker = system.lastIndexOf("```json");
   if (marker < 0) return lastEnvelopeKind(body);

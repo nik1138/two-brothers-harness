@@ -1818,10 +1818,11 @@ them):
 - **Anthropic prompt caching** (TS package) — every Anthropic Messages
   request carries up to three `cache_control:{type:"ephemeral"}` breakpoints:
   the merged system prompt, the last tool definition and the last content
-  block of the newest conversation turn. The repeated prefix of a cooperation
-  cycle (system + tool schemas + growing transcript) is therefore read from
-  Anthropic's 5-minute prompt cache on the 2nd..Nth call, which lowers latency
-  and input cost; a single-call run instead pays the 1.25× cache-write premium
+  block of the newest conversation turn. The system prompt is kind-stable —
+  the per-node few-shot block rides in the last user message — so the repeated
+  prefix of a cooperation cycle (system + tool schemas + growing transcript) is
+  read from Anthropic's 5-minute prompt cache on the 2nd..Nth call, which lowers
+  latency and input cost; a single-call run instead pays the 1.25× cache-write premium
   on the marked prefix (prompts below the model's cache minimum are accepted
   with the markers ignored). There is no flag or setting — caching is
   unconditional — and OpenAI-compatible/Gemini request bodies never carry the
