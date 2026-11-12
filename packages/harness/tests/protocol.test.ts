@@ -120,11 +120,18 @@ test("unknown keys are dropped", () => {
   assert.deepEqual(Object.keys(out).sort(), ["text"]);
 });
 
-test("PAYLOAD_SCHEMAS covers every protocol kind", () => {
+test("PAYLOAD_SCHEMAS covers every protocol kind (plus the code-only route kind)", () => {
   for (const kind of KINDS) {
     assert.ok(PAYLOAD_SCHEMAS[kind], `missing schema for kind: ${kind}`);
   }
-  assert.equal(Object.keys(PAYLOAD_SCHEMAS).length, KINDS.length);
+  // `route` is the auto-mode routing pre-decision: a code-only zod kind that
+  // is NEVER a protocol envelope (KINDS stays frozen), so it is the one
+  // deliberate addition beyond the protocol kinds.
+  assert.deepEqual(
+    Object.keys(PAYLOAD_SCHEMAS).filter((kind) => !(KINDS as readonly string[]).includes(kind)),
+    ["route"],
+  );
+  assert.equal(Object.keys(PAYLOAD_SCHEMAS).length, KINDS.length + 1);
 });
 
 test("parsePayload fills pydantic-mirroring defaults", () => {

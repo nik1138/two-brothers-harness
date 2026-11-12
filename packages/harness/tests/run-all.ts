@@ -126,3 +126,4 @@ import "./sessionrewind.test.ts";
 import "./workspaceundo.test.ts";
 import "./serverundo.test.ts";
 import "./modebytes.test.ts";
+import "./autoroute.test.ts";

@@ -13,8 +13,8 @@
  * envelope log. Events are the typed runtime events (run_status / envelope /
  * tool_started / tool_completed / approval_requested / approval_resolved /
  * approval_auto_denied / approval_auto_allowed / todo_updated / prompt_audit /
- * reasoning / subagent_started / subagent_activity / subagent_completed /
- * run_error / run_end) plus `run_id`
+ * reasoning / auto_route / subagent_started / subagent_activity /
+ * subagent_completed / run_error / run_end) plus `run_id`
  * and `at` (epoch seconds). Event JSON keeps the Python field names
  * (`run_id`, `approval_id`) so sidecar files stay interchangeable with the
  * Python implementation; `prompt_audit` keeps its camelCase payload
@@ -273,6 +273,26 @@ export interface SteeringDroppedEvent extends RuntimeEventMeta {
   limit: number;
 }
 
+/**
+ * Additive event: the auto-mode routing pre-decision (`senior_route` node).
+ * `route` is the EFFECTIVE route after the harness guardrails, `reason` the
+ * senior's one-sentence justification (flattened, clipped), `requested` the
+ * mode the operator asked for (always "auto" today) and `downgraded_from`
+ * present only when guardrail G1 downgraded work→consult because no workspace
+ * is bound. Emitted once per auto run, before the `[[AUTO ROUTE]]` marker
+ * envelope is published; persisted by the run sidecar like every typed event,
+ * and `RunRecord.public()` derives `route`/`route_reason` from it so the
+ * fields survive a sidecar-rebuilt terminal record. Consumers that do not
+ * know the type can ignore it safely.
+ */
+export interface AutoRouteEvent extends RuntimeEventMeta {
+  type: "auto_route";
+  route: "solo" | "consult" | "work";
+  reason: string;
+  requested: "auto";
+  downgraded_from?: "work";
+}
+
 /** The job raised; surfaced to the operator before run_end. */
 export interface RunErrorEvent extends RuntimeEventMeta {
   type: "run_error";
@@ -313,6 +333,7 @@ export type RuntimeEvent =
   | PromptAuditEvent
   | ReasoningEvent
   | SteeringDroppedEvent
+  | AutoRouteEvent
   | UsageEvent
   | SubagentStartedEvent
   | SubagentActivityEvent

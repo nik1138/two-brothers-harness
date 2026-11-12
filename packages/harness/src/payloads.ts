@@ -71,6 +71,18 @@ export const messagePayloadSchema = z.object({
   text: z.string().default(""),
 });
 
+/**
+ * The auto-mode routing pre-decision (code-only kind; NEVER a protocol
+ * envelope). Unlike the protocol schemas it carries NO defaults: both fields
+ * are required, so a prose/empty reply fails the strict check and takes the
+ * one repair re-ask, then the fail-closed consult degradation. `reason` is
+ * clipped/flattened by the harness (`ROUTE_REASON_CHARS`), not here.
+ */
+export const routePayloadSchema = z.object({
+  route: z.enum(["solo", "consult", "work"]),
+  reason: z.string().min(1),
+});
+
 export const PAYLOAD_SCHEMAS: Record<string, z.ZodTypeAny> = {
   consult: consultPayloadSchema,
   proposal: proposalPayloadSchema,
@@ -79,6 +91,7 @@ export const PAYLOAD_SCHEMAS: Record<string, z.ZodTypeAny> = {
   review: reviewPayloadSchema,
   decision: decisionPayloadSchema,
   message: messagePayloadSchema,
+  route: routePayloadSchema,
 };
 
 export type ConsultPayload = z.infer<typeof consultPayloadSchema>;
@@ -88,6 +101,7 @@ export type DeliverablePayload = z.infer<typeof deliverablePayloadSchema>;
 export type ReviewPayload = z.infer<typeof reviewPayloadSchema>;
 export type DecisionPayload = z.infer<typeof decisionPayloadSchema>;
 export type MessagePayload = z.infer<typeof messagePayloadSchema>;
+export type RoutePayload = z.infer<typeof routePayloadSchema>;
 
 export type PayloadParseResult =
   | { ok: true; data: Record<string, unknown> }
@@ -119,8 +133,10 @@ export function parsePayload(kind: string, data: unknown): PayloadParseResult {
 
 /**
  * The kinds that travel as structured node payloads — the six protocol kinds
- * a model is asked to emit. `message` is the free-text kind and is never
- * repaired. Kept in sync with {@link PAYLOAD_SCHEMAS}.
+ * a model is asked to emit, plus the code-only `route` pre-decision (auto
+ * mode; never appended as an envelope, so `protocol.ts` stays untouched).
+ * `message` is the free-text kind and is never repaired. Kept in sync with
+ * {@link PAYLOAD_SCHEMAS}.
  */
 export const STRUCTURED_PAYLOAD_KINDS: ReadonlySet<string> = new Set([
   "consult",
@@ -129,6 +145,7 @@ export const STRUCTURED_PAYLOAD_KINDS: ReadonlySet<string> = new Set([
   "deliverable",
   "review",
   "decision",
+  "route",
 ]);
 
 /**

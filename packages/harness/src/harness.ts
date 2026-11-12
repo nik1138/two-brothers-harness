@@ -172,6 +172,7 @@ import {
 } from "./compaction.ts";
 import {
   buildRepairRequest,
+  parsePayload,
   relaxedStrictPayload,
   strictPayloadIssues,
   STRUCTURED_PAYLOAD_KINDS,
@@ -428,6 +429,27 @@ export const WORKSPACE_MUTATION_TOOL_NAMES: ReadonlySet<string> = new Set([
 export const STEERING_PREFIX = "[[OPERATOR STEER]] ";
 
 /**
+ * Prefix carried by the auto-mode routing marker envelope's payload text
+ * (real `auto` + Senior solo decision). The route WHY rides as an ORDINARY
+ * protocol `message` envelope from `"user"` to `"senior"` — the
+ * compaction-summary/steer convention — appended after the task envelope and
+ * before the first cycle node: `[[AUTO ROUTE]] <route> — <reason>`. Both
+ * brothers see it in "Context events:" on every later call, so the Junior
+ * knows why it was (or was not) consulted. The prefix is plain payload text,
+ * byte-stable once shipped; nothing in the renderer parses it. Rewind and the
+ * web projection exclude it exactly like the other marked internal envelopes
+ * (`sessionrewind.ts::isRealOperatorTask`, `web/src/chat.ts`).
+ */
+export const AUTO_ROUTE_PREFIX = "[[AUTO ROUTE]] ";
+
+/**
+ * Character budget for the routing reason inside the marker/event/result
+ * (mirrors `REPAIR_ISSUE_CHARS`). The reason is flattened to one line and
+ * clipped with the shared `clipText` ellipsis convention.
+ */
+export const ROUTE_REASON_CHARS = 500;
+
+/**
  * Hard bound on steer envelopes appended to one run's shared context. The
  * runtime queue is already capped (`STEER_QUEUE_MAX` pending); this second,
  * run-lifetime cap keeps a callback that keeps producing text from growing the
@@ -495,6 +517,34 @@ export const DELEGATION_DIRECTIVE =
   "(result, artifacts, notes, confidence), with the tool evidence (paths, " +
   "commands, outcomes) in `artifacts`. Do not describe work you did not perform.";
 
+/**
+ * The auto-mode routing instruction (code-only; `shared/prompts.json` stays
+ * byte-identical). It rides the routing call's transcript user turn BEFORE
+ * the reply-format block — unlike DELEGATION_DIRECTIVE, which trails it — so
+ * `trailingReplyFormat`'s existing suffix handling stays sufficient: an
+ * overflow rebuild re-applying `withReplyFormat` sees a clean trailing block.
+ * The work-availability sentence is computed from the SAME predicate as
+ * guardrail G1 (`options.workspace !== undefined`), so the router is never
+ * told work is possible when it is not.
+ */
+export const ROUTING_DIRECTIVE =
+  "\n\nAuto mode: choose how this run proceeds on the CURRENT task; do not " +
+  "perform the task now. Reply with the route payload. `solo`: you can fully " +
+  "answer the task yourself from knowledge, the transcript and read-only " +
+  "inspection — no workspace changes are needed and the junior's contribution " +
+  "would not materially improve the answer. `consult`: the junior's advice or " +
+  "proposal would improve the answer (the default when in doubt). `work`: the " +
+  "task requires actually performing workspace changes. ";
+
+/** G1 honesty: the routing directive's work-availability sentence. */
+export const ROUTING_WORK_AVAILABLE =
+  "Work mode is available in this run (a workspace with write tools is bound).";
+export const ROUTING_WORK_UNAVAILABLE =
+  "Work mode is NOT available in this run (no workspace is bound); choosing work falls back to consult.";
+
+/** The routing directive's closing instruction (after the availability line). */
+const ROUTING_REASON_INSTRUCTION = " Give a one-sentence reason.";
+
 /** One prompt line for a tool: `- name — one-line description`. */
 function toolLine(tool: Tool): string {
   const description = clipText(tool.description ?? "", PROMPT_TOOL_DESCRIPTION_CHARS);
@@ -542,6 +592,7 @@ export const PAYLOAD_EXAMPLES: Record<string, Record<string, unknown>> = {
   deliverable: { result: "…", artifacts: ["path/to/artifact"], notes: "…", confidence: 0.8 },
   review: { verdict: "accept", notes: "…", points: ["…"] },
   decision: { decision: "…", rationale: "…", confidence: 0.7, dissent: null, accepted_proposals: ["…"] },
+  route: { route: "consult", reason: "…" },
 };
 
 /**
@@ -1003,7 +1054,8 @@ export interface PromptAuditEntry {
   role: "senior" | "junior";
   /**
    * The node kind the call answers: consult / delegation / proposal /
-   * deliverable / verify / review / decision.
+   * deliverable / verify / review / decision, plus the code-only auto-mode
+   * routing pre-decision `route` (never a protocol envelope kind).
    */
   kind: string;
   /** Assembled system-prompt section names, in order. */
@@ -1020,6 +1072,19 @@ export interface PromptAuditEntry {
   systemChars: number;
   /** Characters in the rendered user message (the shared context). */
   userChars: number;
+}
+
+/**
+ * The effective auto-mode routing decision (additive; present only on auto
+ * runs). `route` is the route the run actually took after the harness
+ * guardrails, `reason` the senior's justification (flattened, clipped to
+ * {@link ROUTE_REASON_CHARS}); `downgradedFrom` is set only when guardrail G1
+ * downgraded work→consult because no workspace is bound.
+ */
+export interface AutoRouteInfo {
+  route: "solo" | "consult" | "work";
+  reason: string;
+  downgradedFrom?: "work";
 }
 
 export interface HarnessResult {
@@ -1054,6 +1119,12 @@ export interface HarnessResult {
    * session JSONL; consumers that do not render a plan can ignore it.
    */
   todos?: TodoItem[];
+  /**
+   * The auto-mode routing decision, present only when the run was submitted
+   * with `mode: "auto"` and the routing node decided (a run cancelled before
+   * routing carries none). Explicit consult/work runs never route.
+   */
+  autoRoute?: AutoRouteInfo;
 }
 
 interface CooperationState {
@@ -1091,15 +1162,19 @@ interface CooperationState {
    * by the cooperation flow, never persisted in protocol envelopes.
    */
   todos: TodoItem[];
+  /** The auto-mode routing decision once `senior_route` has decided. */
+  autoRoute?: AutoRouteInfo;
 }
 
 type NodeName =
+  | "senior_route"
   | "senior_open"
   | "junior_answer"
   | "senior_verify"
   | "senior_review"
   | "junior_revise"
-  | "senior_decide";
+  | "senior_decide"
+  | "senior_solo";
 
 type NodeResult = NodeName | "END";
 
@@ -1327,6 +1402,8 @@ export class TwoBrothersHarness {
   private readonly spillStore: SpillStore | null;
   /** Fail-soft operator-steering warnings (folded into `result.warnings`). */
   private steeringWarnings: string[] = [];
+  /** Fail-soft auto-routing degradation/downgrade warnings (folded into `result.warnings`). */
+  private routeWarnings: string[] = [];
   /** Set once a steering callback failed this run: never call it again. */
   private steeringFailed = false;
   /** Steer envelopes appended this run (capped by MAX_STEERING_ENVELOPES_PER_RUN). */
@@ -1682,6 +1759,7 @@ export class TwoBrothersHarness {
     responseKind: string,
     messages: ChatMessage[],
     rebuild?: () => ChatMessage[],
+    warn?: string[],
   ): Promise<Record<string, unknown>> {
     this.checkCancel();
     messages = withReplyFormat(messages, responseKind);
@@ -1711,7 +1789,9 @@ export class TwoBrothersHarness {
       responseKind,
       messages,
       text,
-      this.lastErrors,
+      // The routing pre-decision degrades fail-soft (a WARNING sink); every
+      // other plain node keeps the run-error sink, unchanged.
+      warn ?? this.lastErrors,
       rebuild,
     );
     return sanitizePayload(responseKind, reply.payload, reply.text, taskOf(state.ctx));
@@ -2891,6 +2971,106 @@ export class TwoBrothersHarness {
 
   // -- nodes -----------------------------------------------------------------
 
+  /**
+   * The auto-mode routing pre-decision (entry node ONLY when
+   * `cfg.mode === "auto"`; explicit consult/work runs never enter it, so their
+   * request bytes stay identical). ONE plain senior call — no tool belt on the
+   * wire, no tool loop: routing is a judgment about the task, grounding tools
+   * belong to the execution nodes. The strict discipline is the existing
+   * machinery (strict check → relaxed strict parse → exactly ONE repair
+   * re-ask); a still-invalid reply degrades fail-closed to `consult` with ONE
+   * warning (the route is an internal pre-decision, not a protocol node
+   * payload — its degradation is fail-soft like compaction/steering, exit 0).
+   * A provider FAILURE on the call fails the run normally (thrown error,
+   * usage attached). Guardrail G1 downgrades work→consult when no workspace is
+   * bound; G2 always honors solo (the solo branch is structurally read-only);
+   * G3 routes once per run and consumes no rounds.
+   */
+  private async seniorRoute(state: CooperationState): Promise<NodeResult> {
+    const workAvailable = this.options.workspace !== undefined;
+    const directive =
+      ROUTING_DIRECTIVE +
+      (workAvailable ? ROUTING_WORK_AVAILABLE : ROUTING_WORK_UNAVAILABLE) +
+      ROUTING_REASON_INSTRUCTION;
+    const build = (): ChatMessage[] => {
+      const messages = state.ctx.renderForRole("senior", this.systemPrompt("senior", [], "route"));
+      const last = messages[messages.length - 1]!;
+      // Directive BEFORE the reply-format block: a rebuild/overflow retry
+      // re-applying withReplyFormat sees a clean trailing block (no-op).
+      messages[messages.length - 1] = { ...last, content: last.content + directive };
+      return withReplyFormat(messages, "route");
+    };
+    const routeWarnings: string[] = [];
+    const payload = await this.askWithMessages(state, "senior", "route", build(), build, routeWarnings);
+
+    let route: AutoRouteInfo["route"];
+    let reason: string;
+    let downgradedFrom: "work" | undefined;
+    const parsed = parsePayload("route", payload);
+    if (parsed.ok) {
+      route = (parsed.data as { route: AutoRouteInfo["route"] }).route;
+      reason = clipText(String((parsed.data as { reason?: unknown }).reason ?? ""), ROUTE_REASON_CHARS);
+    } else {
+      // Fail-closed: the model did not produce a valid route even after the
+      // one repair re-ask. Cooperation stays visible; the degradation is
+      // recorded as ONE warning, never silent (exit 0).
+      route = "consult";
+      reason = "unstructured model reply for route";
+      this.routeWarnings.push(`auto routing degraded to consult: ${reason}`);
+    }
+    // G1 — work requires a bound workspace (the junior mutating belt exists).
+    // Explicit --mode work keeps its current delegate+warning behavior; the
+    // downgrade is an auto-only routing decision.
+    if (route === "work" && !workAvailable) {
+      downgradedFrom = "work";
+      reason = clipText(`downgraded from work (no workspace bound): ${reason}`, ROUTE_REASON_CHARS);
+      route = "consult";
+      this.routeWarnings.push("auto routing downgraded work to consult: no workspace is bound");
+    }
+
+    const info: AutoRouteInfo = {
+      route,
+      reason,
+      ...(downgradedFrom !== undefined ? { downgradedFrom } : {}),
+    };
+    state.autoRoute = info;
+    // The runtime event precedes the marker envelope (the todo_updated /
+    // steering_dropped pattern): SSE live + sidecar replay after reload.
+    this.emitRuntime({
+      type: "auto_route",
+      route,
+      reason,
+      requested: "auto",
+      ...(downgradedFrom !== undefined ? { downgraded_from: downgradedFrom } : {}),
+    });
+    // The authoritative transcript record: an ordinary marked message
+    // envelope (user → senior), dense seq, session JSONL, onEnvelope, stream.
+    this.append(state, "user", "senior", "message", {
+      text: `${AUTO_ROUTE_PREFIX}${route} — ${reason}`,
+    });
+    // The effective route drives the existing nodes unchanged: consult/work
+    // branch on state.mode exactly as an explicit run does.
+    state.mode = route;
+    return route === "solo" ? "senior_solo" : "senior_open";
+  }
+
+  /**
+   * The solo decision (PROTOCOL.md §5 "decide on its own"): the Senior answers
+   * the task without the Junior, grounded in its read-only CONSULT belt
+   * (`consultNode` — mutations filtered, helpers kept, bounded tool loop; a
+   * tool-less configuration keeps the exact plain ask path). The decision
+   * envelope is senior → user and ends the cycle; no proposal/review precedes
+   * it, which the protocol already allows. Tool activity rides runtime/stream
+   * events only — the decision payload is exactly what the model emitted,
+   * sanitized (the seniorOpen evidence rule).
+   */
+  private async seniorSolo(state: CooperationState): Promise<NodeResult> {
+    const payload = await this.consultNode(state, "senior", "decision");
+    this.append(state, "senior", "user", "decision", payload);
+    state.decision = payload;
+    return "END";
+  }
+
   private async seniorOpen(state: CooperationState): Promise<NodeResult> {
     const kind = state.mode === "work" ? "delegation" : "consult";
     // Consult mode grounds the opening question with the senior's read-only
@@ -3096,12 +3276,14 @@ export class TwoBrothersHarness {
   }
 
   private readonly nodes: Record<NodeName, (state: CooperationState) => Promise<NodeResult>> = {
+    senior_route: (state) => this.seniorRoute(state),
     senior_open: (state) => this.seniorOpen(state),
     junior_answer: (state) => this.juniorAnswer(state),
     senior_verify: (state) => this.seniorVerify(state),
     senior_review: (state) => this.seniorReview(state),
     junior_revise: (state) => this.juniorRevise(state),
     senior_decide: (state) => this.seniorDecide(state),
+    senior_solo: (state) => this.seniorSolo(state),
   };
 
   // -- public API --------------------------------------------------------------
@@ -3152,6 +3334,7 @@ export class TwoBrothersHarness {
     this.steeringWarnings = [];
     this.steeringFailed = false;
     this.steeringCount = 0;
+    this.routeWarnings = [];
     const ctx = context ?? new SharedContext();
     const release = await acquireSession(ctx);
     const sessionId = this.sessionId(ctx);
@@ -3190,7 +3373,9 @@ export class TwoBrothersHarness {
         this.publishEnvelope(state, msg);
       }
 
-      let node: NodeResult = "senior_open";
+      // Auto mode routes first (one bounded senior pre-decision); explicit
+      // consult/work runs enter the cycle directly, byte-identical.
+      let node: NodeResult = this.cfg.mode === "auto" ? "senior_route" : "senior_open";
       // Live usage: one additive snapshot after each node's provider calls.
       // The cache percentage is only knowable from the provider's reported
       // counters, and emitting at node boundaries keeps the stream honest
@@ -3233,6 +3418,7 @@ export class TwoBrothersHarness {
         warnings: [
           ...this.compactionWarnings,
           ...this.steeringWarnings,
+          ...this.routeWarnings,
           ...this.spillWarnings,
           ...this.subagentWarnings,
           ...this.instructionWarnings,
@@ -3243,6 +3429,7 @@ export class TwoBrothersHarness {
         ...(state.todos.length > 0
           ? { todos: state.todos.map((todo) => ({ ...todo })) }
           : {}),
+        ...(state.autoRoute !== undefined ? { autoRoute: { ...state.autoRoute } } : {}),
       };
       this.emitStream({ type: "run_status", status: "completed", at: nowIso() });
       this.emitStream({ type: "result", result: this.streamSummary(result, ctx), at: nowIso() });
@@ -3263,6 +3450,7 @@ export class TwoBrothersHarness {
           warnings: [
             ...this.compactionWarnings,
             ...this.steeringWarnings,
+            ...this.routeWarnings,
             ...this.spillWarnings,
             ...this.subagentWarnings,
             ...this.instructionWarnings,
@@ -3273,6 +3461,7 @@ export class TwoBrothersHarness {
           ...(state.todos.length > 0
             ? { todos: state.todos.map((todo) => ({ ...todo })) }
             : {}),
+          ...(state.autoRoute !== undefined ? { autoRoute: { ...state.autoRoute } } : {}),
         };
       }
       status = "failed";
