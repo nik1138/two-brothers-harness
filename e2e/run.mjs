@@ -2527,9 +2527,11 @@ async function scenarioComposerSeats(runner) {
     const modelsText = (await models.innerText()).replace(/\s+/g, ' ').trim()
     assert.ok(modelsText.includes(`S ${SEAT_SENIOR}`), `senior model missing from seats: ${modelsText}`)
     assert.ok(modelsText.includes(`J ${SEAT_JUNIOR}`), `junior model missing from seats: ${modelsText}`)
+    // The permission seat is a clickable pill: the trailing › is the affordance
+    // that it opens Settings → Permissions.
     assert.equal(
       (await permission.innerText()).replace(/\s+/g, ' ').trim(),
-      'Permissions Always ask',
+      'Permissions Always ask ›',
     )
     // no audited provider call yet: the context seat has no data and must hide
     assert.equal(await contextSeat.count(), 0, 'the context seat must hide without an audit')
@@ -2591,6 +2593,105 @@ async function scenarioComposerSeats(runner) {
     await context.close().catch(() => {})
     await killBackend(be)
     rmTree(wsDir)
+    rmTree(be.dir)
+  }
+}
+
+// -- scenario: composer model switch ------------------------------------------
+//
+// The Models chip lives in the message input. It opens a two-level switch:
+// Senior/Junior root rows, then a searchable provider-grouped list. Selecting
+// a preset model persists `provider_ref` + `model` through PUT /api/settings
+// (labelled "Saved for new runs"), so the base URL and key follow the preset.
+
+async function scenarioModelSwitch(runner) {
+  const SENIOR_MODEL = 'e2e-switch-senior'
+  const JUNIOR_MODEL = 'e2e-switch-junior'
+  const be = await startBackend({ kind: 'mock' })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  try {
+    const put = await apiCall(be.base, 'PUT', '/api/settings', {
+      senior: { model: SENIOR_MODEL, base_url: 'http://127.0.0.1:9/v1' },
+      junior: { model: JUNIOR_MODEL, base_url: 'http://127.0.0.1:9/v1' },
+    })
+    assert.equal(put.status, 200, `PUT /api/settings -> HTTP ${put.status}`)
+
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+
+    const chip = page.locator('.route-chip')
+    await chip.waitFor({ state: 'visible', timeout: 10000 })
+    const chipText = (await chip.innerText()).replace(/\s+/g, ' ')
+    assert.ok(chipText.includes(SENIOR_MODEL), `senior model missing from the chip: ${chipText}`)
+    assert.ok(chipText.includes(JUNIOR_MODEL), `junior model missing from the chip: ${chipText}`)
+
+    const menu = page.locator('#composer-model-route')
+    await chip.click()
+    await menu.waitFor({ state: 'visible' })
+    assert.ok(
+      (await menu.innerText()).includes('Saved for new runs'),
+      'the switch must state that the choice is saved for new runs',
+    )
+    const seniorRow = menu.locator('.model-role-row').filter({ hasText: 'Senior' })
+    const juniorRow = menu.locator('.model-role-row').filter({ hasText: 'Junior' })
+    await seniorRow.waitFor({ state: 'visible' })
+    assert.ok((await seniorRow.innerText()).includes(SENIOR_MODEL))
+    assert.ok((await juniorRow.innerText()).includes(JUNIOR_MODEL))
+
+    // drill into Senior: the current manual model is checked and searchable
+    await seniorRow.click()
+    const search = menu.locator('.model-search')
+    await search.waitFor({ state: 'visible' })
+    const currentChoice = menu.locator('.model-choice.is-current')
+    await currentChoice.waitFor({ state: 'visible' })
+    assert.ok(
+      (await currentChoice.innerText()).includes(SENIOR_MODEL),
+      'the current model row must carry the check mark',
+    )
+
+    // pick a seeded subscription preset; the endpoint follows provider_ref
+    const group = menu.locator('.model-group').filter({
+      has: page.locator('.model-group-label', { hasText: /opencode-go/i }),
+    })
+    await group.waitFor({ state: 'visible' })
+    await group.locator('.model-choice').filter({ hasText: 'glm-5.2' }).first().click()
+
+    await waitFor(
+      async () => {
+        const res = await apiCall(be.base, 'GET', '/api/settings')
+        return (
+          res.status === 200 &&
+          res.json?.senior?.model === 'glm-5.2' &&
+          res.json?.senior?.provider_ref === 'opencode-go'
+        )
+      },
+      { desc: 'the preset model to persist through PUT /api/settings' },
+    )
+    await waitFor(async () => !(await menu.isVisible()), {
+      desc: 'the model switch to close after a selection',
+    })
+    const savedChip = (await chip.innerText()).replace(/\s+/g, ' ')
+    assert.ok(savedChip.includes('glm-5.2'), `the chip did not refresh: ${savedChip}`)
+
+    // reopening shows the new route checked; Escape backs out one level first
+    await chip.click()
+    await seniorRow.waitFor({ state: 'visible' })
+    await seniorRow.click()
+    await menu.locator('.model-choice.is-current').waitFor({ state: 'visible' })
+    assert.ok(
+      (await menu.locator('.model-choice.is-current').innerText()).includes('glm-5.2'),
+      'the persisted preset model must be the checked row',
+    )
+    await page.keyboard.press('Escape')
+    await seniorRow.waitFor({ state: 'visible' })
+    await page.keyboard.press('Escape')
+    await menu.waitFor({ state: 'hidden' })
+
+    consoleGuard.assertClean()
+    runner.pass('model-switch')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
     rmTree(be.dir)
   }
 }
@@ -4568,6 +4669,13 @@ async function main() {
         run: () => (
           (currentRunner = makeRunner('composer-seats')),
           scenarioComposerSeats(currentRunner)
+        ),
+      },
+      {
+        label: 'model-switch',
+        run: () => (
+          (currentRunner = makeRunner('model-switch')),
+          scenarioModelSwitch(currentRunner)
         ),
       },
       {

@@ -817,9 +817,11 @@ package suite **2 083 tests** (2 076 pass and 7 platform skips on Windows), web
 suite **493/493**, hermetic CLI E2E **19/19** on sources and `--dist`, fault
 injection **7/7**, browser E2E **23 PASS, 0 FAIL, 1 opt-in `real` skip**,
 `npm run typecheck` green. The composer model switch adds
-`web/tests/modelSwitch.test.ts`, bringing the web suite to **501/501**. The
-Wave 30 WSL Linux pass is **2 082 pass with 1 POSIX-specific skip** (Windows
-reports 2 076 pass with 7 platform skips).
+`web/tests/modelSwitch.test.ts` and a `model-switch` browser scenario, bringing
+the web suite to **501/501** and the offline browser matrix to 23 blocks
+(**24 PASS, 0 FAIL**, 1 opt-in `real` skip). The Wave 30 WSL Linux pass is
+**2 082 pass with 1 POSIX-specific skip** (Windows reports 2 076 pass with 7
+platform skips).
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
@@ -1028,7 +1030,11 @@ theme switch shrinks, and the density choice survives a reload),
 place, per-session reset), `plan-dock` (Plan dock counts/markers/bounded
 `+N more` expand and the polite announcements, including "Plan cleared."),
 `composer-seats` (role models plus the prompt-audit context seat, with no token
-wording), `hero-starters` (landing and empty-session hero; starters prefill only
+wording), `model-switch` (the composer's Models chip opens the two-level
+switch: Senior/Junior root rows, the current model checked, a searchable
+provider-grouped catalog, and selecting a seeded preset persists
+`provider_ref` + `model` through `PUT /api/settings` with the chip and check
+mark refreshing; Escape backs out one level), `hero-starters` (landing and empty-session hero; starters prefill only
 an empty composer, a preserved draft wins with a notice) and `approval-reason`
 (a delete approval shows the documented reason on the pending card; its
 collapsed-by-default preview toggle exposes the bounded diff as plain text —
@@ -1104,7 +1110,7 @@ native-valid but non-whole value is an inline `role=alert` with `aria-invalid`
 that blocks the save before any PUT; a corrected save rides the dialog's single
 Save action, persists the budgets in `sessions/settings.json`, and the
 persisted values plus their effective lines survive a reload). The offline
-suite now holds 21 hermetic scenario blocks; the last canonical run is **22
+suite now holds 23 hermetic scenario blocks; the last canonical run is **24
 PASS, 0 FAIL, 1 SKIP** (the `chat/resume` block prints one line for chat and
 one for resume). The queue dock and the session-scope approval decisions
 remain covered by the web unit suites, not by separate browser scenarios. The
