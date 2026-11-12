@@ -150,6 +150,13 @@ export interface ApprovalRequestedEvent extends RuntimeEventMeta {
    * when the request carries no detail.
    */
   detail?: ApprovalDetail;
+  /**
+   * Additive helper identity: present only when an isolated subagent's tool
+   * call parked this request. Display/routing only — old consumers ignore it,
+   * and it is never part of the session-allow `(action, target)` pair.
+   */
+  subagent_id?: string;
+  subagent_label?: string;
 }
 
 /** An approval wait was resolved exactly once (allow/deny, or deny/cancelled). */
@@ -158,6 +165,8 @@ export interface ApprovalResolvedEvent extends RuntimeEventMeta {
   approval_id: string;
   decision: string;
   reason?: string;
+  /** Additive; lets a live UI clear the helper's "waiting" row. */
+  subagent_id?: string;
 }
 
 /**
@@ -726,6 +735,31 @@ function shortId(): string {
 }
 
 /**
+ * Additive helper-identity fields of one approval request, omitted when the
+ * request is a brother's (or the fields are empty/malformed).
+ */
+function childApprovalFields(request: ApprovalRequest): {
+  subagent_id?: string;
+  subagent_label?: string;
+} {
+  const fields: { subagent_id?: string; subagent_label?: string } = {};
+  if (typeof request.subagent_id === "string" && request.subagent_id !== "") {
+    fields.subagent_id = request.subagent_id;
+  }
+  if (typeof request.subagent_label === "string" && request.subagent_label !== "") {
+    fields.subagent_label = request.subagent_label;
+  }
+  return fields;
+}
+
+/** The `subagent_id` one resolved event carries (absent for a brother's). */
+function childIdField(request: ApprovalRequest): { subagent_id?: string } {
+  return typeof request.subagent_id === "string" && request.subagent_id !== ""
+    ? { subagent_id: request.subagent_id }
+    : {};
+}
+
+/**
  * Approval broker for one run: emits `approval_requested` events, then parks
  * the awaiting tool coroutine until the operator answers via `respond()`, the
  * run is stopped (`denyAll()` / abort signal — a stopped run must never leave
@@ -914,6 +948,7 @@ export class RunApprovalBroker implements ApprovalBroker {
         ? { reason: effectiveRequest.reason }
         : {}),
       ...(effectiveRequest.detail !== undefined ? { detail: effectiveRequest.detail } : {}),
+      ...childApprovalFields(effectiveRequest),
     });
 
     let onAbort: (() => void) | null = null;
@@ -927,6 +962,7 @@ export class RunApprovalBroker implements ApprovalBroker {
           approval_id: approvalId,
           decision: Decision.DENY,
           reason: "cancelled",
+          ...childIdField(effectiveRequest),
         });
         return Decision.DENY;
       }
@@ -937,6 +973,7 @@ export class RunApprovalBroker implements ApprovalBroker {
             approval_id: approvalId,
             decision: Decision.DENY,
             reason: "cancelled",
+            ...childIdField(effectiveRequest),
           });
         }
         entry.resolve(Decision.DENY);
@@ -958,6 +995,7 @@ export class RunApprovalBroker implements ApprovalBroker {
       type: "approval_resolved",
       approval_id: approvalId,
       decision,
+      ...childIdField(entry.request),
     });
     return decision;
   }
@@ -975,6 +1013,7 @@ export class RunApprovalBroker implements ApprovalBroker {
         command: entry.request.command ?? null,
         reason: entry.request.reason ?? null,
         ...(entry.request.detail !== undefined ? { detail: entry.request.detail } : {}),
+        ...childApprovalFields(entry.request),
       });
     }
     return out;
@@ -1059,6 +1098,7 @@ export class RunApprovalBroker implements ApprovalBroker {
         approval_id: approvalId,
         decision: Decision.DENY,
         reason,
+        ...childIdField(entry.request),
       });
     }
     return entries.length;
