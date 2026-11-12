@@ -506,8 +506,24 @@ async function suitePromptAudit(api: Api, runsDir: string): Promise<PromptAuditS
       `${where}: sidecar has ${persisted.length} prompt_audit frames (expected ${audits.length})`,
     );
 
-    const replay = await driveRunSse(srv.base, runId, () => undefined, HERMETIC_TIMEOUT_MS, events.length - 2);
-    check(replay.length === 2, `${where}: ?after=${events.length - 2} replayed ${replay.length} frames`);
+    // The tail is not a fixed decision+run_end pair: `usage` is an additive
+    // runtime event emitted once per state-machine node (including the final
+    // decision), so a usage snapshot sits between the decision envelope and
+    // `run_end`. Anchor the replay on the decision frame and assert the whole
+    // persisted tail (decision -> … -> run_end) replays verbatim.
+    const decisionFrame = events.findIndex(
+      (event) =>
+        event.type === "envelope" &&
+        (event.envelope as Record<string, unknown>)?.kind === "decision",
+    );
+    check(decisionFrame >= 0, `${where}: no decision envelope in the stream`);
+    const replayAfter = Number(events[decisionFrame].id ?? 0) - 1;
+    const tail = events.slice(decisionFrame);
+    const replay = await driveRunSse(srv.base, runId, () => undefined, HERMETIC_TIMEOUT_MS, replayAfter);
+    check(
+      replay.length === tail.length,
+      `${where}: ?after=${replayAfter} replayed ${replay.length} frames (expected ${tail.length})`,
+    );
     check(
       replay[0].type === "envelope" &&
         (replay[0].envelope as Record<string, unknown>)?.kind === "decision",
