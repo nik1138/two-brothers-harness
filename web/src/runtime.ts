@@ -39,6 +39,12 @@ export interface ApprovalItem {
    * backend sent one. Plain strings only — the card renders them as text.
    */
   detail?: ApprovalDetail
+  /**
+   * Additive helper identity: set only when an isolated helper's tool call
+   * parked this request. Old backends omit both fields.
+   */
+  subagentId?: string
+  subagentLabel?: string
 }
 
 /**
@@ -238,6 +244,8 @@ function appendToRuntimeProjection(state: RuntimeProjectionState, ev: RunEvent) 
     }
     case 'approval_requested': {
       const detail = approvalDetailOf(ev.detail)
+      const subagentId = childFieldOf(ev.subagent_id)
+      const subagentLabel = childFieldOf(ev.subagent_label)
       const item: ApprovalItem = {
         type: 'approval',
         approvalId: ev.approval_id,
@@ -248,6 +256,8 @@ function appendToRuntimeProjection(state: RuntimeProjectionState, ev: RunEvent) 
         at: ev.at,
         runId: ev.run_id,
         ...(detail !== undefined ? { detail } : {}),
+        ...(subagentId !== undefined ? { subagentId } : {}),
+        ...(subagentLabel !== undefined ? { subagentLabel } : {}),
       }
       state.approvals.set(ev.approval_id, state.items.length)
       state.items.push(item)
@@ -613,6 +623,17 @@ export function approvalDetailOf(value: unknown): ApprovalDetail | undefined {
   if (removed !== undefined) detail.removedLines = removed
   if (truncated) detail.truncated = true
   return detail
+}
+
+/**
+ * Tolerant display copy of one additive helper-identity field. Old backends
+ * omit the field and a malformed one renders nothing (the card stays exactly
+ * as it was). Bounded so a hand-written event cannot grow the row.
+ */
+function childFieldOf(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  return trimmed === '' ? undefined : trimmed.slice(0, 200)
 }
 
 /**

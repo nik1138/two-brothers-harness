@@ -391,6 +391,9 @@ export interface ApprovalRequestedEvent {
   reason?: string | null
   /** Additive bounded preview; omitted by old backends and broker-only events. */
   detail?: ApprovalDetail
+  /** Additive helper identity; absent for a brother's request and old backends. */
+  subagent_id?: string
+  subagent_label?: string
   run_id: string
   at: number
 }
@@ -400,6 +403,8 @@ export interface ApprovalResolvedEvent {
   approval_id: string
   decision: string
   reason?: string | null
+  /** Additive: set when the wait belonged to a helper. */
+  subagent_id?: string
   run_id: string
   at: number
 }
@@ -535,7 +540,7 @@ export interface UsageEvent {
   at: number
 }
 
-/** One read-only helper started by the Senior (`subagent_started`). */
+/** One helper started by the Senior (`subagent_started`). */
 export interface SubagentStartedEvent {
   type: 'subagent_started'
   subagent_id: string
@@ -594,7 +599,7 @@ export interface SubagentActivity {
 }
 
 /** One bounded row in the child transcript. */
-export interface SubagentTranscriptEntry {
+export interface SubagentMessageEntry {
   type: 'message' | 'tool'
   role?: 'user' | 'assistant'
   text?: string
@@ -604,6 +609,27 @@ export interface SubagentTranscriptEntry {
   result?: string
   at: number
 }
+
+/** Lifecycle of one helper approval request, as persisted in the child log. */
+export type SubagentApprovalStatus = 'pending' | 'allowed' | 'denied' | 'cancelled'
+
+/** One approval-lifecycle row in the child transcript. */
+export interface SubagentApprovalEntry {
+  type: 'approval'
+  status: SubagentApprovalStatus
+  /** `write` / `edit` / `delete` / `shell`. */
+  action: string
+  /** Workspace-relative path, when the request named one. */
+  target?: string
+  /** Shell command, when present. */
+  command?: string
+  /** Existing approval reason, when present. */
+  reason?: string
+  at: number
+}
+
+/** One bounded row in the child transcript: a message/tool step or an approval. */
+export type SubagentTranscriptEntry = SubagentMessageEntry | SubagentApprovalEntry
 
 /** `GET /api/sessions/{name}/subagents` row (no transcript). */
 export interface SubagentInfo {

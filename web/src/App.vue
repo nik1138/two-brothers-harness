@@ -172,6 +172,8 @@ import WelcomeHero from './components/WelcomeHero.vue'
 import type { HeroStarter } from './components/WelcomeHero.vue'
 import SubagentView from './components/SubagentView.vue'
 import {
+  applySubagentApprovalDetailEvent,
+  applySubagentApprovalEvent,
   applySubagentDetailEvent,
   applySubagentEvent,
   runningSubagentCount,
@@ -188,7 +190,7 @@ const selected = ref<string | null>(null)
 const events = ref<Envelope[]>([])
 /** Runtime sidecar events (tool calls, approvals) for the selected session. */
 const runtimeEvents = ref<RunEvent[]>([])
-/** Read-only helper subagents for the selected session (remote + live tree). */
+/** Helper subagents for the selected session (remote + live tree). */
 const subagents = ref<SubagentInfo[]>([])
 const subagentsOpen = ref(false)
 /** The child transcript currently open in the drawer, if any. */
@@ -1434,6 +1436,15 @@ function ingestRuntimeEvent(ev: RunEvent) {
   if (runtimeSeen.has(key)) return
   runtimeSeen.add(key)
   runtimeEvents.value = [...runtimeEvents.value, ev]
+  // Child-tagged approvals park/resume a helper: patch the live tree row and,
+  // when its drawer is open, the transcript row. An event without a helper id
+  // (every brother approval, and every old backend) is a no-op.
+  if (ev.type === 'approval_requested' || ev.type === 'approval_resolved') {
+    subagents.value = applySubagentApprovalEvent(subagents.value, ev)
+    if (viewedSubagent.value !== null) {
+      viewedSubagent.value = applySubagentApprovalDetailEvent(viewedSubagent.value, ev)
+    }
+  }
 }
 
 /** Replace the runtime history (session load); later live events merge via dedupe. */
@@ -1460,7 +1471,7 @@ function subagentActivityLabel(row: SubagentInfo): string {
   return subagentActivityText(row.last_activity, row.status)
 }
 
-/** Open one child's read-only transcript; the tree panel closes first. */
+/** Open one helper's isolated transcript; the tree panel closes first. */
 async function openSubagent(id: string) {
   subagentsOpen.value = false
   subagentError.value = ''
@@ -2152,12 +2163,17 @@ async function resolveApproval(
   if (!followed || followed.run_id !== runId) {
     // not following that run (e.g. answering from a reopened session): record
     // the resolution locally so the card flips
+    const helperId = runtimeItems.value.find(
+      (item): item is ApprovalItem =>
+        item.type === 'approval' && item.approvalId === approvalId,
+    )?.subagentId
     ingestRuntimeEvent({
       type: 'approval_resolved',
       approval_id: approvalId,
       decision: allow ? 'allow' : 'deny',
       run_id: runId,
       at: Math.floor(Date.now() / 1000),
+      ...(helperId !== undefined ? { subagent_id: helperId } : {}),
     })
   } else if (followed.status === 'waiting') {
     // optimistic: the run resumes as soon as the backend accepts the decision;
@@ -2853,7 +2869,7 @@ onUnmounted(() => {
             </template>
             <section id="subagent-tree" class="subagent-tree" aria-label="Subagents">
               <header class="subagent-tree-head">
-                <p class="subagent-tree-title">Read-only helpers</p>
+                <p class="subagent-tree-title">Helpers</p>
                 <p class="subagent-tree-sub">
                   {{ subagents.length }} total<template v-if="runningSubagents"> ·
                     {{ runningSubagents }} running</template>
@@ -3077,7 +3093,7 @@ onUnmounted(() => {
         />
       </div>
 
-      <!-- Read-only helper transcript: covers the chat body/composer so the
+      <!-- Helper transcript: covers the chat body/composer so the
            open child can never accidentally receive a submission. -->
       <SubagentView
         v-if="viewedSubagent || subagentLoading || subagentError"
@@ -3260,13 +3276,13 @@ onUnmounted(() => {
   outline-offset: 2px;
 }
 
-/* The read-only child drawer is absolutely positioned inside this shell. */
+/* The helper drawer is absolutely positioned inside this shell. */
 .chat-shell {
   position: relative;
 }
 
 /* Keep the composer in the layout but remove it from the focus/click order
-   while a read-only child transcript covers the chat. */
+   while a helper transcript covers the chat. */
 .composer-inert {
   display: contents;
 }

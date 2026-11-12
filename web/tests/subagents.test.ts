@@ -1,6 +1,6 @@
 /**
- * Read-only helper subagents in the web shell (pure helpers + source wiring).
- * No DOM/Vue runtime:
+ * Helper subagents in the web shell (pure helpers + source wiring). No DOM/Vue
+ * runtime:
  *   node --import ./tests/register-ts.mjs --test tests/subagents.test.ts
  */
 import assert from 'node:assert/strict'
@@ -9,6 +9,8 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 import {
+  applySubagentApprovalDetailEvent,
+  applySubagentApprovalEvent,
   applySubagentDetailEvent,
   applySubagentEvent,
   normalizeSubagentDetail,
@@ -256,12 +258,14 @@ test('labels, duration, activity and usage stay compact and honest', () => {
   assert.equal(subagentTaskPreview('a\nb', 10), 'a b')
 })
 
-test('the shell owns the live tree, a read-only drawer and the API wiring', () => {
+test('the shell owns the live tree, an isolated drawer and the API wiring', () => {
   const app = read('App.vue')
   assert.ok(app.includes('listSessionSubagents'))
   assert.ok(app.includes('getSubagent'))
   assert.ok(app.includes('applySubagentEvent'))
   assert.ok(app.includes('applySubagentDetailEvent'))
+  assert.ok(app.includes('applySubagentApprovalEvent'))
+  assert.ok(app.includes('applySubagentApprovalDetailEvent'))
   assert.ok(app.includes('SubagentView'))
   assert.ok(app.includes('subagent-chip'))
   assert.ok(app.includes('subagent-tree'))
@@ -270,14 +274,135 @@ test('the shell owns the live tree, a read-only drawer and the API wiring', () =
   assert.ok(app.includes('openSubagent'))
   assert.ok(app.includes('closeSubagent'))
   assert.ok(app.includes('onSubagentEscape'))
+  assert.ok(app.includes('Helpers'), 'the tree title no longer claims read-only')
 
   const view = read('components/SubagentView.vue')
   assert.ok(view.includes('Final report'))
-  assert.ok(view.includes('read-only'))
+  assert.ok(view.includes('subagent-approval'), 'approval rows render in the drawer')
   assert.ok(view.includes('transcript'))
-  assert.equal(view.includes('<Composer'), false, 'the child view is read-only')
+  assert.equal(view.includes('read-only'), false, 'the drawer copy is not read-only')
+  assert.equal(/v-html\s*=/.test(view), false, 'child rows are plain text only')
+  assert.equal(view.includes('<Composer'), false, 'the child view has no composer')
 
   const api = read('api.ts')
   assert.ok(api.includes('/api/sessions/${encodeURIComponent(name)}/subagents'))
   assert.ok(api.includes('/api/subagents/${encodeURIComponent(id)}'))
+})
+
+// ---------------------------------------------------------------------------
+// approval rows and child-tagged approval events
+// ---------------------------------------------------------------------------
+
+function approvalEvent(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    type: 'approval_requested',
+    approval_id: 'approval-1',
+    action: 'write',
+    target: 'e2e-helper.txt',
+    subagent_id: 'sub-12345678',
+    subagent_label: 'Write the helper file',
+    run_id: 'run-1',
+    at: 40,
+    ...overrides,
+  }
+}
+
+test('the child detail keeps approval rows and drops malformed ones', () => {
+  const row = normalizeSubagentDetail({
+    ...info(),
+    transcript: [
+      { type: 'approval', status: 'pending', action: 'write', target: 'a.txt', at: 1 },
+      { type: 'approval', status: 'allowed', action: 'shell', command: 'echo hi', at: 2 },
+      { type: 'approval', status: 'bogus', action: 'write', at: 3 },
+      { type: 'approval', status: 'pending', action: '', at: 4 },
+      { type: 'message', role: 'assistant', text: 'done', at: 5 },
+    ],
+  })
+  assert.ok(row)
+  assert.equal(row.transcript.length, 3)
+  const first = row.transcript[0]
+  assert.ok(first?.type === 'approval')
+  assert.equal(first.status, 'pending')
+  assert.equal(first.action, 'write')
+  assert.equal(first.target, 'a.txt')
+  const second = row.transcript[1]
+  assert.ok(second?.type === 'approval')
+  assert.equal(second.command, 'echo hi')
+})
+
+test('a child-tagged approval event sets and clears the row wait', () => {
+  const tree: SubagentInfo[] = [info()]
+  const waiting = applySubagentApprovalEvent(tree, approvalEvent() as RunEvent)
+  assert.equal(waiting[0]?.last_activity?.kind, 'status')
+  assert.equal(waiting[0]?.last_activity?.status, 'awaiting_approval')
+  assert.equal(
+    subagentActivityText(waiting[0]?.last_activity, 'running'),
+    'waiting for approval',
+  )
+  const resumed = applySubagentApprovalEvent(
+    waiting,
+    {
+      type: 'approval_resolved',
+      approval_id: 'approval-1',
+      decision: 'allow',
+      subagent_id: 'sub-12345678',
+      run_id: 'run-1',
+      at: 41,
+    } as RunEvent,
+  )
+  assert.equal(resumed[0]?.last_activity?.status, 'running')
+  // Unknown child / no helper id / terminal row: no patch, same list.
+  assert.equal(applySubagentApprovalEvent(tree, approvalEvent({ subagent_id: 'sub-nope' }) as RunEvent), tree)
+  assert.equal(applySubagentApprovalEvent(tree, approvalEvent({ subagent_id: undefined }) as RunEvent), tree)
+  const finished = applySubagentEvent(tree, completed() as RunEvent)
+  const afterFinish = applySubagentApprovalEvent(finished, approvalEvent() as RunEvent)
+  assert.equal(afterFinish[0]?.last_activity?.status, 'completed')
+})
+
+test('a child-tagged approval event appends and flips the drawer row', () => {
+  const row = detail({ status: 'running', result: null, transcript: [] })
+  const pending = applySubagentApprovalDetailEvent(row, approvalEvent() as RunEvent)
+  assert.equal(pending.transcript.length, 1)
+  const approval = pending.transcript[0]
+  assert.ok(approval?.type === 'approval')
+  assert.equal(approval.status, 'pending')
+  assert.equal(approval.target, 'e2e-helper.txt')
+  assert.equal(pending.last_activity?.status, 'awaiting_approval')
+  // A repeated requested event does not duplicate the pending row.
+  assert.equal(
+    applySubagentApprovalDetailEvent(pending, approvalEvent() as RunEvent),
+    pending,
+  )
+  const resolved = applySubagentApprovalDetailEvent(pending, {
+    type: 'approval_resolved',
+    approval_id: 'approval-1',
+    decision: 'allow',
+    subagent_id: 'sub-12345678',
+    run_id: 'run-1',
+    at: 41,
+  } as RunEvent)
+  const flipped = resolved.transcript[0]
+  assert.ok(flipped?.type === 'approval')
+  assert.equal(flipped.status, 'allowed')
+  assert.equal(resolved.last_activity?.status, 'running')
+  // A cancellation resolves the row as cancelled; another child is a no-op.
+  const cancelled = applySubagentApprovalDetailEvent(pending, {
+    type: 'approval_resolved',
+    approval_id: 'approval-1',
+    decision: 'deny',
+    reason: 'cancelled',
+    subagent_id: 'sub-12345678',
+    run_id: 'run-1',
+    at: 42,
+  } as RunEvent)
+  assert.equal(
+    (cancelled.transcript[0] as { status?: string } | undefined)?.status,
+    'cancelled',
+  )
+  assert.equal(
+    applySubagentApprovalDetailEvent(pending, approvalEvent({ subagent_id: 'sub-other' }) as RunEvent),
+    pending,
+  )
 })

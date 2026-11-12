@@ -105,7 +105,7 @@ export async function getSessionRuntimeEvents(name: string): Promise<SessionRunt
   return request<SessionRuntimeEvents>(`/api/sessions/${encodeURIComponent(name)}/events`)
 }
 
-/** Read-only helper children recorded for one parent session, newest first. */
+/** Helper children recorded for one parent session, newest first. */
 export async function listSessionSubagents(name: string): Promise<SubagentInfo[]> {
   const body = await request<unknown>(
     `/api/sessions/${encodeURIComponent(name)}/subagents`,

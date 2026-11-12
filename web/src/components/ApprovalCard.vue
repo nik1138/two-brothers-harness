@@ -137,7 +137,7 @@ function onKeydown(e: KeyboardEvent) {
     }"
     :data-approval-id="item.approvalId"
     role="group"
-    :aria-label="`Approval requested: ${item.action}${item.target ? ` ${item.target}` : ''}`"
+    :aria-label="`Approval requested: ${item.action}${item.target ? ` ${item.target}` : ''}${item.subagentLabel ? ` by helper ${item.subagentLabel}` : ''}`"
     aria-keyshortcuts="y n a"
     tabindex="0"
     @keydown="onKeydown"
@@ -163,9 +163,16 @@ function onKeydown(e: KeyboardEvent) {
         <dt>command</dt>
         <dd><code class="approval-command">{{ item.command }}</code></dd>
       </div>
+      <div v-if="item.subagentLabel" class="approval-row">
+        <dt>helper</dt>
+        <dd><code class="approval-helper">{{ item.subagentLabel }}</code></dd>
+      </div>
     </dl>
 
     <p v-if="item.reason && pending" class="approval-reason muted">{{ item.reason }}</p>
+    <p v-if="item.subagentLabel && pending" class="approval-helper-note muted">
+      Requested by an isolated helper on behalf of the Senior.
+    </p>
     <p v-if="errorText" class="approval-error" role="alert">{{ errorText }}</p>
 
     <!-- Additive bounded preview (old backends send no detail → nothing here).
@@ -436,7 +443,8 @@ function onKeydown(e: KeyboardEvent) {
 }
 
 .approval-reason,
-.approval-note {
+.approval-note,
+.approval-helper-note {
   margin: 0;
   font-size: 0.78rem;
 }

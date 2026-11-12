@@ -32,7 +32,9 @@ test('Settings owns a third helper route with its own model and effort', () => {
   const editor = read('components/settings/RoleEditor.vue')
   assert.ok(editor.includes("'senior' | 'junior' | 'subagent'"))
   assert.ok(editor.includes("props.role === 'junior' ? 'Junior' : 'Subagent'"))
-  assert.ok(editor.includes('Read-only helper spawned by the Senior'))
+  assert.ok(editor.includes('Isolated helper spawned by the Senior'))
+  assert.ok(editor.includes('approved workspace changes'))
+  assert.equal(editor.includes('Read-only helper'), false)
   assert.ok(editor.includes('.role-card--subagent .role-dot'))
 
   const api = read('api.ts')

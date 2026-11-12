@@ -83,7 +83,7 @@ function closeOnBackdrop(event: MouseEvent) {
             :class="`is-${detail?.status ?? 'running'}`"
             aria-hidden="true"
           ></span>
-          {{ detail ? subagentRoleLabel(detail.role) : 'Read-only helper' }}
+          {{ detail ? subagentRoleLabel(detail.role) : 'Helper' }}
           <template v-if="elapsed"> · {{ elapsed }}</template>
         </p>
         <h2>{{ detail?.label ?? 'Subagent' }}</h2>
@@ -100,7 +100,7 @@ function closeOnBackdrop(event: MouseEvent) {
       <template v-else-if="detail">
         <p v-if="detail.status === 'running'" class="subagent-view-note is-live">
           <span class="subagent-live-dot" aria-hidden="true"></span>
-          The helper is working. This view updates live and is read-only.
+          The helper is working. This view updates live and is isolated from the parent transcript.
         </p>
 
         <ol v-if="timeline.length || detail.result" class="subagent-timeline">
@@ -116,7 +116,7 @@ function closeOnBackdrop(event: MouseEvent) {
               <pre>{{ entry.text }}</pre>
             </article>
             <article
-              v-else
+              v-else-if="entry.type === 'tool'"
               class="subagent-tool"
               :class="`is-${entry.status ?? 'started'}`"
             >
@@ -128,6 +128,23 @@ function closeOnBackdrop(event: MouseEvent) {
                 argsText(entry.args)
               }}</pre>
               <pre v-if="entry.result" class="subagent-tool-result">{{ entry.result }}</pre>
+            </article>
+            <article
+              v-else-if="entry.type === 'approval'"
+              class="subagent-approval"
+              :class="`is-${entry.status}`"
+            >
+              <div class="subagent-approval-head">
+                <span class="subagent-approval-label">Approval · {{ entry.action }}</span>
+                <span class="subagent-approval-status">{{ entry.status }}</span>
+              </div>
+              <p v-if="entry.target" class="subagent-approval-target">
+                <code>{{ entry.target }}</code>
+              </p>
+              <pre v-if="entry.command" class="subagent-approval-command">{{
+                entry.command
+              }}</pre>
+              <p v-if="entry.reason" class="subagent-approval-reason">{{ entry.reason }}</p>
             </article>
           </li>
         </ol>
@@ -322,11 +339,79 @@ function closeOnBackdrop(event: MouseEvent) {
 
 .subagent-message,
 .subagent-tool,
+.subagent-approval,
 .subagent-report {
   padding: var(--space-3);
   background: var(--surface-panel);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
+}
+
+/* One child approval row: status, action, target and (for shell) the exact
+   command. Plain text only — never v-html. */
+.subagent-approval {
+  border-left: 3px solid var(--accent);
+}
+
+.subagent-approval.is-allowed {
+  border-left-color: var(--ok);
+}
+
+.subagent-approval.is-denied,
+.subagent-approval.is-cancelled {
+  border-left-color: var(--danger);
+}
+
+.subagent-approval-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-1);
+}
+
+.subagent-approval-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.subagent-approval-status {
+  flex: none;
+  font-size: 0.68rem;
+  color: var(--text-tertiary);
+}
+
+.subagent-approval.is-allowed .subagent-approval-status {
+  color: var(--ok);
+}
+
+.subagent-approval.is-denied .subagent-approval-status,
+.subagent-approval.is-cancelled .subagent-approval-status {
+  color: var(--danger);
+}
+
+.subagent-approval-target,
+.subagent-approval-reason {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 0.76rem;
+  color: var(--text-secondary);
+}
+
+.subagent-approval-target code,
+.subagent-approval-command {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.subagent-approval-command {
+  margin: var(--space-1) 0 0;
+  overflow-wrap: anywhere;
+  font-size: 0.74rem;
+  color: var(--text-primary);
+  white-space: pre-wrap;
 }
 
 .subagent-message.is-task {

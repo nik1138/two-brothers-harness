@@ -9,10 +9,13 @@
  */
 
 import type {
+  ApprovalRequestedEvent,
+  ApprovalResolvedEvent,
   RunEvent,
   RunUsage,
   SubagentActivity,
   SubagentActivityEvent,
+  SubagentApprovalStatus,
   SubagentCompletedEvent,
   SubagentDetail,
   SubagentInfo,
@@ -74,6 +77,30 @@ function activityOf(value: unknown): SubagentActivity | null {
 
 function transcriptEntryOf(value: unknown): SubagentTranscriptEntry | null {
   if (!isRecord(value)) return null
+  if (value.type === 'approval') {
+    const status =
+      value.status === 'pending' ||
+      value.status === 'allowed' ||
+      value.status === 'denied' ||
+      value.status === 'cancelled'
+        ? value.status
+        : null
+    if (status === null) return null
+    const action = stringOf(value.action, 40)
+    if (action === '') return null
+    const target = stringOf(value.target, 500)
+    const command = stringOf(value.command, 1_000)
+    const reason = stringOf(value.reason, 500)
+    return {
+      type: 'approval',
+      status,
+      action,
+      at: intOf(value.at),
+      ...(target !== '' ? { target } : {}),
+      ...(command !== '' ? { command } : {}),
+      ...(reason !== '' ? { reason } : {}),
+    }
+  }
   if (value.type === 'message') {
     const text = stringOf(value.text, 12_000)
     if (text === '') return null
@@ -302,9 +329,11 @@ export function applySubagentDetailEvent(
         }
       }
       if (openIndex >= 0) {
+        const openEntry = detail.transcript[openIndex]
+        if (openEntry === undefined || openEntry.type !== 'tool') return detail
         const transcript = [...detail.transcript]
         transcript[openIndex] = {
-          ...transcript[openIndex]!,
+          ...openEntry,
           status,
           ...(typeof activity.result === 'string' ? { result: activity.result } : {}),
         }
@@ -361,6 +390,110 @@ export function applySubagentDetailEvent(
     }
   }
   return detail
+}
+
+/** The usable helper id of one approval event, or null (old backends). */
+function childEventId(event: RunEvent): string | null {
+  if (event.type !== 'approval_requested' && event.type !== 'approval_resolved') return null
+  const id = (event as { subagent_id?: unknown }).subagent_id
+  return typeof id === 'string' && id !== '' ? id : null
+}
+
+/**
+ * Fold one live child-tagged approval event into the tree: `approval_requested`
+ * sets the matching row's `last_activity` to `awaiting_approval`, and
+ * `approval_resolved` sets it back to running (a terminal row keeps its final
+ * state). An event without a helper id or for an unknown child is a no-op, so
+ * an old backend never patches anything.
+ */
+export function applySubagentApprovalEvent(
+  list: readonly SubagentInfo[],
+  event: RunEvent,
+): SubagentInfo[] {
+  const id = childEventId(event)
+  if (id === null) return list as SubagentInfo[]
+  const index = list.findIndex((row) => row.id === id)
+  if (index < 0) return list as SubagentInfo[]
+  const current = list[index]!
+  // A settled child keeps its terminal state; a late/duplicate approval event
+  // never reopens the row.
+  if (current.status !== 'running') return list as SubagentInfo[]
+  const copy = [...list]
+  if (event.type === 'approval_requested') {
+    copy[index] = {
+      ...current,
+      last_activity: { kind: 'status', status: 'awaiting_approval', at: event.at },
+    }
+    return copy
+  }
+  copy[index] = {
+    ...current,
+    last_activity: { kind: 'status', status: 'running', at: event.at },
+  }
+  return copy
+}
+
+/**
+ * Fold one live child-tagged approval event into the open child drawer: append
+ * a pending approval row (unless one is already pending) and flip the newest
+ * pending row to allowed/denied/cancelled on resolution. An event for another
+ * child, without a helper id, or with no pending row to flip is a no-op.
+ */
+export function applySubagentApprovalDetailEvent(
+  detail: SubagentDetail,
+  event: RunEvent,
+): SubagentDetail {
+  const id = childEventId(event)
+  if (id === null || id !== detail.id) return detail
+  if (event.type === 'approval_requested') {
+    if (detail.transcript.some((entry) => entry.type === 'approval' && entry.status === 'pending')) {
+      return detail
+    }
+    const requested = event as ApprovalRequestedEvent
+    const action = stringOf(requested.action, 40) || 'action'
+    const target = stringOf(requested.target, 500)
+    const command = stringOf(requested.command, 1_000)
+    return {
+      ...detail,
+      last_activity: { kind: 'status', status: 'awaiting_approval', at: event.at },
+      transcript: [
+        ...detail.transcript,
+        {
+          type: 'approval',
+          status: 'pending',
+          action,
+          at: event.at * 1_000,
+          ...(target !== '' ? { target } : {}),
+          ...(command !== '' ? { command } : {}),
+        },
+      ],
+    }
+  }
+  if (event.type !== 'approval_resolved') return detail
+  const resolved = event as ApprovalResolvedEvent
+  const status: SubagentApprovalStatus =
+    resolved.reason === 'cancelled'
+      ? 'cancelled'
+      : resolved.decision === 'allow'
+        ? 'allowed'
+        : 'denied'
+  const transcript = [...detail.transcript]
+  for (let index = transcript.length - 1; index >= 0; index -= 1) {
+    const entry = transcript[index]!
+    if (entry.type === 'approval' && entry.status === 'pending') {
+      transcript[index] = { ...entry, status }
+      break
+    }
+  }
+  return {
+    ...detail,
+    last_activity: {
+      kind: 'status',
+      status: detail.status === 'running' ? 'running' : detail.status,
+      at: event.at,
+    },
+    transcript,
+  }
 }
 
 export function runningSubagentCount(list: readonly SubagentInfo[]): number {
@@ -427,7 +560,9 @@ export function subagentActivityText(
         ? 'failed'
         : activity.status === 'cancelled'
           ? 'cancelled'
-          : 'working…'
+          : activity.status === 'awaiting_approval'
+            ? 'waiting for approval'
+            : 'working…'
   }
   return ''
 }
