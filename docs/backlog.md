@@ -1652,6 +1652,25 @@ Tests: `tests/autoroute.test.ts` (31), `tests/solo.test.ts` (24),
 `tests/modebytes.test.ts` (12), server/runtime/CLI/TUI/web extensions and the
 `auto-solo` browser scenario. No new runtime dependencies.
 
+## Shipped 2026-11-12 (CI red window: hermetic replay, watcher, smoke gate)
+
+- **Ubuntu CI red window closed (runs 80–89)** — the hermetic
+  `e2e/server-prompt-audit` replay check assumed a fixed decision + `run_end`
+  tail, but c6e41b4's additive `usage` runtime event also lands for the decision
+  node (tail decision → usage → run_end); the check now anchors on the decision
+  frame and asserts the whole persisted tail replays verbatim after `?after=`.
+  A pre-existing `tests/tuikeys.test.ts` watcher race (a keys-file write issued
+  in the same tick as `fs.watchFile` could become libuv's asynchronous stat
+  baseline under parallel `node --test` load) waits for the baseline before the
+  first mutation. The offline smoke gate now runs the hermetic server E2E
+  (`node e2e/run.ts` from `packages/harness` with
+  `TWO_BROTHERS_E2E_BASE_URL=http://127.0.0.1:9/v1`, restored afterwards), so
+  the live-model suites skip and the server-status/prompt-audit suites run; the
+  regression that only the ubuntu matrix could see now fails in the offline
+  smoke gate too. Files: `packages/harness/e2e/server-prompt-audit.ts`,
+  `packages/harness/tests/tuikeys.test.ts`, `scripts/smoke-test.ps1`; docs
+  `docs/testing.md`, `packages/harness/e2e/AGENTS.md`, `scripts/AGENTS.md`.
+
 ## Open items (deferred)
 
 - **models.dev catalog browse/import (medium)** — kimi-code fetches
@@ -1741,15 +1760,26 @@ Tests: `tests/autoroute.test.ts` (31), `tests/solo.test.ts` (24),
   tool. The child has its own context, a fresh provider instance, read-only
   workspace tools, a bounded task/report and a durable transcript under
   `<sessions-dir>/subagents/`; the parent stream carries `subagent_*` events
-  and the web header shows a live tree with a read-only child drawer. The
-  child cannot mutate, run shell, recurse, or receive follow-ups. Remaining
-  phases: mutating child tools with child-tagged approvals, `send_message` /
-  `interrupt_agent` / `list_agents` controls, async completion/wake (the
-  parent currently waits for the bounded report), a TUI tree, forked-context
-  children, deeper nesting, per-call model/effort overrides (the operator's
-  Settings → Models & roles → Subagent route already fixes the child route) and
-  cost/cache roll-up into the parent view. The protocol stays unchanged;
-  children are internal executions, not second protocol peers.
+  and the web header shows a live tree with a read-only child drawer.
+  **Phase 2 slice 1 shipped 2026-11-12 for `serve`/web:** a workspace-bound
+  helper now gets the seven workspace built-ins (three reads plus
+  write/edit/delete/shell, plus `spill_read` when offered); every child
+  mutation is an ordinary operator approval on the parent run's broker, tagged
+  with the helper's identity (`subagent_id`/`subagent_label` on
+  `approval_requested` and `pending()`, `subagent_id` on `approval_resolved`
+  and on a stop's cancellation); the `(action, target)` session-allow pair and
+  the denial cap stay shared with the brothers. Child writes land in the
+  run-scoped undo record through a shared capture seam, the child transcript
+  carries bounded approval rows (`pending` → `allowed`/`denied`/`cancelled`),
+  and the web approval card, tree and child drawer name the helper. The child
+  still cannot recurse or receive follow-ups. Remaining phases: `send_message` /
+  `interrupt_agent` / `list_agents` controls (in progress), async
+  completion/wake (the parent currently waits for the bounded report), a TUI
+  tree, forked-context children, deeper nesting, per-call model/effort
+  overrides (the operator's Settings → Models & roles → Subagent route already
+  fixes the child route) and cost/cache roll-up into the parent view. The
+  protocol stays unchanged; children are internal executions, not second
+  protocol peers.
 - **Stacked-dialog mask-click (web, non-blocker)** — **blocked on upstream**
   (evidence updated 2026-11-08): naive-ui fires `mask-click` for clicks that
   land inside a stacked second dialog, so every dialog's handler must ignore

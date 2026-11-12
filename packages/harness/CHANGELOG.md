@@ -36,9 +36,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are untouched; no new runtime dependencies. Tests: `tests/autoroute`,
   `tests/solo`, `tests/modebytes`, server/runtime/CLI/TUI/web extensions,
   and the `auto-solo` browser scenario.
+- **Mutating helper subagents (phase 2 slice 1, `serve`/web):** a
+  workspace-bound helper now receives the seven workspace built-ins — the three
+  reads plus write/edit/delete/shell — from a child view of the run's
+  workspace, plus `spill_read` when the parent offers it. Every child mutation
+  is an ordinary operator approval on the parent run's broker, tagged with the
+  helper's identity (`subagent_id`/`subagent_label` on `approval_requested`
+  and `pending()`, `subagent_id` on `approval_resolved` and on a stop's
+  cancellation), so the run's permission mode decides exactly what a helper may
+  do. The `(action, target)` session-allow pair and the denial cap are
+  unchanged, so one allow or cap spans both brothers and every helper.
+  `PermissionManager.childView` snapshots the run's policy at spawn
+  (fail-closed with no broker) and `Workspace.childView` shares the run's undo
+  capture seam, so a child write lands in the existing run-scoped undo record.
+  The child transcript gains bounded append-only `approval` rows (`pending`,
+  then `allowed`/`denied`/`cancelled`), and the web approval card, subagent
+  tree, child drawer and Settings copy name the helper instead of calling it
+  read-only. No protocol envelope, schema or `prompts.json` change; the child
+  still cannot recurse or receive follow-ups. Files: `src/subagent.ts`,
+  `src/permissions.ts`, `src/workspace.ts`, `src/harness.ts`,
+  `src/runevents.ts`, `web/src/subagents.ts`, `web/src/runtime.ts`,
+  `web/src/types.ts`, `web/src/api.ts`, `web/src/App.vue`,
+  `web/src/components/ApprovalCard.vue`, `web/src/components/SubagentView.vue`,
+  `web/src/components/settings/ModelsRolesSection.vue`,
+  `web/src/components/settings/RoleEditor.vue`; tests
+  `tests/subagentmutating.test.ts`, `tests/subagentapprovals.test.ts`,
+  `tests/subagent.test.ts`, `web/tests/subagentapprovals.test.ts`,
+  `web/tests/subagents.test.ts` and the `subagent-mutation` browser scenario.
 
 ### Fixed
 
+- **Browser-E2E session-switch race:** `createSession()` returned as soon as
+  the New-session dialog closed, while the app still had to refresh the session
+  list and load the new session before the composer's target moved, so a send
+  or a DOM assertion in that window raced the switch. The helper now waits for
+  the new session's chat title (the switch's rendered marker) before returning,
+  the folding assertion keeps a bounded fold-count wait, and the
+  reasoning-replay sidecar wait is split into "run appears" then "run_end" so a
+  run registered in the wrong session fails honestly. This fixes the
+  pre-existing reasoning-replay wrong-session submission (the plain run was
+  posted into the reasoning session, whose sidecar then never reached
+  `run_end`) and the folding stale-fold-count flake; both reproduced on base
+  c445eee. The assertions themselves are unchanged — only the waits in front of
+  them. File: `e2e/run.mjs`; no product-source change.
+- **Hermetic server E2E replay, watcher baseline and the smoke gate:** the
+  ubuntu CI red window (runs 80–89) came from the hermetic
+  `e2e/server-prompt-audit` replay check, which assumed a fixed decision +
+  `run_end` tail; the additive `usage` runtime event from c6e41b4 is emitted
+  for the decision node too, so the persisted tail is
+  decision → usage → run_end. The check now anchors on the decision frame and
+  asserts the whole persisted tail replays verbatim through `?after=`, so
+  additive per-node events cannot break the durability assertion again (the
+  Windows leg stayed green only because it does not run `e2e/run.ts`). A
+  pre-existing `tests/tuikeys.test.ts` watcher race — a keys-file write issued
+  in the same tick as `fs.watchFile` could become libuv's asynchronous stat
+  baseline, losing the change under `node --test`'s parallel load — now yields
+  past a couple of poll intervals before the first mutation. The offline smoke
+  gate runs the hermetic runner (`node e2e/run.ts` from `packages/harness` with
+  `TWO_BROTHERS_E2E_BASE_URL=http://127.0.0.1:9/v1`, the closed loopback port
+  CI uses, restored afterwards), so the live-model suites SKIP, the
+  server-status/prompt-audit suites run and the detection gap that kept this
+  regression invisible locally is closed. Files:
+  `packages/harness/e2e/server-prompt-audit.ts`,
+  `packages/harness/tests/tuikeys.test.ts`, `scripts/smoke-test.ps1`; docs
+  `docs/testing.md`, `packages/harness/e2e/AGENTS.md`, `scripts/AGENTS.md`.
 - **OpenCode Go/Zen requests carry the required session header:** every
   provider request to `opencode.ai` now sends a stable `x-opencode-session`
   (the web session name, the session-file stem, or a per-provider UUID for
