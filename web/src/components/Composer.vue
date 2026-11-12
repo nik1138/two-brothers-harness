@@ -5,10 +5,23 @@ import {
   ApiError,
   getSettings,
   listCommands,
+  listProviders,
   listSkills,
   listWorkspaceFiles,
+  updateSettings,
 } from '../api'
 import type { SettingsResponse } from '../api'
+import {
+  filterModelGroups,
+  isCurrentModelChoice,
+  modelChoiceCount,
+  modelChoiceKey,
+  modelChoicePatch,
+  modelGroupsForRole,
+} from '../modelSwitch'
+import type { ModelChoice, ModelRole } from '../modelSwitch'
+import { normalizeProviders } from '../providerSettings'
+import type { ProviderView } from '../providerSettings'
 import {
   MODE_COMMAND_USAGE,
   commandSectionCount,
@@ -141,6 +154,8 @@ const emit = defineEmits<{
   openSettings: []
   /** Open Settings directly on the Permissions section. */
   openPermissions: []
+  /** The composer saved a role model choice; the shell should refresh settings. */
+  modelsChanged: []
   /** A first-party base action chosen from the `/` menu or typed directly. */
   command: [request: ComposerCommandRequest]
   /** Neutral, composer-local notice for the shell to surface (usage errors…). */
@@ -259,10 +274,10 @@ const routeAriaLabel = computed(() => {
     const source = route?.providerRef ? `, ${route.providerRef} preset` : ''
     return `${role}: ${model}${source}`
   }
-  return `Model route from settings — ${describe('Senior', seniorRoute.value)}; ${describe(
+  return `Model switch — ${describe('Senior', seniorRoute.value)}; ${describe(
     'Junior',
     juniorRoute.value,
-  )}`
+  )}. Opens model choices for the message input.`
 })
 
 async function checkSettings() {
@@ -1396,32 +1411,197 @@ function openModePicker(): void {
   })
 }
 
-// -- model route popover ------------------------------------------------------
+// -- model switch (inside the message input) ---------------------------------
+//
+// The chip opens a two-level menu borrowed from the vendor model pickers:
+// the root lists the Senior and Junior routes; each drills into a searchable,
+// provider-grouped model list with the current row checked. Selecting writes
+// that role's `provider_ref` + `model` through PUT /api/settings, so the base
+// URL, wire kind and key follow the chosen preset. The menu labels the choice
+// "saved for new runs" — it is a persisted setting, not a one-shot override.
 
 const modelOpen = ref(false)
 const modelTrigger = ref<HTMLButtonElement | null>(null)
-const modelConfigure = ref<HTMLButtonElement | null>(null)
+const modelRoot = ref<HTMLElement | null>(null)
+const modelList = ref<HTMLElement | null>(null)
+const modelSearch = ref<HTMLInputElement | null>(null)
+const modelPane = ref<'root' | ModelRole>('root')
+const modelQuery = ref('')
+const modelSaving = ref(false)
+const modelSaveError = ref<string | null>(null)
+const modelProviders = ref<ProviderView[]>([])
+const modelProvidersState = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
+const modelProvidersError = ref('')
+let modelProvidersRequest = 0
+
+const activeModelRole = computed<ModelRole>(() =>
+  modelPane.value === 'junior' ? 'junior' : 'senior',
+)
+const activeModelRoleLabel = computed(() =>
+  activeModelRole.value === 'junior' ? 'Junior' : 'Senior',
+)
+const modelGroups = computed(() =>
+  modelPane.value === 'root'
+    ? []
+    : modelGroupsForRole(settings.value, modelProviders.value, activeModelRole.value),
+)
+const filteredModelGroups = computed(() =>
+  filterModelGroups(modelGroups.value, modelQuery.value),
+)
+const modelChoiceTotal = computed(() => modelChoiceCount(modelGroups.value))
+/** Vendor parity: search appears for catalogs above four choices. */
+const showModelSearch = computed(() => modelChoiceTotal.value > 4)
+const modelEmptyText = computed(() => {
+  if (modelProvidersState.value === 'loading') return 'Loading models…'
+  if (modelQuery.value.trim()) return 'No models match.'
+  return 'No models are configured for this role — use Configure providers.'
+})
+
+function errorText(e: unknown): string {
+  return e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e)
+}
+
+function modelSourceLabel(route: RoleRoute | null): string {
+  if (!route) return 'not configured'
+  if (route.provider === 'mock') return 'built-in'
+  return route.providerRef ? `${route.providerRef} preset` : 'manual connection'
+}
+
+async function loadModelProviders(force = false): Promise<void> {
+  if (modelProvidersState.value === 'loading') return
+  if (!force && modelProvidersState.value === 'ready') return
+  const request = ++modelProvidersRequest
+  modelProvidersState.value = 'loading'
+  modelProvidersError.value = ''
+  try {
+    const next = await listProviders()
+    if (request !== modelProvidersRequest) return
+    modelProviders.value = normalizeProviders(next)
+    modelProvidersState.value = 'ready'
+  } catch (e) {
+    if (request !== modelProvidersRequest) return
+    modelProvidersState.value = 'error'
+    modelProvidersError.value = errorText(e)
+  }
+}
 
 function onModelShow(show: boolean) {
   modelOpen.value = show
-  if (show) void nextTick(() => modelConfigure.value?.focus())
+  if (!show) return
+  modelPane.value = 'root'
+  modelQuery.value = ''
+  modelSaveError.value = null
+  void loadModelProviders()
+  void nextTick(() => {
+    modelRoot.value?.querySelector<HTMLButtonElement>('.model-role-row')?.focus()
+  })
 }
 
 function onModelKeydown(e: KeyboardEvent) {
   if (e.key !== 'Escape') return
   e.preventDefault()
   e.stopPropagation()
-  closeModels(true)
+  if (modelPane.value !== 'root') backToModelRoot()
+  else closeModels(true)
 }
 
 function closeModels(restoreFocus = false) {
   modelOpen.value = false
+  modelPane.value = 'root'
   if (restoreFocus) void nextTick(() => modelTrigger.value?.focus())
 }
 
 function configureModels() {
   modelOpen.value = false
   emit('openSettings')
+}
+
+function openRoleModels(role: ModelRole) {
+  modelPane.value = role
+  modelQuery.value = ''
+  modelSaveError.value = null
+  void loadModelProviders()
+  void nextTick(() => {
+    if (showModelSearch.value) {
+      modelSearch.value?.focus()
+      return
+    }
+    const list = modelList.value
+    const target =
+      list?.querySelector<HTMLButtonElement>('.model-choice.is-current:not(:disabled)') ??
+      list?.querySelector<HTMLButtonElement>('.model-choice:not(:disabled)')
+    target?.focus()
+  })
+}
+
+function backToModelRoot() {
+  modelPane.value = 'root'
+  modelQuery.value = ''
+  modelSaveError.value = null
+  void nextTick(() => {
+    modelRoot.value?.querySelector<HTMLButtonElement>('.model-role-row')?.focus()
+  })
+}
+
+function moveModelFocus(delta: number) {
+  const items = Array.from(
+    modelList.value?.querySelectorAll<HTMLButtonElement>('.model-choice:not(:disabled)') ?? [],
+  )
+  if (items.length === 0) return
+  const active = items.indexOf(document.activeElement as HTMLButtonElement)
+  const next =
+    active < 0
+      ? delta > 0
+        ? 0
+        : items.length - 1
+      : (active + delta + items.length) % items.length
+  items[next]?.focus()
+}
+
+function onModelListKeydown(e: KeyboardEvent) {
+  if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
+  e.preventDefault()
+  moveModelFocus(e.key === 'ArrowDown' ? 1 : -1)
+}
+
+function focusFirstModel() {
+  moveModelFocus(1)
+}
+
+async function chooseModel(choice: ModelChoice) {
+  if (modelSaving.value || modelPane.value === 'root') return
+  const role = activeModelRole.value
+  if (isCurrentModelChoice(settings.value?.[role], choice)) {
+    closeModels(true)
+    return
+  }
+  const patch = modelChoicePatch(role, choice)
+  if (patch === null) {
+    closeModels(true)
+    return
+  }
+  modelSaving.value = true
+  modelSaveError.value = null
+  try {
+    const next = await updateSettings(patch)
+    settings.value = next
+    settingsState.value = 'ready'
+    emit('modelsChanged')
+    emit(
+      'notice',
+      `${role === 'senior' ? 'Senior' : 'Junior'} model set to ${choice.model} — saved for new runs.`,
+    )
+    modelSaving.value = false
+    closeModels(true)
+  } catch (e) {
+    modelSaving.value = false
+    modelSaveError.value = errorText(e)
+  }
+}
+
+const MODEL_MENU_STYLE = {
+  padding: '0.4rem',
+  width: 'min(24rem, calc(100vw - 2rem))',
 }
 
 const MENU_STYLE = { padding: '0.35rem', width: 'min(20rem, calc(100vw - 2rem))' }
@@ -1544,6 +1724,8 @@ watch(
 watch(() => props.settingsVersion, () => {
   resetCatalogs()
   if (pickerOpen.value) ensureCatalogs()
+  modelProvidersState.value = 'idle'
+  if (modelOpen.value) void loadModelProviders(true)
   void checkSettings()
 })
 
@@ -1742,7 +1924,7 @@ onBeforeUnmount(() => {
             v-model:show="modelOpen"
             trigger="click"
             placement="top-start"
-            :content-style="MENU_STYLE"
+            :content-style="MODEL_MENU_STYLE"
             @update:show="onModelShow"
           >
             <template #trigger>
@@ -1781,45 +1963,178 @@ onBeforeUnmount(() => {
 
             <div
               id="composer-model-route"
-              class="model-menu"
+              ref="modelRoot"
+              class="model-menu model-switch"
               role="group"
-              aria-label="Model route from settings"
+              aria-label="Model switch"
               @keydown="onModelKeydown"
             >
-              <p class="menu-heading">Model route from settings</p>
+              <template v-if="modelPane === 'root'">
+                <p class="menu-heading">Models</p>
+                <p class="model-switch-note">Saved for new runs</p>
 
-              <template v-if="settingsState === 'loading'">
-                <p class="menu-empty">Loading model settings…</p>
+                <template v-if="settingsState === 'loading'">
+                  <p class="menu-empty">Loading model settings…</p>
+                </template>
+                <template v-else-if="settingsState === 'unknown'">
+                  <p class="menu-empty">Model settings could not be loaded.</p>
+                </template>
+                <template v-else>
+                  <button
+                    type="button"
+                    class="model-role-row"
+                    :aria-label="`Choose the Senior model. Current: ${modelLabel(seniorRoute)}. ${modelSourceLabel(seniorRoute)}.`"
+                    @click="openRoleModels('senior')"
+                  >
+                    <span class="model-role">Senior</span>
+                    <span class="model-role-main">
+                      <span class="model-name">{{ modelLabel(seniorRoute) }}</span>
+                      <span class="model-source">{{ modelSourceLabel(seniorRoute) }}</span>
+                    </span>
+                    <svg class="model-role-chevron" viewBox="0 0 16 16" aria-hidden="true">
+                      <path
+                        d="m6 3 5 5-5 5"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                      />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
+                    class="model-role-row"
+                    :aria-label="`Choose the Junior model. Current: ${modelLabel(juniorRoute)}. ${modelSourceLabel(juniorRoute)}.`"
+                    @click="openRoleModels('junior')"
+                  >
+                    <span class="model-role">Junior</span>
+                    <span class="model-role-main">
+                      <span class="model-name">{{ modelLabel(juniorRoute) }}</span>
+                      <span class="model-source">{{ modelSourceLabel(juniorRoute) }}</span>
+                    </span>
+                    <svg class="model-role-chevron" viewBox="0 0 16 16" aria-hidden="true">
+                      <path
+                        d="m6 3 5 5-5 5"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                      />
+                    </svg>
+                  </button>
+                </template>
+
+                <p v-if="modelProvidersState === 'loading'" class="menu-empty">
+                  Loading provider models…
+                </p>
+                <p v-else-if="modelProvidersError" class="model-error" role="alert">
+                  {{ modelProvidersError }}
+                  <button
+                    type="button"
+                    class="model-retry"
+                    @click="loadModelProviders(true)"
+                  >
+                    Retry
+                  </button>
+                </p>
+
+                <div class="menu-divider" role="presentation"></div>
+                <button
+                  type="button"
+                  class="menu-action"
+                  @click="configureModels"
+                >
+                  Configure providers
+                </button>
               </template>
-              <template v-else-if="settingsState === 'unknown'">
-                <p class="menu-empty">Model settings could not be loaded.</p>
-              </template>
+
               <template v-else>
-                <div class="model-row">
-                  <span class="model-role">Senior</span>
-                  <span class="model-name">{{ seniorRoute?.model || 'No model set' }}</span>
-                  <span v-if="seniorRoute?.providerRef" class="model-source">
-                    {{ seniorRoute.providerRef }} preset
-                  </span>
+                <div class="model-pane-head">
+                  <button
+                    type="button"
+                    class="model-back"
+                    aria-label="Back to roles"
+                    title="Back to roles"
+                    @click="backToModelRoot"
+                  >
+                    ‹
+                  </button>
+                  <p class="menu-heading">{{ activeModelRoleLabel }} model</p>
                 </div>
-                <div class="model-row">
-                  <span class="model-role">Junior</span>
-                  <span class="model-name">{{ juniorRoute?.model || 'No model set' }}</span>
-                  <span v-if="juniorRoute?.providerRef" class="model-source">
-                    {{ juniorRoute.providerRef }} preset
-                  </span>
-                </div>
-              </template>
 
-              <div class="menu-divider" role="presentation"></div>
-              <button
-                ref="modelConfigure"
-                type="button"
-                class="menu-action"
-                @click="configureModels"
-              >
-                Configure models
-              </button>
+                <input
+                  v-if="showModelSearch"
+                  ref="modelSearch"
+                  v-model="modelQuery"
+                  class="model-search"
+                  type="search"
+                  placeholder="Search models"
+                  aria-label="Search models"
+                  autocomplete="off"
+                  spellcheck="false"
+                  @keydown.down.prevent="focusFirstModel"
+                  @keydown.up.prevent="moveModelFocus(-1)"
+                />
+
+                <div
+                  ref="modelList"
+                  class="model-list"
+                  role="radiogroup"
+                  :aria-label="`${activeModelRoleLabel} model`"
+                  :aria-busy="modelSaving"
+                  @keydown="onModelListKeydown"
+                >
+                  <div
+                    v-for="group in filteredModelGroups"
+                    :key="group.provider"
+                    class="model-group"
+                  >
+                    <p class="model-group-label">
+                      <span>{{ group.provider }}</span>
+                      <span
+                        v-if="!group.hasKey"
+                        class="model-key-warn"
+                        title="No API key is configured for this provider"
+                      >
+                        no key
+                      </span>
+                    </p>
+                    <button
+                      v-for="choice in group.models"
+                      :key="modelChoiceKey(choice)"
+                      type="button"
+                      class="model-choice"
+                      :class="{ 'is-current': choice.current }"
+                      role="radio"
+                      :aria-checked="choice.current"
+                      :disabled="modelSaving"
+                      @click="chooseModel(choice)"
+                    >
+                      <span class="model-choice-name">{{ choice.model }}</span>
+                      <span v-if="choice.current" class="model-check" aria-hidden="true">✓</span>
+                    </button>
+                  </div>
+                  <p v-if="!filteredModelGroups.length" class="menu-empty">
+                    {{ modelEmptyText }}
+                  </p>
+                </div>
+
+                <p v-if="modelSaveError" class="model-error" role="alert">{{ modelSaveError }}</p>
+                <p v-if="modelProvidersError" class="model-error" role="alert">
+                  {{ modelProvidersError }}
+                </p>
+
+                <div class="menu-divider" role="presentation"></div>
+                <button
+                  type="button"
+                  class="menu-action"
+                  @click="configureModels"
+                >
+                  Configure providers
+                </button>
+              </template>
             </div>
           </n-popover>
         </div>
@@ -2509,6 +2824,236 @@ onBeforeUnmount(() => {
   font-size: 0.72rem;
   color: var(--text-secondary);
   overflow-wrap: anywhere;
+}
+
+/* Model switch (inside the message input): a two-level menu borrowed from the
+   vendor model pickers. The root lists the two role routes; the drilled pane
+   is a provider-grouped, searchable model list. */
+.model-switch-note {
+  margin: -0.15rem 0 var(--space-1);
+  padding: 0 var(--space-2);
+  font-size: 0.7rem;
+  color: var(--text-tertiary, var(--text-secondary));
+}
+
+.model-role-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  padding: var(--space-2);
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.model-role-row:hover {
+  background: var(--surface-hover);
+}
+
+.model-role-row:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--focus-ring);
+}
+
+.model-role-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 0.05rem;
+  min-width: 0;
+}
+
+.model-role-row .model-name {
+  overflow: hidden;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-role-row .model-source {
+  overflow: hidden;
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-role-chevron {
+  flex: none;
+  width: 0.75rem;
+  height: 0.75rem;
+  opacity: 0.55;
+}
+
+.model-role-row:hover .model-role-chevron,
+.model-role-row:focus-visible .model-role-chevron {
+  opacity: 0.9;
+}
+
+.model-pane-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0 0.15rem;
+}
+
+.model-pane-head .menu-heading {
+  padding-left: 0;
+}
+
+.model-back {
+  flex: none;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  font-size: 1.1rem;
+  line-height: 1;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.model-back:hover,
+.model-back:focus-visible {
+  color: var(--text-primary);
+  background: var(--surface-hover);
+}
+
+.model-back:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -1px;
+}
+
+.model-search {
+  width: 100%;
+  margin: 0.15rem 0 var(--space-1);
+  padding: 0.4rem var(--space-2);
+  font: inherit;
+  font-size: 0.8rem;
+  color: var(--text-primary);
+  background: var(--surface-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.model-search:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -1px;
+}
+
+.model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  max-height: 17rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.model-group + .model-group {
+  margin-top: 0.15rem;
+}
+
+.model-group-label {
+  position: sticky;
+  top: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0.35rem var(--space-2) 0.2rem;
+  font-size: 0.68rem;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--text-tertiary, var(--text-secondary));
+  background: var(--surface-panel);
+}
+
+.model-key-warn {
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--warning);
+}
+
+.model-choice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 0.4rem var(--space-2);
+  font: inherit;
+  font-size: 0.8rem;
+  color: var(--text-primary);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.model-choice:hover {
+  background: var(--surface-hover);
+}
+
+.model-choice:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--focus-ring);
+}
+
+.model-choice.is-current {
+  background: var(--surface-highlight);
+}
+
+.model-choice:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.model-choice-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-check {
+  flex: none;
+  font-weight: 700;
+  color: var(--accent-text);
+}
+
+.model-error {
+  margin: 0;
+  padding: 0.3rem var(--space-2);
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--danger);
+}
+
+.model-retry {
+  margin-left: 0.35rem;
+  padding: 0;
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--accent-text);
+  text-decoration: underline;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
 }
 
 .menu-empty {

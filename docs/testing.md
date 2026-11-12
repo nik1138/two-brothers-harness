@@ -811,8 +811,10 @@ pins belt-stable prefixes). Final measured totals for the merged tree:
 package suite **2 083 tests** (2 076 pass and 7 platform skips on Windows), web
 suite **493/493**, hermetic CLI E2E **19/19** on sources and `--dist`, fault
 injection **7/7**, browser E2E **23 PASS, 0 FAIL, 1 opt-in `real` skip**,
-`npm run typecheck` green. The Wave 30 WSL Linux pass is **2 082 pass with 1
-POSIX-specific skip** (Windows reports 2 076 pass with 7 platform skips).
+`npm run typecheck` green. The composer model switch adds
+`web/tests/modelSwitch.test.ts`, bringing the web suite to **501/501**. The
+Wave 30 WSL Linux pass is **2 082 pass with 1 POSIX-specific skip** (Windows
+reports 2 076 pass with 7 platform skips).
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a

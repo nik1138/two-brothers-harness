@@ -372,6 +372,13 @@ function onSettingsSaved() {
   settingsOpen.value = false
   settingsVersion.value++
 }
+/**
+ * The composer's model switch saves through PUT /api/settings directly; just
+ * refresh the shell's settings snapshot without closing the Settings dialog.
+ */
+function onComposerModelsChanged() {
+  settingsVersion.value++
+}
 const workspaceDialogOpen = ref(false)
 const newSessionOpen = ref(false)
 /** Workspace whose rename dialog is open (null = closed). */
@@ -2850,6 +2857,7 @@ onUnmounted(() => {
         @stop="requestStop"
         @open-settings="openSettings()"
         @open-permissions="openSettings('permissions')"
+        @models-changed="onComposerModelsChanged"
         @command="onComposerCommand"
         @notice="showNotice"
       />

@@ -94,6 +94,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Model switch in the message input (web):** the composer's Models chip now
+  opens a two-level switch instead of a read-only summary. The root lists the
+  Senior and Junior routes; each drills into a searchable, provider-grouped
+  model list with the current row checked. Selecting writes that role's
+  `provider_ref` + `model` through `PUT /api/settings`, so the base URL, wire
+  kind and key follow the chosen preset, and refreshes the shell without
+  closing Settings. A preset without a key is marked `no key`; a manual
+  connection keeps a first `Current connection` row and stays a no-op. Search
+  appears above four choices, Arrow keys move through the list, Escape backs
+  out one level, and the menu is labelled "saved for new runs" (a persisted
+  setting, not a one-shot override). Files:
+  `web/src/modelSwitch.ts`, `web/src/components/Composer.vue`,
+  `web/src/App.vue`; tests `web/tests/modelSwitch.test.ts`.
 - **Subscription provider presets:** the seed table now includes OpenCode
   Zen/Go, Kimi For Coding, the Z.AI coding plans, the Qwen and Xiaomi token
   plans, Moonshot and MiniMax, using the endpoint/environment-key pairs from

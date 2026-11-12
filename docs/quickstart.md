@@ -229,8 +229,14 @@ the same hero appears inside a selected session that has no transcript yet.
 2. **Set the models** — the Settings dialog opens from the bottom-left of the
    sidebar; per-role Senior/Junior provider, model, base URL, and API key
    (keys are never echoed back; the server seals them at rest). Runs use the
-   configured models; there is no separate "mock" switch in the UI. Settings →
-   **Providers** lists the provider presets by name and opens the selected
+   configured models; there is no separate "mock" switch in the UI. The
+   composer's **Models** chip is the fast path: it opens the current
+   Senior/Junior routes, then a searchable provider-grouped model list.
+   Picking a model writes that role's provider preset + model (saved for new
+   runs) so the base URL, wire kind and key follow the preset; a preset with no
+   usable key is marked **no key**, and a manual connection keeps its
+   **Current connection** row. Settings → **Providers** lists the provider
+   presets by name and opens the selected
    provider's settings right below it (base URL, masked API key, model ids,
    advanced wire kind, add/delete). A customized built-in seed also shows
    **Reset to default**: the confirmation warns that the customized values and
