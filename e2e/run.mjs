@@ -676,6 +676,22 @@ async function createSession(page, title) {
   await dialog.getByRole('button', { name: 'Create' }).click()
   await dialog.waitFor({ state: 'hidden', timeout: 10000 })
   await page.locator('.chat-scroll').waitFor({ state: 'visible' })
+  // The dialog closes before App.vue's onCreateSession finishes
+  // (`await refreshSessions()` then `await loadSession(name)`), so for a few
+  // milliseconds `selected` — and therefore the composer's target session —
+  // still points at the PREVIOUS session. A send or a DOM assertion issued in
+  // that window races the switch: reasoning-replay posted its plain run into
+  // the reasoning session (whose sidecar therefore never saw it) and folding
+  // counted the previous session's `.fold-toggle` rows. Both flakes reproduce
+  // on base c445eee. The new session's title only renders once loadSession()
+  // has installed its transcript and `selected`, so it is the switch's own
+  // "rendered" marker; wait for it before returning.
+  if (title) {
+    await waitFor(
+      async () => (await page.locator('.chat-title').innerText()).trim() === title,
+      { desc: `the new session "${title}" to become the rendered session` },
+    )
+  }
 }
 
 const MODE_LABELS = { consult: 'Consult', work: 'Work', auto: 'Auto' }
@@ -2387,7 +2403,14 @@ async function scenarioFolding(runner) {
 
     // -- fold state is per session: switching away and back starts collapsed
     await createSession(page, OTHER)
-    await page.locator('.chat-scroll').waitFor({ state: 'visible' })
+    // createSession now waits for the switch to render, but keep the fold
+    // count as the explicit marker here: the previous session's rendered folds
+    // must leave the DOM in the same flush that installs the new transcript.
+    // This wait keeps the assertion deterministic against that render race
+    // (the intermittent failure was a wrong count, never a product fold bug).
+    await waitFor(async () => (await page.locator('.fold-toggle').count()) === 0, {
+      desc: "the previous session's fold rows to leave the DOM after the switch",
+    })
     assert.equal(await page.locator('.fold-toggle').count(), 0, 'another session has no folds')
     await page.locator('.session-item', { hasText: 'E2E folding session' }).first().click()
     await waitFor(async () => (await page.locator('.fold-toggle').count()) >= 1, {
@@ -3887,6 +3910,20 @@ async function scenarioReasoningReplay(runner) {
     await createSession(page, PLAIN_SESSION)
     await sendTask(page, PLAIN_TASK)
     await waitForRunEnd(page)
+    // Two phases, because the old single 15 s wait conflated two failures.
+    // (a) The run must APPEAR in this session's sidecar. A run writes its
+    // `run_status` event at submission, so an empty sidecar means the run was
+    // not registered here at all — the session-switch race fixed in
+    // createSession() used to send it to the previous session, and the wait
+    // then timed out exactly like a slow run (the base c445eee signature).
+    await waitFor(
+      async () => (await runtimeEventsOf(PLAIN_SESSION)).length > 0,
+      { desc: 'the plain session run to appear in its runtime sidecar' },
+    )
+    // (b) The terminal event must then land. This is still the real contract:
+    // a failed/cancelled run also writes `run_end`; only a missing or never
+    // terminal run fails. Kept at 15 s — the observed failure was a run in the
+    // wrong session, never a run that needed more time.
     const plainEvents = await waitFor(
       async () => {
         const events = await runtimeEventsOf(PLAIN_SESSION)
