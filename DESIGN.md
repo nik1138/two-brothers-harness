@@ -95,7 +95,10 @@ senior → user     decision   (final, confidence, dissent)
   the senior decides.
 - `--mode work`: the senior delegates part of the work, the junior executes
   and returns the result.
-- `--mode auto`: the senior chooses (in v0.1 this reduces to `consult`).
+- `--mode auto`: the senior chooses. One structured pre-decision routes the
+  run to `solo` (the senior decides on its own, read-only), `consult` or
+  `work`; the harness bounds the choice (fail-closed `consult`, work requires
+  a bound workspace) and records the route and its reason.
 
 ## 6. Decisions and limitations v0.1
 

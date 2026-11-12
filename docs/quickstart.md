@@ -64,6 +64,21 @@ node dist/cli.js run "Write hello world" --provider mock --mode work
 
 The junior takes on part of the work: `delegation` → `deliverable` → `review` → `decision`.
 
+In `auto` mode the senior chooses the route itself — one structured
+pre-decision picks `solo` (the senior answers alone, read-only), `consult` or
+`work`, and the reason is recorded in the transcript:
+
+```powershell
+node dist/cli.js run "Explain the trade-offs of dual-write migration" --provider mock --mode auto
+```
+
+The mock provider cannot produce a route payload, so this offline demo
+deterministically takes the fail-closed `consult` path with one honest
+warning; with a real or scripted provider the senior may answer solo. An
+unparseable route always degrades to `consult` (never a silent guess), and
+`work` is downgraded to `consult` when no workspace is bound. See
+[Modes](cli-reference.md#modes).
+
 Workspace-bound runs (`tui --workspace <dir>` and `serve` runs linked to a
 workspace) also load root-level `AGENTS.md` and `CLAUDE.md` into both roles'
 system prompts. Only regular files directly under the workspace root are read;

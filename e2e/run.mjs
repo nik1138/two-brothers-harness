@@ -88,6 +88,12 @@
 //                  the source byte-identical, the fork's second turn is rewound
 //                  away, and a mid-run steer proves rejected drafts survive
 //                  while an accepted Alt+Enter POST clears the composer
+//   auto-solo      scripted fixture: auto mode's senior routing call declares
+//                  the solo route; the transcript shows the neutral "Auto ·
+//                  Senior chose solo" activity (exactly once) and the
+//                  highlighted decision, no junior rows exist, the composer's
+//                  Auto copy is truthful, and the run record keeps mode "auto"
+//                  with the additive route/route_reason fields
 //   tab-title      scripted fixture: the selected session's document title is
 //                  "<session> — Two Brothers", gains the documented `▶ ` marker
 //                  while the run is live and `! ` while it waits for an
@@ -4037,6 +4043,113 @@ async function scenarioReasoningReplay(runner) {
 // Every applied surface is asserted through both the UI and the persisted API
 // state, and the steer acceptance is the backend's real 200 (the one synthetic
 // response is the deliberate 409 that proves a rejected draft is preserved).
+// -- scenario: real auto mode + Senior solo decision ---------------------------
+//
+// The scripted `auto-solo` fixture answers the senior routing call with the
+// solo route and the solo decision call with the decision payload; the junior
+// is never called. The browser asserts the honest route activity, the
+// highlighted decision, the absence of junior rows, the truthful composer Auto
+// copy, and the additive record fields (mode stays the REQUESTED "auto").
+
+async function scenarioAutoSolo(runner) {
+  const SESSION = 'E2E auto solo'
+  const TASK = 'Explain the trade-offs of a dual-write migration'
+  const ROUTE_REASON = 'the scripted task is answerable from knowledge'
+  const be = await startBackend({ kind: 'fixture', scenario: 'auto-solo' })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  const getJson = async (pathname) => {
+    const res = await fetch(`${be.base}${pathname}`)
+    assert.equal(res.status, 200, `GET ${pathname} -> HTTP ${res.status}`)
+    return res.json()
+  }
+  try {
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await createSession(page, SESSION)
+    await waitFor(
+      async () => (await page.locator('.chat-title').innerText()).trim() === SESSION,
+      { desc: 'the auto-solo session to be selected' },
+    )
+
+    // The composer's Auto copy is truthful now (no "(currently consult)").
+    await page.locator('button[data-testid="composer-mode"]').click()
+    const menu = page.locator('#composer-mode-menu')
+    await menu.waitFor({ state: 'visible' })
+    const autoOption = menu.locator('.mode-option:has(.mode-title:text-is("Auto"))')
+    const autoCopy = (await autoOption.innerText()).trim()
+    assert.ok(
+      autoCopy.includes('The Senior chooses solo, consult or work at run time.'),
+      `the Auto option must describe real routing (got "${autoCopy}")`,
+    )
+    assert.ok(!autoCopy.includes('currently consult'), 'the stale auto copy must be gone')
+    await autoOption.click()
+
+    await page.locator('textarea.composer-input').fill(TASK)
+    await page.locator('textarea.composer-input').press('Enter')
+    await waitForRunEnd(page)
+
+    // The route activity: honest "Senior chose solo" + the recorded reason.
+    // The reason rides the quiet activity's collapsed <details> (the same
+    // chrome as the compaction summary), so read textContent, not innerText.
+    const activity = page.locator('.system-activity', { hasText: 'Auto · Senior chose solo' })
+    await activity.waitFor({ state: 'visible', timeout: 15000 })
+    assert.ok(
+      (await activity.textContent()).includes(ROUTE_REASON),
+      'the route activity must carry the senior’s reason',
+    )
+    // Exactly one route row: the runtime event is shadowed once the marker
+    // envelope lands (the decision renders once, never twice).
+    assert.equal(
+      await page.locator('.system-activity:has-text("Auto ·")').count(),
+      1,
+      'the routing decision must render exactly once',
+    )
+
+    // The highlighted senior decision; no junior rows on a solo run.
+    const decision = page.locator('.bubble-highlight')
+    await decision.waitFor({ state: 'visible', timeout: 15000 })
+    assert.ok(
+      (await decision.innerText()).includes('Proceed with the scripted plan.'),
+      'the solo decision renders through the existing decision row',
+    )
+    assert.equal(
+      await page.locator('.chat-group.side-junior').count(),
+      0,
+      'a solo run never shows junior rows',
+    )
+
+    // The record keeps the REQUESTED mode and adds the effective route.
+    const sourceName = await sessionNameByTitle(be.base, SESSION)
+    const runs = await getJson(`/api/runs?session=${encodeURIComponent(sourceName)}`)
+    const run = runs.find((entry) => entry.status === 'completed')
+    assert.ok(run, 'the auto run completed')
+    assert.equal(run.mode, 'auto', 'the record keeps the requested mode')
+    assert.equal(run.route, 'solo')
+    assert.equal(run.route_reason, ROUTE_REASON)
+
+    // The session log: task, marker, decision — dense seq, no junior envelopes.
+    const detail = await getJson(`/api/sessions/${encodeURIComponent(sourceName)}`)
+    assert.deepEqual(
+      detail.events.map((event) => event.kind),
+      ['message', 'message', 'decision'],
+    )
+    assert.deepEqual(detail.events.map((event) => event.seq), [1, 2, 3])
+    assert.ok(
+      String(detail.events[1].payload.text).startsWith('[[AUTO ROUTE]] solo — '),
+      'the marker envelope rides the session log',
+    )
+    assert.equal(detail.events[2].from, 'senior')
+    assert.equal(detail.events[2].to, 'user')
+
+    consoleGuard.assertClean()
+    runner.pass('auto-solo')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(be.dir)
+  }
+}
+
 async function scenarioCooperationSurfaces(runner) {
   const SESSION = 'E2E cooperation surfaces'
   const FORK_TITLE = `${SESSION} (fork)`
@@ -5155,6 +5268,13 @@ async function main() {
         ),
       },
       {
+        label: 'auto-solo',
+        run: () => (
+          (currentRunner = makeRunner('auto-solo')),
+          scenarioAutoSolo(currentRunner)
+        ),
+      },
+      {
         label: 'tab-title',
         run: () => (
           (currentRunner = makeRunner('tab-title')),
@@ -5211,6 +5331,7 @@ async function main() {
       'workspace-drag',
       'reasoning-replay',
       'cooperation-surfaces',
+      'auto-solo',
       'tab-title',
       'settings-advanced',
       'real',

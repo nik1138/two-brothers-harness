@@ -27,7 +27,8 @@
 //
 //   --port PORT            (required) TCP port to listen on
 //   --scenario NAME        approval | slow | plan | folding | delete | reasoning
-//                          | cooperation | title | list | helper-write (default: approval)
+//                          | cooperation | title | list | helper-write | auto-solo
+//                          (default: approval)
 //                          approval: one workspace_write_file call, then the
 //                                    deliverable after the tool result; the first
 //                                    senior opening reply is deliberately
@@ -86,6 +87,14 @@
 //                                    write `e2e-helper.txt` before their final
 //                                    report, so the operator approval is a real
 //                                    child-tagged request.
+//                          auto-solo: auto-mode run whose senior routing call
+//                                    (the request tail carries `Requested
+//                                    payload: route`) declares the solo route,
+//                                    and the solo decision call answers with
+//                                    the decision payload; the junior is never
+//                                    called, so the browser scenario asserts
+//                                    the route activity, the highlighted
+//                                    decision and the absence of junior rows.
 //   --senior-model NAME    default: e2e-senior
 //   --junior-model NAME    default: e2e-junior
 //   --helper-model NAME    default: e2e-helper (the helper route's model)
@@ -320,6 +329,27 @@ function isRepairRequest(last) {
 }
 
 /**
+ * The payload kind the request tail asks for (`Requested payload: <kind>`,
+ * harness.ts REPLY_FORMAT_MARKER). The wire never carries the response kind,
+ * so the auto-solo scenario reads the marker the same way e2e/faults.ts does.
+ */
+function requestedPayloadKind(messages) {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i]
+    if (message.role !== 'user' || typeof message.content !== 'string') continue
+    const match = /Requested payload: ([a-z]+)/.exec(message.content)
+    if (match) return match[1]
+  }
+  return null
+}
+
+/** The auto-solo scenario's routing declaration (strict-valid route payload). */
+const AUTO_SOLO_ROUTE = {
+  route: 'solo',
+  reason: 'the scripted task is answerable from knowledge',
+}
+
+/**
  * Wait until just after the next wall-clock second boundary.
  *
  * Envelope timestamps are whole seconds and the web client breaks equal-time
@@ -434,6 +464,17 @@ function decide(body) {
   const role = body.model === OPTS.seniorModel ? 'senior' : 'junior'
   const wantsTools = Array.isArray(body.tools) && body.tools.length > 0
   const toolResults = messages.filter((m) => m.role === 'tool').length
+
+  // auto-solo: the senior declares the solo route, then decides alone. The
+  // routing call is plain; the solo decision may ride the read-only consult
+  // belt when a workspace is bound — either way it answers with the decision
+  // payload and calls no tools. The junior is never part of a solo run.
+  if (OPTS.scenario === 'auto-solo' && role === 'senior') {
+    if (requestedPayloadKind(messages) === 'route') {
+      return { content: JSON.stringify(AUTO_SOLO_ROUTE), toolCalls: [] }
+    }
+    return { content: JSON.stringify(payloadFor('decision')), toolCalls: [] }
+  }
 
   // The isolated helper route has its own model id; its request is the child
   // conversation, not a brother turn. First round: the workspace write that

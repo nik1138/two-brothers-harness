@@ -1606,6 +1606,52 @@ Also shipped in wave 30:
   explicit consent. Tests: `web/tests/permissionsUi.test.ts` (source-level
   confirmation wiring), web suite/build.
 
+## Shipped 2026-11-12 (real `auto` + Senior solo decision)
+
+Todo item 4 is shipped: `auto` is no longer a consult alias. The owner-approved
+design (`.tmp/research/auto-solo-design.md`, six owner decisions recorded in
+its §10) landed as model-declared routing with deterministic harness
+guardrails:
+
+- **Routing** — a new `senior_route` entry node runs ONLY when the mode is
+  `auto`: one plain senior call requesting the code-only `route` payload
+  `{route: "solo"|"consult"|"work", reason}` (strict schema, relaxed strict
+  parse, exactly one repair re-ask). An unparseable route fails closed to
+  `consult` with ONE warning (exit 0); a provider failure fails the run
+  normally with usage attached. Guardrail G1 downgrades work→consult when no
+  workspace is bound (recorded in the marker, the event and a warning); G2
+  always honors solo (structurally read-only); G3 routes once per run and
+  consumes no rounds; G4 leaves operator precedence unchanged.
+- **Solo** — `senior_route → senior_solo → END`: the senior answers alone on
+  its read-only CONSULT belt (helpers kept, mutations and `todo_write`
+  filtered; tool-less configs keep the exact plain path), bounded by
+  `MAX_CONSULT_TOOL_ITERATIONS`. The code-only `SOLO_DECISION_DIRECTIVE`
+  forbids claiming unperformed work. Legal per PROTOCOL.md §5 ("decide on its
+  own"); zero protocol/schema/prompts.json changes.
+- **Recording** — the route WHY rides a `[[AUTO ROUTE]] <route> — <reason>`
+  marked message envelope (compaction/steer convention), the additive
+  `auto_route` runtime event, `HarnessResult.autoRoute`, the CLI `--json`
+  `auto_route` key, and the run record's additive `route`/`route_reason`
+  fields (derived from the persisted event, so they survive a sidecar
+  rebuild; `mode` keeps the requested `auto`).
+- **Surfaces** — `/mode` accepts `auto` in chat/TUI/web/base commands;
+  command frontmatter may pin `auto`; the web projects the marker as a
+  neutral "Auto · Senior chose …" activity (the runtime event covers the
+  live window and is shadowed once the envelope lands), the solo decision
+  renders through the existing highlighted decision row, and the composer's
+  Auto copy is truthful. Rewind excludes the marker in both the backend and
+  the web mirror, so cuts never land mid-cycle.
+- **Byte-stability** — explicit consult/work runs never enter routing; the
+  `tests/modebytes.test.ts` golden suite (captured on the pre-change tree)
+  pins their full provider requests, transcripts and envelope logs. The mock
+  provider is UNCHANGED (PROTOCOL.md §11): mock auto deterministically
+  demonstrates the fail-closed consult path; solo demos use scripted
+  providers (the `auto-solo` browser scenario).
+
+Tests: `tests/autoroute.test.ts` (31), `tests/solo.test.ts` (24),
+`tests/modebytes.test.ts` (12), server/runtime/CLI/TUI/web extensions and the
+`auto-solo` browser scenario. No new runtime dependencies.
+
 ## Open items (deferred)
 
 - **models.dev catalog browse/import (medium)** — kimi-code fetches

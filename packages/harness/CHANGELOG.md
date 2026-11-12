@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Real `auto` mode + Senior solo decision:** `auto` is no longer a consult
+  alias. A new `senior_route` entry node (auto runs only) makes ONE plain
+  senior call requesting the code-only `route` payload
+  `{route: "solo"|"consult"|"work", reason}` — strict schema, relaxed strict
+  parse, exactly one repair re-ask, then fail-closed `consult` with one
+  warning (exit 0); a provider failure fails the run normally with usage
+  attached. Guardrails: work→consult downgrade when no workspace is bound
+  (recorded in marker/event/warning), solo always honored (structurally
+  read-only), one route per run consuming no rounds, operator precedence
+  unchanged. The solo branch (`senior_route → senior_solo → END`) answers on
+  the senior's read-only consult belt (helpers kept; tool-less configs keep
+  the exact plain path) with a code-only directive forbidding claims of
+  unperformed work. The route WHY rides a `[[AUTO ROUTE]] <route> — <reason>`
+  marked message envelope, the additive `auto_route` runtime event,
+  `HarnessResult.autoRoute`, the `--json` `auto_route` key, and the run
+  record's additive `route`/`route_reason` fields (sidecar-rebuild safe;
+  `mode` keeps the requested `auto`). `/mode` accepts `auto` in
+  chat/TUI/web/base commands; command frontmatter may pin `auto`; the web
+  shows a neutral "Auto · Senior chose …" activity and the existing
+  highlighted decision row; rewind excludes the marker (backend + web
+  mirror). Explicit consult/work runs never route — the `tests/modebytes`
+  golden suite pins their bytes. The mock provider is unchanged
+  (PROTOCOL.md §11): mock auto demonstrates the fail-closed consult path.
+  PROTOCOL.md, the JSON schema, both prompts.json copies and `typescript/`
+  are untouched; no new runtime dependencies. Tests: `tests/autoroute`,
+  `tests/solo`, `tests/modebytes`, server/runtime/CLI/TUI/web extensions,
+  and the `auto-solo` browser scenario.
+
 ### Fixed
 
 - **OpenCode Go/Zen requests carry the required session header:** every
