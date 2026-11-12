@@ -9,7 +9,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 
+import { resolveConfig } from "../src/config.ts";
+import { SharedContext } from "../src/context.ts";
+import { TwoBrothersHarness } from "../src/harness.ts";
 import {
+  CallbackBroker,
   Action,
   ApprovalMode,
   Decision,
@@ -18,7 +22,23 @@ import {
   type ApprovalBroker,
   type ApprovalRequest,
 } from "../src/permissions.ts";
-import { Workspace } from "../src/workspace.ts";
+import {
+  MockProvider,
+  type MockScriptStep,
+  type Tool,
+  type ToolChatOptions,
+  type ToolChatResponse,
+} from "../src/provider.ts";
+import type { RuntimeEvent } from "../src/runevents.ts";
+import {
+  newSubagentId,
+  SUBAGENT_SYSTEM_PROMPT,
+  SUBAGENT_TOOL_DESCRIPTION,
+  SUBAGENT_TOOL_NAME,
+  SubagentStore,
+} from "../src/subagent.ts";
+import { applyUndo, beginUndoCapture } from "../src/workspacehistory.ts";
+import { Workspace, type WorkspaceMutationRecorder } from "../src/workspace.ts";
 
 function tmpdir(): { root: string; cleanup: () => void } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-subagent-mut-"));
@@ -26,6 +46,113 @@ function tmpdir(): { root: string; cleanup: () => void } {
     root,
     cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
   };
+}
+
+function fakeTool(
+  name: string,
+  execute: (args: Record<string, unknown>) => string | Promise<string> = () => "ok",
+): Tool {
+  return {
+    name,
+    description: `fake ${name}`,
+    parameters: { type: "object", properties: {} },
+    execute,
+  };
+}
+
+/** A MockProvider that records the exact belt each tool-loop call offered. */
+class RecordingMock extends MockProvider {
+  seenToolNames: string[][] = [];
+
+  override async chatWithTools(
+    messages: Parameters<MockProvider["chatWithTools"]>[0],
+    tools: Tool[],
+    options: ToolChatOptions = {},
+  ): Promise<ToolChatResponse> {
+    this.seenToolNames.push(tools.map((tool) => tool.name));
+    return super.chatWithTools(messages, tools, options);
+  }
+}
+
+interface ChildScenario {
+  root: string;
+  workspace: Workspace;
+  store: SubagentStore;
+  requests: ApprovalRequest[];
+  events: RuntimeEvent[];
+}
+
+/**
+ * Run one cooperation cycle in which the Senior delegates to `children[i]`
+ * (one `subagent` call per child) with a workspace bound at `mode`.
+ */
+async function runChildScenario(options: {
+  mode: ApprovalMode;
+  children: RecordingMock[];
+  decide?: (request: ApprovalRequest) => Decision;
+  parentSteps?: MockScriptStep[];
+  root?: string;
+  recorder?: WorkspaceMutationRecorder;
+  toolScopes?: { shared?: Tool[]; senior?: Tool[]; junior?: Tool[] };
+  spillRoot?: string;
+}): Promise<ChildScenario> {
+  const fixture = options.root === undefined ? tmpdir() : null;
+  const root = options.root ?? fixture!.root;
+  const requests: ApprovalRequest[] = [];
+  const events: RuntimeEvent[] = [];
+  const broker = new CallbackBroker((request) => {
+    requests.push(request);
+    return options.decide?.(request) ?? Decision.ALLOW;
+  });
+  const workspace = new Workspace(
+    root,
+    new PermissionManager(new PermissionPolicy(options.mode), broker),
+  );
+  if (options.recorder !== undefined) workspace.setMutationRecorder(options.recorder);
+  const store = new SubagentStore(path.join(root, "subagents"));
+  const children = [...options.children];
+  const parentSteps: MockScriptStep[] =
+    options.parentSteps ??
+    children.map((_child, index) => ({
+      tool: SUBAGENT_TOOL_NAME,
+      args: { task: `Do child task ${index + 1}.` },
+    }));
+  const parent = new RecordingMock(parentSteps);
+  const harness = new TwoBrothersHarness(resolveConfig({ provider: "mock" }), {
+    senior: parent,
+    junior: new MockProvider(),
+    workspace,
+    ...(options.toolScopes !== undefined ? { toolScopes: options.toolScopes } : {}),
+    ...(options.spillRoot !== undefined ? { spill: { root: options.spillRoot } } : {}),
+    subagents: {
+      store,
+      parentSession: "parent.jsonl",
+      providerFactory: () => children.shift() ?? new MockProvider([{ text: "no more children" }]),
+    },
+    onEvent: (event) => events.push(event),
+  });
+  await harness.run("Plan a migration", new SharedContext());
+  return { root, workspace, store, requests, events };
+}
+
+function childLog(store: SubagentStore): NonNullable<ReturnType<SubagentStore["get"]>> {
+  const rows = store.list("parent.jsonl");
+  assert.equal(rows.length > 0, true);
+  const detail = store.get(rows[0]!.id);
+  assert.ok(detail);
+  return detail;
+}
+
+function toolResults(log: NonNullable<ReturnType<SubagentStore["get"]>>): string[] {
+  return log.transcript
+    .filter((entry) => entry.type === "tool" && entry.status === "completed")
+    .map((entry) => (entry.type === "tool" ? entry.result ?? "" : ""));
+}
+
+function approvalStatuses(log: NonNullable<ReturnType<SubagentStore["get"]>>): string[] {
+  return log.transcript
+    .filter((entry) => entry.type === "approval")
+    .map((entry) => (entry.type === "approval" ? entry.status : ""));
 }
 
 /** A broker that records every request and answers with a fixed decision. */
@@ -201,6 +328,293 @@ test("a child workspace parks on the parent broker and reports a denial as a too
     assert.equal(fs.existsSync(path.join(root, "blocked.txt")), false);
     assert.equal(broker.requests.length, 1);
     assert.equal(broker.requests[0]?.subagent_id, "sub-6");
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Step 2: the workspace-bound child belt and the spawn wiring
+// ---------------------------------------------------------------------------
+
+test("a workspace-bound child gets the seven built-ins (same for both roles), never recursion/todo/plugins", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const juniorChild = new RecordingMock([
+      { tool: "workspace_list_dir", args: { path: "." } },
+      { text: "listed" },
+    ]);
+    const seniorChild = new RecordingMock([
+      { tool: "workspace_list_dir", args: { path: "." } },
+      { text: "listed" },
+    ]);
+    const scenario = await runChildScenario({
+      mode: ApprovalMode.ASK,
+      children: [juniorChild, seniorChild],
+      root,
+      parentSteps: [
+        { tool: SUBAGENT_TOOL_NAME, args: { task: "List the workspace.", role: "junior" } },
+        { tool: SUBAGENT_TOOL_NAME, args: { task: "List the workspace.", role: "senior" } },
+      ],
+      toolScopes: { shared: [fakeTool("plugin_notes")] },
+      spillRoot: path.join(root, "spill"),
+    });
+    const expected = [
+      "workspace_delete_file",
+      "workspace_edit_file",
+      "workspace_list_dir",
+      "workspace_read_file",
+      "workspace_run_shell",
+      "workspace_search_text",
+      "workspace_write_file",
+      "spill_read",
+    ].sort();
+    const belts = [juniorChild, seniorChild].map((child) => {
+      const belt = (child.seenToolNames.at(-1) ?? []).slice().sort();
+      assert.deepEqual(belt, expected);
+      assert.equal(belt.includes(SUBAGENT_TOOL_NAME), false);
+      assert.equal(belt.includes("todo_write"), false);
+      assert.equal(belt.includes("plugin_notes"), false);
+      return belt;
+    });
+    assert.deepEqual(belts[0], belts[1]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("ask mode: an allowed child write runs and the child log records pending + allowed", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const child = new RecordingMock([
+      { tool: "workspace_write_file", args: { path: "e2e.txt", content: "hello" } },
+      { text: "Wrote e2e.txt." },
+    ]);
+    const scenario = await runChildScenario({ mode: ApprovalMode.ASK, children: [child], root });
+    assert.equal(fs.readFileSync(path.join(root, "e2e.txt"), "utf-8"), "hello");
+    assert.equal(scenario.requests.length, 1);
+    assert.equal(scenario.requests[0]?.action, "write");
+    assert.equal(scenario.requests[0]?.target, "e2e.txt");
+    assert.match(String(scenario.requests[0]?.subagent_id), /^sub-[a-f0-9]{8,32}$/);
+    const log = childLog(scenario.store);
+    assert.deepEqual(approvalStatuses(log), ["pending", "allowed"]);
+    const results = toolResults(log).map((result) => JSON.parse(result) as { status?: string });
+    assert.equal(results[0]?.status, "ok");
+  } finally {
+    cleanup();
+  }
+});
+
+test("ask mode: a denied child write leaves no file and records pending + denied", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const child = new RecordingMock([
+      { tool: "workspace_write_file", args: { path: "blocked.txt", content: "nope" } },
+      { text: "The operator denied the write." },
+    ]);
+    const scenario = await runChildScenario({
+      mode: ApprovalMode.ASK,
+      children: [child],
+      root,
+      decide: () => Decision.DENY,
+    });
+    assert.equal(fs.existsSync(path.join(root, "blocked.txt")), false);
+    const log = childLog(scenario.store);
+    assert.deepEqual(approvalStatuses(log), ["pending", "denied"]);
+    const results = toolResults(log).map((result) => JSON.parse(result) as { status?: string });
+    assert.equal(results[0]?.status, "denied");
+    assert.equal(log.status, "completed");
+  } finally {
+    cleanup();
+  }
+});
+
+test("readonly mode denies all four child mutations without asking; reads still work", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    fs.writeFileSync(path.join(root, "notes.txt"), "hello notes\n", "utf-8");
+    const child = new RecordingMock([
+      { tool: "workspace_read_file", args: { path: "notes.txt" } },
+      { tool: "workspace_write_file", args: { path: "new.txt", content: "x" } },
+      { tool: "workspace_edit_file", args: { path: "notes.txt", old: "hello", new: "bye" } },
+      { tool: "workspace_delete_file", args: { path: "notes.txt" } },
+      { tool: "workspace_run_shell", args: { command: "echo denied" } },
+      { text: "The run is read-only." },
+    ]);
+    const scenario = await runChildScenario({ mode: ApprovalMode.READONLY, children: [child], root });
+    assert.equal(scenario.requests.length, 0);
+    assert.equal(fs.existsSync(path.join(root, "new.txt")), false);
+    assert.equal(fs.readFileSync(path.join(root, "notes.txt"), "utf-8"), "hello notes\n");
+    const log = childLog(scenario.store);
+    assert.deepEqual(approvalStatuses(log), []);
+    const results = toolResults(log).map((result) => JSON.parse(result) as { status?: string });
+    assert.deepEqual(
+      results.map((result) => result.status),
+      ["ok", "denied", "denied", "denied", "denied"],
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("edits mode auto-allows child write/edit and parks delete/shell", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const child = new RecordingMock([
+      { tool: "workspace_write_file", args: { path: "e2e.txt", content: "one" } },
+      { tool: "workspace_edit_file", args: { path: "e2e.txt", old: "one", new: "two" } },
+      { tool: "workspace_delete_file", args: { path: "e2e.txt" } },
+      { tool: "workspace_run_shell", args: { command: "echo child-shell" } },
+      { text: "Done." },
+    ]);
+    const scenario = await runChildScenario({ mode: ApprovalMode.EDITS, children: [child], root });
+    // Only delete and shell asked; write/edit were auto-allowed by the mode.
+    assert.deepEqual(
+      scenario.requests.map((request) => request.action),
+      ["delete", "shell"],
+    );
+    assert.equal(fs.existsSync(path.join(root, "e2e.txt")), false);
+    const log = childLog(scenario.store);
+    assert.deepEqual(approvalStatuses(log), ["pending", "allowed", "pending", "allowed"]);
+    const results = toolResults(log).map((result) => JSON.parse(result) as { status?: string });
+    assert.deepEqual(
+      results.map((result) => result.status),
+      ["ok", "ok", "ok", "ok"],
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("allow-all mode runs all four child mutations without consulting the broker", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const child = new RecordingMock([
+      { tool: "workspace_write_file", args: { path: "e2e.txt", content: "one" } },
+      { tool: "workspace_edit_file", args: { path: "e2e.txt", old: "one", new: "two" } },
+      { tool: "workspace_delete_file", args: { path: "e2e.txt" } },
+      { tool: "workspace_run_shell", args: { command: "echo child-shell" } },
+      { text: "Done." },
+    ]);
+    const scenario = await runChildScenario({ mode: ApprovalMode.ALLOW_ALL, children: [child], root });
+    assert.equal(scenario.requests.length, 0);
+    assert.equal(fs.existsSync(path.join(root, "e2e.txt")), false);
+    const log = childLog(scenario.store);
+    assert.deepEqual(approvalStatuses(log), []);
+    const results = toolResults(log);
+    assert.equal((JSON.parse(results[0]!) as { status?: string }).status, "ok");
+    assert.equal((JSON.parse(results[3]!) as { status?: string }).status, "ok");
+    assert.match(results[3]!, /child-shell/);
+  } finally {
+    cleanup();
+  }
+});
+
+test("child mutations land in the parent run's one-net-entry undo record", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const storeRoot = path.join(root, "undo");
+    const capture = beginUndoCapture(storeRoot, "run-child-undo", root, { retention: false });
+    const firstChild = new RecordingMock([
+      { tool: "workspace_write_file", args: { path: "a.txt", content: "one\n" } },
+      { tool: "workspace_write_file", args: { path: "b.txt", content: "child b" } },
+      { tool: "workspace_edit_file", args: { path: "a.txt", old: "one", new: "one two" } },
+      { text: "Created a.txt and b.txt." },
+    ]);
+    const secondChild = new RecordingMock([
+      // denied: no undo entry may be recorded for it
+      { tool: "workspace_write_file", args: { path: "c.txt", content: "denied" } },
+      { tool: "workspace_edit_file", args: { path: "a.txt", old: "two", new: "two three" } },
+      { text: "Done." },
+    ]);
+    const scenario = await runChildScenario({
+      mode: ApprovalMode.ASK,
+      children: [firstChild, secondChild],
+      root,
+      recorder: capture.recorder,
+      decide: (request) => (request.target === "c.txt" ? Decision.DENY : Decision.ALLOW),
+    });
+    // A parent mutation on the same file later in the run's capture window:
+    // the record still keeps ONE net entry for a.txt (earliest pre-image,
+    // latest post-image).
+    await scenario.workspace.write_file("a.txt", "one two three!\n");
+    capture.close();
+    assert.equal(capture.entryCount, 2); // a.txt (net) + b.txt; no c.txt
+    assert.equal(fs.existsSync(path.join(root, "c.txt")), false);
+    const undone = applyUndo(storeRoot, "run-child-undo", root);
+    assert.equal(undone.applied, 2);
+    // Both files were created inside the run, so undo removes them.
+    assert.equal(fs.existsSync(path.join(root, "a.txt")), false);
+    assert.equal(fs.existsSync(path.join(root, "b.txt")), false);
+  } finally {
+    cleanup();
+  }
+});
+
+test("the child prompt and tool description no longer claim a read-only helper", () => {
+  assert.equal(/read-only/i.test(SUBAGENT_SYSTEM_PROMPT), false);
+  assert.equal(/read-only/i.test(SUBAGENT_TOOL_DESCRIPTION), false);
+  assert.match(SUBAGENT_SYSTEM_PROMPT, /approv/i);
+  assert.match(SUBAGENT_TOOL_DESCRIPTION, /approval/i);
+});
+
+test("the child store tolerates approval rows, unknown rows and a torn tail", () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const directory = path.join(root, "subagents");
+    const store = new SubagentStore(directory);
+    const id = newSubagentId();
+    store.begin({
+      id,
+      parent_session: "parent.jsonl",
+      label: "Approver",
+      role: "junior",
+      model: "m",
+      task: "Write a file.",
+      started_at: 1,
+    });
+    store.append(id, {
+      type: "approval",
+      status: "pending",
+      action: "write",
+      target: "a.txt",
+      at: 10,
+    });
+    let detail = store.get(id);
+    assert.ok(detail);
+    assert.equal(detail.last_activity?.status, "awaiting_approval");
+    assert.equal(detail.transcript.length, 1);
+    const row = detail.transcript[0];
+    assert.ok(row?.type === "approval");
+    assert.equal(row.target, "a.txt");
+    store.append(id, {
+      type: "approval",
+      status: "allowed",
+      action: "write",
+      target: "a.txt",
+      at: 20,
+    });
+    detail = store.get(id);
+    assert.equal(detail?.last_activity?.status, "running");
+    // Unknown row type and a malformed approval row are ignored; a phase-1
+    // message row still parses; a torn tail is skipped.
+    const file = path.join(directory, `${id}.jsonl`);
+    fs.appendFileSync(file, `${JSON.stringify({ type: "future_row", x: 1 })}\n`, "utf-8");
+    fs.appendFileSync(
+      file,
+      `${JSON.stringify({ type: "approval", status: "bogus", action: "write" })}\n`,
+      "utf-8",
+    );
+    store.append(id, { type: "message", role: "assistant", text: "done", at: 30 });
+    store.finish(id, { status: "completed", ended_at: 40, result: "done" });
+    // A torn final line is skipped; the earlier complete rows (and the end row
+    // written before it) still read back.
+    fs.appendFileSync(file, '{"type":"message"', "utf-8");
+    detail = store.get(id);
+    assert.ok(detail);
+    assert.equal(detail.transcript.length, 3);
+    assert.equal(detail.transcript[2]?.type, "message");
+    assert.equal(detail.status, "completed");
   } finally {
     cleanup();
   }

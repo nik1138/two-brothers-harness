@@ -1,22 +1,26 @@
 /**
- * Read-only helper subagents ("a third tier", not a second Junior).
+ * Helper subagents ("a third tier", not a second Junior).
  *
  * A subagent is a single-role worker with its own isolated conversation and
  * its own provider instance. It never sees the parent transcript, never emits
- * protocol envelopes, and never gets mutating tools: the model-facing
- * `subagent` tool exists only on the Senior's belt in `serve`/web runs, and
- * every child tool call is drawn from the read-only workspace slice.
+ * protocol envelopes, and never joins the brothers' shared context. The
+ * model-facing `subagent` tool exists only on the Senior's belt in `serve`/web
+ * runs. A workspace-bound child gets the seven workspace built-ins (three
+ * reads plus write/edit/delete/shell); every mutation is an ordinary
+ * operator approval on the parent run, tagged with the child's identity, so
+ * the run's permission mode decides exactly what a helper may do.
  *
  * The child transcript is persisted under `<sessionsDir>/subagents/<id>.jsonl`
- * (one JSON object per line: `meta`, `message`/`tool`, then `end`). That
- * directory is reserved and never appears in the session sidebar. The parent's
- * runtime sidecar carries live `subagent_started` / `subagent_activity` /
- * `subagent_completed` events, so a reload can rebuild the tree without
- * reading the child log.
+ * (one JSON object per line: `meta`, `message`/`tool`/`approval`, then `end`).
+ * That directory is reserved and never appears in the session sidebar. The
+ * parent's runtime sidecar carries live `subagent_started` /
+ * `subagent_activity` / `subagent_completed` events, so a reload can rebuild
+ * the tree without reading the child log.
  *
  * The runner is deliberately synchronous from the parent's point of view: the
  * parent's tool call waits for the child to settle and returns its bounded
- * report. Live progress still streams through the parent's event sink. An
+ * report. An approval wait is inside that call and does not consume a child
+ * step. Live progress still streams through the parent's event sink. An
  * asynchronous completion/wake loop is a later phase.
  */
 
@@ -43,7 +47,7 @@ export const SUBAGENT_MAX_TASK_CHARS = 4_000;
 export const SUBAGENT_MAX_LABEL_CHARS = 80;
 /** Per-run child budget (the parent can delegate repeatedly, but not forever). */
 export const SUBAGENT_DEFAULT_MAX_PER_RUN = 8;
-/** Read-only children are cheap; this guards a future parallel path. */
+/** Read-only actions are checks; this guards a future parallel activation path. */
 export const SUBAGENT_DEFAULT_MAX_ACTIVE = 4;
 /** Bounded child tool loop: a report, not an unbounded investigation. */
 export const SUBAGENT_MAX_ITERATIONS = 6;
@@ -52,15 +56,48 @@ export const SUBAGENT_RESULT_MAX_CHARS = 12_000;
 /** Per-line bound for stored tool results and activity events. */
 export const SUBAGENT_TOOL_RESULT_MAX_CHARS = 4_000;
 
+/** The three workspace reads a helper may always use. */
+export const SUBAGENT_READ_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "workspace_read_file",
+  "workspace_list_dir",
+  "workspace_search_text",
+]);
+
+/**
+ * A workspace-bound child's full built-in belt: the three reads plus the four
+ * mutations. `spill_read` joins on top when the parent harness offers it.
+ * Nothing else is offered — no recursion, no plan tool, no plugin/MCP/skills
+ * tools.
+ */
+export const SUBAGENT_CHILD_TOOL_NAMES: ReadonlySet<string> = new Set([
+  ...SUBAGENT_READ_TOOL_NAMES,
+  "workspace_write_file",
+  "workspace_edit_file",
+  "workspace_delete_file",
+  "workspace_run_shell",
+]);
+
+/** Bound on one stored approval row's action string. */
+export const SUBAGENT_APPROVAL_ACTION_MAX_CHARS = 40;
+/** Bound on one stored approval row's target. */
+export const SUBAGENT_APPROVAL_TARGET_MAX_CHARS = 500;
+/** Bound on one stored approval row's command. */
+export const SUBAGENT_APPROVAL_COMMAND_MAX_CHARS = 1_000;
+/** Bound on one stored approval row's reason. */
+export const SUBAGENT_APPROVAL_REASON_MAX_CHARS = 500;
+
 /**
  * The child's base prompt. It is assembled with the same tool sections as a
  * brother prompt, but it is deliberately not a brother persona: the child is a
- * helper with a fixed read-only scope and no memory of the parent conversation.
+ * helper with a fixed scope and no memory of the parent conversation. Its
+ * workspace mutations are ordinary approvals on the parent run, so the prompt
+ * must describe them honestly instead of claiming the child is read-only.
  */
 export const SUBAGENT_SYSTEM_PROMPT = [
   "You are a helper subagent spawned by the Senior in a Two Brothers run.",
   "Your context is isolated: you do not see the parent conversation or its other agents.",
-  "Work only on the task you were given. Use the read-only tools you are given when facts are needed; if no tools are available, answer from the task and say what is missing.",
+  "Work only on the task you were given. Use the tools you are given when facts are needed; if no tools are available, answer from the task and say what is missing.",
+  "Workspace changes (write, edit, delete, shell) are allowed only when the operator's run policy approves them. A `status:\"denied\"` result means the change did not run; an approval wait is the operator deciding, not an error.",
   "Never claim a file, command, or result you did not observe. If the task cannot be answered with the available tools, state exactly what is missing.",
   "Do not spawn subagents. Do not ask the operator questions; the Senior reads your report.",
   "Answer with a concise factual report: findings, evidence (paths and line numbers), and any uncertainty. No preamble.",
@@ -80,8 +117,8 @@ export interface SubagentActivity {
   at: number;
 }
 
-/** One bounded transcript row in the child log. */
-export interface SubagentTranscriptEntry {
+/** One bounded message/tool transcript row in the child log. */
+export interface SubagentMessageEntry {
   type: "message" | "tool";
   /** Message role; tool rows omit it. */
   role?: "user" | "assistant";
@@ -92,6 +129,31 @@ export interface SubagentTranscriptEntry {
   result?: string;
   at: number;
 }
+
+/** Lifecycle of one child approval request, as persisted in the child log. */
+export type SubagentApprovalStatus = "pending" | "allowed" | "denied" | "cancelled";
+
+/**
+ * One approval-lifecycle row: written as `pending` before the parent broker is
+ * consulted and once more with the outcome. Display-only, bounded, and ignored
+ * by an older reader (`type:"approval"` normalizes to nothing there).
+ */
+export interface SubagentApprovalEntry {
+  type: "approval";
+  status: SubagentApprovalStatus;
+  /** `write` / `edit` / `delete` / `shell`. */
+  action: string;
+  /** Workspace-relative path (bounded). */
+  target?: string;
+  /** Shell command (bounded); absent for file mutations. */
+  command?: string;
+  /** Existing approval reason (bounded). */
+  reason?: string;
+  at: number;
+}
+
+/** One bounded row in the child log: a message/tool step or an approval. */
+export type SubagentTranscriptEntry = SubagentMessageEntry | SubagentApprovalEntry;
 
 /** Header fields shared by the list and detail views. */
 export interface SubagentInfo {
@@ -197,6 +259,15 @@ function usageOf(value: unknown): UsageTotals | null {
 }
 
 function activityOf(entry: SubagentTranscriptEntry): SubagentActivity {
+  if (entry.type === "approval") {
+    // A pending row is the durable "parked on the operator" signal; an
+    // outcome row means the child continued (an end row still wins).
+    return {
+      kind: "status",
+      status: entry.status === "pending" ? "awaiting_approval" : "running",
+      at: entry.at,
+    };
+  }
   if (entry.type === "tool") {
     return {
       kind: "tool",
@@ -314,7 +385,11 @@ export class SubagentStore {
         meta = parsed;
       } else if (parsed.type === "end") {
         end = parsed;
-      } else if (parsed.type === "message" || parsed.type === "tool") {
+      } else if (
+        parsed.type === "message" ||
+        parsed.type === "tool" ||
+        parsed.type === "approval"
+      ) {
         const entry = this.normalizeEntry(parsed);
         if (entry !== null) transcript.push(entry);
       }
@@ -351,6 +426,30 @@ export class SubagentStore {
   }
 
   private normalizeEntry(raw: Record<string, unknown>): SubagentTranscriptEntry | null {
+    if (raw.type === "approval") {
+      const action = textOf(raw.action, SUBAGENT_APPROVAL_ACTION_MAX_CHARS);
+      if (action === "") return null;
+      const status =
+        raw.status === "pending" ||
+        raw.status === "allowed" ||
+        raw.status === "denied" ||
+        raw.status === "cancelled"
+          ? raw.status
+          : null;
+      if (status === null) return null;
+      const target = textOf(raw.target, SUBAGENT_APPROVAL_TARGET_MAX_CHARS);
+      const command = textOf(raw.command, SUBAGENT_APPROVAL_COMMAND_MAX_CHARS);
+      const reason = textOf(raw.reason, SUBAGENT_APPROVAL_REASON_MAX_CHARS);
+      return {
+        type: "approval",
+        status,
+        action,
+        at: intOf(raw.at),
+        ...(target !== "" ? { target } : {}),
+        ...(command !== "" ? { command } : {}),
+        ...(reason !== "" ? { reason } : {}),
+      };
+    }
     if (raw.type === "message") {
       const role = raw.role === "user" ? "user" : "assistant";
       const text = textOf(raw.text, SUBAGENT_RESULT_MAX_CHARS);
@@ -509,7 +608,7 @@ function toolResultText(value: unknown): string {
 }
 
 /**
- * Run one isolated read-only child. Every expected failure becomes a
+ * Run one isolated child. Every expected failure becomes a
  * `failed`/`cancelled` result; only an aborted parent signal is re-thrown so
  * the parent cooperates with the shared cancellation path.
  */
@@ -675,11 +774,12 @@ export async function runSubagent(options: SubagentRunOptions): Promise<Subagent
  * harness (it owns the settings/store/events).
  */
 export const SUBAGENT_TOOL_DESCRIPTION = [
-  "Spawn one isolated read-only helper for a focused side task.",
-  "The helper does not see this conversation; it gets only your task brief and read-only workspace tools, then returns a bounded report.",
+  "Spawn one isolated helper for a focused side task.",
+  "The helper does not see this conversation; it gets only your task brief and workspace tools, then returns a bounded report.",
   "Use it for parallel discovery, a second opinion on a file, or reading a large area without polluting this context.",
   "The operator may configure a dedicated helper route in Settings; when set, it wins over the `role` argument.",
-  "It cannot edit files, run shell commands, or spawn more subagents. Do not use it as a replacement for the Junior.",
+  "Workspace changes the helper makes are ordinary operator approvals in this run, under the same permission mode; a helper cannot widen the run's policy.",
+  "It cannot spawn more subagents. Do not use it as a replacement for the Junior.",
 ].join(" ");
 
 export const SUBAGENT_TOOL_PARAMETERS: Record<string, unknown> = {

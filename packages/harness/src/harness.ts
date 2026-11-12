@@ -185,6 +185,7 @@ import {
   type HookRegistry,
   type HookRole,
 } from "./plugins.ts";
+import { Decision, type ApprovalRequest } from "./permissions.ts";
 import { nowIso, parseModelOutput, type Message } from "./protocol.ts";
 import type { RoleEndpoint } from "./runtime.ts";
 import type { HarnessResultSummary, StreamEvent, StreamToolStatus } from "./runstream.ts";
@@ -251,15 +252,22 @@ import {
   deriveSubagentLabel,
   newSubagentId,
   runSubagent,
+  SUBAGENT_CHILD_TOOL_NAMES,
   SUBAGENT_DEFAULT_MAX_ACTIVE,
   SUBAGENT_DEFAULT_MAX_PER_RUN,
+  SUBAGENT_APPROVAL_ACTION_MAX_CHARS,
+  SUBAGENT_APPROVAL_COMMAND_MAX_CHARS,
+  SUBAGENT_APPROVAL_REASON_MAX_CHARS,
+  SUBAGENT_APPROVAL_TARGET_MAX_CHARS,
   SUBAGENT_MAX_LABEL_CHARS,
   SUBAGENT_MAX_TASK_CHARS,
+  SUBAGENT_READ_TOOL_NAMES,
   SUBAGENT_RESULT_MAX_CHARS,
   SUBAGENT_SYSTEM_PROMPT,
   SUBAGENT_TOOL_DESCRIPTION,
   SUBAGENT_TOOL_NAME,
   SUBAGENT_TOOL_PARAMETERS,
+  type SubagentApprovalStatus,
   type SubagentEndpoint,
   type SubagentSettings,
   type SubagentTranscriptEntry,
@@ -888,14 +896,17 @@ export interface HarnessOptions {
    */
   spill?: SpillOptions;
   /**
-   * Read-only helper subagents (`src/subagent.ts`): when configured, the Senior
-   * gains the model-facing `subagent` tool. A child is a single-role worker
-   * with isolated context, its own fresh provider instance, read-only workspace
-   * tools, a bounded task/report and a durable child transcript under
-   * `settings.store.directory`. The parent's runtime stream carries
-   * `subagent_started` / `subagent_activity` / `subagent_completed` events for
-   * the live tree. The child never gets mutating tools and cannot spawn another
-   * child. `serve`/web enables it; other surfaces opt in.
+   * Helper subagents (`src/subagent.ts`): when configured, the Senior gains the
+   * model-facing `subagent` tool. A child is a single-role worker with isolated
+   * context, its own fresh provider instance, a bounded task/report and a
+   * durable child transcript under `settings.store.directory`. A
+   * workspace-bound child gets the seven workspace built-ins (the three reads
+   * plus write/edit/delete/shell); every child mutation is an ordinary
+   * approval on the parent run's broker, tagged with the child's identity, so
+   * the run's permission mode decides what a helper may do. The parent's
+   * runtime stream carries `subagent_started` / `subagent_activity` /
+   * `subagent_completed` events for the live tree. The child cannot spawn
+   * another child. `serve`/web enables it; other surfaces opt in.
    */
   subagents?: SubagentSettings;
   /**
@@ -2143,12 +2154,13 @@ export class TwoBrothersHarness {
   }
 
   /**
-   * The model-facing `subagent` tool: spawn one isolated read-only helper,
-   * wait for its bounded report, and return it as this tool's result. The child
-   * gets a fresh provider instance (so its usage is not folded into the
-   * parent's footer), a read-only workspace slice, and its own transcript
-   * store. Live progress is emitted as `subagent_*` runtime events; the parent
-   * context/protocol envelopes are untouched.
+   * The model-facing `subagent` tool: spawn one isolated helper, wait for its
+   * bounded report, and return it as this tool's result. The child gets a fresh
+   * provider instance (so its usage is not folded into the parent's footer), a
+   * workspace view whose mutations are child-tagged operator approvals on the
+   * parent run, and its own transcript store. Live progress is emitted as
+   * `subagent_*` runtime events; the parent context/protocol envelopes are
+   * untouched.
    */
   private subagentTool(state: CooperationState): Tool {
     return {
@@ -2159,21 +2171,30 @@ export class TwoBrothersHarness {
     };
   }
 
-  /** The child's read-only belt: workspace reads plus spill retrieval only. */
-  private subagentToolSet(state: CooperationState, role: "senior" | "junior"): Tool[] {
+  /**
+   * The child's tool belt. A workspace-bound child gets the seven workspace
+   * built-ins from its own child view (so every mutation carries the
+   * child-tagged permission manager), plus `spill_read` when the parent offers
+   * it. Without a workspace, the phase-1 read-only injection fallback keeps
+   * working: the role belt is filtered to the three reads plus `spill_read`.
+   */
+  private subagentToolSet(
+    state: CooperationState,
+    role: "senior" | "junior",
+    child: Workspace | null,
+  ): Tool[] {
+    if (child !== null) {
+      return child
+        .asTools()
+        .filter((tool) => SUBAGENT_CHILD_TOOL_NAMES.has(tool.name))
+        .concat(this.spillReadOffered() ? [this.spillReadTool()] : []);
+    }
+    // No workspace: keep phase-1 injection behavior for tests/integrations that
+    // pass fake workspace_* tools through a tool scope.
     const belt = role === "senior" ? this.verificationToolSet(state) : this.toolSet(state);
-    const allowed = new Set([
-      "workspace_read_file",
-      "workspace_list_dir",
-      "workspace_search_text",
-      SPILL_READ_TOOL_NAME,
-    ]);
-    return belt.filter(
-      (tool) =>
-        allowed.has(tool.name) &&
-        tool.name !== SUBAGENT_TOOL_NAME &&
-        tool.name !== TODO_TOOL_NAME,
-    );
+    return belt
+      .filter((tool) => SUBAGENT_READ_TOOL_NAMES.has(tool.name))
+      .concat(this.spillReadOffered() ? [this.spillReadTool()] : []);
   }
 
   /** A fresh provider for one child; keeps child usage out of the parent total. */
@@ -2265,12 +2286,6 @@ export class TwoBrothersHarness {
     const model = this.subagentModel(role, configured);
     const provider =
       settings.providerFactory?.(role) ?? this.buildSubagentProvider(role, configured);
-    const tools = this.subagentToolSet(state, role);
-    const childTools = provider.chatWithTools === undefined ? [] : tools;
-    const systemPrompt = assembleSystemPrompt(SUBAGENT_SYSTEM_PROMPT, childTools, "subagent", {
-      role,
-      ...(this.instructionBlock !== "" ? { instructions: this.instructionBlock } : {}),
-    }).text;
     const startedAt = Date.now();
     this.subagentRuns += 1;
     this.subagentActive += 1;
@@ -2291,6 +2306,62 @@ export class TwoBrothersHarness {
         `subagent transcript store failed for ${id}: ${exc instanceof Error ? exc.message : String(exc)}; continuing without persistence`,
       );
     }
+    // Approval rows ride the same child log. One failed append disables them
+    // for this child and records one warning: a broken child store never
+    // fails the child.
+    let approvalRows = !storeFailed;
+    const bounded = (value: string | undefined, limit: number): string | undefined =>
+      value !== undefined && value !== "" ? value.slice(0, limit) : undefined;
+    const appendApproval = (
+      status: SubagentApprovalStatus,
+      request: ApprovalRequest,
+    ): void => {
+      if (!approvalRows) return;
+      const target = bounded(request.target, SUBAGENT_APPROVAL_TARGET_MAX_CHARS);
+      const command = bounded(request.command, SUBAGENT_APPROVAL_COMMAND_MAX_CHARS);
+      const reason = bounded(request.reason, SUBAGENT_APPROVAL_REASON_MAX_CHARS);
+      try {
+        settings.store.append(id, {
+          type: "approval",
+          status,
+          action: bounded(request.action, SUBAGENT_APPROVAL_ACTION_MAX_CHARS) ?? "",
+          ...(target !== undefined ? { target } : {}),
+          ...(command !== undefined ? { command } : {}),
+          ...(reason !== undefined ? { reason } : {}),
+          at: Date.now(),
+        });
+      } catch (exc) {
+        approvalRows = false;
+        this.subagentWarnings.push(
+          `subagent approval store failed for ${id}: ${exc instanceof Error ? exc.message : String(exc)}; continuing without approval persistence`,
+        );
+      }
+    };
+    // The child view snapshots the run's permission policy and routes every
+    // parked mutation to the parent run's broker, tagged with this child.
+    const childWorkspace: Workspace | null = this.options.workspace
+      ? this.options.workspace.childView(
+          { id, label },
+          {
+            onRequest: (request) => appendApproval("pending", request),
+            onResolved: (request, decision) =>
+              appendApproval(
+                signal?.aborted
+                  ? "cancelled"
+                  : decision === Decision.ALLOW
+                    ? "allowed"
+                    : "denied",
+                request,
+              ),
+          },
+        )
+      : null;
+    const tools = this.subagentToolSet(state, role, childWorkspace);
+    const childTools = provider.chatWithTools === undefined ? [] : tools;
+    const systemPrompt = assembleSystemPrompt(SUBAGENT_SYSTEM_PROMPT, childTools, "subagent", {
+      role,
+      ...(this.instructionBlock !== "" ? { instructions: this.instructionBlock } : {}),
+    }).text;
     this.emitRuntime({
       type: "subagent_started",
       subagent_id: id,

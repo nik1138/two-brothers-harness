@@ -168,8 +168,10 @@ test("the child store round-trips meta, transcript, usage and terminal state", (
     assert.equal(detail.model, "lfm3-1.7b");
     assert.equal(detail.duration_ms, 30);
     assert.equal(detail.transcript.length, 3);
-    assert.equal(detail.transcript[1]?.tool, "workspace_read_file");
-    assert.equal(detail.transcript[1]?.status, "completed");
+    const toolRow = detail.transcript[1];
+    assert.equal(toolRow?.type, "tool");
+    assert.equal(toolRow.type === "tool" ? toolRow.tool : undefined, "workspace_read_file");
+    assert.equal(toolRow.type === "tool" ? toolRow.status : undefined, "completed");
     assert.equal(detail.usage?.cached_tokens, 4);
     assert.equal(detail.last_activity?.kind, "status");
     assert.equal(detail.last_activity?.status, "completed");
@@ -255,11 +257,11 @@ test("the runner loops through a read-only tool and returns a bounded report", a
     assert.ok(detail);
     assert.equal(detail.status, "completed");
     assert.equal(detail.transcript.filter((entry) => entry.type === "tool").length, 2);
-    assert.equal(
-      detail.transcript.find((entry) => entry.type === "tool" && entry.status === "completed")
-        ?.result,
-      "hello",
+    const completedRow = detail.transcript.find(
+      (entry) => entry.type === "tool" && entry.status === "completed",
     );
+    assert.ok(completedRow?.type === "tool");
+    assert.equal(completedRow.result, "hello");
   } finally {
     cleanup();
   }
@@ -297,7 +299,7 @@ test("the runner reports a cancelled parent signal and a provider failure honest
   assert.match(failed.error ?? "", /upstream exploded/);
 });
 
-test("the Senior's subagent tool runs one isolated read-only child and reports it", async () => {
+test("the Senior's subagent tool runs one isolated child and reports it", async () => {
   const { root, cleanup } = tmpdir();
   try {
     const store = new SubagentStore(path.join(root, "subagents"));
@@ -351,12 +353,16 @@ test("the Senior's subagent tool runs one isolated read-only child and reports i
       ),
     );
 
-    // The child belt is read-only and cannot recurse.
+    // No workspace is bound here, so the child keeps the phase-1 injection
+    // fallback: workspace reads only, never mutation tools, recursion or the
+    // display-only plan tool. A workspace-bound child gets the full belt
+    // (tests/subagentmutating.test.ts).
     const childBelt = child.seenToolNames.at(-1) ?? [];
     assert.ok(childBelt.includes("workspace_read_file"));
     assert.equal(childBelt.includes("workspace_write_file"), false);
     assert.equal(childBelt.includes("workspace_run_shell"), false);
     assert.equal(childBelt.includes(SUBAGENT_TOOL_NAME), false);
+    assert.equal(childBelt.includes("todo_write"), false);
     // The parent total stays the brothers' total; the child provider is fresh.
     assert.ok(result.usage.model_calls > rows[0]!.usage!.model_calls);
   } finally {
