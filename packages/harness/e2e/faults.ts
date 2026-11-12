@@ -320,7 +320,16 @@ function kindOfPayload(payload: Record<string, unknown>): string | null {
  * regardless of the node being retried.
  */
 function requestedNodeKind(body: Record<string, unknown>): string | null {
-  for (const text of [lastUserText(body), systemText(body)]) {
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  const userTexts: string[] = [];
+  for (const message of messages) {
+    if (isRecord(message) && message.role === "user" && typeof message.content === "string") {
+      userTexts.push(message.content);
+    }
+  }
+  // Tool loops end with a tool-result user turn; the marker lives on the
+  // opening user turn, so scan every user message newest-first.
+  for (const text of [...userTexts.reverse(), systemText(body)]) {
     const marker = /(?:^|\n)Requested payload: ([a-z]+)(?:\n|$)/u.exec(text);
     if (marker?.[1] !== undefined) return marker[1];
   }
