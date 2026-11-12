@@ -37,6 +37,11 @@ The script runs:
 Expected final line: `SMOKE TEST: PASS`. It is an offline pre-flight, not the
 whole product gate — run the package gates below for that.
 
+Stop a local `serve`/web backend that uses `packages/harness/sessions` before
+running the gate: the TUI tests take the same single-writer lock, and a live
+server makes them exit with `sessions directory is in use by serve (pid …)`
+instead of reaching their assertions.
+
 ## Release gate: independent subagent E2E
 
 A release is not ready because its implementers ran focused tests. Before
