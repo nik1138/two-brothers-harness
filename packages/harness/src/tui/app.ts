@@ -660,7 +660,7 @@ export function reduceStreamEvent(
 /** What one submitted input line means for the app. */
 export type TuiAction =
   | { type: "none" }
-  | { type: "run"; task: string; mode?: "consult" | "work" }
+  | { type: "run"; task: string; mode?: "consult" | "work" | "auto" }
   | { type: "lines"; lines: TuiLine[]; status?: string }
   | { type: "mode"; mode: "consult" | "work" }
   | { type: "exit" };

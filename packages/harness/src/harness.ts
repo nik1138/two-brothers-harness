@@ -1617,6 +1617,7 @@ export class TwoBrothersHarness {
       usage: result.usage,
       warnings: result.warnings.length,
       sessionFile: ctx.store !== null ? ctx.store.path : null,
+      ...(result.autoRoute !== undefined ? { autoRoute: { ...result.autoRoute } } : {}),
     };
   }
 

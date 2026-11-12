@@ -1685,6 +1685,17 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       record.error = error.message;
     }
     if (isRecord(end.decision)) record.decision = end.decision;
+    // Auto-mode routing honesty survives the rebuild: the effective route and
+    // its reason are derived from the persisted `auto_route` event (the same
+    // additive derivation RunRecord.public() applies to live records). `mode`
+    // stays "" like `task` — the requested mode is not an event field.
+    for (const event of found.events) {
+      if (event.type === "auto_route") {
+        record.route = event.route;
+        record.route_reason = event.reason;
+        break;
+      }
+    }
     const usage = isRecord(end.usage) ? { ...emptyUsage(), ...end.usage } : { ...emptyUsage() };
     record.usage = usage;
     // Recompute (never persist) the cost: the event stream stays free of a
@@ -2005,7 +2016,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     /** The task as submitted (a known slash command is expanded). */
     task: string;
     /** Command `mode`: overrides the request/cooperation mode for this run only. */
-    modeOverride?: "consult" | "work";
+    modeOverride?: "consult" | "work" | "auto";
     /** Rendered `<skill-loaded>`/`<file>` blocks, in injection order. */
     injections: string[];
   }
@@ -2057,7 +2068,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
    */
   async function prepareSubmission(req: RunRequestData): Promise<PreparedSubmission> {
     let task = req.task;
-    let modeOverride: "consult" | "work" | undefined;
+    let modeOverride: "consult" | "work" | "auto" | undefined;
 
     const invocation = matchCommand(task);
     if (invocation !== null) {

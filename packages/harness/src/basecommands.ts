@@ -94,7 +94,7 @@ export interface BaseCommand {
    */
   template?: string;
   /** Prompt commands only: cooperation mode the expanded run uses. */
-  mode?: "consult" | "work";
+  mode?: "consult" | "work" | "auto";
   /** Action commands only: what a surface performs for this command. */
   action?: BaseCommandAction;
   /**

@@ -751,3 +751,77 @@ test("run: the work-mode warning is stderr-only in machine output modes", async 
   assert.equal(consult.out.length, 1);
   JSON.parse(consult.out[0]);
 });
+
+// ---------------------------------------------------------------------------
+// auto mode: the additive auto_route machine key (mock fails closed to
+// consult with one warning — the green offline demo; PROTOCOL.md §11 mock
+// contract unchanged).
+// ---------------------------------------------------------------------------
+
+test("run: --mode auto --json carries the additive auto_route key (fail-closed mock)", async () => {
+  const io = makeIO();
+  const code = await main([...MOCK_RUN_ARGS, "--mode", "auto", "--json"], io);
+  assert.equal(code, 0, "the degradation is fail-soft: exit 0");
+  assert.equal(io.out.length, 1, "one machine object on stdout");
+  const parsed = JSON.parse(io.out[0]) as Record<string, unknown>;
+  assert.deepEqual(parsed.auto_route, {
+    route: "consult",
+    reason: "unstructured model reply for route",
+  });
+  assert.deepEqual(parsed.errors, []);
+  assert.deepEqual(
+    Object.keys(parsed).sort(),
+    ["auto_route", "cost", "decision", "errors", "events", "rounds", "task", "usage"],
+  );
+  assert.ok(
+    io.err.some((line) => line.includes("auto routing degraded to consult: unstructured model reply for route")),
+    "the one degradation warning reaches stderr",
+  );
+  // The marker envelope rides the events array like any ordinary message.
+  const events = parsed.events as Array<{ kind: string; payload: { text?: string } }>;
+  assert.ok(
+    events.some((event) => event.kind === "message" && (event.payload.text ?? "").startsWith("[[AUTO ROUTE]] consult — ")),
+  );
+});
+
+test("run: explicit consult/work --json objects carry no auto_route key", async () => {
+  for (const mode of ["consult", "work"]) {
+    const io = makeIO();
+    assert.equal(await main([...MOCK_RUN_ARGS, "--mode", mode, "--json"], io), 0);
+    const parsed = JSON.parse(io.out[0]) as Record<string, unknown>;
+    assert.equal("auto_route" in parsed, false, `${mode}: machine shape unchanged`);
+  }
+});
+
+test("run: --mode auto --stream result summary carries autoRoute", async () => {
+  const io = makeIO();
+  const code = await main([...MOCK_RUN_ARGS, "--mode", "auto", "--stream"], io);
+  assert.equal(code, 0);
+  const records = io.out.map((line) => JSON.parse(line) as Record<string, unknown>);
+  const result = records.find((record) => record.type === "result") as
+    | { result: Record<string, unknown> }
+    | undefined;
+  assert.ok(result !== undefined, "the terminal result record exists");
+  assert.deepEqual(result!.result.autoRoute, {
+    route: "consult",
+    reason: "unstructured model reply for route",
+  });
+  // The marker arrives as an ordinary envelope record (no new stream type).
+  assert.ok(
+    records.some(
+      (record) =>
+        record.type === "envelope" &&
+        String((record.envelope as { payload?: { text?: string } })?.payload?.text ?? "").startsWith("[[AUTO ROUTE]]"),
+    ),
+  );
+});
+
+test("run: --mode auto dry-run bytes stay unchanged (no predicted route)", async () => {
+  const io = makeIO();
+  const code = await main([...MOCK_RUN_ARGS, "--mode", "auto", "--dry-run"], io);
+  assert.equal(code, 0);
+  const text = io.out.join("\n");
+  assert.ok(text.includes("mode: auto (flag --mode)"));
+  assert.ok(!text.includes("[[AUTO ROUTE]]"), "dry-run makes no model call, so it cannot know the route");
+  assert.ok(!text.includes("route:"), "no fabricated route prediction");
+});

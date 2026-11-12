@@ -21,6 +21,7 @@ import {
   ACTIVE_STATES,
   resolveSubagentEndpoint,
   RunManager,
+  RunRecord,
   RuntimeSettings,
   type RunJob,
   type RunJobResult,
@@ -894,6 +895,84 @@ test("RuntimeSettings hydrates from and writes through a SettingsStore", () => {
     second.apply(cfg);
     assert.equal(cfg.apiKey, "secret-key");
     assert.equal(cfg.provider, "mock");
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// auto_route: RunRecord.public() derives route/route_reason from the
+// persisted event (the steering_dropped pattern), additive and absent on
+// non-auto runs / pre-feature event streams.
+// ---------------------------------------------------------------------------
+
+test("RunRecord.public() derives route/route_reason from an auto_route event", () => {
+  const record = new RunRecord("run-auto", "s.jsonl", "task", "auto");
+  record.emit({
+    type: "auto_route",
+    route: "solo",
+    reason: "knowledge is enough",
+    requested: "auto",
+  });
+  const view = record.public();
+  assert.equal(view.mode, "auto", "the requested mode is unchanged");
+  assert.equal(view.route, "solo");
+  assert.equal(view.route_reason, "knowledge is enough");
+});
+
+test("RunRecord.public() carries the G1 downgrade reason", () => {
+  const record = new RunRecord("run-auto-g1", "s.jsonl", "task", "auto");
+  record.emit({
+    type: "auto_route",
+    route: "consult",
+    reason: "downgraded from work (no workspace bound): files must change",
+    requested: "auto",
+    downgraded_from: "work",
+  });
+  const view = record.public();
+  assert.equal(view.route, "consult");
+  assert.equal(
+    view.route_reason,
+    "downgraded from work (no workspace bound): files must change",
+  );
+});
+
+test("RunRecord.public() omits route fields without an auto_route event", () => {
+  const record = new RunRecord("run-consult", "s.jsonl", "task", "consult");
+  record.emit({ type: "run_status", status: "running" });
+  const view = record.public();
+  assert.equal("route" in view, false);
+  assert.equal("route_reason" in view, false);
+});
+
+test("RunRecord.public() uses the first auto_route event (one route per run)", () => {
+  const record = new RunRecord("run-auto-once", "s.jsonl", "task", "auto");
+  record.emit({ type: "auto_route", route: "solo", reason: "first", requested: "auto" });
+  record.emit({ type: "auto_route", route: "work", reason: "second", requested: "auto" });
+  const view = record.public();
+  assert.equal(view.route, "solo");
+  assert.equal(view.route_reason, "first");
+});
+
+test("auto_route events persist in the runtime sidecar and replay", () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const store = new RuntimeEventStore(root);
+    store.append("s.jsonl", {
+      type: "auto_route",
+      route: "solo",
+      reason: "persisted why",
+      requested: "auto",
+      run_id: "run-persist",
+      at: 1,
+    });
+    store.append("s.jsonl", { type: "run_end", status: "completed", usage: {}, run_id: "run-persist", at: 2 });
+    const found = store.findRun("run-persist");
+    assert.ok(found !== null);
+    const routeEvent = found!.events.find((event) => event.type === "auto_route");
+    assert.ok(routeEvent !== undefined);
+    assert.equal(routeEvent!.type === "auto_route" ? routeEvent!.route : "", "solo");
+    assert.equal(routeEvent!.type === "auto_route" ? routeEvent!.reason : "", "persisted why");
   } finally {
     cleanup();
   }

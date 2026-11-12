@@ -1419,6 +1419,9 @@ async function runOnce(
           cost: estimateRunCost(cfg, result.usage ?? {}),
           rounds: result.rounds,
           errors: result.errors,
+          // Additive auto-mode routing key, present only when the run routed;
+          // consult/work machine objects stay byte-identical.
+          ...(result.autoRoute !== undefined ? { auto_route: result.autoRoute } : {}),
         }),
       );
       return failed ? 1 : 0;

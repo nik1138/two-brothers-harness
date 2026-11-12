@@ -4093,3 +4093,197 @@ test("serve spill retention is opt-in and prunes only files older than the confi
     tmp.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Auto-mode routing: the record keeps the REQUESTED mode, the additive
+// route/route_reason fields carry the effective decision, SSE streams the
+// auto_route event, and the sidecar-rebuilt record still reports the route.
+// ---------------------------------------------------------------------------
+
+/** A plain scripted senior: per-kind reply queues, strict-valid fallback. */
+function routeScriptedSenior(scripts: Record<string, string[]>): Provider {
+  const queues: Record<string, string[]> = Object.fromEntries(
+    Object.entries(scripts).map(([kind, replies]) => [kind, [...replies]]),
+  );
+  const valid: Record<string, Record<string, unknown>> = {
+    consult: { task: "t", ask: "a", expect: "proposal", deadline_hint: "today" },
+    review: { verdict: "accept", notes: "", points: [] },
+    decision: { decision: "D", rationale: "", confidence: 0.7, dissent: null, accepted_proposals: [] },
+  };
+  return {
+    async chat(_messages: ChatMessage[], responseKind = "message") {
+      const queue = queues[responseKind];
+      if (queue !== undefined && queue.length > 0) return queue.shift()!;
+      return JSON.stringify(valid[responseKind] ?? { text: "ok" });
+    },
+  };
+}
+
+const SOLO_ROUTE_REPLY = JSON.stringify({ route: "solo", reason: "the server can answer this alone" });
+
+test("auto run: record keeps mode auto and adds route/route_reason; SSE carries auto_route", async () => {
+  const srv = await startServer({
+    providerOverrides: { senior: routeScriptedSenior({ route: [SOLO_ROUTE_REPLY] }) },
+  });
+  try {
+    const started = await post<Record<string, any>>(srv.base, "/api/runs", {
+      task: "auto solo over http",
+      mode: "auto",
+    });
+    assert.equal(started.status, 202);
+    const runId = String(started.body.run_id);
+    const events = await runUntilEnd(srv.base, runId);
+    const routeEvent = events.find((event) => event.type === "auto_route") as Record<string, any>;
+    assert.ok(routeEvent !== undefined, "SSE carries the additive auto_route event");
+    assert.equal(routeEvent.route, "solo");
+    assert.equal(routeEvent.reason, "the server can answer this alone");
+    assert.equal(routeEvent.requested, "auto");
+    // The event precedes the marker envelope on the stream.
+    const routeIndex = events.findIndex((event) => event.type === "auto_route");
+    const markerIndex = events.findIndex(
+      (event) =>
+        event.type === "envelope" &&
+        String((event.envelope as any)?.payload?.text ?? "").startsWith("[[AUTO ROUTE]]"),
+    );
+    assert.ok(markerIndex > routeIndex);
+    assert.equal(events.at(-1)?.type, "run_end");
+
+    const record = await waitTerminal(srv.base, runId);
+    assert.equal(record.mode, "auto", "the record keeps the REQUESTED mode");
+    assert.equal(record.route, "solo");
+    assert.equal(record.route_reason, "the server can answer this alone");
+    assert.equal(record.status, "completed");
+    assert.equal((record.decision as any).decision, "D");
+    // The listed records carry the same additive fields.
+    const listed = await get<Array<Record<string, any>>>(
+      srv.base,
+      `/api/runs?session=${encodeURIComponent(String(record.session))}`,
+    );
+    const listedRun = listed.body.find((entry) => entry.run_id === runId);
+    assert.equal(listedRun?.route, "solo");
+    assert.equal(listedRun?.route_reason, "the server can answer this alone");
+  } finally {
+    await srv.close();
+  }
+});
+
+test("auto run: mock provider fails closed to consult with the honest reason", async () => {
+  const srv = await startServer();
+  try {
+    const started = await post<Record<string, any>>(srv.base, "/api/runs", {
+      task: "auto mock demo",
+      mode: "auto",
+    });
+    assert.equal(started.status, 202);
+    const record = await waitTerminal(srv.base, started.body.run_id);
+    assert.equal(record.status, "completed");
+    assert.equal(record.mode, "auto");
+    assert.equal(record.route, "consult");
+    assert.equal(record.route_reason, "unstructured model reply for route");
+    assert.ok((record.decision as any)?.decision, "the full consult cycle still decided");
+  } finally {
+    await srv.close();
+  }
+});
+
+test("auto run: explicit consult/work records carry no route fields", async () => {
+  const srv = await startServer();
+  try {
+    for (const mode of ["consult", "work"]) {
+      const started = await post<Record<string, any>>(srv.base, "/api/runs", {
+        task: `explicit ${mode}`,
+        mode,
+      });
+      const record = await waitTerminal(srv.base, started.body.run_id);
+      assert.equal(record.mode, mode);
+      assert.equal("route" in record, false);
+      assert.equal("route_reason" in record, false);
+    }
+  } finally {
+    await srv.close();
+  }
+});
+
+test("auto run: invalid mode stays 400 (solo is not a mode)", async () => {
+  const srv = await startServer();
+  try {
+    const bad = await post<Record<string, any>>(srv.base, "/api/runs", {
+      task: "bad mode",
+      mode: "solo",
+    });
+    assert.equal(bad.status, 400);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("auto run: sidecar-rebuilt terminal record still reports the route", async () => {
+  const tmp = tmpdir("tb-auto-rebuild-");
+  const options: ServerOptions = {
+    configFactory: mockConfig(),
+    sessionsDir: tmp.root,
+    webDist: null,
+    providerOverrides: { senior: routeScriptedSenior({ route: [SOLO_ROUTE_REPLY] }) },
+  };
+  try {
+    const first = createServer(options);
+    const serverA = await first.listen("127.0.0.1", 0);
+    const baseA = `http://127.0.0.1:${(serverA.address() as AddressInfo).port}`;
+    const started = await post<Record<string, any>>(baseA, "/api/runs", {
+      task: "route survives restart",
+      mode: "auto",
+    });
+    assert.equal(started.status, 202);
+    const runId = String(started.body.run_id);
+    const live = await waitTerminal(baseA, runId);
+    assert.equal(live.route, "solo");
+    await first.close();
+
+    // Restart: a fresh server over the same sessions dir; the sidecar is all
+    // that is left, and the rebuilt record derives route/route_reason from it.
+    const second = createServer(options);
+    const serverB = await second.listen("127.0.0.1", 0);
+    const baseB = `http://127.0.0.1:${(serverB.address() as AddressInfo).port}`;
+    try {
+      const rebuilt = await get<Record<string, any>>(baseB, `/api/runs/${runId}`);
+      assert.equal(rebuilt.status, 200);
+      assert.equal(rebuilt.body.rebuilt, true);
+      assert.equal(rebuilt.body.status, "completed");
+      assert.equal(rebuilt.body.route, "solo");
+      assert.equal(rebuilt.body.route_reason, "the server can answer this alone");
+      // The requested mode is not an event field; it stays blank on rebuild.
+      assert.equal(rebuilt.body.mode, "");
+    } finally {
+      await second.close();
+    }
+  } finally {
+    tmp.cleanup();
+  }
+});
+
+test("auto run: legacy sync POST /api/run routes the same way (parity)", async () => {
+  const srv = await startServer({
+    providerOverrides: { senior: routeScriptedSenior({ route: [SOLO_ROUTE_REPLY] }) },
+  });
+  try {
+    // The legacy route is synchronous: it returns the envelope log directly
+    // (no run record), so parity means the same routing behavior — the marker
+    // envelope and the solo decision — through the shared preparation path.
+    const ran = await post<Record<string, any>>(srv.base, "/api/run", {
+      task: "legacy auto parity",
+      mode: "auto",
+    });
+    assert.equal(ran.status, 200);
+    assert.deepEqual(ran.body.errors, []);
+    const kinds = (ran.body.events as Array<{ kind: string }>).map((event) => event.kind);
+    assert.deepEqual(kinds, ["message", "message", "decision"]);
+    const marker = (ran.body.events as Array<{ payload: { text?: string } }>)[1];
+    assert.equal(
+      marker.payload.text,
+      "[[AUTO ROUTE]] solo — the server can answer this alone",
+    );
+    assert.equal(ran.body.decision.decision, "D");
+  } finally {
+    await srv.close();
+  }
+});

@@ -68,6 +68,12 @@ export interface HarnessResultSummary {
   warnings: number;
   /** The session JSONL the run persisted to, or null for an in-memory run. */
   sessionFile: string | null;
+  /**
+   * Additive auto-mode routing decision (mirrors `HarnessResult.autoRoute`),
+   * present only when the run routed. Structural duplicate of the harness
+   * type so this module stays dependency-free of harness.ts.
+   */
+  autoRoute?: { route: "solo" | "consult" | "work"; reason: string; downgradedFrom?: "work" };
 }
 
 export interface RunStatusStreamEvent {

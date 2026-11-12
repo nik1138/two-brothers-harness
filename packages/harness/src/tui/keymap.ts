@@ -845,7 +845,7 @@ export interface SlashCommandInfo {
   name: string;
   description: string;
   argumentHint?: string;
-  mode?: "consult" | "work";
+  mode?: "consult" | "work" | "auto";
 }
 
 /** One row in the palette or help overlay. */
@@ -863,7 +863,7 @@ export interface PaletteEntry {
   disabled: boolean;
   disabledReason: string;
   /** Template frontmatter mode, `""` when unset. */
-  mode: "consult" | "work" | "";
+  mode: "consult" | "work" | "auto" | "";
 }
 
 /** Inputs for entry construction. */

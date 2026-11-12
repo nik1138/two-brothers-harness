@@ -60,7 +60,7 @@ export interface Command {
    * runs in. Absent when the key is missing/empty or its value is invalid
    * (an invalid value is diagnosed and omitted).
    */
-  mode?: "consult" | "work";
+  mode?: "consult" | "work" | "auto";
   /** Absolute path of the `<name>.md` file. */
   file: string;
   /** Markdown after the frontmatter fence — the prompt template. */
@@ -86,7 +86,7 @@ interface ParsedCommandDocument {
 const FENCE = "---";
 const NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
 const COMMAND_EXT = ".md";
-const MODES: ReadonlySet<string> = new Set(["consult", "work"]);
+const MODES: ReadonlySet<string> = new Set(["consult", "work", "auto"]);
 const EXCLUDED_DIRS: ReadonlySet<string> = new Set(["node_modules"]);
 
 /** Stable, locale-independent ordering. */

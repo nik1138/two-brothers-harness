@@ -775,6 +775,19 @@ export class RunRecord {
     }
     if (steeringDropped > 0) out.steering_dropped = steeringDropped;
     if (!this._doneFlag && this._steering.length > 0) out.steering_pending = this._steering.length;
+    // Auto-mode routing honesty (additive): the effective route and its reason
+    // are derived from the persisted `auto_route` event exactly like
+    // steering_dropped, so they survive a sidecar-rebuilt terminal record after
+    // a backend restart. `mode` keeps reporting the REQUESTED mode ("auto");
+    // the route is the new additive field. Absent on non-auto runs and on
+    // pre-feature sidecars — old clients ignore it.
+    for (const event of this.events) {
+      if (event.type === "auto_route") {
+        out.route = event.route;
+        out.route_reason = event.reason;
+        break;
+      }
+    }
     return out;
   }
 
