@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
+import { NButton } from 'naive-ui'
 import type { RunUsage, SubagentDetail } from '../types'
 import {
   subagentDuration,
@@ -9,6 +10,14 @@ import {
   subagentTaskPreview,
   subagentTokenLabel,
 } from '../subagents'
+import {
+  SUBAGENT_CONTROLS_UNSUPPORTED_NOTICE,
+  isMissingSubagentControlRoute,
+  markSubagentControlsUnavailable,
+  subagentControlsUnavailable,
+  subagentInterruptNotice,
+} from '../subagentControls'
+import { ApiError, interruptSubagent } from '../api'
 import { cacheHitPercent, promptTokensOf } from '../usageCache'
 
 const props = defineProps<{
@@ -28,6 +37,39 @@ const cachePct = computed(() => cacheHitPercent(props.detail?.usage))
 const promptTokens = computed(() => promptTokensOf(props.detail?.usage))
 const taskLine = computed(() => subagentTaskPreview(props.detail?.task ?? '', 180))
 const usage = computed<RunUsage | null>(() => props.detail?.usage ?? null)
+
+/** Local request state for the drawer-only Stop control (the SSE event is the truth). */
+const stopping = ref(false)
+const stopNotice = ref('')
+const stopError = ref('')
+/** Latched off after a 404: an old backend has no helper controls. */
+const controlsUnavailable = ref(subagentControlsUnavailable())
+const canStop = computed(
+  () => props.detail?.status === 'running' && !controlsUnavailable.value,
+)
+
+/** Stop only this helper; the parent run keeps going. */
+async function stopHelper() {
+  const detail = props.detail
+  if (detail === null || stopping.value || !canStop.value) return
+  stopping.value = true
+  stopNotice.value = ''
+  stopError.value = ''
+  try {
+    const result = await interruptSubagent(detail.id)
+    stopNotice.value = subagentInterruptNotice(result.status) ?? ''
+  } catch (exc) {
+    if (exc instanceof ApiError && isMissingSubagentControlRoute(exc.status)) {
+      markSubagentControlsUnavailable()
+      controlsUnavailable.value = true
+      stopError.value = SUBAGENT_CONTROLS_UNSUPPORTED_NOTICE
+    } else {
+      stopError.value = exc instanceof Error ? exc.message : String(exc)
+    }
+  } finally {
+    stopping.value = false
+  }
+}
 
 /** Avoid painting the final report twice: the store's last assistant message wins. */
 const timeline = computed(() => {
@@ -92,9 +134,26 @@ function closeOnBackdrop(event: MouseEvent) {
       <span class="subagent-status-badge" :class="`is-${detail?.status ?? 'running'}`">
         {{ statusLabel }}
       </span>
+      <!-- Drawer-only operator control: tree rows stay plain buttons (no nested
+           interactive elements), and the backend 404 on an old server hides it. -->
+      <div v-if="canStop" class="subagent-view-actions">
+        <NButton
+          size="small"
+          quaternary
+          :disabled="stopping"
+          aria-label="Stop this helper"
+          @click="stopHelper"
+        >
+          {{ stopping ? 'Stopping…' : 'Stop helper' }}
+        </NButton>
+      </div>
     </header>
 
     <div class="subagent-view-body">
+      <p v-if="stopError" class="subagent-view-error" role="alert">{{ stopError }}</p>
+      <p v-else-if="stopNotice" class="subagent-view-note is-control" role="status">
+        {{ stopNotice }}
+      </p>
       <p v-if="loading" class="subagent-view-note">Loading the helper transcript…</p>
       <p v-else-if="error" class="subagent-view-error" role="alert">{{ error }}</p>
       <template v-else-if="detail">
@@ -226,6 +285,12 @@ function closeOnBackdrop(event: MouseEvent) {
   min-width: 0;
 }
 
+.subagent-view-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+}
+
 .subagent-view-kicker {
   display: flex;
   align-items: center;
@@ -309,6 +374,11 @@ function closeOnBackdrop(event: MouseEvent) {
   margin: 0 0 var(--space-3);
   font-size: 0.78rem;
   color: var(--text-secondary);
+}
+
+/* Local feedback for the drawer's Stop control (cleared by the live event). */
+.subagent-view-note.is-control {
+  color: var(--accent);
 }
 
 .subagent-view-error {

@@ -64,6 +64,12 @@
 //                  drawer keeps the allowed approval row + the real tool row,
 //                  the run's undo preview lists the child-created file, and a
 //                  reload replays the approval row from the child store
+//   subagent-controls scripted fixture: the same parked helper, but the operator
+//                  opens the drawer and clicks the drawer-only Stop helper; the
+//                  approval is withdrawn as "interrupted", no file is written,
+//                  the tree/drawer say cancelled while the parent run completes,
+//                  the child log ends with cancelled_by "operator", and a reload
+//                  keeps the terminal row
 //   tool-preview  scripted fixture: a workspace_list_dir result's additive
 //                  bounded `preview` makes the completed tool card expandable;
 //                  its toggle is keyboard-operable (aria-expanded), the plain-
@@ -2838,6 +2844,156 @@ async function scenarioSubagentMutation(runner) {
   }
 }
 
+// -- scenario: operator interrupt of a live helper -------------------------------------
+//
+// One concern: the drawer's Stop helper control end to end. The `helper-write`
+// fixture parks the child's write on the parent run; instead of answering the
+// card, the operator opens the helper drawer and clicks Stop. Asserted here:
+// the child-scoped interrupt withdraws the parked approval as "interrupted"
+// and creates no file, the drawer/header flip to cancelled with the honest
+// cause, the tree row follows, the parent run still completes (R1), the
+// durable child log ends with cancelled_by "operator", and the terminal state
+// survives a reload.
+
+async function scenarioSubagentControls(runner) {
+  const HELPER_FILE = 'e2e-helper.txt'
+  const HELPER_LABEL = 'Write helper file'
+  const SESSION_TITLE = 'E2E helper interrupt'
+  const wsDir = tmpDir('tb-e2e-ws-subctl')
+  const wsName = path.basename(wsDir)
+  const be = await startBackend({ kind: 'fixture', scenario: 'helper-write' })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  try {
+    const put = await apiCall(be.base, 'PUT', '/api/settings', {
+      subagent: {
+        provider: 'openai',
+        base_url: be.modelBase,
+        api_key: 'e2e-helper-key',
+        model: 'e2e-helper',
+      },
+    })
+    assert.equal(put.status, 200, `PUT /api/settings -> HTTP ${put.status}`)
+
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await ensureWorkspace(page, wsDir, wsName)
+    await selectWorkspaceFilter(page, wsName)
+    await createSession(page, SESSION_TITLE)
+    await sendTask(page, 'Write the helper file in the workspace', { mode: 'work' })
+
+    // The helper parks on the parent run's approval card: genuinely live.
+    const card = page.locator('.approval-dock article.approval', { hasText: 'awaiting you' })
+    await card.first().waitFor({ timeout: 60000 })
+    assert.ok(
+      (await card.first().innerText()).includes(HELPER_LABEL),
+      'the parked card names the helper',
+    )
+
+    // Open the drawer from the tree and use the drawer-only Stop control.
+    const chip = page.locator('.subagent-chip')
+    await chip.waitFor({ state: 'visible', timeout: 20000 })
+    await chip.click()
+    const tree = page.locator('#subagent-tree')
+    await tree.waitFor({ state: 'visible' })
+    await tree.locator('.subagent-tree-row').first().click()
+    const drawer = page.locator('.subagent-view')
+    await drawer.waitFor({ state: 'visible', timeout: 15000 })
+    const stop = drawer.locator('button[aria-label="Stop this helper"]')
+    await stop.waitFor({ state: 'visible', timeout: 15000 })
+    await stop.click()
+
+    // The terminal event is the truth: header/tree flip and the control goes.
+    await drawer.locator('.subagent-status-badge.is-cancelled').waitFor({ timeout: 30000 })
+    await drawer
+      .locator('button[aria-label="Stop this helper"]')
+      .waitFor({ state: 'hidden', timeout: 30000 })
+    await drawer
+      .locator('.subagent-approval.is-cancelled')
+      .first()
+      .waitFor({ timeout: 15000 })
+    await drawer.locator('.subagent-view-error').waitFor({ timeout: 15000 })
+    assert.match(
+      (await drawer.locator('.subagent-view-error').innerText()).replace(/\s+/g, ' '),
+      /interrupted by the operator/,
+    )
+    assert.equal(
+      fs.existsSync(path.join(wsDir, HELPER_FILE)),
+      false,
+      'an interrupted helper never wrote its file',
+    )
+
+    // R1: the child interrupt never stops the parent run — it completes.
+    await waitForRunEnd(page)
+    const sessionName = await sessionNameByTitle(be.base, SESSION_TITLE)
+    const completed = await waitFor(
+      async () => {
+        const list = await (
+          await fetch(`${be.base}/api/runs?session=${encodeURIComponent(sessionName)}`)
+        ).json()
+        return list.find((run) => run.status === 'completed') ?? false
+      },
+      { desc: 'the parent run to complete after the child interrupt' },
+    )
+    assert.equal(completed.status, 'completed')
+    assert.equal(
+      await page.locator('.approval-dock article.approval').count(),
+      0,
+      'the withdrawn approval card leaves the dock',
+    )
+
+    // The durable child log ends once with the honest cause.
+    const treeBody = await (
+      await fetch(`${be.base}/api/sessions/${encodeURIComponent(sessionName)}/subagents`)
+    ).json()
+    assert.equal(treeBody.subagents.length, 1)
+    const childId = treeBody.subagents[0].id
+    assert.equal(treeBody.subagents[0].status, 'cancelled')
+    const logFile = path.join(be.dir, 'subagents', `${childId}.jsonl`)
+    const rows = fs
+      .readFileSync(logFile, 'utf-8')
+      .split(/\r?\n/)
+      .filter((line) => line.trim() !== '')
+      .map((line) => JSON.parse(line))
+    const ends = rows.filter((row) => row.type === 'end')
+    assert.equal(ends.length, 1, 'exactly one terminal row')
+    assert.equal(ends[0].status, 'cancelled')
+    assert.equal(ends[0].cancelled_by, 'operator')
+    assert.equal(ends[0].error, 'interrupted by the operator')
+
+    // Reload: the durable terminal row is the truth and the drawer is read-only.
+    await page.reload()
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await page.locator('.session-item', { hasText: SESSION_TITLE }).first().click()
+    const chipAfter = page.locator('.subagent-chip')
+    await chipAfter.waitFor({ state: 'visible', timeout: 20000 })
+    await chipAfter.click()
+    const treeAfter = page.locator('#subagent-tree')
+    await treeAfter.waitFor({ state: 'visible' })
+    const rowAfter = (await treeAfter.locator('.subagent-tree-row').first().innerText()).replace(
+      /\s+/g,
+      ' ',
+    )
+    assert.match(rowAfter, /cancelled/i)
+    await treeAfter.locator('.subagent-tree-row').first().click()
+    const drawerAfter = page.locator('.subagent-view')
+    await drawerAfter.waitFor({ state: 'visible', timeout: 15000 })
+    await drawerAfter.locator('.subagent-status-badge.is-cancelled').waitFor({ timeout: 15000 })
+    assert.equal(
+      await drawerAfter.locator('button[aria-label="Stop this helper"]').count(),
+      0,
+      'a settled helper offers no Stop control',
+    )
+
+    consoleGuard.assertClean()
+    runner.pass('subagent-controls')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(wsDir)
+    rmTree(be.dir)
+  }
+}
+
 // -- scenario: composer status seats ---------------------------------------------------
 //
 // Role models are written through the settings API before the page loads, so the
@@ -5239,6 +5395,13 @@ async function main() {
         run: () => (
           (currentRunner = makeRunner('subagent-mutation')),
           scenarioSubagentMutation(currentRunner)
+        ),
+      },
+      {
+        label: 'subagent-controls',
+        run: () => (
+          (currentRunner = makeRunner('subagent-controls')),
+          scenarioSubagentControls(currentRunner)
         ),
       },
       {

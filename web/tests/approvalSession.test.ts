@@ -350,13 +350,26 @@ test('Allow/Deny keeps the request reason on the resolved card', () => {
   }
 })
 
-test('a resolution reason wins when present (cancellation keeps "cancelled")', () => {
+test('a cancellation-class resolution keeps the request reason (the card stays honest)', () => {
+  // Stopping the run (or interrupting the helper) resolves the wait, but the
+  // cancellation is not WHY the action was requested: the card must keep
+  // "matches sensitive file pattern .env" instead of the literal "cancelled".
+  for (const reason of ['cancelled', 'interrupted']) {
+    const approvals = approvalsOf([
+      requested(undefined, { reason: REQUEST_REASON }),
+      resolved({ decision: 'deny', reason }),
+    ])
+    assert.equal(approvals[0].decision, 'deny')
+    assert.equal(approvals[0].reason, REQUEST_REASON)
+  }
+})
+
+test('a non-cancellation resolution reason still wins when present', () => {
   const approvals = approvalsOf([
     requested(undefined, { reason: REQUEST_REASON }),
-    resolved({ decision: 'deny', reason: 'cancelled' }),
+    resolved({ decision: 'deny', reason: 'denied by policy' }),
   ])
-  assert.equal(approvals[0].decision, 'deny')
-  assert.equal(approvals[0].reason, 'cancelled')
+  assert.equal(approvals[0].reason, 'denied by policy')
 })
 
 test('no reason on either event stays undefined (nothing is invented)', () => {

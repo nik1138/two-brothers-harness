@@ -121,6 +121,25 @@ export async function getSubagent(id: string): Promise<SubagentDetail | null> {
   return normalizeSubagentDetail(body?.subagent)
 }
 
+/** Result of the operator's child interrupt (`POST /api/subagents/{id}/interrupt`). */
+export interface SubagentInterruptResult {
+  subagent_id: string
+  /** `interrupting` for a live child; `already_finished` is the idempotent answer. */
+  status: 'interrupting' | 'already_finished'
+}
+
+/**
+ * Abort one live helper only. The parent run is untouched. An old backend
+ * without the route answers 404 — callers latch the capability off instead of
+ * showing an error toast.
+ */
+export async function interruptSubagent(id: string): Promise<SubagentInterruptResult> {
+  return request<SubagentInterruptResult>(
+    `/api/subagents/${encodeURIComponent(id)}/interrupt`,
+    { method: 'POST' },
+  )
+}
+
 export async function createSession(body: SessionCreateRequest): Promise<SessionInfo> {
   return request<SessionInfo>('/api/sessions', json('POST', body))
 }

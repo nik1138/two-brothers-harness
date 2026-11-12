@@ -607,6 +607,12 @@ export interface SubagentCompletedEvent {
   duration_ms: number
   /** Epoch milliseconds. */
   ended_at: number
+  /**
+   * Additive: present only on a cancelled child, naming the cause (operator
+   * interrupt, the Senior, the parent run stopping, or a restart
+   * reconciliation). Older backends omit it; the tree/drawer read `status`.
+   */
+  cancelled_by?: 'operator' | 'senior' | 'parent_run' | 'restart'
   run_id: string
   at: number
 }

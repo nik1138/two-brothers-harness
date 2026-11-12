@@ -134,6 +134,18 @@ export function runtimeDedupeKey(ev: RunEvent): string {
   return JSON.stringify(ev)
 }
 
+/**
+ * Cancellation-class `approval_resolved.reason` values (a stopped run or an
+ * interrupted child). They describe why the wait ended, never why the action
+ * was requested, so the card must keep the request's own reason.
+ */
+const CANCELLATION_REASONS: ReadonlySet<string> = new Set(['cancelled', 'interrupted'])
+
+/** True for a cancellation-class approval resolution reason. */
+export function isCancellationReason(reason: unknown): boolean {
+  return typeof reason === 'string' && CANCELLATION_REASONS.has(reason)
+}
+
 // -- replayed reasoning (additive, tolerant) ---------------------------------
 
 /**
@@ -293,9 +305,15 @@ function appendToRuntimeProjection(state: RuntimeProjectionState, ev: RunEvent) 
         state.items[index] = {
           ...open,
           decision: ev.decision,
-          // Keep the request's honest reason when the resolution carries none
-          // (normal allow/deny); a cancellation reason wins when present.
-          reason: ev.reason ?? open.reason,
+          // A cancellation-class reason describes why the wait ended, not why
+          // the action was requested: keep the card's own reason instead of
+          // replacing it with the literal word "interrupted"/"cancelled". An
+          // explicit allow/deny reason still wins (normal resolutions carry
+          // none, so the request's reason stays).
+          reason:
+            typeof ev.reason === 'string' && !isCancellationReason(ev.reason)
+              ? ev.reason
+              : open.reason,
         }
       } else {
         state.items.push({
