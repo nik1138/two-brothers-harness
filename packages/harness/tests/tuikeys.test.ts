@@ -84,6 +84,17 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 3_000): Promise<b
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * `fs.watchFile` establishes its stat baseline on the first asynchronous poll.
+ * A write issued in the same tick as the install can land before that poll and
+ * silently become the baseline (no change is ever reported), which is exactly
+ * what happens under `node --test`'s parallel file load. Yield past a couple of
+ * poll intervals so the baseline exists before the first test mutation.
+ */
+async function waitForWatchBaseline(intervalMs: number): Promise<void> {
+  await sleep(Math.max(100, intervalMs * 4));
+}
+
 // --------------------------------------------------------------------------- //
 // chord grammar
 // --------------------------------------------------------------------------- //
@@ -772,6 +783,7 @@ test("watch: a valid change live-loads through the reload path and reports exact
   assert.notEqual(watcher, null, "the watcher installs for a temp keys file");
   try {
     assert.equal(watcher?.active, true);
+    await waitForWatchBaseline(20);
     writeFileSync(file, doc({ palette: ["ctrl+u"], help: ["f2"] }), "utf8");
     assert.ok(await waitUntil(() => results.length > 0), "the change is detected");
     const first = results[0];
@@ -811,6 +823,7 @@ test("watch: an invalid change keeps the last good table, warns once, and recove
   });
   assert.notEqual(watcher, null);
   try {
+    await waitForWatchBaseline(20);
     writeFileSync(file, "{oops\n", "utf8");
     assert.ok(await waitUntil(() => results.length > 0), "the corrupt file is detected");
     assert.equal(results[0]?.state, "invalid");
@@ -923,6 +936,7 @@ test("watch: rapid writes inside the debounce window coalesce into one reload", 
   });
   assert.notEqual(watcher, null);
   try {
+    await waitForWatchBaseline(10);
     writeFileSync(file, doc({ palette: ["ctrl+u"] }), "utf8");
     await sleep(60);
     writeFileSync(file, doc({ palette: ["ctrl+y"] }), "utf8");
