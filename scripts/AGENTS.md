@@ -6,8 +6,8 @@ Local map for the repository gates and release tooling. Root rules:
 ## What lives here
 
 - `smoke-test.ps1` — offline gate: package typecheck/build/tests/selftest,
-  mock run, hermetic CLI E2E, fault injection, reference selftest, web tests
-  and build.
+  mock run, hermetic CLI E2E, fault injection, hermetic server E2E, reference
+  selftest, web tests and build.
 - `e2e-test.ps1` — browser-E2E wrapper (builds web when stale, installs E2E
   deps, runs `e2e/web-freshness.test.mjs` and `e2e/run.mjs`).
 - `release-rehearsal.ps1` — pre-push rehearsal: clean tree, build + dependency

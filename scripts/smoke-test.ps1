@@ -6,9 +6,9 @@
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-test.ps1
 #
 # Runs: packages/harness typecheck -> build -> npm test -> dist selftest ->
-# mock run -> hermetic CLI E2E -> real-socket fault injection, the
-# typescript/ reference selftest, the web/ unit tests, and the web/ build.
-# Everything is offline; no model endpoint or API key is needed.
+# mock run -> hermetic CLI E2E -> real-socket fault injection -> hermetic
+# server E2E, the typescript/ reference selftest, the web/ unit tests, and the
+# web/ build. Everything is offline; no model endpoint or API key is needed.
 
 $ErrorActionPreference = "Stop"
 
@@ -100,6 +100,24 @@ Section "Package: real-socket fault injection"
 Push-Location $pkg
 Run-External "faults e2e" "node" "e2e/faults.ts"
 Pop-Location
+
+# The closed loopback port makes the endpoint probe fail at once: the
+# live-model suites SKIP, the hermetic server-status/prompt-audit suites run,
+# and the runner exits 0. The override is scoped to this stage.
+Section "Package: hermetic server E2E"
+Push-Location $pkg
+$savedE2eBaseUrl = $env:TWO_BROTHERS_E2E_BASE_URL
+$env:TWO_BROTHERS_E2E_BASE_URL = "http://127.0.0.1:9/v1"
+try {
+    Run-External "server e2e" "node" "e2e/run.ts"
+} finally {
+    if ($null -eq $savedE2eBaseUrl) {
+        Remove-Item Env:\TWO_BROTHERS_E2E_BASE_URL -ErrorAction SilentlyContinue
+    } else {
+        $env:TWO_BROTHERS_E2E_BASE_URL = $savedE2eBaseUrl
+    }
+    Pop-Location
+}
 
 Section "Protocol reference: selftest"
 Push-Location $ref

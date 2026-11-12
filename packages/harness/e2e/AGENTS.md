@@ -18,8 +18,9 @@ root project rules: `../../../AGENTS.md`; the detailed suite matrix is in
 ## Boundaries
 
 - Never move hermetic suites under `../tests/` or into `npm test`; keep the
-  offline/live split. The smoke gate runs `cli.ts` and `faults.ts`; CI runs
-  `run.ts` with a closed endpoint so live suites SKIP and hermetic ones run.
+  offline/live split. The smoke gate and CI run `cli.ts`, `faults.ts` and
+  `run.ts` (the latter with a closed endpoint so the live suites SKIP and the
+  hermetic ones run).
 - Live/manual runners are never part of offline gates or CI. They need a
   reachable endpoint and may cost money; run them only when the brief says so.
 - Do not commit `runs/` evidence, keys, or generated session dirs.

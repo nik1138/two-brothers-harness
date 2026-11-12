@@ -23,16 +23,20 @@ The script runs:
 6. the hermetic CLI E2E (`node e2e/cli.ts`)
 7. the real-socket fault-injection runner (`node e2e/faults.ts` — loopback
    only, seven retry/timeout/overflow/quota scenarios)
-8. the `typescript/` reference selftest
-9. the `web/` unit tests (`npm test` — chat, timeline, drafts, palette,
-   session-status, recents, density, find, content-search, mentions, provider
-   settings and model discovery, queue visibility, session-scope approvals,
-   step folding, composer status seats, plan docks, streaming, composer prompt
-   recall, the approval-policy model, the design-token layer, mid-run steering,
-   session fork/rewind, run-scoped file undo, the HTML export helpers,
-   transcript windowing and the run-cost footer, the persisted compaction card,
-   the tab-title model and the fork-from-here request model)
-10. the `web/` build
+8. the hermetic server E2E (`node e2e/run.ts` with
+   `TWO_BROTHERS_E2E_BASE_URL=http://127.0.0.1:9/v1`; the closed port fails the
+   endpoint probe at once, so the live-model suites SKIP and the hermetic
+   server-status/prompt-audit suites run)
+9. the `typescript/` reference selftest
+10. the `web/` unit tests (`npm test` — chat, timeline, drafts, palette,
+    session-status, recents, density, find, content-search, mentions, provider
+    settings and model discovery, queue visibility, session-scope approvals,
+    step folding, composer status seats, plan docks, streaming, composer prompt
+    recall, the approval-policy model, the design-token layer, mid-run steering,
+    session fork/rewind, run-scoped file undo, the HTML export helpers,
+    transcript windowing and the run-cost footer, the persisted compaction card,
+    the tab-title model and the fork-from-here request model)
+11. the `web/` build
 
 Expected final line: `SMOKE TEST: PASS`. It is an offline pre-flight, not the
 whole product gate — run the package gates below for that.
