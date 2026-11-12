@@ -232,6 +232,38 @@ function meteredMockProvider(
   };
 }
 
+/**
+ * A metered provider that succeeds once (recording that call's usage), then
+ * throws on every later call. A run using it fails only AFTER real spending,
+ * which is the partial usage a failed record must keep.
+ */
+function failAfterOneMeteredCallProvider(
+  input: number,
+  output: number,
+  cached: number,
+  cacheWrite: number,
+): Provider & { usageSnapshot(): UsageTotals } {
+  const inner = new MockProvider();
+  const tracker = new UsageTracker();
+  let calls = 0;
+  const recordOrThrow = (): void => {
+    calls += 1;
+    if (calls > 1) throw new Error("provider failed after one successful call");
+    tracker.record(input, output, cached, cacheWrite);
+  };
+  return {
+    async chat(messages: ChatMessage[], responseKind?: string, _signal?: AbortSignal) {
+      recordOrThrow();
+      return inner.chat(messages, responseKind);
+    },
+    async chatWithTools(messages: ChatMessage[], tools: Tool[], options?: ToolChatOptions) {
+      recordOrThrow();
+      return inner.chatWithTools(messages, tools, options) as Promise<ToolChatResponse>;
+    },
+    usageSnapshot: () => tracker.snapshot(),
+  };
+}
+
 /** One consult cycle with the deterministic mock: 5 envelopes, usage 40/20. */
 const CONSULT_KINDS = ["message", "consult", "proposal", "review", "decision"];
 const EXPECTED_USAGE = {
@@ -1539,6 +1571,79 @@ test("failed run error survives a backend restart (sidecar recovery)", async () 
       assert.equal("rebuilt" in failed, false);
       // unknown ids still 404
       assert.equal((await get(baseB, "/api/runs/nope")).status, 404);
+    } finally {
+      await second.close();
+    }
+  } finally {
+    tmp.cleanup();
+  }
+});
+
+test("failed run keeps partial usage on record, run_end, sidecar and rebuilt record", async () => {
+  const tmp = tmpdir("tb-restart-usage-");
+  const expected = {
+    model_calls: 2,
+    input_tokens: 1010,
+    output_tokens: 105,
+    cached_tokens: 800,
+    cache_write_tokens: 100,
+  };
+  const options: ServerOptions = {
+    configFactory: mockConfig({ provider: "mock", retries: 0 }),
+    sessionsDir: tmp.root,
+    webDist: null,
+    // one successful senior call (1000/100, cache 800/100), then the review
+    // call throws; the junior's deterministic mock call adds 10/5.
+    providerOverrides: { senior: failAfterOneMeteredCallProvider(1000, 100, 800, 100) },
+  };
+  try {
+    const first = createServer(options);
+    const serverA = await first.listen("127.0.0.1", 0);
+    const baseA = `http://127.0.0.1:${(serverA.address() as AddressInfo).port}`;
+    const started = await post<Record<string, any>>(baseA, "/api/runs", {
+      task: "partial spend",
+      mode: "consult",
+    });
+    assert.equal(started.status, 202);
+    const failed = await waitTerminal(baseA, started.body.run_id);
+    assert.equal(failed.status, "failed");
+    assert.ok(String(failed.error).includes("provider failed after one successful call"));
+    // the live record no longer reports zeros for a run that really spent
+    assert.deepEqual(failed.usage, expected);
+
+    const data = await runUntilEnd(baseA, started.body.run_id);
+    const end = data.at(-1) as Record<string, any>;
+    assert.equal(end.type, "run_end");
+    assert.equal(end.status, "failed");
+    assert.deepEqual(end.usage, expected);
+
+    const sidecar = path.join(tmp.root, "runtime", `${failed.session}.events.jsonl`);
+    const persisted = fs
+      .readFileSync(sidecar, "utf-8")
+      .split(/\r?\n/)
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line) as Record<string, any>);
+    assert.deepEqual(
+      persisted.filter((event) => event.type === "run_end").at(-1)?.usage,
+      expected,
+    );
+    await first.close();
+
+    // simulate a restart: the minimal record is rebuilt from the terminal
+    // run_end, so the partial usage survives with the error.
+    const second = createServer(options);
+    const serverB = await second.listen("127.0.0.1", 0);
+    const baseB = `http://127.0.0.1:${(serverB.address() as AddressInfo).port}`;
+    try {
+      const recovered = await get<Record<string, any>>(
+        baseB,
+        `/api/runs/${started.body.run_id}`,
+      );
+      assert.equal(recovered.status, 200);
+      assert.equal(recovered.body.status, "failed");
+      assert.equal(recovered.body.error, failed.error);
+      assert.equal(recovered.body.rebuilt, true);
+      assert.deepEqual(recovered.body.usage, expected);
     } finally {
       await second.close();
     }

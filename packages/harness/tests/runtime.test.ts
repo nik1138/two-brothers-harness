@@ -200,6 +200,59 @@ test("run_end carries per-run usage", async () => {
   assert.deepEqual(end.usage, record.usage);
 });
 
+test("a failed job keeps the partial usage attached to its error", async () => {
+  const manager = new RunManager();
+  const partial = {
+    model_calls: 1,
+    input_tokens: 11,
+    output_tokens: 7,
+    cached_tokens: 5,
+  };
+  const expected = { ...partial, cache_write_tokens: 0 };
+  const job: RunJob = async () => {
+    // The harness attaches `usage` to the non-abort error it rethrows after
+    // successful provider calls; a job can do the same (a partial snapshot is
+    // normalized, not rejected).
+    const failure = new Error("provider failed after one call");
+    Object.defineProperty(failure, "usage", { value: partial, configurable: true });
+    throw failure;
+  };
+  const record = manager.submit("task", "s.jsonl", job);
+  assert.equal(await manager.wait(record.runId), true);
+  assert.equal(record.status, "failed");
+  assert.equal(record.error, "Error: provider failed after one call");
+  assert.deepEqual(record.usage, expected);
+  assert.deepEqual(record.public().usage, expected);
+  // the terminal event order and payload are unchanged apart from the usage
+  const types = record.events.map((event) => event.type);
+  assert.equal(types.at(-2), "run_error");
+  assert.equal(types.at(-1), "run_end");
+  const end = record.events.at(-1) as { type: string; status: string; usage: Record<string, number> };
+  assert.equal(end.type, "run_end");
+  assert.equal(end.status, "failed");
+  assert.deepEqual(end.usage, expected);
+});
+
+test("a failed job without usage reports zeros, not invented numbers", async () => {
+  const manager = new RunManager();
+  const job: RunJob = async () => {
+    throw new Error("failed before any provider call");
+  };
+  const record = manager.submit("task", "s.jsonl", job);
+  assert.equal(await manager.wait(record.runId), true);
+  assert.equal(record.status, "failed");
+  assert.deepEqual(record.usage, {
+    model_calls: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    cached_tokens: 0,
+    cache_write_tokens: 0,
+  });
+  const end = record.events.at(-1) as { type: string; usage: Record<string, number> };
+  assert.equal(end.type, "run_end");
+  assert.deepEqual(end.usage, record.usage);
+});
+
 test("live usage event updates the record before run_end", async () => {
   const manager = new RunManager();
   let release!: () => void;
