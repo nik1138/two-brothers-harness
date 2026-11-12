@@ -1564,18 +1564,30 @@ family-normalized percentage tests). See `docs/cli-reference.md` → Approval mo
 `docs/quickstart.md`, `docs/troubleshooting.md` → Permissions/Tokens and
 prompt cache, and `docs/keyboard.md`.
 
+## Shipped 2026-11-12 (wave 30: kind-stable system prompts for cache reuse)
+
+The per-node few-shot payload block moved from the system prompt to the tail of
+the request's last user message. `REPLY_FORMAT_MARKER` (`Requested payload:
+<kind>`), `replyFormatBlock` and `withReplyFormat` live in
+`packages/harness/src/harness.ts` and are exported for embedders. With the same
+role, tool belt, skills and workspace instructions, consult → review → decision
+now sends a byte-identical system prompt, so OpenAI/DeepSeek implicit caching
+and Anthropic's system breakpoint can reuse the prefix. The block still sits
+closest to the reply; `DELEGATION_DIRECTIVE` remains the final suffix of the
+junior work request. `e2e/faults.ts` parses the marker first and keeps the old
+system-fence/transcript fallbacks. Tests:
+`tests/payloadrepair.test.ts` (strict-valid block, no system fence,
+non-mutating/replacing helper, one system prompt per role across node calls);
+focused suites plus the full package suite, CLI E2E and fault injection.
+
 ## Open items (deferred)
 
-- **Prompt-prefix cache stability across cooperation nodes (medium)** — the
-  assembled system prompt still appends the current node's few-shot payload
-  example, so a consult → review → decision sequence changes the system prefix
-  and pays a fresh cache write. DeepSeek/OpenAI implicit caching and Anthropic's
-  system breakpoint only hit within a node or tool loop. The next step is to
-  move the kind example to the tail of the request (the
-  `DELEGATION_DIRECTIVE`/`VERIFY_INSTRUCTION` pattern) or keep a role-stable
-  example set, and update `e2e/faults.ts` to identify the requested node from
-  the user-message marker instead of the last system fence. Do not do this
-  without re-running the live cache evidence.
+- **Per-turn prompt-cache statistics** — pi's `cache-stats.ts` exposes
+  per-turn cache-miss/write stats beyond the run total. Our footer now shows
+  the normalized run percentage and write count; a per-call breakdown in the
+  prompt-audit rows would make cache misses attributable to a node/tool belt.
+  Requires an additive `prompt_audit` field or a new display-only event, so it
+  was not folded into the kind-stable prompt change.
 - **Remaining key-binding surfaces** — wave 16 shipped the web's three
   modifier global chords (command palette, find, shortcut reference) with the
   Settings → Keyboard capture UI, and wave 19 shipped the TUI's three global
