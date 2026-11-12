@@ -269,8 +269,11 @@ import {
   SUBAGENT_TOOL_NAME,
   SUBAGENT_TOOL_PARAMETERS,
   type SubagentApprovalStatus,
+  type SubagentCancelledBy,
+  type SubagentControlHandle,
   type SubagentEndpoint,
   type SubagentSettings,
+  type SubagentStatus,
   type SubagentTranscriptEntry,
 } from "./subagent.ts";
 
@@ -1399,6 +1402,26 @@ interface ReasoningCapture {
   finish(): void;
 }
 
+/**
+ * One live child's control state (the mutable half; `SubagentControlHandle` is
+ * the read-only view the server registers). The child's own controller is
+ * composed with the parent run signal: an interrupt aborts this child only,
+ * while a parent stop still unwinds every child. `parentSignal` alone decides
+ * whether the parent run unwinds.
+ */
+interface ChildControl {
+  id: string;
+  runId: string | null;
+  label: string;
+  background: boolean;
+  startedAt: number;
+  controller: AbortController;
+  /** Who interrupted this child; null until an interrupt arrives. */
+  cancelledBy: "operator" | "senior" | null;
+  /** Live status for the handle; set to its terminal value before release. */
+  status: SubagentStatus;
+}
+
 export class TwoBrothersHarness {
   readonly cfg: Config;
   readonly providers: Record<"senior" | "junior", Provider>;
@@ -2334,10 +2357,37 @@ export class TwoBrothersHarness {
   }
 
   /**
+   * The read-only handle the server registers for one live child. `interrupt`
+   * aborts the child's own controller only (never the parent run); it is
+   * idempotent and reports false once the child settled or was already
+   * interrupted.
+   */
+  private childControlHandle(control: ChildControl): SubagentControlHandle {
+    return {
+      id: control.id,
+      runId: control.runId,
+      label: control.label,
+      background: control.background,
+      startedAt: control.startedAt,
+      interrupt: (by) => {
+        if (control.status !== "running" || control.controller.signal.aborted) {
+          return false;
+        }
+        control.cancelledBy = by;
+        control.controller.abort();
+        return true;
+      },
+      status: () => control.status,
+    };
+  }
+
+  /**
    * Start, await, persist and report one child. Validation errors and child
    * failures are returned as a JSON tool result (the parent model can react);
    * an aborted parent signal is re-thrown after the child settles so the parent
-   * unwinds through the shared cancellation path.
+   * unwinds through the shared cancellation path. A child-scoped interrupt
+   * cancels only this child: the parent tool result is an honest `cancelled`
+   * payload and the parent run keeps going.
    */
   private async runSubagentTool(
     state: CooperationState,
@@ -2393,7 +2443,25 @@ export class TwoBrothersHarness {
     const provider =
       settings.providerFactory?.(role) ?? this.buildSubagentProvider(role, configured);
     const startedAt = Date.now();
-    this.subagentRuns += 1;
+    // One control per child. The parent run signal decides whether the parent
+    // unwinds; the child's own controller exists so the operator (and, in a
+    // later slice, the Senior) can stop this helper without touching the run.
+    const control: ChildControl = {
+      id,
+      runId: settings.runId ?? null,
+      label,
+      background: false,
+      startedAt,
+      controller: new AbortController(),
+      cancelledBy: null,
+      status: "running",
+    };
+    const parentSignal = signal;
+    const childSignal =
+      parentSignal === undefined
+        ? control.controller.signal
+        : AbortSignal.any([parentSignal, control.controller.signal]);
+    settings.controls?.register(this.childControlHandle(control));    this.subagentRuns += 1;
     this.subagentActive += 1;
     let storeFailed = false;
     try {
@@ -2444,15 +2512,17 @@ export class TwoBrothersHarness {
       }
     };
     // The child view snapshots the run's permission policy and routes every
-    // parked mutation to the parent run's broker, tagged with this child.
+    // parked mutation to the parent run's broker, tagged with this child. The
+    // child signal lets an operator interrupt withdraw a parked wait; the
+    // parent run signal keeps its own (denyAll) path.
     const childWorkspace: Workspace | null = this.options.workspace
       ? this.options.workspace.childView(
-          { id, label },
+          { id, label, signal: childSignal },
           {
             onRequest: (request) => appendApproval("pending", request),
             onResolved: (request, decision) =>
               appendApproval(
-                signal?.aborted
+                childSignal.aborted
                   ? "cancelled"
                   : decision === Decision.ALLOW
                     ? "allowed"
@@ -2486,7 +2556,7 @@ export class TwoBrothersHarness {
         provider,
         tools: childTools,
         systemPrompt,
-        signal,
+        signal: childSignal,
         ...(storeFailed
           ? {}
           : {
@@ -2527,13 +2597,34 @@ export class TwoBrothersHarness {
       });
       const endedAt = Date.now();
       const report = result.text.slice(0, SUBAGENT_RESULT_MAX_CHARS);
+      // A child interrupt always settles `cancelled` with the honest cause,
+      // even when the abort landed between the last provider step and the loop
+      // exit (there the runner still reports a step-budget failure). A child
+      // that really produced its report keeps `completed` — an interrupt that
+      // lost the race is not retroactively applied.
+      const outcomeStatus: Exclude<SubagentStatus, "running"> =
+        result.status !== "completed" && control.cancelledBy !== null
+          ? "cancelled"
+          : result.status;
+      const cancelledBy: SubagentCancelledBy | undefined =
+        outcomeStatus === "cancelled"
+          ? (control.cancelledBy ?? (parentSignal?.aborted === true ? "parent_run" : undefined))
+          : undefined;
+      const outcomeError =
+        cancelledBy === "operator"
+          ? "interrupted by the operator"
+          : cancelledBy === "senior"
+            ? "interrupted by the Senior"
+            : result.error;
+      control.status = outcomeStatus;
       if (!storeFailed) {
         try {
           settings.store.finish(id, {
-            status: result.status,
+            status: outcomeStatus,
             ended_at: endedAt,
-            ...(result.status === "completed" ? { result: report } : {}),
-            ...(result.error !== undefined ? { error: sanitizeOutput(result.error) } : {}),
+            ...(outcomeStatus === "completed" ? { result: report } : {}),
+            ...(outcomeError !== undefined ? { error: sanitizeOutput(outcomeError) } : {}),
+            ...(cancelledBy !== undefined ? { cancelled_by: cancelledBy } : {}),
             usage: result.usage,
           });
         } catch (exc) {
@@ -2546,9 +2637,10 @@ export class TwoBrothersHarness {
         type: "subagent_completed",
         subagent_id: id,
         label,
-        status: result.status,
-        ...(result.status === "completed" ? { result: clipBlock(report, 2_000) } : {}),
-        ...(result.error !== undefined ? { error: sanitizeOutput(result.error) } : {}),
+        status: outcomeStatus,
+        ...(outcomeStatus === "completed" ? { result: clipBlock(report, 2_000) } : {}),
+        ...(outcomeError !== undefined ? { error: sanitizeOutput(outcomeError) } : {}),
+        ...(cancelledBy !== undefined ? { cancelled_by: cancelledBy } : {}),
         usage: { ...result.usage },
         duration_ms: result.durationMs,
         ended_at: endedAt,
@@ -2559,21 +2651,24 @@ export class TwoBrothersHarness {
         label,
         role,
         model,
-        status: result.status,
-        ...(result.status === "completed"
+        status: outcomeStatus,
+        ...(outcomeStatus === "completed"
           ? { report: report.slice(0, SUBAGENT_RESULT_MAX_CHARS) }
           : {}),
-        ...(result.error !== undefined ? { error: sanitizeOutput(result.error) } : {}),
+        ...(outcomeError !== undefined ? { error: sanitizeOutput(outcomeError) } : {}),
         usage: result.usage,
         duration_ms: result.durationMs,
         tool_calls: result.toolCalls,
       };
-      if (signal?.aborted) throw new ProviderAbortError();
+      // Only the PARENT signal unwinds the parent run; a child interrupt must
+      // leave the parent's next step running (R1).
+      if (parentSignal?.aborted) throw new ProviderAbortError();
       return JSON.stringify(payload);
     } catch (exc) {
       if (exc instanceof ProviderAbortError) throw exc;
       const message = exc instanceof Error ? exc.message : String(exc);
       const endedAt = Date.now();
+      control.status = "failed";
       if (!storeFailed) {
         try {
           settings.store.finish(id, {
@@ -2604,6 +2699,10 @@ export class TwoBrothersHarness {
         error: message,
       });
     } finally {
+      // Release the control on every settle path (including a parent unwind):
+      // a route can never poke a dead child, and the map stays balanced.
+      if (control.status === "running") control.status = "cancelled";
+      settings.controls?.release(id);
       this.subagentActive -= 1;
     }
   }

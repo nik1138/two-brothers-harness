@@ -132,6 +132,13 @@ export interface SubagentCompletedEvent extends RuntimeEventMeta {
   usage?: Record<string, unknown>;
   duration_ms: number;
   ended_at: number;
+  /**
+   * Additive: present only when `status:"cancelled"`, naming the cause
+   * (operator interrupt, the Senior's interrupt, the parent run stopping, or
+   * the startup reconciliation of an orphaned log). A completed child carries
+   * no such key, so its event bytes are unchanged.
+   */
+  cancelled_by?: "operator" | "senior" | "parent_run" | "restart";
 }
 
 /** An approval wait was parked; the operator must answer (or the run stops). */
@@ -1002,10 +1009,53 @@ export class RunApprovalBroker implements ApprovalBroker {
       signal.addEventListener("abort", onAbort, { once: true });
     }
 
+    // A helper's own control can withdraw its parked wait: the child signal
+    // aborts on interrupt, resolving DENY `reason:"interrupted"` exactly like
+    // the run-signal path (the `_pending.delete` guard keeps it to one event).
+    // A run stop aborts both signals; the run-signal listener owns that case,
+    // so this one stays silent while `this._signal` is aborted — the run
+    // reason ("cancelled"/denyAll) must keep winning.
+    let onChildAbort: (() => void) | null = null;
+    const childSignal = effectiveRequest.signal;
+    if (childSignal !== undefined) {
+      if (childSignal.aborted) {
+        if (onAbort !== null && signal !== null) {
+          signal.removeEventListener("abort", onAbort);
+        }
+        if (this._pending.delete(approvalId)) {
+          this._event({
+            type: "approval_resolved",
+            approval_id: approvalId,
+            decision: Decision.DENY,
+            reason: "interrupted",
+            ...childIdField(effectiveRequest),
+          });
+        }
+        return Decision.DENY;
+      }
+      onChildAbort = () => {
+        if (this._signal?.aborted === true) return; // the run-signal path owns it
+        if (this._pending.delete(approvalId)) {
+          this._event({
+            type: "approval_resolved",
+            approval_id: approvalId,
+            decision: Decision.DENY,
+            reason: "interrupted",
+            ...childIdField(effectiveRequest),
+          });
+        }
+        entry.resolve(Decision.DENY);
+      };
+      childSignal.addEventListener("abort", onChildAbort, { once: true });
+    }
+
     await settled;
 
     if (onAbort !== null && this._signal !== null) {
       this._signal.removeEventListener("abort", onAbort);
+    }
+    if (onChildAbort !== null && childSignal !== undefined) {
+      childSignal.removeEventListener("abort", onChildAbort);
     }
     if (!this._pending.delete(approvalId)) {
       // denyAll() already resolved and emitted for this request

@@ -364,6 +364,13 @@ export interface ApprovalRequest {
   /** Additive bounded preview (diff/command) for the operator UI. */
   detail?: ApprovalDetail;
   /**
+   * Additive, internal-only: aborts a parked wait when the requester is a
+   * child whose own control was interrupted. It is never persisted, never part
+   * of the `(action, target)` pair, and never emitted on an event or
+   * `pending()` — it exists only so the broker can withdraw the wait.
+   */
+  signal?: AbortSignal;
+  /**
    * Additive: the isolated helper (subagent) whose tool call asked, when the
    * request comes from a child. Display/routing identity only — it is never
    * part of the `(action, target)` pair a session allow persists, and an older
@@ -377,11 +384,14 @@ export interface ApprovalRequest {
 /**
  * The identity a child `PermissionManager` view is tagged with. The parent
  * approval broker receives it on every parked child request so the operator
- * sees which helper asked.
+ * sees which helper asked, and listens to `signal` to withdraw a parked wait
+ * when that child alone is interrupted.
  */
 export interface ApprovalChildIdentity {
   id: string;
   label: string;
+  /** The child's own control signal (never the parent run's); optional. */
+  signal?: AbortSignal;
 }
 
 /** Observer for one child view's approval lifecycle (the child store rows). */
@@ -560,6 +570,7 @@ export class PermissionManager {
           ...request,
           subagent_id: child.id,
           subagent_label: child.label,
+          ...(child.signal !== undefined ? { signal: child.signal } : {}),
         };
         observer?.onRequest?.(tagged);
         let decision: Decision = Decision.DENY;

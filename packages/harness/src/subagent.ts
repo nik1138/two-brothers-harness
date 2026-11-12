@@ -106,6 +106,13 @@ export const SUBAGENT_SYSTEM_PROMPT = [
 export type SubagentRole = "senior" | "junior";
 export type SubagentStatus = "running" | "completed" | "failed" | "cancelled";
 export type SubagentActivityKind = "message" | "tool" | "status";
+/**
+ * Who caused a `cancelled` child: the operator's interrupt, the Senior's
+ * (model-facing, a later slice), the parent run's stop/reap, or the startup
+ * reconciliation of a log the crashed backend left without an `end` row.
+ * Additive and present only on a cancelled child.
+ */
+export type SubagentCancelledBy = "operator" | "senior" | "parent_run" | "restart";
 
 /** One display-only activity row in the parent tree and child header. */
 export interface SubagentActivity {
@@ -193,6 +200,36 @@ export interface SubagentEndpoint {
   effort?: string;
 }
 
+/**
+ * The public handle the server keeps so the web can reach one live child.
+ *
+ * A1 exposes the child-scoped interrupt; every member describes the child
+ * honestly (no transient "interrupting" status — the terminal event and the
+ * `end` row are the truth). The follow-up members land with the follow-up
+ * slice.
+ */
+export interface SubagentControlHandle {
+  readonly id: string;
+  /** The parent run that spawned this child, when a run is attached. */
+  readonly runId: string | null;
+  readonly label: string;
+  /** False for every synchronous child; the background slice flips it. */
+  readonly background: boolean;
+  readonly startedAt: number;
+  /**
+   * Abort this child only — never its parent run. Idempotent: false when the
+   * child already settled or was already interrupted.
+   */
+  interrupt(by: "operator" | "senior"): boolean;
+  status(): SubagentStatus;
+}
+
+/** The server's registry seam; the harness registers on spawn, releases on settle. */
+export interface SubagentControlSink {
+  register(handle: SubagentControlHandle): void;
+  release(id: string): void;
+}
+
 /** Settings the parent harness needs to offer the tool. */
 export interface SubagentSettings {
   store: SubagentStore;
@@ -204,6 +241,14 @@ export interface SubagentSettings {
   endpoint?: SubagentEndpoint;
   /** Tests/integrations can inject a fresh provider per child. */
   providerFactory?: (role: SubagentRole) => Provider;
+  /**
+   * Additive: the server's live-child registry (absent on the CLI, where no
+   * operator can reach a child). Registration happens at spawn, release at
+   * settle, so an unknown id can never poke a dead control.
+   */
+  controls?: SubagentControlSink;
+  /** Additive: the parent run id the handle reports (`null` when unknown). */
+  runId?: string | null;
 }
 
 /** A child id is a filesystem-safe token, never a path. */
@@ -345,6 +390,8 @@ export class SubagentStore {
       result?: string;
       error?: string;
       usage?: UsageTotals;
+      /** Additive: set only for a cancelled child (omitted otherwise). */
+      cancelled_by?: SubagentCancelledBy;
     },
   ): void {
     this.appendLine(id, {
@@ -355,8 +402,80 @@ export class SubagentStore {
         ? { result: textOf(result.result, SUBAGENT_RESULT_MAX_CHARS) }
         : {}),
       ...(result.error !== undefined ? { error: textOf(result.error, 2_000) } : {}),
+      ...(result.cancelled_by !== undefined ? { cancelled_by: result.cancelled_by } : {}),
       ...(result.usage !== undefined ? { usage: result.usage } : {}),
     });
+  }
+
+  /**
+   * Startup reconciliation for logs a crashed backend left without an `end`
+   * row: append exactly one `cancelled` / `cancelled_by:"restart"` row to
+   * every child log that has a header and no terminal row. `serve` calls this
+   * once, after the single-writer lock, so a graceful shutdown (which writes
+   * every `end` row) makes the sweep a no-op.
+   *
+   * Bounded by the same 200-file scan as `list`, idempotent (a second run
+   * finds an `end` row and appends nothing), and fail-soft per file: an
+   * unreadable or unwritable log is skipped and never fails startup.
+   */
+  reconcileOrphans(
+    at = Date.now(),
+    reason = "backend restarted before the helper finished",
+  ): number {
+    let files: string[];
+    try {
+      files = fs.readdirSync(this.directory).filter((name) => name.endsWith(".jsonl"));
+    } catch {
+      return 0; // no child directory yet: nothing to reconcile
+    }
+    let reconciled = 0;
+    for (const file of files.slice(0, 200)) {
+      const id = file.slice(0, -".jsonl".length);
+      if (!isSubagentId(id)) continue;
+      let raw: string;
+      try {
+        raw = fs.readFileSync(this.fileFor(id), "utf-8");
+      } catch {
+        continue; // unreadable (or a directory with that name): skip it
+      }
+      let hasMeta = false;
+      let hasEnd = false;
+      for (const line of raw.split(/\r?\n/)) {
+        if (line.trim() === "") continue;
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          continue; // torn final line or hand-edited junk
+        }
+        if (!isRecord(parsed)) continue;
+        if (parsed.type === "meta") hasMeta = true;
+        else if (parsed.type === "end") {
+          hasEnd = true;
+          break;
+        }
+      }
+      if (!hasMeta || hasEnd) continue;
+      try {
+        // A crash can tear the final line mid-write. Terminate it before the
+        // new row, otherwise the two would concatenate and neither would parse;
+        // the torn fragment itself stays as the tolerant reader already skips it.
+        if (raw !== "" && !raw.endsWith("\n")) {
+          fs.appendFileSync(this.fileFor(id), "\n", "utf-8");
+        }
+        this.appendLine(id, {
+          type: "end",
+          status: "cancelled",
+          ended_at: intOf(at),
+          error: textOf(reason, 2_000),
+          cancelled_by: "restart",
+        });
+        reconciled += 1;
+      } catch {
+        // read-only/unwritable log: skip it and keep the sweep going
+      }
+    }
+    return reconciled;
   }
 
   /** Read one child; null for a missing/invalid id or a headerless file. */
