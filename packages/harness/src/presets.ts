@@ -89,6 +89,110 @@ const SEED_PRESETS: readonly Preset[] = [
     models: ["openai/gpt-4o", "deepseek/deepseek-chat", "anthropic/claude-sonnet-4"],
   },
   {
+    // OpenCode Zen (the general plan). Model ids and endpoint follow the
+    // models.dev `opencode` entry; models served only through its Anthropic or
+    // Google endpoints are deliberately omitted because one preset speaks one
+    // wire family.
+    name: "opencode",
+    base_url: "https://opencode.ai/inference/openai/v1",
+    api_key: "",
+    api_key_env: "OPENCODE_API_KEY",
+    kind: "openai-compatible",
+    models: ["gpt-5.5", "glm-5.3", "kimi-k3", "deepseek-v4.1-flash", "minimax-m3"],
+  },
+  {
+    // OpenCode Go (the coding subscription). Same caveat: only the models on
+    // the provider-level OpenAI-compatible endpoint are seeded; a model the
+    // catalog routes to another protocol needs its own provider preset.
+    name: "opencode-go",
+    base_url: "https://opencode.ai/inference/go/openai/v1",
+    api_key: "",
+    api_key_env: "OPENCODE_API_KEY",
+    kind: "openai-compatible",
+    models: [
+      "glm-5.2",
+      "glm-5.3",
+      "kimi-k3.1-pro",
+      "kimi-k2.7-code",
+      "deepseek-v4.1-flash",
+      "deepseek-v4-pro",
+      "minimax-m3.1-flash",
+      "mimo-v2.6-pro",
+      "step-5-preview",
+    ],
+  },
+  {
+    // Kimi For Coding subscription (the endpoint and env name dsh/pi use).
+    name: "kimi-coding",
+    base_url: "https://api.kimi.com/coding/v1",
+    api_key: "",
+    api_key_env: "KIMI_API_KEY",
+    kind: "openai-compatible",
+    models: [
+      "kimi-for-coding",
+      "kimi-for-coding-highspeed",
+      "k3",
+      "k3-256k",
+      "k3.1-pro",
+      "k3.1-pro-highspeed",
+    ],
+  },
+  {
+    // Z.AI coding plan (dsh's ZAI_API_KEY; models.dev lists the same endpoint
+    // under zai-coding-plan with ZHIPU_API_KEY — either key works when stored).
+    name: "zai-coding",
+    base_url: "https://api.z.ai/api/coding/paas/v4",
+    api_key: "",
+    api_key_env: "ZAI_API_KEY",
+    kind: "openai-compatible",
+    models: ["glm-5.3", "glm-5.3-flash", "glm-5.3-highspeed"],
+  },
+  {
+    // Z.AI coding plan in China (BigModel).
+    name: "zai-coding-cn",
+    base_url: "https://open.bigmodel.cn/api/coding/paas/v4",
+    api_key: "",
+    api_key_env: "ZAI_CODING_CN_API_KEY",
+    kind: "openai-compatible",
+    models: ["glm-5.3", "glm-5.3-flash", "glm-5.3-highspeed"],
+  },
+  {
+    // Alibaba/Qwen token plan (the models.dev `alibaba-token-plan` entry).
+    name: "qwen-token-plan",
+    base_url: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+    api_key: "",
+    api_key_env: "QWEN_TOKEN_PLAN_API_KEY",
+    kind: "openai-compatible",
+    models: ["qwen3.6-plus", "qwen3.8-flash", "kimi-k2.6", "glm-5.2", "deepseek-v4.1-flash"],
+  },
+  {
+    // Xiaomi token plan (Singapore).
+    name: "xiaomi-token-plan-sgp",
+    base_url: "https://token-plan-sgp.xiaomimimo.com/v1",
+    api_key: "",
+    api_key_env: "XIAOMI_TOKEN_PLAN_SGP_API_KEY",
+    kind: "openai-compatible",
+    models: ["mimo-v2.6-pro", "mimo-v2.6-flash"],
+  },
+  {
+    // Moonshot's direct API (subscription or pay-as-you-go key).
+    name: "moonshotai",
+    base_url: "https://api.moonshot.ai/v1",
+    api_key: "",
+    api_key_env: "MOONSHOT_API_KEY",
+    kind: "openai-compatible",
+    models: ["kimi-k3.1-pro", "kimi-k3", "kimi-k2.6", "kimi-k2.7-code"],
+  },
+  {
+    // MiniMax's Anthropic-compatible endpoint; the adapter appends /v1/messages.
+    name: "minimax",
+    base_url: "https://api.minimax.io/anthropic",
+    api_key: "",
+    api_key_env: "MINIMAX_API_KEY",
+    kind: "anthropic",
+    models: ["MiniMax-M3", "MiniMax-M3.1-Flash"],
+  },
+  {
     // The local-first default (same URL `onboard` offers): LM Studio serves an
     // OpenAI-compatible API and needs no key. The model ids are the ones the
     // LM Studio transcript evidence used; `two-brothers models --base-url

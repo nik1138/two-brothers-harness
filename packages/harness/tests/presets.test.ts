@@ -41,7 +41,15 @@ test("seeds: every preset has the persisted shape and a usable endpoint", () => 
 
 test("seeds: include the expected well-known providers and a custom skeleton", () => {
   const ids = new Set(presetIds());
-  for (const id of ["openai", "deepseek", "anthropic", "gemini", "openrouter", "lmstudio", "custom"]) {
+  for (const id of [
+    "openai",
+    "deepseek",
+    "anthropic",
+    "gemini",
+    "openrouter",
+    "lmstudio",
+    "custom",
+  ]) {
     assert.ok(ids.has(id), `missing seed: ${id}`);
   }
   assert.equal(presetById("openai")?.base_url, "https://api.openai.com/v1");
@@ -53,6 +61,41 @@ test("seeds: include the expected well-known providers and a custom skeleton", (
   assert.equal(presetById("lmstudio")?.base_url, "http://localhost:1234/v1");
   assert.equal(presetById("lmstudio")?.api_key_env, undefined);
   assert.deepEqual(presetById("custom")?.models, []);
+});
+
+test("seeds: subscription plans from the dsh provider table and models.dev", () => {
+  const subscriptions = [
+    "opencode",
+    "opencode-go",
+    "kimi-coding",
+    "zai-coding",
+    "zai-coding-cn",
+    "qwen-token-plan",
+    "xiaomi-token-plan-sgp",
+    "moonshotai",
+    "minimax",
+  ];
+  const ids = new Set(presetIds());
+  for (const id of subscriptions) {
+    const preset = presetById(id);
+    assert.ok(preset, `missing subscription seed: ${id}`);
+    assert.ok(ids.has(id));
+    assert.match(preset.base_url, /^https:\/\//, `${id}: hosted endpoint`);
+    assert.match(preset.api_key_env ?? "", ENV_NAME, `${id}: env-var name`);
+    assert.ok(preset.models.length > 0, `${id}: a curated model list`);
+    assert.ok(!preset.models.includes(""), `${id}: no empty model ids`);
+  }
+
+  assert.equal(presetById("opencode-go")?.base_url, "https://opencode.ai/inference/go/openai/v1");
+  assert.equal(presetById("opencode-go")?.api_key_env, "OPENCODE_API_KEY");
+  assert.equal(presetById("opencode")?.base_url, "https://opencode.ai/inference/openai/v1");
+  assert.equal(presetById("kimi-coding")?.base_url, "https://api.kimi.com/coding/v1");
+  assert.equal(presetById("kimi-coding")?.api_key_env, "KIMI_API_KEY");
+  assert.equal(presetById("zai-coding")?.base_url, "https://api.z.ai/api/coding/paas/v4");
+  assert.equal(presetById("zai-coding-cn")?.api_key_env, "ZAI_CODING_CN_API_KEY");
+  // MiniMax speaks the Anthropic Messages protocol, not Chat Completions.
+  assert.equal(presetById("minimax")?.kind, "anthropic");
+  assert.equal(presetById("minimax")?.base_url, "https://api.minimax.io/anthropic");
 });
 
 test("presetById: exact, case-insensitive and unknown lookups", () => {

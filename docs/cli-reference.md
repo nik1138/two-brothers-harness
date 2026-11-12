@@ -464,6 +464,18 @@ Precedence, the operator's most explicit request first:
 A dangling `provider_ref` warns at startup and falls back to the role's manual
 fields instead of crashing.
 
+The seed table also carries subscription-plan presets copied from the
+dsh/pi provider catalog: `opencode`/`opencode-go` (OpenCode Zen/Go),
+`kimi-coding` (Kimi For Coding), `zai-coding`/`zai-coding-cn` (Z.AI coding
+plans), `qwen-token-plan`, `xiaomi-token-plan-sgp`, `moonshotai` and `minimax`.
+Each resolves its key from the plan's own environment variable
+(`OPENCODE_API_KEY`, `KIMI_API_KEY`, `ZAI_API_KEY`, `QWEN_TOKEN_PLAN_API_KEY`,
+`XIAOMI_TOKEN_PLAN_SGP_API_KEY`, `MOONSHOT_API_KEY`, `MINIMAX_API_KEY`); a key
+stored through Settings or `onboard` works too. One preset speaks one wire
+family, so a plan model served on another protocol (some OpenCode Go models use
+its Anthropic/Google endpoints) needs its own provider entry; the curated model
+lists only include IDs on the seeded endpoint.
+
 `/provider` is the in-TUI connect surface (also reached through `/settings` →
 **Connect provider…**; `/settings` is in the Ctrl+P palette). It opens a
 per-role summary — provider · model · kind · base URL ·
@@ -997,7 +1009,7 @@ but stores `meta.json` and `events.jsonl` inside
 | `POST /api/runs/{run_id}/steer` | mid-run operator steering: queue `{"text": "..."}` for an ACTIVE run — `running`, or `waiting` on an approval (applied at the next step after it resolves). Accepted `200 {"run_id", "status", "pending"}` (`pending` = steering texts now waiting, 1–8); the text is trimmed, must be non-empty and at most 4 000 characters (`400` otherwise; a non-string `text` is the standard `400 invalid request body`), an unknown run is `404`, and a queued/terminal run or a full pending queue is an honest `409` (the detail names the run's status, or `steering queue is full …`). Acceptance emits **no** event: the steer is appended to the shared context as an ordinary `user`→`senior` `message` envelope (payload text prefixed `[[OPERATOR STEER]] `) when the harness reaches the next node boundary/tool-loop iteration, so SSE consumers see the normal `envelope` frame with its dense `seq` at that moment. Pending steering is in-memory only: a stopped run appends nothing more and drops what was queued, and a backend restart loses the queue (`404` for the run id) |
 | `GET /api/runs/{run_id}/events?after=N` | SSE of typed runtime events (`run_status`, `envelope`, `tool_started`, `tool_completed`, `approval_requested`, `approval_resolved`, `approval_auto_allowed`, `approval_auto_denied`, `todo_updated`, `prompt_audit`, `reasoning`, `usage`, `steering_dropped`, `run_error`, `run_end`); reconnectable via `after`. `approval_requested` additively carries `reason` and a bounded `detail` (`{kind, diff?, addedLines?, removedLines?, command?, truncated?}` preview) when the request has one; `todo_updated` carries the model's complete sanitized plan snapshot; `steering_dropped` carries `{dropped, applied, limit}` when a 200-accepted steer later hit the per-run envelope cap. When the run was started with `stream_tokens`, the same stream additionally carries ephemeral named `token` frames (`event: token`, data `{type, run_id, role, kind: "text"\\|"thinking", delta, at}`) with no SSE id — they are live-only, never persisted and never replayed |
 | `GET /api/runs/{run_id}/approvals`, `POST /api/runs/{run_id}/approvals/{id}` | list/answer pending operator approvals (`{"allow": bool, "scope"?: "once" \| "session"}` → `{approval_id, decision, scope}`; `scope` defaults to `once`, an invalid value or `session` with a deny is a 400, an unknown/already-resolved approval id is a 404). See the session-scope paragraph below |
-| `GET /api/providers`, `POST /api/providers`, `PUT /api/providers/{seed}`, `POST /api/providers/{name}/reset`, `POST /api/providers/{name}/discover`, `DELETE /api/providers/{name}` | provider presets (seeded: openai, deepseek, anthropic, gemini, openrouter, lmstudio, custom). `GET` returns `{name, base_url, api_key_set, kind, models}` plus additive `seed` (the name comes from the built-in seed table) and `customized` (a stored override of that name exists), so a client can tell a pristine seed from an edited/custom entry; a positive preset `context_window` (tokens, used only as a compaction fallback) is exposed additively, while `0`/absent stays unknown and omitted so pre-wave presets keep the exact old shape. `POST` creates a custom provider (409 on a duplicate name, including a seed name); `PUT` updates it, and on a seed name materializes a stored override (blank `base_url` is a 400); both accept `context_window` as a positive safe integer; an explicit `0` clears it, an absent/null field on an update leaves the stored value untouched (a create starts without one), and negative/float/string/boolean/unsafe values are a `400` before any write; `DELETE` removes a stored preset/override and clears any role `provider_ref` that pointed at it (a pristine seed is a 404); `POST /api/providers/{name}/reset` restores a customized built-in seed without clearing role references (see below); `POST /api/providers/{name}/discover` probes a draft endpoint for its model list without saving (see the discovery paragraph below). Keys are never returned — responses carry `api_key_set` only. The Settings → Providers tab is the operator UI for these routes |
+| `GET /api/providers`, `POST /api/providers`, `PUT /api/providers/{seed}`, `POST /api/providers/{name}/reset`, `POST /api/providers/{name}/discover`, `DELETE /api/providers/{name}` | provider presets (the curated seed table: hosted providers, subscription plans, LM Studio, custom). `GET` returns `{name, base_url, api_key_set, kind, models}` plus additive `seed` (the name comes from the built-in seed table) and `customized` (a stored override of that name exists), so a client can tell a pristine seed from an edited/custom entry; a positive preset `context_window` (tokens, used only as a compaction fallback) is exposed additively, while `0`/absent stays unknown and omitted so pre-wave presets keep the exact old shape. `POST` creates a custom provider (409 on a duplicate name, including a seed name); `PUT` updates it, and on a seed name materializes a stored override (blank `base_url` is a 400); both accept `context_window` as a positive safe integer; an explicit `0` clears it, an absent/null field on an update leaves the stored value untouched (a create starts without one), and negative/float/string/boolean/unsafe values are a `400` before any write; `DELETE` removes a stored preset/override and clears any role `provider_ref` that pointed at it (a pristine seed is a 404); `POST /api/providers/{name}/reset` restores a customized built-in seed without clearing role references (see below); `POST /api/providers/{name}/discover` probes a draft endpoint for its model list without saving (see the discovery paragraph below). Keys are never returned — responses carry `api_key_set` only. The Settings → Providers tab is the operator UI for these routes |
 | `GET /api/plugins` | discovered plugins (`name`, `description`, `roles`, load `errors`, `diagnostics`) |
 | `GET /api/skills` | discovered skills metadata (`name`, `description`, `scope`, `tools`, `file`) — never bodies |
 | `GET /api/commands` | discovered slash-command metadata (`name`, `description`, `argumentHint`, `mode?`, `file`) plus the additive first-party `baseCommands` list (`name`, `aliases`, `description`, `argumentHint`, `kind: "prompt"\|"action"`, `action?`, `requiresArguments`, `priority`) — never bodies |
@@ -1216,10 +1228,12 @@ node dist/cli.js onboard --base-url https://api.deepseek.com/v1 `
   --api-key sk-... --senior-model deepseek-chat --junior-model deepseek-chat --non-interactive
 ```
 
-`--preset <id>` takes a seeded preset id (openai, deepseek, anthropic,
-gemini, openrouter, lmstudio, custom); its API key resolves from the env-var
-name the preset declares. Manual fields: `--base-url`, `--api-key` (or
-`--api-key-env <VAR>`), `--senior-model`, `--junior-model`.
+`--preset <id>` takes a seeded preset id (the curated table includes hosted
+providers, subscription plans such as OpenCode Zen/Go, Kimi For Coding, Z.AI
+coding, Qwen/Xiaomi token plans, Moonshot, MiniMax, LM Studio and `custom`);
+its API key resolves from the env-var name the preset declares. Manual fields:
+`--base-url`, `--api-key` (or `--api-key-env <VAR>`), `--senior-model`,
+`--junior-model`.
 
 The same store is what `serve` and the TUI read (the TUI also re-resolves it
 before every turn), so an `onboard` run configures both surfaces. Inside the
@@ -1855,8 +1869,8 @@ them):
   are out of scope. See the API row below for the exact contract.
 - **Plugins** — see `docs/plugins.md`.
 - **Skills** — role-scoped `SKILL.md` catalogs (see [Skills](#skills-ts-package)).
-- **Provider presets, onboarding, cost** — seeded presets (openai, deepseek,
-  anthropic, gemini, openrouter, lmstudio, custom) keyed by env-var names,
+- **Provider presets, onboarding, cost** — the curated seeded table (hosted
+  providers, subscription plans, LM Studio, custom) keyed by env-var names,
   `onboard` to write per-role settings, `models` to list an endpoint's
   models, a `cost:` line (and `cost` in `--mode json`) from a hand-maintained
   price table, and per-role `--max-tokens` output caps. A customized built-in

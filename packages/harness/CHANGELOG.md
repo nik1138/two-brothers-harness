@@ -94,6 +94,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Subscription provider presets:** the seed table now includes OpenCode
+  Zen/Go, Kimi For Coding, the Z.AI coding plans, the Qwen and Xiaomi token
+  plans, Moonshot and MiniMax, using the endpoint/environment-key pairs from
+  dsh/pi and model IDs verified against models.dev. They appear in Settings →
+  Providers, `onboard --preset`, the TUI `/provider` flow and role
+  `provider_ref` resolution. One preset speaks one wire family, so a plan model
+  served on another protocol needs its own provider entry. Files:
+  `src/presets.ts`, `tests/presets.test.ts`; docs `README.md`,
+  `docs/cli-reference.md`.
 - **Visible permissions control in the web composer:** the permission seat now
   renders as a bordered pill — `Permissions · Always ask ›` — with an explicit
   chevron, hover/focus accent and `aria-haspopup="dialog"`, so the current

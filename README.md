@@ -181,8 +181,10 @@ server then serves (the npm tarball ships its own copy of that build).
   error-classification registry: 408/409/429/5xx and transport errors retry
   (honoring `Retry-After`), other 4xx, quota/billing, and context overflow fail
   fast — overflow triggers compaction instead of burning the retry budget.
-- **Presets, onboarding, cost.** A curated seed table (openai, deepseek,
-  anthropic, gemini, openrouter, lmstudio, custom) keyed by env-var names,
+- **Presets, onboarding, cost.** A curated seed table (hosted providers,
+  subscription plans such as OpenCode Zen/Go, Kimi For Coding, Z.AI coding,
+  Qwen/Xiaomi token plans, Moonshot and MiniMax — see `src/presets.ts`) keyed
+  by env-var names,
   `onboard` to write per-role settings, `models` to list an endpoint's models,
   a hand-maintained price table for `cost: $…` estimates, and per-role
   `--max-tokens` output caps. In the web workspace, Settings → Providers is a
@@ -529,8 +531,9 @@ What the workspace gives you:
   earlier accepted tasks. Below the drawer breakpoint the sidebar turns into a
   drawer over the chat (backdrop, Escape, focus handling).
 - **Sessions and presets** — session files listed with readable titles and
-  workspace grouping, plus named provider presets (seeded: openai, deepseek,
-  anthropic, gemini, openrouter, lmstudio, custom) that a role can reference;
+  workspace grouping, plus named provider presets (the curated seed table:
+  hosted providers, subscription plans, LM Studio, custom) that a role can
+  reference;
   API keys are write-only and sealed at rest. A customized built-in seed has
   **Reset to default**, which removes the stored override and its key while the
   role references stay.

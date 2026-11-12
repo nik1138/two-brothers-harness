@@ -1608,6 +1608,28 @@ Also shipped in wave 30:
 
 ## Open items (deferred)
 
+- **models.dev catalog browse/import (medium)** — kimi-code fetches
+  `https://models.dev/api.json` (10-minute cache, 10-second timeout) and falls
+  back to a release-build snapshot; its provider manager lists catalog
+  providers, infers the wire family from `type`/`npm`/id, imports the selected
+  models, rejects proprietary protocols, and asks for a base URL when the
+  catalog has none. Our seed table now covers the common subscription plans,
+  but a catalog browser would scale beyond it. Proposed first slice: a
+  read-only `GET /api/models-dev/providers` summary endpoint and
+  `GET /api/models-dev/providers/{id}` model list (server-side cache, no key
+  handling), then reuse the existing `POST /api/providers` create path by
+  prefilling the Add-provider form; no new write route and no runtime
+  dependency on models.dev. Keep a curated snapshot or seed fallback for
+  offline use. Do not assume one catalog provider is one wire family: OpenCode
+  Go routes some models to Anthropic/Google endpoints through per-model
+  `provider.api` overrides, while our preset is one wire family. The public
+  catalog is ~6 MB / ~9 000 models, so never ship it whole or fetch it on every
+  settings render. Tests need an injected fetch and a fixed fixture.
+- **OAuth-only subscription sign-in (large)** — GitHub Copilot, OpenAI Codex
+  (ChatGPT Plus/Pro) and the Kimi Code managed login use OAuth/device-code
+  flows and token refresh, not a static API key. Supporting them means a login
+  flow, a refresh-locked token store and provider-specific request headers;
+  the subscription seeds deliberately cover API-key plans only.
 - **Per-turn prompt-cache statistics** — pi's `cache-stats.ts` exposes
   per-turn cache-miss/write stats beyond the run total. Our footer now shows
   the normalized run percentage and write count; a per-call breakdown in the
