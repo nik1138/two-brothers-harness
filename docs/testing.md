@@ -800,13 +800,17 @@ repeat-tool guard, workspace instruction loading and web message quotes. Tests:
 `tests/instructions.test.ts` and `web/tests/messageQuote.test.ts`, plus
 extended session/server/workspace suites. The review hardening adds concurrent
 lock-reclaim/stalled-write tests (`tests/sessionlayout.test.ts`) and multi-line
-astral continuation tests (`tests/readrange.test.ts`). Wave 29 adds the
-permission presets, prompt-contract tests and live usage/cache coverage; final
-measured totals for that tree: package suite **2 072 tests** (2 065 pass and 7
-platform skips on Windows), web suite **493/493**, hermetic CLI E2E **19/19**
-on sources and `--dist`, browser E2E **23 PASS, 0 FAIL, 1 opt-in `real` skip**,
-`npm run typecheck` green. The Wave 29 WSL Linux pass is **2 071 pass with 1
-POSIX-specific skip** (Windows reports 2 065 pass with 7 platform skips).
+astral continuation tests (`tests/readrange.test.ts`). Wave 29 added the
+permission presets, prompt-contract tests and live usage/cache coverage; wave 30
+adds kind-stable prompt blocks (`tests/payloadrepair.test.ts`), failed-run
+partial usage (`tests/graph.test.ts`, `tests/runtime.test.ts`,
+`tests/server.test.ts`) and the web Full-access confirmation
+(`web/tests/permissionsUi.test.ts`). Final measured totals for the merged tree:
+package suite **2 078 tests** (2 071 pass and 7 platform skips on Windows), web
+suite **493/493**, hermetic CLI E2E **19/19** on sources and `--dist`, browser
+E2E **23 PASS, 0 FAIL, 1 opt-in `real` skip**, `npm run typecheck` green. The
+Wave 30 WSL Linux pass is **2 077 pass with 1 POSIX-specific skip** (Windows
+reports 2 071 pass with 7 platform skips).
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a

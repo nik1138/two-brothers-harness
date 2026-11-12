@@ -165,7 +165,8 @@ answer is valid and a typed key is one-shot). An approval card can
 session settings while one-shot allow/deny, the denial cap and the fail-closed
 default are unchanged. Settings → **Permissions** selects the workspace
 preset (Read only / Always ask / Workspace write / Full access) with honest
-copy and an inline destructive warning for Full access (`allow-all`); the
+copy, an inline destructive warning and a checkbox confirmation for Full
+access (`allow-all`); the
 preset stores one mode in `sessions/settings.json`, a flag/env pin is reported
 read-only, an older backend without the field shows Always ask and never
 receives a patch, and the mode never bypasses workspace confinement. The

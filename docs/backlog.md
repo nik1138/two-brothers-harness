@@ -1580,6 +1580,24 @@ system-fence/transcript fallbacks. Tests:
 non-mutating/replacing helper, one system prompt per role across node calls);
 focused suites plus the full package suite, CLI E2E and fault injection.
 
+Also shipped in wave 30:
+
+- **Failed-run partial usage** — a non-abort harness failure now carries the
+  merged usage of the provider calls that already succeeded as a non-enumerable
+  `usage` property (`HarnessRunFailure` / `runFailureUsage`), and
+  `RunManager` folds it onto the failed record before `run_error`/`run_end`.
+  Failed runs therefore keep real spend/cache evidence on the live record,
+  in the terminal event, and after a sidecar-rebuild restart; a failure before
+  any call still reports zeros, never invented numbers. Tests:
+  `tests/graph.test.ts`, `tests/runtime.test.ts`, `tests/server.test.ts`.
+- **Full-access risk confirmation (web)** — selecting Full access in Settings →
+  Permissions no longer switches immediately. A deepseek-style confirmation
+  panel requires the acknowledgement checkbox before `allow-all` is emitted;
+  Cancel keeps the previous preset. The TUI keeps its explicit-button plus
+  warning-toast flow, and a typed `/permission danger-full-access` remains
+  explicit consent. Tests: `web/tests/permissionsUi.test.ts` (source-level
+  confirmation wiring), web suite/build.
+
 ## Open items (deferred)
 
 - **Per-turn prompt-cache statistics** — pi's `cache-stats.ts` exposes

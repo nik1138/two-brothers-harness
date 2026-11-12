@@ -365,7 +365,8 @@ the same hero appears inside a selected session that has no transcript yet.
    default: reads free, everything mutating asks), **Workspace write**
    (`edits`: writes/edits run freely; deletes and shell still ask) and **Full
    access** (`allow-all`: everything runs without asking — explicit opt-in,
-   shown with a destructive warning inline). The mode is stored in
+   shown with a destructive warning inline; the web also requires an
+   acknowledgement checkbox before enabling it). The mode is stored in
    `sessions/settings.json` and applies to new workspace runs; it never
    bypasses workspace confinement or the sensitive-path refusal, and an older
    backend that does not report the setting shows Always ask without sending

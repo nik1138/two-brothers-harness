@@ -209,8 +209,9 @@ server then serves (the npm tarball ships its own copy of that build).
   process with `--approval-mode` (never persisted), and is editable from
   Settings → Permissions in the web workspace, the TUI `/settings` →
   Permissions action and `/permission` (`/permission <preset|mode>` still
-  accepts the legacy names); Full access is explicit opt-in and always shows a
-  destructive warning. A mode never
+  accepts the legacy names); Full access is explicit opt-in, always shows a
+  destructive warning, and the web asks for an acknowledgement checkbox before
+  enabling it. A mode never
   bypasses workspace confinement or the sensitive-path refusal, `readonly`
   denies without asking, and neither a model reply nor a tool call can change
   it. The TUI `/permission` dialog also states the effective mode and accepts

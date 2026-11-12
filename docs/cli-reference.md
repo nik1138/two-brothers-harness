@@ -1505,8 +1505,11 @@ keeps working:
 | Full access | `allow-all` | run freely | run freely | run freely | run freely |
 
 Full access is the only preset with a destructive warning, and it is an
-explicit opt-in. The legacy mode names (`ask`, `readonly`, `edits`,
-`allow-all`) remain accepted everywhere a preset is accepted.
+explicit opt-in: the web Permissions section asks for an acknowledgement
+checkbox before emitting `allow-all`; the TUI keeps its explicit button plus
+warning toast, and a typed `/permission danger-full-access` is explicit
+consent. The legacy mode names (`ask`, `readonly`, `edits`, `allow-all`)
+remain accepted everywhere a preset is accepted.
 
 - **Sources.** Persisted top-level in `sessions/settings.json` as
   `{"approval_policy": {"mode": "ask"}}`; the web Settings → **Permissions**

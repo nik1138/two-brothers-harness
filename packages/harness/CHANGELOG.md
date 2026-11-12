@@ -106,6 +106,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Files: `src/harness.ts`, `src/index.ts`, `e2e/faults.ts`; tests
   `tests/payloadrepair.test.ts`; docs `docs/cli-reference.md`,
   `README.md`, `packages/harness/README.md`, `packages/harness/AGENTS.md`.
+- **Failed-run partial usage:** a non-abort harness failure now keeps the
+  merged usage from the provider calls that already succeeded. The error
+  carries a non-enumerable `usage` (`HarnessRunFailure`, read via
+  `runFailureUsage`), and `RunManager` folds it onto the failed record before
+  `run_error`/`run_end`, so the live record, terminal event, sidecar and a
+  restart-rebuilt record report real spend/cache evidence instead of zeros.
+  A failure before any call reports zeros, never invented numbers. Files:
+  `src/harness.ts`, `src/runtime.ts`, `src/index.ts`; tests
+  `tests/graph.test.ts`, `tests/runtime.test.ts`, `tests/server.test.ts`.
+- **Web Full-access risk confirmation:** selecting the Full access preset now
+  opens a checkbox-gated confirmation instead of immediately emitting
+  `allow-all`; Cancel keeps the previous preset. The TUI keeps its explicit
+  button plus warning toast, and typed `/permission danger-full-access` remains
+  explicit consent. Files: `web/src/components/settings/PermissionsSection.vue`;
+  tests `web/tests/permissionsUi.test.ts`.
 - **Permission presets in the TUI and web Settings:** four named presets
   (`read-only`, `ask` / Always ask, `workspace-write`, `danger-full-access` /
   Full access) now alias the existing persisted `approval_policy.mode` values
