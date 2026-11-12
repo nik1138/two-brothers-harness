@@ -85,8 +85,8 @@ function updateSubagent(patch: Partial<RoleForm>) {
     </div>
 
     <p v-if="subagentSupported" class="settings-note">
-      Helper subagents are read-only and isolated. Leaving the helper route empty keeps the
-      tool's Senior/Junior fallback; a configured route wins.
+      Helper subagents are isolated and request approved workspace changes. Leaving the helper
+      route empty keeps the tool's Senior/Junior fallback; a configured route wins.
     </p>
     <p class="settings-note">
       Each role needs a model and a base URL, supplied manually, through a preset and model, or by

@@ -28,6 +28,14 @@ test('Settings owns a third helper route with its own model and effort', () => {
   assert.ok(section.includes('effortOptions.subagent'))
   assert.ok(section.includes('effortErrors.subagent'))
   assert.ok(section.includes('update:subagent'))
+  assert.ok(
+    section.includes('Helper subagents are isolated and request approved workspace changes.'),
+  )
+  assert.equal(
+    section.includes('read-only'),
+    false,
+    'the helper intro no longer claims read-only',
+  )
 
   const editor = read('components/settings/RoleEditor.vue')
   assert.ok(editor.includes("'senior' | 'junior' | 'subagent'"))
