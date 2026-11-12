@@ -545,6 +545,24 @@ export const ROUTING_WORK_UNAVAILABLE =
 /** The routing directive's closing instruction (after the availability line). */
 const ROUTING_REASON_INSTRUCTION = " Give a one-sentence reason.";
 
+/**
+ * The solo decision instruction (code-only; `shared/prompts.json` stays
+ * byte-identical). It rides the solo decision call's transcript user turn
+ * BEFORE the reply-format block, exactly like the routing directive. The
+ * honesty guard is contractual: a solo decision is advice, never execution —
+ * the solo belt is structurally read-only, and the directive forbids claiming
+ * unperformed work. No confidence cap is imposed: calibration is the model's
+ * declared judgment, recorded as-is (sanitize fallback 0.5).
+ */
+export const SOLO_DECISION_DIRECTIVE =
+  "\n\nYou chose to answer this task solo, without the junior. Ground every " +
+  "file or command claim in the read-only tools offered for this call; never " +
+  "invent results. You have made NO workspace changes: if the task actually " +
+  "requires changes, give the concrete plan and state that execution needs " +
+  "work mode — do not claim performed work. State confidence honestly; no " +
+  "junior was consulted, so dissent is null and accepted_proposals is empty " +
+  "unless the transcript already contains proposals you accept.";
+
 /** One prompt line for a tool: `- name — one-line description`. */
 function toolLine(tool: Tool): string {
   const description = clipText(tool.description ?? "", PROMPT_TOOL_DESCRIPTION_CHARS);
@@ -1744,12 +1762,19 @@ export class TwoBrothersHarness {
     state: CooperationState,
     role: "senior" | "junior",
     responseKind: string,
+    directive = "",
   ): Promise<Record<string, unknown>> {
-    const build = (): ChatMessage[] =>
-      withReplyFormat(
-        state.ctx.renderForRole(role, this.systemPrompt(role, [], responseKind)),
-        responseKind,
-      );
+    const build = (): ChatMessage[] => {
+      const messages = state.ctx.renderForRole(role, this.systemPrompt(role, [], responseKind));
+      if (directive !== "") {
+        // A code-only directive rides the transcript user turn BEFORE the
+        // reply-format block (the solo decision path); an empty directive
+        // keeps the exact pre-directive request bytes.
+        const last = messages[messages.length - 1]!;
+        messages[messages.length - 1] = { ...last, content: last.content + directive };
+      }
+      return withReplyFormat(messages, responseKind);
+    };
     return this.askWithMessages(state, role, responseKind, build(), build);
   }
 
@@ -2915,14 +2940,15 @@ export class TwoBrothersHarness {
     state: CooperationState,
     role: "senior" | "junior",
     kind: string,
+    directive = "",
   ): Promise<Record<string, unknown>> {
     const tools = this.consultToolSet(state, role);
     // spill_read (and the display-only plan tool) alone do not justify a tool
     // loop: a tool-less consult run keeps its exact plain request path.
     if (!this.hasTaskTools(tools) || !this.offersTools(role, tools)) {
-      return this.ask(state, role, kind);
+      return this.ask(state, role, kind, directive);
     }
-    return (await this.consultWithTools(state, role, kind, tools)).payload;
+    return (await this.consultWithTools(state, role, kind, tools, directive)).payload;
   }
 
   /**
@@ -2939,12 +2965,18 @@ export class TwoBrothersHarness {
     role: "senior" | "junior",
     kind: string,
     tools: Tool[],
+    directive = "",
   ): Promise<{ payload: Record<string, unknown>; evidence: string[] }> {
-    const build = (): ChatMessage[] =>
-      withReplyFormat(
-        state.ctx.renderForRole(role, this.systemPrompt(role, tools, kind)),
-        kind,
-      );
+    const build = (): ChatMessage[] => {
+      const messages = state.ctx.renderForRole(role, this.systemPrompt(role, tools, kind));
+      if (directive !== "") {
+        // The directive rides BEFORE the reply-format block so an overflow
+        // rebuild re-applying withReplyFormat sees a clean trailing block.
+        const last = messages[messages.length - 1]!;
+        messages[messages.length - 1] = { ...last, content: last.content + directive };
+      }
+      return withReplyFormat(messages, kind);
+    };
     const { evidence, text, messages } = await this.toolLoop(
       state,
       role,
@@ -3065,7 +3097,7 @@ export class TwoBrothersHarness {
    * sanitized (the seniorOpen evidence rule).
    */
   private async seniorSolo(state: CooperationState): Promise<NodeResult> {
-    const payload = await this.consultNode(state, "senior", "decision");
+    const payload = await this.consultNode(state, "senior", "decision", SOLO_DECISION_DIRECTIVE);
     this.append(state, "senior", "user", "decision", payload);
     state.decision = payload;
     return "END";

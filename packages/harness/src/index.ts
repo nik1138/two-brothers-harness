@@ -80,6 +80,7 @@ export {
   ROUTING_DIRECTIVE,
   ROUTING_WORK_AVAILABLE,
   ROUTING_WORK_UNAVAILABLE,
+  SOLO_DECISION_DIRECTIVE,
   type AutoRouteInfo,
 } from "./harness.ts";
 export {
