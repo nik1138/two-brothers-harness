@@ -13,11 +13,14 @@ import {
 import type { SettingsResponse } from '../api'
 import {
   filterModelGroups,
+  hiddenKeylessGroupCount,
   isCurrentModelChoice,
   modelChoiceCount,
   modelChoiceKey,
   modelChoicePatch,
   modelGroupsForRole,
+  routeNeedsKey,
+  visibleModelGroups as visibleModelGroupsForDisplay,
 } from '../modelSwitch'
 import type { ModelChoice, ModelRole } from '../modelSwitch'
 import { normalizeProviders } from '../providerSettings'
@@ -218,6 +221,7 @@ interface RoleRoute {
   model: string | null
   providerRef: string | null
   baseUrl: string | null
+  apiKeySet: boolean
 }
 
 const settings = ref<SettingsResponse | null>(null)
@@ -233,6 +237,7 @@ function routeFor(role: 'senior' | 'junior'): RoleRoute | null {
     model: view.model?.trim() || null,
     providerRef: view.provider_ref?.trim() || null,
     baseUrl: view.base_url?.trim() || null,
+    apiKeySet: view.api_key_set === true,
   }
 }
 
@@ -1445,15 +1450,37 @@ const modelGroups = computed(() =>
     ? []
     : modelGroupsForRole(settings.value, modelProviders.value, activeModelRole.value),
 )
-const filteredModelGroups = computed(() =>
-  filterModelGroups(modelGroups.value, modelQuery.value),
+/**
+ * Keyless providers are hidden by default (vendor behavior): the composer
+ * offers models that can run now, not the whole seed catalog. The current
+ * route is always visible, and the explicit toggle reveals the rest.
+ */
+const showKeylessModels = ref(false)
+const displayedModelGroups = computed(() =>
+  visibleModelGroupsForDisplay(modelGroups.value, showKeylessModels.value),
 )
-const modelChoiceTotal = computed(() => modelChoiceCount(modelGroups.value))
+const filteredModelGroups = computed(() =>
+  filterModelGroups(displayedModelGroups.value, modelQuery.value),
+)
+const modelChoiceTotal = computed(() => modelChoiceCount(displayedModelGroups.value))
 /** Vendor parity: search appears for catalogs above four choices. */
 const showModelSearch = computed(() => modelChoiceTotal.value > 4)
+const hiddenKeylessCount = computed(() => hiddenKeylessGroupCount(modelGroups.value))
+const keylessToggleLabel = computed(() =>
+  hiddenKeylessCount.value === 1
+    ? 'Show 1 provider without keys'
+    : `Show ${hiddenKeylessCount.value} providers without keys`,
+)
 const modelEmptyText = computed(() => {
   if (modelProvidersState.value === 'loading') return 'Loading models…'
-  if (modelQuery.value.trim()) return 'No models match.'
+  if (modelQuery.value.trim()) {
+    return hiddenKeylessCount.value > 0
+      ? 'No keyed models match. Show providers without keys to search the full catalog.'
+      : 'No models match.'
+  }
+  if (hiddenKeylessCount.value > 0) {
+    return 'No keyed models for this role. Show providers without keys to browse the catalog.'
+  }
   return 'No models are configured for this role — use Configure providers.'
 })
 
@@ -1465,6 +1492,12 @@ function modelSourceLabel(route: RoleRoute | null): string {
   if (!route) return 'not configured'
   if (route.provider === 'mock') return 'built-in'
   return route.providerRef ? `${route.providerRef} preset` : 'manual connection'
+}
+
+/** Source text for accessible names; the visual row adds a `no key` badge. */
+function modelSourceText(route: RoleRoute | null): string {
+  const source = modelSourceLabel(route)
+  return routeNeedsKey(route) ? `${source}, no key configured` : source
 }
 
 async function loadModelProviders(force = false): Promise<void> {
@@ -1491,6 +1524,7 @@ function onModelShow(show: boolean) {
   modelPane.value = 'root'
   modelQuery.value = ''
   modelSaveError.value = null
+  showKeylessModels.value = false
   void loadModelProviders()
   void nextTick(() => {
     modelRoot.value?.querySelector<HTMLButtonElement>('.model-role-row')?.focus()
@@ -1508,6 +1542,7 @@ function onModelKeydown(e: KeyboardEvent) {
 function closeModels(restoreFocus = false) {
   modelOpen.value = false
   modelPane.value = 'root'
+  showKeylessModels.value = false
   if (restoreFocus) void nextTick(() => modelTrigger.value?.focus())
 }
 
@@ -1983,13 +2018,22 @@ onBeforeUnmount(() => {
                   <button
                     type="button"
                     class="model-role-row"
-                    :aria-label="`Choose the Senior model. Current: ${modelLabel(seniorRoute)}. ${modelSourceLabel(seniorRoute)}.`"
+                    :aria-label="`Choose the Senior model. Current: ${modelLabel(seniorRoute)}. ${modelSourceText(seniorRoute)}.`"
                     @click="openRoleModels('senior')"
                   >
                     <span class="model-role">Senior</span>
                     <span class="model-role-main">
                       <span class="model-name">{{ modelLabel(seniorRoute) }}</span>
-                      <span class="model-source">{{ modelSourceLabel(seniorRoute) }}</span>
+                      <span class="model-source-row">
+                        <span class="model-source">{{ modelSourceLabel(seniorRoute) }}</span>
+                        <span
+                          v-if="routeNeedsKey(seniorRoute)"
+                          class="model-key-warn"
+                          title="No usable API key for this preset; runs will fail until one is added."
+                        >
+                          no key
+                        </span>
+                      </span>
                     </span>
                     <svg class="model-role-chevron" viewBox="0 0 16 16" aria-hidden="true">
                       <path
@@ -2005,13 +2049,22 @@ onBeforeUnmount(() => {
                   <button
                     type="button"
                     class="model-role-row"
-                    :aria-label="`Choose the Junior model. Current: ${modelLabel(juniorRoute)}. ${modelSourceLabel(juniorRoute)}.`"
+                    :aria-label="`Choose the Junior model. Current: ${modelLabel(juniorRoute)}. ${modelSourceText(juniorRoute)}.`"
                     @click="openRoleModels('junior')"
                   >
                     <span class="model-role">Junior</span>
                     <span class="model-role-main">
                       <span class="model-name">{{ modelLabel(juniorRoute) }}</span>
-                      <span class="model-source">{{ modelSourceLabel(juniorRoute) }}</span>
+                      <span class="model-source-row">
+                        <span class="model-source">{{ modelSourceLabel(juniorRoute) }}</span>
+                        <span
+                          v-if="routeNeedsKey(juniorRoute)"
+                          class="model-key-warn"
+                          title="No usable API key for this preset; runs will fail until one is added."
+                        >
+                          no key
+                        </span>
+                      </span>
                     </span>
                     <svg class="model-role-chevron" viewBox="0 0 16 16" aria-hidden="true">
                       <path
@@ -2079,6 +2132,7 @@ onBeforeUnmount(() => {
                 />
 
                 <div
+                  id="composer-model-list"
                   ref="modelList"
                   class="model-list"
                   role="radiogroup"
@@ -2120,6 +2174,17 @@ onBeforeUnmount(() => {
                     {{ modelEmptyText }}
                   </p>
                 </div>
+
+                <button
+                  v-if="hiddenKeylessCount > 0"
+                  type="button"
+                  class="model-keyless-toggle"
+                  :aria-pressed="showKeylessModels"
+                  aria-controls="composer-model-list"
+                  @click="showKeylessModels = !showKeylessModels"
+                >
+                  {{ showKeylessModels ? 'Hide providers without keys' : keylessToggleLabel }}
+                </button>
 
                 <p v-if="modelSaveError" class="model-error" role="alert">{{ modelSaveError }}</p>
                 <p v-if="modelProvidersError" class="model-error" role="alert">
@@ -2885,6 +2950,17 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
+.model-source-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.model-source-row .model-key-warn {
+  flex: none;
+}
+
 .model-role-chevron {
   flex: none;
   width: 0.75rem;
@@ -2957,6 +3033,30 @@ onBeforeUnmount(() => {
   max-height: 17rem;
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+
+.model-keyless-toggle {
+  align-self: flex-start;
+  margin: 0.1rem 0 0;
+  padding: 0.35rem var(--space-2);
+  font: inherit;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.model-keyless-toggle:hover {
+  color: var(--text-primary);
+  background: var(--surface-hover);
+}
+
+.model-keyless-toggle:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -1px;
 }
 
 .model-group + .model-group {

@@ -100,11 +100,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   model list with the current row checked. Selecting writes that role's
   `provider_ref` + `model` through `PUT /api/settings`, so the base URL, wire
   kind and key follow the chosen preset, and refreshes the shell without
-  closing Settings. A preset without a key is marked `no key`; a manual
-  connection keeps a first `Current connection` row and stays a no-op. Search
-  appears above four choices, Arrow keys move through the list, Escape backs
-  out one level, and the menu is labelled "saved for new runs" (a persisted
-  setting, not a one-shot override). Files:
+  closing Settings. The list shows providers with a usable key (stored or
+  `api_key_env`-backed) and always keeps the current route visible; the rest of
+  the seed catalog is behind an explicit **Show providers without keys** toggle
+  and marked `no key`. A manual connection keeps a first `Current connection`
+  row and stays a no-op; a role row whose preset has no usable key is marked
+  `no key` too. Search appears above four choices, Arrow keys move
+  through the list, Escape backs out one level, and the menu is labelled "saved
+  for new runs" (a persisted setting, not a one-shot override). Files:
   `web/src/modelSwitch.ts`, `web/src/components/Composer.vue`,
   `web/src/App.vue`; tests `web/tests/modelSwitch.test.ts`.
 - **Subscription provider presets:** the seed table now includes OpenCode

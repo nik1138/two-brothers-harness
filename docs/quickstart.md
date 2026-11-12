@@ -231,10 +231,14 @@ the same hero appears inside a selected session that has no transcript yet.
    (keys are never echoed back; the server seals them at rest). Runs use the
    configured models; there is no separate "mock" switch in the UI. The
    composer's **Models** chip is the fast path: it opens the current
-   Senior/Junior routes, then a searchable provider-grouped model list.
-   Picking a model writes that role's provider preset + model (saved for new
-   runs) so the base URL, wire kind and key follow the preset; a preset with no
-   usable key is marked **no key**, and a manual connection keeps its
+   Senior/Junior routes, then a searchable provider-grouped model list of
+   providers with a usable key (stored or environment-backed). The current
+   route stays visible even when it is keyless (a manual connection or a local
+   endpoint such as LM Studio), and **Show providers without keys** reveals the
+   rest of the seed catalog with the honest **no key** marker. Picking a model
+   writes that role's provider preset + model (saved for new runs) so the base
+   URL, wire kind and key follow the preset; a role still on a keyless preset
+   shows **no key** on its row, and a manual connection keeps its
    **Current connection** row. Settings → **Providers** lists the provider
    presets by name and opens the selected
    provider's settings right below it (base URL, masked API key, model ids,

@@ -150,6 +150,30 @@ export function modelChoiceCount(groups: readonly ModelGroup[]): number {
 }
 
 /**
+ * Groups the composer switch may show by default: providers with a usable key
+ * (stored or `api_key_env`-backed) plus the current route's group, even when it
+ * has no key (a manual connection or a local endpoint such as LM Studio). The
+ * full keyless catalog is available only when the operator explicitly asks for
+ * it, so the input does not offer dozens of models that cannot run yet.
+ */
+export function visibleModelGroups(
+  groups: readonly ModelGroup[],
+  showKeyless = false,
+): ModelGroup[] {
+  if (showKeyless) return [...groups]
+  return groups.filter(
+    (group) => group.hasKey || group.models.some((choice) => choice.current),
+  )
+}
+
+/** Keyless, non-current groups hidden behind the "show without keys" toggle. */
+export function hiddenKeylessGroupCount(groups: readonly ModelGroup[]): number {
+  return groups.filter(
+    (group) => !group.hasKey && !group.models.some((choice) => choice.current),
+  ).length
+}
+
+/**
  * Case-insensitive search over model ids and provider names. Every
  * whitespace-separated term must match the combined text, so "kimi go" finds
  * a Kimi model in the `opencode-go` group. Groups with no matches disappear.
@@ -204,4 +228,22 @@ export function isCurrentModelChoice(
     currentModel === text(choice.model) &&
     folded(currentRef) === folded(choiceRef)
   )
+}
+
+/** The route facts the composer row needs to warn about a missing key. */
+export interface RouteKeyState {
+  provider?: string | null
+  providerRef?: string | null
+  apiKeySet?: boolean
+}
+
+/**
+ * True when a role points at a provider preset with no usable key (neither
+ * stored nor `api_key_env`-backed). A manual connection is not flagged: local
+ * endpoints such as LM Studio legitimately run without a key.
+ */
+export function routeNeedsKey(route: RouteKeyState | null | undefined): boolean {
+  if (!route) return false
+  if (text(route.provider) === 'mock') return false
+  return text(route.providerRef) !== '' && route.apiKeySet !== true
 }

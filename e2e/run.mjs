@@ -2638,10 +2638,8 @@ async function scenarioModelSwitch(runner) {
     assert.ok((await seniorRow.innerText()).includes(SENIOR_MODEL))
     assert.ok((await juniorRow.innerText()).includes(JUNIOR_MODEL))
 
-    // drill into Senior: the current manual model is checked and searchable
+    // drill into Senior: the current manual model is checked
     await seniorRow.click()
-    const search = menu.locator('.model-search')
-    await search.waitFor({ state: 'visible' })
     const currentChoice = menu.locator('.model-choice.is-current')
     await currentChoice.waitFor({ state: 'visible' })
     assert.ok(
@@ -2649,11 +2647,27 @@ async function scenarioModelSwitch(runner) {
       'the current model row must carry the check mark',
     )
 
-    // pick a seeded subscription preset; the endpoint follows provider_ref
+    // pick a seeded subscription preset; the endpoint follows provider_ref.
+    // Keyless providers are hidden by default, so the toggle reveals the seed
+    // catalog first (the current route alone stays visible without it).
     const group = menu.locator('.model-group').filter({
       has: page.locator('.model-group-label', { hasText: /opencode-go/i }),
     })
+    const keylessToggle = menu.locator('.model-keyless-toggle')
+    await keylessToggle.waitFor({ state: 'visible' })
+    assert.ok(
+      (await keylessToggle.innerText()).includes('without keys'),
+      'the keyless catalog toggle must say what it reveals',
+    )
+    assert.equal(
+      await group.count(),
+      0,
+      'keyless providers must stay out of the default switch catalog',
+    )
+    await keylessToggle.click()
     await group.waitFor({ state: 'visible' })
+    // the revealed catalog is large enough for search, like the vendor pickers
+    await menu.locator('.model-search').waitFor({ state: 'visible' })
     await group.locator('.model-choice').filter({ hasText: 'glm-5.2' }).first().click()
 
     await waitFor(

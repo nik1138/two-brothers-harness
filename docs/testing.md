@@ -818,7 +818,7 @@ suite **493/493**, hermetic CLI E2E **19/19** on sources and `--dist`, fault
 injection **7/7**, browser E2E **23 PASS, 0 FAIL, 1 opt-in `real` skip**,
 `npm run typecheck` green. The composer model switch adds
 `web/tests/modelSwitch.test.ts` and a `model-switch` browser scenario, bringing
-the web suite to **501/501** and the offline browser matrix to 23 blocks
+the web suite to **505/505** and the offline browser matrix to 23 blocks
 (**24 PASS, 0 FAIL**, 1 opt-in `real` skip). The Wave 30 WSL Linux pass is
 **2 082 pass with 1 POSIX-specific skip** (Windows reports 2 076 pass with 7
 platform skips).
@@ -1032,7 +1032,8 @@ place, per-session reset), `plan-dock` (Plan dock counts/markers/bounded
 `composer-seats` (role models plus the prompt-audit context seat, with no token
 wording), `model-switch` (the composer's Models chip opens the two-level
 switch: Senior/Junior root rows, the current model checked, a searchable
-provider-grouped catalog, and selecting a seeded preset persists
+provider-grouped catalog with keyless providers hidden behind an explicit
+toggle, and selecting a seeded preset persists
 `provider_ref` + `model` through `PUT /api/settings` with the chip and check
 mark refreshing; Escape backs out one level), `hero-starters` (landing and empty-session hero; starters prefill only
 an empty composer, a preserved draft wins with a notice) and `approval-reason`

@@ -11,11 +11,14 @@ import { fileURLToPath } from 'node:url'
 import type { ProviderView } from '../src/providerSettings.ts'
 import {
   filterModelGroups,
+  hiddenKeylessGroupCount,
   isCurrentModelChoice,
   modelChoiceCount,
   modelChoiceKey,
   modelChoicePatch,
   modelGroupsForRole,
+  routeNeedsKey,
+  visibleModelGroups,
 } from '../src/modelSwitch.ts'
 
 const read = (relative: string): string =>
@@ -134,6 +137,67 @@ test('the patch writes provider_ref + model so the endpoint follows the preset',
   )
 })
 
+test('keyless providers are hidden unless current or explicitly revealed', () => {
+  const groups = modelGroupsForRole(settings, providers, 'senior')
+  assert.deepEqual(
+    visibleModelGroups(groups).map((group) => group.provider),
+    ['opencode-go'],
+  )
+  assert.equal(hiddenKeylessGroupCount(groups), 1)
+  assert.deepEqual(
+    visibleModelGroups(groups, true).map((group) => group.provider),
+    ['opencode-go', 'kimi-coding'],
+  )
+})
+
+test('the current keyless route stays visible and the hidden count stays honest', () => {
+  const groups = modelGroupsForRole(settings, providers, 'junior')
+  assert.deepEqual(
+    visibleModelGroups(groups).map((group) => group.provider),
+    ['Current connection', 'opencode-go'],
+  )
+  assert.equal(hiddenKeylessGroupCount(groups), 1)
+  assert.deepEqual(
+    visibleModelGroups(groups, true).map((group) => group.provider),
+    ['Current connection', 'opencode-go', 'kimi-coding'],
+  )
+})
+
+test('a keyless preset that becomes the current route needs no toggle', () => {
+  const current = {
+    senior: { ...settings.senior, model: 'k3.1-pro', provider_ref: 'kimi-coding' },
+    junior: settings.junior,
+  }
+  const groups = modelGroupsForRole(current, providers, 'senior')
+  assert.deepEqual(
+    visibleModelGroups(groups).map((group) => group.provider),
+    ['kimi-coding', 'opencode-go'],
+  )
+  assert.equal(hiddenKeylessGroupCount(groups), 0)
+})
+
+test('a preset route without a usable key is flagged, a manual route is not', () => {
+  assert.equal(
+    routeNeedsKey({ provider: 'openai', providerRef: 'opencode', apiKeySet: false }),
+    true,
+  )
+  assert.equal(
+    routeNeedsKey({ provider: 'openai', providerRef: 'opencode-go', apiKeySet: true }),
+    false,
+  )
+  assert.equal(
+    routeNeedsKey({ provider: 'openai', providerRef: null, apiKeySet: false }),
+    false,
+    'a manual local connection legitimately needs no key',
+  )
+  assert.equal(
+    routeNeedsKey({ provider: 'mock', providerRef: 'opencode', apiKeySet: false }),
+    false,
+    'the built-in mock provider never needs a key',
+  )
+  assert.equal(routeNeedsKey(null), false)
+})
+
 test('no settings or providers is an empty switch, never a fabricated route', () => {
   assert.deepEqual(modelGroupsForRole(null, [], 'senior'), [])
   assert.deepEqual(modelGroupsForRole(undefined, providers, 'senior').length, 2)
@@ -149,6 +213,11 @@ test('the message input owns the switch: provider fetch, save and refresh wiring
   assert.ok(composer.includes('chooseModel'))
   assert.ok(composer.includes('modelsChanged'))
   assert.ok(composer.includes('Search models'))
+  assert.ok(composer.includes('showKeylessModels'))
+  assert.ok(composer.includes('model-keyless-toggle'))
+  assert.ok(composer.includes('keylessToggleLabel'))
+  assert.ok(composer.includes('routeNeedsKey'))
+  assert.ok(composer.includes('modelSourceText'))
   assert.ok(read('modelSwitch.ts').includes('Current connection'))
   assert.ok(composer.includes('@click="chooseModel(choice)"'))
 
