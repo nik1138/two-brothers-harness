@@ -70,6 +70,8 @@
  * object (never a frame) is recovered the same way. A successful SSE stream
  * and every non-streaming request stay byte-identical.
  */
+import { randomUUID } from "node:crypto";
+
 import type { ChatMessage, ToolCall } from "./context.ts";
 import { extractTask } from "./context.ts";
 
@@ -262,6 +264,13 @@ export interface ProviderConfig {
   juniorModel: string;
   /** Explicit model override (per-role endpoint resolution). */
   model?: string;
+  /**
+   * Stable per-conversation id for endpoints that route by session (OpenCode).
+   * When unset, a session file stem is used as the fallback.
+   */
+  sessionId?: string;
+  /** Session file whose stem supplies `sessionId` when it is not set. */
+  sessionFile?: string;
   temperature: number;
   timeout: number;
   retries?: number;
@@ -297,6 +306,61 @@ export interface ProviderConfig {
    * one run); a caller with a run-wide budget may cap the sink further.
    */
   onWarning?: (line: string) => void;
+}
+
+/** OpenCode's host: requests there require a stable per-conversation id. */
+const OPENCODE_HOST = "opencode.ai";
+
+/** Client identity for OpenCode routing/attribution (never a generic SDK name). */
+export const TWO_BROTHERS_CLIENT_NAME = "two-brothers";
+export const TWO_BROTHERS_USER_AGENT = "two-brothers-harness";
+
+/** True for the OpenCode Zen/Go endpoint (including custom paths on its host). */
+export function isOpenCodeEndpoint(baseUrl: string): boolean {
+  try {
+    return new URL(baseUrl).hostname === OPENCODE_HOST;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Identity headers OpenCode requires on every request: a self-identifying
+ * user agent, the client name (Pi/OpenCode convention) and, when known, the
+ * stable per-conversation `x-opencode-session` used for routing and prompt
+ * caching. Other endpoints return `{}` so their request bytes stay unchanged.
+ */
+export function openCodeClientHeaders(
+  baseUrl: string,
+  sessionId?: string,
+): Record<string, string> {
+  if (!isOpenCodeEndpoint(baseUrl)) return {};
+  const headers: Record<string, string> = {
+    "User-Agent": TWO_BROTHERS_USER_AGENT,
+    "x-opencode-client": TWO_BROTHERS_CLIENT_NAME,
+  };
+  const id = sessionId?.trim();
+  if (id) headers["x-opencode-session"] = id;
+  return headers;
+}
+
+/** The session-file stem, stable across resume (the `.jsonl` extension drops). */
+export function providerSessionIdFromFile(sessionFile: string | undefined): string | undefined {
+  const file = sessionFile?.trim();
+  if (!file) return undefined;
+  const base = file.split(/[\\/]/).pop() ?? "";
+  const stem = base.replace(/\.jsonl$/i, "").trim();
+  return stem === "" ? undefined : stem;
+}
+
+/** The conversation id for a provider: explicit `sessionId`, else file stem. */
+export function providerSessionId(
+  cfg: Pick<ProviderConfig, "sessionId" | "sessionFile">,
+): string | undefined {
+  const explicit = cfg.sessionId?.trim();
+  return explicit !== "" && explicit !== undefined
+    ? explicit
+    : providerSessionIdFromFile(cfg.sessionFile);
 }
 
 /**
@@ -1192,6 +1256,8 @@ export abstract class BaseHttpProvider implements Provider {
   readonly backoffBase: number;
   readonly backoffCap: number;
   readonly usage = new UsageTracker();
+  /** Stable per-conversation id used by OpenCode's routing header. */
+  readonly sessionId?: string;
   /** Output-token cap (`--max-tokens`); undefined keeps the provider default. */
   readonly maxTokens?: number;
 
@@ -1207,6 +1273,11 @@ export abstract class BaseHttpProvider implements Provider {
     this.baseUrl = cfg.baseUrl.replace(/\/+$/, "");
     this.apiKey = cfg.apiKey ?? "";
     this.model = cfg.model;
+    // A stable id is preferred (session name/file stem); OpenCode still needs
+    // a header on in-memory runs, so fall back to one id per provider instance.
+    this.sessionId =
+      providerSessionId(cfg) ??
+      (isOpenCodeEndpoint(this.baseUrl) ? randomUUID() : undefined);
     this.temperature = cfg.temperature;
     this.timeout = cfg.timeout;
     this.retries = Math.max(0, Math.trunc(cfg.retries ?? 6));
@@ -1226,6 +1297,15 @@ export abstract class BaseHttpProvider implements Provider {
   /** The run's usage so far; merge with other roles' snapshots for a run total. */
   usageSnapshot(): UsageTotals {
     return this.usage.snapshot();
+  }
+
+  /**
+   * Provider identity headers for this endpoint. Only OpenCode needs any
+   * (client user agent + stable session); every other target stays empty so
+   * its request bytes are unchanged.
+   */
+  protected clientIdentityHeaders(): Record<string, string> {
+    return openCodeClientHeaders(this.baseUrl, this.sessionId);
   }
 
   abstract chat(messages: ChatMessage[], responseKind?: string, signal?: AbortSignal): Promise<string>;
@@ -1648,7 +1728,10 @@ export class OpenAICompatibleProvider extends BaseHttpProvider {
   }
 
   protected requestHeaders(): Record<string, string> {
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const headers: Record<string, string> = {
+      ...this.clientIdentityHeaders(),
+      "Content-Type": "application/json",
+    };
     if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
     return headers;
   }
@@ -2239,6 +2322,7 @@ export class AnthropicProvider extends BaseHttpProvider {
 
   protected requestHeaders(): Record<string, string> {
     const headers: Record<string, string> = {
+      ...this.clientIdentityHeaders(),
       "Content-Type": "application/json",
       "anthropic-version": ANTHROPIC_VERSION,
     };
@@ -2558,7 +2642,10 @@ export class GoogleProvider extends BaseHttpProvider {
   }
 
   protected requestHeaders(): Record<string, string> {
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const headers: Record<string, string> = {
+      ...this.clientIdentityHeaders(),
+      "Content-Type": "application/json",
+    };
     if (this.apiKey) headers["x-goog-api-key"] = this.apiKey;
     return headers;
   }

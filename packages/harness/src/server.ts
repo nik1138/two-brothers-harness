@@ -1677,6 +1677,9 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     projectPath?: string | null,
   ): Promise<HarnessResult> {
     const store = materializeStore(name, projectPath ?? workspace?.root ?? null);
+    // OpenCode routes each conversation by this stable id (x-opencode-session);
+    // the session name is the same identity across resumed web runs.
+    cfg.sessionId = name;
     const context = store.exists() ? restoreContext(store) : new SharedContext(store);
     // Tool-output spill lives beside the session files (the same root the
     // optional startup retention pass inspects).
@@ -2624,6 +2627,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         let provider: Provider;
         try {
           const { cfg, endpoints } = buildCfg({ task: "compact" });
+          cfg.sessionId = name;
           settings = manualCompactionSettings(cfg, presetContextWindow(endpoints));
           provider = summarizerProvider(cfg, endpoints, settings.summarizerRole ?? "senior");
         } catch (exc) {

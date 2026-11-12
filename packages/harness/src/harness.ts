@@ -1240,6 +1240,8 @@ function providerFromEndpoint(
       maxTokens: maxTokensForRole(cfg, role),
       thinkingBudgetTokens: thinkingBudgetForRole(cfg, role),
       model: endpoint.model || (role === "senior" ? cfg.seniorModel : cfg.juniorModel),
+      sessionId: cfg.sessionId,
+      sessionFile: cfg.sessionFile,
       ...(onWarning ? { onWarning } : {}),
     };
     if (kind === "anthropic") return new AnthropicProvider(config);

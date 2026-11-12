@@ -812,16 +812,16 @@ partial usage (`tests/graph.test.ts`, `tests/runtime.test.ts`,
 `tests/server.test.ts`) and the web Full-access confirmation
 (`web/tests/permissionsUi.test.ts`). Wave 30 also hardens the prompt block
 (marker collisions, repair tails, verify kind; `tests/promptsections.test.ts`
-pins belt-stable prefixes). Final measured totals for the merged tree:
-package suite **2 083 tests** (2 076 pass and 7 platform skips on Windows), web
-suite **493/493**, hermetic CLI E2E **19/19** on sources and `--dist`, fault
-injection **7/7**, browser E2E **23 PASS, 0 FAIL, 1 opt-in `real` skip**,
+pins belt-stable prefixes). Latest measured totals for the merged tree:
+package suite **2 089 tests** (2 082 pass and 7 platform skips on Windows), web
+suite **505/505**, hermetic CLI E2E **19/19** on sources and `--dist`, fault
+injection **7/7**, browser E2E **24 PASS, 0 FAIL, 1 opt-in `real` skip**,
 `npm run typecheck` green. The composer model switch adds
-`web/tests/modelSwitch.test.ts` and a `model-switch` browser scenario, bringing
-the web suite to **505/505** and the offline browser matrix to 23 blocks
-(**24 PASS, 0 FAIL**, 1 opt-in `real` skip). The Wave 30 WSL Linux pass is
-**2 082 pass with 1 POSIX-specific skip** (Windows reports 2 076 pass with 7
-platform skips).
+`web/tests/modelSwitch.test.ts` and a `model-switch` browser scenario; the
+OpenCode session-header fix adds five provider tests
+(`tests/providers.test.ts`, `tests/adapters.test.ts`). The Wave 30 WSL Linux
+pass was **2 082 pass with 1 POSIX-specific skip** before these additions
+(Windows reported 2 076 pass with 7 platform skips then).
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **OpenCode Go/Zen requests carry the required session header:** every
+  provider request to `opencode.ai` now sends a stable `x-opencode-session`
+  (the web session name, the session-file stem, or a per-provider UUID for
+  in-memory runs), plus a `two-brothers-harness` user agent and
+  `x-opencode-client`. This fixes the HTTP 400 `MissingSessionID` from OpenCode
+  Go. The header is applied in `BaseHttpProvider`, so the OpenAI-compatible,
+  Anthropic and Google wire families are all covered; other endpoints' request
+  headers stay byte-identical. Files: `src/provider.ts`,
+  `src/harness.ts`, `src/server.ts`, `src/tui/app.ts`, `src/cli.ts`;
+  tests `tests/providers.test.ts`, `tests/adapters.test.ts`.
 - **Spill root can no longer be redirected outside the store:** `SpillStore`
   now accepts only a missing root (created lazily) or an existing real
   directory. A symlink/junction root makes `stats`/`prune` throw and

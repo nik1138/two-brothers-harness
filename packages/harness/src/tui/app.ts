@@ -1092,6 +1092,8 @@ function tuiRoleProvider(
     contextWindow: cfg.contextWindow,
     maxTokens: maxTokensForRole(cfg, role),
     model: endpoint.model || (role === "senior" ? cfg.seniorModel : cfg.juniorModel),
+    sessionId: cfg.sessionId,
+    sessionFile: cfg.sessionFile,
     ...(onWarning !== undefined ? { onWarning } : {}),
   };
   return buildProvider(config, role);

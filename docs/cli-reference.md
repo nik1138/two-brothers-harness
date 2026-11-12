@@ -474,7 +474,10 @@ Each resolves its key from the plan's own environment variable
 stored through Settings or `onboard` works too. One preset speaks one wire
 family, so a plan model served on another protocol (some OpenCode Go models use
 its Anthropic/Google endpoints) needs its own provider entry; the curated model
-lists only include IDs on the seeded endpoint.
+lists only include IDs on the seeded endpoint. Requests to `opencode.ai` carry
+the required `x-opencode-session` routing header (a stable per-conversation id
+taken from the session name/file stem) and a `two-brothers-harness` client user
+agent for every wire family; requests to other endpoints are unchanged.
 
 `/provider` is the in-TUI connect surface (also reached through `/settings` →
 **Connect provider…**; `/settings` is in the Ctrl+P palette). It opens a

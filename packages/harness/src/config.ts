@@ -71,6 +71,13 @@ export interface Config {
   verbose: boolean;
   jsonOut: boolean;
   sessionFile: string;
+  /**
+   * Runtime-only per-conversation id for providers that route by session
+   * (OpenCode's `x-opencode-session`). Set by the server to the session name
+   * and by the TUI/CLI from the session file stem; never a flag/env input and
+   * never persisted.
+   */
+  sessionId?: string;
   resume: boolean;
   /** `--compact`: compact the context once before the run starts. */
   compact: boolean;

@@ -18,11 +18,14 @@ import {
   buildProvider,
   emptyUsage,
   extractUsage,
+  isOpenCodeEndpoint,
   mergeUsage,
   MockProvider,
+  openCodeClientHeaders,
   OpenAICompatibleProvider,
   ProviderAbortError,
   ProviderHttpError,
+  providerSessionIdFromFile,
   UsageTracker,
   type FetchLike,
   type ProviderConfig,
@@ -105,6 +108,72 @@ function makeProvider(overrides: Partial<ProviderConfig & {
 // ---------------------------------------------------------------------------
 // backoff delays (BackoffDelaysTest)
 // ---------------------------------------------------------------------------
+
+test("OpenCode headers identify the client and route by conversation", () => {
+  assert.equal(isOpenCodeEndpoint("https://opencode.ai/inference/go/openai/v1"), true);
+  assert.equal(isOpenCodeEndpoint("https://opencode.ai.evil.example/v1"), false);
+  assert.equal(isOpenCodeEndpoint("not a url"), false);
+  assert.deepEqual(openCodeClientHeaders("https://api.openai.com/v1", "s"), {});
+  assert.deepEqual(openCodeClientHeaders("https://opencode.ai/zen/v1", "conv-1"), {
+    "User-Agent": "two-brothers-harness",
+    "x-opencode-client": "two-brothers",
+    "x-opencode-session": "conv-1",
+  });
+  // No session means no fabricated header, but the client still identifies itself.
+  assert.deepEqual(openCodeClientHeaders("https://opencode.ai/zen/v1"), {
+    "User-Agent": "two-brothers-harness",
+    "x-opencode-client": "two-brothers",
+  });
+  assert.equal(providerSessionIdFromFile("C:\\sessions\\2026-11-12-demo.jsonl"), "2026-11-12-demo");
+  assert.equal(providerSessionIdFromFile("/tmp/chat.jsonl"), "chat");
+  assert.equal(providerSessionIdFromFile(""), undefined);
+});
+
+test("an OpenCode request carries x-opencode-session through the OpenAI adapter", async () => {
+  let captured: Record<string, string> | undefined;
+  const provider = makeProvider({
+    baseUrl: "https://opencode.ai/inference/go/openai/v1",
+    sessionId: "web-session-42",
+    fetchImpl: async (_url, init) => {
+      captured = init?.headers as Record<string, string>;
+      return jsonResponse(usageBody(3, 1, 0));
+    },
+  });
+  await provider.chat([{ role: "user", content: "hi" }], "message");
+  assert.equal(captured?.["x-opencode-session"], "web-session-42");
+  assert.equal(captured?.["x-opencode-client"], "two-brothers");
+  assert.equal(captured?.["User-Agent"], "two-brothers-harness");
+  assert.equal(captured?.Authorization, undefined);
+});
+
+test("an in-memory OpenCode provider still sends a generated session id", async () => {
+  let captured: Record<string, string> | undefined;
+  const provider = makeProvider({
+    baseUrl: "https://opencode.ai/inference/go/openai/v1",
+    fetchImpl: async (_url, init) => {
+      captured = init?.headers as Record<string, string>;
+      return jsonResponse(usageBody(1, 1, 0));
+    },
+  });
+  await provider.chat([{ role: "user", content: "hi" }], "message");
+  assert.match(captured?.["x-opencode-session"] ?? "", /^[0-9a-f]{8}-[0-9a-f]{4}-/);
+});
+
+test("a non-OpenCode request keeps its exact header set", async () => {
+  let captured: Record<string, string> | undefined;
+  const provider = makeProvider({
+    baseUrl: "http://127.0.0.1:9/v1",
+    sessionId: "web-session-42",
+    fetchImpl: async (_url, init) => {
+      captured = init?.headers as Record<string, string>;
+      return jsonResponse(usageBody(1, 1, 0));
+    },
+  });
+  await provider.chat([{ role: "user", content: "hi" }], "message");
+  assert.equal(captured?.["x-opencode-session"], undefined);
+  assert.equal(captured?.["x-opencode-client"], undefined);
+  assert.equal(captured?.["User-Agent"], undefined);
+});
 
 test("default backoff table is capped exponential", () => {
   assert.deepEqual(backoffDelays(6), [2, 4, 8, 16, 30, 30]);

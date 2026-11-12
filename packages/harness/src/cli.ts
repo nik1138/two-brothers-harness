@@ -682,6 +682,8 @@ function nativeProviders(
         // Extended thinking is Anthropic-only; buildProvider forwards the
         // field and every other adapter ignores it (request bytes unchanged).
         thinkingBudgetTokens: thinkingBudgetForRole(cfg, role),
+        sessionId: cfg.sessionId,
+        sessionFile: cfg.sessionFile,
         ...(onWarning ? { onWarning } : {}),
       },
       role,
@@ -2008,6 +2010,8 @@ function replSummarizerProvider(
       retries: cfg.retries,
       contextWindow: cfg.contextWindow,
       maxTokens: maxTokensForRole(cfg, role),
+      sessionId: cfg.sessionId,
+      sessionFile: cfg.sessionFile,
       onWarning: providerWarningSink(io, 3, style),
     },
     role,

@@ -847,6 +847,26 @@ test("adapters drive the cooperation loop end-to-end (Google senior, Anthropic j
   assert.ok(urls.some((url) => url.endsWith("/v1/messages")));
 });
 
+test("OpenCode identity headers reach the Anthropic and Google adapters", async () => {
+  const anthropic = stubFetch(() => jsonResponse({ content: [], usage: {} }));
+  await anthropicProvider(anthropic.fetchImpl, {
+    baseUrl: "https://opencode.ai/inference/go/anthropic",
+    sessionId: "conv-anthropic",
+  }).chat([{ role: "user", content: "hi" }]);
+  assert.equal(anthropic.requests[0]?.headers["x-opencode-session"], "conv-anthropic");
+  assert.equal(anthropic.requests[0]?.headers["x-opencode-client"], "two-brothers");
+  assert.equal(anthropic.requests[0]?.headers["user-agent"], "two-brothers-harness");
+
+  const google = stubFetch(() =>
+    jsonResponse({ candidates: [{ content: { parts: [{ text: "ok" }] } }] }),
+  );
+  await googleProvider(google.fetchImpl, {
+    baseUrl: "https://opencode.ai/inference/go/google",
+    sessionId: "conv-google",
+  }).chat([{ role: "user", content: "hi" }]);
+  assert.equal(google.requests[0]?.headers["x-opencode-session"], "conv-google");
+});
+
 test("CLI: kind flags parse (mock run stays offline)", async () => {
   const out: string[] = [];
   const code = await main(
