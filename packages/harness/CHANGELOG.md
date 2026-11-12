@@ -104,6 +104,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Dedicated helper-subagent route (Settings):** the operator can now pin the
+  read-only helper's model independently of Senior/Junior. Settings → Models &
+  roles gains a third **Subagent** card with the same connection/preset, model,
+  base URL, API-key and model-declared effort controls; the route is persisted
+  as the top-level `subagent` section of `sessions/settings.json` (its key is
+  sealed like role keys) and is echoed additively by `GET/PUT /api/settings`.
+  A configured route wins over the tool's `role` argument; an empty route keeps
+  the existing Junior/Senior fallback. Deleting a provider clears a matching
+  helper `provider_ref`, and a role save or provider save preserves the helper
+  section. Files: `src/settings_store.ts`, `src/runtime.ts`,
+  `src/harness.ts`, `src/server.ts`, `src/subagent.ts`,
+  `web/src/components/SettingsDialog.vue`,
+  `web/src/components/settings/ModelsRolesSection.vue`,
+  `web/src/components/settings/RoleEditor.vue`, `web/src/api.ts`,
+  `web/src/types.ts`; tests `tests/settings.test.ts`, `tests/runtime.test.ts`,
+  `tests/subagent.test.ts`, `tests/server.test.ts`,
+  `web/tests/settingsSubagent.test.ts`.
 - **Read-only helper subagents (serve/web):** the Senior can now call a
   model-facing `subagent` tool to spawn one isolated single-role helper for a
   focused side task. The child has its own context and a fresh provider

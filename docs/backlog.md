@@ -1700,9 +1700,10 @@ Also shipped in wave 30:
   phases: mutating child tools with child-tagged approvals, `send_message` /
   `interrupt_agent` / `list_agents` controls, async completion/wake (the
   parent currently waits for the bounded report), a TUI tree, forked-context
-  children, deeper nesting, per-child model/effort selection and cost/cache
-  roll-up into the parent view. The protocol stays unchanged; children are
-  internal executions, not second protocol peers.
+  children, deeper nesting, per-call model/effort overrides (the operator's
+  Settings → Models & roles → Subagent route already fixes the child route) and
+  cost/cache roll-up into the parent view. The protocol stays unchanged;
+  children are internal executions, not second protocol peers.
 - **Stacked-dialog mask-click (web, non-blocker)** — **blocked on upstream**
   (evidence updated 2026-11-08): naive-ui fires `mask-click` for clicks that
   land inside a stacked second dialog, so every dialog's handler must ignore

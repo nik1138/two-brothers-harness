@@ -300,7 +300,10 @@ the same hero appears inside a selected session that has no transcript yet.
    focused side task to a read-only helper through the `subagent` tool. The
    helper gets a fresh context and only the workspace read/list/search tools;
    it cannot edit, run shell or spawn another helper, and it returns a bounded
-   report. When one has been spawned, the chat header shows **Subagents · N**:
+   report. Settings → **Models & roles → Subagent** gives it a dedicated
+   provider/model/effort route; leaving that route empty keeps the tool's
+   Senior/Junior fallback, and a configured route wins. When one has been
+   spawned, the chat header shows **Subagents · N**:
    the chip opens a live tree with each helper's status, current activity,
    elapsed time and tokens, and clicking a row opens a read-only transcript
    drawer with the task, tool calls and final report. The parent composer is

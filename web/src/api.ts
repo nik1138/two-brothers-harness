@@ -386,6 +386,11 @@ export function normalizePluginSelection(value: unknown): PluginSelection {
 export interface SettingsPatch {
   senior?: RoleSettingsPatch
   junior?: RoleSettingsPatch
+  /**
+   * Additive dedicated helper route (`subagent` section). Omit on an older
+   * backend: the app only sends it when GET reported the section.
+   */
+  subagent?: RoleSettingsPatch
   /** Omit to leave the persisted plugin selection untouched. */
   plugins?: PluginSelection
   /**

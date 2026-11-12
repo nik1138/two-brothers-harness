@@ -491,6 +491,53 @@ test("effort round-trips and only model-safe tokens survive a read", () => {
   }
 });
 
+test("the subagent route round-trips with a sealed key and survives role saves", () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const file = path.join(root, "settings.json");
+    const store = new SettingsStore(file);
+    store.write(
+      { senior: { model: "senior-model" } },
+      undefined,
+      undefined,
+      {
+        provider_ref: "acme",
+        provider: "openai",
+        model: "helper-model",
+        base_url: "http://127.0.0.1:9999/v1",
+        api_key: "sub-secret",
+        effort: "HIGH",
+      },
+    );
+    const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, any>;
+    assert.equal(raw.subagent.provider_ref, "acme");
+    assert.equal(raw.subagent.model, "helper-model");
+    assert.equal(raw.subagent.effort, "high");
+    assert.ok(!JSON.stringify(raw).includes("sub-secret"), "the helper key is sealed on disk");
+
+    const read = store.readSubagent();
+    assert.equal(read.provider_ref, "acme");
+    assert.equal(read.model, "helper-model");
+    assert.equal(read.api_key, "sub-secret");
+    assert.equal(read.effort, "high");
+
+    // A normal role save preserves the helper section byte-for-byte in shape.
+    store.write({ senior: { model: "updated" } });
+    const after = new SettingsStore(file).readSubagent();
+    assert.equal(after.model, "helper-model");
+    assert.equal(after.api_key, "sub-secret");
+    assert.equal(new SettingsStore(file).read().senior?.model, "updated");
+
+    // An explicit empty route clears it; a corrupt hand edit reads as absent.
+    store.write({}, undefined, undefined, {});
+    assert.deepEqual(new SettingsStore(file).readSubagent(), {});
+    fs.writeFileSync(file, JSON.stringify({ subagent: { model: 42 } }));
+    assert.deepEqual(new SettingsStore(file).readSubagent(), {});
+  } finally {
+    cleanup();
+  }
+});
+
 test("public view never leaks keys", () => {
   const { root, cleanup } = tmpdir();
   try {

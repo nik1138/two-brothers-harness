@@ -260,6 +260,7 @@ import {
   SUBAGENT_TOOL_DESCRIPTION,
   SUBAGENT_TOOL_NAME,
   SUBAGENT_TOOL_PARAMETERS,
+  type SubagentEndpoint,
   type SubagentSettings,
   type SubagentTranscriptEntry,
 } from "./subagent.ts";
@@ -2176,8 +2177,15 @@ export class TwoBrothersHarness {
   }
 
   /** A fresh provider for one child; keeps child usage out of the parent total. */
-  private buildSubagentProvider(role: "senior" | "junior"): Provider {
+  private buildSubagentProvider(
+    role: "senior" | "junior",
+    configured?: SubagentEndpoint,
+  ): Provider {
     const warn = this.options.onProviderWarning;
+    if (configured !== undefined) {
+      const built = providerFromEndpoint(this.cfg, role, configured, warn);
+      if (built !== null) return built;
+    }
     const endpoint = this.options.endpoints?.[role];
     if (endpoint !== undefined) {
       const built = providerFromEndpoint(this.cfg, role, endpoint, warn);
@@ -2187,11 +2195,15 @@ export class TwoBrothersHarness {
   }
 
   /** The role's model id, for the tree row (display only). */
-  private subagentModel(role: "senior" | "junior"): string {
+  private subagentModel(
+    role: "senior" | "junior",
+    configured?: SubagentEndpoint,
+  ): string {
+    if (configured?.model) return configured.model;
     const endpoint = this.options.endpoints?.[role];
-    const configured =
+    const configuredModel =
       endpoint?.model || (role === "senior" ? this.cfg.seniorModel : this.cfg.juniorModel);
-    return configured || (role === "senior" ? "senior" : "junior");
+    return configuredModel || (role === "senior" ? "senior" : "junior");
   }
 
   /**
@@ -2249,8 +2261,10 @@ export class TwoBrothersHarness {
     }
 
     const id = newSubagentId();
-    const model = this.subagentModel(role);
-    const provider = settings.providerFactory?.(role) ?? this.buildSubagentProvider(role);
+    const configured = settings.endpoint;
+    const model = this.subagentModel(role, configured);
+    const provider =
+      settings.providerFactory?.(role) ?? this.buildSubagentProvider(role, configured);
     const tools = this.subagentToolSet(state, role);
     const childTools = provider.chatWithTools === undefined ? [] : tools;
     const systemPrompt = assembleSystemPrompt(SUBAGENT_SYSTEM_PROMPT, childTools, "subagent", {

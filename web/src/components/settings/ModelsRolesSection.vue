@@ -13,16 +13,20 @@ interface RoleForm {
 defineProps<{
   senior: RoleForm
   junior: RoleForm
-  keySet: { senior: boolean; junior: boolean }
+  subagent: RoleForm
+  /** An older backend omits the additive helper route; hide the card. */
+  subagentSupported: boolean
+  keySet: { senior: boolean; junior: boolean; subagent: boolean }
   connectionOptions: { label: string; value: string }[]
-  effortOptions: { senior: string[]; junior: string[] }
-  effortLoading: { senior: boolean; junior: boolean }
-  effortErrors: { senior: string; junior: string }
+  effortOptions: { senior: string[]; junior: string[]; subagent: string[] }
+  effortLoading: { senior: boolean; junior: boolean; subagent: boolean }
+  effortErrors: { senior: string; junior: string; subagent: string }
 }>()
 
 const emit = defineEmits<{
   'update:senior': [Partial<RoleForm>]
   'update:junior': [Partial<RoleForm>]
+  'update:subagent': [Partial<RoleForm>]
 }>()
 
 function updateSenior(patch: Partial<RoleForm>) {
@@ -32,13 +36,18 @@ function updateSenior(patch: Partial<RoleForm>) {
 function updateJunior(patch: Partial<RoleForm>) {
   emit('update:junior', patch)
 }
+
+function updateSubagent(patch: Partial<RoleForm>) {
+  emit('update:subagent', patch)
+}
 </script>
 
 <template>
   <div class="models-roles">
     <p class="settings-lead">
       Both brothers share one conversation but keep their own provider connection and model. A
-      preset supplies the base URL and API key; choose Manual to enter them directly.
+      preset supplies the base URL and API key; choose Manual to enter them directly. The
+      optional helper subagent can use a dedicated route of its own.
     </p>
 
     <div class="role-stack">
@@ -62,8 +71,23 @@ function updateJunior(patch: Partial<RoleForm>) {
         :effort-error="effortErrors.junior"
         @update:form="updateJunior"
       />
+      <RoleEditor
+        v-if="subagentSupported"
+        role="subagent"
+        :form="subagent"
+        :key-set="keySet.subagent"
+        :connection-options="connectionOptions"
+        :effort-options="effortOptions.subagent"
+        :effort-loading="effortLoading.subagent"
+        :effort-error="effortErrors.subagent"
+        @update:form="updateSubagent"
+      />
     </div>
 
+    <p v-if="subagentSupported" class="settings-note">
+      Helper subagents are read-only and isolated. Leaving the helper route empty keeps the
+      tool's Senior/Junior fallback; a configured route wins.
+    </p>
     <p class="settings-note">
       Each role needs a model and a base URL, supplied manually, through a preset and model, or by
       environment pins.

@@ -813,9 +813,9 @@ partial usage (`tests/graph.test.ts`, `tests/runtime.test.ts`,
 (`web/tests/permissionsUi.test.ts`). Wave 30 also hardens the prompt block
 (marker collisions, repair tails, verify kind; `tests/promptsections.test.ts`
 pins belt-stable prefixes). Latest measured totals for the merged tree:
-package suite **2 114 tests** (2 107 pass and 7 platform skips on Windows), web
-suite **517/517**, hermetic CLI E2E **19/19** on sources and `--dist`, fault
-injection **7/7**, browser E2E **25 PASS, 0 FAIL, 1 opt-in `real` skip**,
+package suite **2 120 tests** (2 113 pass and 7 platform skips on Windows), web
+suite **518/518**, hermetic CLI E2E **19/19** on sources and `--dist`, fault
+injection **7/7**, browser E2E **26 PASS, 0 FAIL, 1 opt-in `real` skip**,
 `npm run typecheck` green. The composer model switch adds
 `web/tests/modelSwitch.test.ts` and a `model-switch` browser scenario; the
 OpenCode session-header fix adds five provider tests
@@ -823,9 +823,13 @@ OpenCode session-header fix adds five provider tests
 adds `tests/effort.test.ts`, `tests/modelcatalog.test.ts` and
 `web/tests/modelEfforts.test.ts`; read-only helper subagents add
 `tests/subagent.test.ts`, server route/delete coverage,
-`web/tests/subagents.test.ts` and the `subagents` browser scenario. The Wave 30
-WSL Linux pass was **2 082 pass with 1 POSIX-specific skip** before these
-additions (Windows reported 2 076 pass with 7 platform skips then).
+`web/tests/subagents.test.ts` and the `subagents` browser scenario, and the
+dedicated helper route adds `tests/settings.test.ts`,
+`tests/runtime.test.ts`, `tests/server.test.ts`,
+`web/tests/settingsSubagent.test.ts` and the `settings-subagent` browser
+scenario. The Wave 30 WSL Linux pass was **2 082 pass with 1 POSIX-specific
+skip** before these additions (Windows reported 2 076 pass with 7 platform
+skips then).
 
 Hermetic offline CLI E2E: `npm run test:e2e:cli` (sources) /
 `npm run test:e2e:cli:dist` (built `dist/cli.js`) drive the CLI as a
@@ -1043,7 +1047,7 @@ mark refreshing; Escape backs out one level), `subagents` (a seeded read-only
 helper appears as a `Subagents · N` header chip; the tree shows its status,
 activity, elapsed time and tokens; clicking a row opens the read-only
 transcript drawer with the task, tool call and final report; the parent
-composer is inert while the drawer is open and Escape restores it), `hero-starters` (landing and empty-session hero; starters prefill only
+composer is inert while the drawer is open and Escape restores it), `settings-subagent` (Settings → Models & roles shows the third Subagent card; a manual model/base URL/key saves through the dialog, persists the helper route, keeps the key masked and sealed on disk, and a reload seeds the card with the key marked set), `hero-starters` (landing and empty-session hero; starters prefill only
 an empty composer, a preserved draft wins with a notice) and `approval-reason`
 (a delete approval shows the documented reason on the pending card; its
 collapsed-by-default preview toggle exposes the bounded diff as plain text —
@@ -1119,7 +1123,7 @@ native-valid but non-whole value is an inline `role=alert` with `aria-invalid`
 that blocks the save before any PUT; a corrected save rides the dialog's single
 Save action, persists the budgets in `sessions/settings.json`, and the
 persisted values plus their effective lines survive a reload). The offline
-suite now holds 23 hermetic scenario blocks; the last canonical run is **24
+suite now holds 25 hermetic scenario blocks; the last canonical run is **26
 PASS, 0 FAIL, 1 SKIP** (the `chat/resume` block prints one line for chat and
 one for resume). The queue dock and the session-scope approval decisions
 remain covered by the web unit suites, not by separate browser scenarios. The

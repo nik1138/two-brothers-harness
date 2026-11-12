@@ -13,7 +13,7 @@ interface RoleForm {
 }
 
 const props = defineProps<{
-  role: 'senior' | 'junior'
+  role: 'senior' | 'junior' | 'subagent'
   form: RoleForm
   keySet: boolean
   connectionOptions: { label: string; value: string }[]
@@ -25,11 +25,15 @@ const props = defineProps<{
 
 const emit = defineEmits<{ 'update:form': [Partial<RoleForm>] }>()
 
-const label = computed(() => (props.role === 'senior' ? 'Senior' : 'Junior'))
+const label = computed(() =>
+  props.role === 'senior' ? 'Senior' : props.role === 'junior' ? 'Junior' : 'Subagent',
+)
 const description = computed(() =>
   props.role === 'senior'
     ? 'Arbitrates the exchange and makes the final decision.'
-    : 'Explores, implements, and reports back to the Senior.',
+    : props.role === 'junior'
+      ? 'Explores, implements, and reports back to the Senior.'
+      : 'Read-only helper spawned by the Senior. A configured route here overrides the tool\'s role fallback.',
 )
 const presetActive = computed(() => Boolean(props.form.providerRef))
 const showEffort = computed(
@@ -173,6 +177,10 @@ function onEffort(value: string) {
 
 .role-card--junior .role-dot {
   background: var(--junior-fill);
+}
+
+.role-card--subagent .role-dot {
+  background: var(--accent);
 }
 
 .role-card-copy {

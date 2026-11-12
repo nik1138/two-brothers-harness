@@ -10,11 +10,12 @@
  * memory. `public()` masks them behind `api_key_set`.
  *
  *     read()           -> {senior: {provider, model, base_url, api_key, ...}, ...}
+ *     readSubagent()   -> {provider, model, base_url, api_key, provider_ref, effort?}
  *     readPlugins()    -> [name, ...]                        // one shared list
  *     readProviders()  -> [{name, base_url, api_key, kind, models, context_window?}, ...]   // key decrypted
  *     readApprovalPolicy() -> "ask" | "readonly" | "edits" | "allow-all"
  *     readCompaction() -> {threshold_chars?, threshold_tokens?, ...}  // budgets
- *     write(settings, plugins?, providers?)                  // api_key in
+ *     write(settings, plugins?, providers?, subagent?)       // api_key in
  *         plaintext; encrypted for disk
  *     writeApprovalPolicy(mode)                              // strict enum, atomic
  *     writeCompaction(settings)                              // strict ints, atomic
@@ -250,7 +251,9 @@ export interface SettingsSchemaState {
 /**
  * Top-level sections this release owns. `write()` rebuilds these (dropping
  * legacy plugin keys on purpose) and copies every other top-level section
- * through unchanged, so a same-version extension survives a save.
+ * through unchanged, so a same-version extension survives a save. The
+ * dedicated `subagent` route is handled explicitly by `write()`'s optional
+ * fourth argument and otherwise preserved by that same copy-through.
  */
 const KNOWN_SECTIONS = new Set<string>([
   ...ROLES,
@@ -621,6 +624,34 @@ export class SettingsStore {
   }
 
   /**
+   * Decrypted dedicated helper route (`subagent` section), or `{}` when the
+   * operator never configured one. The shape is the same as one role entry:
+   * provider/model/base_url/api_key/provider_ref/effort, with the key unsealed.
+   * A corrupt/missing section reads as absent, never as invented fields.
+   */
+  readSubagent(): RoleSettings {
+    const data = this.readRaw().subagent;
+    if (!isRecord(data)) return {};
+    const entry: RoleSettings = {};
+    let storedKey: string | undefined;
+    for (const field of ROLE_FIELDS) {
+      if (field === "effort") {
+        const effort = normalizeEffortValue(data[field]);
+        if (effort !== null) entry.effort = effort;
+        continue;
+      }
+      const value = asNonEmptyString(data[field]);
+      if (value === undefined) continue;
+      if (field === "api_key") storedKey = value;
+      else entry[field] = value;
+    }
+    const ref = asNonEmptyString(data.provider_ref);
+    if (ref !== undefined) entry.provider_ref = ref;
+    if (storedKey !== undefined) entry.api_key = this.secretBox.unseal(storedKey);
+    return entry;
+  }
+
+  /**
    * The persisted shared active-plugin list (empty when absent).
    *
    * Legacy shapes are merged in fail-soft: a per-role `{senior, junior}`
@@ -821,12 +852,15 @@ export class SettingsStore {
    *
    * Fields currently pinned by `TWO_BROTHERS_*` env vars are stripped from
    * the roles being written — env values must never reach the file (see
-   * module docstring).
+   * module docstring). The optional `subagent` argument writes the dedicated
+   * helper route in the same atomic pass (its key is sealed with the role
+   * keys); omitting it preserves whatever `subagent` section is on disk.
    */
   write(
     settings: Record<string, unknown>,
     plugins?: unknown,
     providers?: unknown[],
+    subagent?: unknown,
   ): void {
     const raw = this.readRaw();
     this.assertWritable(raw);
@@ -860,6 +894,33 @@ export class SettingsStore {
       const ref = asNonEmptyString(data.provider_ref);
       if (ref !== undefined) entry.provider_ref = ref;
       payload[role] = entry;
+    }
+
+    // Optional dedicated helper route. When the caller passes `undefined`, the
+    // unknown-section copy above already preserved any stored `subagent`
+    // section; passing an object (or `{}`) replaces it. It is deliberately not
+    // a protocol role: no env pins apply, and a corrupt/missing section reads
+    // back as an absent route.
+    if (subagent !== undefined) {
+      const entry: Record<string, string> = {};
+      if (isRecord(subagent)) {
+        for (const field of ROLE_FIELDS) {
+          if (field === "effort") {
+            const effort = normalizeEffortValue(subagent[field]);
+            if (effort !== null) entry.effort = effort;
+            continue;
+          }
+          const value = asNonEmptyString(subagent[field]);
+          if (value === undefined) continue;
+          if (field === "api_key") {
+            pending.push({ holder: entry }); // sealed in one batch below
+          }
+          entry[field] = value;
+        }
+        const ref = asNonEmptyString(subagent.provider_ref);
+        if (ref !== undefined) entry.provider_ref = ref;
+      }
+      payload.subagent = entry;
     }
 
     if (plugins === undefined) {

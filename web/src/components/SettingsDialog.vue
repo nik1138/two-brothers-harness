@@ -88,6 +88,8 @@ interface RoleForm {
   effort: string
 }
 
+type RoleKey = 'senior' | 'junior' | 'subagent'
+
 const loading = ref(true)
 const settingsLoaded = ref(false)
 const saving = ref(false)
@@ -110,7 +112,17 @@ const junior = reactive<RoleForm>({
   providerRef: '',
   effort: '',
 })
-const keySet = reactive({ senior: false, junior: false })
+const subagent = reactive<RoleForm>({
+  provider: '',
+  model: '',
+  base_url: '',
+  api_key: '',
+  providerRef: '',
+  effort: '',
+})
+/** An older backend omits the additive `subagent` route; hide the card. */
+const subagentSupported = ref(false)
+const keySet = reactive({ senior: false, junior: false, subagent: false })
 
 // Plugin selection (Stage 15): options come from GET /api/plugins, the
 // active list rides the settings GET/PUT under `plugins`. Plugins are
@@ -337,11 +349,13 @@ function errText(e: unknown): string {
   return e instanceof ApiError ? e.message : String(e)
 }
 
-function roleForm(role: 'senior' | 'junior'): RoleForm {
-  return role === 'senior' ? senior : junior
+function roleForm(role: RoleKey): RoleForm {
+  if (role === 'senior') return senior
+  if (role === 'junior') return junior
+  return subagent
 }
 
-function fill(role: 'senior' | 'junior', view: RoleSettingsView) {
+function fill(role: RoleKey, view: RoleSettingsView) {
   const form = roleForm(role)
   form.provider = view.provider ?? ''
   form.model = view.model ?? ''
@@ -353,25 +367,29 @@ function fill(role: 'senior' | 'junior', view: RoleSettingsView) {
 
 // Model-declared effort levels: fetched per provider/model, debounced while the
 // operator types a model id. Unknown/unavailable metadata offers no control.
-const effortOptions = reactive<Record<'senior' | 'junior', string[]>>({
+const effortOptions = reactive<Record<RoleKey, string[]>>({
   senior: [],
   junior: [],
+  subagent: [],
 })
-const effortLoading = reactive<Record<'senior' | 'junior', boolean>>({
+const effortLoading = reactive<Record<RoleKey, boolean>>({
   senior: false,
   junior: false,
+  subagent: false,
 })
-const effortErrors = reactive<Record<'senior' | 'junior', string>>({
+const effortErrors = reactive<Record<RoleKey, string>>({
   senior: '',
   junior: '',
+  subagent: '',
 })
-const effortRequests = { senior: 0, junior: 0 }
-const effortTimers: Record<'senior' | 'junior', ReturnType<typeof setTimeout> | null> = {
+const effortRequests: Record<RoleKey, number> = { senior: 0, junior: 0, subagent: 0 }
+const effortTimers: Record<RoleKey, ReturnType<typeof setTimeout> | null> = {
   senior: null,
   junior: null,
+  subagent: null,
 }
 
-async function refreshEffortOptions(role: 'senior' | 'junior'): Promise<void> {
+async function refreshEffortOptions(role: RoleKey): Promise<void> {
   const form = roleForm(role)
   const provider = form.providerRef
   const model = form.model.trim()
@@ -401,7 +419,7 @@ async function refreshEffortOptions(role: 'senior' | 'junior'): Promise<void> {
   }
 }
 
-function scheduleEffortOptions(role: 'senior' | 'junior'): void {
+function scheduleEffortOptions(role: RoleKey): void {
   const timer = effortTimers[role]
   if (timer !== null) clearTimeout(timer)
   effortTimers[role] = setTimeout(() => {
@@ -411,7 +429,7 @@ function scheduleEffortOptions(role: 'senior' | 'junior'): void {
 }
 
 onBeforeUnmount(() => {
-  for (const role of ['senior', 'junior'] as const) {
+  for (const role of ['senior', 'junior', 'subagent'] as const) {
     if (effortTimers[role] !== null) clearTimeout(effortTimers[role])
     effortTimers[role] = null
   }
@@ -427,6 +445,11 @@ function updateJunior(patch: Partial<RoleForm>) {
   if ('providerRef' in patch || 'model' in patch) scheduleEffortOptions('junior')
 }
 
+function updateSubagent(patch: Partial<RoleForm>) {
+  Object.assign(subagent, patch)
+  if ('providerRef' in patch || 'model' in patch) scheduleEffortOptions('subagent')
+}
+
 async function refreshProviders() {
   providers.value = await listProviders()
 }
@@ -439,7 +462,7 @@ function onProvidersUpdated(next: ProviderPreset[]) {
 function onProviderDeleted(name: string) {
   // the backend clears a deleted preset's role refs; re-sync the form so a
   // stranded select value doesn't fail the next save with a 400
-  for (const role of ['senior', 'junior'] as const) {
+  for (const role of ['senior', 'junior', 'subagent'] as const) {
     if (roleForm(role).providerRef === name) roleForm(role).providerRef = ''
   }
 }
@@ -457,6 +480,8 @@ onMounted(async () => {
     const [view, discovered] = await Promise.all([getSettings(), listPlugins()])
     fill('senior', view.senior)
     fill('junior', view.junior)
+    subagentSupported.value = view.subagent !== undefined && view.subagent !== null
+    if (view.subagent) fill('subagent', view.subagent)
     plugins.value = normalizePluginSelection(view.plugins)
     approvalPolicy.value = approvalPolicyOf(view)
     applyCompaction(view)
@@ -468,6 +493,7 @@ onMounted(async () => {
     settingsLoaded.value = true
     void refreshEffortOptions('senior')
     void refreshEffortOptions('junior')
+    if (subagentSupported.value) void refreshEffortOptions('subagent')
   } catch (e) {
     error.value = errText(e)
   } finally {
@@ -512,6 +538,18 @@ async function save() {
     if (form.api_key) entry.api_key = form.api_key
     patch[role] = entry
   }
+  if (subagentSupported.value) {
+    const form = subagent
+    const entry: RoleSettingsPatch = {
+      model: form.model.trim(),
+      base_url: form.base_url.trim(),
+      provider_ref: form.providerRef,
+      effort: form.effort,
+    }
+    if (form.provider) entry.provider = form.provider
+    if (form.api_key) entry.api_key = form.api_key
+    patch.subagent = entry
+  }
   try {
     // role settings, the shared plugin selection, the approval mode and the
     // context budgets travel in one PUT; an unsupported (older) backend and a
@@ -528,11 +566,13 @@ async function save() {
     })
     fill('senior', view.senior)
     fill('junior', view.junior)
+    if (view.subagent) fill('subagent', view.subagent)
     plugins.value = normalizePluginSelection(view.plugins)
     approvalPolicy.value = approvalPolicyOf(view)
     applyCompaction(view)
     senior.api_key = ''
     junior.api_key = ''
+    subagent.api_key = ''
     emit('saved')
     // reflects preset renames/deletes made while the dialog was open
     try {
@@ -741,13 +781,28 @@ async function save() {
               <ModelsRolesSection
                 :senior="senior"
                 :junior="junior"
+                :subagent="subagent"
+                :subagent-supported="subagentSupported"
                 :key-set="keySet"
                 :connection-options="connectionOptions"
-                :effort-options="{ senior: effortOptions.senior, junior: effortOptions.junior }"
-                :effort-loading="{ senior: effortLoading.senior, junior: effortLoading.junior }"
-                :effort-errors="{ senior: effortErrors.senior, junior: effortErrors.junior }"
+                :effort-options="{
+                  senior: effortOptions.senior,
+                  junior: effortOptions.junior,
+                  subagent: effortOptions.subagent,
+                }"
+                :effort-loading="{
+                  senior: effortLoading.senior,
+                  junior: effortLoading.junior,
+                  subagent: effortLoading.subagent,
+                }"
+                :effort-errors="{
+                  senior: effortErrors.senior,
+                  junior: effortErrors.junior,
+                  subagent: effortErrors.subagent,
+                }"
                 @update:senior="updateSenior"
                 @update:junior="updateJunior"
+                @update:subagent="updateSubagent"
               />
             </div>
 

@@ -793,6 +793,93 @@ test("settings: effort is validated and model levels come from the catalog", asy
   }
 });
 
+test("settings: subagent route is validated, masked and preserved", async () => {
+  const srv = await startServer();
+  try {
+    const secret = "helper-secret-9c1d";
+    const put = await api<Record<string, any>>(srv.base, "PUT", "/api/settings", {
+      subagent: {
+        provider_ref: "opencode-go",
+        model: "helper-model",
+        effort: "HIGH",
+        api_key: secret,
+      },
+    });
+    assert.equal(put.status, 200);
+    assert.equal(put.body.subagent.provider_ref, "opencode-go");
+    assert.equal(put.body.subagent.model, "helper-model");
+    assert.equal(put.body.subagent.effort, "high");
+    assert.equal(put.body.subagent.api_key_set, true);
+    assert.ok(!JSON.stringify(put.body).includes(secret));
+
+    const got = await get<Record<string, any>>(srv.base, "/api/settings");
+    assert.equal(got.status, 200);
+    assert.equal(got.body.subagent.model, "helper-model");
+    assert.equal(got.body.subagent.api_key_set, true);
+    assert.ok(!JSON.stringify(got.body).includes(secret));
+
+    // A normal role save preserves the helper route.
+    const roleSave = await api<Record<string, any>>(srv.base, "PUT", "/api/settings", {
+      senior: { model: "senior-after-helper" },
+    });
+    assert.equal(roleSave.status, 200);
+    assert.equal(roleSave.body.subagent.model, "helper-model");
+    assert.equal(roleSave.body.subagent.provider_ref, "opencode-go");
+    assert.equal(roleSave.body.subagent.api_key_set, true);
+
+    // Strict ref/effort validation; a bad patch is a 400 and changes nothing.
+    assert.equal(
+      (await api(srv.base, "PUT", "/api/settings", {
+        subagent: { provider_ref: "no-such-provider" },
+      })).status,
+      400,
+    );
+    assert.equal(
+      (await api(srv.base, "PUT", "/api/settings", {
+        subagent: { effort: "high effort" },
+      })).status,
+      400,
+    );
+    assert.equal(
+      (await get<Record<string, any>>(srv.base, "/api/settings")).body.subagent.model,
+      "helper-model",
+    );
+
+    const raw = fs.readFileSync(path.join(srv.dir, "settings.json"), "utf-8");
+    assert.ok(!raw.includes(secret), "the helper key is sealed on disk");
+    assert.ok(raw.includes('"subagent"'));
+  } finally {
+    await srv.close();
+  }
+});
+
+test("deleting a provider clears its subagent route reference", async () => {
+  const srv = await startServer();
+  try {
+    const created = await api<Record<string, any>>(srv.base, "POST", "/api/providers", {
+      name: "helper-provider",
+      base_url: "https://helper.example/v1",
+      models: ["helper-model"],
+    });
+    assert.equal(created.status, 201);
+    assert.equal(
+      (await api(srv.base, "PUT", "/api/settings", {
+        subagent: { provider_ref: "helper-provider", model: "helper-model" },
+      })).status,
+      200,
+    );
+    assert.equal(
+      (await api(srv.base, "DELETE", "/api/providers/helper-provider")).status,
+      200,
+    );
+    const after = await get<Record<string, any>>(srv.base, "/api/settings");
+    assert.equal(after.body.subagent.provider_ref, null);
+    assert.equal(after.body.subagent.model, "helper-model");
+  } finally {
+    await srv.close();
+  }
+});
+
 test("settings: roundtrip across server restart (persisted, masked)", async () => {
   const tmp = tmpdir("tb-persist-");
   try {

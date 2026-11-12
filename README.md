@@ -90,7 +90,9 @@ server then serves (the npm tarball ships its own copy of that build).
 - **Read-only helper subagents (`serve`/web).** The Senior can spawn one
   isolated single-role helper through the `subagent` tool: its own context, a
   fresh provider (usage stays out of the parent footer), and only workspace
-  read/list/search (plus `spill_read`). It cannot mutate, run shell, recurse,
+  read/list/search (plus `spill_read`). Settings → Models & roles has a
+  dedicated **Subagent** route (provider/model/effort) that wins over the
+  tool's Senior/Junior fallback. It cannot mutate, run shell, recurse,
   or receive follow-ups; it returns a bounded report. The web header shows a
   live `Subagents · N` tree with status, activity, elapsed time and tokens;
   clicking a child opens a read-only transcript drawer while the parent

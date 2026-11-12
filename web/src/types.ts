@@ -253,7 +253,10 @@ export interface RoleSettingsView {
   effort?: string | null
 }
 
-export type SettingsView = Record<'senior' | 'junior', RoleSettingsView>
+export type SettingsView = Record<'senior' | 'junior', RoleSettingsView> & {
+  /** Additive dedicated helper route; older backends omit it. */
+  subagent?: RoleSettingsView
+}
 
 /**
  * Operator approval mode for workspace mutations and shell commands

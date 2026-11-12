@@ -162,6 +162,9 @@ export interface PublicRuntimeRoleSettings {
 
 export type PublicRuntimeSettings = Record<"senior" | "junior", PublicRuntimeRoleSettings>;
 export type RuntimeSettingsSnapshot = Record<"senior" | "junior", RuntimeRoleSettings>;
+/** The dedicated helper route has the same fields but is not a protocol role. */
+export type PublicRuntimeSubagentSettings = PublicRuntimeRoleSettings;
+export type RuntimeSubagentSnapshot = RuntimeRoleSettings;
 
 const ROLE_FIELDS = ["provider", "model", "base_url", "api_key", "provider_ref", "effort"] as const;
 
@@ -247,6 +250,33 @@ function roleEnvPair(role: "senior" | "junior"): readonly [string, string] {
  * sent to a base_url that came from a different source. A dangling
  * `provider_ref` warns and falls back to the role manual fields.
  */
+function resolvePresetPair(
+  data: Partial<RuntimeRoleSettings>,
+  presets: ReadonlyArray<EndpointPreset>,
+  warnings: string[],
+  roleLabel: string,
+  fallbackLabel: string,
+): [string, string, string?, number?] {
+  const ref = data.provider_ref ?? "";
+  if (ref) {
+    const preset = presets.find((p) => p.name === ref);
+    if (preset) {
+      const window =
+        typeof preset.context_window === "number" &&
+        Number.isSafeInteger(preset.context_window) &&
+        preset.context_window > 0
+          ? preset.context_window
+          : undefined;
+      return [preset.base_url, preset.api_key, preset.kind, window];
+    }
+    warnings.push(
+      `provider_ref "${ref}" for the ${roleLabel} has no matching preset; ` +
+        `falling back to the ${fallbackLabel}`,
+    );
+  }
+  return [data.base_url ?? "", data.api_key ?? "", undefined];
+}
+
 function resolvePair(
   role: "senior" | "junior",
   snapshot: RuntimeSettingsSnapshot,
@@ -262,24 +292,7 @@ function resolvePair(
   const envKey = env[SHARED_ENV_PAIR[0][1]] ?? "";
   if (envBase || envKey) return [envBase, envKey, undefined];
   const roleData = snapshot[role] ?? ({} as RuntimeRoleSettings);
-  const ref = roleData.provider_ref ?? "";
-  if (ref) {
-    const preset = presets.find((p) => p.name === ref);
-    if (preset) {
-      const window =
-        typeof preset.context_window === "number" &&
-        Number.isSafeInteger(preset.context_window) &&
-        preset.context_window > 0
-          ? preset.context_window
-          : undefined;
-      return [preset.base_url, preset.api_key, preset.kind, window];
-    }
-    warnings.push(
-      `provider_ref "${ref}" for the ${role} role has no matching preset; ` +
-        "falling back to the role's manual fields",
-    );
-  }
-  return [roleData.base_url ?? "", roleData.api_key ?? "", undefined];
+  return resolvePresetPair(roleData, presets, warnings, `${role} role`, "role's manual fields");
 }
 
 /**
@@ -347,6 +360,43 @@ export function resolveRoleEndpoints(
 }
 
 /**
+ * Resolve the dedicated helper route. Unlike the two protocol roles it has no
+ * per-role env pair: a named preset (`provider_ref`) or the route's manual
+ * fields supply the connection, with the run-level provider/model fallbacks.
+ * Returns null when the operator never configured a route (no ref, base URL or
+ * model), so the harness keeps its existing `role` argument fallback.
+ */
+export function resolveSubagentEndpoint(
+  settings: Partial<RuntimeSubagentSnapshot> | undefined,
+  presets: ReadonlyArray<EndpointPreset>,
+  defaults: RoleEndpointDefaults = {},
+  warnings: string[] = [],
+): RoleEndpoint | null {
+  const data = settings ?? emptyRole();
+  const ref = data.provider_ref ?? "";
+  if (!ref && !data.base_url && !data.model) return null;
+  const [baseUrl, apiKey, kind, contextWindow] = resolvePresetPair(
+    data,
+    presets,
+    warnings,
+    "subagent route",
+    "route's manual fields",
+  );
+  const provider = data.provider || defaults.provider || "";
+  const model = data.model || "";
+  const effort = normalizeEffortValue(data.effort);
+  return {
+    provider,
+    baseUrl,
+    apiKey,
+    model,
+    ...(effort ? { effort } : {}),
+    ...(kind ? { kind } : {}),
+    ...(contextWindow !== undefined ? { contextWindow } : {}),
+  };
+}
+
+/**
  * The run-level context window implied by the resolved per-role presets, in
  * tokens.
  *
@@ -389,6 +439,8 @@ export function presetContextWindow(
 export class RuntimeSettings {
   private senior: RuntimeRoleSettings = emptyRole();
   private junior: RuntimeRoleSettings = emptyRole();
+  /** Dedicated read-only helper route; empty = the tool's role fallback. */
+  private subagent: RuntimeRoleSettings = emptyRole();
   private readonly store: SettingsStore | null;
 
   constructor(store: SettingsStore | null = null) {
@@ -403,20 +455,33 @@ export class RuntimeSettings {
           if (typeof value === "string" && value) this[role][field] = value;
         }
       }
+      const savedSubagent = store.readSubagent();
+      for (const field of ROLE_FIELDS) {
+        const value = savedSubagent[field];
+        if (typeof value === "string" && value) this.subagent[field] = value;
+      }
     }
   }
 
   /** Operator-facing view — no API key material, only whether one is set. */
   public(): PublicRuntimeSettings {
-    const view = (rs: RuntimeRoleSettings): PublicRuntimeRoleSettings => ({
+    return { senior: this.viewOf(this.senior), junior: this.viewOf(this.junior) };
+  }
+
+  /** Operator-facing view of the dedicated helper route. */
+  publicSubagent(): PublicRuntimeSubagentSettings {
+    return this.viewOf(this.subagent);
+  }
+
+  private viewOf(rs: RuntimeRoleSettings): PublicRuntimeRoleSettings {
+    return {
       provider: rs.provider || null,
       model: rs.model || null,
       base_url: rs.base_url || null,
       api_key_set: Boolean(rs.api_key),
       provider_ref: rs.provider_ref || null,
       effort: normalizeEffortValue(rs.effort),
-    });
-    return { senior: view(this.senior), junior: view(this.junior) };
+    };
   }
 
   /**
@@ -426,6 +491,11 @@ export class RuntimeSettings {
   snapshot(): RuntimeSettingsSnapshot {
     const copy = (rs: RuntimeRoleSettings): RuntimeRoleSettings => ({ ...rs });
     return { senior: copy(this.senior), junior: copy(this.junior) };
+  }
+
+  /** Full in-memory helper route **including api_key** — persistence only. */
+  snapshotSubagent(): RuntimeSubagentSnapshot {
+    return { ...this.subagent };
   }
 
   /**
@@ -438,25 +508,41 @@ export class RuntimeSettings {
       for (const role of ["senior", "junior"] as const) {
         const patch = data[role];
         if (!isRecord(patch)) continue;
-        for (const field of ROLE_FIELDS) {
-          const value = patch[field];
-          if (value === undefined || value === null) continue;
-          if (field === "provider" && !VALID_PROVIDERS.has(String(value))) {
-            throw new Error(`invalid provider: ${String(value)} (use openai|mock)`);
-          }
-          if (field === "effort") {
-            const effort = normalizeEffortValue(value);
-            if (String(value) !== "" && effort === null) {
-              throw new Error(
-                `invalid effort: ${String(value)} (use the model's reported level, or empty for the provider default)`,
-              );
-            }
-            this[role].effort = effort ?? "";
-            continue;
-          }
-          this[role][field] = String(value);
-        }
+        this.applyRoleFields(this[role], patch);
       }
+    }
+  }
+
+  /** Validate the helper patch without mutating any in-memory route. */
+  validateSubagentPatch(data: unknown): void {
+    if (!isRecord(data)) return;
+    this.applyRoleFields({ ...this.subagent }, data);
+  }
+
+  /** Patch the dedicated helper route in memory only (env overlay/test seam). */
+  applySubagentInMemory(data: unknown): void {
+    if (!isRecord(data)) return;
+    this.applyRoleFields(this.subagent, data);
+  }
+
+  private applyRoleFields(target: RuntimeRoleSettings, patch: Record<string, unknown>): void {
+    for (const field of ROLE_FIELDS) {
+      const value = patch[field];
+      if (value === undefined || value === null) continue;
+      if (field === "provider" && !VALID_PROVIDERS.has(String(value))) {
+        throw new Error(`invalid provider: ${String(value)} (use openai|mock)`);
+      }
+      if (field === "effort") {
+        const effort = normalizeEffortValue(value);
+        if (String(value) !== "" && effort === null) {
+          throw new Error(
+            `invalid effort: ${String(value)} (use the model's reported level, or empty for the provider default)`,
+          );
+        }
+        target.effort = effort ?? "";
+        continue;
+      }
+      target[field] = String(value);
     }
   }
 
@@ -465,6 +551,13 @@ export class RuntimeSettings {
     this.applyInMemory(data);
     this.store?.write(this.snapshot());
     return this.public();
+  }
+
+  /** Patch the dedicated helper route and persist it with the roles. */
+  updateSubagent(data: unknown): PublicRuntimeSubagentSettings {
+    this.applySubagentInMemory(data);
+    this.store?.write(this.snapshot(), undefined, undefined, this.snapshotSubagent());
+    return this.publicSubagent();
   }
 
   /**

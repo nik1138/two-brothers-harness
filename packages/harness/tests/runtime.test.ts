@@ -17,7 +17,14 @@ import { Action, Decision, type ApprovalRequest } from "../src/permissions.ts";
 import { DefaultSecretBox } from "../src/secretbox.ts";
 import { SettingsStore } from "../src/settings_store.ts";
 import { resolveConfig, type Config } from "../src/config.ts";
-import { ACTIVE_STATES, RunManager, RuntimeSettings, type RunJob, type RunJobResult } from "../src/runtime.ts";
+import {
+  ACTIVE_STATES,
+  resolveSubagentEndpoint,
+  RunManager,
+  RuntimeSettings,
+  type RunJob,
+  type RunJobResult,
+} from "../src/runtime.ts";
 import { RuntimeEventStore, RunApprovalBroker } from "../src/runevents.ts";
 
 // ---------------------------------------------------------------------------
@@ -772,6 +779,96 @@ test("effort accepts model tokens and rejects unsafe values", () => {
     () => settings.update({ senior: { effort: "high effort" } }),
     /invalid effort/,
   );
+});
+
+test("resolveSubagentEndpoint: absent, preset, manual and dangling routes", () => {
+  const presets = [
+    {
+      name: "acme",
+      base_url: "https://acme.test/v1",
+      api_key: "preset-key",
+      kind: "anthropic",
+      context_window: 200_000,
+    },
+  ];
+  assert.equal(resolveSubagentEndpoint({}, []), null);
+  assert.equal(resolveSubagentEndpoint({ provider: "openai" }, []), null);
+
+  const preset = resolveSubagentEndpoint(
+    { provider_ref: "acme", model: "helper-model", effort: "HIGH" },
+    presets,
+    { provider: "openai" },
+  );
+  assert.ok(preset);
+  assert.equal(preset.baseUrl, "https://acme.test/v1");
+  assert.equal(preset.apiKey, "preset-key");
+  assert.equal(preset.kind, "anthropic");
+  assert.equal(preset.contextWindow, 200_000);
+  assert.equal(preset.model, "helper-model");
+  assert.equal(preset.effort, "high");
+
+  const manual = resolveSubagentEndpoint(
+    { base_url: "http://127.0.0.1:9/v1", api_key: "manual-key", model: "m" },
+    presets,
+    { provider: "openai" },
+  );
+  assert.ok(manual);
+  assert.equal(manual.baseUrl, "http://127.0.0.1:9/v1");
+  assert.equal(manual.apiKey, "manual-key");
+  assert.equal(manual.kind, undefined);
+
+  const warnings: string[] = [];
+  const dangling = resolveSubagentEndpoint(
+    { provider_ref: "missing", base_url: "http://manual.test/v1", model: "m" },
+    presets,
+    { provider: "openai" },
+    warnings,
+  );
+  assert.ok(dangling);
+  assert.equal(dangling.baseUrl, "http://manual.test/v1");
+  assert.match(warnings[0] ?? "", /subagent route.*no matching preset/);
+});
+
+test("RuntimeSettings persists and masks the dedicated subagent route", () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const file = path.join(root, "settings.json");
+    const box = new DefaultSecretBox({ dpapi: null });
+    const store = new SettingsStore(file, box);
+    const settings = new RuntimeSettings(store);
+    const view = settings.updateSubagent({
+      provider_ref: "acme",
+      model: "helper-model",
+      effort: "HIGH",
+      api_key: "sub-secret",
+    });
+    assert.equal(view.provider_ref, "acme");
+    assert.equal(view.model, "helper-model");
+    assert.equal(view.effort, "high");
+    assert.equal(view.api_key_set, true);
+    assert.ok(!JSON.stringify(view).includes("sub-secret"));
+    assert.equal(settings.snapshotSubagent().api_key, "sub-secret");
+
+    const fresh = new RuntimeSettings(new SettingsStore(file, box));
+    assert.equal(fresh.publicSubagent().model, "helper-model");
+    assert.equal(fresh.publicSubagent().api_key_set, true);
+
+    // A role save must preserve the helper route.
+    fresh.update({ senior: { model: "senior-model" } });
+    assert.equal(new SettingsStore(file, box).readSubagent().model, "helper-model");
+    assert.equal(new RuntimeSettings(new SettingsStore(file, box)).publicSubagent().provider_ref, "acme");
+
+    assert.throws(
+      () => settings.updateSubagent({ effort: "high effort" }),
+      /invalid effort/,
+    );
+    assert.throws(
+      () => settings.updateSubagent({ provider: "bad" }),
+      /invalid provider/,
+    );
+  } finally {
+    cleanup();
+  }
 });
 
 test("RuntimeSettings hydrates from and writes through a SettingsStore", () => {

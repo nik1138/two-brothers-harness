@@ -345,10 +345,12 @@ import {
   TERMINAL_STATES,
   presetContextWindow,
   resolveRoleEndpoints,
+  resolveSubagentEndpoint,
   RunManager,
   RuntimeSettings,
   type LiveTokenHook,
   type PublicRuntimeSettings,
+  type RoleEndpoint,
   type RoleEndpoints,
   type RunCost,
   type RunJob,
@@ -1280,7 +1282,10 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     return items;
   }
 
-  function buildCfg(req: RunRequestData, warn = true): { cfg: Config; endpoints: RoleEndpoints } {
+  function buildCfg(
+    req: RunRequestData,
+    warn = true,
+  ): { cfg: Config; endpoints: RoleEndpoints; subagentEndpoint: RoleEndpoint | null } {
     const cfg = state.configFactory();
     // Run-level provider (flags/env) before role settings overlay it —
     // it is the fallback for roles that do not set their own provider.
@@ -1315,9 +1320,10 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     // only as the per-field fallback inside the harness/validation.
     // Presets are the seeded table with stored presets layered on top; each
     // key is resolved through `presetApiKey` so an env-backed seed works.
+    const presets = resolvablePresets();
     const endpoints = resolveRoleEndpoints(
       snapshot,
-      resolvablePresets(),
+      presets,
       process.env,
       { provider: baseProvider, seniorModel: cfg.seniorModel, juniorModel: cfg.juniorModel },
       req.provider === undefined,
@@ -1325,7 +1331,20 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     for (const warning of endpoints.warnings) {
       if (warn) console.warn(`[two-brothers] ${warning}`);
     }
-    return { cfg, endpoints };
+    // Dedicated helper route: no per-role env pair; a named preset or the
+    // route's manual fields win, with the run-level provider/model fallbacks.
+    // An absent route leaves the harness's `role` argument fallback intact.
+    const subagentWarnings: string[] = [];
+    const subagentEndpoint = resolveSubagentEndpoint(
+      state.settings.snapshotSubagent(),
+      presets,
+      { provider: baseProvider, seniorModel: cfg.seniorModel, juniorModel: cfg.juniorModel },
+      subagentWarnings,
+    );
+    for (const warning of subagentWarnings) {
+      if (warn) console.warn(`[two-brothers] ${warning}`);
+    }
+    return { cfg, endpoints, subagentEndpoint };
   }
 
   /**
@@ -1694,6 +1713,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     steering?: () => string[],
     runIdOf?: () => string | null,
     projectPath?: string | null,
+    subagentEndpoint?: RoleEndpoint | null,
   ): Promise<HarnessResult> {
     const store = materializeStore(name, projectPath ?? workspace?.root ?? null);
     // OpenCode routes each conversation by this stable id (x-opencode-session);
@@ -1820,7 +1840,11 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       ...(repeatToolGuard !== undefined ? { repeatToolGuard } : {}),
       ...(projectInstructions !== undefined ? { projectInstructions } : {}),
       spill: { root: spillRoot },
-      subagents: { store: state.subagents, parentSession: name },
+      subagents: {
+        store: state.subagents,
+        parentSession: name,
+        ...(subagentEndpoint ? { endpoint: subagentEndpoint } : {}),
+      },
       ...(toolScopes ? { toolScopes } : {}),
       ...(hooks ? { hooks } : {}),
       // Mid-run operator steering (wave 23): the run job hands the record's
@@ -1893,7 +1917,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     // at start time; the broker binds the per-run emit hook and cancel
     // signal once the worker starts it.
     return async (signal, onEnvelope, onToken) => {
-      const { cfg, endpoints } = buildCfg(req);
+      const { cfg, endpoints, subagentEndpoint } = buildCfg(req);
       // A queued run may start after the operator granted a session allow to an
       // earlier run on the same session: refresh the broker from the store.
       broker.seedSessionAllows(state.settingsStore.readSessionApprovals(name));
@@ -1923,6 +1947,8 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         req.stream_tokens === true ? onToken : undefined,
         steering,
         runIdOf,
+        undefined,
+        subagentEndpoint,
       );
       // Workspace-instruction skips (oversize/binary/unreadable) are fail-soft
       // but must not be silent on the serve path; the TUI already prints them.
@@ -2399,6 +2425,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
           runReq.workspace_id
             ? (state.workspaces.get(runReq.workspace_id)?.path ?? null)
             : null,
+          cfg.subagentEndpoint,
         );
       } catch (exc) {
         if (exc instanceof RunConfigError) throw new HttpError(400, exc.message);
@@ -2865,6 +2892,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       // each budget's stored/effective value and its source.
       return {
         ...state.settings.public(),
+        subagent: state.settings.publicSubagent(),
         plugins: [...state.pluginSelection],
         approval_policy: approvalPolicyView(),
         compaction: compactionView(),
@@ -2886,7 +2914,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       // update, Python persisted only at the end of the handler). Refs may
       // point at a stored preset or a seeded one (seeds are always known).
       const knownPresets = new Set(mergedPresets().map((p) => p.name));
-      for (const role of ROLES) {
+      for (const role of [...ROLES, "subagent"] as const) {
         const patch = body[role];
         if (!isRecord(patch)) continue;
         const ref = patch.provider_ref;
@@ -2939,7 +2967,13 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       }
       let updated: PublicRuntimeSettings;
       try {
+        if (body.subagent !== undefined) {
+          // Validate the provider/effort fields on a copy before any mutation;
+          // the route's role save below must not half-apply a bad helper route.
+          state.settings.validateSubagentPatch(body.subagent);
+        }
         updated = state.settings.update(body);
+        if (body.subagent !== undefined) state.settings.applySubagentInMemory(body.subagent);
       } catch (exc) {
         if (exc instanceof SettingsWriteRefusedError) throw exc;
         throw new HttpError(400, errorDetail(exc));
@@ -2962,7 +2996,12 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       // Persist the plugin selection; role settings were already persisted by
       // RuntimeSettings.update (env-pinned fields stripped by the store).
       // Writing the list shape also drops any legacy per-role keys on disk.
-      state.settingsStore.write(state.settings.snapshot(), savedPluginSelection);
+      state.settingsStore.write(
+        state.settings.snapshot(),
+        savedPluginSelection,
+        undefined,
+        state.settings.snapshotSubagent(),
+      );
       if (approvalPatch !== null) {
         // Persist AFTER the role/plugin save: that write preserves an existing
         // `approval_policy` section, and the policy write then reads it back
@@ -2989,6 +3028,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       }
       return {
         ...updated,
+        subagent: state.settings.publicSubagent(),
         plugins: [...state.pluginSelection],
         approval_policy: approvalPolicyView(),
         compaction: compactionView(),
@@ -3236,7 +3276,18 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
           state.settings.update({ [role]: { provider_ref: "" } });
         }
       }
-      state.settingsStore.write(state.settings.snapshot(), undefined, remaining);
+      if (
+        (state.settings.snapshotSubagent().provider_ref ?? "").toLowerCase() ===
+        ctx.params.name.toLowerCase()
+      ) {
+        state.settings.applySubagentInMemory({ provider_ref: "" });
+      }
+      state.settingsStore.write(
+        state.settings.snapshot(),
+        undefined,
+        remaining,
+        state.settings.snapshotSubagent(),
+      );
       return { removed: ctx.params.name };
     }),
   );

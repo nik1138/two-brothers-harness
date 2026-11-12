@@ -1681,7 +1681,16 @@ child cannot receive it either (no recursion).
 - **Arguments:** `{"task": "self-contained brief", "label?": "short tree
   label", "role?": "senior" | "junior"}`. `task` is required and capped at
   4 000 chars; the label defaults to the task's first line; `role` defaults to
-  `junior` (cheaper) and `role: "senior"` uses the stronger Senior model.
+  `junior` (cheaper) and `role: "senior"` uses the stronger Senior model. A
+  dedicated helper route configured in Settings always wins over `role`.
+- **Settings route:** Settings → **Models & roles** has a third **Subagent**
+  card. It accepts the same provider preset / manual connection, model, base
+  URL, API key and model-declared effort as a role, persisted in the top-level
+  `subagent` section of `sessions/settings.json` (key sealed at rest) and
+  served additively as `subagent` by `GET/PUT /api/settings`. Leaving it empty
+  keeps the `role` fallback. Deleting a provider clears a matching helper
+  `provider_ref`; role/provider saves preserve the helper section. The child
+  still has only the read-only tool set regardless of the route's model.
 - **Limits:** six child tool-loop steps, eight children per parent run, four
   active children, and a 12 000-char report cap. Exceeding a limit is a normal
   JSON tool error, never a parent crash.
@@ -1706,8 +1715,9 @@ child cannot receive it either (no recursion).
 - **Not in this slice:** mutating child tools (no child approval routing yet),
   follow-up messages or interruption, a TUI tree, async completion/wake (the
   parent waits for the bounded report), forked-context children, deeper
-  nesting, per-child model/effort selection and cost/cache roll-up into the
-  parent footer. `run`/`chat`/`tui` do not expose the tool in this slice.
+  nesting, per-call model/effort overrides (the operator's Settings route
+  already fixes the child route) and cost/cache roll-up into the parent footer.
+  `run`/`chat`/`tui` do not expose the tool in this slice.
 
 ## Workspace instructions (TS package)
 

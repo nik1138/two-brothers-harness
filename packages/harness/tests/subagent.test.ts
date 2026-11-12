@@ -364,6 +364,46 @@ test("the Senior's subagent tool runs one isolated read-only child and reports i
   }
 });
 
+test("a configured helper route sets the child model independently of the role", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const store = new SubagentStore(path.join(root, "subagents"));
+    const events: RuntimeEvent[] = [];
+    const senior = new RecordingMock([
+      { tool: SUBAGENT_TOOL_NAME, args: { task: "Check the configured helper." } },
+    ]);
+    const harness = new TwoBrothersHarness(resolveConfig({ provider: "mock" }), {
+      senior,
+      junior: new MockProvider(),
+      subagents: {
+        store,
+        parentSession: "parent.jsonl",
+        endpoint: {
+          provider: "mock",
+          baseUrl: "http://127.0.0.1:9/v1",
+          apiKey: "",
+          model: "helper-model",
+          kind: "openai-compatible",
+        },
+      },
+      onEvent: (event) => events.push(event),
+    });
+    const result = await harness.run("Plan a migration", new SharedContext());
+    assert.equal(result.cancelled, false);
+    const started = events.find((event) => event.type === "subagent_started") as
+      | { model?: string; role?: string }
+      | undefined;
+    assert.equal(started?.model, "helper-model");
+    assert.equal(started?.role, "junior");
+    const rows = store.list("parent.jsonl");
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.model, "helper-model");
+    assert.equal(rows[0]?.status, "completed");
+  } finally {
+    cleanup();
+  }
+});
+
 test("the subagent tool validates the task and enforces the per-run budget", async () => {
   const { root, cleanup } = tmpdir();
   try {

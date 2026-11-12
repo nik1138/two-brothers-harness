@@ -4578,6 +4578,86 @@ async function scenarioSettingsAdvanced(runner) {
   }
 }
 
+// -- scenario: dedicated helper-subagent route in Settings ----------------------------
+
+async function scenarioSettingsSubagent(runner) {
+  const be = await startBackend({ kind: 'mock' })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  const puts = []
+  page.on('request', (request) => {
+    if (request.method() === 'PUT' && new URL(request.url()).pathname === '/api/settings') {
+      puts.push(request.postData() ?? '')
+    }
+  })
+  const getSettings = async () => {
+    const res = await fetch(`${be.base}/api/settings`)
+    assert.equal(res.status, 200, `GET /api/settings -> HTTP ${res.status}`)
+    return res.json()
+  }
+  try {
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await page.locator('.sidebar-footer .footer-action').click()
+    const dialog = page.locator('[role="dialog"][aria-labelledby="settings-dialog-title"]')
+    await dialog.waitFor({ state: 'visible' })
+    // Settings opens on Models & roles by default; the helper route is the
+    // third card after Senior and Junior.
+    const card = dialog.locator('.role-card--subagent')
+    await card.waitFor({ state: 'visible' })
+    assert.match(await card.innerText(), /Subagent/)
+    assert.match(await card.innerText(), /Read-only helper/)
+    const model = card.locator('input[placeholder="e.g. spark-x2.6-4b@q4_k_m"]')
+    const base = card.locator('input[placeholder="http://127.0.0.1:1234/v1"]')
+    const key = card.locator('input[type="password"]')
+    await model.fill('helper-e2e-model')
+    await base.fill('http://127.0.0.1:9/v1')
+    await key.fill('helper-e2e-key')
+    await dialog
+      .locator('.settings-footer-actions button.n-button--primary-type')
+      .first()
+      .click()
+    await dialog.waitFor({ state: 'hidden', timeout: 15000 })
+
+    const saved = await getSettings()
+    assert.equal(saved.subagent.provider_ref, null)
+    assert.equal(saved.subagent.model, 'helper-e2e-model')
+    assert.equal(saved.subagent.base_url, 'http://127.0.0.1:9/v1')
+    assert.equal(saved.subagent.api_key_set, true)
+    assert.ok(puts.some((body) => body.includes('"subagent"')), 'the save carries the helper section')
+    assert.ok(puts.some((body) => body.includes('helper-e2e-model')))
+    const onDisk = JSON.parse(fs.readFileSync(path.join(be.dir, 'settings.json'), 'utf-8'))
+    assert.equal(onDisk.subagent.model, 'helper-e2e-model')
+    assert.ok(!onDisk.subagent.api_key.includes('helper-e2e-key'), 'the helper key is sealed')
+
+    // Reload: the persisted route seeds the card, and the key stays masked.
+    await page.reload()
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await page.locator('.sidebar-footer .footer-action').click()
+    await dialog.waitFor({ state: 'visible' })
+    const reopened = dialog.locator('.role-card--subagent')
+    await reopened.waitFor({ state: 'visible' })
+    assert.equal(
+      await reopened.locator('input[placeholder="e.g. spark-x2.6-4b@q4_k_m"]').inputValue(),
+      'helper-e2e-model',
+    )
+    assert.equal(
+      await reopened.locator('input[placeholder="http://127.0.0.1:1234/v1"]').inputValue(),
+      'http://127.0.0.1:9/v1',
+    )
+    assert.match(
+      await reopened.locator('input[type="password"]').getAttribute('placeholder'),
+      /set — type a new value to replace/,
+    )
+
+    consoleGuard.assertClean()
+    runner.pass('settings-subagent')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(be.dir)
+  }
+}
+
 // -- scenario: real models (opt-in) ---------------------------------------------------
 
 async function scenarioReal(runner) {
@@ -4894,6 +4974,13 @@ async function main() {
         run: () => (
           (currentRunner = makeRunner('settings-advanced')),
           scenarioSettingsAdvanced(currentRunner)
+        ),
+      },
+      {
+        label: 'settings-subagent',
+        run: () => (
+          (currentRunner = makeRunner('settings-subagent')),
+          scenarioSettingsSubagent(currentRunner)
         ),
       },
     ]

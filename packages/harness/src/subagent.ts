@@ -120,6 +120,17 @@ export interface SubagentDetail extends SubagentInfo {
 /** A child row without its transcript (`GET /api/sessions/{name}/subagents`). */
 export type SubagentSummary = Omit<SubagentDetail, "transcript">;
 
+/** A resolved dedicated helper route (same fields as a role endpoint). */
+export interface SubagentEndpoint {
+  provider: string;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  kind?: string;
+  contextWindow?: number;
+  effort?: string;
+}
+
 /** Settings the parent harness needs to offer the tool. */
 export interface SubagentSettings {
   store: SubagentStore;
@@ -127,6 +138,8 @@ export interface SubagentSettings {
   parentSession: string;
   maxPerRun?: number;
   maxActive?: number;
+  /** Configured in Settings; when present it wins over the tool's role. */
+  endpoint?: SubagentEndpoint;
   /** Tests/integrations can inject a fresh provider per child. */
   providerFactory?: (role: SubagentRole) => Provider;
 }
@@ -665,6 +678,7 @@ export const SUBAGENT_TOOL_DESCRIPTION = [
   "Spawn one isolated read-only helper for a focused side task.",
   "The helper does not see this conversation; it gets only your task brief and read-only workspace tools, then returns a bounded report.",
   "Use it for parallel discovery, a second opinion on a file, or reading a large area without polluting this context.",
+  "The operator may configure a dedicated helper route in Settings; when set, it wins over the `role` argument.",
   "It cannot edit files, run shell commands, or spawn more subagents. Do not use it as a replacement for the Junior.",
 ].join(" ");
 
@@ -684,7 +698,7 @@ export const SUBAGENT_TOOL_PARAMETERS: Record<string, unknown> = {
       type: "string",
       enum: ["senior", "junior"],
       description:
-        "Model to use for the helper. Default `junior` is cheaper; `senior` is stronger.",
+        "Fallback model when no dedicated helper route is configured in Settings. A configured route always wins.",
     },
   },
   required: ["task"],
