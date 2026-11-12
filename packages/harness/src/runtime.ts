@@ -37,6 +37,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { Config } from "./config.ts";
+import { runFailureUsage } from "./harness.ts";
 import { emptyUsage, ProviderAbortError, type UsageTotals } from "./provider.ts";
 import type { ApprovalBroker } from "./permissions.ts";
 import type { RunApprovalBroker, RuntimeEvent } from "./runevents.ts";
@@ -994,6 +995,15 @@ export class RunManager {
       } else {
         record.status = "failed";
         record.error = String(exc);
+        // A harness failure carries the merged usage of the provider calls
+        // that already succeeded (additive metadata on the thrown error). Fold
+        // it onto the failed record BEFORE the terminal events, so
+        // `run_error`/`run_end`, `public()` and the sidecar-rebuilt record all
+        // report real spend/cache evidence instead of zeros. A failure with no
+        // usage keeps the record's existing counters (zero, or the last live
+        // `usage` frame) — nothing is invented.
+        const failureUsage = runFailureUsage(exc);
+        if (failureUsage !== undefined) record.usage = failureUsage;
         this._emit(record, { type: "run_error", message: String(exc) });
       }
       this._emit(record, { type: "run_end", status: record.status, usage: { ...record.usage } });

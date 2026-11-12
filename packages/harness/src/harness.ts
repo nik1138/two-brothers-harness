@@ -996,6 +996,60 @@ function usageOf(provider: Provider): UsageTotals {
 }
 
 /**
+ * Additive metadata on the error thrown by {@link TwoBrothersHarness.run} when
+ * a non-abort failure ends the run after some provider calls already
+ * succeeded. The property carries the merged usage snapshot taken at the
+ * failure boundary, so a `RunManager` can keep the real spend/cache evidence
+ * on a failed run instead of reporting zeros.
+ *
+ * It is attached as a NON-ENUMERABLE own property: the error's identity,
+ * `message`, `String(error)` and JSON serialization stay unchanged, and
+ * consumers that do not know the field ignore it. The abort/cancel path still
+ * returns a `HarnessResult` with usage and never becomes a thrown error.
+ */
+export interface HarnessRunFailure extends Error {
+  /** Merged provider usage recorded before the run failed. */
+  readonly usage: UsageTotals;
+}
+
+/**
+ * Attach the run's merged usage to a non-abort failure, fail-soft. Errors are
+ * normally mutable objects; a frozen/non-extensible one keeps its identity and
+ * message (the attachment is additive and never replaces the real failure).
+ */
+export function attachRunFailureUsage(error: unknown, usage: UsageTotals): void {
+  if (error === null || typeof error !== "object") return;
+  try {
+    Object.defineProperty(error, "usage", {
+      value: { ...usage },
+      configurable: true,
+      enumerable: false,
+      writable: true,
+    });
+  } catch {
+    // preserving the original error beats duplicating it for metadata
+  }
+}
+
+/**
+ * Read the usage attached by {@link attachRunFailureUsage}, if present and
+ * shaped like usage. Returns a normalized copy (every counter present, missing
+ * ones zero) or undefined when the error carries no usable usage — a plain
+ * failure before any provider call is never turned into invented numbers.
+ */
+export function runFailureUsage(error: unknown): UsageTotals | undefined {
+  if (error === null || typeof error !== "object") return undefined;
+  try {
+    const usage = (error as { usage?: unknown }).usage;
+    if (usage === null || typeof usage !== "object" || Array.isArray(usage)) return undefined;
+    return mergeUsage(usage as Partial<UsageTotals>);
+  } catch {
+    // a hostile/throwing getter must never replace the real failure
+    return undefined;
+  }
+}
+
+/**
  * Map a runtime `tool_completed` status onto the stream's three-way status.
  * Tools may report arbitrary strings through `compactToolResult`; only the
  * `blocked` (plugin deny) and `ok` cases are carried verbatim, everything
@@ -2574,6 +2628,12 @@ export class TwoBrothersHarness {
    * `failed` (any other thrown error). The in-process stream
    * (`options.onStreamEvent`) mirrors the same lifecycle with `run_status`
    * and, on completion, one terminal `result` record.
+   *
+   * A non-abort failure is rethrown unchanged (same identity and message) with
+   * the run's merged usage attached as a non-enumerable `usage` property
+   * ({@link HarnessRunFailure}), so a caller that records failed runs does not
+   * lose the spend of the provider calls that already succeeded. The abort
+   * path stays a returned `cancelled` result and never throws.
    */
   async run(task: string, context?: SharedContext): Promise<HarnessResult> {
     this.checkCancel(); // stopped before the start: raise, write nothing
@@ -2705,6 +2765,15 @@ export class TwoBrothersHarness {
         };
       }
       status = "failed";
+      // Keep the real spend/cache evidence of the provider calls that already
+      // succeeded: the runtime reads this off the error before it writes
+      // `run_error`/`run_end` and the failed run record. Purely additive; the
+      // error's identity and message are unchanged.
+      try {
+        attachRunFailureUsage(err, this.usageSnapshot());
+      } catch {
+        // a broken usage tracker never replaces the real run failure
+      }
       this.emitStream({ type: "run_status", status: "failed", at: nowIso() });
       throw err;
     } finally {

@@ -16,7 +16,9 @@ import { SharedContext, type ChatMessage, type ToolCall } from "../src/context.t
 import {
   SENIOR_VERIFY_TOOL_NAMES,
   TwoBrothersHarness,
+  runFailureUsage,
   type HarnessResult,
+  type HarnessRunFailure,
 } from "../src/harness.ts";
 import { CLIP_ARG_CHARS, CLIP_EVIDENCE_CHARS, MAX_EVIDENCE_ENTRIES } from "../src/runevents.ts";
 import {
@@ -26,6 +28,7 @@ import {
   type Tool,
   type ToolChatOptions,
   type ToolChatResponse,
+  type UsageTotals,
 } from "../src/provider.ts";
 import { SessionStore } from "../src/session.ts";
 import { TODO_TOOL_NAME } from "../src/todos.ts";
@@ -67,6 +70,25 @@ class ReviseProvider implements Provider {
       return '{"verdict": "revise", "notes": "needs rework", "points": ["details"]}';
     }
     return new MockProvider().chat(messages, responseKind);
+  }
+}
+
+/**
+ * Succeeds once with the deterministic mock usage, then throws on the next
+ * call — the partial-usage failure a real provider mid-run produces.
+ */
+class FailAfterOneCallProvider implements Provider {
+  private readonly inner = new MockProvider();
+  private calls = 0;
+
+  async chat(messages: ChatMessage[], responseKind = "message"): Promise<string> {
+    this.calls += 1;
+    if (this.calls > 1) throw new Error("provider failed after one call");
+    return this.inner.chat(messages, responseKind);
+  }
+
+  usageSnapshot(): UsageTotals {
+    return this.inner.usageSnapshot();
   }
 }
 
@@ -475,6 +497,61 @@ test("custom providers without usage tracking report zeros", async () => {
     cached_tokens: 0,
     cache_write_tokens: 0,
   });
+});
+
+test("a failed run's error carries the usage merged from successful calls", async () => {
+  const harness = new TwoBrothersHarness(cfg({ mode: "consult" }), {
+    senior: new FailAfterOneCallProvider(),
+  });
+  await assert.rejects(
+    () => harness.run("fail after one successful call"),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      // the real failure is not swallowed or reworded
+      assert.equal(error.message, "provider failed after one call");
+      assert.ok("usage" in error, "the failed error carries usage");
+      // additive: the property stays out of enumeration/JSON
+      assert.equal(Object.prototype.propertyIsEnumerable.call(error, "usage"), false);
+      const failure = error as HarnessRunFailure;
+      // the first senior call (10/5) plus the junior's one call (10/5); the
+      // failing senior call added nothing.
+      assert.deepEqual(failure.usage, {
+        model_calls: 2,
+        input_tokens: 20,
+        output_tokens: 10,
+        cached_tokens: 0,
+        cache_write_tokens: 0,
+      });
+      assert.deepEqual(runFailureUsage(error), failure.usage);
+      return true;
+    },
+  );
+});
+
+test("a run failing before any provider call attaches zero usage", async () => {
+  const failing: Provider = {
+    async chat(): Promise<string> {
+      throw new Error("no successful calls");
+    },
+  };
+  const harness = new TwoBrothersHarness(cfg({ mode: "consult" }), { senior: failing });
+  await assert.rejects(
+    () => harness.run("fail immediately"),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, "no successful calls");
+      const failure = error as HarnessRunFailure;
+      // tracked providers report zeros; nothing is invented
+      assert.deepEqual(failure.usage, {
+        model_calls: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cached_tokens: 0,
+        cache_write_tokens: 0,
+      });
+      return true;
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------
