@@ -229,6 +229,34 @@ test("add_tool options are validated (PluginError on bad values)", () => {
   assert.equal(ctx._tools.length, 0);
 });
 
+test("add_tool validates the tool name grammar (^[a-z0-9_-]{1,64}$)", () => {
+  const ctx = new PluginContext("unit");
+  // the 64-char boundary is valid and stored verbatim
+  const ok64 = "a".repeat(64);
+  ctx.add_tool(ok64, () => "boundary");
+  assert.equal(ctx._tools[0].name, ok64);
+  assert.equal(ctx._tools.length, 1);
+  // 65 chars is one too many
+  const tooLong = "b".repeat(65);
+  assert.throws(
+    () => ctx.add_tool(tooLong, () => ""),
+    (exc: unknown) =>
+      exc instanceof PluginError && exc.message.includes("must match ^[a-z0-9_-]{1,64}$"),
+  );
+  // spaces and other grammar violations are rejected the same way
+  for (const bad of ["has space", "CamelCase", "with.dot", "slash/name", "under score_x"]) {
+    assert.throws(
+      () => ctx.add_tool(bad, () => ""),
+      (exc: unknown) =>
+        exc instanceof PluginError && exc.message.includes("^[a-z0-9_-]{1,64}$"),
+      `expected rejection for ${JSON.stringify(bad)}`,
+    );
+  }
+  // the rejections above registered nothing; dashes/underscores/digits are fine
+  ctx.add_tool("a-z_0-9", () => "");
+  assert.deepEqual(ctx._tools.map((tool) => tool.name), [ok64, "a-z_0-9"]);
+});
+
 test("the legacy positional role maps onto scope and leaves a deprecation note", () => {
   const ctx = new PluginContext("unit");
   ctx.add_tool("legacy", () => "", "", {}, "senior");
@@ -815,6 +843,84 @@ test("a registration failure for a run is reported, not thrown", async () => {
         (entry) => entry.plugin === "flaky" && /registration failed for a run/.test(entry.message),
       ),
     );
+  } finally {
+    dir.cleanup();
+    tmp.cleanup();
+  }
+});
+
+test("bindingsFor: a tool name claimed by two plugins keeps the first registration only", async () => {
+  const alpha = [
+    "export function register(ctx) {",
+    '  ctx.add_tool("shared_tool", () => "alpha won", { scope: "junior" });',
+    '  ctx.add_tool("alpha_only", () => "alpha only");',
+    "}",
+    "",
+  ].join("\n");
+  const beta = [
+    "export function register(ctx) {",
+    '  ctx.add_tool("shared_tool", () => "beta lost");',
+    '  ctx.add_tool("beta_only", () => "beta only");',
+    "}",
+    "",
+  ].join("\n");
+  const dir = makePluginsDir({ "alpha.ts": alpha, "beta.ts": beta });
+  const tmp = tmpdir("tb-plugincore-ws-");
+  try {
+    const manager = await PluginManager.create(dir.root);
+    assert.deepEqual(manager.errors, []);
+    const bindings = await manager.bindingsFor(["alpha", "beta"], workspaceWith(tmp.root));
+    // one effective tool under the colliding name, the first registration wins
+    const names = bindings.tools.map((tool) => tool.name);
+    assert.deepEqual(names, ["shared_tool", "alpha_only", "beta_only"]);
+    assert.equal(names.filter((name) => name === "shared_tool").length, 1);
+    const winner = bindings.tools[names.indexOf("shared_tool")];
+    assert.equal(await winner.execute({}), "alpha won");
+    // the losing plugin's non-colliding tool still registers
+    assert.equal(
+      await bindings.tools[names.indexOf("beta_only")].execute({}),
+      "beta only",
+    );
+    // the winner's declared scope is preserved exactly once
+    assert.deepEqual(bindings.toolsByScope.junior.map((tool) => tool.name), ["shared_tool"]);
+    assert.deepEqual(bindings.toolsByScope.shared.map((tool) => tool.name), [
+      "alpha_only",
+      "beta_only",
+    ]);
+    assert.deepEqual(bindings.toolsByScope.senior, []);
+    // the collision is surfaced through the run diagnostics with plugin identity
+    const collision = bindings.diagnostics.filter((entry) => /already registered by plugin/.test(entry.message));
+    assert.equal(collision.length, 1);
+    assert.equal(collision[0].plugin, "beta");
+    assert.match(collision[0].message, /"alpha"/);
+    assert.match(collision[0].message, /"shared_tool"/);
+    assert.match(collision[0].message, /first loaded registration wins/);
+    // activation order decides: beta first, beta wins
+    const reversed = await manager.bindingsFor(["beta", "alpha"], workspaceWith(tmp.root));
+    const reversedNames = reversed.tools.map((tool) => tool.name);
+    const reversedWinner = reversed.tools[reversedNames.indexOf("shared_tool")];
+    assert.equal(await reversedWinner.execute({}), "beta lost");
+    assert.ok(
+      reversed.diagnostics.some(
+        (entry) => entry.plugin === "alpha" && /already registered by plugin "beta"/.test(entry.message),
+      ),
+    );
+  } finally {
+    dir.cleanup();
+    tmp.cleanup();
+  }
+});
+
+test("bindingsFor: a plugin never collides with itself across repeated activation", async () => {
+  const dir = makePluginsDir({ "plain.ts": PLAIN_PLUGIN });
+  const tmp = tmpdir("tb-plugincore-ws-");
+  try {
+    const manager = await PluginManager.create(dir.root);
+    // a duplicated settings entry re-registers the same plugin; its tool is
+    // not a cross-plugin duplicate, so it is not skipped or diagnosed
+    const bindings = await manager.bindingsFor(["plain", "plain"], workspaceWith(tmp.root));
+    assert.deepEqual(bindings.tools.map((tool) => tool.name), ["plain", "plain"]);
+    assert.deepEqual(bindings.diagnostics, []);
   } finally {
     dir.cleanup();
     tmp.cleanup();

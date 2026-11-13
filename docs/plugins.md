@@ -36,8 +36,10 @@ export function register(ctx: PluginContext): void { ... }
 
 `PluginContext` (exported by `src/plugins.ts`) offers:
 
-- `ctx.add_tool(name, handler, options?)` — register one tool. The options
-  form is:
+- `ctx.add_tool(name, handler, options?)` — register one tool. The tool name
+  must match `^[a-z0-9_-]{1,64}$`; anything else throws a `PluginError` with a
+  bounded message at registration, and the fail-soft loader skips the plugin
+  (the error lands in `errors[]`). The options form is:
   - `description` — model-facing description (`""` keeps the default).
   - `parameters` — the tool's argument schema (the JSON-Schema subset from
     `src/toolschema.ts`). Declaring it also **turns on dispatch-time
@@ -117,6 +119,13 @@ Loading rules:
   registration (built-ins win — the plugin is skipped and listed in
   `errors[]`); the check also runs at run time against the live workspace
   tool set, where the colliding tool is skipped.
+- **Cross-plugin collisions resolve deterministically, first wins.** When two
+  active plugins register the same tool name, the first loaded registration
+  (activation order) keeps the name and the later duplicate is skipped for
+  that run — its plugin's other tools still register. The skip is surfaced
+  through the run diagnostics (`bindingsFor(...).diagnostics`) and the server
+  log, naming both plugins. Within one plugin, duplicate tool names fail the
+  load as before.
 - No new runtime dependencies: a plugin may use only Node's standard library
   **and** the packages the harness already pins (e.g. `zod`). There is no
   plugin-level dependency installation.
@@ -361,8 +370,9 @@ export function register(ctx: PluginContext): void {
 }
 ```
 
-The repo's `plugins/notes.mts` remains the minimal v1-style example (legacy
-positional call shape, shared scope).
+The repo's `plugins/notes.mts` is the minimal shipped example: the options
+call shape with an explicit `scope: "junior"` (no options, hooks, or MCP
+servers — just the scoped tool above).
 
 ## Divergences from the original prototype's plugin contract
 

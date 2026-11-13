@@ -59,8 +59,12 @@
  * Loading is **fail-soft**: a plugin that fails to import or register is
  * skipped, its error is logged and recorded in `errors` (surfaced through
  * `GET /api/plugins`), and never breaks server startup or a run. Tool names
- * colliding with the built-in workspace tools are rejected at registration —
- * built-ins always win.
+ * must match `^[a-z0-9_-]{1,64}$` (`add_tool` throws a `PluginError` —
+ * bounded text — otherwise); names colliding with the built-in workspace
+ * tools are rejected at registration — built-ins always win. A tool name
+ * claimed by two plugins resolves per run in `bindingsFor`: the first
+ * loaded registration wins, later duplicates are skipped with a diagnostic
+ * naming both plugins (within one plugin, duplicate names fail the load).
  *
  * The manager is created once at server startup (and reloaded after a
  * settings change carrying a `plugins` section, per the design doc). Importing
@@ -177,6 +181,8 @@ export const BUILTIN_TOOL_NAMES: ReadonlySet<string> = new Set([
 ]);
 
 const PLUGIN_FILE_RE = /^[a-z0-9_]+\.(?:ts|mts|mjs)$/;
+/** Tool-name grammar enforced by `add_tool` (same alphabet as MCP server names). */
+const TOOL_NAME_RE = /^[a-z0-9_-]{1,64}$/;
 const ROLES = ["senior", "junior"] as const;
 type Role = (typeof ROLES)[number];
 
@@ -559,7 +565,9 @@ export class PluginContext {
   /**
    * Record one tool.
    *
-   * Preferred form: `add_tool(name, execute, { description, parameters,
+   * The name must match `^[a-z0-9_-]{1,64}$`; anything else throws a
+   * `PluginError` (the fail-soft loader then skips the plugin). Preferred
+   * form: `add_tool(name, execute, { description, parameters,
    * scope, timeoutMs })`. The positional Python-parity form
    * `add_tool(name, handler, description?, paramsSchema?, role?)` still works;
    * a positional `role` is mapped onto `scope` and produces a deprecation note
@@ -572,8 +580,13 @@ export class PluginContext {
     paramsSchema?: Record<string, unknown> | null,
     role?: string,
   ): void {
-    if (typeof name !== "string" || !name.trim()) {
+    if (typeof name !== "string" || name.trim() === "") {
       throw new PluginError("tool name must be a non-empty string");
+    }
+    if (!TOOL_NAME_RE.test(name)) {
+      throw new PluginError(
+        `tool name ${shortValue(name)} must match ^[a-z0-9_-]{1,64}$`,
+      );
     }
     if (typeof handler !== "function") {
       throw new PluginError(`handler for ${JSON.stringify(name)} is not callable`);
@@ -839,6 +852,15 @@ export function asHarnessTool(tool: RegisteredTool): Tool {
 
 function formatError(exc: unknown): string {
   return exc instanceof Error ? `${exc.name}: ${exc.message}` : String(exc);
+}
+
+/**
+ * One value rendered for an error/diagnostic line, capped so a hostile
+ * plugin-supplied string cannot blow up a bounded message.
+ */
+function shortValue(value: unknown, max = 80): string {
+  const text = typeof value === "string" ? JSON.stringify(value) : String(value);
+  return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
 function isModuleNamespace(value: unknown): value is Record<string, unknown> {
@@ -1274,6 +1296,13 @@ export class PluginManager {
       }
     }
     const settingsOptions = optionsByName(this.settings);
+    // Tool name -> plugin that claimed it first this run. Cross-plugin
+    // collisions resolve deterministically: built-ins always win (checked per
+    // tool below), then the first loaded registration wins; later duplicates
+    // are skipped with a diagnostic naming both plugins. Same-name entries of
+    // one plugin are already rejected at load (registerModule), so a plugin
+    // never collides with itself here.
+    const claimedBy = new Map<string, string>();
     for (const entry of normalizePluginSettings(active)) {
       const loaded = this.plugins.get(entry.path) ?? this.plugins.get(pluginNameOf(entry.path));
       if (loaded === undefined) continue;
@@ -1316,6 +1345,16 @@ export class PluginManager {
           );
           continue;
         }
+        const owner = claimedBy.get(tool.name);
+        if (owner !== undefined && owner !== loaded.name) {
+          const message =
+            `tool ${JSON.stringify(tool.name)} already registered by plugin ${JSON.stringify(owner)} ` +
+            "(first loaded registration wins; this one is skipped)";
+          console.warn(`[two-brothers] plugin "${loaded.name}" ${message}`);
+          bindings.diagnostics.push({ plugin: loaded.name, message });
+          continue;
+        }
+        claimedBy.set(tool.name, loaded.name);
         const harnessTool = asHarnessTool(tool);
         bindings.tools.push(harnessTool);
         bindings.toolsByScope[effectiveToolScope(tool)].push(harnessTool);
