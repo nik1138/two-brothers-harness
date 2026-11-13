@@ -29,9 +29,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import type { ChatMessage } from "./context.ts";
-import type { Provider, Tool, UsageTotals } from "./provider.ts";
+import type { Provider, ProviderKind, Tool, UsageTotals } from "./provider.ts";
 import {
   emptyUsage,
+  isProviderKind,
   ProviderAbortError,
   USAGE_KEYS,
 } from "./provider.ts";
@@ -52,6 +53,12 @@ export const SUBAGENT_MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$/;
 export const SUBAGENT_EFFORT_MAX_CHARS = 32;
 /** Short display label retained in the parent tree and the child header. */
 export const SUBAGENT_MAX_LABEL_CHARS = 80;
+/**
+ * Bound on the persisted wire family (`meta.provider_kind`, slice C). The
+ * accepted values are the three known `ProviderKind` literals, so 40 is far
+ * above the longest; the bound only guards a hand-edited log.
+ */
+export const SUBAGENT_PROVIDER_KIND_MAX_CHARS = 40;
 /** Per-run child budget (the parent can delegate repeatedly, but not forever). */
 export const SUBAGENT_DEFAULT_MAX_PER_RUN = 8;
 /** Read-only actions are checks; this guards a future parallel activation path. */
@@ -261,6 +268,13 @@ export interface SubagentInfo {
    * existing rows and event bytes are unchanged.
    */
   background?: boolean;
+  /**
+   * Additive (slice C): the wire family the child's provider actually used,
+   * recorded only when it differs from the role's resolved kind (the reader's
+   * fallback), so a helper priced after a restart or a settings change knows
+   * its family. Absent for every pre-slice-C log and every role-kind helper.
+   */
+  provider_kind?: ProviderKind;
 }
 
 /** One child with its full bounded transcript (`GET /api/subagents/{id}`). */
@@ -382,6 +396,18 @@ function statusOf(value: unknown): SubagentStatus {
     : "running";
 }
 
+/**
+ * Tolerant read of one persisted wire family: only a known `ProviderKind`
+ * within the bound survives, so a pre-slice-C log (no key), a hand-edited
+ * value and an over-long string all read exactly as "no recorded family".
+ */
+function providerKindOf(value: unknown): ProviderKind | null {
+  if (typeof value !== "string") return null;
+  const kind = value.trim();
+  if (kind === "" || kind.length > SUBAGENT_PROVIDER_KIND_MAX_CHARS) return null;
+  return isProviderKind(kind) ? kind : null;
+}
+
 function usageOf(value: unknown): UsageTotals | null {
   if (!isRecord(value)) return null;
   const usage = emptyUsage();
@@ -454,7 +480,14 @@ export class SubagentStore {
     started_at: number;
     /** Additive: set only for a background child (omitted otherwise). */
     background?: boolean;
+    /**
+     * Additive (slice C): the child's resolved wire family, persisted only
+     * when it differs from the role's own kind (the harness computes that);
+     * an unknown or over-long value is dropped like `background:false`.
+     */
+    provider_kind?: string;
   }): void {
+    const providerKind = providerKindOf(record.provider_kind);
     this.appendLine(record.id, {
       type: "meta",
       id: record.id,
@@ -465,6 +498,7 @@ export class SubagentStore {
       task: textOf(record.task, SUBAGENT_MAX_TASK_CHARS),
       started_at: intOf(record.started_at),
       ...(record.background === true ? { background: true } : {}),
+      ...(providerKind !== null ? { provider_kind: providerKind } : {}),
     });
   }
 
@@ -625,6 +659,7 @@ export class SubagentStore {
     const startedAt = intOf(meta.started_at);
     const endedAt = end === null ? undefined : intOf(end.ended_at);
     const status = end === null ? "running" : statusOf(end.status);
+    const providerKind = providerKindOf(meta.provider_kind);
     const last =
       end !== null
         ? { kind: "status" as const, status, at: endedAt ?? startedAt }
@@ -651,6 +686,9 @@ export class SubagentStore {
       // Additive and tolerant: a pre-slice-B log has no such key, so it reads
       // exactly as before (and never gains a false `background:false`).
       ...(meta.background === true ? { background: true } : {}),
+      // Additive and tolerant (slice C): absent on every pre-slice-C log and
+      // dropped when unknown/over-long, so old rows read exactly as before.
+      ...(providerKind !== null ? { provider_kind: providerKind } : {}),
       transcript,
     };
   }
@@ -764,6 +802,70 @@ export class SubagentStore {
       return false;
     }
   }
+}
+
+/**
+ * The helper usage/cache roll-up (slice C): one pure aggregate over the
+ * settled rows of a session's child list. A running child counts in the
+ * status counts but contributes no tokens — the store's `usage` on a running
+ * row is always null, and a live estimate would be a lie. Token counters are
+ * summed as reported; `prompt_tokens` carries the family-normalized prompt
+ * total on rows whose adapter reports uncached-only `input_tokens`
+ * (Anthropic/Gemini), and is 0 elsewhere (the caller falls back to
+ * `input + cached + cache_write` for those families).
+ */
+export interface SubagentUsageRollup {
+  /** Every row in the list (running + settled). */
+  total: number;
+  /** Live children: counted, never token-bearing. */
+  running: number;
+  /** Terminal children (`completed` + `failed` + `cancelled`). */
+  settled: number;
+  completed: number;
+  failed: number;
+  cancelled: number;
+  input_tokens: number;
+  output_tokens: number;
+  cached_tokens: number;
+  cache_write_tokens: number;
+  prompt_tokens: number;
+}
+
+/** Sum one session's helper rows over the settled children only. */
+export function subagentUsageRollup(
+  rows: readonly Pick<SubagentSummary, "status" | "usage">[],
+): SubagentUsageRollup {
+  const rollup: SubagentUsageRollup = {
+    total: rows.length,
+    running: 0,
+    settled: 0,
+    completed: 0,
+    failed: 0,
+    cancelled: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    cached_tokens: 0,
+    cache_write_tokens: 0,
+    prompt_tokens: 0,
+  };
+  for (const row of rows) {
+    if (row.status === "running") {
+      rollup.running += 1;
+      continue;
+    }
+    rollup.settled += 1;
+    if (row.status === "completed") rollup.completed += 1;
+    else if (row.status === "failed") rollup.failed += 1;
+    else rollup.cancelled += 1;
+    const usage = row.usage;
+    if (usage === null || usage === undefined) continue;
+    rollup.input_tokens += Math.max(0, intOf(usage.input_tokens));
+    rollup.output_tokens += Math.max(0, intOf(usage.output_tokens));
+    rollup.cached_tokens += Math.max(0, intOf(usage.cached_tokens));
+    rollup.cache_write_tokens += Math.max(0, intOf(usage.cache_write_tokens));
+    rollup.prompt_tokens += Math.max(0, intOf(usage.prompt_tokens));
+  }
+  return rollup;
 }
 
 /** A typed progress event the parent harness maps onto `subagent_activity`. */

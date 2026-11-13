@@ -1432,6 +1432,64 @@ test("a TUI turn delegates: the helper appears, its transcript opens, and the pa
   }
 });
 
+test("a settled helper rolls up into the status bar and side panel without touching the brothers' numbers", async () => {
+  const { sessionsDir, workspace, sessionFile, cleanup } = helperRoot();
+  // Two provider calls (one tool step + the report) at the mock's deterministic
+  // 10-in/5-out per call: 20 input + 10 output = 30 settled tokens.
+  const child = new RecordingMock([
+    { tool: "workspace_read_file", args: { path: "notes.txt" } },
+    { text: "The notes file says hello." },
+  ]);
+  const senior = new RecordingMock([
+    { tool: SUBAGENT_TOOL_NAME, args: { task: "Inspect the notes file.", label: "notes helper" } },
+  ]);
+  const { app, input, output } = startApp({
+    cfg: resolveConfig({ provider: "mock", sessionFile }),
+    sessionsDir,
+    workspaceRoot: workspace,
+    providerOverrides: { senior, junior: new MockProvider() },
+    subagentProviderFactory: () => child,
+  });
+  try {
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+    // Wide enough that the responsive status bar keeps the helpers aggregate
+    // after the brothers' metrics (it is designed to drop first when the row
+    // is crowded) and the side panel has room for its roll-up rows.
+    output.resize(220, 60);
+    input.type("inspect the notes");
+    input.enter();
+    assert.ok(await waitFor(() => textOf(output).includes("decision:"), 30_000), "the turn completed");
+
+    // Slice C: the helpers aggregate is a separate surface — its own status-bar
+    // segment after `cost` and its own side-panel rows. The child model
+    // ("junior" role literal) is unpriced, so the cost reads the honest
+    // `unknown` instead of a made-up $0.
+    assert.ok(
+      await waitFor(() => /helpers 1 done · 30 tok · cost unknown/.test(lastFrameText(output)), 30_000),
+      "the status bar carries the settled helpers aggregate",
+    );
+    const frame = lastFrameText(output);
+    assert.match(frame, /HELPER TOK\s+30 tok/);
+    assert.match(frame, /HELPER COST\s+cost unknown/);
+    // The brothers' own rows keep their own numbers (no helper merge).
+    assert.match(frame, /TOKENS\s+in /);
+    assert.doesNotMatch(frame, /TOKENS\s+in 30/);
+
+    // The aggregate reads from the refreshed store rows: the child log has no
+    // provider_kind (providerFactory injection) and settles as completed.
+    const childId = fs.readdirSync(path.join(sessionsDir, "subagents"))[0]!.replace(/\.jsonl$/, "");
+    const store = new SubagentStore(path.join(sessionsDir, "subagents"));
+    const detail = store.get(childId);
+    assert.equal(detail?.status, "completed");
+    assert.equal(detail?.usage?.input_tokens, 20);
+    assert.equal(detail?.provider_kind, undefined);
+
+    assert.equal(await quit(input, app), 0);
+  } finally {
+    cleanup();
+  }
+});
+
 test("a helper write parks a child-tagged approval and the panel names the helper", async () => {
   const { sessionsDir, workspace, sessionFile, cleanup } = helperRoot();
   const child = new RecordingMock([

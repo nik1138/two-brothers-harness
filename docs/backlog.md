@@ -1871,8 +1871,8 @@ What landed, as recorded behavior:
   new timer, no new flag/env, no protocol change; tests
   `tests/tuihelpers.test.ts` plus `tuiintegration`/`tuikeymap` cases.
   Remaining phases: async completion/wake (delivery stays poll-only),
-  forked-context children, deeper nesting and cost/cache roll-up into the
-  parent view. The protocol stays
+  forked-context children and deeper nesting (each deferred to its own
+  design). The protocol stays
   **Slice O2 (TUI helper controls) shipped 2026-11-13:** inside the open
   child transcript, `i` interrupts the helper through the same in-process
   `SubagentControlHandle` the web routes use (`interrupt("operator")` — the
@@ -1919,6 +1919,27 @@ What landed, as recorded behavior:
   `tests/subagent.test.ts` pins; the hermetic browser `subagent-mutation`
   scenario delegates with `e2e-helper-fast` and asserts the drawer shows the
   override.
+  **Slice C (helper usage/cache/cost roll-up) shipped 2026-11-13:** one
+  persistent addition, `meta.provider_kind` on the child log — a known
+  `ProviderKind`, ≤40 chars, recorded only when the child's resolved family
+  differs from the role's (and never for a `providerFactory` injection), so a
+  helper stays priceable after a restart or a settings change; pre-C logs read
+  exactly as before and no event byte changes. `subagentUsageRollup` (pure,
+  exported from `subagent.ts`) sums tokens and every status count over settled
+  rows only — a running child counts but contributes no tokens. The TUI
+  composes the aggregate family-normalized (`costUsageForFamily`) and priced
+  per child with `estimateCost(row.model)`; the helper cost is all-or-nothing
+  — `cost unknown` when any settled token-bearing child is unpriced — and the
+  web shows no helper cost at all (it has no price table). Placement is a
+  separate `helpers` surface, never merged into the brothers' footer: the
+  status-bar `helpers` segment extends after `cost` (so the fitter drops it
+  first) and the side panel gains `HELPER TOK`/`HELPER COST` rows; the web
+  helper tree header shows `n total · r running · tok` over settled rows
+  only. Helper-free frames stay byte-identical, no new timer, and the
+  parent's `result.usage`, context meter and run footer are untouched.
+  Tests: `tests/subagent.test.ts` (+4), `tests/tuihelpers.test.ts` (+5),
+  `tests/tuiintegration.test.ts` (+1), `web/tests/subagents.test.ts` (+4) and
+  the hermetic browser `subagents` scenario (exact aggregate + no-cost pin).
 - **Stacked-dialog mask-click (web, non-blocker)** — **blocked on upstream**
   (evidence updated 2026-11-08): naive-ui fires `mask-click` for clicks that
   land inside a stacked second dialog, so every dialog's handler must ignore

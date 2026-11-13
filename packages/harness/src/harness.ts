@@ -213,6 +213,7 @@ import {
   type Provider,
   type ProviderKind,
   resolveProviderKind,
+  roleProviderKind,
   type Tool,
   type ToolChatResponse,
   type UsageTotals,
@@ -2471,6 +2472,26 @@ export class TwoBrothersHarness {
   }
 
   /**
+   * The wire family the child's provider actually talks (slice C), resolved
+   * the same way `buildSubagentProvider` resolves it: the dedicated helper
+   * route's kind wins, else the role endpoint's, else the role/run chain.
+   * Returned only when it differs from the role's own resolved kind — the
+   * reader's fallback after a restart or a settings change — and never for a
+   * `providerFactory` injection (the injected provider owns its family, so
+   * nothing is claimed and the log reads as the role's kind).
+   */
+  private subagentProviderKind(
+    settings: SubagentSettings,
+    role: "senior" | "junior",
+  ): ProviderKind | null {
+    if (settings.providerFactory !== undefined) return null;
+    const roleEndpoint = this.options.endpoints?.[role];
+    const child = roleProviderKind(this.cfg, settings.endpoint ?? roleEndpoint, role);
+    const roleKind = roleProviderKind(this.cfg, roleEndpoint, role);
+    return child !== null && child !== roleKind ? child : null;
+  }
+
+  /**
    * The model id the child actually runs, for the tree row, `list_agents` and
    * `subagent_report` (display only). Precedence: the validated per-call
    * override, then the resolved base endpoint's model (helper route, else
@@ -2996,6 +3017,7 @@ export class TwoBrothersHarness {
         : AbortSignal.any([parentSignal, control.controller.signal]);
     let storeFailed = false;
     try {
+      const providerKind = this.subagentProviderKind(settings, role);
       settings.store.begin({
         id,
         parent_session: settings.parentSession,
@@ -3005,6 +3027,7 @@ export class TwoBrothersHarness {
         task,
         started_at: startedAt,
         ...(background ? { background: true } : {}),
+        ...(providerKind !== null ? { provider_kind: providerKind } : {}),
       });
     } catch (exc) {
       storeFailed = true;

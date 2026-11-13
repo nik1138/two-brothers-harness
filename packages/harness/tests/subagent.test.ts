@@ -30,6 +30,7 @@ import {
   SUBAGENT_TOOL_DESCRIPTION,
   SUBAGENT_TOOL_NAME,
   SUBAGENT_TOOL_PARAMETERS,
+  subagentUsageRollup,
   SubagentStore,
 } from "../src/subagent.ts";
 import type { RuntimeEvent } from "../src/runevents.ts";
@@ -410,6 +411,215 @@ test("a configured helper route sets the child model independently of the role",
   } finally {
     cleanup();
   }
+});
+
+// --------------------------------------------------------------------------- //
+// slice C: meta.provider_kind + the pure usage roll-up
+// --------------------------------------------------------------------------- //
+
+/** One delegation run against a helper route with the given wire family. */
+async function spawnWithKind(
+  store: SubagentStore,
+  kind: string | undefined,
+): Promise<void> {
+  const senior = new RecordingMock([
+    { tool: SUBAGENT_TOOL_NAME, args: { task: "Check the helper route kind." } },
+  ]);
+  const harness = new TwoBrothersHarness(resolveConfig({ provider: "mock" }), {
+    senior,
+    junior: new MockProvider(),
+    subagents: {
+      store,
+      parentSession: "parent.jsonl",
+      endpoint: {
+        provider: "mock",
+        baseUrl: "http://127.0.0.1:9/v1",
+        apiKey: "",
+        model: "helper-model",
+        ...(kind !== undefined ? { kind } : {}),
+      },
+    },
+  });
+  const result = await harness.run("Plan a migration", new SharedContext());
+  assert.equal(result.cancelled, false);
+}
+
+test("meta.provider_kind is omitted when equal to the role kind and present when different", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const store = new SubagentStore(path.join(root, "subagents"));
+    // The role's resolved kind on a bare mock config is "openai-compatible";
+    // a route with the same kind records nothing (exactly like `background`).
+    await spawnWithKind(store, "openai-compatible");
+    const equal = store.list("parent.jsonl");
+    assert.equal(equal.length, 1);
+    assert.equal(equal[0]?.provider_kind, undefined);
+
+    // A route on a different family is persisted so the roll-up can price the
+    // child after a restart or a settings change.
+    await spawnWithKind(store, "google");
+    const different = store.list("parent.jsonl");
+    assert.equal(different.length, 2);
+    const row = different.find((entry) => entry.provider_kind !== undefined);
+    assert.equal(row?.provider_kind, "google");
+    assert.equal(row?.status, "completed");
+  } finally {
+    cleanup();
+  }
+});
+
+test("meta.provider_kind is never recorded for a providerFactory injection", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const store = new SubagentStore(path.join(root, "subagents"));
+    const senior = new RecordingMock([
+      { tool: SUBAGENT_TOOL_NAME, args: { task: "Check the injected child." } },
+    ]);
+    const harness = new TwoBrothersHarness(resolveConfig({ provider: "mock" }), {
+      senior,
+      junior: new MockProvider(),
+      subagents: {
+        store,
+        parentSession: "parent.jsonl",
+        providerFactory: () => new MockProvider(),
+      },
+    });
+    const result = await harness.run("Plan a migration", new SharedContext());
+    assert.equal(result.cancelled, false);
+    const rows = store.list("parent.jsonl");
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.provider_kind, undefined);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a pre-slice-C child log reads exactly as before and bad kinds are dropped", () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const directory = path.join(root, "subagents");
+    fs.mkdirSync(directory, { recursive: true });
+    const writeLog = (id: string, meta: Record<string, unknown>, end: Record<string, unknown>) => {
+      fs.writeFileSync(
+        path.join(directory, `${id}.jsonl`),
+        [JSON.stringify({ type: "meta", ...meta }), JSON.stringify({ type: "end", ...end })].join(
+          "\n",
+        ) + "\n",
+        "utf-8",
+      );
+    };
+    const usage = {
+      model_calls: 1,
+      input_tokens: 20,
+      output_tokens: 8,
+      cached_tokens: 4,
+      cache_write_tokens: 0,
+    };
+    // A hand-written pre-C log: no provider_kind key at all.
+    writeLog(
+      "sub-aaaaaaaaaaaaaaa1",
+      {
+        id: "sub-aaaaaaaaaaaaaaa1",
+        parent_session: "parent.jsonl",
+        label: "Pre-C",
+        role: "junior",
+        model: "m",
+        task: "Old log.",
+        started_at: 1,
+      },
+      { status: "completed", ended_at: 2, usage },
+    );
+    // Garbage kinds: an unknown value and an over-long one never surface.
+    writeLog(
+      "sub-aaaaaaaaaaaaaaa2",
+      {
+        id: "sub-aaaaaaaaaaaaaaa2",
+        parent_session: "parent.jsonl",
+        label: "Bad kind",
+        role: "junior",
+        model: "m",
+        task: "Bad kind.",
+        started_at: 1,
+        provider_kind: "not-a-real-family",
+      },
+      { status: "completed", ended_at: 2, usage },
+    );
+    writeLog(
+      "sub-aaaaaaaaaaaaaaa3",
+      {
+        id: "sub-aaaaaaaaaaaaaaa3",
+        parent_session: "parent.jsonl",
+        label: "Long kind",
+        role: "junior",
+        model: "m",
+        task: "Long kind.",
+        started_at: 1,
+        provider_kind: `anthropic${"x".repeat(40)}`,
+      },
+      { status: "completed", ended_at: 2, usage },
+    );
+
+    const store = new SubagentStore(directory);
+    const pre = store.get("sub-aaaaaaaaaaaaaaa1");
+    assert.ok(pre);
+    assert.equal(pre.provider_kind, undefined);
+    assert.equal(pre.status, "completed");
+    assert.equal(pre.usage?.input_tokens, 20);
+    assert.equal(store.get("sub-aaaaaaaaaaaaaaa2")?.provider_kind, undefined);
+    assert.equal(store.get("sub-aaaaaaaaaaaaaaa3")?.provider_kind, undefined);
+  } finally {
+    cleanup();
+  }
+});
+
+test("subagentUsageRollup sums settled rows only and counts every status", () => {
+  const usage = (input: number, output = 0, prompt?: number) => ({
+    model_calls: 1,
+    input_tokens: input,
+    output_tokens: output,
+    cached_tokens: 0,
+    cache_write_tokens: 0,
+    ...(prompt !== undefined ? { prompt_tokens: prompt } : {}),
+  });
+  const rows = [
+    { status: "completed" as const, usage: usage(100, 50, 115) },
+    { status: "completed" as const, usage: usage(20, 5) },
+    { status: "failed" as const, usage: usage(7) },
+    { status: "cancelled" as const, usage: null },
+    // Defensive: a running row must never contribute tokens even if a caller
+    // hands it a usage object (the store never does).
+    { status: "running" as const, usage: usage(999, 999) },
+    { status: "running" as const, usage: null },
+  ];
+  const rollup = subagentUsageRollup(rows);
+  assert.deepEqual(rollup, {
+    total: 6,
+    running: 2,
+    settled: 4,
+    completed: 2,
+    failed: 1,
+    cancelled: 1,
+    input_tokens: 127,
+    output_tokens: 55,
+    cached_tokens: 0,
+    cache_write_tokens: 0,
+    prompt_tokens: 115,
+  });
+
+  const empty = subagentUsageRollup([]);
+  assert.deepEqual(empty, {
+    total: 0,
+    running: 0,
+    settled: 0,
+    completed: 0,
+    failed: 0,
+    cancelled: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    cached_tokens: 0,
+    cache_write_tokens: 0,
+    prompt_tokens: 0,
+  });
 });
 
 test("the subagent tool validates the task and enforces the per-run budget", async () => {

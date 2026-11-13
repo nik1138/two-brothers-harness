@@ -694,6 +694,13 @@ export interface SubagentInfo {
    * pre-slice-B backend, so the drawer stays badge-free there.
    */
   background?: boolean
+  /**
+   * Additive (slice C): the wire family the helper's provider actually used,
+   * recorded by the backend only when it differs from the role's resolved
+   * kind. Absent for pre-slice-C helpers and role-kind helpers; the web shows
+   * no helper cost, so this only normalizes the settled token aggregate.
+   */
+  provider_kind?: string
 }
 
 /** `GET /api/subagents/{id}` detail (the full bounded transcript). */

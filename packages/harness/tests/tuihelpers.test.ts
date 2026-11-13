@@ -40,27 +40,32 @@ import {
   foldHelperDetail,
   foldHelperEvent,
   helperActivityLabel,
+  helperCost,
   helperCounts,
   helperDetailHeader,
   helperDetailRows,
   helperDetailView,
   helperElapsed,
   helperOverlayKey,
+  helperRowFamily,
   helperRowsFromSummaries,
   helperSelectionIndex,
   helperStatusGlyph,
   helperTokenLabel,
+  helperTokenTotal,
+  helperUsageLine,
   helpersListView,
   helpersListTitle,
   selectedHelperRow,
   type HelperOverlayState,
+  type HelperRoleKinds,
   type HelperRow,
 } from "../src/tui/view/helpers.ts";
 import {
   sidePanelEntries,
   type SidePanelState,
 } from "../src/tui/view/sidepanel.ts";
-import { statusBarSegments, type StatusBarState } from "../src/tui/view/statusbar.ts";
+import { renderStatusBar, statusBarSegments, type StatusBarState } from "../src/tui/view/statusbar.ts";
 import {
   HELPER_UNKNOWN_COPY as UNKNOWN_COPY,
 } from "../src/tui/view/helpers.ts";
@@ -844,6 +849,180 @@ test("side panel shows a HELPERS row only when the session has helpers", () => {
     withoutHelpers.filter((entry) => ["CONTEXT", "TOKENS", "COST"].includes(entry.label)),
   );
   assert.equal(sidePanelEntries({ ...base, helpers: { total: 0, running: 0 } }).some((entry) => entry.label === "HELPERS"), false);
+});
+
+// --------------------------------------------------------------------------- //
+// slice C: the helper usage/cache/cost roll-up (a separate helpers aggregate)
+// --------------------------------------------------------------------------- //
+
+/** One settled summary row; the store is the authority for these fields. */
+function settledSummary(overrides: Partial<SubagentSummary> = {}): SubagentSummary {
+  return summary({ status: "completed", started_at: 1, ...overrides });
+}
+
+test("helperUsageLine aggregates settled tokens with the status counts; running rows contribute none", () => {
+  const kinds: HelperRoleKinds = { senior: "openai-compatible", junior: "openai-compatible" };
+  const settled = settledSummary({
+    usage: usage({ input_tokens: 1_200, output_tokens: 300 }),
+  });
+  const live = summary({ usage: usage({ input_tokens: 9_999, output_tokens: 9_999 }) });
+  const rows = helperRowsFromSummaries([settled, live]);
+  assert.equal(helperTokenTotal(rows, kinds), 1_500);
+  assert.equal(
+    helperUsageLine(rows, kinds),
+    "1 running · 1 done · 1.5k tok · cost unknown",
+    "the mock child model is unpriced, so the cost reads unknown — never a partial sum",
+  );
+
+  const doneOnly = helperRowsFromSummaries([settled]);
+  assert.equal(helperUsageLine(doneOnly, kinds), "1 done · 1.5k tok · cost unknown");
+  assert.equal(helperUsageLine([], kinds), null, "no helpers compose no line");
+  assert.equal(helperTokenTotal([], kinds), null);
+  assert.equal(helperCost([], kinds), null);
+});
+
+test("helper tokens are family-normalized: the recorded kind wins, else the role's kind", () => {
+  const anthropicUsage = usage({
+    input_tokens: 1_000,
+    cached_tokens: 500,
+    cache_write_tokens: 200,
+    output_tokens: 100,
+  });
+  // Anthropic reports uncached-only input: the prompt total is 1 000 + 500 +
+  // 200 = 1 700, plus 100 completion = 1 800.
+  const recorded = helperRowsFromSummaries([
+    settledSummary({ provider_kind: "anthropic", usage: anthropicUsage }),
+  ]);
+  assert.equal(helperRowFamily(recorded[0]!, { junior: "openai-compatible" }), "anthropic");
+  assert.equal(helperTokenTotal(recorded, {}), 1_800);
+
+  // Same row without the durable kind falls back to the role's resolved kind.
+  const fallback = helperRowsFromSummaries([settledSummary({ usage: anthropicUsage })]);
+  assert.equal(helperRowFamily(fallback[0]!, { junior: "anthropic" }), "anthropic");
+  assert.equal(helperTokenTotal(fallback, { junior: "anthropic" }), 1_800);
+  // With no known family anywhere the openai-compatible gauge applies
+  // (prompt = input_tokens): 1 000 + 100 = 1 100.
+  assert.equal(helperTokenTotal(fallback, {}), 1_100);
+  assert.equal(helperTokenTotal(fallback, { junior: "not-a-kind" }), 1_100);
+
+  // A live row never contributes tokens, whatever its family.
+  const liveAnthropic = helperRowsFromSummaries([
+    summary({ provider_kind: "anthropic", usage: anthropicUsage }),
+  ]);
+  assert.equal(helperTokenTotal(liveAnthropic, {}), null);
+});
+
+test("helperCost sums mixed families and is all-or-nothing on an unpriced child", () => {
+  const kinds: HelperRoleKinds = { senior: "openai-compatible", junior: "openai-compatible" };
+  const priced = helperRowsFromSummaries([
+    settledSummary({
+      provider_kind: "anthropic",
+      model: "claude-sonnet-4",
+      usage: usage({ input_tokens: 100_000 }),
+    }),
+    settledSummary({
+      model: "gpt-4o-mini",
+      usage: usage({ input_tokens: 100_000, output_tokens: 50_000 }),
+    }),
+  ]);
+  const cost = helperCost(priced, kinds);
+  assert.ok(cost !== null && Math.abs(cost - 0.345) < 1e-9, "0.30 + 0.045 USD");
+  assert.equal(
+    helperUsageLine(priced, kinds),
+    "2 done · 250k tok · $0.3450",
+  );
+
+  // One settled token-bearing child with a model the table does not know
+  // turns the WHOLE helper cost into `unknown` — the priced child never leaks
+  // a partial sum.
+  const mixed = helperRowsFromSummaries([
+    settledSummary({ model: "gpt-4o-mini", usage: usage({ input_tokens: 100_000 }) }),
+    settledSummary({ model: "child-model", usage: usage({ input_tokens: 10 }) }),
+  ]);
+  assert.equal(helperCost(mixed, kinds), null);
+  assert.equal(helperTokenTotal(mixed, kinds), 100_010);
+  assert.match(helperUsageLine(mixed, kinds) ?? "", /cost unknown$/);
+
+  // Settled children that reported no tokens price as nothing, not as unknown.
+  const silent = helperRowsFromSummaries([
+    settledSummary({ model: "child-model", usage: usage() }),
+  ]);
+  assert.equal(helperCost(silent, kinds), null);
+  assert.equal(helperUsageLine(silent, kinds), "1 done");
+});
+
+test("status bar renders the composed helpers aggregate after cost", () => {
+  const base: StatusBarState = {
+    mode: "work",
+    seniorModel: "senior-model",
+    juniorModel: "junior-model",
+  };
+  const state: StatusBarState = {
+    ...base,
+    cost: 0.01,
+    helpersRunning: 0,
+    helpersTotal: 2,
+    helpersUsage: "2 done · 3.3k tok · $0.3450",
+  };
+  const [first, second] = statusBarSegments(state);
+  const costIndex = second.findIndex((segment) => segment.text.startsWith("cost "));
+  const helperIndex = second.findIndex((segment) => segment.text.startsWith("helpers "));
+  assert.equal(helperIndex, costIndex + 1, "the aggregate still follows cost (drops first)");
+  assert.equal(second[helperIndex]?.text, "helpers 2 done · 3.3k tok · $0.3450");
+  assert.equal(second[helperIndex]?.tone, "muted");
+
+  // Byte behavior at real widths: the whole segment fits at 120, drops whole
+  // at 40 (never a torn half-segment), and row one never moves.
+  const wide = renderStatusBar(state, { width: 120 });
+  assert.match(wide[1] ?? "", /helpers 2 done · 3\.3k tok · \$0\.3450/);
+  const narrow = renderStatusBar(state, { width: 40 });
+  const noHelpers = renderStatusBar(base, { width: 40 });
+  assert.deepEqual(narrow[0], noHelpers[0], "row one never moves for helpers");
+  assert.equal((narrow[1] ?? "").includes("helpers"), false);
+  assert.equal((narrow[0] ?? "").includes("helpers"), false);
+
+  // Absent helpersUsage keeps the counts-only segment (pre-slice-C callers).
+  const countsOnly = statusBarSegments({ ...state, helpersUsage: undefined })[1];
+  assert.equal(
+    countsOnly.find((segment) => segment.text.startsWith("helpers "))?.text,
+    "helpers 2 done",
+  );
+});
+
+test("side panel shows HELPER TOK and HELPER COST rows only when there is something settled", () => {
+  const base: SidePanelState = { mode: "consult", seniorModel: "s", juniorModel: "j" };
+  const without = sidePanelEntries({ ...base, helpers: { total: 1, running: 1 } });
+  assert.equal(without.some((entry) => entry.label === "HELPER TOK"), false);
+  assert.equal(without.some((entry) => entry.label === "HELPER COST"), false);
+
+  const withRollup = sidePanelEntries({
+    ...base,
+    helpers: { total: 2, running: 0, tokens: 1_500, cost: 0.345 },
+  });
+  const tokRow = withRollup.find((entry) => entry.label === "HELPER TOK");
+  assert.equal(tokRow?.value, "1.5k tok");
+  assert.equal(tokRow?.tone, "muted");
+  const costRow = withRollup.find((entry) => entry.label === "HELPER COST");
+  assert.equal(costRow?.value, "$0.3450");
+  const helpersIndex = withRollup.findIndex((entry) => entry.label === "HELPERS");
+  assert.equal(withRollup.findIndex((entry) => entry.label === "HELPER TOK"), helpersIndex + 1);
+  assert.equal(withRollup.findIndex((entry) => entry.label === "HELPER COST"), helpersIndex + 2);
+  // The brothers' rows are untouched; the roll-up never merges into them.
+  const brothers = (entries: ReturnType<typeof sidePanelEntries>) =>
+    entries.filter((entry) => ["CONTEXT", "TOKENS", "COST"].includes(entry.label));
+  assert.deepEqual(brothers(withRollup), brothers(sidePanelEntries(base)));
+
+  // An unknown helper cost is the honest `cost unknown`, never $0 or a
+  // partial sum; a missing token total renders no HELPER COST row at all.
+  const unknown = sidePanelEntries({
+    ...base,
+    helpers: { total: 1, running: 0, tokens: 1_500, cost: null },
+  });
+  const unknownRow = unknown.find((entry) => entry.label === "HELPER COST");
+  assert.equal(unknownRow?.value, "cost unknown");
+  assert.equal(unknownRow?.tone, "warning");
+  const noTokens = sidePanelEntries({ ...base, helpers: { total: 1, running: 0 } });
+  assert.equal(noTokens.some((entry) => entry.label === "HELPER COST"), false);
 });
 
 test("approval panel names the helper and keeps a brother's approval byte-identical", () => {

@@ -177,6 +177,16 @@ export interface SidePanelMcp {
 export interface SidePanelHelpers {
   total: number;
   running: number;
+  /**
+   * Settled token total (slice C), family-normalized; `null`/absent renders
+   * no HELPER TOK row. Never merged into the brothers' TOKENS row.
+   */
+  tokens?: number | null;
+  /**
+   * Settled helper cost (slice C, TUI only); `null` is the honest unknown
+   * price (any settled token-bearing child unpriced). Absent renders no row.
+   */
+  cost?: number | null;
 }
 
 /** Discovery counts the app already knows at session start. */
@@ -422,6 +432,24 @@ export function sidePanelEntries(
       value: `${running} running · ${helpers.total} total`,
       tone: running > 0 ? "warning" : "muted",
     });
+    // Slice C: the roll-up rides its own rows after HELPERS. Both are absent
+    // (never `unknown`) when there is nothing settled to report; the cost row
+    // reads the honest `cost unknown` when any settled token-bearing child is
+    // unpriced — never a partial sum.
+    if (helpers.tokens !== undefined && helpers.tokens !== null) {
+      rows.push({
+        label: "HELPER TOK",
+        value: `${formatCount(helpers.tokens)} tok`,
+        tone: "muted",
+      });
+    }
+    if (helpers.cost !== undefined) {
+      rows.push({
+        label: "HELPER COST",
+        value: helpers.cost === null ? "cost unknown" : (formatCost(helpers.cost) ?? "cost unknown"),
+        tone: helpers.cost === null ? "warning" : "muted",
+      });
+    }
   }
   rows.push({ label: "", value: "", tone: "dim" });
   for (const tip of sidePanelKeyTips(commands)) rows.push({ label: "", value: tip, tone: "dim" });
@@ -431,7 +459,10 @@ export function sidePanelEntries(
 /**
  * Render the content rows to exactly `contentWidth` columns (or less, since
  * `renderBox` pads). Values are sanitized (terminal controls removed) and
- * truncated with `…`; labels are dim.
+ * truncated with `…`; labels are dim. The label column is at least
+ * {@link LABEL_WIDTH} and grows to the longest label this frame (the slice-C
+ * HELPER TOK / HELPER COST rows are 10–11 chars), so helper-free frames keep
+ * the historical 9-column alignment byte-for-byte.
  */
 export function sidePanelRows(
   state: SidePanelState,
@@ -440,22 +471,28 @@ export function sidePanelRows(
   commands: readonly TuiCommand[] = TUI_COMMANDS,
 ): string[] {
   const columns = Math.max(1, Math.floor(contentWidth));
+  const entries = sidePanelEntries(state, commands);
+  const labelWidth = Math.max(LABEL_WIDTH, ...entries.map((entry) => entry.label.length));
   const rows: string[] = [];
-  for (const cell of sidePanelEntries(state, commands)) {
+  for (const cell of entries) {
     const value = sanitizeDisplayText(cell.value);
     if (cell.label === "") {
       rows.push(value === "" ? "" : theme.paint(cell.tone, truncateToWidth(value, columns)));
       continue;
     }
-    if (columns <= LABEL_WIDTH) {
+    if (columns <= labelWidth) {
       rows.push(
         theme.paint(cell.tone, truncateToWidth(`${cell.label} ${value}`, columns)),
       );
       continue;
     }
-    const label = cell.label.padEnd(LABEL_WIDTH);
+    const label = cell.label.padEnd(labelWidth);
+    // A label as long as the column (HELPER COST) still gets its separating
+    // space; the value column shifts by that one cell for that row only.
+    const gap = cell.label.length >= labelWidth ? 1 : 0;
     rows.push(
-      theme.paint("dim", label) + theme.paint(cell.tone, truncateToWidth(value, columns - LABEL_WIDTH)),
+      theme.paint("dim", gap === 1 ? `${label} ` : label) +
+        theme.paint(cell.tone, truncateToWidth(value, Math.max(1, columns - labelWidth - gap))),
     );
   }
   return rows;

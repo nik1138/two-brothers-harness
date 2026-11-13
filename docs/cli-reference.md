@@ -223,7 +223,12 @@ from `<sessions-dir>/subagents/` in process — it appends no envelope and
 changes no transcript byte, and a child's usage is never merged into the
 status bar's token/cost numbers. A live helper adds one
 `helpers N running · M done` status-bar segment after `cost` and a `HELPERS`
-row in the side panel (both absent without helpers); a helper mutation parks on
+row in the side panel (both absent without helpers); once helpers settle, the
+segment carries the roll-up — `helpers 2 done · 14.2k tok · $0.0031`, or
+`cost unknown` when any settled token-bearing helper is unpriced (never a
+partial sum) — and the panel gains `HELPER TOK`/`HELPER COST` rows. The
+aggregate is family-normalized and priced locally; the parent's own
+tokens/context/cost numbers never include a helper. A helper mutation parks on
 the ordinary approval panel with one dim `helper: <label>` row. Without a
 session file (`--session-file`) the list is live-only and says so; a
 file-backed session lists the children of previous runs. Slash input: `/mode consult|work|auto`, `/models`,
@@ -1782,7 +1787,11 @@ Junior never receives it, and a child cannot receive it either (no recursion).
   the sidebar never list them.
 - **Web:** the chat header shows `Subagents · N` after the first helper. The
   chip opens a live tree with status, current activity, elapsed time and
-  tokens; clicking a row opens a read-only child drawer with the task, tool
+  tokens; the header line carries the settled token aggregate
+  (`2 total · 1 running · 1.5k tok` — counts over every helper, tokens over
+  the settled ones only, family-normalized via the child log's optional
+  `provider_kind`) and deliberately no cost: the web has no price table.
+  Clicking a row opens a read-only child drawer with the task, tool
   calls and final report. The parent composer is inert while the drawer is
   open; **← Parent** or `Esc` closes it. The tree is reloaded from the routes
   after a restart, so completed helpers remain inspectable.
@@ -1796,15 +1805,28 @@ Junior never receives it, and a child cannot receive it either (no recursion).
   final report. `Esc` layers child → list → closed, `PgUp`/`PgDn` page the
   transcript, and an in-memory session lists only its live helpers. A helper
   adds a `helpers N running · M done` status-bar segment and a side-panel
-  `HELPERS` row; without helpers both are absent. The startup orphan sweep runs
+  `HELPERS` row; without helpers both are absent. Once helpers settle, the
+  segment extends with the roll-up (`helpers 2 done · 14.2k tok · $0.0031`,
+  family-normalized and priced locally, or `cost unknown` when any settled
+  token-bearing helper is unpriced) and the panel gains `HELPER TOK` /
+  `HELPER COST` rows — a separate `helpers` surface that is never merged into
+  the brothers' tokens/context/cost. The startup orphan sweep runs
   once under the writer lock, so a crashed run's unfinished child log is shown
   as `cancelled` instead of a phantom `running`. The TUI's Senior prompt gains
   the helper tool line (`run`/`chat` prompts stay byte-identical), its child
   logs use the session's sidecar key (or one per-process `tui-<hex>.jsonl` for
   an in-memory session) and nothing the overlay does touches the brothers'
   transcript.
-- **Not in this slice:** forked-context children, deeper nesting and a helper
-  usage/cache/cost roll-up into the parent footer.
+- **Roll-up (slice C):** the child log records the resolved wire family as
+  optional `meta.provider_kind` (only when it differs from the role's kind,
+  so older logs and role-kind helpers read exactly as before), and
+  `subagentUsageRollup` sums settled helpers only — a running helper counts
+  but contributes no tokens. The TUI prices the aggregate locally
+  (all-or-nothing: `cost unknown` beats a partial sum); the web shows tokens
+  and counts only. The parent's `result.usage`, context meter and run footer
+  are never touched.
+- **Not in this slice:** forked-context children and deeper nesting are
+  deferred designs.
   `run`/`chat` do not enable the tier.
 
 ## Workspace instructions (TS package)
