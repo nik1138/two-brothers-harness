@@ -134,6 +134,43 @@ class HangingChildProvider implements Provider {
   }
 }
 
+/**
+ * A senior provider that delegates once per task, however many nodes/runs share
+ * the harness construction: before a tool result it spawns one helper, after it
+ * reports. Used by the multi-run isolation test (a scripted MockProvider's step
+ * counter is shared across runs, and a stateless spawner would delegate again
+ * from a later node's tool loop).
+ */
+class DelegatingSeniorProvider extends MockProvider {
+  private readonly delegated = new Set<string>();
+
+  override async chatWithTools(
+    messages: ChatMessage[],
+    _tools: Tool[],
+    _options: ToolChatOptions = {},
+  ): Promise<ToolChatResponse> {
+    const hasToolResult = messages.some((message) => message.role === "tool");
+    // The rendered transcript always carries the initial task envelope, so its
+    // text identifies the run even when a later node's transcript has grown.
+    const rendered = String(messages.find((message) => message.role === "user")?.content ?? "");
+    const task = /\[\[TASK\]\]([\s\S]*?)\[\[\/TASK\]\]/.exec(rendered)?.[1] ?? rendered;
+    if (hasToolResult || this.delegated.has(task)) {
+      return { content: "Verification complete.", toolCalls: [] };
+    }
+    this.delegated.add(task);
+    return {
+      content: "",
+      toolCalls: [
+        {
+          id: `spawn-${messages.length}`,
+          name: SUBAGENT_TOOL_NAME,
+          args: { task: "Write the helper note." },
+        },
+      ],
+    };
+  }
+}
+
 /** A child provider that makes tool calls and records every request. */
 class ScriptedChildProvider implements Provider {
   calls: ChatMessage[][] = [];
@@ -791,8 +828,12 @@ async function configureHelper(srv: RunningServer, model: { baseUrl: string }): 
   assert.equal(put.status, 200);
 }
 
-async function registerWorkspace(srv: RunningServer, root: string): Promise<string> {
-  const ws = await post(srv.base, "/api/workspaces", { path: root, name: "e2e-helper" });
+async function registerWorkspace(
+  srv: RunningServer,
+  root: string,
+  name = "e2e-helper",
+): Promise<string> {
+  const ws = await post(srv.base, "/api/workspaces", { path: root, name });
   assert.equal(ws.status, 201);
   return String(ws.body.id);
 }
@@ -801,9 +842,10 @@ async function startRun(
   srv: RunningServer,
   workspaceId: string,
   session: string,
+  task = "Do the scripted E2E task",
 ): Promise<string> {
   const started = await post(srv.base, "/api/runs", {
-    task: "Do the scripted E2E task",
+    task,
     mode: "consult",
     provider: "mock",
     workspace_id: workspaceId,
@@ -988,7 +1030,8 @@ test("messages route: a queued follow-up reaches the child after the approval, o
       delivered: 1,
       dropped: 0,
     });
-    // No new subagent event type: the stream keeps started/activity/completed.
+    // No new subagent event type or field: the stream keeps
+    // started/activity/completed, and `followups` stays a durable-row fact.
     const types = new Set(
       [...run.events, ...rest]
         .filter((event) => String(event.type).startsWith("subagent_"))
@@ -999,9 +1042,99 @@ test("messages route: a queued follow-up reaches the child after the approval, o
       "subagent_completed",
       "subagent_started",
     ]);
+    const completedEvent = [...run.events, ...rest].find(
+      (event) => event.type === "subagent_completed",
+    ) as AnyRecord;
+    assert.equal(Object.prototype.hasOwnProperty.call(completedEvent, "followups"), false);
   } finally {
     await run.srv.close();
     await model.close();
     run.ws.cleanup();
+  }
+});
+
+test("messages route: two live runs never reach each other's children", async () => {
+  const model = await startHelperModel();
+  const srv = await startServer({
+    providerOverrides: {
+      senior: new DelegatingSeniorProvider(),
+      junior: new MockProvider(),
+    },
+  });
+  const wsA = tmpdir("tb-subfollow-isolation-ws-a-");
+  const wsB = tmpdir("tb-subfollow-isolation-ws-b-");
+  try {
+    await configureHelper(srv, model);
+    // Two independent runs with their own workspace (the per-file mutation
+    // queue is keyed by realpath, so a shared target would serialize the
+    // children instead of parking both).
+    const wsIdA = await registerWorkspace(srv, wsA.root, "e2e-helper-a");
+    const wsIdB = await registerWorkspace(srv, wsB.root, "e2e-helper-b");
+    const runA = await startRun(srv, wsIdA, "followup-isolation-a", "Isolation task A");
+    const eventsA = await sseEvents(
+      srv.base,
+      `/api/runs/${runA}/events?after=0`,
+      (events) => events.some((event) => event.type === "approval_requested"),
+      15000,
+    );
+    const parkedA = eventsA.find((event) => event.type === "approval_requested") as AnyRecord;
+    const runB = await startRun(srv, wsIdB, "followup-isolation-b", "Isolation task B");
+    const eventsB = await sseEvents(
+      srv.base,
+      `/api/runs/${runB}/events?after=0`,
+      (events) => events.some((event) => event.type === "approval_requested"),
+      15000,
+    );
+    const parkedB = eventsB.find((event) => event.type === "approval_requested") as AnyRecord;
+    const childA = String(parkedA.subagent_id);
+    const childB = String(parkedB.subagent_id);
+    assert.notEqual(childA, childB);
+
+    // Each queue is keyed by its own child id: neither text reaches the other.
+    const sentA = await post(srv.base, `/api/subagents/${childA}/messages`, {
+      text: "only for A",
+    });
+    const sentB = await post(srv.base, `/api/subagents/${childB}/messages`, {
+      text: "only for B",
+    });
+    assert.deepEqual(sentA.body, { subagent_id: childA, status: "queued", pending: 1 });
+    assert.deepEqual(sentB.body, { subagent_id: childB, status: "queued", pending: 1 });
+
+    // Each run's own card resolves its own helper.
+    assert.equal(
+      (
+        await post(srv.base, `/api/runs/${runA}/approvals/${String(parkedA.approval_id)}`, {
+          allow: true,
+        })
+      ).status,
+      200,
+    );
+    assert.equal(
+      (
+        await post(srv.base, `/api/runs/${runB}/approvals/${String(parkedB.approval_id)}`, {
+          allow: true,
+        })
+      ).status,
+      200,
+    );
+    const restA = await runUntilEnd(srv.base, runA, eventsA.length);
+    const restB = await runUntilEnd(srv.base, runB, eventsB.length);
+    assert.equal(restA.at(-1)?.status, "completed");
+    assert.equal(restB.at(-1)?.status, "completed");
+
+    const store = new SubagentStore(path.join(srv.dir, "subagents"));
+    const originText = (id: string): string[] =>
+      logRows(store, id)
+        .filter((row) => row.type === "message" && row.origin === "operator")
+        .map((row) => String(row.text));
+    assert.deepEqual(originText(childA), ["only for A"]);
+    assert.deepEqual(originText(childB), ["only for B"]);
+    assert.deepEqual(endRow(store, childA)?.followups, { delivered: 1, dropped: 0 });
+    assert.deepEqual(endRow(store, childB)?.followups, { delivered: 1, dropped: 0 });
+  } finally {
+    await srv.close();
+    await model.close();
+    wsA.cleanup();
+    wsB.cleanup();
   }
 });

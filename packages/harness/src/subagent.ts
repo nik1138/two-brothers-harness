@@ -888,18 +888,29 @@ export async function runSubagent(options: SubagentRunOptions): Promise<Subagent
       return;
     }
     if (!Array.isArray(drained) || drained.length === 0) return;
+    // Defensive: only a valid queued entry is deliverable. Anything else was
+    // drained, so it is counted as dropped rather than silently lost.
+    const entries = drained.filter(
+      (entry): entry is SubagentFollowUp =>
+        entry !== null &&
+        typeof entry === "object" &&
+        typeof (entry as SubagentFollowUp).text === "string" &&
+        ((entry as SubagentFollowUp).from === "operator" ||
+          (entry as SubagentFollowUp).from === "senior"),
+    );
+    followUpsDropped += drained.length - entries.length;
     const blocks: string[] = [];
     let estimate = contextChars();
-    for (let index = 0; index < drained.length; index += 1) {
+    for (let index = 0; index < entries.length; index += 1) {
       if (followUpsDelivered >= SUBAGENT_MAX_FOLLOWUPS_PER_CHILD) {
-        followUpsDropped += drained.length - index;
+        followUpsDropped += entries.length - index;
         break;
       }
-      const followup = drained[index]!;
+      const followup = entries[index]!;
       const text = subagentFollowUpMessage(followup);
       const cost = text.length + (blocks.length > 0 ? 2 : 0);
       if (estimate + cost > SUBAGENT_CONTEXT_MAX_CHARS) {
-        followUpsDropped += drained.length - index;
+        followUpsDropped += entries.length - index;
         break;
       }
       blocks.push(text);
