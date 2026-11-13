@@ -3240,14 +3240,22 @@ export class TwoBrothersHarness {
       pending.push(control);
     }
     if (pending.length === 0) return;
-    await Promise.race([
-      Promise.allSettled(pending.map((control) => control.settled ?? Promise.resolve())),
-      new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, SUBAGENT_SHUTDOWN_GRACE_MS);
-        // Never keep the process alive for the grace window.
-        (timer as { unref?: () => void }).unref?.();
-      }),
-    ]);
+    // The grace timer stays referenced: an unref'd timer lets an otherwise idle
+    // event loop (a test runner, a CLI exiting) resolve the pending race as
+    // "still pending" instead of enforcing the grace, so the bounded wait would
+    // never land on Node 22. It is cleared as soon as the race settles, so a
+    // settled reap never keeps the process alive past the intended grace.
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.allSettled(pending.map((control) => control.settled ?? Promise.resolve())),
+        new Promise<void>((resolve) => {
+          graceTimer = setTimeout(resolve, SUBAGENT_SHUTDOWN_GRACE_MS);
+        }),
+      ]);
+    } finally {
+      if (graceTimer !== undefined) clearTimeout(graceTimer);
+    }
     const endedAt = Date.now();
     for (const control of pending) {
       if (control.status !== "running") continue;
