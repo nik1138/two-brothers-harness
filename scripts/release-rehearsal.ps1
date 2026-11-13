@@ -23,8 +23,12 @@ final summary table:
   7. Final working-tree check (the rehearsal must not modify tracked files).
 
 The script prepends Git Bash (`C:\Program Files\Git\bin`) to PATH when present
-(the package's shell suites spawn `bash`) and points TEMP/TMP at
-`<repo>\.tmp` for every child process (the documented Windows Vite workaround).
+(the package's shell suites spawn `bash`). It never redirects the caller's
+TEMP/TMP globally: the smoke gate scopes the repo-local esbuild workaround to
+its own web build stage, and the only rehearsal-level redirect is a private
+temp dir around the browser E2E step, only when that step must rebuild
+`web/dist` (a stale/missing dist is detected the same way
+`scripts/e2e-test.ps1` does).
 It never swallows a non-zero exit code: an external command's `$LASTEXITCODE`
 is checked, the output tail is printed on failure, and the script exits 1.
 
@@ -134,11 +138,9 @@ if (-not (Test-Path -LiteralPath $script:LogDir)) {
     New-Item -ItemType Directory -Path $script:LogDir -Force | Out-Null
 }
 
-# Keep the caller's environment to restore it before exiting (harmless for a
+# Keep the caller's PATH to restore it before exiting (harmless for a
 # -File run, correct for a dot-sourced run).
 $script:SavedPath = $env:PATH
-$script:SavedTemp = $env:TEMP
-$script:SavedTmp = $env:TMP
 
 # The package's shell suites spawn `bash`; prefer Git Bash over a WSL shim.
 $bashExe = Join-Path $script:GitBashDir 'bash.exe'
@@ -147,9 +149,11 @@ if (Test-Path -LiteralPath $bashExe) {
     $env:PATH = $script:GitBashDir + ';' + $env:PATH
     $gitBashNote = $bashExe
 }
-# Vite dev/build on this machine needs a temp dir inside the checkout.
-$env:TEMP = $script:TempDir
-$env:TMP = $script:TempDir
+# TEMP/TMP deliberately untouched here: a global redirect to the repo-local
+# dir breaks the package watcher/editor suites in the smoke gate's test stage
+# (see scripts/smoke-test.ps1, which scopes the esbuild workaround to its web
+# build stage). The only remaining redirect lives in Step-BrowserE2E, scoped
+# to a web rebuild.
 
 # --------------------------------------------------------------------------- #
 # process helpers
@@ -325,9 +329,59 @@ function Step-BrowserE2E {
     Write-Host 'NOTE: this step needs the system Microsoft Edge browser; it is an opt-in/manual layer and CI does not run it.' -ForegroundColor Yellow
     $e2eScript = Join-Path $script:RepoRoot 'scripts\e2e-test.ps1'
     $log = Join-Path $script:LogDir '06-browser-e2e.log'
-    $code = Invoke-StreamedProcess -Exe $script:PowerShellExe -Arguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $e2eScript) -WorkDir $script:RepoRoot -LogFile $log
-    Assert-ExitCode -ExitCode $code -Label 'scripts/e2e-test.ps1 (browser E2E)' -LogFile $log
-    Assert-Marker -LogFile $log -Pattern 'failures:\s*0\b' -Label 'scripts/e2e-test.ps1 (browser E2E)'
+
+    # `scripts/e2e-test.ps1` rebuilds web/ when dist is missing or older than
+    # its inputs, and a Vite/esbuild build on this machine fails against the
+    # ambient per-user TEMP ("Access is denied" removing the esbuild service
+    # dir) — the documented Windows workaround is a temp dir inside the
+    # checkout. Scope that redirect to THIS step and only when a rebuild is
+    # actually needed; every other child keeps the caller's temp env.
+    $distIndex = Join-Path $script:RepoRoot 'web\dist\index.html'
+    $needsWebBuild = -not (Test-Path -LiteralPath $distIndex)
+    if (-not $needsWebBuild) {
+        $distTime = (Get-Item -LiteralPath $distIndex).LastWriteTimeUtc
+        $inputs = @(
+            (Join-Path $script:RepoRoot 'web\src'),
+            (Join-Path $script:RepoRoot 'web\index.html'),
+            (Join-Path $script:RepoRoot 'web\vite.config.ts'),
+            (Join-Path $script:RepoRoot 'web\package.json')
+        )
+        $newer = Get-ChildItem -Path $inputs -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTimeUtc -gt $distTime } |
+            Select-Object -First 1
+        $needsWebBuild = $null -ne $newer
+    }
+
+    $webBuildTemp = $null
+    $savedTemp = $env:TEMP
+    $savedTmp = $env:TMP
+    if ($needsWebBuild) {
+        $webBuildTemp = Join-Path $script:LogDir 'web-build-temp'
+        New-Item -ItemType Directory -Path $webBuildTemp -Force | Out-Null
+        $env:TEMP = $webBuildTemp
+        $env:TMP = $webBuildTemp
+    }
+    try {
+        $code = Invoke-StreamedProcess -Exe $script:PowerShellExe -Arguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $e2eScript) -WorkDir $script:RepoRoot -LogFile $log
+        Assert-ExitCode -ExitCode $code -Label 'scripts/e2e-test.ps1 (browser E2E)' -LogFile $log
+        Assert-Marker -LogFile $log -Pattern 'failures:\s*0\b' -Label 'scripts/e2e-test.ps1 (browser E2E)'
+    } finally {
+        if ($null -eq $savedTemp) {
+            Remove-Item Env:\TEMP -ErrorAction SilentlyContinue
+        } else {
+            $env:TEMP = $savedTemp
+        }
+        if ($null -eq $savedTmp) {
+            Remove-Item Env:\TMP -ErrorAction SilentlyContinue
+        } else {
+            $env:TMP = $savedTmp
+        }
+        if ($null -ne $webBuildTemp) {
+            # Best-effort cleanup of the private stage dir; it lives under the
+            # gitignored log dir, so a leftover is not a gate failure.
+            Remove-Item -Path $webBuildTemp -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
     $summary = Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue
     $match = [regex]::Match($summary, 'total:\s*([0-9.]+)s,\s*failures:\s*0')
     if ($match.Success) {
@@ -410,7 +464,6 @@ try {
     Write-Host ("branch:      {0}" -f $branchName)
     Write-Host ("node:        {0} ({1})" -f $nodeVersion, $script:NodeExe)
     Write-Host ("powershell:  {0}" -f $PSVersionTable.PSVersion.ToString())
-    Write-Host ("TEMP/TMP:    {0}" -f $script:TempDir)
     Write-Host ("Git Bash:    {0}" -f $gitBashNote)
     Write-Host ("steps:       {0} (browser E2E: {1}; tarball checks: {2})" -f $plan.Count, $(if ($SkipBrowser) { 'skipped' } else { 'included' }), $(if ($SkipTarball) { 'skipped' } else { 'included' }))
     Write-Host ("logs:        {0}" -f $script:LogDir)
@@ -435,8 +488,6 @@ try {
     $script:ExitCode = 1
 } finally {
     $env:PATH = $script:SavedPath
-    $env:TEMP = $script:SavedTemp
-    $env:TMP = $script:SavedTmp
 }
 
 $totalStopwatch.Stop()

@@ -19,15 +19,14 @@ explicitly. A `v*` tag whose version does not match
 
 ## Pre-push release-candidate rehearsal
 
-Run from a clean `main` on Windows with Git Bash first on `PATH` and
-`TEMP`/`TMP` pointing at the checkout's `.tmp` (the documented Vite
-workaround).
+Run from a clean `main` on Windows; no `TEMP`/`TMP` setup is needed (the
+smoke gate and the rehearsal scope the documented Windows Vite/esbuild
+workaround to their web-build stages only).
 
 1. `git status --short` is empty and `git log -1 --oneline` is the intended
    commit.
 2. Run the one-command rehearsal from the repo root (Windows PowerShell 5.1;
-   it prepends Git Bash and points `TEMP`/`TMP` at the checkout's `.tmp`
-   itself):
+   it prepends Git Bash to `PATH` itself):
 
    ```powershell
    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/release-rehearsal.ps1
@@ -39,7 +38,7 @@ workaround).
    captured output tail and exit 1: clean tree → candidate build +
    `npm run check` → `scripts/smoke-test.ps1` (`SMOKE TEST: PASS`) →
    `node scripts/tarball-smoke.mjs` (`TARBALL SMOKE: PASS (7/7)`) and
-   `npm run pack:check` → `scripts/e2e-test.ps1` (22 PASS / 0 FAIL / 1 SKIP;
+   `npm run pack:check` → `scripts/e2e-test.ps1` (28 PASS / 0 FAIL / 1 SKIP;
    needs system Edge, not run in CI) → final clean-tree check.
 
    Fast iterations: `-SkipBrowser` (skip the system-Edge pass) and

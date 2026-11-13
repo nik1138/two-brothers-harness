@@ -31,6 +31,11 @@ Local map for the repository gates and release tooling. Root rules:
 - `smoke-test.ps1` must end with `SMOKE TEST: PASS`; `release-rehearsal.ps1`
   exits 0 only when every planned step passes; `tarball-smoke.mjs` prints
   `TARBALL SMOKE: PASS (7/7)`.
+- `smoke-test.ps1` scopes the repo-local TEMP/TMP redirect to the web build
+  stage only (esbuild EPERM workaround); do not widen it to a global redirect —
+  the package watcher/editor suites depend on the ambient temp. The rehearsal
+  keeps the caller's TEMP/TMP untouched and applies the same scoped redirect
+  only around the browser-E2E step when that step must rebuild `web/dist`.
 - `check-runtime-deps.mjs` reads `packages/harness/dist/`; build first.
 - `tarball-smoke.mjs` packs + installs (slow) and is deliberately not part of
   `npm run check`; run it manually or via the rehearsal.
