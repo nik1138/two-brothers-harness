@@ -19,6 +19,7 @@ import type {
   SubagentCompletedEvent,
   SubagentDetail,
   SubagentInfo,
+  SubagentMessageEntry,
   SubagentRole,
   SubagentStartedEvent,
   SubagentStatus,
@@ -104,9 +105,12 @@ function transcriptEntryOf(value: unknown): SubagentTranscriptEntry | null {
   if (value.type === 'message') {
     const text = stringOf(value.text, 12_000)
     if (text === '') return null
+    const origin =
+      value.origin === 'operator' || value.origin === 'senior' ? value.origin : undefined
     return {
       type: 'message',
       role: value.role === 'user' ? 'user' : 'assistant',
+      ...(origin !== undefined ? { origin } : {}),
       text,
       at: intOf(value.at),
     }
@@ -509,6 +513,20 @@ export function subagentStatusLabel(status: SubagentStatus): string {
 
 export function subagentRoleLabel(role: SubagentRole): string {
   return role === 'senior' ? 'Senior model' : 'Junior model'
+}
+
+/**
+ * One transcript row's role label. A user row is the helper's own task unless
+ * it carries the additive follow-up origin, in which case it says who sent it:
+ * `Task` / `Follow-up · operator` / `Follow-up · Senior`.
+ */
+export function subagentMessageLabel(
+  entry: Pick<SubagentMessageEntry, 'role' | 'origin'>,
+): string {
+  if (entry.role !== 'user') return 'Helper'
+  if (entry.origin === 'operator') return 'Follow-up · operator'
+  if (entry.origin === 'senior') return 'Follow-up · Senior'
+  return 'Task'
 }
 
 /** Compact duration label (`0:42`, `12:03`, `1:02:03`) for elapsed/total ms. */

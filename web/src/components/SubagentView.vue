@@ -5,6 +5,7 @@ import type { RunUsage, SubagentDetail } from '../types'
 import {
   subagentDuration,
   subagentElapsed,
+  subagentMessageLabel,
   subagentRoleLabel,
   subagentStatusLabel,
   subagentTaskPreview,
@@ -12,12 +13,14 @@ import {
 } from '../subagents'
 import {
   SUBAGENT_CONTROLS_UNSUPPORTED_NOTICE,
+  canSendSubagentFollowUp,
   isMissingSubagentControlRoute,
   markSubagentControlsUnavailable,
   subagentControlsUnavailable,
+  subagentFollowUpNotice,
   subagentInterruptNotice,
 } from '../subagentControls'
-import { ApiError, interruptSubagent } from '../api'
+import { ApiError, interruptSubagent, sendSubagentMessage } from '../api'
 import { cacheHitPercent, promptTokensOf } from '../usageCache'
 
 const props = defineProps<{
@@ -48,6 +51,19 @@ const canStop = computed(
   () => props.detail?.status === 'running' && !controlsUnavailable.value,
 )
 
+/** Drawer follow-up state (A2): queued text, local in-flight/feedback only. */
+const followUpDraft = ref('')
+const sendingFollowUp = ref(false)
+const followUpNotice = ref('')
+const followUpError = ref('')
+const canFollowUp = computed(
+  () =>
+    !controlsUnavailable.value &&
+    canSendSubagentFollowUp(props.detail?.status ?? 'running') &&
+    props.detail !== null,
+)
+const followUpReady = computed(() => followUpDraft.value.trim() !== '')
+
 /** Stop only this helper; the parent run keeps going. */
 async function stopHelper() {
   const detail = props.detail
@@ -70,6 +86,55 @@ async function stopHelper() {
     stopping.value = false
   }
 }
+
+/**
+ * Queue one follow-up for this helper's next step. The response says `queued`
+ * (never delivered); nothing here claims the helper read it. A 404 is an old
+ * backend and latches the whole control family off; 400/409 details (too long,
+ * finished, queue full, context full) stay inline.
+ */
+async function sendFollowUp() {
+  const detail = props.detail
+  if (detail === null || sendingFollowUp.value || !canFollowUp.value) return
+  const text = followUpDraft.value.trim()
+  if (text === '') return
+  sendingFollowUp.value = true
+  followUpNotice.value = ''
+  followUpError.value = ''
+  try {
+    const result = await sendSubagentMessage(detail.id, text)
+    followUpDraft.value = ''
+    followUpNotice.value = subagentFollowUpNotice(result.pending)
+  } catch (exc) {
+    if (exc instanceof ApiError && isMissingSubagentControlRoute(exc.status)) {
+      markSubagentControlsUnavailable()
+      controlsUnavailable.value = true
+      followUpError.value = SUBAGENT_CONTROLS_UNSUPPORTED_NOTICE
+    } else {
+      followUpError.value = exc instanceof Error ? exc.message : String(exc)
+    }
+  } finally {
+    sendingFollowUp.value = false
+  }
+}
+
+/** Enter sends; Shift+Enter inserts a newline (IME composition stays untouched). */
+function onFollowUpKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return
+  event.preventDefault()
+  void sendFollowUp()
+}
+
+/**
+ * The drawer never closes under a non-empty follow-up draft: `App.vue` asks
+ * this before handling Escape (design §7.1). Exposed, not a prop, because the
+ * draft is drawer-local.
+ */
+function hasFollowUpDraft(): boolean {
+  return followUpDraft.value.trim() !== ''
+}
+
+defineExpose({ hasFollowUpDraft })
 
 /** Avoid painting the final report twice: the store's last assistant message wins. */
 const timeline = computed(() => {
@@ -170,7 +235,7 @@ function closeOnBackdrop(event: MouseEvent) {
               :class="entry.role === 'user' ? 'is-task' : 'is-helper'"
             >
               <p class="subagent-message-role">
-                {{ entry.role === 'user' ? 'Task' : 'Helper' }}
+                {{ subagentMessageLabel(entry) }}
               </p>
               <pre>{{ entry.text }}</pre>
             </article>
@@ -215,6 +280,40 @@ function closeOnBackdrop(event: MouseEvent) {
 
         <p v-if="detail.error" class="subagent-view-error" role="alert">
           {{ detail.error }}
+        </p>
+
+        <!-- Drawer-only follow-up (A2): queued for the helper's next step, never
+             written into the brothers' transcript. Hidden once the helper
+             settled; enabled while it is parked on an approval (the whole
+             point), disabled only while a local request is in flight. -->
+        <form v-if="canFollowUp" class="subagent-follow-up" @submit.prevent="sendFollowUp">
+          <label class="subagent-follow-up-label" for="subagent-follow-up-text">
+            Follow-up
+          </label>
+          <textarea
+            id="subagent-follow-up-text"
+            v-model="followUpDraft"
+            class="subagent-follow-up-input"
+            rows="1"
+            placeholder="Message this helper — queued for its next step"
+            aria-label="Follow-up message"
+            :disabled="sendingFollowUp"
+            @keydown="onFollowUpKeydown"
+          ></textarea>
+          <NButton
+            size="small"
+            type="primary"
+            attr-type="submit"
+            :disabled="sendingFollowUp || !followUpReady"
+          >
+            {{ sendingFollowUp ? 'Sending…' : 'Send' }}
+          </NButton>
+        </form>
+        <p v-if="followUpNotice" class="subagent-view-note is-control" role="status">
+          {{ followUpNotice }}
+        </p>
+        <p v-if="followUpError" class="subagent-view-error" role="alert">
+          {{ followUpError }}
         </p>
 
         <footer class="subagent-view-foot">
@@ -396,6 +495,52 @@ function closeOnBackdrop(event: MouseEvent) {
   border-radius: 50%;
   background: var(--accent);
   animation: subagent-pulse 1.4s ease-in-out infinite;
+}
+
+/* Drawer follow-up composer: one line by default, never a nested tree control. */
+.subagent-follow-up {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+  padding: var(--space-3);
+  background: var(--surface-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.subagent-follow-up-label {
+  flex: none;
+  padding-bottom: 0.45rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.subagent-follow-up-input {
+  flex: 1;
+  min-width: 0;
+  max-height: 9rem;
+  padding: 0.45rem 0.6rem;
+  font: inherit;
+  font-size: 0.84rem;
+  line-height: 1.4;
+  color: var(--text-primary);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  resize: vertical;
+}
+
+.subagent-follow-up-input:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+.subagent-follow-up-input:disabled {
+  opacity: 0.6;
 }
 
 .subagent-timeline {

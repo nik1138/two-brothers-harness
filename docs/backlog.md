@@ -1779,15 +1779,31 @@ Tests: `tests/autoroute.test.ts` (31), `tests/solo.test.ts` (24),
   child approval is withdrawn as `deny`/`interrupted`); the terminal event and
   the child log's `end` row carry the additive `cancelled_by`
   (`operator`/`parent_run`/`restart`), and a log a crash left without an `end`
-  row is reconciled to `cancelled`/`restart` at the next `serve` startup. The child
-  still cannot recurse or receive follow-ups. Remaining phases: `send_message` /
-  `interrupt_agent` / `list_agents` controls (in progress), async
-  completion/wake (the parent currently waits for the bounded report), a TUI
-  tree, forked-context children, deeper nesting, per-call model/effort
-  overrides (the operator's Settings → Models & roles → Subagent route already
-  fixes the child route) and cost/cache roll-up into the parent view. The
-  protocol stays unchanged; children are internal executions, not second
-  protocol peers.
+  row is reconciled to `cancelled`/`restart` at the next `serve` startup.
+  **Slice A2 (operator follow-ups) shipped 2026-11-13 for `serve`/web:** each
+  live helper has a bounded follow-up queue (8 pending, 4 000 chars each, 8
+  applied per child). `POST /api/subagents/{id}/messages` accepts an operator
+  text and answers `queued` with the pending count (never "delivered"), and the
+  queue is drained only between child provider steps (step >= 1, never step 0,
+  never inside a parked approval wait): the text arrives as an ordinary user
+  turn in the child's isolated conversation, with an additive `origin`
+  (`operator`/`senior`) row in the child log, and never in the brothers'
+  transcript. A follow-up that would push the child's estimated context past
+  80 000 chars is refused up front (409 `helper context is full (… chars)`) or
+  counted as dropped at the delivery point; there is no compaction inside a
+  child. The terminal row gains additive `end.followups {delivered, dropped}`
+  only when at least one follow-up was queued, and an interrupted child's
+  queued texts are dropped and counted. The drawer gains the follow-up field
+  (Enter sends, Shift+Enter inserts a newline, Escape never discards a typed
+  draft); a 404 from an old backend hides the whole control family with one
+  inline sentence. Remaining phases: the model-facing `send_message` /
+  `interrupt_agent` / `list_agents`/`subagent_report` tools with opt-in
+  background children (slice B), async completion/wake (the parent currently
+  waits for the bounded report), a TUI tree, forked-context children, deeper
+  nesting, per-call model/effort overrides (the operator's Settings → Models &
+  roles → Subagent route already fixes the child route) and cost/cache roll-up
+  into the parent view. The protocol stays unchanged; children are internal
+  executions, not second protocol peers.
 - **Stacked-dialog mask-click (web, non-blocker)** — **blocked on upstream**
   (evidence updated 2026-11-08): naive-ui fires `mask-click` for clicks that
   land inside a stacked second dialog, so every dialog's handler must ignore

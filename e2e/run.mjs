@@ -70,6 +70,13 @@
 //                  the tree/drawer say cancelled while the parent run completes,
 //                  the child log ends with cancelled_by "operator", and a reload
 //                  keeps the terminal row
+//   subagent-followups scripted fixture: the same parked helper, but the operator
+//                  types a follow-up in the drawer (Escape keeps a typed draft,
+//                  Enter queues it with the honest "queued … next step" copy),
+//                  the parked card is untouched, Allow once runs the write and
+//                  the follow-up is delivered at the helper's next step (origin
+//                  row + end.followups), the composer disappears once settled,
+//                  and the text stays out of the brothers' transcript
 //   tool-preview  scripted fixture: a workspace_list_dir result's additive
 //                  bounded `preview` makes the completed tool card expandable;
 //                  its toggle is keyboard-operable (aria-expanded), the plain-
@@ -2994,6 +3001,173 @@ async function scenarioSubagentControls(runner) {
   }
 }
 
+// -- scenario: operator follow-up to a live helper (A2) --------------------------------
+//
+// One concern: the drawer follow-up field end to end. The `helper-write` fixture
+// parks the child's write on the parent run, so the operator can type while the
+// helper is genuinely parked. Asserted: Escape never discards a typed draft,
+// Enter queues it with the honest copy ("queued — delivered at the helper's next
+// step"), the parked card is untouched, Escape then closes on the now-empty
+// field, Allow once lets the helper continue, the follow-up is delivered at its
+// next step (durable origin row + `end.followups {delivered:1}`), the composer is
+// gone once the helper settled, and the text never appears in the brothers'
+// transcript.
+
+async function scenarioSubagentFollowUps(runner) {
+  const HELPER_FILE = 'e2e-helper.txt'
+  const SESSION_TITLE = 'E2E helper follow-up'
+  const FOLLOW_UP = 'Prefer e2e-helper.txt and write the greeting.'
+  const wsDir = tmpDir('tb-e2e-ws-subfollow')
+  const wsName = path.basename(wsDir)
+  const be = await startBackend({ kind: 'fixture', scenario: 'helper-write' })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  try {
+    const put = await apiCall(be.base, 'PUT', '/api/settings', {
+      subagent: {
+        provider: 'openai',
+        base_url: be.modelBase,
+        api_key: 'e2e-helper-key',
+        model: 'e2e-helper',
+      },
+    })
+    assert.equal(put.status, 200, `PUT /api/settings -> HTTP ${put.status}`)
+
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await ensureWorkspace(page, wsDir, wsName)
+    await selectWorkspaceFilter(page, wsName)
+    await createSession(page, SESSION_TITLE)
+    await sendTask(page, 'Write the helper file in the workspace', { mode: 'work' })
+
+    // The helper parks on the parent run's approval card and stays live.
+    const card = page.locator('.approval-dock article.approval', { hasText: 'awaiting you' })
+    await card.first().waitFor({ timeout: 60000 })
+    assert.ok(
+      (await card.first().innerText()).includes('Write helper file'),
+      'the parked card names the helper',
+    )
+
+    // Open the child drawer: the follow-up field is available while parked.
+    const chip = page.locator('.subagent-chip')
+    await chip.waitFor({ state: 'visible', timeout: 20000 })
+    await chip.click()
+    const tree = page.locator('#subagent-tree')
+    await tree.waitFor({ state: 'visible' })
+    await tree.locator('.subagent-tree-row').first().click()
+    const drawer = page.locator('.subagent-view')
+    await drawer.waitFor({ state: 'visible', timeout: 15000 })
+    const field = drawer.locator('textarea[aria-label="Follow-up message"]')
+    await field.waitFor({ state: 'visible', timeout: 15000 })
+
+    // Typed text is not discarded by Escape (design §7.1).
+    await field.fill(FOLLOW_UP)
+    await page.keyboard.press('Escape')
+    await page.waitForTimeout(150)
+    assert.equal(await drawer.isVisible(), true, 'Escape keeps a typed follow-up draft open')
+
+    // Enter queues it: honest "queued" copy with the pending count.
+    await field.press('Enter')
+    const notice = drawer.locator('.subagent-view-note.is-control', { hasText: 'queued' })
+    await notice.waitFor({ timeout: 15000 })
+    assert.match(
+      (await notice.innerText()).replace(/\s+/g, ' '),
+      /queued — delivered at the helper's next step \(1 pending\)/,
+    )
+    assert.equal(await field.inputValue(), '', 'an accepted follow-up clears the field')
+
+    // A follow-up never answers, denies or withdraws the parked card.
+    assert.equal(
+      await page.locator('.approval-dock article.approval', { hasText: 'awaiting you' }).count(),
+      1,
+      'the parked approval is untouched by the follow-up',
+    )
+
+    // With the field empty, Escape closes the drawer and the parent is usable.
+    await page.keyboard.press('Escape')
+    await drawer.waitFor({ state: 'hidden', timeout: 10000 })
+    await page.locator('.approval-dock button.approval-btn', { hasText: 'Allow once' }).click()
+    await waitForRunEnd(page)
+    assert.equal(
+      fs.existsSync(path.join(wsDir, HELPER_FILE)),
+      true,
+      'the approved helper write ran after the follow-up was queued',
+    )
+
+    // The parent run completes (the follow-up is not an interruption).
+    const sessionName = await sessionNameByTitle(be.base, SESSION_TITLE)
+    const completed = await waitFor(
+      async () => {
+        const list = await (
+          await fetch(`${be.base}/api/runs?session=${encodeURIComponent(sessionName)}`)
+        ).json()
+        return list.find((entry) => entry.status === 'completed') ?? false
+      },
+      { desc: 'the parent run to complete after the helper follow-up' },
+    )
+    assert.equal(completed.status, 'completed')
+
+    // Reopen the drawer from the reloaded tree: the delivered row is labeled
+    // with its sender and the composer is gone for a settled helper.
+    await chip.waitFor({ state: 'visible', timeout: 20000 })
+    await chip.click()
+    const treeAfter = page.locator('#subagent-tree')
+    await treeAfter.waitFor({ state: 'visible' })
+    await treeAfter.locator('.subagent-tree-row').first().click()
+    const drawerAfter = page.locator('.subagent-view')
+    await drawerAfter.waitFor({ state: 'visible', timeout: 15000 })
+    const row = drawerAfter.locator('.subagent-message', { hasText: FOLLOW_UP }).first()
+    await row.waitFor({ timeout: 15000 })
+    // textContent (not innerText): the shared label style uppercases visually.
+    assert.equal(
+      (await row.locator('.subagent-message-role').textContent())?.trim(),
+      'Follow-up · operator',
+    )
+    assert.equal(
+      await drawerAfter.locator('textarea[aria-label="Follow-up message"]').count(),
+      0,
+      'a settled helper offers no follow-up field',
+    )
+
+    // Durable child log: one origin row and an honest end row.
+    const treeBody = await (
+      await fetch(`${be.base}/api/sessions/${encodeURIComponent(sessionName)}/subagents`)
+    ).json()
+    assert.equal(treeBody.subagents.length, 1)
+    const childId = treeBody.subagents[0].id
+    const rows = fs
+      .readFileSync(path.join(be.dir, 'subagents', `${childId}.jsonl`), 'utf-8')
+      .split(/\r?\n/)
+      .filter((line) => line.trim() !== '')
+      .map((line) => JSON.parse(line))
+    const originRows = rows.filter(
+      (entry) => entry.type === 'message' && entry.origin === 'operator',
+    )
+    assert.equal(originRows.length, 1)
+    assert.equal(originRows[0].text, FOLLOW_UP)
+    const ends = rows.filter((entry) => entry.type === 'end')
+    assert.equal(ends.length, 1)
+    assert.deepEqual(ends[0].followups, { delivered: 1, dropped: 0 })
+
+    // The follow-up is a fact of the child conversation only.
+    const sessionDetail = await (
+      await fetch(`${be.base}/api/sessions/${encodeURIComponent(sessionName)}`)
+    ).json()
+    assert.equal(
+      JSON.stringify(sessionDetail).includes(FOLLOW_UP),
+      false,
+      'the follow-up never enters the brothers transcript',
+    )
+
+    consoleGuard.assertClean()
+    runner.pass('subagent-followups')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(wsDir)
+    rmTree(be.dir)
+  }
+}
+
 // -- scenario: composer status seats ---------------------------------------------------
 //
 // Role models are written through the settings API before the page loads, so the
@@ -5402,6 +5576,13 @@ async function main() {
         run: () => (
           (currentRunner = makeRunner('subagent-controls')),
           scenarioSubagentControls(currentRunner)
+        ),
+      },
+      {
+        label: 'subagent-followups',
+        run: () => (
+          (currentRunner = makeRunner('subagent-followups')),
+          scenarioSubagentFollowUps(currentRunner)
         ),
       },
       {

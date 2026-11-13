@@ -633,6 +633,11 @@ export interface SubagentActivity {
 export interface SubagentMessageEntry {
   type: 'message' | 'tool'
   role?: 'user' | 'assistant'
+  /**
+   * Additive: on a delivered follow-up's user row, who sent it. Absent on the
+   * initial task row and on every pre-A2 log.
+   */
+  origin?: 'operator' | 'senior'
   text?: string
   tool?: string
   status?: 'started' | 'completed' | 'error'

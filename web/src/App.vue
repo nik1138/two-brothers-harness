@@ -197,6 +197,8 @@ const subagentsOpen = ref(false)
 const viewedSubagent = ref<SubagentDetail | null>(null)
 const subagentLoading = ref(false)
 const subagentError = ref('')
+/** The drawer's exposed follow-up-draft guard (Escape never discards typed text). */
+const subagentViewRef = ref<InstanceType<typeof SubagentView> | null>(null)
 const runningSubagents = computed(() => runningSubagentCount(subagents.value))
 /** One-second clock while a child runs, so its duration stays truthful. */
 const subagentClock = ref(Date.now())
@@ -1507,8 +1509,27 @@ function closeSubagent() {
 function onSubagentEscape(e: KeyboardEvent) {
   if (e.key !== 'Escape' || e.defaultPrevented) return
   if (!viewedSubagent.value && !subagentLoading.value) return
+  // A typed follow-up draft is the topmost layer: Escape must not close the
+  // drawer and discard it (design §7.1). An empty field closes as before.
+  if (subagentFollowUpDraftOpen()) {
+    // Mark the key handled so it also never arms the double-Escape stop.
+    e.preventDefault()
+    lastEscapeAt = null
+    return
+  }
+  e.preventDefault()
   e.stopPropagation()
+  // The Escape that closed the drawer must not arm the double-Esc stop.
+  lastEscapeAt = null
   closeSubagent()
+}
+
+/** Read the drawer's exposed draft guard; absent once the drawer unmounted. */
+function subagentFollowUpDraftOpen(): boolean {
+  const view = subagentViewRef.value as unknown as
+    | { hasFollowUpDraft?: () => boolean }
+    | null
+  return view?.hasFollowUpDraft?.() === true
 }
 
 /** Fold one live helper event into the tree and the open child drawer. */
@@ -3106,6 +3127,7 @@ onUnmounted(() => {
            open child can never accidentally receive a submission. -->
       <SubagentView
         v-if="viewedSubagent || subagentLoading || subagentError"
+        ref="subagentViewRef"
         :detail="viewedSubagent"
         :loading="subagentLoading"
         :error="subagentError"

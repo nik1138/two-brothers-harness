@@ -140,6 +140,34 @@ export async function interruptSubagent(id: string): Promise<SubagentInterruptRe
   )
 }
 
+/** Result of one operator follow-up (`POST /api/subagents/{id}/messages`). */
+export interface SubagentMessageResult {
+  subagent_id: string
+  /**
+   * Always `queued`: the helper reads the text at its next provider step, so the
+   * response never claims delivery.
+   */
+  status: 'queued'
+  /** Follow-ups pending after this one (1-based). */
+  pending: number
+}
+
+/**
+ * Queue one bounded follow-up for a live helper (sync or background). A 404
+ * means an old backend without the route (the drawer latches the capability
+ * off); a 409 is an honest refusal (finished / queue full / context full) and
+ * its detail belongs inline in the drawer.
+ */
+export async function sendSubagentMessage(
+  id: string,
+  text: string,
+): Promise<SubagentMessageResult> {
+  return request<SubagentMessageResult>(
+    `/api/subagents/${encodeURIComponent(id)}/messages`,
+    json('POST', { text }),
+  )
+}
+
 export async function createSession(body: SessionCreateRequest): Promise<SessionInfo> {
   return request<SessionInfo>('/api/sessions', json('POST', body))
 }
