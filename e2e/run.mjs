@@ -397,7 +397,36 @@ async function portFree(port, timeoutMs = 5000) {
 
 // -- backend process management -------------------------------------------------
 
-/** Spawn a server process; returns a handle with kill() that reaps the tree. */
+/**
+ * Every server handle spawnServer() has produced and no killBackend()/sweep has
+ * reaped yet. The end-of-run cleanup and the signal/fatal paths walk this
+ * registry, so an interrupted scenario can never leave a backend behind; a
+ * handle removes itself on kill().
+ */
+const servers = new Set()
+
+/**
+ * Kill a process together with its whole tree. Windows has no POSIX process
+ * groups, so this shells out to `taskkill /T /F` (the same tree-kill the
+ * per-scenario cleanup already used); elsewhere it kills the child directly
+ * (the spawned servers have no children of their own). Always resolves — a
+ * dead PID is the outcome either way, and a stale PID must never fail the run.
+ */
+function killPidTree(pid, child = null) {
+  return new Promise((resolve) => {
+    if (process.platform === 'win32') {
+      execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }, () => resolve())
+    } else {
+      try {
+        if (child) child.kill('SIGKILL')
+        else process.kill(pid, 'SIGKILL')
+      } catch {}
+      resolve()
+    }
+  })
+}
+
+/** Spawn a server process; returns an idempotent handle whose kill() reaps the tree. */
 function spawnServer(args, label, { bin = process.execPath, env = process.env } = {}) {
   const p = spawn(bin, args, { cwd: ROOT, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
   children.add(p)
@@ -405,17 +434,17 @@ function spawnServer(args, label, { bin = process.execPath, env = process.env } 
   p.stdout?.on('data', () => {})
   const handle = {
     pid: p.pid,
+    killed: false,
     async kill() {
-      if (p.exitCode !== null || p.signalCode) return
-      await new Promise((resolve) => {
-        execFile('taskkill', ['/PID', String(p.pid), '/T', '/F'], { windowsHide: true }, () =>
-          resolve(),
-        )
-      })
+      if (this.killed) return
+      this.killed = true
+      servers.delete(handle)
+      if (p.exitCode === null && !p.signalCode) await killPidTree(p.pid, p)
       // reap zombies / stragglers
       for (let i = 0; i < 20 && p.exitCode === null; i++) await sleep(100)
     },
   }
+  servers.add(handle)
   p.on('exit', () => children.delete(p))
   return handle
 }
@@ -486,34 +515,46 @@ function tsEnv(overrides = {}) {
 async function startBackend({ kind, scenario, lingerMs, helperModel }) {
   const port = await freePort()
   const dir = tmpDir('tb-e2e-ts')
+  // Every handle spawned below; on failure the scenario never sees a backend
+  // handle, so this function must reap its own processes and temp dir before
+  // rethrowing — otherwise a never-ready backend is orphaned.
+  const spawned = []
   let modelServer = null
   let modelBase = null
   let env
-  if (kind === 'mock') {
-    env = tsEnv({ TWO_BROTHERS_PROVIDER: 'mock' })
-  } else {
-    const modelPort = await freePort()
-    const modelArgs = [NODE_SCRIPTED, '--port', String(modelPort), '--scenario', scenario]
-    if (Number.isFinite(lingerMs)) modelArgs.push('--linger-ms', String(lingerMs))
-    if (typeof helperModel === 'string' && helperModel !== '')
-      modelArgs.push('--helper-model', helperModel)
-    modelServer = spawnServer(modelArgs, 'ts-model')
-    await waitForModelServer(modelPort)
-    modelBase = `http://127.0.0.1:${modelPort}/v1`
-    env = tsEnv({
-      TWO_BROTHERS_PROVIDER: 'openai',
-      TWO_BROTHERS_BASE_URL: modelBase,
-      TWO_BROTHERS_SENIOR_MODEL: 'e2e-senior',
-      TWO_BROTHERS_JUNIOR_MODEL: 'e2e-junior',
-    })
+  try {
+    if (kind === 'mock') {
+      env = tsEnv({ TWO_BROTHERS_PROVIDER: 'mock' })
+    } else {
+      const modelPort = await freePort()
+      const modelArgs = [NODE_SCRIPTED, '--port', String(modelPort), '--scenario', scenario]
+      if (Number.isFinite(lingerMs)) modelArgs.push('--linger-ms', String(lingerMs))
+      if (typeof helperModel === 'string' && helperModel !== '')
+        modelArgs.push('--helper-model', helperModel)
+      modelServer = spawnServer(modelArgs, 'ts-model')
+      spawned.push(modelServer)
+      await waitForModelServer(modelPort)
+      modelBase = `http://127.0.0.1:${modelPort}/v1`
+      env = tsEnv({
+        TWO_BROTHERS_PROVIDER: 'openai',
+        TWO_BROTHERS_BASE_URL: modelBase,
+        TWO_BROTHERS_SENIOR_MODEL: 'e2e-senior',
+        TWO_BROTHERS_JUNIOR_MODEL: 'e2e-junior',
+      })
+    }
+    const server = spawnServer(
+      [TS_CLI, 'serve', '--host', '127.0.0.1', '--port', String(port), '--sessions-dir', dir],
+      `ts-${kind}`,
+      { env },
+    )
+    spawned.push(server)
+    await waitForServer(port)
+    return { port, dir, server, modelServer, modelBase, base: `http://127.0.0.1:${port}` }
+  } catch (e) {
+    for (const handle of spawned.reverse()) await handle.kill().catch(() => {})
+    rmTree(dir)
+    throw e
   }
-  const server = spawnServer(
-    [TS_CLI, 'serve', '--host', '127.0.0.1', '--port', String(port), '--sessions-dir', dir],
-    `ts-${kind}`,
-    { env },
-  )
-  await waitForServer(port)
-  return { port, dir, server, modelServer, modelBase, base: `http://127.0.0.1:${port}` }
 }
 
 async function killBackend(be) {
@@ -525,7 +566,8 @@ async function killBackend(be) {
 }
 
 /** Sibling of startBackend() for a plain `serve` — no --provider mock,
- *  no scripted fixture; role models come from PUT /api/settings instead. */
+ *  no scripted fixture; role models come from PUT /api/settings instead.
+ *  Same self-cleanup contract as startBackend() on readiness failure. */
 async function startPlainBackend() {
   const port = await freePort()
   const dir = tmpDir('tb-e2e-real')
@@ -534,7 +576,13 @@ async function startPlainBackend() {
     'real',
     { env: tsEnv() },
   )
-  await waitForServer(port)
+  try {
+    await waitForServer(port)
+  } catch (e) {
+    await server.kill().catch(() => {})
+    rmTree(dir)
+    throw e
+  }
   return { port, dir, server, modelServer: null, base: `http://127.0.0.1:${port}` }
 }
 
@@ -6424,17 +6472,58 @@ async function main() {
   return failures
 }
 
+/**
+ * Reap everything the runner still owns: the browser, every live server
+ * handle, then any other spawned child (e.g. the web build). Idempotent, and
+ * safe to call from the normal tail, the signal handlers and the fatal paths —
+ * whichever runs first does the work, the rest are no-ops. This is what makes
+ * backend cleanup deterministic: pass, FAIL, exception and interruption all
+ * funnel through here, and each reap is awaited before the process exits.
+ */
+let sweeping = false
+async function sweepOwnedProcesses() {
+  if (sweeping) return
+  sweeping = true
+  if (browser) {
+    await browser.close().catch(() => {})
+    browser = null
+  }
+  for (const handle of [...servers]) await handle.kill().catch(() => {})
+  await Promise.all([...children].map((p) => killPidTree(p.pid, p)))
+  // give the exit events a moment to land so nothing is reaped twice
+  for (let i = 0; i < 30 && children.size > 0; i++) await sleep(100)
+}
+
 process.on('uncaughtException', (e) => {
   log(`uncaught: ${e.stack ?? e.message}`)
-  process.exitCode = 1
+  sweepOwnedProcesses().finally(() => process.exit(1))
 })
 
-const failures = await main()
-if (browser) await browser.close().catch(() => {})
-// hard reap anything still alive
-for (const p of children) {
-  try {
-    execFile('taskkill', ['/PID', String(p.pid), '/T', '/F'], { windowsHide: true }, () => {})
-  } catch {}
+// An unhandled rejection would otherwise crash the runner without any
+// cleanup (the tail below never runs) and orphan the live backend — route it
+// through the same sweep as everything else.
+process.on('unhandledRejection', (reason) => {
+  log(`unhandled rejection: ${reason?.stack ?? String(reason)}`)
+  sweepOwnedProcesses().finally(() => process.exit(1))
+})
+
+// Console interruption (Ctrl+C / Ctrl+Break / console close) and external
+// termination requests: reap the scenario's backend before exiting so an
+// interrupted run never leaves a `cli.js serve` behind. Windows maps Ctrl+C to
+// SIGINT and Ctrl+Break to SIGBREAK; both exit 130 by convention.
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
+  process.on(sig, () => {
+    log(`received ${sig} — reaping backend processes ...`)
+    sweepOwnedProcesses().finally(() => process.exit(sig === 'SIGINT' || sig === 'SIGBREAK' ? 130 : 1))
+  })
+}
+
+let failures = 1
+try {
+  failures = await main()
+} catch (e) {
+  log(`runner crashed: ${e.stack ?? e.message}`)
+} finally {
+  await sweepOwnedProcesses()
 }
 process.exit(failures ? 1 : 0)
