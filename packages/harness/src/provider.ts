@@ -889,6 +889,24 @@ export class ProviderContextOverflowError extends ProviderHttpError {
   }
 }
 
+/**
+ * The provider deliberately refused to answer the prompt — e.g. a Gemini
+ * response carrying `promptFeedback.blockReason` (SAFETY, RECITATION, OTHER)
+ * with no candidate content. Distinct from a malformed payload (`unexpected
+ * response shape`): resending the same prompt hits the same block, so the
+ * message names the provider's reason and the error fails fast.
+ */
+export class ProviderBlockedError extends Error {
+  /** The provider's block reason (Gemini `promptFeedback.blockReason`). */
+  readonly reason: string;
+
+  constructor(reason: string, url: string) {
+    super(`Google blocked the prompt (${reason}) for ${url}`);
+    this.name = "ProviderBlockedError";
+    this.reason = reason;
+  }
+}
+
 export type ProviderErrorKind = "retryable" | "fatal";
 
 /** Inputs a classification rule may inspect. */
@@ -1710,9 +1728,14 @@ export class OpenAICompatibleProvider extends BaseHttpProvider {
   ): Promise<string> {
     const data = await this.complete(messages, undefined, signal, options);
     const content = (data as ChatCompletionJson).choices?.[0]?.message?.content;
+    // Spec-valid: a refusal or tool-only reply may carry `content: null` on
+    // the wire; chatWithTools has always tolerated it, so plain chat matches —
+    // empty content, with reasoning/usage recorded exactly as before.
+    if (content === null) return "";
     if (typeof content !== "string") {
+      // Bounded: name what is wrong without dumping the whole response body.
       throw new Error(
-        `unexpected response shape from ${this.requestUrl()}: ${JSON.stringify(data)}`,
+        `unexpected response shape from ${this.requestUrl()}: choices[0].message.content is not a string`,
       );
     }
     return content;
@@ -2484,11 +2507,18 @@ function googleToolDefinitions(tools: Tool[]): unknown[] {
 
 function googleCompletion(data: unknown, url: string): ToolChatResponse {
   const candidates = (data as { candidates?: unknown } | null)?.candidates;
-  if (!Array.isArray(candidates) || candidates.length === 0) {
-    throw new Error(`unexpected response shape from ${url}: ${JSON.stringify(data)}`);
-  }
-  const parts = (candidates[0] as { content?: { parts?: unknown } } | null)?.content?.parts;
-  if (!Array.isArray(parts)) {
+  const parts =
+    Array.isArray(candidates) && candidates.length > 0
+      ? (candidates[0] as { content?: { parts?: unknown } } | null)?.content?.parts
+      : undefined;
+  if (!Array.isArray(candidates) || candidates.length === 0 || !Array.isArray(parts)) {
+    // A blocked prompt is a deliberate provider refusal, not a malformed
+    // payload: Gemini answers it with `promptFeedback.blockReason` and no
+    // candidate content, so surface the reason instead of the shape error.
+    const feedback = (data as { promptFeedback?: unknown } | null)?.promptFeedback;
+    const blockReason =
+      isRecord(feedback) && typeof feedback.blockReason === "string" ? feedback.blockReason : "";
+    if (blockReason) throw new ProviderBlockedError(blockReason, url);
     throw new Error(`unexpected response shape from ${url}: ${JSON.stringify(data)}`);
   }
   const texts: string[] = [];

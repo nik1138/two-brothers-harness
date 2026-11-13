@@ -27,6 +27,7 @@ import {
   DEFAULT_PROVIDER_KIND,
   GoogleProvider,
   OpenAICompatibleProvider,
+  ProviderBlockedError,
   ProviderContextOverflowError,
   ProviderHttpError,
   resolveProviderKind,
@@ -502,8 +503,23 @@ test("google: text skips thought parts, functionCall parses, usage subtracts cac
   });
 });
 
-test("google: a response without candidates is a shape error", async () => {
-  const stub = stubFetch(() => jsonResponse({ promptFeedback: { blockReason: "SAFETY" } }));
+test("google: promptFeedback.blockReason yields a dedicated blocked error naming the reason", async () => {
+  for (const blockReason of ["SAFETY", "OTHER"]) {
+    const stub = stubFetch(() => jsonResponse({ promptFeedback: { blockReason } }));
+    const provider = googleProvider(stub.fetchImpl);
+    await assert.rejects(provider.chat([{ role: "user", content: "u" }]), (err: unknown) => {
+      assert.ok(err instanceof ProviderBlockedError, String(err));
+      assert.equal(err.reason, blockReason);
+      assert.match(err.message, new RegExp(`Google blocked the prompt \\(${blockReason}\\)`));
+      assert.match(err.message, /generateContent/);
+      return true;
+    });
+    assert.equal(stub.requests.length, 1);
+  }
+});
+
+test("google: a malformed payload without candidates or blockReason is still a shape error", async () => {
+  const stub = stubFetch(() => jsonResponse({ nope: true }));
   const provider = googleProvider(stub.fetchImpl);
   await assert.rejects(
     provider.chat([{ role: "user", content: "u" }]),
@@ -780,6 +796,61 @@ test("openai-compatible: request shape is unchanged by the adapter refactor", as
         },
       },
     ],
+  });
+});
+
+// ---------------------------------------------------------------------------
+// OpenAI-compatible chat() null-content parity + bounded shape errors
+// ---------------------------------------------------------------------------
+
+test("openai-compatible: plain chat tolerates spec-valid content:null like chatWithTools", async () => {
+  const stub = stubFetch((_request, index) =>
+    index === 0
+      ? jsonResponse({
+          choices: [{ index: 0, message: { role: "assistant", content: null }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 3, completion_tokens: 0 },
+        })
+      : jsonResponse({ choices: [{ message: { content: "normal answer" } }], usage: {} }),
+  );
+  const provider = new OpenAICompatibleProvider({
+    ...BASE,
+    model: "openai-model",
+    fetchImpl: stub.fetchImpl,
+  });
+  // content:null (a refusal or tool-only reply) is empty content, not an error.
+  assert.equal(await provider.chat([{ role: "user", content: "u" }]), "");
+  // Usage is still recorded exactly as before.
+  assert.deepEqual(provider.usageSnapshot(), {
+    model_calls: 1,
+    input_tokens: 3,
+    output_tokens: 0,
+    cached_tokens: 0,
+    cache_write_tokens: 0,
+  });
+  // chatWithTools on the same body agrees, and a normal string is unchanged.
+  assert.equal(
+    (
+      await provider.chatWithTools([{ role: "user", content: "u" }], [])
+    ).content,
+    "normal answer",
+  );
+  assert.equal(await provider.chat([{ role: "user", content: "u" }]), "normal answer");
+});
+
+test("openai-compatible: a malformed chat body is still a shape error, without the whole body", async () => {
+  const huge = { choices: [], usage: {}, flooded: "x".repeat(5000) };
+  const stub = stubFetch(() => jsonResponse(huge));
+  const provider = new OpenAICompatibleProvider({
+    ...BASE,
+    model: "openai-model",
+    fetchImpl: stub.fetchImpl,
+  });
+  await assert.rejects(provider.chat([{ role: "user", content: "u" }]), (err: unknown) => {
+    assert.ok(err instanceof Error);
+    assert.match(err.message, /unexpected response shape from .*\/chat\/completions/);
+    assert.ok(!err.message.includes("flooded"), "the error must not dump the response body");
+    assert.ok(err.message.length < 200, `shape error must stay bounded, got ${err.message.length}`);
+    return true;
   });
 });
 
