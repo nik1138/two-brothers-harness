@@ -289,6 +289,156 @@ test("overflow recovery: a tool-loop overflow compacts and retries with rebuilt 
   assert.equal(result.context.events.filter(isCompactionSummary).length, 1);
 });
 
+// ---------------------------------------------------------------------------
+// repair overflow: the structured-reply repair of a tool-loop node re-renders
+// the compacted shared context instead of resending the oversized tool
+// conversation (the deliverable/consult nodes pass their build callback as
+// the structuredReply rebuild).
+// ---------------------------------------------------------------------------
+
+/** User contents of one recorded call, joined (transcript + repair turns). */
+function callText(messages: ChatMessage[]): string {
+  return messages.map((message) => message.content).join("\n");
+}
+
+/**
+ * The rendered transcript JSON-escapes payload newlines, so assertions use
+ * the summary marker's newline-free first line (present verbatim in the
+ * rendered envelope payload).
+ */
+const COMPACTION_SUMMARY_MARKER = COMPACTION_SUMMARY_PREFIX.split("\n")[0]!;
+
+test("overflow recovery: a deliverable repair overflow retries against the compacted context and degrades with one warning", async () => {
+  const BAD = "prose deliverable answer with no JSON payload anywhere";
+  class JuniorRepairOverflow implements Provider {
+    readonly chatCalls: ChatMessage[][] = [];
+    overflowThrown = 0;
+
+    async chat(messages: ChatMessage[], responseKind = "message"): Promise<string> {
+      this.chatCalls.push(messages.map((message) => ({ ...message })));
+      if (responseKind === "deliverable") {
+        // Emulate the provider refusing the stale oversized request: only a
+        // request rebuilt from the compacted context (carrying the summary)
+        // fits. Without the rebuild the retry overflows again and the run
+        // hard-fails; with it the retry renders the summary and the run
+        // degrades with exactly one warning.
+        if (!callText(messages).includes(COMPACTION_SUMMARY_MARKER)) {
+          this.overflowThrown += 1;
+          throw new ProviderContextOverflowError(413, "repair request exceeds the context window");
+        }
+        return BAD; // still bad: the tolerant boundary degrades, never throws
+      }
+      return new MockProvider().chat(messages, responseKind);
+    }
+
+    async chatWithTools(_messages: ChatMessage[], _tools: Tool[], _options = {}) {
+      return { content: BAD, toolCalls: [] };
+    }
+  }
+
+  const tool: Tool = {
+    name: "read_file",
+    description: "read a file",
+    parameters: {},
+    execute: () => "contents",
+  };
+  const junior = new JuniorRepairOverflow();
+  const harness = new TwoBrothersHarness(resolveConfig({ provider: "mock", mode: "work" }), {
+    senior: new RecordingProvider(),
+    junior,
+    toolScopes: { junior: [tool] },
+    compaction: { keepRecentChars: 100 },
+  });
+
+  const result = await harness.run("repair overflow task");
+
+  assert.ok(result.decision.decision);
+  assert.ok(
+    result.errors.includes("unstructured model reply for deliverable"),
+    "the still-bad retry degrades on the tolerant boundary with one warning",
+  );
+  assert.equal(junior.overflowThrown, 1, "the rebuilt retry did not overflow again");
+  assert.equal(result.context.events.filter(isCompactionSummary).length, 1);
+  const repairCalls = junior.chatCalls.filter((messages) =>
+    callText(messages).includes("Requested payload: deliverable"),
+  );
+  assert.equal(repairCalls.length, 2, "the repair attempt and its overflow retry");
+  const retry = repairCalls[1]!;
+  assert.deepEqual(
+    retry.map((message) => message.role),
+    ["system", "user"],
+    "the retry re-renders the opening pair from the compacted shared context, not the stale tool conversation",
+  );
+  assert.ok(callText(retry).includes(COMPACTION_SUMMARY_MARKER));
+  assert.ok(callText(retry).includes("[[REPAIR_REQUEST]]"));
+});
+
+test("overflow recovery: a consult repair overflow retries against the compacted context and degrades with one warning", async () => {
+  const BAD = "prose consult answer with no JSON payload anywhere";
+  class SeniorConsultOverflow implements Provider {
+    readonly chatCalls: ChatMessage[][] = [];
+    overflowThrown = 0;
+
+    async chat(messages: ChatMessage[], responseKind = "message"): Promise<string> {
+      this.chatCalls.push(messages.map((message) => ({ ...message })));
+      if (responseKind === "compaction") return SUMMARY_TEXT;
+      if (responseKind === "consult") {
+        if (!callText(messages).includes(COMPACTION_SUMMARY_MARKER)) {
+          this.overflowThrown += 1;
+          throw new ProviderContextOverflowError(413, "consult request exceeds the context window");
+        }
+        return BAD;
+      }
+      return new MockProvider().chat(messages, responseKind);
+    }
+
+    async chatWithTools(messages: ChatMessage[], tools: Tool[], options = {}) {
+      if ((options as { responseKind?: string }).responseKind === "consult") {
+        return { content: BAD, toolCalls: [] };
+      }
+      const response = await new MockProvider().chatWithTools(messages, tools, options);
+      return { content: response.content, toolCalls: [] };
+    }
+  }
+
+  const tool: Tool = {
+    name: "read_file",
+    description: "read a file",
+    parameters: {},
+    execute: () => "contents",
+  };
+  const senior = new SeniorConsultOverflow();
+  const harness = new TwoBrothersHarness(resolveConfig({ provider: "mock", mode: "consult" }), {
+    senior,
+    seniorTools: [tool],
+    compaction: { keepRecentChars: 100 },
+  });
+
+  const result = await harness.run("consult repair overflow task");
+
+  assert.ok(result.decision.decision);
+  assert.ok(
+    result.errors.includes("unstructured model reply for consult"),
+    "the still-bad retry degrades on the tolerant boundary with one warning",
+  );
+  assert.equal(senior.overflowThrown, 1, "the rebuilt retry did not overflow again");
+  assert.equal(result.context.events.filter(isCompactionSummary).length, 1);
+  const repairCalls = senior.chatCalls.filter((messages) =>
+    callText(messages).includes("Requested payload: consult"),
+  );
+  assert.equal(repairCalls.length, 2, "the repair attempt and its overflow retry");
+  const retry = repairCalls[1]!;
+  assert.deepEqual(
+    retry.map((message) => message.role),
+    ["system", "user"],
+    "the retry re-renders the opening pair from the compacted shared context, not the stale tool conversation",
+  );
+  assert.ok(callText(retry).includes(COMPACTION_SUMMARY_MARKER));
+  // the repair envelope is the only non-head event here, so the split-payload
+  // cut folds it into the summary (head+tail serialization) — the marker and
+  // the two-message shape above are the rebuild evidence.
+});
+
 test("overflow recovery: a second overflow surfaces the provider error", async () => {
   const ctx = overflowContext();
   const provider = new OverflowProvider(true);

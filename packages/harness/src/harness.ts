@@ -3766,6 +3766,9 @@ export class TwoBrothersHarness {
       messages,
       String(text),
       this.lastErrors,
+      // A repair overflow retry must re-render the compacted shared context,
+      // not resend this stale oversized tool conversation.
+      build,
     );
     return {
       payload: sanitizePayload(kind, reply.payload, reply.text, taskOf(state.ctx)),
@@ -3889,8 +3892,12 @@ export class TwoBrothersHarness {
   }
 
   private async juniorAnswer(state: CooperationState): Promise<NodeResult> {
-    const last = state.ctx.events[state.ctx.events.length - 1];
-    const kind = last.kind === "delegation" ? "deliverable" : "proposal";
+    // The reply kind follows the run mode, mirroring seniorOpen — never the
+    // last context event: a steering envelope or the compaction summary may
+    // ride between the delegation and this node, and in work mode the answer
+    // must still be the deliverable (the reference implementation decides
+    // from the senior's node kind, i.e. the mode).
+    const kind = state.mode === "work" ? "deliverable" : "proposal";
     let payload: Record<string, unknown>;
     if (kind === "deliverable") {
       const tools = this.toolSet(state);
@@ -3943,6 +3950,9 @@ export class TwoBrothersHarness {
       messages,
       String(text),
       state.errors,
+      // A repair overflow retry must re-render the compacted shared context,
+      // not resend this stale oversized tool conversation.
+      build,
     );
     const payload = sanitizePayload("deliverable", reply.payload, reply.text, taskOf(state.ctx));
     if (evidence.length > 0) {
@@ -4131,6 +4141,7 @@ export class TwoBrothersHarness {
     this.checkCancel(); // stopped before the start: raise, write nothing
     this.compactionFailed = false;
     this.compactionWarnings = [];
+    this.lastErrors = [];
     this.spillWarnings = [];
     this.subagentWarnings = [];
     this.subagentRuns = 0;
@@ -4252,7 +4263,8 @@ export class TwoBrothersHarness {
           task,
           messages: state.runEvents,
           decision: {},
-          rounds: 0,
+          // the rounds completed before the stop, like every other field here
+          rounds: state.rounds,
           context: ctx,
           errors: [...state.errors, "stopped by operator"],
           warnings: [
