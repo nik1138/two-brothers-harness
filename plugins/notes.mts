@@ -1,11 +1,12 @@
 /**
  * Minimal note-keeping plugin (example).
  *
- * Registers one junior-role tool, `write_note`, whose write goes through
+ * Registers one junior-scoped tool, `write_note`, whose write goes through
  * the run workspace — confined and approval-gated like a built-in tool.
- * A minimal example of the legacy v1 call shape (positional description and
- * params_schema; see docs/plugins.md). The `.mts` extension
- * keeps the module kind unambiguous ESM without a package.json `type`.
+ * A minimal example of the v2 options call shape (explicit description,
+ * parameters schema, and `scope: "junior"`; see docs/plugins.md). The
+ * `.mts` extension keeps the module kind unambiguous ESM without a
+ * package.json `type`.
  */
 
 import type { PluginContext } from "@two-brothers/harness";
@@ -22,11 +23,13 @@ export function register(ctx: PluginContext): void {
     return `note saved to ${filename}`;
   }
 
-  ctx.add_tool(
-    "write_note",
-    write_note,
-    "Write (overwrite) a short note file inside the workspace",
-    { text: "string", filename: "string" },
-    "junior",
-  );
+  ctx.add_tool("write_note", write_note, {
+    description: "Write (overwrite) a short note file inside the workspace",
+    parameters: {
+      type: "object",
+      properties: { text: { type: "string" }, filename: { type: "string" } },
+      required: ["text"],
+    },
+    scope: "junior",
+  });
 }
