@@ -67,7 +67,12 @@ PASS from each:
 5. Linux parity — on WSL (Ubuntu, Node 24) run `npm run typecheck` and the full
    package suite so POSIX-only mode/ownership tests actually execute (on
    Windows they skip). The worktree is on `/mnt/c`, so chmod semantics differ
-   from ext4; CI's ubuntu legs remain the final POSIX evidence.
+   from ext4; CI's ubuntu legs remain the final POSIX evidence. Final result
+   at `3f07d316`: both Node 22.22.2 and 24.16.0 passed typecheck, `npm test`
+   and `npm run test:spawn` each ran 2 461 tests (2 460 pass, 0 fail, 1
+   intentional Windows-only skip), and the hermetic server E2E passed 4/4 —
+   the live suites skipped because the local endpoint lacked the required
+   model.
 
 Each lane reports the exact command, scenario/test counts and PASS/FAIL; one
 FAIL blocks the publish. The subagent must not be the author of the feature
@@ -845,7 +850,11 @@ injection **7/7**, hermetic server E2E **4/4**, browser E2E **38 PASS, 0 FAIL,
 1 opt-in `real` skip** (raw log — 37 hermetic scenario blocks, the
 `chat/resume` block reporting chat and resume as separate lines),
 browser-E2E helper tests **18/18**, offline smoke **PASS**, `npm run typecheck`
-green. The final WSL Linux pass at these counts is still pending. The composer model switch adds
+green. The final WSL Linux pass at these counts also landed: at `3f07d316` on
+WSL (Ubuntu), both Node 22.22.2 and 24.16.0 passed typecheck, `npm test` and
+`npm run test:spawn` each 2 461 tests (2 460 pass, 0 fail, 1 intentional
+Windows-only skip), and the hermetic server E2E 4/4 — the live suites skipped
+because the local endpoint lacked the required model. The composer model switch adds
 `web/tests/modelSwitch.test.ts` and a `model-switch` browser scenario; the
 OpenCode session-header fix adds five provider tests
 (`tests/providers.test.ts`, `tests/adapters.test.ts`); model-declared effort

@@ -61,8 +61,12 @@ workaround to their web-build stages only).
    `chat/resume` block reporting chat and resume as separate lines);
    browser-E2E helper tests **18/18**; tarball smoke **7/7** with
    `pack:check` passing; offline smoke **PASS** (fault injection 7/7,
-   hermetic server suites 4/4). The final WSL Linux pass at these counts is
-   still pending.
+   hermetic server suites 4/4). The WSL Linux pass at these counts also
+   completed at `3f07d316`: on Ubuntu, both Node 22.22.2 and 24.16.0 passed
+   `npm run typecheck`, and `npm test` and `npm run test:spawn` each ran
+   2 461 tests — 2 460 pass, 0 fail, 1 intentional Windows-only skip; the
+   hermetic server E2E passed 4/4 (the live suites skipped because the local
+   endpoint lacked the required model).
 4. Push and confirm CI green on the ubuntu Node 22/24 matrix and the
    `windows-latest` Node 24 leg.
 5. Only then follow the publishing checklist below (tag + workflow).
