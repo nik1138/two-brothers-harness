@@ -1,0 +1,13 @@
+{
+  "captured_from": "main @ 0725545 (before slice B)",
+  "note": "A completed synchronous child's model-facing tool result (normalized: id and duration) and the subagent_* event type sequence. Slice B must leave both byte-identical: no new key, no new event.",
+  "sync_task": "Check the notes.",
+  "sync_label": "Notes check",
+  "tool_result": "{\"tool\":\"subagent\",\"subagent_id\":\"sub-GOLDEN\",\"label\":\"Notes check\",\"role\":\"junior\",\"model\":\"junior\",\"status\":\"completed\",\"report\":\"The notes say hello.\",\"usage\":{\"model_calls\":0,\"input_tokens\":0,\"output_tokens\":0,\"cached_tokens\":0,\"cache_write_tokens\":0},\"duration_ms\":0,\"tool_calls\":0}",
+  "subagent_event_types": [
+    "subagent_started",
+    "subagent_activity",
+    "subagent_activity",
+    "subagent_completed"
+  ]
+}
