@@ -278,16 +278,20 @@ import {
   createHelperOverlayState,
   foldHelperDetail,
   foldHelperEvent,
+  helperCost,
   helperCounts,
   helperDetailView,
   helperFollowUpToastText,
   helperInterruptToastText,
   helperRowsFromSummaries,
   helperOverlayKey,
+  helperTokenTotal,
+  helperUsageLine,
   helpersListView,
   HELPER_UNKNOWN_COPY,
   isHelperRuntimeEvent,
   type HelperOverlayState,
+  type HelperRoleKinds,
   type HelperRow,
 } from "./view/helpers.ts";
 import { persistTodoSnapshot } from "./todoPersist.ts";
@@ -2236,6 +2240,7 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
     const hints = statusHints();
     const [seniorRole, juniorRole] = providerSummaries();
     const helpers = helperCounts(helperRows);
+    const roleKinds: HelperRoleKinds = { senior: seniorRole.kind, junior: juniorRole.kind };
     const transient = transientHintFor({
       approvalParked: approval !== null,
       ...(transientHint !== null ? { transient: transientHint.text } : {}),
@@ -2261,7 +2266,11 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
         : {}),
       cost,
       ...(helpers.total > 0
-        ? { helpersRunning: helpers.running, helpersTotal: helpers.total }
+        ? {
+            helpersRunning: helpers.running,
+            helpersTotal: helpers.total,
+            helpersUsage: helperUsageLine(helperRows, roleKinds) ?? undefined,
+          }
         : {}),
       ...(running
         ? { elapsedMs: Date.now() - turnStartedAt }
@@ -2324,6 +2333,8 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
   const sidePanelState = (): SidePanelState => {
     const [seniorRole, juniorRole] = providerSummaries();
     const helpers = helperCounts(helperRows);
+    const roleKinds: HelperRoleKinds = { senior: seniorRole.kind, junior: juniorRole.kind };
+    const helperTokens = helperTokenTotal(helperRows, roleKinds);
     // One shared provider label when both roles agree; otherwise say so
     // honestly instead of pretending one provider covers both.
     const provider =
@@ -2353,7 +2364,20 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
           }
         : {}),
       cost,
-      ...(helpers.total > 0 ? { helpers } : {}),
+      ...(helpers.total > 0
+        ? {
+            helpers: {
+              total: helpers.total,
+              running: helpers.running,
+              // The roll-up rows are separate (HELPER TOK / HELPER COST); both
+              // stay absent until a settled child reported tokens, and the
+              // cost reads `cost unknown` rather than a partial sum.
+              ...(helperTokens !== null
+                ? { tokens: helperTokens, cost: helperCost(helperRows, roleKinds) }
+                : {}),
+            },
+          }
+        : {}),
       ...(running
         ? { elapsedMs: Date.now() - turnStartedAt }
         : lastElapsedMs !== undefined

@@ -27,6 +27,8 @@
  * never an optimistic status flip, a locally appended transcript row, or a
  * "delivered" claim.
  */
+import { costUsageForFamily, estimateCost, type CostPromptFamily } from "../../cost.ts";
+import { isProviderKind } from "../../provider.ts";
 import type { UsageTotals } from "../../provider.ts";
 import type {
   ApprovalRequestedEvent,
@@ -39,6 +41,7 @@ import type {
 import {
   SUBAGENT_FOLLOWUP_QUEUE_MAX,
   SUBAGENT_FOLLOWUP_TEXT_MAX_CHARS,
+  subagentUsageRollup,
   type SubagentFollowUpSendResult,
 } from "../../subagent.ts";
 import type {
@@ -71,7 +74,7 @@ import {
 } from "../screen.ts";
 import { displayWidth } from "../text.ts";
 import { plainTheme, type Theme, type ThemeToken } from "../theme.ts";
-import { formatCount } from "./statusbar.ts";
+import { formatCost, formatCount } from "./statusbar.ts";
 
 // --------------------------------------------------------------------------- //
 // bounds (the design's single bounds table)
@@ -116,6 +119,12 @@ export interface HelperRow {
   endedAt?: number;
   activity?: SubagentActivity | null;
   usage?: UsageTotals | null;
+  /**
+   * The durable wire family from `meta.provider_kind` (slice C); absent on
+   * live rows (events carry no kind) and on every pre-slice-C log, where the
+   * role's currently resolved kind is the honest fallback for pricing.
+   */
+  providerKind?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -184,6 +193,7 @@ export function helperRowsFromSummaries(list: readonly SubagentSummary[]): Helpe
     ...(summary.ended_at !== undefined ? { endedAt: intOf(summary.ended_at) } : {}),
     activity: summary.last_activity ?? null,
     usage: summary.usage ?? null,
+    ...(summary.provider_kind !== undefined ? { providerKind: summary.provider_kind } : {}),
   }));
   return rows.sort((left, right) => right.startedAt - left.startedAt);
 }
@@ -625,6 +635,131 @@ export function helperTokenLabel(usage: UsageTotals | null | undefined): string 
 export function helpersListTitle(rows: readonly HelperRow[]): string {
   const counts = helperCounts(rows);
   return `HELPERS · ${counts.total} total · ${counts.running} running`;
+}
+
+// --------------------------------------------------------------------------- //
+// usage/cache/cost roll-up (slice C — a separate helpers aggregate, never
+// merged into the brothers' tokens/context/cost footer)
+// --------------------------------------------------------------------------- //
+
+/**
+ * The wire family per role exactly as the app's provider summaries report it
+ * (endpoint kind, else the role/run chain). Values may be arbitrary strings
+ * from a hand-edited config; anything that is not a known `ProviderKind`
+ * prices as `null` (cost unknown), never as a guessed family.
+ */
+export interface HelperRoleKinds {
+  senior?: string | null;
+  junior?: string | null;
+}
+
+/**
+ * The family one row prices with: the durable `meta.provider_kind` wins (it
+ * survives a restart and a settings change); a row without one — every live
+ * row and every pre-slice-C log — falls back to the role's currently resolved
+ * kind. Unknown or absent on both sides reads as `null`.
+ */
+export function helperRowFamily(
+  row: HelperRow,
+  roleKinds: HelperRoleKinds,
+): CostPromptFamily | null {
+  const recorded = row.providerKind;
+  if (recorded !== undefined && isProviderKind(recorded)) return recorded;
+  const fallback = roleKinds[row.role];
+  return fallback !== undefined && fallback !== null && isProviderKind(fallback)
+    ? fallback
+    : null;
+}
+
+/**
+ * Family-normalized prompt+completion tokens for one SETTLED row (0 for a
+ * running row, a row without usage, or a row whose counters are all zero).
+ * Anthropic/Gemini report uncached-only `input_tokens`, so the prompt total
+ * is rebuilt the same way `costUsageForFamily` does it; a row without a known
+ * family uses the openai-compatible mapping (prompt = input), the same
+ * conservative fallback `estimateRunCost` applies.
+ */
+function helperRowTokens(row: HelperRow, family: CostPromptFamily | null): number {
+  if (row.status === "running") return 0;
+  const usage = row.usage;
+  if (usage === null || usage === undefined) return 0;
+  const costUsage = costUsageForFamily(family ?? "openai-compatible", usage);
+  return costUsage.promptTokens + costUsage.completionTokens;
+}
+
+/**
+ * Settled tokens only, family-normalized: `null` when no settled child
+ * reported tokens (nothing honest to show), never a live estimate — a running
+ * child contributes its existence and its count, nothing more.
+ */
+export function helperTokenTotal(
+  rows: readonly HelperRow[],
+  roleKinds: HelperRoleKinds,
+): number | null {
+  let total = 0;
+  let seen = false;
+  for (const row of rows) {
+    if (row.status === "running") continue;
+    const tokens = helperRowTokens(row, helperRowFamily(row, roleKinds));
+    if (tokens > 0) seen = true;
+    total += tokens;
+  }
+  return seen ? total : null;
+}
+
+/**
+ * The all-or-nothing helper cost (TUI only — the web has no price table).
+ * The sum of per-child `estimateCost(row.model, costUsageForFamily(family,
+ * usage))` over the settled token-bearing children; `null` when any of them
+ * is unpriced or its family is unknown, so a partial sum is never presented
+ * as a total. `null` also when there is nothing settled to price.
+ */
+export function helperCost(
+  rows: readonly HelperRow[],
+  roleKinds: HelperRoleKinds,
+): number | null {
+  let total = 0;
+  let priced = false;
+  for (const row of rows) {
+    if (row.status === "running") continue;
+    const usage = row.usage;
+    if (usage === null || usage === undefined) continue;
+    const family = helperRowFamily(row, roleKinds);
+    if (helperRowTokens(row, family) <= 0) continue;
+    if (family === null) return null;
+    const estimate = estimateCost(row.model, costUsageForFamily(family, usage));
+    if (estimate === null) return null;
+    priced = true;
+    total += estimate.totalCost;
+  }
+  return priced ? total : null;
+}
+
+/**
+ * The composed `helpers` aggregate for the status bar and the side panel:
+ * `1 running · 3 done · 14.2k tok · $0.0031` (parts absent when they would
+ * invent a number — no helpers at all reads `null`, so the segment stays
+ * byte-absent). The cost part appears only once a settled child reported
+ * tokens; an unpriced one reads the honest `cost unknown`, never a partial
+ * sum.
+ */
+export function helperUsageLine(
+  rows: readonly HelperRow[],
+  roleKinds: HelperRoleKinds,
+): string | null {
+  const rollup = subagentUsageRollup(rows);
+  if (rollup.total === 0) return null;
+  const parts: string[] = [];
+  if (rollup.running > 0) parts.push(`${rollup.running} running`);
+  const done = rollup.total - rollup.running;
+  if (done > 0) parts.push(`${done} done`);
+  const tokens = helperTokenTotal(rows, roleKinds);
+  if (tokens !== null) parts.push(`${formatCount(tokens)} tok`);
+  if (rollup.settled > 0 && tokens !== null) {
+    const cost = helperCost(rows, roleKinds);
+    parts.push(cost === null ? "cost unknown" : (formatCost(cost) ?? "cost unknown"));
+  }
+  return parts.join(" · ");
 }
 
 // --------------------------------------------------------------------------- //

@@ -13,7 +13,10 @@ import {
   applySubagentApprovalEvent,
   applySubagentDetailEvent,
   applySubagentEvent,
+  helperUsageHeaderLabel,
+  helperUsageTotals,
   normalizeSubagentDetail,
+  normalizeSubagentInfo,
   normalizeSubagentList,
   runningSubagentCount,
   subagentActivityText,
@@ -275,6 +278,8 @@ test('the shell owns the live tree, an isolated drawer and the API wiring', () =
   assert.ok(app.includes('closeSubagent'))
   assert.ok(app.includes('onSubagentEscape'))
   assert.ok(app.includes('Helpers'), 'the tree title no longer claims read-only')
+  assert.ok(app.includes('helperUsageTotals'), 'the header aggregate is wired')
+  assert.ok(app.includes('helperUsageHeaderLabel'))
 
   const view = read('components/SubagentView.vue')
   assert.ok(view.includes('Final report'))
@@ -405,4 +410,189 @@ test('a child-tagged approval event appends and flips the drawer row', () => {
     applySubagentApprovalDetailEvent(pending, approvalEvent({ subagent_id: 'sub-other' }) as RunEvent),
     pending,
   )
+})
+
+
+// ---------------------------------------------------------------------------
+// slice C: the settled token aggregate for the tree header (no cost on the web)
+// ---------------------------------------------------------------------------
+
+test('normalizeSubagentInfo carries provider_kind tolerantly', () => {
+  const withKind = normalizeSubagentInfo({
+    ...info({ status: 'completed' }),
+    provider_kind: 'anthropic',
+  })
+  assert.equal(withKind?.provider_kind, 'anthropic')
+  // A pre-slice-C backend omits the key; a garbage value never surfaces.
+  assert.equal(normalizeSubagentInfo(info())?.provider_kind, undefined)
+  assert.equal(
+    normalizeSubagentInfo({ ...info(), provider_kind: 42 })?.provider_kind,
+    undefined,
+  )
+  assert.equal(
+    normalizeSubagentInfo({ ...info(), provider_kind: '   ' })?.provider_kind,
+    undefined,
+  )
+  // Detail rows keep it too (the drawer is the same header contract).
+  const withDetail = normalizeSubagentDetail({
+    ...info({ status: 'completed' }),
+    provider_kind: 'google',
+    transcript: [],
+  })
+  assert.equal(withDetail?.provider_kind, 'google')
+})
+
+test('helperUsageTotals sums settled rows only and counts every status', () => {
+  const list = [
+    info({
+      id: 'sub-1',
+      status: 'completed',
+      usage: { model_calls: 1, input_tokens: 1_200, output_tokens: 300, cached_tokens: 600 },
+    }),
+    info({
+      id: 'sub-2',
+      status: 'failed',
+      usage: { model_calls: 1, input_tokens: 200, output_tokens: 0, cached_tokens: 0 },
+    }),
+    info({ id: 'sub-3', status: 'cancelled', usage: null }),
+    // A running row never contributes tokens, whatever its payload says.
+    info({
+      id: 'sub-4',
+      status: 'running',
+      usage: { model_calls: 1, input_tokens: 9_999, output_tokens: 9_999, cached_tokens: 0 },
+    }),
+    info({ id: 'sub-5', status: 'running', usage: null }),
+  ]
+  const totals = helperUsageTotals(list)
+  assert.deepEqual(totals, {
+    total: 5,
+    running: 2,
+    settled: 3,
+    completed: 1,
+    failed: 1,
+    cancelled: 1,
+    tokens: 1_700,
+  })
+  assert.deepEqual(helperUsageTotals([]), {
+    total: 0,
+    running: 0,
+    settled: 0,
+    completed: 0,
+    failed: 0,
+    cancelled: 0,
+    tokens: 0,
+  })
+})
+
+test('helperUsageTotals normalizes the prompt total by the recorded family', () => {
+  // Anthropic reports uncached-only input: 1 000 + 500 reads + 200 writes =
+  // 1 700 prompt, plus 100 completion. The durable provider_kind is what
+  // makes the normalization honest after a restart or a settings change.
+  const anthropic = info({
+    status: 'completed',
+    provider_kind: 'anthropic',
+    usage: {
+      model_calls: 1,
+      input_tokens: 1_000,
+      output_tokens: 100,
+      cached_tokens: 500,
+      cache_write_tokens: 200,
+      prompt_tokens: 1_700,
+    },
+  })
+  assert.equal(helperUsageTotals([anthropic]).tokens, 1_800)
+
+  const google = info({
+    status: 'completed',
+    provider_kind: 'google',
+    usage: {
+      model_calls: 1,
+      input_tokens: 1_000,
+      output_tokens: 100,
+      cached_tokens: 500,
+      cache_write_tokens: 200,
+      prompt_tokens: 1_500,
+    },
+  })
+  // Gemini has no write counter on the wire: input + reads = 1 500.
+  assert.equal(helperUsageTotals([google]).tokens, 1_600)
+
+  // No recorded family: prompt_tokens wins when the backend carried one
+  // (older backends reporting it), otherwise input_tokens is the gauge.
+  const plain = info({
+    status: 'completed',
+    usage: {
+      model_calls: 1,
+      input_tokens: 1_200,
+      output_tokens: 300,
+      cached_tokens: 600,
+      prompt_tokens: 1_200,
+    },
+  })
+  assert.equal(helperUsageTotals([plain]).tokens, 1_500)
+  assert.equal(
+    helperUsageTotals([
+      info({
+        status: 'completed',
+        usage: { model_calls: 1, input_tokens: 700, output_tokens: 0, cached_tokens: 0 },
+      }),
+    ]).tokens,
+    700,
+  )
+})
+
+test('helperUsageHeaderLabel composes the tree header deterministically', () => {
+  assert.equal(
+    helperUsageHeaderLabel({
+      total: 1,
+      running: 0,
+      settled: 1,
+      completed: 1,
+      failed: 0,
+      cancelled: 0,
+      tokens: 1_500,
+    }),
+    '1 total · 1.5k tok',
+  )
+  assert.equal(
+    helperUsageHeaderLabel({
+      total: 2,
+      running: 1,
+      settled: 1,
+      completed: 1,
+      failed: 0,
+      cancelled: 0,
+      tokens: 1_500,
+    }),
+    '2 total · 1 running · 1.5k tok',
+  )
+  // Nothing settled to count: no invented `0 tok` part.
+  assert.equal(
+    helperUsageHeaderLabel({
+      total: 1,
+      running: 1,
+      settled: 0,
+      completed: 0,
+      failed: 0,
+      cancelled: 0,
+      tokens: 0,
+    }),
+    '1 total · 1 running',
+  )
+  assert.equal(
+    helperUsageHeaderLabel({
+      total: 0,
+      running: 0,
+      settled: 0,
+      completed: 0,
+      failed: 0,
+      cancelled: 0,
+      tokens: 0,
+    }),
+    '0 total',
+  )
+  // No cost anywhere in the label: the web has no price table (D13).
+  assert.equal(helperUsageHeaderLabel(helperUsageTotals([
+    info({ status: 'completed', usage: { model_calls: 1, input_tokens: 1_000, output_tokens: 0, cached_tokens: 0 } }),
+  ])).includes('$'), false)
 })

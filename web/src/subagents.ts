@@ -159,6 +159,11 @@ export function normalizeSubagentInfo(value: unknown): SubagentInfo | null {
     // Additive and tolerant: only an explicit true becomes a badge, so an old
     // backend's row reads exactly as before.
     ...(value.background === true ? { background: true } : {}),
+    // Additive and tolerant (slice C): only a non-empty bounded string is
+    // kept, so a pre-slice-C backend's row reads exactly as before.
+    ...(typeof value.provider_kind === 'string' && value.provider_kind.trim() !== ''
+      ? { provider_kind: value.provider_kind.trim().slice(0, 40) }
+      : {}),
   }
 }
 
@@ -507,6 +512,98 @@ export function applySubagentApprovalDetailEvent(
 
 export function runningSubagentCount(list: readonly SubagentInfo[]): number {
   return list.filter((row) => row.status === 'running').length
+}
+
+/**
+ * The settled token aggregate for the tree header (slice C). Tokens sum over
+ * SETTLED rows only — a running helper counts in the status counts but
+ * contributes no tokens (its `usage` is null and a live estimate would be a
+ * lie). The web shows no helper cost (no price table here), so this is
+ * tokens/counts only.
+ */
+export interface HelperUsageTotals {
+  /** Every row in the list (running + settled). */
+  total: number
+  /** Live children: counted, never token-bearing. */
+  running: number
+  /** Terminal children (`completed` + `failed` + `cancelled`). */
+  settled: number
+  completed: number
+  failed: number
+  cancelled: number
+  /** Family-normalized prompt+completion tokens over the settled rows. */
+  tokens: number
+}
+
+function nonNegative(value: number | undefined): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0
+}
+
+/**
+ * Prompt tokens for one row with the slice-C normalization: Anthropic and
+ * Gemini report uncached-only `input_tokens`, so the durable `provider_kind`
+ * says when the total must be rebuilt (`input + cached + cache writes` /
+ * `input + cached`). Without a recorded family, `prompt_tokens` wins when the
+ * backend carried one; otherwise `input_tokens` is the honest gauge (the
+ * openai-compatible family reports the prompt total there).
+ */
+function normalizedPromptTokens(row: SubagentInfo): number {
+  const usage = row.usage
+  if (!usage) return 0
+  const input = nonNegative(usage.input_tokens)
+  const cached = nonNegative(usage.cached_tokens)
+  const written = nonNegative(usage.cache_write_tokens)
+  if (row.provider_kind === 'anthropic') return input + cached + written
+  if (row.provider_kind === 'google') return input + cached
+  if (usage.prompt_tokens !== undefined) return nonNegative(usage.prompt_tokens)
+  return input
+}
+
+export function helperUsageTotals(list: readonly SubagentInfo[]): HelperUsageTotals {
+  const totals: HelperUsageTotals = {
+    total: list.length,
+    running: 0,
+    settled: 0,
+    completed: 0,
+    failed: 0,
+    cancelled: 0,
+    tokens: 0,
+  }
+  for (const row of list) {
+    if (row.status === 'running') {
+      totals.running += 1
+      continue
+    }
+    totals.settled += 1
+    if (row.status === 'completed') totals.completed += 1
+    else if (row.status === 'failed') totals.failed += 1
+    else totals.cancelled += 1
+    totals.tokens += normalizedPromptTokens(row) + nonNegative(row.usage?.output_tokens)
+  }
+  return totals
+}
+
+/**
+ * The tree-header line: `2 total · 1 running · 1.5k tok`. Parts that would
+ * invent a number are omitted (no `0 tok` on a delegation-only session); the
+ * label is deterministic so the header is assertion-friendly.
+ */
+export function helperUsageHeaderLabel(totals: HelperUsageTotals): string {
+  const parts = [`${totals.total} total`]
+  if (totals.running > 0) parts.push(`${totals.running} running`)
+  if (totals.tokens > 0) {
+    const tokens = totals.tokens
+    const label =
+      tokens >= 1_000_000
+        ? `${(tokens / 1_000_000).toFixed(1)}m tok`
+        : tokens >= 100_000
+          ? `${Math.round(tokens / 1_000)}k tok`
+          : tokens >= 1_000
+            ? `${(tokens / 1_000).toFixed(1)}k tok`
+            : `${Math.round(tokens)} tok`
+    parts.push(label)
+  }
+  return parts.join(' · ')
 }
 
 export function subagentStatusLabel(status: SubagentStatus): string {

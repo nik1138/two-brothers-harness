@@ -176,6 +176,8 @@ import {
   applySubagentApprovalEvent,
   applySubagentDetailEvent,
   applySubagentEvent,
+  helperUsageHeaderLabel,
+  helperUsageTotals,
   runningSubagentCount,
   subagentActivityText,
   subagentElapsed,
@@ -200,6 +202,13 @@ const subagentError = ref('')
 /** The drawer's exposed follow-up-draft guard (Escape never discards typed text). */
 const subagentViewRef = ref<InstanceType<typeof SubagentView> | null>(null)
 const runningSubagents = computed(() => runningSubagentCount(subagents.value))
+/**
+ * The settled token aggregate for the helper tree header (slice C): counts
+ * over every row, tokens over the settled ones only. Deliberately no cost —
+ * the web has no price table and must not grow one.
+ */
+const subagentTotals = computed(() => helperUsageTotals(subagents.value))
+const subagentHeaderLabel = computed(() => helperUsageHeaderLabel(subagentTotals.value))
 /** One-second clock while a child runs, so its duration stays truthful. */
 const subagentClock = ref(Date.now())
 let subagentTimer: ReturnType<typeof setInterval> | null = null
@@ -2984,8 +2993,7 @@ onUnmounted(() => {
               <header class="subagent-tree-head">
                 <p class="subagent-tree-title">Helpers</p>
                 <p class="subagent-tree-sub">
-                  {{ subagents.length }} total<template v-if="runningSubagents"> ·
-                    {{ runningSubagents }} running</template>
+                  {{ subagentHeaderLabel }}
                 </p>
               </header>
               <ul class="subagent-tree-list">

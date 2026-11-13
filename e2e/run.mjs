@@ -2827,6 +2827,7 @@ async function scenarioPlanDock(runner) {
 
 async function scenarioSubagents(runner) {
   const CHILD = 'sub-12345678'
+  const LIVE_CHILD = 'sub-87654321'
   const be = await startBackend({ kind: 'mock' })
   const { context, page, consoleGuard } = await newScenarioPage()
   try {
@@ -2887,11 +2888,37 @@ async function scenarioSubagents(runner) {
         },
       },
     ]
+    // A second helper still running (seeded after the backend started, so the
+    // startup orphan sweep cannot settle it): it counts in the header but its
+    // null usage must not change the settled token aggregate.
+    const liveRows = [
+      {
+        type: 'meta',
+        id: LIVE_CHILD,
+        parent_session: session,
+        label: 'Scan routes',
+        role: 'junior',
+        model: 'e2e-junior',
+        task: 'List the exported routes.',
+        started_at: now - 10_000,
+      },
+      {
+        type: 'message',
+        role: 'user',
+        text: 'List the exported routes.',
+        at: now - 10_000,
+      },
+    ]
     const storeDir = path.join(be.dir, 'subagents')
     fs.mkdirSync(storeDir, { recursive: true })
     fs.writeFileSync(
       path.join(storeDir, `${CHILD}.jsonl`),
       rows.map((row) => JSON.stringify(row)).join('\n') + '\n',
+      'utf-8',
+    )
+    fs.writeFileSync(
+      path.join(storeDir, `${LIVE_CHILD}.jsonl`),
+      liveRows.map((row) => JSON.stringify(row)).join('\n') + '\n',
       'utf-8',
     )
 
@@ -2904,12 +2931,21 @@ async function scenarioSubagents(runner) {
 
     const chip = page.locator('.subagent-chip')
     await chip.waitFor({ state: 'visible', timeout: 10000 })
-    assert.match((await chip.innerText()).replace(/\s+/g, ' '), /Subagents · 1/)
+    assert.match((await chip.innerText()).replace(/\s+/g, ' '), /Subagents · 2/)
     await chip.click()
     const tree = page.locator('#subagent-tree')
     await tree.waitFor({ state: 'visible' })
+    // Slice C: the header carries the settled token aggregate (tokens sum over
+    // the completed helper only: 1 200 + 300 = 1.5k) and deliberately NO cost
+    // — the web has no price table.
+    const headText = ((await tree.locator('.subagent-tree-sub').innerText()) ?? '').replace(
+      /\s+/g,
+      ' ',
+    )
+    assert.equal(headText.trim(), '2 total · 1 running · 1.5k tok')
+    assert.doesNotMatch(headText, /\$|cost/i, 'the helper header shows no cost (D13)')
     const treeRows = tree.locator('.subagent-tree-row')
-    assert.equal(await treeRows.count(), 1)
+    assert.equal(await treeRows.count(), 2)
     const rowText = (await treeRows.first().innerText()).replace(/\s+/g, ' ')
     assert.match(rowText, /Read auth/)
     assert.match(rowText, /completed/)

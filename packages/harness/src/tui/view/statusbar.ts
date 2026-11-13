@@ -55,6 +55,14 @@ export interface StatusBarState {
    */
   helpersRunning?: number;
   helpersTotal?: number;
+  /**
+   * The composed helpers aggregate (slice C), e.g.
+   * `1 running · 3 done · 14.2k tok · $0.0031` — everything after the
+   * `helpers ` label, built by `helperUsageLine`. Absent renders the
+   * counts-only segment; helper cost reads `cost unknown` inside the line
+   * when any settled token-bearing child is unpriced.
+   */
+  helpersUsage?: string;
   elapsedMs?: number;
   /** The rotating projection hint (or the app's composed tool-fold hint). */
   hints?: string;
@@ -197,8 +205,9 @@ export function statusBarSegments(
     const parts = [running > 0 ? `${running} running` : "", done > 0 ? `${done} done` : ""].filter(
       (part) => part !== "",
     );
+    const detail = state.helpersUsage?.trim() ?? "";
     second.push({
-      text: `helpers ${parts.join(" · ")}`,
+      text: `helpers ${detail === "" ? parts.join(" · ") : detail}`,
       tone: running > 0 ? "warning" : "muted",
     });
   }
