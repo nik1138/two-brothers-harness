@@ -22,8 +22,11 @@
  * rejection. Every run emits typed runtime events (`run_status` / `envelope` /
  * tool/approval events / `run_error` / `run_end`) carrying `run_id`/`at`; the
  * buffer is kept in memory so a dropped SSE connection can reconnect with
- * `?after=N`. `run_status` covers the approval park too: `waiting` when the
- * run parks on an operator approval, back to `running` once it resolves, so a
+ * `?after=N`. Terminal records are retained only up to
+ * {@link MAX_TERMINAL_RUNS} (see the constant): the buffers of a long-lived
+ * backend stay bounded while every active run and the recent run list remain
+ * fully replayable. `run_status` covers the approval park too: `waiting` when
+ * the run parks on an operator approval, back to `running` once it resolves, so a
  * client watching the stream needs no separate poll for the parked state. An
  * optional `persist` hook (e.g. `RuntimeEventStore.asPersist()`) additionally
  * writes every event to a per-session sidecar file.
@@ -48,6 +51,28 @@ import type { TokenStreamEvent } from "./runstream.ts";
 export const ACTIVE_STATES: ReadonlySet<string> = new Set(["queued", "running", "waiting"]);
 export const TERMINAL_STATES: ReadonlySet<string> = new Set(["completed", "failed", "cancelled"]);
 const VALID_PROVIDERS: ReadonlySet<string> = new Set(["openai", "mock"]);
+
+/**
+ * Bounded terminal-run retention: a `RunManager` keeps at most this many
+ * TERMINAL records in memory, on top of every active/queued/waiting run.
+ * Chosen from the existing scale expectations: the serve load runner batches
+ * at most 50 runs per pass (`MAX_RUNS` in `e2e/serve-load.ts`) and the
+ * hermetic scale suites drive hundreds of runs through one manager, so 100
+ * retained terminal runs cover the web run list and the run API with
+ * headroom while bounding the per-record event buffers (`RunRecord.events`,
+ * including the replayed `envelope` tail) a long-lived backend would
+ * otherwise accumulate forever.
+ *
+ * Eviction drops the record from the manager's registry only; an open SSE
+ * consumer holding the record keeps a stable object and its `?after` replay
+ * stays intact until it disconnects. An evicted id behaves exactly like an
+ * id unknown to the in-memory pool: `GET /api/runs/{id}` rebuilds a minimal
+ * terminal record from the persisted runtime sidecar where one exists, and
+ * returns the documented unknown response otherwise. Eviction runs when a
+ * run finishes and on `submit()` — a quiet backend keeps its history until
+ * the next run lands or completes.
+ */
+export const MAX_TERMINAL_RUNS = 100;
 
 /**
  * Run statuses that accept mid-run operator steering (wave 23). Both are
@@ -588,7 +613,10 @@ export class RuntimeSettings {
 // Background run manager
 // ---------------------------------------------------------------------------
 
-/** One submitted run; state is in-memory for the process lifetime. */
+/** One submitted run. Active state is in-memory for the process lifetime; a
+ * terminal record may later be evicted under the manager's
+ * {@link MAX_TERMINAL_RUNS} retention bound (the record object itself is
+ * never mutated — consumers already holding it keep a consistent view). */
 export class RunRecord {
   readonly runId: string;
   readonly session: string;
@@ -864,6 +892,12 @@ export interface SteerResult {
  * queues a bounded text on the run's `RunRecord`; the job's harness drains it
  * and appends an ordinary envelope (see `RunRecord.steer`/`drainSteering`).
  * The manager never emits an early event for a queued text.
+ *
+ * Terminal-run retention is bounded ({@link MAX_TERMINAL_RUNS}): every
+ * active/queued/waiting run is kept, plus the most recent terminal records;
+ * older terminal records are evicted from the registry on submit (their
+ * sidecar persistence and any open consumer's replay are unaffected — see
+ * `_pruneTerminalRuns`).
  */
 export class RunManager {
   private readonly _workers: number;
@@ -912,6 +946,7 @@ export class RunManager {
     this._pending.push(record);
     this._emit(record, { type: "run_status", status: "queued" });
     this._pump();
+    this._pruneTerminalRuns();
     return record;
   }
 
@@ -923,6 +958,43 @@ export class RunManager {
   list(): Array<Record<string, unknown>> {
     const ordered = [...this._order].reverse();
     return ordered.map((runId) => this._records.get(runId) as RunRecord).map((r) => r.public());
+  }
+
+  /**
+   * Enforce {@link MAX_TERMINAL_RUNS}: evict the oldest terminal records past
+   * the cap so a long-lived backend's `_records`/`_order` and the per-record
+   * event buffers stay bounded. Only TERMINAL records are candidates — every
+   * queued/running/waiting run stays, and so does a terminal record still
+   * sitting in `_pending` (a stopped queued run has not unwound yet).
+   *
+   * Eviction removes the id from the registry only; the record object itself
+   * is untouched, so a consumer already holding it (an open SSE replay loop)
+   * keeps a consistent view, and `stop`/`get`/`wait` on an evicted id answer
+   * exactly like an unknown id (null/false — the server's run route then
+   * falls back to the persisted sidecar, which is unaffected). The session
+   * JSONL and the runtime sidecar are never touched here.
+   */
+  private _pruneTerminalRuns(): void {
+    let terminal = 0;
+    for (const runId of this._order) {
+      const record = this._records.get(runId);
+      if (record !== undefined && TERMINAL_STATES.has(record.status)) terminal += 1;
+    }
+    for (let i = 0; i < this._order.length && terminal > MAX_TERMINAL_RUNS; ) {
+      const runId = this._order[i];
+      const record = this._records.get(runId);
+      if (
+        record !== undefined &&
+        TERMINAL_STATES.has(record.status) &&
+        !this._pending.includes(record)
+      ) {
+        this._order.splice(i, 1);
+        this._records.delete(runId);
+        terminal -= 1;
+      } else {
+        i += 1;
+      }
+    }
   }
 
   /**
@@ -1041,6 +1113,11 @@ export class RunManager {
         this._inflight -= 1;
         this._activeSessions.delete(record.session);
         this._pump();
+        // The run that just finished (or was cancelled) may have pushed the
+        // terminal records past the retention bound — a synchronous burst of
+        // submits alone never triggers pruning, since no run is terminal
+        // until the event loop turns.
+        this._pruneTerminalRuns();
       }
     }
   }

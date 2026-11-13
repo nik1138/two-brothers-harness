@@ -222,7 +222,10 @@ the protocol reference and is not modified by work here either.
    events stay `{type, status, run_id, at}`, so protocol envelopes are
    untouched. `RunRecord` carries `mode` — the request's mode, else the
    resolved config default — through `POST /api/runs` and
-   `GET /api/runs[/{id}]`. Run records remain in-memory, but
+   `GET /api/runs[/{id}]`. Run records remain in-memory (terminal records
+   bounded — `RunManager` keeps every active run plus at most
+   `MAX_TERMINAL_RUNS` recent terminal records and evicts older ones on
+   submit/finish), but
    `GET /api/runs/{id}` for an unknown id falls back to
    `RuntimeEventStore.findRun()` (sorted sidecar scan) and rebuilds a
    minimal terminal record from `run_end` + `run_error`, so a failed

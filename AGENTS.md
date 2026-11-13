@@ -185,7 +185,11 @@ node dist/cli.js run "Plan a migration from Redis to Valkey" --provider mock
   accept both (`src/sessionlayout.ts`, `docs/session-storage.md`). `serve`/TUI
   hold the store's single-writer lock (`.writer.json`) and `sessions migrate`
   refuses while a live writer owns it. Run records
-  and pending approvals are in-memory only; role settings persist to
+  and pending approvals are in-memory only — with terminal run records
+  bounded: a `RunManager` keeps every active/queued/waiting run plus at most
+  `MAX_TERMINAL_RUNS` (100, `src/runtime.ts`) recent terminal records and
+  evicts older ones (recoverable by id via the runtime sidecar where
+  persisted); role settings persist to
   `sessions/settings.json` (keys encrypted at rest).
 - Oversized plain-text tool results spill under a private root (`<sessions-dir>/spill`
   on the server) and are retrieved by the `spill_read` tool; storage failure
