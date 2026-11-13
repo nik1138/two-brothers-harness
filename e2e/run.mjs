@@ -3,6 +3,14 @@
 // Scenarios (each hermetic, deterministic, offline unless noted):
 //   chat           mock provider: full cooperation cycle in the group chat
 //   resume         reload after chat: session list + conversation history
+//   history-nav    seeded session (no model run): 120 operator messages in a
+//                  paged transcript (newest-200 window hides the first 40 rows);
+//                  the navigator lists all of them chronologically, keyboard
+//                  open/arrows/Escape with focus return, jumping to a rendered
+//                  message scrolls it into view and focuses it with the active
+//                  entry mirrored by aria-current (non-color cue), jumping to a
+//                  hidden message grows the window until it renders, and a
+//                  session without user messages shows the honest empty state
 //   approval-allow scripted fixture: approve a workspace write -> file exists, UI shows diff
 //   approval-deny  scripted fixture: deny the write -> file absent
 //   stop           scripted fixture: stop a slow run -> cancelled state
@@ -967,6 +975,248 @@ async function scenarioChat(runner) {
     await context.close().catch(() => {})
     await killBackend(be)
     rmTree(wsDir)
+    rmTree(be.dir)
+  }
+}
+
+// -- scenario: user-message navigator ------------------------------------------------
+//
+// The transcript is seeded directly through the on-disk store (the same flat
+// JSONL the backend serves), so the scenario stays hermetic and instant: 120
+// operator messages alternating with senior replies project to 240 rows, and
+// the newest-200 window hides the first 40.
+
+async function scenarioHistoryNav(runner) {
+  const be = await startBackend({ kind: 'mock' })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  /** seq of user message i (1-based): the seed writes two envelopes per turn. */
+  const userSeq = (i) => 2 * i - 1
+  try {
+    const created = await apiCall(be.base, 'POST', '/api/sessions', {
+      title: 'E2E history nav',
+    })
+    assert.ok(created.json?.name, `create session -> HTTP ${created.status}`)
+    const session = created.json.name
+    const rows = []
+    const t0 = Date.UTC(2026, 10, 10, 12, 0, 0)
+    let seq = 1
+    for (let i = 1; i <= 120; i += 1) {
+      const text = `Nav probe ${String(i).padStart(3, '0')} — alpha bravo charlie delta echo`
+      rows.push({
+        v: 1,
+        id: `msg-${seq}`,
+        seq,
+        ts: new Date(t0 + (seq - 1) * 30_000).toISOString(),
+        from: 'user',
+        to: 'senior',
+        kind: 'message',
+        payload: { text },
+      })
+      seq += 1
+      rows.push({
+        v: 1,
+        id: `msg-${seq}`,
+        seq,
+        ts: new Date(t0 + (seq - 1) * 30_000).toISOString(),
+        from: 'senior',
+        to: 'user',
+        kind: 'message',
+        payload: { text: `Acknowledged probe ${i}.` },
+      })
+      seq += 1
+    }
+    fs.writeFileSync(
+      path.join(be.dir, session),
+      rows.map((row) => JSON.stringify(row)).join('\n') + '\n',
+      'utf-8',
+    )
+
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await page
+      .locator('nav[aria-label="Sessions"]')
+      .getByText('E2E history nav', { exact: true })
+      .click()
+    await page.locator('.chat-scroll').waitFor()
+
+    // the transcript is paged: 40 of 240 rows hide behind "show earlier"
+    await page.locator('button.show-earlier').waitFor({ state: 'visible' })
+
+    const trigger = page.locator('.history-nav-trigger')
+    await trigger.waitFor({ state: 'visible' })
+    assert.equal(await trigger.getAttribute('aria-label'), 'Your messages (120)')
+
+    // -- list: all operator messages, chronological, single-line excerpts ------
+    await trigger.click()
+    const panel = page.locator('#history-nav-panel')
+    await panel.waitFor({ state: 'visible' })
+    const items = panel.locator('.history-nav-item')
+    assert.equal(await items.count(), 120, 'every operator message is listed')
+    assert.match(
+      await items.first().locator('.history-nav-excerpt').innerText(),
+      /Nav probe 001/,
+      'the first entry is the oldest message',
+    )
+    assert.match(
+      await items.nth(99).locator('.history-nav-excerpt').innerText(),
+      /Nav probe 100/,
+      'entries are chronological by message, not by group',
+    )
+    assert.match(
+      await items.last().locator('.history-nav-excerpt').innerText(),
+      /Nav probe 120/,
+      'the last entry is the newest message',
+    )
+
+    // -- keyboard: open focuses an item, arrows move, Escape returns focus ------
+    await waitFor(
+      async () =>
+        page.evaluate(() =>
+          document.activeElement?.classList.contains('history-nav-item'),
+        ),
+      { desc: 'focus to land inside the navigator on open' },
+    )
+    const focusedExcerpt = async () =>
+      page.evaluate(
+        () => document.activeElement?.querySelector('.history-nav-excerpt')?.textContent ?? '',
+      )
+    const firstFocused = await focusedExcerpt()
+    await page.keyboard.press('ArrowDown')
+    await waitFor(
+      async () => (await focusedExcerpt()) !== firstFocused,
+      { desc: 'ArrowDown to move between entries' },
+    )
+    await page.keyboard.press('Escape')
+    await panel.waitFor({ state: 'hidden', timeout: 10000 })
+    assert.equal(
+      await page.evaluate(() => document.activeElement === document.querySelector('.history-nav-trigger')),
+      true,
+      'Escape returns focus to the trigger',
+    )
+
+    // -- jump to a rendered message: scroll + focus + active mirror -------------
+    await trigger.click()
+    await panel.waitFor({ state: 'visible' })
+    await panel.locator('.history-nav-item', { hasText: 'Nav probe 100' }).click()
+    await panel.waitFor({ state: 'hidden', timeout: 10000 })
+    const target = page.locator(`[data-history-nav-target="${userSeq(100)}"]`)
+    await waitFor(
+      async () =>
+        page.evaluate(
+          (seq) => document.activeElement?.getAttribute('data-history-nav-target') === seq,
+          String(userSeq(100)),
+        ),
+      { desc: 'the jumped-to bubble to hold focus' },
+    )
+    await waitFor(
+      async () =>
+        target.evaluate((el) => {
+          const sc = el.closest('.chat-scroll')
+          if (!sc) return false
+          const r = el.getBoundingClientRect()
+          const v = sc.getBoundingClientRect()
+          return r.top >= v.top - 1 && r.bottom <= v.bottom + 1
+        }),
+      { desc: 'the jumped-to bubble to be scrolled into view' },
+    )
+    const distanceFromBottom = await page.evaluate(() => {
+      const el = document.querySelector('.chat-scroll')
+      return el.scrollHeight - el.scrollTop - el.clientHeight
+    })
+    assert.ok(
+      distanceFromBottom > 200,
+      `jumping to history must leave the bottom pin (distance ${distanceFromBottom})`,
+    )
+
+    // the active entry mirrors the visible message, marked by more than color
+    await trigger.click()
+    await panel.waitFor({ state: 'visible' })
+    const current = panel.locator('.history-nav-item[aria-current="true"]')
+    assert.match(await current.innerText(), /Nav probe 100/, 'aria-current mirrors the visible message')
+    assert.equal(
+      await current.evaluate((el) => getComputedStyle(el).fontWeight),
+      '600',
+      'the active entry carries a non-color cue',
+    )
+    await page.keyboard.press('Escape')
+    await panel.waitFor({ state: 'hidden', timeout: 10000 })
+
+    // -- jump to a hidden message: the paged window grows until it renders ------
+    await trigger.click()
+    await panel.waitFor({ state: 'visible' })
+    await panel.locator('.history-nav-item', { hasText: 'Nav probe 001' }).click()
+    await waitFor(
+      async () => (await page.locator('button.show-earlier').count()) === 0,
+      { desc: 'the window to grow until nothing is hidden' },
+    )
+    const firstTarget = page.locator(`[data-history-nav-target="${userSeq(1)}"]`)
+    await firstTarget.waitFor({ state: 'visible' })
+    await waitFor(
+      async () =>
+        page.evaluate(
+          (seq) => document.activeElement?.getAttribute('data-history-nav-target') === seq,
+          String(userSeq(1)),
+        ),
+      { desc: 'the first message to hold focus after window growth' },
+    )
+    assert.match(await firstTarget.innerText(), /Nav probe 001/)
+    await waitFor(
+      async () =>
+        firstTarget.evaluate((el) => {
+          const sc = el.closest('.chat-scroll')
+          const r = el.getBoundingClientRect()
+          const v = sc.getBoundingClientRect()
+          return r.top >= v.top - 1 && r.bottom <= v.bottom + 1
+        }),
+      { desc: 'the grown-window target to be scrolled into view' },
+    )
+
+    // -- empty state: a session without operator messages is honest -------------
+    const empty = await apiCall(be.base, 'POST', '/api/sessions', {
+      title: 'E2E history nav empty',
+    })
+    assert.ok(empty.json?.name, `create empty session -> HTTP ${empty.status}`)
+    const emptyRows = [1, 2].map((n) => ({
+      v: 1,
+      id: `only-${n}`,
+      seq: n,
+      ts: new Date(t0 + n * 30_000).toISOString(),
+      from: 'senior',
+      to: 'user',
+      kind: 'message',
+      payload: { text: `Senior note ${n}.` },
+    }))
+    fs.writeFileSync(
+      path.join(be.dir, empty.json.name),
+      emptyRows.map((row) => JSON.stringify(row)).join('\n') + '\n',
+      'utf-8',
+    )
+    await page.reload()
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await page
+      .locator('nav[aria-label="Sessions"]')
+      .getByText('E2E history nav empty', { exact: true })
+      .click()
+    const emptyTrigger = page.locator('.history-nav-trigger')
+    await emptyTrigger.waitFor({ state: 'visible' })
+    assert.equal(await emptyTrigger.getAttribute('aria-label'), 'Your messages (0)')
+    await emptyTrigger.click()
+    const emptyPanel = page.locator('#history-nav-panel')
+    await emptyPanel.waitFor({ state: 'visible' })
+    assert.match(
+      await emptyPanel.locator('.history-nav-empty').innerText(),
+      /No messages from you/,
+      'the no-user-message state says so honestly',
+    )
+    assert.equal(await emptyPanel.locator('.history-nav-item').count(), 0)
+    await page.keyboard.press('Escape')
+    await emptyPanel.waitFor({ state: 'hidden', timeout: 10000 })
+
+    consoleGuard.assertClean()
+    runner.pass('history-nav')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
     rmTree(be.dir)
   }
 }
@@ -6037,6 +6287,13 @@ async function main() {
           scenarioStopSwitchLeak(currentRunner)
         ),
       },
+      {
+        label: 'history-nav',
+        run: () => (
+          (currentRunner = makeRunner('history-nav')),
+          scenarioHistoryNav(currentRunner)
+        ),
+      },
     ]
     blocks.push(...hermetic.filter((block) => scenarioSelected(block.label)))
     if (realEnabled && scenarioSelected('real')) {
@@ -6076,6 +6333,8 @@ async function main() {
       'auto-solo',
       'tab-title',
       'settings-advanced',
+      'settings-subagent',
+      'history-nav',
       'session-switch-race',
       'subagent-switch-race',
       'reconnect-exhaustion',
