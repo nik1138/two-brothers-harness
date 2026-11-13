@@ -50,6 +50,7 @@ import {
   loadMcpToolSpecs,
   loadMcpTools,
   mergeMcpConfig,
+  closeMcpClientBounded,
   type McpConfigFileShape,
   type McpToolSet,
 } from "../mcp.ts";
@@ -3258,7 +3259,9 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
             }
           }
         } finally {
-          await mcp?.client.close();
+          // Bounded close: a wedged server transport must not hang the turn
+          // teardown (the client unwinds in-process; one warning notice).
+          await closeMcpClientBounded(mcp?.client, { onTimeout: onWarning });
         }
       } catch (exc) {
         const text = messageOf(exc);

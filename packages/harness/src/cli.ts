@@ -96,6 +96,7 @@ import {
   loadMcpToolSpecs,
   loadMcpTools,
   mergeMcpConfig,
+  closeMcpClientBounded,
   type McpConfigFileShape,
   type McpToolSet,
 } from "./mcp.ts";
@@ -1485,8 +1486,12 @@ async function runOnce(
   } finally {
     // Handlers exist only while this turn is active: remove them before the
     // MCP teardown so a later command (or an embedder) never inherits them.
+    // The close is bounded: a wedged server transport must not hang the
+    // command past the grace (the client unwinds in-process; one warning).
     turnSignals.dispose();
-    await mcp?.client.close();
+    await closeMcpClientBounded(mcp?.client, {
+      onTimeout: (line) => io.error(paintWarningPrefix(textStyle, `[warn] ${line}`)),
+    });
   }
 }
 
