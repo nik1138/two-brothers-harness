@@ -40,7 +40,10 @@ The script runs:
 11. the `web/` build
 
 Expected final line: `SMOKE TEST: PASS`. It is an offline pre-flight, not the
-whole product gate — run the package gates below for that.
+whole product gate — run the package gates below for that. On the final
+validation run (commit `3f07d316`) the smoke gate passed with the package
+suite at 2 461 tests (2 453 pass, 0 fail, 8 skips), fault injection 7/7 and
+the hermetic server suites 4/4.
 
 Stop a local `serve`/web backend that uses `packages/harness/sessions` before
 running the gate: the TUI tests take the same single-writer lock, and a live
@@ -64,7 +67,12 @@ PASS from each:
 5. Linux parity — on WSL (Ubuntu, Node 24) run `npm run typecheck` and the full
    package suite so POSIX-only mode/ownership tests actually execute (on
    Windows they skip). The worktree is on `/mnt/c`, so chmod semantics differ
-   from ext4; CI's ubuntu legs remain the final POSIX evidence.
+   from ext4; CI's ubuntu legs remain the final POSIX evidence. Final result
+   at `3f07d316`: both Node 22.22.2 and 24.16.0 passed typecheck, `npm test`
+   and `npm run test:spawn` each ran 2 461 tests (2 460 pass, 0 fail, 1
+   intentional Windows-only skip), and the hermetic server E2E passed 4/4 —
+   the live suites skipped because the local endpoint lacked the required
+   model.
 
 Each lane reports the exact command, scenario/test counts and PASS/FAIL; one
 FAIL blocks the publish. The subagent must not be the author of the feature
@@ -99,7 +107,8 @@ Both legs run the same hermetic gates, in this order:
 7. at the repo root: the browser-E2E helper unit tests
    (`node --test e2e/web-freshness.test.mjs e2e/skip-registry.test.mjs` — plain
    `node:test`, no deps and no browser): the packaged-web freshness guard and
-   the missing-backend SKIP-registry parity guard;
+   the missing-backend SKIP-registry parity guard (18/18 on the final
+   validation run at `3f07d316`);
 8. ubuntu Node 22 only, after the web build: `node scripts/tarball-smoke.mjs` at
    the repo root and `npm run pack:check` in `packages/harness`. Both trigger
    the package `prepack` (build + `sync-web`), which is why they need
@@ -151,10 +160,11 @@ npm test                # in-process node:test runner
 npm run test:spawn      # node --test tests/ (child processes allowed)
 ```
 
-On the canonical integrated run for this round the in-process suite is
-**1 772 tests: 1 770 pass, 0 fail, 2 skipped** (exit 0); the two skips are
-environment-gated and never failures — the workspace symlink-parity test and
-the MCP stdio spawn are unavailable in this environment. `npm run typecheck`
+On the canonical integrated run for this round — validated at commit
+`3f07d316` — the package suite is
+**2 461 tests: 2 453 pass, 0 fail, 8 skipped** (exit 0) in both `npm test`
+and `npm run test:spawn`; the eight skips are environment/platform-gated and
+never failures. `npm run typecheck`
 and `npm run build` pass, the hermetic CLI E2E is 19/19 on sources and 19/19
 against `--dist`, the tarball smoke is 7/7 and `pack:check` passes. The
 tarball smoke pins its own consumer manifest inside the temp dir, so it also
@@ -831,11 +841,20 @@ partial usage (`tests/graph.test.ts`, `tests/runtime.test.ts`,
 `tests/server.test.ts`) and the web Full-access confirmation
 (`web/tests/permissionsUi.test.ts`). Wave 30 also hardens the prompt block
 (marker collisions, repair tails, verify kind; `tests/promptsections.test.ts`
-pins belt-stable prefixes). Latest measured totals for the merged tree:
-package suite **2 120 tests** (2 113 pass and 7 platform skips on Windows), web
-suite **518/518**, hermetic CLI E2E **19/19** on sources and `--dist`, fault
-injection **7/7**, browser E2E **26 PASS, 0 FAIL, 1 opt-in `real` skip**,
-`npm run typecheck` green. The composer model switch adds
+pins belt-stable prefixes). Final measured totals for the merged tree,
+validated at commit `3f07d316`:
+package suite **2 461 tests** (2 453 pass, 0 fail, 8 skips on Windows, in both
+`npm test` and `npm run test:spawn`), web
+suite **608/608**, hermetic CLI E2E **19/19** on sources and `--dist`, fault
+injection **7/7**, hermetic server E2E **4/4**, browser E2E **38 PASS, 0 FAIL,
+1 opt-in `real` skip** (raw log — 37 hermetic scenario blocks, the
+`chat/resume` block reporting chat and resume as separate lines),
+browser-E2E helper tests **18/18**, offline smoke **PASS**, `npm run typecheck`
+green. The final WSL Linux pass at these counts also landed: at `3f07d316` on
+WSL (Ubuntu), both Node 22.22.2 and 24.16.0 passed typecheck, `npm test` and
+`npm run test:spawn` each 2 461 tests (2 460 pass, 0 fail, 1 intentional
+Windows-only skip), and the hermetic server E2E 4/4 — the live suites skipped
+because the local endpoint lacked the required model. The composer model switch adds
 `web/tests/modelSwitch.test.ts` and a `model-switch` browser scenario; the
 OpenCode session-header fix adds five provider tests
 (`tests/providers.test.ts`, `tests/adapters.test.ts`); model-declared effort
@@ -1142,9 +1161,10 @@ native-valid but non-whole value is an inline `role=alert` with `aria-invalid`
 that blocks the save before any PUT; a corrected save rides the dialog's single
 Save action, persists the budgets in `sessions/settings.json`, and the
 persisted values plus their effective lines survive a reload). The offline
-suite now holds 25 hermetic scenario blocks; the last canonical run is **26
-PASS, 0 FAIL, 1 SKIP** (the `chat/resume` block prints one line for chat and
-one for resume). The queue dock and the session-scope approval decisions
+suite now holds 37 hermetic scenario blocks; the final validated run at
+commit `3f07d316` is **38 PASS, 0 FAIL, 1 SKIP** in the raw log (the
+`chat/resume` block prints one line for chat and one for resume, so 37
+blocks report 38 PASS lines). The queue dock and the session-scope approval decisions
 remain covered by the web unit suites, not by separate browser scenarios. The
 default suite is fully offline; the
 opt-in `real` scenario (below) reports `SKIP` unless an endpoint is configured.
