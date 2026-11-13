@@ -28,8 +28,11 @@ import {
   subagentInterruptNotice,
 } from '../src/subagentControls.ts'
 import {
+  applySubagentDetailEvent,
   applySubagentEvent,
   normalizeSubagentDetail,
+  normalizeSubagentInfo,
+  subagentBackgroundLabel,
   subagentMessageLabel,
 } from '../src/subagents.ts'
 import type { RunEvent, SubagentInfo } from '../src/types.ts'
@@ -379,4 +382,106 @@ test('the drawer follow-up field is queued-only, live-only and Escape-safe', () 
   assert.match(app, /function onSubagentEscape[\s\S]{0,700}lastEscapeAt = null/)
   // Tree rows stay plain buttons (no nested interactive elements).
   assert.ok(/<button[\s\S]{0,400}class="subagent-tree-row"/.test(app))
+})
+
+// ---------------------------------------------------------------------------
+// Slice B: the drawer Background badge is additive and optional
+// ---------------------------------------------------------------------------
+
+test('the background flag is additive: only an explicit true reaches the row', () => {
+  const base = {
+    id: 'sub-abc12345',
+    parent_session: 's.jsonl',
+    label: 'Notes',
+    status: 'running',
+    started_at: 1,
+  }
+  const sync = normalizeSubagentInfo({ ...base })
+  assert.ok(sync)
+  assert.equal('background' in sync, false, 'a sync row gains no key')
+  assert.equal(subagentBackgroundLabel(sync), '')
+
+  const background = normalizeSubagentInfo({ ...base, background: true })
+  assert.ok(background)
+  assert.equal(background.background, true)
+  assert.equal(subagentBackgroundLabel(background), 'Background')
+
+  // A non-boolean or false value never becomes a badge.
+  for (const value of [false, 'true', 1, null, {}]) {
+    const row = normalizeSubagentInfo({ ...base, background: value })
+    assert.ok(row)
+    assert.equal('background' in row, false, `background ${JSON.stringify(value)}`)
+    assert.equal(subagentBackgroundLabel(row), '')
+  }
+  assert.equal(subagentBackgroundLabel(null), '')
+
+  // The loaded detail carries it through (the badge reads the detail).
+  const detail = normalizeSubagentDetail({
+    ...base,
+    background: true,
+    transcript: [{ type: 'message', role: 'assistant', text: 'done', at: 2 }],
+  })
+  assert.equal(detail?.background, true)
+  assert.equal(subagentBackgroundLabel(detail), 'Background')
+})
+
+test('a live background started event marks the row and the open drawer keeps it', () => {
+  const legacy = applySubagentEvent([], {
+    type: 'subagent_started',
+    subagent_id: 'sub-abc12345',
+    label: 'Notes',
+    role: 'junior',
+    model: 'junior',
+    task: 'read',
+    started_at: 1,
+    run_id: 'run-1',
+    at: 1,
+  } as RunEvent)
+  assert.equal(legacy.length, 1)
+  assert.equal('background' in (legacy[0] ?? {}), false, 'an old event invents no flag')
+
+  const bg = applySubagentEvent([], {
+    type: 'subagent_started',
+    subagent_id: 'sub-abc12346',
+    label: 'Notes',
+    role: 'junior',
+    model: 'junior',
+    task: 'read',
+    started_at: 1,
+    background: true,
+    run_id: 'run-1',
+    at: 1,
+  } as RunEvent)
+  assert.equal(bg[0]?.background, true)
+
+  const detail = normalizeSubagentDetail({
+    id: 'sub-abc12346',
+    parent_session: 's.jsonl',
+    label: 'Notes',
+    status: 'running',
+    started_at: 1,
+    background: true,
+    transcript: [],
+  })
+  assert.ok(detail)
+  const next = applySubagentDetailEvent(detail, {
+    type: 'subagent_activity',
+    subagent_id: 'sub-abc12346',
+    label: 'Notes',
+    activity: 'status',
+    status: 'running',
+    run_id: 'run-1',
+    at: 2,
+  } as RunEvent)
+  assert.equal(next.background, true)
+})
+
+test('the drawer header renders the Background badge from the loaded detail', () => {
+  const view = read('components/SubagentView.vue')
+  assert.ok(view.includes('subagentBackgroundLabel'))
+  assert.ok(view.includes('subagent-background-badge'))
+  assert.ok(view.includes('v-if="backgroundLabel"'))
+  // The badge is a quiet marker next to the status, never a second status.
+  assert.ok(view.includes('{{ backgroundLabel }}'))
+  assert.equal(/v-html\s*=/.test(view), false)
 })

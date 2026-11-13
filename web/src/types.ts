@@ -576,6 +576,11 @@ export interface SubagentStartedEvent {
   task: string
   /** Epoch milliseconds, for a stable elapsed time across reloads. */
   started_at: number
+  /**
+   * Additive: true only for a background spawn (the Senior did not wait for the
+   * report). Older backends omit it, so the drawer shows no badge.
+   */
+  background?: boolean
   run_id: string
   at: number
 }
@@ -683,6 +688,12 @@ export interface SubagentInfo {
   usage?: RunUsage | null
   result?: string | null
   error?: string | null
+  /**
+   * Additive: true when the helper was spawned with `background:true` (the
+   * parent continued without waiting). Absent for every sync child and every
+   * pre-slice-B backend, so the drawer stays badge-free there.
+   */
+  background?: boolean
 }
 
 /** `GET /api/subagents/{id}` detail (the full bounded transcript). */

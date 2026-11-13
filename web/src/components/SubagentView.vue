@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { NButton } from 'naive-ui'
 import type { RunUsage, SubagentDetail } from '../types'
 import {
+  subagentBackgroundLabel,
   subagentDuration,
   subagentElapsed,
   subagentMessageLabel,
@@ -32,6 +33,8 @@ const props = defineProps<{
 const emit = defineEmits<{ back: [] }>()
 
 const statusLabel = computed(() => subagentStatusLabel(props.detail?.status ?? 'running'))
+/** Slice B: the Senior did not wait for this helper (opt-in background spawn). */
+const backgroundLabel = computed(() => subagentBackgroundLabel(props.detail))
 const elapsed = computed(() =>
   props.detail ? subagentElapsed(props.detail.started_at, props.detail.ended_at) : '',
 )
@@ -198,6 +201,11 @@ function closeOnBackdrop(event: MouseEvent) {
       </div>
       <span class="subagent-status-badge" :class="`is-${detail?.status ?? 'running'}`">
         {{ statusLabel }}
+      </span>
+      <!-- Background helper (slice B): the parent continued without waiting for
+           this report. Hidden for a sync child and on an old backend. -->
+      <span v-if="backgroundLabel" class="subagent-background-badge">
+        {{ backgroundLabel }}
       </span>
       <!-- Drawer-only operator control: tree rows stay plain buttons (no nested
            interactive elements), and the backend 404 on an old server hides it. -->
@@ -454,6 +462,17 @@ function closeOnBackdrop(event: MouseEvent) {
 
 .subagent-status-badge.is-failed {
   color: var(--danger);
+}
+
+/* Background helper (slice B): a quiet marker, never a second status. */
+.subagent-background-badge {
+  flex: none;
+  padding: 0.1rem 0.45rem;
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
 }
 
 .subagent-view-body {

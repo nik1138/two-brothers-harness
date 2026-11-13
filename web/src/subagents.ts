@@ -156,6 +156,9 @@ export function normalizeSubagentInfo(value: unknown): SubagentInfo | null {
     usage: usageOf(value.usage),
     result: typeof value.result === 'string' ? value.result : null,
     error: typeof value.error === 'string' ? value.error : null,
+    // Additive and tolerant: only an explicit true becomes a badge, so an old
+    // backend's row reads exactly as before.
+    ...(value.background === true ? { background: true } : {}),
   }
 }
 
@@ -207,6 +210,8 @@ export function applySubagentEvent(
       usage: null,
       result: null,
       error: null,
+      // Additive: a background spawn carries its flag; a sync spawn omits it.
+      ...(started.background === true ? { background: true } : {}),
     }
     if (index >= 0) {
       const copy = [...list]
@@ -513,6 +518,16 @@ export function subagentStatusLabel(status: SubagentStatus): string {
 
 export function subagentRoleLabel(role: SubagentRole): string {
   return role === 'senior' ? 'Senior model' : 'Junior model'
+}
+
+/**
+ * The drawer-header badge text for a background helper, or '' for a sync one.
+ * Slice B only: an old backend omits `background`, so no badge is invented.
+ */
+export function subagentBackgroundLabel(
+  info: Pick<SubagentInfo, 'background'> | null | undefined,
+): string {
+  return info?.background === true ? 'Background' : ''
 }
 
 /**
