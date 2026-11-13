@@ -43,6 +43,7 @@ import "./settings.test.ts";
 import "./settingsschema.test.ts";
 import "./secretbox.test.ts";
 import "./runtime.test.ts";
+import "./runhistorybound.test.ts";
 import "./runevents.test.ts";
 import "./server.test.ts";
 import "./cli.test.ts";
