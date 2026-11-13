@@ -169,18 +169,27 @@ function terminalWith(outputTTY = true): {
 }
 
 test("terminal.setTitle writes one OSC 0 and restore resets the product title", () => {
-  const { output, terminal } = terminalWith();
-  terminal.enter();
-  terminal.setTitle("Two Brothers — s.jsonl · working");
-  terminal.restore();
-  assert.ok(output.data.includes(terminalTitleSequence("Two Brothers — s.jsonl · working")));
-  assert.ok(
-    output.data.includes(terminalTitleSequence(PRODUCT_NAME)),
-    "the shell prompt does not inherit a stale run status",
-  );
-  const written = output.data.length;
-  terminal.setTitle("after restore");
-  assert.equal(output.data.length, written, "post-restore title writes are silent");
+  // The title path no-ops on TERM=dumb by design, so a shell that exports
+  // TERM=dumb (Git Bash on Windows) would silence every assertion here.
+  const previousTerm = process.env.TERM;
+  try {
+    process.env.TERM = "xterm-256color";
+    const { output, terminal } = terminalWith();
+    terminal.enter();
+    terminal.setTitle("Two Brothers — s.jsonl · working");
+    terminal.restore();
+    assert.ok(output.data.includes(terminalTitleSequence("Two Brothers — s.jsonl · working")));
+    assert.ok(
+      output.data.includes(terminalTitleSequence(PRODUCT_NAME)),
+      "the shell prompt does not inherit a stale run status",
+    );
+    const written = output.data.length;
+    terminal.setTitle("after restore");
+    assert.equal(output.data.length, written, "post-restore title writes are silent");
+  } finally {
+    if (previousTerm === undefined) delete process.env.TERM;
+    else process.env.TERM = previousTerm;
+  }
 });
 
 test("terminal.setTitle/notify are no-ops on a non-TTY output and TERM=dumb", () => {
