@@ -71,6 +71,7 @@ import "./approvaldeny.test.ts";
 import "./security.test.ts";
 import "./providerwarnings.test.ts";
 import "./cliwiring.test.ts";
+import "./clipluginparity.test.ts";
 import "./serveshutdown.test.ts";
 import "./apicommands.test.ts";
 import "./serverbase.test.ts";

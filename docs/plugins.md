@@ -371,10 +371,24 @@ Settings entries may carry per-plugin settings:
     accepts the shared list (with `{path, options}` entries) and a legacy
     per-role object (merged); a save carrying `plugins` updates the
     manager settings and reloads it.
-- **CLI parity.** `run`, `chat`, `tui` and `serve` load plugins too. Hooks
-  apply to every run; plugin **tools** are only offered to workspace-bound
-  runs, so `serve` runs over a workspace and a `tui --workspace <dir>` run get
-  them, while a plain CLI run (no workspace concept) gets hooks/skills only.
+- **CLI parity (strict opt-in).** `run`, `chat`, `tui` and `serve` all read
+  the same persisted selection — `sessions/settings.json` (resolve it with
+  `SettingsStore.readPlugins()` / the shared
+  `settings_store.ts::resolvePluginSelection`, which adds the env overlay) —
+  and `run`/`chat`/`tui` load **only the selected code plugins**
+  (`PluginManager` `{ selectedOnly: true }`): a code file merely discovered
+  in the plugin directory is never imported or executed unless the operator
+  persisted it (web Settings / `PUT /api/settings`) or named it in the
+  `TWO_BROTHERS_PLUGINS_SENIOR`/`_JUNIOR` env overlay. There are no
+  `--plugin` flags. `--sessions-dir` on `run`/`chat` (default
+  `<cwd>/sessions`) picks the settings store to read; it does not redirect
+  `--session-file`. The server keeps importing every discovered plugin so
+  `GET /api/plugins` can list them all; its per-run binding is opt-in
+  through `bindingsFor`. Hooks apply to every run; plugin **tools** are only
+  offered to workspace-bound runs, so `serve` runs over a workspace and a
+  `tui --workspace <dir>` run get them, while a plain CLI run (no workspace
+  concept) gets hooks/skills only. Declarative bundles flow through the same
+  manager on every surface and never execute code.
 
 ## Confinement and permissions
 

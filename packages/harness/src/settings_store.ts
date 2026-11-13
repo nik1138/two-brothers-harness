@@ -1065,3 +1065,78 @@ export class SettingsStore {
     return { senior: view("senior"), junior: view("junior") };
   }
 }
+
+
+// ---------------------------------------------------------------------------
+// Shared plugin-selection resolver (serve / CLI / TUI parity)
+// ---------------------------------------------------------------------------
+
+/**
+ * Dedupe key of one selection entry (the plugin name or path). Shared by the
+ * server, the CLI and the TUI so the three surfaces can never disagree about
+ * what "the same plugin" means.
+ */
+export function pluginSelectionKey(entry: string | PluginSelectionEntry): string {
+  return typeof entry === "string" ? entry : entry.path;
+}
+
+/**
+ * Merge `names` into `target` in order, dropping duplicates (the first
+ * occurrence wins, so a persisted `{path, options}` entry keeps its options
+ * when an env alias repeats the bare name).
+ */
+export function addPluginSelectionNames(
+  target: PluginSelection,
+  names: readonly string[],
+): PluginSelection {
+  const seen = new Set(target.map(pluginSelectionKey));
+  for (const name of names) {
+    if (seen.has(name)) continue;
+    seen.add(name);
+    target.push(name);
+  }
+  return target;
+}
+
+/**
+ * The plugin-selection env overlay: the deprecated `TWO_BROTHERS_PLUGINS_SENIOR`
+ * / `TWO_BROTHERS_PLUGINS_JUNIOR` comma-separated vars stay accepted as
+ * additive aliases for the one shared list (owner decision 2026-11-03 — they
+ * scope no role anymore). They are an overlay only — never persisted, so
+ * removing them reveals the saved list again.
+ */
+export function envPluginSelectionNames(env: NodeJS.ProcessEnv = process.env): string[] {
+  const out: string[] = [];
+  for (const envName of [
+    "TWO_BROTHERS_PLUGINS_SENIOR",
+    "TWO_BROTHERS_PLUGINS_JUNIOR",
+  ] as const) {
+    const raw = env[envName];
+    if (!raw) continue;
+    for (const part of raw.split(",")) {
+      const name = part.trim();
+      if (name && !out.includes(name)) out.push(name);
+    }
+  }
+  return out;
+}
+
+/**
+ * The effective plugin selection for one process: the persisted
+ * `<sessionsDir>/settings.json` `plugins` list (strict opt-in; a legacy
+ * per-role section or `plugins_senior`/`plugins_junior` keys are merged on
+ * read, `{path, options}` entries keep their options) plus the
+ * `TWO_BROTHERS_PLUGINS_SENIOR`/`_JUNIOR` env overlay. This is the single
+ * resolver `serve`, `run`/`chat` and the TUI all build their `PluginManager`
+ * from, so one persisted list drives every surface.
+ *
+ * Reading is fail-soft by construction (`SettingsStore.readPlugins` never
+ * throws), so a missing/corrupt settings file resolves to an empty
+ * selection — and with strict opt-in loading that means no plugin code runs.
+ */
+export function resolvePluginSelection(
+  store: SettingsStore,
+  env: NodeJS.ProcessEnv = process.env,
+): PluginSelection {
+  return addPluginSelectionNames(store.readPlugins(), envPluginSelectionNames(env));
+}

@@ -468,6 +468,7 @@ export const SHARED_FLAGS: readonly string[] = [
   "plugins-dir",
   "skills-dir",
   "commands-dir",
+  "sessions-dir",
 ];
 
 /** Output-related shared flags (`run` only, listed separately in `run --help`). */
@@ -542,6 +543,7 @@ defineCommand({
     "mcp-config",
     "plugins-dir",
     "skills-dir",
+    "sessions-dir",
     "approval-mode",
     "help",
   ],
@@ -559,6 +561,10 @@ defineCommand({
     "dry-run":
       "print the resolved plan (roles with sources, tools, session, compaction) " +
       "and exit 0; invalid with --stream (usage error)",
+    "sessions-dir":
+      "sessions directory whose settings.json supplies the persisted plugin " +
+      "selection (strict opt-in: only selected plugins load; default <cwd>/sessions); " +
+      "does not redirect --session-file",
     "approval-mode":
       "workspace approval mode ask|readonly|edits|allow-all; no workspace is bound " +
       "on this surface, so the mode changes nothing here; `serve` pins it for its " +
@@ -625,6 +631,7 @@ defineCommand({
     "plugins-dir",
     "skills-dir",
     "commands-dir",
+    "sessions-dir",
     "approval-mode",
     "help",
   ],
@@ -640,6 +647,10 @@ defineCommand({
     mode: "cooperation mode consult|work|auto, or an output mode print|json for machine turns (chat accepts the run output modes too)",
     "compact-keep-recent":
       "recent chars kept verbatim by auto-compaction and by the REPL /compact action",
+    "sessions-dir":
+      "sessions directory whose settings.json supplies the persisted plugin " +
+      "selection (strict opt-in: only selected plugins load; default <cwd>/sessions); " +
+      "does not redirect --session-file",
     "approval-mode":
       "workspace approval mode ask|readonly|edits|allow-all; no workspace is bound " +
       "on this surface, so the mode changes nothing here; `serve` pins it for its " +
@@ -738,7 +749,6 @@ defineCommand({
   acceptedFlags: [
     ...SHARED_FLAGS,
     "workspace",
-    "sessions-dir",
     "keys-file",
     "keys-watch",
     "thinking-budget",
@@ -815,7 +825,7 @@ defineCommand({
     "verbose",
     "help",
   ],
-  acceptedFlags: [...SHARED_FLAGS, "host", "port", "sessions-dir", "workers", "thinking-budget", "approval-mode", "spill-retention-days"],
+  acceptedFlags: [...SHARED_FLAGS, "host", "port", "workers", "thinking-budget", "approval-mode", "spill-retention-days"],
   flagNotes: {
     timeout:
       "per-provider-attempt timeout in seconds (default 120; env TWO_BROTHERS_TIMEOUT); " +

@@ -2092,3 +2092,83 @@ test("a model-supplied multiline helper label is normalized to one line at the s
     cleanup();
   }
 });
+
+
+test("a TUI turn executes only persisted-selected plugins (strict opt-in, unselected code never runs)", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-tui-pluginparity-"));
+  try {
+    const sessionsDir = path.join(root, "sessions");
+    const pluginsDir = path.join(root, "plugins");
+    const alphaMarker = path.join(root, "alpha.log");
+    const betaMarker = path.join(root, "beta.log");
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    fs.writeFileSync(path.join(pluginsDir, "alpha.mts"), [
+      'import * as fs from "node:fs";',
+      "export function register(ctx) {",
+      '  ctx.set_description("alpha parity plugin");',
+      '  fs.appendFileSync(ctx.options.marker, "register\\n");',
+      '  ctx.on_hook("session_start", () => {',
+      '    fs.appendFileSync(ctx.options.marker, "hook:session_start\\n");',
+      "  });",
+      '  ctx.add_tool("alpha_ping", () => "pong", "Ping");',
+      "}",
+      "export const configSchema = {",
+      "  type: 'object',",
+      "  properties: { marker: { type: 'string' } },",
+      "  required: ['marker'],",
+      "};",
+      "",
+    ].join("\n"));
+    fs.writeFileSync(path.join(pluginsDir, "beta.mts"), [
+      'import * as fs from "node:fs";',
+      "export function register(ctx) {",
+      `  fs.writeFileSync(${JSON.stringify(betaMarker)}, "beta executed\\n");`,
+      "}",
+      "",
+    ].join("\n"));
+    fs.writeFileSync(path.join(pluginsDir, "package.json"), JSON.stringify({ type: "module" }));
+    fs.writeFileSync(
+      path.join(sessionsDir, "settings.json"),
+      JSON.stringify({
+        version: 1,
+        plugins: [{ path: "alpha", options: { marker: alphaMarker } }],
+      }),
+    );
+    const { app, input, output } = startApp({
+      cfg: resolveConfig({ provider: "mock" }),
+      sessionsDir,
+      pluginsDir,
+    });
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+    input.type("run a turn");
+    input.enter();
+    assert.ok(
+      await waitFor(() => textOf(output).includes("decision:"), 30_000),
+      "the turn completed",
+    );
+    const text = fs.readFileSync(alphaMarker, "utf-8");
+    assert.match(text, /^register$/m, "the selected plugin registered at discovery");
+    assert.match(
+      text,
+      /hook:session_start/,
+      "the selected plugin's session_start hook fired in the turn",
+    );
+    assert.equal(
+      fs.existsSync(betaMarker),
+      false,
+      "the unselected plugin's register never ran — its code was never imported",
+    );
+    assert.equal(await quit(input, app), 0);
+  } finally {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        fs.rmSync(root, { recursive: true, force: true });
+        break;
+      } catch (exc) {
+        if (attempt >= 4) throw exc;
+        await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+      }
+    }
+  }
+});

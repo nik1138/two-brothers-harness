@@ -356,6 +356,8 @@ import {
   SettingsSchemaVersionError,
   SettingsStore,
   SettingsWriteRefusedError,
+  addPluginSelectionNames,
+  envPluginSelectionNames,
   strictCompactionSettings,
   type PersistedCompactionSettings,
   type PluginSelection,
@@ -643,24 +645,14 @@ function cleanPluginSelection(value: unknown): PluginSelection {
   throw new HttpError(400, "plugins must be a list of plugin names");
 }
 
-/** Dedupe key of a selection entry (the plugin name or path). */
-function pluginEntryName(entry: string | { path: string }): string {
-  return typeof entry === "string" ? entry : entry.path;
-}
-
-/** Merge names into `target` in order, dropping duplicates. */
+/**
+ * Merge names into `target` in order, dropping duplicates. Thin local wrapper
+ * over the shared `settings_store.ts` resolver helpers so this file's PUT and
+ * startup paths read exactly like the CLI/TUI code they mirror.
+ */
 function addPluginNames(target: PluginSelection, names: string[]): void {
-  const seen = new Set(target.map(pluginEntryName));
-  for (const name of names) {
-    if (seen.has(name)) continue;
-    seen.add(name);
-    target.push(name);
-  }
+  addPluginSelectionNames(target, names);
 }
-
-// ---------------------------------------------------------------------------
-// Session naming + env helpers (python server.py parity)
-// ---------------------------------------------------------------------------
 
 /**
  * Filesystem-safe, collision-free session name. Second-precision stamps
@@ -676,28 +668,6 @@ export function newSessionName(now: Date = new Date()): string {
   const millis = pad(now.getMilliseconds(), 3);
   const suffix = randomBytes(3).toString("hex");
   return `${stamp}-${millis}-${suffix}.jsonl`;
-}
-
-/**
- * Deprecated env aliases for the shared plugin selection (comma-separated).
- * `TWO_BROTHERS_PLUGINS_SENIOR` / `_JUNIOR` are kept so existing operator
- * scripts keep working; they now merge into the one shared list instead of
- * scoping a role. They are an overlay only — never persisted.
- */
-function envPluginNames(): string[] {
-  const out: string[] = [];
-  for (const envName of [
-    "TWO_BROTHERS_PLUGINS_SENIOR",
-    "TWO_BROTHERS_PLUGINS_JUNIOR",
-  ]) {
-    const raw = process.env[envName];
-    if (!raw) continue;
-    for (const part of raw.split(",")) {
-      const name = part.trim();
-      if (name && !out.includes(name)) out.push(name);
-    }
-  }
-  return out;
 }
 
 /**
@@ -1260,7 +1230,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   // them reveals the saved list again.
   let savedPluginSelection: PluginSelection = settingsStore.readPlugins();
   const pluginSelection: PluginSelection = [...savedPluginSelection];
-  addPluginNames(pluginSelection, envPluginNames());
+  addPluginNames(pluginSelection, envPluginSelectionNames());
 
   // Local plugin system (plugins.py port): discovered once here and reloaded
   // after every settings change carrying a `plugins` section; a broken
@@ -3332,7 +3302,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         // `TWO_BROTHERS_*` env values.
         savedPluginSelection = [...pluginsPatch];
         const effective = [...savedPluginSelection];
-        addPluginNames(effective, envPluginNames());
+        addPluginNames(effective, envPluginSelectionNames());
         state.pluginSelection = effective;
         // Per-plugin options travel inside `{path, options}` entries: hand
         // the new selection to the manager before the (re)import so load-time

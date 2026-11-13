@@ -986,6 +986,17 @@ function optionsByName(
 }
 
 /**
+ * The plugin names (extension-stripped basenames) named by a selection list —
+ * the strict opt-in import filter's key set. Names that match no discovered
+ * file simply select nothing.
+ */
+export function pluginSelectionNames(
+  settings: readonly PluginSetting[],
+): Set<string> {
+  return new Set(normalizePluginSettings(settings).map((entry) => pluginNameOf(entry.path)));
+}
+
+/**
  * Check a plugin's declared options against its optional exported
  * `configSchema` (the `toolschema.ts` subset).
  *
@@ -1028,11 +1039,23 @@ export function resolvePluginOptions(
  * `?v=N` cache-bust so a reload re-imports changed files (ESM caches by URL).
  * `settings` supplies per-plugin options (and does not filter discovery — the
  * enable list is the caller's business).
+ *
+ * `importOnly` is the strict opt-in filter used by the CLI/TUI surfaces: when
+ * non-null, only plugin files whose name (extension-stripped basename) is in
+ * the set is imported at all — an unselected file is never read, imported or
+ * executed, so repository-discovered code cannot run without an explicit
+ * persisted/env selection. It is not an error for a directory to hold
+ * unselected plugins: they are skipped silently (the caller's selection is
+ * the single source of truth, and a noisy skip list would just train
+ * operators to ignore diagnostics). The server passes null: its discovery
+ * view (`GET /api/plugins`) lists every discovered plugin and per-run
+ * binding is opt-in through `bindingsFor`.
  */
 export async function loadPlugins(
   pluginsDir: string,
   loadCount = 0,
   settings: readonly PluginSetting[] = [],
+  importOnly: ReadonlySet<string> | null = null,
 ): Promise<{
   plugins: Map<string, LoadedPlugin>;
   errors: PluginErrorEntry[];
@@ -1063,6 +1086,7 @@ export async function loadPlugins(
 
   for (const fileName of files) {
     const name = fileName.replace(/\.[^.]+$/, "");
+    if (importOnly !== null && !importOnly.has(name)) continue;
     const filePath = path.join(pluginsDir, fileName);
     try {
       const module = await importPluginModule(filePath, loadCount);
@@ -1190,6 +1214,24 @@ export interface ScopedTools {
   junior: Tool[];
 }
 
+/**
+ * Construction options for {@link PluginManager} (both the constructor and
+ * `create()`).
+ */
+export interface PluginManagerOptions {
+  /**
+   * Strict opt-in loading for the CLI/TUI surfaces (owner decision for the
+   * CLI/TUI plugin-parity slice): only the plugins named by `settings` — the
+   * persisted selection + env overlay resolved by
+   * `settings_store.ts::resolvePluginSelection` — are imported; code files
+   * discovered in the plugins directory that the operator did not select are
+   * never read, imported or executed. The server leaves this off: its
+   * discovery view lists every discovered plugin, selected or not, and its
+   * per-run binding is already opt-in through `bindingsFor`.
+   */
+  selectedOnly?: boolean;
+}
+
 /** One run's plugin contribution: tools (flat + scoped), hooks, MCP servers, diagnostics. */
 export interface PluginBindings {
   /** Every tool of the active plugins, registration order (the historical shape). */
@@ -1218,6 +1260,9 @@ export interface PluginBindings {
  * The optional `settings` list supplies per-plugin options
  * (`{path, options}` entries; plain strings keep the historical shape) used
  * for the load-time registration; `bindingsFor` re-resolves them per run.
+ * With `{ selectedOnly: true }` (CLI/TUI) the same list doubles as the strict
+ * opt-in import filter: only the named code plugins are ever imported, so
+ * unselected repository code is not executed.
  *
  * The constructor stays synchronous and leaves the manager empty: ESM
  * `import()` is async, so the eager load Python does in `__init__` lives in
@@ -1239,23 +1284,27 @@ export class PluginManager {
    * same name wins the collision and the bundle is skipped with a diagnostic.
    */
   bundles = new Map<string, LoadedPluginBundle>();
+  private readonly selectedOnly: boolean;
   private loadCount = 0;
   private reloadTail: Promise<void> = Promise.resolve();
 
   constructor(
     pluginsDir: string = defaultPluginsDir(),
     settings: readonly PluginSetting[] = [],
+    options: PluginManagerOptions = {},
   ) {
     this.pluginsDir = pluginsDir;
     this.settings = [...settings];
+    this.selectedOnly = options.selectedOnly === true;
   }
 
   /** Construct + load — the async equivalent of Python's eager `__init__`. */
   static async create(
     pluginsDir: string = defaultPluginsDir(),
     settings: readonly PluginSetting[] = [],
+    options: PluginManagerOptions = {},
   ): Promise<PluginManager> {
-    const manager = new PluginManager(pluginsDir, settings);
+    const manager = new PluginManager(pluginsDir, settings, options);
     await manager.reload();
     return manager;
   }
@@ -1281,6 +1330,7 @@ export class PluginManager {
       this.pluginsDir,
       this.loadCount,
       this.settings,
+      this.selectedOnly ? pluginSelectionNames(this.settings) : null,
     );
     const discovered = discoverPluginBundles(this.pluginsDir);
     this.plugins = plugins;
