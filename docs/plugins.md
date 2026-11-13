@@ -48,10 +48,17 @@ export function register(ctx: PluginContext): void { ... }
     `plugin tool error: invalid arguments: args.code: expected string, got number`
     result, so the model can repair the call.
   - `scope` — `"shared"` (default), `"senior"` or `"junior"`.
-  - `timeoutMs` — cooperative deadline around the handler.
+  - `timeoutMs` — cooperative deadline around the handler, in milliseconds.
+    Default **60 000 ms** when omitted. When the deadline expires the
+    handler's `AbortSignal` aborts and the run stops waiting, surfacing a
+    `plugin tool error: timed out after <ms> ms` result. The deadline is
+    cooperative: a handler that never settles and ignores its signal cannot
+    be forcibly killed (in-process JS offers no such thing), so the deadline
+    bounds the wait, not the execution.
 - `handler(args, signal?)` receives the model's arguments as one object and
-  the run's `AbortSignal` as an optional second argument (aborted when the
-  operator cancels the turn) and returns the tool result — a string, or any
+  an `AbortSignal` as an optional second argument — aborted when the
+  operator cancels the turn and when the tool's `timeoutMs` deadline expires
+  — and returns the tool result: a string, or any
   JSON-serializable value (objects let the graph surface a structured status
   such as `"denied"`); a thrown exception becomes a failed tool result, never
   a crashed run.

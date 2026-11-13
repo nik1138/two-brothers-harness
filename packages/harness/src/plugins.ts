@@ -191,10 +191,18 @@ export const TOOL_SCOPES = ["shared", "senior", "junior"] as const;
 export type ToolScope = (typeof TOOL_SCOPES)[number];
 
 /**
- * A plugin tool handler: receives the model's arguments and the run's abort
- * signal (the same `AbortSignal` a built-in `Tool.execute` receives; it is
- * aborted when the operator cancels the turn). A handler that starts a shell
- * should pass the signal on to `workspace_shell`.
+ * A plugin tool handler: receives the model's arguments and an `AbortSignal`
+ * as an optional second argument. The signal is the run's cancellation
+ * channel (aborted when the operator cancels the turn) combined with the
+ * tool's cooperative deadline (aborted when the declared or default
+ * `timeoutMs` expires), so a handler that watches the signal can stop early
+ * in both cases. A handler that starts a shell should pass the signal on to
+ * `workspace_shell`.
+ *
+ * The boundary is cooperative: arbitrary in-process JS cannot be forcibly
+ * killed, so a handler that neither settles nor reacts to its signal cannot
+ * be stopped from the inside — the deadline only bounds how long the run
+ * waits before the tool result reports `timed out after <ms> ms`.
  */
 export type PluginToolHandler =
   (args: Record<string, unknown>, signal?: AbortSignal) => unknown;
@@ -244,7 +252,14 @@ export interface AddToolOptions {
    * unless it says otherwise).
    */
   scope?: ToolScope;
-  /** Cooperative deadline enforced around the handler; omitted = no limit. */
+  /**
+   * Cooperative deadline enforced around the handler, in milliseconds;
+   * omitted = the 60 s default (`DEFAULT_PLUGIN_TOOL_TIMEOUT_MS`). The
+   * handler's `AbortSignal` aborts when the deadline expires; a handler that
+   * ignores the signal still surfaces as a `timed out after <ms> ms` tool
+   * error once the deadline passes (the wait is bounded, the JS is not
+   * killed).
+   */
   timeoutMs?: number;
 }
 
@@ -282,7 +297,10 @@ export interface RegisteredTool {
    * Present = dispatch-time validation is on; absent = tolerant (no check).
    */
   parameters?: JsonSchemaSubset;
-  /** Declared per-tool deadline in milliseconds, when any. */
+  /**
+   * Declared per-tool deadline in milliseconds, when any. Absent = the
+   * dispatch-time default of 60 s (`DEFAULT_PLUGIN_TOOL_TIMEOUT_MS`).
+   */
   timeoutMs?: number;
 }
 
@@ -798,10 +816,50 @@ export function validateToolArgs(
   return { ok: false, error: `invalid arguments: ${check.errors.join("; ")}` };
 }
 
-function withTimeout<T>(work: Promise<T>, timeoutMs: number | undefined): Promise<T> {
-  if (timeoutMs === undefined) return work;
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs} ms`)), timeoutMs);
+/**
+ * Default cooperative deadline for a plugin tool handler that declared no
+ * `timeoutMs`: 60 s. Without it, one tool that never settles would hang its
+ * run indefinitely. Documented in docs/plugins.md.
+ */
+const DEFAULT_PLUGIN_TOOL_TIMEOUT_MS = 60_000;
+
+/**
+ * Run one tool handler under its cooperative deadline.
+ *
+ * The handler receives an `AbortSignal` that combines the caller's signal
+ * (operator cancel) with a deadline signal, so cancellation and timeout are
+ * both cooperative through the one signal the handler contract documents
+ * (`AbortSignal.any`, Node ≥ 22 — the "where supported" half; where it is
+ * missing the caller's raw signal is passed and only the race below bounds
+ * the wait). The deadline is additionally enforced with a wall-clock race,
+ * because arbitrary in-process JS cannot be forcibly killed: a handler that
+ * never settles and ignores its signal still becomes a
+ * `timed out after <ms> ms` tool error once the deadline passes.
+ *
+ * The `work.then(...)` pair stays attached after the outer promise settles,
+ * so a handler that ignored the deadline and settles (or rejects) late is
+ * still handled — never an unhandled rejection.
+ */
+function runPluginHandler(
+  tool: RegisteredTool,
+  args: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+): Promise<unknown> {
+  const deadlineMs = tool.timeoutMs ?? DEFAULT_PLUGIN_TOOL_TIMEOUT_MS;
+  const deadline = new AbortController();
+  let handlerSignal: AbortSignal | undefined = signal;
+  if (typeof AbortSignal.any === "function") {
+    handlerSignal =
+      signal === undefined
+        ? AbortSignal.any([deadline.signal])
+        : AbortSignal.any([signal, deadline.signal]);
+  }
+  const work = Promise.resolve(tool.handler(args, handlerSignal));
+  return new Promise<unknown>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      deadline.abort();
+      reject(new Error(`timed out after ${deadlineMs} ms`));
+    }, deadlineMs);
     work.then(
       (value) => {
         clearTimeout(timer);
@@ -819,9 +877,9 @@ function withTimeout<T>(work: Promise<T>, timeoutMs: number | undefined): Promis
  * Wrap one registered tool as a harness `Tool` for the cooperation loop.
  * Tolerant at the boundary and fail-soft at run time, like the original
  * prototype's tool adapter: declared args are validated first, a string result
- * passes through, anything else is JSON-serialized, a declared `timeoutMs`
- * bounds the handler, and a thrown exception becomes a failed tool result —
- * never a crashed run.
+ * passes through, anything else is JSON-serialized, the declared `timeoutMs`
+ * (default 60 s) bounds the wait for the handler, and a thrown exception
+ * becomes a failed tool result — never a crashed run.
  */
 export function asHarnessTool(tool: RegisteredTool): Tool {
   return {
@@ -832,10 +890,7 @@ export function asHarnessTool(tool: RegisteredTool): Tool {
       const check = validateToolArgs(tool, args);
       if (!check.ok) return `plugin tool error: ${check.error}`;
       try {
-        const result = await withTimeout(
-          Promise.resolve(tool.handler(check.args, signal)),
-          tool.timeoutMs,
-        );
+        const result = await runPluginHandler(tool, check.args, signal);
         if (typeof result === "string") return result;
         return JSON.stringify(result ?? null);
       } catch (exc) {
