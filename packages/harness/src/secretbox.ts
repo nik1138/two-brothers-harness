@@ -71,17 +71,25 @@ const PS_TIMEOUT_MS = 15_000;
 const PS_MAX_BUFFER = 4 * 1024 * 1024;
 
 /**
- * Run one batch of DPAPI operations in a single PowerShell process.
- * `$in` is a PowerShell array literal of base64 strings; each item is
- * protected/unprotected with the fixed CurrentUser scope and re-emitted as
- * base64, one line per item; a failing item yields an empty line (base64
- * never contains newlines, and DPAPI output is never empty).
+ * The PowerShell batch script. STATIC: it carries only the operation name
+ * (a fixed "Protect"/"Unprotect" token, never payload) — all key material
+ * arrives over stdin, one base64 item per line, read via
+ * `[Console]::In.ReadToEnd()`. Base64 never contains newlines and the JS
+ * side joins items with "\n" (no trailing newline), so `-split` reproduces
+ * the item list exactly — including an intentionally empty item, which
+ * mirrors the old array-literal form. Each item is protected/unprotected
+ * with the fixed CurrentUser scope and re-emitted as base64, one line per
+ * item; a failing item yields an empty line (base64 never contains
+ * newlines, and DPAPI output is never empty).
+ * Keeping payloads out of the `-Command` argv matters: a process command
+ * line is visible machine-wide (tasklist/WMI), while stdin is private to
+ * the child.
  */
-function dpapiScript(operation: "Protect" | "Unprotect", items: string[]): string {
-  const array = items.map((b64) => `'${b64}'`).join(",");
+function dpapiScript(operation: "Protect" | "Unprotect"): string {
   return [
     "Add-Type -AssemblyName System.Security",
-    `$in = @(${array})`,
+    "$raw = [Console]::In.ReadToEnd()",
+    '$in = $raw -split "\\r?\\n"',
     "$out = foreach ($b64 in $in) {",
     "  try {",
     "    $bytes = [Convert]::FromBase64String($b64)",
@@ -95,12 +103,15 @@ function dpapiScript(operation: "Protect" | "Unprotect", items: string[]): strin
   ].join("\n");
 }
 
-function runPowerShell(script: string): string {
-  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+type SpawnSyncFn = typeof spawnSync;
+
+function runPowerShell(spawn: SpawnSyncFn, script: string, stdin: string): string {
+  const result = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
     encoding: "utf-8",
     timeout: PS_TIMEOUT_MS,
     maxBuffer: PS_MAX_BUFFER,
     windowsHide: true,
+    input: stdin,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
@@ -110,16 +121,33 @@ function runPowerShell(script: string): string {
   return result.stdout ?? "";
 }
 
+export interface PowerShellDpapiCipherOptions {
+  /**
+   * Spawn implementation; defaults to `spawnSync` from `node:child_process`.
+   * Injectable so tests can capture the invocation without touching the
+   * real `powershell.exe`.
+   */
+  spawn?: SpawnSyncFn;
+}
+
 /**
  * DPAPI through `powershell.exe` + `ProtectedData`. Each process spawn costs
  * ~50-300 ms on this class of machine, so the cipher is batch-only and
  * `DefaultSecretBox` funnels every key of one settings write through a
- * single `protectMany` call.
+ * single `protectMany` call. Payloads travel on the child's stdin, never
+ * on the `-Command` argv (see `dpapiScript`).
  */
 export class PowerShellDpapiCipher implements DpapiCipher {
+  private readonly spawn: SpawnSyncFn;
+
+  constructor(options: PowerShellDpapiCipherOptions = {}) {
+    this.spawn = options.spawn ?? spawnSync;
+  }
+
   protectMany(data: Buffer[]): Buffer[] {
-    const script = dpapiScript("Protect", data.map((buf) => buf.toString("base64")));
-    const lines = runPowerShell(script).split(/\r?\n/).slice(0, data.length);
+    const script = dpapiScript("Protect");
+    const stdin = data.map((buf) => buf.toString("base64")).join("\n");
+    const lines = runPowerShell(this.spawn, script, stdin).split(/\r?\n/).slice(0, data.length);
     if (lines.length < data.length) {
       throw new Error("powershell DPAPI protect returned too few results");
     }
@@ -130,8 +158,9 @@ export class PowerShellDpapiCipher implements DpapiCipher {
   }
 
   unprotectMany(data: Buffer[]): Array<Buffer | null> {
-    const script = dpapiScript("Unprotect", data.map((buf) => buf.toString("base64")));
-    const lines = runPowerShell(script).split(/\r?\n/).slice(0, data.length);
+    const script = dpapiScript("Unprotect");
+    const stdin = data.map((buf) => buf.toString("base64")).join("\n");
+    const lines = runPowerShell(this.spawn, script, stdin).split(/\r?\n/).slice(0, data.length);
     if (lines.length < data.length) {
       throw new Error("powershell DPAPI unprotect returned too few results");
     }
