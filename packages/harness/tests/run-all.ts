@@ -41,6 +41,7 @@ import "./spill.test.ts";
 import "./spillcli.test.ts";
 import "./settings.test.ts";
 import "./settingsschema.test.ts";
+import "./secretbox.test.ts";
 import "./runtime.test.ts";
 import "./runevents.test.ts";
 import "./server.test.ts";
