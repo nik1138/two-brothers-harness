@@ -409,7 +409,11 @@ the protocol reference and is not modified by work here either.
    (the CLI now forwards `--mcp-config` to `createServer`), merges per run
    after `bindingsFor` and before the harness, folds the MCP role buckets
    into `toolScopes`, and closes `mcp.client` in a `finally` around
-   `harness.run`. A missing configured file warns and keeps the plugin
+   `harness.run` through `closeMcpClientBounded` (grace
+   `MCP_CLOSE_TIMEOUT_MS`, 5 s — a wedged server transport must not pin the
+   worker/session slot; the timeout is one console warning naming the
+   session, the client unwinds in-process; the race timer stays REF'd and is
+   cleared in `finally`). A missing configured file warns and keeps the plugin
    servers. Tests: `tests/pluginmcp.test.ts`.
    **Token-level streaming is wired (Wave 5, wiring lane):**
    `run --stream --stream-tokens` sets `HarnessOptions.streamTokens`, so

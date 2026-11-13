@@ -65,6 +65,10 @@
  * `loadMcpTools` returns `(tools, client, errors)` as an object —
  * keep `client` referenced for as long as the tools may be used, because it
  * holds the open stdio/HTTP connections; `client.close()` is idempotent.
+ * Callers releasing a finished run should close through
+ * `closeMcpClientBounded` (default grace {@link MCP_CLOSE_TIMEOUT_MS}): a
+ * wedged server transport must not pin the run's worker/session slot, and
+ * the timeout diagnostic lands on the caller's warning channel.
  * A server that fails to start is recorded in `errors` and skipped; the
  * run continues with the remaining servers (fail-soft, as in Python).
  */
@@ -101,6 +105,14 @@ export const MCP_OUTPUT_MAX_CHARS = 20 * 1024;
 
 /** Per-tool-call timeout when a server entry does not set `timeoutMs`. */
 export const MCP_DEFAULT_TIMEOUT_MS = 60_000;
+
+/**
+ * Bound for `client.close()` when a run releases its MCP connections (the
+ * same 5 s grace `serve` shutdown uses for in-flight runs to unwind). A
+ * close that cannot settle within the grace is treated as wedged: the caller
+ * is released (one honest diagnostic) and the client unwinds in-process.
+ */
+export const MCP_CLOSE_TIMEOUT_MS = 5_000;
 
 /** One `mcpServers` entry: a stdio command spec or a streamable-HTTP spec. */
 export interface McpServerSpec {
@@ -277,6 +289,49 @@ export interface McpToolClient {
   readonly servers: string[];
   /** Idempotent: closes every owned client/transport; safe to call twice. */
   close(): Promise<void>;
+}
+
+/**
+ * Close an MCP tool client with a bounded wait ({@link MCP_CLOSE_TIMEOUT_MS}
+ * unless `timeoutMs` overrides it). The run is over at this point: a close
+ * that cannot settle within the grace (a wedged server transport) must not
+ * pin the caller's worker/session slot, so the wait resolves after the grace
+ * and reports ONE diagnostic through `onTimeout` while the client keeps
+ * unwinding in-process. A close that settles normally resolves immediately
+ * with no diagnostic; a close that rejects before the grace propagates
+ * (unchanged from an unbounded `close()`).
+ *
+ * Timer discipline (the Node 22 event-loop hazard): the race timer stays
+ * REF'd and is cleared in `finally` as soon as the race settles, so neither
+ * a wedged close nor a fast close leaves a timer on the loop.
+ */
+export async function closeMcpClientBounded(
+  client: McpToolClient | null | undefined,
+  options: {
+    timeoutMs?: number;
+    onTimeout?: (message: string) => void;
+  } = {},
+): Promise<void> {
+  if (client == null) return;
+  const timeoutMs = options.timeoutMs ?? MCP_CLOSE_TIMEOUT_MS;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      client.close(),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(() => {
+          options.onTimeout?.(
+            `MCP client close did not settle within ${timeoutMs} ms ` +
+              `(servers: ${client.servers.join(", ") || "none"}); ` +
+              "the run is released and the client unwinds in the background",
+          );
+          resolve();
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 /** Optional hooks for `loadMcpTools` (tests inject in-memory transports). */

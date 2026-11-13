@@ -278,7 +278,9 @@ import {
   loadMcpToolSpecs,
   loadMcpTools,
   mergeMcpConfig,
+  closeMcpClientBounded,
   type McpConfigFileShape,
+  type McpLoadOptions,
   type McpToolSet,
 } from "./mcp.ts";
 import { deriveTitle, SessionMetadataStore } from "./metadata.ts";
@@ -922,6 +924,12 @@ export interface ServerOptions {
    */
   mcpConfig?: string;
   /**
+   * Test hook: extra `loadMcpTools` options for every run this server
+   * starts (hermetic tests inject in-memory MCP transports; production
+   * leaves it unset and the configured transports apply).
+   */
+  mcpLoadOptions?: McpLoadOptions;
+  /**
    * Compaction settings for web runs (auto-compact threshold, keep-recent
    * budget, force). When set, wins wholesale over the resolved config and the
    * persisted `compaction` setting; unset = merge the config factory's
@@ -1001,6 +1009,8 @@ export interface ServerState {
   pluginDiagnostics: string[];
   /** `--mcp-config` file merged under the plugin MCP servers on every run. */
   mcpConfig?: string;
+  /** Test hook pass-through (see `ServerOptions.mcpLoadOptions`). */
+  mcpLoadOptions?: McpLoadOptions;
   /**
    * Exact session file names with a manual compaction in flight: the
    * serialization guard shared by the compact route (which reserves/releases)
@@ -1286,6 +1296,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     pluginSelection,
     pluginDiagnostics: [],
     mcpConfig: options.mcpConfig,
+    mcpLoadOptions: options.mcpLoadOptions,
     compactions: new Set<string>(),
     syncRuns: new Set<string>(),
     deleting: new Set<string>(),
@@ -1942,7 +1953,11 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       try {
         // The harness always has a spill store on the server, so MCP hands it
         // the full sanitized text; the harness saves/spills above its budget.
-        mcp = await loadMcpTools(merged.config, { deferOutputBounds: true });
+        // The server's deferOutputBounds stays authoritative over the hook.
+        mcp = await loadMcpTools(merged.config, {
+          ...state.mcpLoadOptions,
+          deferOutputBounds: true,
+        });
         for (const err of mcp.errors) console.warn(`[two-brothers] ${err}`);
         toolScopes = mergeScopeBuckets(toolScopes, {
           shared: mcp.sharedTools,
@@ -2059,8 +2074,13 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       // The run is over: stop accepting undo records (idempotent, never throws,
       // and salvages a record whose last per-mutation write failed).
       undoCapture?.close();
-      // connections stay open for the whole run; closed once it settles
-      await mcp?.client.close();
+      // connections stay open for the whole run; closed once it settles.
+      // The close is bounded: a wedged server transport must not pin this
+      // worker/session slot past the grace (the client unwinds in-process
+      // and the timeout is one honest console warning).
+      await closeMcpClientBounded(mcp?.client, {
+        onTimeout: (line) => console.warn(`[two-brothers] run ${name}: ${line}`),
+      });
     }
   }
 
