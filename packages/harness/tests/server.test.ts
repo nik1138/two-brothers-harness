@@ -200,6 +200,29 @@ async function waitTerminal(
   }
 }
 
+async function waitActive(
+  base: string,
+  session: string,
+  timeoutMs = 5000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const records = await get<Array<Record<string, unknown>>>(
+      base,
+      `/api/runs?session=${encodeURIComponent(session)}`,
+    );
+    if (
+      records.body.some((record) =>
+        ["queued", "running", "waiting"].includes(String(record.status)),
+      )
+    ) {
+      return;
+    }
+    if (Date.now() > deadline) throw new Error(`run for ${session} never became active`);
+    await sleep(20);
+  }
+}
+
 /** A provider that sleeps before every mock answer (cooperative-stop window). */
 function slowProvider(delayMs: number): Provider {
   const inner = new MockProvider();
@@ -2163,6 +2186,402 @@ test("delete: traversal attempts stay inside the sessions dir", async () => {
     assert.ok(fs.existsSync(path.join(srv.dir, keep)));
     assert.equal((await get<Array<Record<string, unknown>>>(srv.base, "/api/sessions")).body[0].name, keep);
     assert.ok(!fs.existsSync(path.join(srv.dir, "escape.jsonl")));
+  } finally {
+    await srv.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Session-concurrency reservations (sync runs vs maintenance guards / delete)
+// ---------------------------------------------------------------------------
+
+/**
+ * A provider whose calls park on a gate until released and signal when the
+ * first call reaches the gate: tests can hold a run live inside the provider
+ * while they probe the maintenance routes. `rearm()` replaces the gate with a
+ * fresh parked one (and a fresh `started`), so a later run can be held too.
+ */
+function parkedMock(): {
+  provider: Provider;
+  started: Promise<void>;
+  release: () => void;
+  rearm: () => void;
+} {
+  const inner = new MockProvider();
+  let release!: () => void;
+  let current: Promise<void>;
+  const newGate = (): void => {
+    current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+  };
+  newGate();
+  let markStarted!: () => void;
+  let started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  let first = true;
+  const park = async (): Promise<void> => {
+    if (first) {
+      first = false;
+      markStarted();
+    }
+    await current;
+  };
+  return {
+    provider: {
+      async chat(messages: ChatMessage[], responseKind?: string) {
+        await park();
+        return inner.chat(messages, responseKind);
+      },
+      async chatWithTools(messages: ChatMessage[], tools: Tool[], options?: ToolChatOptions) {
+        await park();
+        return inner.chatWithTools(messages, tools, options) as Promise<ToolChatResponse>;
+      },
+    },
+    get started() {
+      return started;
+    },
+    release: () => release(),
+    rearm: () => {
+      newGate();
+      first = true;
+      started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+    },
+  };
+}
+
+/** A provider that parks every call and IGNORES the abort signal (unstoppable). */
+function stubbornMock(): { provider: Provider; release: () => void } {
+  const inner = new MockProvider();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return {
+    provider: {
+      async chat(messages: ChatMessage[], responseKind?: string) {
+        await gate;
+        return inner.chat(messages, responseKind);
+      },
+      async chatWithTools(messages: ChatMessage[], tools: Tool[], options?: ToolChatOptions) {
+        await gate;
+        return inner.chatWithTools(messages, tools, options) as Promise<ToolChatResponse>;
+      },
+    },
+    release: () => release(),
+  };
+}
+
+function readJsonl(dir: string, name: string): Array<Record<string, any>> {
+  return fs
+    .readFileSync(path.join(dir, name), "utf-8")
+    .split(/\r?\n/)
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as Record<string, any>);
+}
+
+function assertDenseSeq(events: Array<Record<string, any>>, what: string): void {
+  assert.deepEqual(
+    events.map((event) => event.seq),
+    Array.from({ length: events.length }, (_, index) => index + 1),
+    `${what}: dense seq`,
+  );
+}
+
+test("session races: a live sync run makes compact/fork/rewind/delete 409s and the JSONL stays byte-identical", async () => {
+  const gate = parkedMock();
+  const srv = await startServer({
+    providerOverrides: { senior: gate.provider, junior: gate.provider },
+  });
+  try {
+    const syncRes = post<Record<string, any>>(srv.base, "/api/run", {
+      task: "guarded sync task",
+      session: "guards.jsonl",
+    });
+    await gate.started;
+    const file = path.join(srv.dir, "guards.jsonl");
+    const beforeBytes = fs.readFileSync(file, "utf-8");
+
+    const compact = await post<{ detail?: string }>(
+      srv.base,
+      "/api/sessions/guards.jsonl/compact",
+    );
+    assert.equal(compact.status, 409);
+    assert.equal(compact.body.detail, "a run is active for this session; stop it before compacting");
+
+    const fork = await post<{ detail?: string }>(srv.base, "/api/sessions/guards.jsonl/fork", {
+      name: "guards-copy.jsonl",
+    });
+    assert.equal(fork.status, 409);
+    assert.equal(
+      fork.body.detail,
+      "a run is active for this session; stop it before forking it",
+    );
+
+    const rewind = await post<{ detail?: string }>(srv.base, "/api/sessions/guards.jsonl/rewind", {
+      turns: 1,
+    });
+    assert.equal(rewind.status, 409);
+    assert.equal(
+      rewind.body.detail,
+      "a run is active for this session; stop it before rewinding it",
+    );
+
+    // Delete waits out the unwind window and then refuses, keeping the file.
+    const del = await api<{ detail?: string }>(srv.base, "DELETE", "/api/sessions/guards.jsonl");
+    assert.equal(del.status, 409);
+    assert.equal(
+      del.body.detail,
+      "a run is still active for this session; stop it before deleting",
+    );
+
+    assert.equal(
+      fs.readFileSync(file, "utf-8"),
+      beforeBytes,
+      "no maintenance route touched the session while the sync run was live",
+    );
+
+    gate.release();
+    const done = await syncRes;
+    assert.equal(done.status, 200, JSON.stringify(done.body));
+    assertDenseSeq(readJsonl(srv.dir, "guards.jsonl"), "after the sync run");
+  } finally {
+    await srv.close();
+  }
+});
+
+test("session races: a second sync run while one is live is a 409 and the seq stays dense", async () => {
+  const gate = parkedMock();
+  const srv = await startServer({
+    providerOverrides: { senior: gate.provider, junior: gate.provider },
+  });
+  try {
+    const first = post<Record<string, any>>(srv.base, "/api/run", {
+      task: "first twin task",
+      session: "twins.jsonl",
+    });
+    await gate.started;
+
+    // The first run is parked inside the provider: admission must refuse the
+    // overlapping submission before any write.
+    const second = await post<{ detail?: string }>(srv.base, "/api/run", {
+      task: "second twin task",
+      session: "twins.jsonl",
+    });
+    assert.equal(second.status, 409);
+    assert.equal(
+      second.body.detail,
+      "a run is in progress for this session; retry in a moment",
+    );
+
+    gate.release();
+    const firstRes = await first;
+    assert.equal(firstRes.status, 200, JSON.stringify(firstRes.body));
+
+    const events = readJsonl(srv.dir, "twins.jsonl");
+    assertDenseSeq(events, "overlapping sync runs");
+    const texts = events.map((event) => String(event.payload?.text ?? ""));
+    assert.ok(texts.includes("first twin task"), "the admitted run's task is persisted");
+    assert.ok(!texts.includes("second twin task"), "the rejected run never touched the session");
+  } finally {
+    await srv.close();
+  }
+});
+
+test("session races: a sync run and a background run cannot overlap on one session", async () => {
+  const gate = parkedMock();
+  const srv = await startServer({
+    providerOverrides: { senior: gate.provider, junior: gate.provider },
+  });
+  try {
+    // Sync live, background refused: the sync reservation is the only visible
+    // sign of the run (no RunManager record).
+    const syncP = post<Record<string, any>>(srv.base, "/api/run", {
+      task: "mix sync task",
+      session: "mix.jsonl",
+    });
+    await gate.started;
+    const bg = await post<{ detail?: string }>(srv.base, "/api/runs", {
+      task: "mix background task",
+      session: "mix.jsonl",
+    });
+    assert.equal(bg.status, 409);
+    assert.equal(bg.body.detail, "a run is in progress for this session; retry in a moment");
+    gate.release();
+    const syncRes = await syncP;
+    assert.equal(syncRes.status, 200, JSON.stringify(syncRes.body));
+
+    let events = readJsonl(srv.dir, "mix.jsonl");
+    assertDenseSeq(events, "sync live vs background admission");
+    assert.ok(
+      events.some((event) => event.payload?.text === "mix sync task"),
+      "the sync run's task is persisted",
+    );
+    assert.ok(
+      !events.some((event) => event.payload?.text === "mix background task"),
+      "the refused background run never touched the session",
+    );
+
+    // Background live, sync refused: the queued/running/waiting record is
+    // visible to the sync admission gate.
+    gate.rearm();
+    const bg2 = await post<{ run_id: string }>(srv.base, "/api/runs", {
+      task: "mix background task two",
+      session: "mix.jsonl",
+    });
+    assert.equal(bg2.status, 202, JSON.stringify(bg2.body));
+    await gate.started;
+    await waitActive(srv.base, "mix.jsonl");
+    const sync2 = await post<{ detail?: string }>(srv.base, "/api/run", {
+      task: "mix sync task two",
+      session: "mix.jsonl",
+    });
+    assert.equal(sync2.status, 409);
+    assert.equal(sync2.body.detail, "a run is in progress for this session; retry in a moment");
+    gate.release();
+    await waitTerminal(srv.base, bg2.body.run_id);
+
+    events = readJsonl(srv.dir, "mix.jsonl");
+    assertDenseSeq(events, "background live vs sync admission");
+    const texts = events.map((event) => String(event.payload?.text ?? ""));
+    assert.ok(texts.includes("mix background task two"), "the background run appends after");
+    assert.ok(!texts.includes("mix sync task two"), "the refused sync run never wrote");
+  } finally {
+    await srv.close();
+  }
+});
+
+test("session races: delete past the unwind deadline is a 409 and the session stays intact", async () => {
+  const gate = stubbornMock();
+  const srv = await startServer({
+    providerOverrides: { senior: gate.provider, junior: gate.provider },
+  });
+  try {
+    const started = await post<{ run_id: string }>(srv.base, "/api/runs", {
+      task: "stubborn task",
+      session: "stubborn.jsonl",
+    });
+    assert.equal(started.status, 202);
+    await waitActive(srv.base, "stubborn.jsonl");
+
+    // The run ignores its abort signal, so the delete's 2.5 s unwind window
+    // expires: the session must survive, and once the run is really gone the
+    // delete must succeed.
+    const blocked = await api<{ detail?: string }>(
+      srv.base,
+      "DELETE",
+      "/api/sessions/stubborn.jsonl",
+    );
+    assert.equal(blocked.status, 409);
+    assert.equal(
+      blocked.body.detail,
+      "a run is still active for this session; stop it before deleting",
+    );
+    assert.ok(fs.existsSync(path.join(srv.dir, "stubborn.jsonl")), "session file intact");
+    assert.equal((await get(srv.base, "/api/sessions/stubborn.jsonl")).status, 200);
+
+    gate.release();
+    const record = await waitTerminal(srv.base, started.body.run_id);
+    assert.equal(record.status, "cancelled");
+
+    const deleted = await api<Record<string, unknown>>(
+      srv.base,
+      "DELETE",
+      "/api/sessions/stubborn.jsonl",
+    );
+    assert.equal(deleted.status, 200);
+    assert.deepEqual(deleted.body, { deleted: "stubborn.jsonl" });
+  } finally {
+    await srv.close();
+  }
+});
+
+test("session races: run admission and a second delete are 409 while a delete is unwinding", async () => {
+  const gate = stubbornMock();
+  const srv = await startServer({
+    providerOverrides: { senior: gate.provider, junior: gate.provider },
+  });
+  try {
+    const started = await post<{ run_id: string }>(srv.base, "/api/runs", {
+      task: "delete-window task",
+      session: "deleting.jsonl",
+    });
+    assert.equal(started.status, 202);
+    await waitActive(srv.base, "deleting.jsonl");
+
+    const pending = api<{ detail?: string }>(srv.base, "DELETE", "/api/sessions/deleting.jsonl");
+    // Give the delete route time to enter its unwind wait loop.
+    await sleep(400);
+
+    const background = await post<{ detail?: string }>(srv.base, "/api/runs", {
+      task: "intruder during delete",
+      session: "deleting.jsonl",
+    });
+    assert.equal(background.status, 409);
+    assert.equal(background.body.detail, "this session is being deleted; retry in a moment");
+
+    const sync = await post<{ detail?: string }>(srv.base, "/api/run", {
+      task: "legacy intruder during delete",
+      session: "deleting.jsonl",
+    });
+    assert.equal(sync.status, 409);
+    assert.equal(sync.body.detail, "this session is being deleted; retry in a moment");
+
+    const secondDelete = await api<{ detail?: string }>(
+      srv.base,
+      "DELETE",
+      "/api/sessions/deleting.jsonl",
+    );
+    assert.equal(secondDelete.status, 409);
+    assert.equal(secondDelete.body.detail, "this session is being deleted; retry in a moment");
+
+    const outcome = await pending;
+    assert.equal(outcome.status, 409);
+    assert.equal(
+      outcome.body.detail,
+      "a run is still active for this session; stop it before deleting",
+    );
+    assert.ok(fs.existsSync(path.join(srv.dir, "deleting.jsonl")), "session file intact");
+
+    gate.release();
+    await waitTerminal(srv.base, started.body.run_id);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("session races: reservations release — back-to-back sync runs and a delete succeed", async () => {
+  const srv = await startServer();
+  try {
+    const first = await post<Record<string, any>>(srv.base, "/api/run", {
+      task: "first normal task",
+      session: "normal.jsonl",
+    });
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+
+    // The sync reservation released in `finally`: a second sync run on the
+    // same session is admitted and appends with continuing dense seq.
+    const second = await post<Record<string, any>>(srv.base, "/api/run", {
+      task: "second normal task",
+      session: "normal.jsonl",
+    });
+    assert.equal(second.status, 200, JSON.stringify(second.body));
+    const events = readJsonl(srv.dir, "normal.jsonl");
+    assertDenseSeq(events, "back-to-back sync runs");
+    assert.ok(events.some((event) => event.payload?.text === "second normal task"));
+
+    // And with nothing live or reserved, the delete takes the normal path.
+    const deleted = await api<Record<string, unknown>>(
+      srv.base,
+      "DELETE",
+      "/api/sessions/normal.jsonl",
+    );
+    assert.equal(deleted.status, 200);
+    assert.deepEqual(deleted.body, { deleted: "normal.jsonl" });
+    assert.deepEqual((await get(srv.base, "/api/sessions")).body, []);
   } finally {
     await srv.close();
   }

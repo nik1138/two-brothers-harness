@@ -134,6 +134,23 @@
  *   session, 200 `{compacted: true, before_events, after_events}` or — honestly,
  *   not an error — `{compacted: false, reason: "nothing to compact"}`, and 502
  *   when the summarizer/provider fails (nothing is written in that case).
+ * - Session-concurrency reservations (backend session races): a legacy sync
+ *   `POST /api/run` holds NO RunManager record, so it is reserved by exact
+ *   session file name in `state.syncRuns` at admission (synchronously, before
+ *   any await) and released in the route's `finally`. Both run-admission routes
+ *   refuse a session with a sync run in flight, a manual compaction, or a
+ *   pending delete — 409 "a run is in progress for this session; retry in a
+ *   moment" / "a compaction is in progress for this session; retry in a
+ *   moment" / "this session is being deleted; retry in a moment" — and the sync
+ *   route likewise refuses a session with a queued/running/waiting background
+ *   run, so two runs can never restore the same context and re-append with
+ *   duplicate `seq`. The compact/fork/rewind guards consult the same
+ *   reservations. `DELETE /api/sessions/{name}` reserves the name in
+ *   `state.deleting` (a concurrent delete is a 409; both admission routes
+ *   refuse meanwhile), stops active runs, waits up to 2.5 s for the unwind,
+ *   and answers 409 "a run is still active for this session; stop it before
+ *   deleting" — leaving the session intact — when a run is still active past
+ *   the deadline; the reservation releases in `finally` on every path.
  * - `POST /api/sessions/{name}/fork` (wave 23) copies a session prefix into a
  *   NEW session file (`src/sessionfork.ts`): body `{seq?: integer, name?:
  *   string}`, `seq` defaults to the whole session; the copied file is a
@@ -992,6 +1009,25 @@ export interface ServerState {
    */
   compactions: Set<string>;
   /**
+   * Exact session file names with a legacy sync `POST /api/run` in flight. The
+   * sync route bypasses the `RunManager`, so its records never appear in
+   * `state.runs`; without this reservation the maintenance guards (compact,
+   * fork, rewind, delete) and the background run admission could interleave
+   * with a sync run — both restore the session context independently and
+   * would re-append envelopes with duplicate `seq`. Reserved synchronously at
+   * admission (before any await) and released in the route's `finally`.
+   * Ephemeral, in-memory only — never persisted.
+   */
+  syncRuns: Set<string>;
+  /**
+   * Exact session file names currently inside `DELETE /api/sessions/{name}`.
+   * While a name is here both run-admission routes answer 409, so no new run
+   * can be admitted for a session whose file is about to disappear; the set
+   * entry is released in the delete route's `finally` on every path. Ephemeral,
+   * in-memory only — never persisted.
+   */
+  deleting: Set<string>;
+  /**
    * Pinned approval mode from `ServerOptions` (a serve CLI flag/env choice),
    * or null when runs follow the persisted `approval_policy` setting. The pin
    * is never persisted; `GET /api/settings` reports it as `pinned`.
@@ -1251,6 +1287,8 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     pluginDiagnostics: [],
     mcpConfig: options.mcpConfig,
     compactions: new Set<string>(),
+    syncRuns: new Set<string>(),
+    deleting: new Set<string>(),
     approvalPolicyOverride,
   };
 
@@ -1495,27 +1533,51 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
    * Thrown before any session file or run record is created, so the
    * compaction's JSONL rewrite can never drop a concurrently admitted run's
    * envelopes. Checked synchronously right before the mutation, so there is no
-   * window for the reservation to appear afterwards.
+   * window for the reservation to appear afterwards. Also consults
+   * `state.syncRuns`: the legacy sync run route holds no RunManager record, so
+   * its reservation is the only visible sign of a live run for the session.
    */
   function assertNotCompacting(name: string): void {
     if (state.compactions.has(name)) {
       throw new HttpError(409, "a compaction is in progress for this session; retry in a moment");
     }
+    if (state.syncRuns.has(name)) {
+      throw new HttpError(409, "a run is in progress for this session; retry in a moment");
+    }
+  }
+
+  /**
+   * Reject run admission while `DELETE /api/sessions/{name}` owns the target
+   * session: the file is about to disappear, so admitting a run would restore
+   * a context the delete is about to unlink. Checked synchronously at
+   * admission, before any session file or run record is created.
+   */
+  function assertNotDeleting(name: string): void {
+    if (state.deleting.has(name)) {
+      throw new HttpError(409, "this session is being deleted; retry in a moment");
+    }
   }
 
   /**
    * Fork and rewind read/rewrite one session file, so they must not race a live
-   * run (which appends to, and compaction may rewrite, the same file) or a
-   * manual compaction that owns it. This is the compact route's guard without
-   * the reservation: both operations complete synchronously after the check, so
-   * no run can be admitted between the check and the file work. The action
-   * wording keeps the 409 honest per route.
+   * run (which appends to, and compaction may rewrite, the same file), a sync
+   * `POST /api/run` in flight (invisible to `state.runs`, reserved in
+   * `state.syncRuns`), or a manual compaction that owns it. This is the compact
+   * route's guard without the reservation: both operations complete
+   * synchronously after the check, so no run can be admitted between the check
+   * and the file work. The action wording keeps the 409 honest per route.
    */
   function assertSessionQuiescent(name: string, action: "fork" | "rewind"): void {
     const live = state.runs.list().some(
       (record) => record.session === name && ACTIVE_STATES.has(String(record.status)),
     );
     if (live) {
+      throw new HttpError(
+        409,
+        `a run is active for this session; stop it before ${action === "fork" ? "forking" : "rewinding"} it`,
+      );
+    }
+    if (state.syncRuns.has(name)) {
       throw new HttpError(
         409,
         `a run is active for this session; stop it before ${action === "fork" ? "forking" : "rewinding"} it`,
@@ -2567,76 +2629,103 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       const rawTask = req.task.trim();
       if (!rawTask) throw new HttpError(400, "task must not be empty");
       const name = sessionName(req.session);
-      // Same linked-workspace rule as POST /api/runs: an omitted workspace_id
-      // inherits the session's metadata link, while an explicit value wins.
-      // The effective request stays in scope for preparation, execution, the
-      // metadata write and the session store/materialization path (which reads
-      // the workspace link after the session-dirs layout merge).
-      const linked = req.workspace_id === undefined ? linkedSessionWorkspace(name) : null;
-      const baseReq: RunRequestData = {
-        ...req,
-        task: rawTask,
-        ...(linked === null ? {} : { workspace_id: linked }),
-      };
-      ensureWorkspace(baseReq.workspace_id);
-      // Same preparation as POST /api/runs (slash expansion + mention
-      // injection); the sync route runs the expanded task while the metadata
-      // title keeps the operator's raw text.
-      const prepared = await prepareSubmission(baseReq);
-      const runReq: RunRequestData =
-        prepared.modeOverride === undefined
-          ? baseReq
-          : { ...baseReq, mode: prepared.modeOverride };
-      const cfg = buildCfg(runReq);
-      // The sync route has no approval channel, so a workspace is built from
-      // the effective id and the effective approval policy (reads auto-allow;
-      // modes that still ask have no broker and fail closed). This is the
-      // workspace the harness offers as its read/write tool belt.
-      let workspace: Workspace | undefined;
-      if (runReq.workspace_id) {
-        const registered = state.workspaces.get(runReq.workspace_id);
-        if (registered === null) throw new HttpError(400, "unknown workspace_id");
-        workspace = new Workspace(
-          registered.path,
-          new PermissionManager(new PermissionPolicy(effectiveApprovalPolicy())),
-        );
-      }
-      // A manual compaction owns this session right now: refuse before the run
-      // context is opened or any envelope is appended.
+      // The synchronous admission gate, before any await: a sync run restores
+      // the session context itself and appends envelopes with no RunManager
+      // record, so it must be the only run touching this session. A manual
+      // compaction, a session being deleted, another sync run, or a
+      // queued/running/waiting background run all mean 409 here — and once the
+      // reservation lands in `state.syncRuns`, the maintenance guards and the
+      // background admission see it for the whole run. Check-and-reserve is one
+      // synchronous block, so no interleaving request can slip in between.
+      assertNotDeleting(name);
       assertNotCompacting(name);
-      let result;
-      try {
-        result = await executeRun(
-          prepared.task,
-          name,
-          cfg.cfg,
-          undefined,
-          undefined,
-          workspace,
-          cfg.endpoints,
-          prepared.injections,
-          undefined,
-          undefined,
-          undefined,
-          runReq.workspace_id
-            ? (state.workspaces.get(runReq.workspace_id)?.path ?? null)
-            : null,
-          cfg.subagentEndpoint,
-        );
-      } catch (exc) {
-        if (exc instanceof RunConfigError) throw new HttpError(400, exc.message);
-        throw exc;
+      if (state.syncRuns.has(name)) {
+        throw new HttpError(409, "a run is in progress for this session; retry in a moment");
       }
-      state.metadata.ensure(name, {
-        workspaceId: runReq.workspace_id,
-        events: userMessageEvent(rawTask),
-      });
-      return {
-        session: name,
-        events: result.messages,
-        decision: result.decision,
-        errors: result.errors,
-      };
+      const backgroundLive = state.runs.list().some(
+        (record) => record.session === name && ACTIVE_STATES.has(String(record.status)),
+      );
+      if (backgroundLive) {
+        throw new HttpError(409, "a run is in progress for this session; retry in a moment");
+      }
+      state.syncRuns.add(name);
+      try {
+        // Same linked-workspace rule as POST /api/runs: an omitted workspace_id
+        // inherits the session's metadata link, while an explicit value wins.
+        // The effective request stays in scope for preparation, execution, the
+        // metadata write and the session store/materialization path (which reads
+        // the workspace link after the session-dirs layout merge).
+        const linked = req.workspace_id === undefined ? linkedSessionWorkspace(name) : null;
+        const baseReq: RunRequestData = {
+          ...req,
+          task: rawTask,
+          ...(linked === null ? {} : { workspace_id: linked }),
+        };
+        ensureWorkspace(baseReq.workspace_id);
+        // Same preparation as POST /api/runs (slash expansion + mention
+        // injection); the sync route runs the expanded task while the metadata
+        // title keeps the operator's raw text.
+        const prepared = await prepareSubmission(baseReq);
+        const runReq: RunRequestData =
+          prepared.modeOverride === undefined
+            ? baseReq
+            : { ...baseReq, mode: prepared.modeOverride };
+        const cfg = buildCfg(runReq);
+        // The sync route has no approval channel, so a workspace is built from
+        // the effective id and the effective approval policy (reads auto-allow;
+        // modes that still ask have no broker and fail closed). This is the
+        // workspace the harness offers as its read/write tool belt.
+        let workspace: Workspace | undefined;
+        if (runReq.workspace_id) {
+          const registered = state.workspaces.get(runReq.workspace_id);
+          if (registered === null) throw new HttpError(400, "unknown workspace_id");
+          workspace = new Workspace(
+            registered.path,
+            new PermissionManager(new PermissionPolicy(effectiveApprovalPolicy())),
+          );
+        }
+        // The sync route's admission gate (above) already holds the compaction
+        // and sync-run reservations for this session, and the background
+        // admission consults `state.syncRuns`, so nothing can have claimed the
+        // session since.
+        let result;
+        try {
+          result = await executeRun(
+            prepared.task,
+            name,
+            cfg.cfg,
+            undefined,
+            undefined,
+            workspace,
+            cfg.endpoints,
+            prepared.injections,
+            undefined,
+            undefined,
+            undefined,
+            runReq.workspace_id
+              ? (state.workspaces.get(runReq.workspace_id)?.path ?? null)
+              : null,
+            cfg.subagentEndpoint,
+          );
+        } catch (exc) {
+          if (exc instanceof RunConfigError) throw new HttpError(400, exc.message);
+          throw exc;
+        }
+        state.metadata.ensure(name, {
+          workspaceId: runReq.workspace_id,
+          events: userMessageEvent(rawTask),
+        });
+        return {
+          session: name,
+          events: result.messages,
+          decision: result.decision,
+          errors: result.errors,
+        };
+      } finally {
+        // The run is over (or failed to start): release the session so the
+        // next submission and the maintenance guards see it quiescent again.
+        state.syncRuns.delete(name);
+      }
     }),
   );
 
@@ -2847,11 +2936,13 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       const store = storeFor(name);
       if (!store.exists()) throw new HttpError(404, "not found");
       // Keep the initial state check: a queued/running/waiting run owns the
-      // context and would append to (or rewrite) the same session file.
+      // context and would append to (or rewrite) the same session file. A sync
+      // `POST /api/run` holds no RunManager record, so its `state.syncRuns`
+      // reservation is checked here too.
       const live = state.runs.list().some(
         (record) => record.session === name && ACTIVE_STATES.has(String(record.status)),
       );
-      if (live) {
+      if (live || state.syncRuns.has(name)) {
         throw new HttpError(409, "a run is active for this session; stop it before compacting");
       }
       // Serialize against run admission and other compactions: reserve the
@@ -3026,55 +3117,79 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         isFile = false;
       }
       if (!isFile) throw new HttpError(404, "not found");
-      // Deleting a session clears that session's persisted approvals before
-      // the file disappears, so it is a settings write and needs a writable
-      // document. A future-version or existing-but-unreadable settings file
-      // refuses up front (409) and keeps the session, rather than leaving
-      // approvals whose shape this release cannot fully inspect for a reused
-      // name. The existence check stays first so an unknown name is a 404.
-      requireWritableSettings();
-      // A live run keeps its SessionStore handle and would re-append the next
-      // envelope, resurrecting the file — stop it and let it unwind first.
-      const activeFor = (): Array<Record<string, unknown>> =>
-        state.runs.list().filter(
-          (record) =>
-            record.session === safe &&
-            typeof record.status === "string" &&
-            ACTIVE_STATES.has(record.status),
-        );
-      for (const record of activeFor()) state.runs.stop(String(record.run_id));
-      const deadline = Date.now() + 2500;
-      while (activeFor().length > 0 && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
+      // One delete per session at a time: while this request owns the name,
+      // both run-admission routes answer 409 (`assertNotDeleting`), so no new
+      // run can be admitted for a file that is about to disappear. Check and
+      // reserve in one synchronous block; released in the `finally` below.
+      if (state.deleting.has(safe)) {
+        throw new HttpError(409, "this session is being deleted; retry in a moment");
       }
-      // Persisted session allows must not outlive the session they were
-      // granted for. Clear them before the file disappears: a failed write
-      // leaves the session in place rather than a deleted session whose auto-
-      // allows could apply again if the name were reused.
+      state.deleting.add(safe);
       try {
-        state.settingsStore.clearSessionApprovals(safe);
-      } catch (exc) {
-        if (exc instanceof SettingsWriteRefusedError) throw exc;
-        throw new HttpError(500, `could not clear the session approvals: ${errorDetail(exc)}`);
-      }
-      fs.unlinkSync(store.path);
-      state.metadata.delete(safe);
-      state.runtimeEvents.delete(safe);
-      // Child helper transcripts belong to the parent session; they must not
-      // survive its deletion (and a reused name must not inherit them).
-      state.subagents.deleteForSession(safe);
-      // A directory-layout session owns its directory; remove it when empty so
-      // the name is fully released. `resolveForWrite` also finds the now-empty
-      // directory after the artifacts were unlinked.
-      const location = layout.resolveForWrite(safe);
-      if (location?.dir) {
-        try {
-          fs.rmdirSync(location.dir);
-        } catch {
-          // not empty (unexpected extra file) or already gone
+        // Deleting a session clears that session's persisted approvals before
+        // the file disappears, so it is a settings write and needs a writable
+        // document. A future-version or existing-but-unreadable settings file
+        // refuses up front (409) and keeps the session, rather than leaving
+        // approvals whose shape this release cannot fully inspect for a reused
+        // name. The existence check stays first so an unknown name is a 404.
+        requireWritableSettings();
+        // A live run keeps its SessionStore handle and would re-append the next
+        // envelope, resurrecting the file — stop it and let it unwind first.
+        // A sync `POST /api/run` holds no RunManager record and cannot be
+        // signalled at all, so it is tracked through `state.syncRuns` here: the
+        // wait loop below simply gives it the same unwind window.
+        const activeFor = (): Array<Record<string, unknown>> =>
+          state.runs.list().filter(
+            (record) =>
+              record.session === safe &&
+              typeof record.status === "string" &&
+              ACTIVE_STATES.has(record.status),
+          );
+        const anythingActive = (): boolean =>
+          activeFor().length > 0 || state.syncRuns.has(safe);
+        for (const record of activeFor()) state.runs.stop(String(record.run_id));
+        const deadline = Date.now() + 2500;
+        while (anythingActive() && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
         }
+        if (anythingActive()) {
+          // The run ignored its stop signal (or the sync run is still mid-call):
+          // deleting now would unlink a session a live run is still appending
+          // to, resurrecting it or dropping envelopes. Keep everything and let
+          // the operator stop the run first.
+          throw new HttpError(409, "a run is still active for this session; stop it before deleting");
+        }
+        // Persisted session allows must not outlive the session they were
+        // granted for. Clear them before the file disappears: a failed write
+        // leaves the session in place rather than a deleted session whose auto-
+        // allows could apply again if the name were reused.
+        try {
+          state.settingsStore.clearSessionApprovals(safe);
+        } catch (exc) {
+          if (exc instanceof SettingsWriteRefusedError) throw exc;
+          throw new HttpError(500, `could not clear the session approvals: ${errorDetail(exc)}`);
+        }
+        fs.unlinkSync(store.path);
+        state.metadata.delete(safe);
+        state.runtimeEvents.delete(safe);
+        // Child helper transcripts belong to the parent session; they must not
+        // survive its deletion (and a reused name must not inherit them).
+        state.subagents.deleteForSession(safe);
+        // A directory-layout session owns its directory; remove it when empty so
+        // the name is fully released. `resolveForWrite` also finds the now-empty
+        // directory after the artifacts were unlinked.
+        const location = layout.resolveForWrite(safe);
+        if (location?.dir) {
+          try {
+            fs.rmdirSync(location.dir);
+          } catch {
+            // not empty (unexpected extra file) or already gone
+          }
+        }
+        return { deleted: safe };
+      } finally {
+        state.deleting.delete(safe);
       }
-      return { deleted: safe };
     }),
   );
 
@@ -3696,8 +3811,12 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
           : { ...baseReq, mode: prepared.modeOverride };
       // The final, synchronous admission gate: a manual compaction must never
       // overlap a run submission (its JSONL rewrite would drop this run's
-      // envelopes). Checked right before the run record exists — nothing has
+      // envelopes), and neither must a sync `POST /api/run` in flight (it
+      // restores and appends the same session file with no RunManager record —
+      // `state.syncRuns` is its only visible reservation) or a session being
+      // deleted. Checked right before the run record exists — nothing has
       // been created for this request yet.
+      assertNotDeleting(name);
       assertNotCompacting(name);
       const broker = new RunApprovalBroker();
       // Seed the persisted "always allow for this session" pairs before the run
