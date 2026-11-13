@@ -211,12 +211,12 @@ honest `+N more` tail — see
 it takes no keys. **Helper subagents.** A TUI turn enables the same helper tier
 `serve` uses (the `subagent` tool plus the four helper-control tools on the
 Senior's belt), so the Senior may delegate a focused side task to an isolated
-helper. `Ctrl+Y` (or `/agents`, or the palette's **Helpers** row) opens a
-read-only observer overlay while the turn runs and after it settles: a
+helper. `Ctrl+Y` (or `/agents`, or the palette's **Helpers** row) opens an
+observer overlay while the turn runs and after it settles: a
 newest-first list (status glyph, label, elapsed time, live activity, tokens;
 `+N older (not shown)` past 20 rows) and, on `Enter`, the selected child's
 bounded transcript (task, replies, tool calls with a short preview, approvals,
-follow-up origin, final report/error). `Esc` layers child → list → closed; the
+follow-up origin, final report/error). Inside the child, `i` interrupts the helper (the child only, never the parent run — no optimistic status flip, the terminal event is the truth) and `m` drafts a one-line follow-up for the helper's next step: the send is *queued* (`queued · N pending`, with a live `N pending` header badge) and the delivered `Follow-up · operator` row appears only when the child's next step consumes the queue; refusals read `helper already finished`, `queue is full (8 pending)` or `context is full (NNN chars)`. `Esc` cancels an open follow-up draft before layering child → list → closed; the
 helper route is the operator's Settings → **Models & roles** → **Subagent**
 connection, resolved exactly like `serve`. The overlay reads the child logs
 from `<sessions-dir>/subagents/` in process — it appends no envelope and

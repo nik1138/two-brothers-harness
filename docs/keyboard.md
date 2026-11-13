@@ -455,6 +455,16 @@ while a turn runs, which is when a live helper exists.
   report. The transcript keeps the newest 400 rows and follows the tail;
   `PgUp`/`PgDn` page back, and `Esc` (or `Enter`) returns to the list.
   `Esc` layers detail → list → closed.
+- **Controls** — inside a child transcript, `i` interrupts the helper (the child
+  only, never the parent run; no optimistic status flip — the terminal event is
+  the truth) and `m` drafts a one-line follow-up for the helper's next step. The
+  follow-up is *queued*, never claimed delivered: the header shows the live
+  `N pending` badge, the `Follow-up · operator` row appears in the transcript
+  only when the child's next step consumes the queue, and an honest refusal
+  (`helper already finished` / `queue is full (8 pending)` /
+  `context is full (NNN chars)`) names the reason. With the draft open, `Esc`
+  cancels only the draft; otherwise `Esc` layers detail → list → closed as
+  before. Both controls act on the open child and stay out of the palette.
 
 The list is rebuilt from the child logs when it opens and after each completion,
 and live `subagent_*` events only update the activity line — a row never
@@ -517,6 +527,8 @@ hint clears on its own).
 | `Esc` | Close the overlay and restore the previous focus. In the helpers overlay: child transcript → helper list → closed. |
 | `Ctrl+Y` | With the helpers overlay open, close it (it toggles the overlay it opens). |
 | `PgUp` / `PgDn` | Inside an open helper transcript, page backwards/forwards; the window follows the tail until you scroll back. |
+| `I` | Inside an open helper transcript: interrupt that helper (the child only, never the parent run). The row keeps its live status — the helper's terminal event is the truth. |
+| `M` | Inside an open helper transcript: draft a one-line follow-up (capped at 4000 chars); `Enter` queues it for the helper's next step, `Esc` cancels only the draft. |
 | `Tab` / `Shift+Tab` | In the `/`, `@skill:` and workspace-file pickers: accept / dismiss (the text input keeps focus; Left/Right keep editing the draft). |
 
 Overlays receive keys before the composer: while one is open, `Up`/`Down` move

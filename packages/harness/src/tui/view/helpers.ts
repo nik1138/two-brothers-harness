@@ -21,7 +21,11 @@
  * its live label, and only `subagent_completed` changes its status. The store is
  * the authority when the overlay opens and after a completion; events are live
  * activity only. Selection is anchored by child id, so a helper starting while
- * the list is open never moves what Enter opens.
+ * the list is open never moves what Enter opens. The O2 controls (interrupt,
+ * one-line follow-up draft) ride the same in-process `SubagentControlHandle`
+ * the web uses: they send a request and render the handle's honest answer —
+ * never an optimistic status flip, a locally appended transcript row, or a
+ * "delivered" claim.
  */
 import type { UsageTotals } from "../../provider.ts";
 import type {
@@ -32,6 +36,11 @@ import type {
   SubagentCompletedEvent,
   SubagentStartedEvent,
 } from "../../runevents.ts";
+import {
+  SUBAGENT_FOLLOWUP_QUEUE_MAX,
+  SUBAGENT_FOLLOWUP_TEXT_MAX_CHARS,
+  type SubagentFollowUpSendResult,
+} from "../../subagent.ts";
 import type {
   SubagentActivity,
   SubagentApprovalEntry,
@@ -41,6 +50,11 @@ import type {
   SubagentSummary,
   SubagentTranscriptEntry,
 } from "../../subagent.ts";
+import {
+  createEditor,
+  handleEditorKey,
+  type EditorState,
+} from "../editor.ts";
 import {
   hintSegments,
   resolveKey,
@@ -614,6 +628,45 @@ export function helpersListTitle(rows: readonly HelperRow[]): string {
 }
 
 // --------------------------------------------------------------------------- //
+// O2 control copy (the answer text is part of the contract — exact strings)
+// --------------------------------------------------------------------------- //
+
+/**
+ * The interrupt answer: accepted means the child abort was requested, nothing
+ * more — the helper's terminal event and `end` row are the truth, so the copy
+ * says exactly that and the app never flips a row's status. A `false` answer
+ * (settled/already-interrupted child) or a missing handle reads the same as
+ * "there is nothing live to interrupt".
+ */
+export function helperInterruptToastText(accepted: boolean): string {
+  return accepted
+    ? "interrupting — the helper's terminal event is the truth"
+    : "helper already finished";
+}
+
+/**
+ * The follow-up send answer, honest per the backend's bounded queue result.
+ * An accepted text is **queued** (delivered at the child's next provider
+ * step — the log row appears then, never here), so the copy never says
+ * "delivered". A missing handle is reported exactly like `not_running`.
+ */
+export function helperFollowUpToastText(result: SubagentFollowUpSendResult): string {
+  if (result.ok) return `queued · ${result.pending} pending`;
+  switch (result.reason) {
+    case "queue_full":
+      return `queue is full (${SUBAGENT_FOLLOWUP_QUEUE_MAX} pending)`;
+    case "context_full":
+      return `context is full (${result.chars ?? 0} chars)`;
+    case "not_running":
+      return "helper already finished";
+    case "invalid_text":
+      // Unreachable: the app trims and only submits non-empty text within the
+      // cap, so the backend cannot reject it as invalid. Kept exhaustive.
+      return "message not queued";
+  }
+}
+
+// --------------------------------------------------------------------------- //
 // overlay state + key routing
 // --------------------------------------------------------------------------- //
 
@@ -625,11 +678,29 @@ export interface HelperOverlayState {
   detail: SubagentDetail | null;
   /** Detail scroll offset from the bottom; `0` = follow the tail. */
   scroll: number;
+  /**
+   * The open one-line follow-up draft (O2), or null. Hosted in an
+   * {@link EditorState} capped at {@link SUBAGENT_FOLLOWUP_TEXT_MAX_CHARS} so
+   * the existing editor primitives (grapheme cursor, paste, deletion) apply
+   * unchanged; the draft is overlay state, so it survives repaints.
+   */
+  draft: EditorState | null;
+  /**
+   * The last control answer (O2), shown as one line inside the overlay. The
+   * app suppresses toasts while a modal overlay is up, so interrupt/follow-up
+   * feedback lives here; the text is the same bounded copy a toast would use.
+   */
+  notice: { text: string; level: "info" | "warn" | "success" } | null;
 }
 
 /** A fresh overlay state in list mode. */
 export function createHelperOverlayState(selectedId: string | null = null): HelperOverlayState {
-  return { selectedId, detail: null, scroll: 0 };
+  return { selectedId, detail: null, scroll: 0, draft: null, notice: null };
+}
+
+/** A fresh one-line follow-up draft, capped at the backend's text bound. */
+export function createHelperFollowUpDraft(): EditorState {
+  return createEditor("", { maxChars: SUBAGENT_FOLLOWUP_TEXT_MAX_CHARS, maxHistory: 0 });
 }
 
 /** The selected row's index, clamped into `rows` (0 when nothing is selected). */
@@ -658,7 +729,12 @@ export type HelperOverlayAction =
   | "open"
   | "back"
   | "close"
-  | "scroll";
+  | "scroll"
+  | "interrupt"
+  | "followup"
+  | "draft-edit"
+  | "draft-submit"
+  | "draft-cancel";
 
 export interface HelperOverlayKeyResult {
   state: HelperOverlayState;
@@ -676,12 +752,19 @@ export interface HelperOverlayKeyOptions {
 /**
  * Fold one keypress into the HELPERS overlay.
  *
+ * Draft open (detail mode): every printable key edits the one-line draft
+ * (capped at {@link SUBAGENT_FOLLOWUP_TEXT_MAX_CHARS}); `Enter` asks the app to
+ * submit it, and `Esc` (or Ctrl+C) cancels **only the draft** — the overlay
+ * stays open. A one-line draft has no newline.
+ *
  * Detail mode: `Enter` and `Esc` return to the list, PgUp/PgDn scroll the
- * transcript (offset from the bottom; `0` follows the tail). List mode:
- * `Ctrl+Y` (the `agents` command, app scope) closes the overlay, `Esc` closes
- * it, Up/Down move the id-anchored selection and `Enter` opens the selected
- * child. The app performs the actual store read on `"open"`, so a stale id is
- * reported honestly instead of rendering a fabricated row.
+ * transcript, `i` asks the app to interrupt the open child and `m` opens the
+ * follow-up draft. List mode: `Ctrl+Y` (the `agents` command, app scope)
+ * closes the overlay, `Esc` closes it, Up/Down move the id-anchored selection
+ * and `Enter` opens the selected child. The app performs the actual store
+ * read / control call on `"open"`, `"interrupt"` and `"draft-submit"`, so a
+ * stale id is reported honestly instead of rendering a fabricated row, and no
+ * control ever claims an outcome the backend has not confirmed.
  */
 export function helperOverlayKey(
   commands: readonly TuiCommand[],
@@ -691,10 +774,37 @@ export function helperOverlayKey(
   options: HelperOverlayKeyOptions = {},
 ): HelperOverlayKeyResult {
   const page = Math.max(1, Math.floor(options.page ?? HELPER_SCROLL_PAGE));
+  if (state.draft !== null) {
+    // Esc cancels only the draft: detail → list → closed stays available after
+    // the draft is gone. Ctrl+C (the editor's other "cancel") does the same —
+    // it never reaches the app's quit/armed-quit precedence while the overlay
+    // owns the key.
+    if (key.name.toLowerCase() === "escape" || key.raw === "\u001b") {
+      return { state: { ...state, draft: null }, action: "draft-cancel" };
+    }
+    const result = handleEditorKey(state.draft, { ...key, raw: key.raw ?? "" }, {
+      maxChars: SUBAGENT_FOLLOWUP_TEXT_MAX_CHARS,
+      maxHistory: 0,
+    });
+    if (result.action === "submit") {
+      // Keep the edited draft in the state so the app can read and trim the
+      // exact text; the app clears the draft once the send is resolved.
+      return { state: { ...state, draft: result.state }, action: "draft-submit" };
+    }
+    if (result.action === "cancel") {
+      return { state: { ...state, draft: null }, action: "draft-cancel" };
+    }
+    if (result.action === "newline") {
+      // One line only: Ctrl+J / Shift+Enter never insert a newline here.
+      return { state, action: "none" };
+    }
+    if (result.action === "ignore") return { state, action: "none" };
+    return { state: { ...state, draft: result.state }, action: "draft-edit" };
+  }
   const match = resolveKey(commands, key, "overlay");
   if (state.detail !== null) {
     if (match?.command.id === "list-close" || match?.command.id === "list-accept") {
-      return { state: { ...state, detail: null, scroll: 0 }, action: "back" };
+      return { state: { ...state, detail: null, scroll: 0, draft: null }, action: "back" };
     }
     if (match?.command.id === "helper-scroll") {
       const total = Math.max(
@@ -704,6 +814,12 @@ export function helperOverlayKey(
       const delta = match.chord.name.toLowerCase() === "pageup" ? page : -page;
       const scroll = Math.min(total, Math.max(0, state.scroll + delta));
       return { state: { ...state, scroll }, action: "scroll" };
+    }
+    if (match?.command.id === "helper-interrupt") {
+      return { state, action: "interrupt" };
+    }
+    if (match?.command.id === "helper-followup") {
+      return { state: { ...state, draft: createHelperFollowUpDraft() }, action: "followup" };
     }
     return { state, action: "none" };
   }
@@ -977,6 +1093,11 @@ export interface HelperDetailOptions {
   commands?: readonly TuiCommand[];
   /** Clock for the elapsed label (tests pin it; the app leaves it out). */
   now?: number;
+  /**
+   * Live queued follow-ups from the child's control handle (O2); `0`/absent
+   * renders no badge. The app reads it from `pendingFollowUps()` each frame.
+   */
+  pending?: number;
 }
 
 export interface HelperDetailView {
@@ -992,12 +1113,14 @@ export interface HelperDetailView {
 /** The four fixed header rows (label, connection, status, tokens). */
 export function helperDetailHeader(
   detail: SubagentDetail,
-  options: { now?: number } = {},
+  options: { now?: number; pending?: number } = {},
 ): string[] {
   const elapsed = helperElapsed(detail.started_at, detail.ended_at, options.now ?? Date.now());
   const tokens = helperTokenLabel(detail.usage);
   const statusParts = [detail.status, elapsed].filter((part) => part !== "");
   if (detail.background === true) statusParts.push("background");
+  const pending = Math.max(0, Math.floor(options.pending ?? 0));
+  if (pending > 0) statusParts.push(`${pending} pending`);
   const connection = `${detail.model || "(model unknown)"} · ${detail.role}`;
   return [
     detail.label || "Subagent",
@@ -1034,7 +1157,10 @@ export function helperDetailView(
   const start = Math.max(0, end - capacity);
   const visible = rows.slice(start, end);
 
-  const header = helperDetailHeader(detail, options.now !== undefined ? { now: options.now } : {});
+  const header = helperDetailHeader(detail, {
+    ...(options.now !== undefined ? { now: options.now } : {}),
+    ...(options.pending !== undefined ? { pending: options.pending } : {}),
+  });
   const headerRows = [
     theme.paint("strong", clipDisplay(header[0] ?? "", contentWidth)),
     theme.paint("muted", clipDisplay(header[1] ?? "", contentWidth)),
@@ -1066,11 +1192,33 @@ export function helperDetailView(
       body.push(rowText === "" ? "" : theme.paint(tone, rowText));
     }
   }
+  // The last control answer (interrupt/follow-up) rides above the footer:
+  // toasts are suppressed under a modal overlay, so the overlay shows the same
+  // bounded copy itself.
+  if (state.notice !== null) {
+    const tone: ThemeToken = state.notice.level === "warn" ? "warning" : "notice";
+    body.push(theme.paint(tone, clipDisplay(state.notice.text, contentWidth)));
+  }
+  // The follow-up draft is one live row above the footer. It is a draft of a
+  // queued message: nothing here appends a transcript row or claims delivery.
+  if (state.draft !== null) {
+    body.push(theme.paint("focus", clipDisplay(`message: ${state.draft.text}`, contentWidth)));
+  }
   while (body.length < Math.max(0, height - 3)) body.push("");
-  const footer = hintSegments(commands, [
-    { id: "helper-scroll", label: "scroll" },
-    { id: "list-close", label: "back" },
-  ]);
+  // With the draft open, Enter submits and Esc cancels only the draft (both
+  // chords are registry-derived); otherwise the O2 footer gains the child
+  // controls next to the O1 scroll/back hints.
+  const footer = state.draft !== null
+    ? hintSegments(commands, [
+        { id: "list-accept", label: "send" },
+        { id: "list-close", label: "cancel" },
+      ])
+    : hintSegments(commands, [
+        { id: "helper-scroll", label: "scroll" },
+        { id: "helper-interrupt", label: "stop" },
+        { id: "helper-followup", label: "message" },
+        { id: "list-close", label: "back" },
+      ]);
   const boxed = renderBox(
     [...body.slice(0, Math.max(0, height - 3)), theme.paint("dim", clipDisplay(footer, contentWidth))],
     { width, title: `HELPER · ${detail.status}`, theme, tone: helperStatusTone(detail.status) },

@@ -19,7 +19,7 @@ import { test } from "node:test";
 import { resolveConfig } from "../src/config.ts";
 import { RuntimeSettings } from "../src/runtime.ts";
 import { SettingsStore } from "../src/settings_store.ts";
-import { MockProvider, type Provider, type Tool, type ToolChatOptions, type ToolChatResponse } from "../src/provider.ts";
+import { MockProvider, ProviderAbortError, type Provider, type Tool, type ToolChatOptions, type ToolChatResponse } from "../src/provider.ts";
 import { toNdjsonLine, type ToolCallStreamEvent } from "../src/runstream.ts";
 import { CANCELLED_TURN_HINT, awaitTurnDrain, runTuiApp, type TuiIO } from "../src/tui/app.ts";
 import {
@@ -1555,6 +1555,280 @@ test("the configured helper route reaches the TUI turn harness (R15)", async () 
     );
     input.key("escape");
     input.key("escape");
+    assert.equal(await quit(input, app), 0);
+  } finally {
+    cleanup();
+  }
+});
+
+// --------------------------------------------------------------------------- //
+// O2: operator controls over the assembled app (fake TTY, hermetic children)
+// --------------------------------------------------------------------------- //
+
+/** A child provider whose first tool-loop step reads a file and whose second
+ * step waits on a test-controlled gate — so the operator can queue a follow-up
+ * and watch it delivered only at the child's next step. */
+class GatedChildProvider implements Provider {
+  calls: unknown[][] = [];
+  private release: () => void = () => {};
+  readonly gate: Promise<void> = new Promise((resolve) => {
+    this.release = resolve;
+  });
+  openGate(): void {
+    this.release();
+  }
+
+  async chat(): Promise<string> {
+    return "done";
+  }
+
+  async chatWithTools(
+    messages: unknown[],
+    _tools: Tool[],
+    _options: ToolChatOptions = {},
+  ): Promise<ToolChatResponse> {
+    this.calls.push(messages);
+    if (this.calls.length === 1) {
+      // Hang on the FIRST step: the operator queues the follow-up while the
+      // child is live, then the gate releases the step; delivery happens at
+      // the child's next provider step (step 1, after the tool result).
+      await this.gate;
+      return {
+        content: "",
+        toolCalls: [{ id: "call-1", name: "workspace_read_file", args: { path: "notes.txt" } }],
+      };
+    }
+    return { content: "Noted — follow-up received.", toolCalls: [] };
+  }
+}
+
+/** A child provider that never answers its first tool-loop step, so the
+ * operator can interrupt a genuinely live child. */
+class HangingChildProvider implements Provider {
+  async chat(): Promise<string> {
+    return new Promise<string>(() => {});
+  }
+
+  async chatWithTools(
+    _messages: unknown[],
+    _tools: Tool[],
+    options: ToolChatOptions = {},
+  ): Promise<ToolChatResponse> {
+    const signal = options.signal;
+    return new Promise<ToolChatResponse>((_resolve, reject) => {
+      if (signal?.aborted) {
+        reject(new ProviderAbortError());
+        return;
+      }
+      signal?.addEventListener("abort", () => reject(new ProviderAbortError()), { once: true });
+    });
+  }
+}
+
+test("O2: i on a live helper cancels only the child — the parent run completes and the parent transcript never changes a byte", async () => {
+  const { sessionsDir, workspace, sessionFile, cleanup } = helperRoot();
+  try {
+    const senior = new RecordingMock([
+      { tool: SUBAGENT_TOOL_NAME, args: { task: "Inspect the notes file.", label: "slow helper" } },
+    ]);
+    const { app, input, output } = startApp({
+      cfg: resolveConfig({ provider: "mock", sessionFile }),
+      sessionsDir,
+      workspaceRoot: workspace,
+      providerOverrides: { senior, junior: new MockProvider() },
+      subagentProviderFactory: () => new HangingChildProvider(),
+    });
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+    output.resize(140, 60);
+    input.type("inspect the notes");
+    input.enter();
+    assert.ok(
+      await waitFor(() => /helpers 1 running/.test(textOf(output)), 30_000),
+      "the live helper shows in the status bar",
+    );
+
+    // Open the helper and interrupt it while its provider hangs.
+    input.key("y", { ctrl: true, raw: "" });
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("HELPERS · 1 total")),
+      "Ctrl+Y opens the list mid-turn",
+    );
+    input.enter();
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("HELPER · running")),
+      "Enter opens the live child's transcript",
+    );
+    const beforeInterrupt = fs.readFileSync(sessionFile);
+    input.key("i", { raw: "i" });
+    assert.ok(
+      await waitFor(() =>
+        textOf(output).includes("interrupting — the helper's terminal event is the truth")
+      ),
+      "the interrupt toast names the request, not an outcome",
+    );
+
+    // The child settles cancelled; the parent run still completes.
+    assert.ok(
+      await waitFor(() => textOf(output).includes("decision:"), 30_000),
+      "the parent turn completes after the child was interrupted",
+    );
+    const childId = fs.readdirSync(path.join(sessionsDir, "subagents"))[0]!;
+    const store = new SubagentStore(path.join(sessionsDir, "subagents"));
+    const detail = store.get(childId.replace(/\.jsonl$/, ""));
+    assert.ok(detail, "the child log exists");
+    assert.equal(detail.status, "cancelled");
+    assert.equal(detail.error, "interrupted by the operator");
+
+    // Settled-phase controls: interrupt and follow-up both refuse honestly,
+    // Esc still layers detail → list → closed, and the parent transcript is
+    // byte-identical across every control interaction.
+    const settled = fs.readFileSync(sessionFile);
+    assert.ok(settled.length > beforeInterrupt.length, "the turn finished persisting its envelopes");
+    input.key("i", { raw: "i" });
+    assert.ok(
+      await waitFor(() => textOf(output).includes("helper already finished")),
+      "a settled child refuses the interrupt with the honest copy",
+    );
+    input.key("m", { raw: "m" });
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("Enter send · Esc cancel")),
+      "m opens the one-line draft on the settled child",
+    );
+    input.type("are you there");
+    input.enter();
+    assert.ok(
+      await waitFor(() =>
+        lastFrameText(output).includes("helper already finished") ||
+        textOf(output).includes("helper already finished")
+      ),
+      "a settled child refuses the follow-up with the honest copy",
+    );
+    assert.deepEqual(
+      fs.readFileSync(sessionFile),
+      settled,
+      "no control interaction appended a parent envelope",
+    );
+    input.key("escape");
+    assert.ok(
+      await waitFor(() => !lastFrameText(output).includes("message: are you there")),
+      "Esc cancels only the draft / the settled refusal closed it",
+    );
+    assert.equal(await quit(input, app), 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test("O2: a follow-up is queued with 1 pending and delivered only at the child's next step; the parent transcript never changes a byte", async () => {
+  const { sessionsDir, workspace, sessionFile, cleanup } = helperRoot();
+  try {
+    const child = new GatedChildProvider();
+    const senior = new RecordingMock([
+      { tool: SUBAGENT_TOOL_NAME, args: { task: "Inspect the notes file.", label: "gated helper" } },
+    ]);
+    const { app, input, output } = startApp({
+      cfg: resolveConfig({ provider: "mock", sessionFile }),
+      sessionsDir,
+      workspaceRoot: workspace,
+      providerOverrides: { senior, junior: new MockProvider() },
+      subagentProviderFactory: () => child,
+    });
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+    output.resize(140, 60);
+    input.type("inspect the notes");
+    input.enter();
+    assert.ok(
+      await waitFor(() => /helpers 1 running/.test(textOf(output)), 30_000),
+      "the live helper shows in the status bar",
+    );
+
+    // Wait until the child is inside its gated second step, then open it.
+    assert.ok(
+      await waitFor(() => child.calls.length >= 1, 30_000),
+      "the child is inside its gated first step",
+    );
+    const childId = fs.readdirSync(path.join(sessionsDir, "subagents"))[0]!.replace(/\.jsonl$/, "");
+    const store = new SubagentStore(path.join(sessionsDir, "subagents"));
+    const rowsBefore = store.get(childId)!.transcript.length;
+
+    input.key("y", { ctrl: true, raw: "" });
+    assert.ok(await waitFor(() => lastFrameText(output).includes("HELPERS · 1 total")));
+    input.enter();
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("HELPER · running")),
+      "Enter opens the live child's transcript",
+    );
+    const before = fs.readFileSync(sessionFile);
+
+    // Draft a follow-up and submit it: accepted means queued, never delivered.
+    input.key("m", { raw: "m" });
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("Enter send · Esc cancel")),
+      "m opens the one-line draft",
+    );
+    input.type("also check the config");
+    input.enter();
+    assert.ok(
+      await waitFor(() => textOf(output).includes("queued · 1 pending")),
+      "the send toast reports the queue honestly",
+    );
+    assert.ok(
+      lastFrameText(output).includes("1 pending"),
+      "the detail header carries the live pending badge",
+    );
+    assert.equal(
+      store.get(childId)!.transcript.length,
+      rowsBefore,
+      "no delivered row exists before the child's next step consumes the queue",
+    );
+    assert.deepEqual(fs.readFileSync(sessionFile), before, "queuing wrote no parent envelope");
+
+    // The child's next step delivers the queue; only now does the row exist.
+    child.openGate();
+    assert.ok(
+      await waitFor(() => textOf(output).includes("decision:"), 30_000),
+      "the parent turn completes after the child consumed the follow-up",
+    );
+    const delivered = store.get(childId)!.transcript.slice(rowsBefore);
+    assert.ok(
+      delivered.some(
+        (entry) =>
+          entry.type === "message" &&
+          entry.role === "user" &&
+          entry.origin === "operator" &&
+          entry.text === "also check the config",
+      ),
+      "the delivered follow-up row appears in the child log with its operator origin",
+    );
+    // The child's next step actually saw the follow-up as a user turn.
+    const secondCall = child.calls[1] as { role: string; content: string }[];
+    assert.ok(
+      secondCall.some(
+        (message) => message.role === "user" && String(message.content).includes("also check the config"),
+      ),
+      "the child's gated step received the delivered follow-up",
+    );
+
+    // CONTROL-SURFACE INVARIANCE: the detail is still open (now settled);
+    // drafting again and cancelling with Esc changes no parent byte.
+    const settled = fs.readFileSync(sessionFile);
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("HELPER · completed")),
+      "the open detail settles to completed through the terminal event",
+    );
+    input.key("m", { raw: "m" });
+    input.type("too late");
+    input.key("escape");
+    assert.ok(
+      await waitFor(() => !lastFrameText(output).includes("message: too late")),
+      "Esc cancels only the draft",
+    );
+    assert.ok(lastFrameText(output).includes("HELPER ·"), "the detail stays open after Esc");
+    assert.deepEqual(
+      fs.readFileSync(sessionFile),
+      settled,
+      "the parent transcript is byte-identical across the control interactions",
+    );
     assert.equal(await quit(input, app), 0);
   } finally {
     cleanup();

@@ -503,3 +503,37 @@ test("helper-scroll is overlay-scope PgUp/PgDn and never shadows transcript scro
     .flatMap((entry) => formatKeys(entry) === "PgUp / PgDn" ? [entry.id] : []);
   assert.deepEqual(overlayChords, ["helper-scroll"]);
 });
+
+test("helper-interrupt and helper-followup are overlay-scope, palette-hidden, documented once", () => {
+  for (const [id, chord] of [["helper-interrupt", "i"], ["helper-followup", "m"]] as const) {
+    const command = findCommand(TUI_COMMANDS, id);
+    assert.ok(command, `the registry has a ${id} command`);
+    assert.equal(command.group, "Cooperation");
+    assert.equal(command.when, "overlay");
+    assert.equal(formatKeys(command), chord);
+    assert.equal(
+      paletteEntries(TUI_COMMANDS).some((entry) => entry.id === id),
+      false,
+      `${id} never appears in the Ctrl+P palette`,
+    );
+    assert.equal(documentEntries(TUI_COMMANDS).filter((entry) => entry.id === id).length, 1);
+    assert.equal(
+      resolveKey(TUI_COMMANDS, key(chord, chord), "overlay")?.command.id,
+      id,
+      `${chord} resolves to ${id} in overlay scope`,
+    );
+    // No global dispatch: app/composer/transcript scopes never see the chord.
+    for (const context of ["app", "find", "mention", "approval"] as const) {
+      assert.equal(
+        resolveKey(TUI_COMMANDS, key(chord, chord), context),
+        null,
+        `${id} is not offered in the ${context} scope`,
+      );
+    }
+  }
+  // No other overlay command claims i or m (the overlay scope stays collision-free).
+  const claimed = TUI_COMMANDS.filter((entry) => (entry.when ?? "always") === "overlay")
+    .filter((entry) => ["i", "m"].includes(formatKeys(entry)))
+    .map((entry) => entry.id);
+  assert.deepEqual(claimed.sort(), ["helper-followup", "helper-interrupt"]);
+});
