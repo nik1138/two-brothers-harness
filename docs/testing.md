@@ -54,7 +54,8 @@ publishing, spawn **separate** subagent lanes on the merged tree and require
 PASS from each:
 
 1. browser E2E — `scripts/e2e-test.ps1` (or `e2e/run.mjs`) with the full
-   offline matrix plus `e2e/web-freshness.test.mjs`;
+   offline matrix plus `e2e/web-freshness.test.mjs` and
+   `e2e/skip-registry.test.mjs`;
 2. hermetic CLI E2E — `node e2e/cli.ts` and `node e2e/cli.ts --dist`;
 3. tarball flow — `scripts/tarball-smoke.mjs` (pack → install → run) and
    `npm run pack:check` in `packages/harness`;
@@ -95,9 +96,10 @@ Both legs run the same hermetic gates, in this order:
    suites, then runs the hermetic server-status and prompt-audit suites and
    exits 0;
 6. `web/`: `npm ci`, `npm test`, `npm run build`;
-7. at the repo root: the browser-E2E packaged-web freshness unit tests
-   (`node --test e2e/web-freshness.test.mjs` — plain `node:test`, no deps and
-   no browser);
+7. at the repo root: the browser-E2E helper unit tests
+   (`node --test e2e/web-freshness.test.mjs e2e/skip-registry.test.mjs` — plain
+   `node:test`, no deps and no browser): the packaged-web freshness guard and
+   the missing-backend SKIP-registry parity guard;
 8. ubuntu Node 22 only, after the web build: `node scripts/tarball-smoke.mjs` at
    the repo root and `npm run pack:check` in `packages/harness`. Both trigger
    the package `prepack` (build + `sync-web`), which is why they need

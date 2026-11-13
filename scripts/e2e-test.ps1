@@ -89,11 +89,16 @@ try {
     }
   }
 
-  # 3. pure packaged-web freshness helper tests (hermetic, no browser)
+  # 3. pure helper tests (hermetic, no browser): packaged-web freshness +
+  #    missing-backend SKIP-registry parity
   Push-Location (Join-Path $root 'e2e')
   try {
     node web-freshness.test.mjs
     $freshCode = $LASTEXITCODE
+    if ($freshCode -eq 0) {
+      node skip-registry.test.mjs
+      $freshCode = $LASTEXITCODE
+    }
   } finally {
     Pop-Location
   }

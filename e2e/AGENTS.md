@@ -10,6 +10,9 @@ workspace rules are in `../web/AGENTS.md`.
 - `fixtures/` — scripted provider/server fixtures and scenario inputs.
 - `web-freshness.mjs` + `web-freshness.test.mjs` — the packaged-web freshness
   guard and its dependency-free unit tests.
+- `scenario-registry.mjs` + `skip-registry.test.mjs` — the hermetic scenario
+  registry (single source of truth for the runner's block list and the
+  missing-backend SKIP report) and its parity unit tests.
 - `package.json` / `package-lock.json` — the separate E2E package
   (`playwright` only).
 
@@ -17,7 +20,8 @@ workspace rules are in `../web/AGENTS.md`.
 
 - This is its own package; do not merge it into `web/` or the harness package.
 - Browser E2E is manual/opt-in (rehearsal, release lane), not part of
-  `npm test`, the smoke gate, or CI. CI runs only the freshness unit tests.
+  `npm test`, the smoke gate, or CI. CI runs the freshness and skip-registry
+  unit tests (`web-freshness.test.mjs`, `skip-registry.test.mjs`).
 - `packages/harness/web` is generated; never hand-edit it. Change `web/src`,
   rebuild, and let the runner/freshness guard copy it.
 - Do not commit `node_modules/`, browser profiles, or run artifacts.
@@ -42,6 +46,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/e2e-test.ps1
 cd e2e
 npm install
 node web-freshness.test.mjs
+node skip-registry.test.mjs
 npm test                       # node run.mjs
 ```
 
