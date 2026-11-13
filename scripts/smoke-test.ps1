@@ -9,6 +9,10 @@
 # mock run -> hermetic CLI E2E -> real-socket fault injection -> hermetic
 # server E2E, the typescript/ reference selftest, the web/ unit tests, and the
 # web/ build. Everything is offline; no model endpoint or API key is needed.
+#
+# The web build stage runs with TEMP/TMP pointed at a private dir inside the
+# checkout (the documented Windows esbuild workaround), scoped to that stage
+# and restored afterwards; every other stage keeps the caller's temp env.
 
 $ErrorActionPreference = "Stop"
 
@@ -131,8 +135,38 @@ Pop-Location
 
 Section "Web workspace: build"
 Push-Location $web
-Run-External "web build" "npm.cmd" "run" "build"
-Pop-Location
+# esbuild cannot remove its service-binary dir under the ambient per-user
+# TEMP on this machine ("Access is denied" during vite build); the documented
+# workaround is a repo-local temp dir. Scope it to THIS stage only: a global
+# TEMP/TMP redirect breaks the package watcher/editor suites, and the web
+# unit tests pass with the ambient temp (585/585).
+$webBuildTemp = Join-Path $root ".tmp\smoke-temp\web-build"
+$savedTemp = $env:TEMP
+$savedTmp = $env:TMP
+New-Item -ItemType Directory -Path $webBuildTemp -Force | Out-Null
+$env:TEMP = $webBuildTemp
+$env:TMP = $webBuildTemp
+try {
+    Run-External "web build" "npm.cmd" "run" "build"
+} finally {
+    if ($null -eq $savedTemp) {
+        Remove-Item Env:\TEMP -ErrorAction SilentlyContinue
+    } else {
+        $env:TEMP = $savedTemp
+    }
+    if ($null -eq $savedTmp) {
+        Remove-Item Env:\TMP -ErrorAction SilentlyContinue
+    } else {
+        $env:TMP = $savedTmp
+    }
+    Pop-Location
+    # Best-effort cleanup of the private stage dir (esbuild removes its own
+    # subdir on success; leftover extraction dirs are safe to drop). The dir
+    # lives under the gitignored .tmp/, so a failed cleanup is not a gate
+    # failure and must not mask the build result.
+    Remove-Item -Path $webBuildTemp -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -Path (Split-Path -Parent $webBuildTemp) -ErrorAction SilentlyContinue
+}
 
 Write-Output ""
 Write-Output "SMOKE TEST: PASS"
