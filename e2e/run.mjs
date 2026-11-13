@@ -137,6 +137,10 @@
 //   settings-subagent mock provider: Settings → Subagent surfaces the persisted
 //                  helper-route default with honest "no helper model" copy and
 //                  the provider-less warning (offline, no model run)
+//   settings-preset-sync mock provider: selecting the lmstudio preset in a role
+//                  card syncs the (previously stale) Base URL field to the
+//                  preset URL; the save persists provider_ref + the preset URL
+//                  (never the stale Manual URL) and survives a reload
 //   session-switch-race mock provider: with session A's detail response held,
 //                  a rapid A→B switch keeps B on screen — the stale A load must
 //                  not commit selection/transcript
@@ -5877,6 +5881,89 @@ async function scenarioSettingsSubagent(runner) {
   }
 }
 
+// -- scenario: selecting a provider preset syncs the role base URL ---------------------
+
+async function scenarioSettingsPresetSync(runner) {
+  const be = await startBackend({ kind: 'mock' })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  const puts = []
+  page.on('request', (request) => {
+    if (request.method() === 'PUT' && new URL(request.url()).pathname === '/api/settings') {
+      puts.push(request.postData() ?? '')
+    }
+  })
+  const LMSTUDIO_URL = 'http://localhost:1234/v1'
+  const STALE_URL = 'https://opencode.example/v1'
+  try {
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await page.locator('.sidebar-footer .footer-action').click()
+    const dialog = page.locator('[role="dialog"][aria-labelledby="settings-dialog-title"]')
+    await dialog.waitFor({ state: 'visible' })
+    const card = dialog.locator('.role-card--senior')
+    await card.waitFor({ state: 'visible' })
+
+    // Stage the reported bug: a stale Manual base URL still in the field while
+    // the Connection dropdown moves to the lmstudio preset. The fix must sync
+    // the field to the preset URL; a save must persist that URL, not the stale
+    // one (routing used the preset, but the stored fallback did not).
+    const base = card.locator('input[placeholder="http://127.0.0.1:1234/v1"]')
+    await base.fill(STALE_URL)
+    await card.locator('.n-base-selection').click()
+    await page.locator('.n-base-select-option', { hasText: 'lmstudio' }).first().click()
+    await waitFor(async () => (await base.inputValue()) === LMSTUDIO_URL, {
+      desc: 'Senior base URL to sync to the lmstudio preset URL',
+    })
+    assert.equal(await base.inputValue(), LMSTUDIO_URL)
+    assert.ok(await base.isDisabled(), 'a preset-supplied base URL is not editable')
+
+    await dialog
+      .locator('.settings-footer-actions button.n-button--primary-type')
+      .first()
+      .click()
+    await dialog.waitFor({ state: 'hidden', timeout: 15000 })
+
+    const saved = await (await fetch(`${be.base}/api/settings`)).json()
+    assert.equal(saved.senior.provider_ref, 'lmstudio')
+    assert.equal(saved.senior.base_url, LMSTUDIO_URL)
+    assert.ok(
+      puts.some((body) => body.includes('"provider_ref":"lmstudio"')),
+      'the save PUT carries the preset ref',
+    )
+    assert.ok(
+      puts.some((body) => body.includes(LMSTUDIO_URL)),
+      'the save PUT carries the synced preset base URL',
+    )
+    assert.ok(
+      !puts.some((body) => body.includes(STALE_URL)),
+      'the stale Manual base URL must not be persisted',
+    )
+    const onDisk = JSON.parse(fs.readFileSync(path.join(be.dir, 'settings.json'), 'utf-8'))
+    assert.equal(onDisk.senior.base_url, LMSTUDIO_URL)
+
+    // Reload: the persisted route seeds the card with the preset + its URL.
+    await page.reload()
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await page.locator('.sidebar-footer .footer-action').click()
+    await dialog.waitFor({ state: 'visible' })
+    const reopened = dialog.locator('.role-card--senior')
+    await reopened.waitFor({ state: 'visible' })
+    await waitFor(
+      async () =>
+        (await reopened.locator('input[placeholder="http://127.0.0.1:1234/v1"]').inputValue()) ===
+        LMSTUDIO_URL,
+      { desc: 'reopened Senior base URL to show the persisted preset URL' },
+    )
+
+    consoleGuard.assertClean()
+    runner.pass('settings-preset-sync')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(be.dir)
+  }
+}
+
 // -- scenario: real models (opt-in) ---------------------------------------------------
 
 async function scenarioReal(runner) {
@@ -6529,6 +6616,13 @@ async function main() {
         ),
       },
       {
+        label: 'settings-preset-sync',
+        run: () => (
+          (currentRunner = makeRunner('settings-preset-sync')),
+          scenarioSettingsPresetSync(currentRunner)
+        ),
+      },
+      {
         label: 'session-switch-race',
         run: () => (
           (currentRunner = makeRunner('session-switch-race')),
@@ -6611,6 +6705,7 @@ async function main() {
       'tab-title',
       'settings-advanced',
       'settings-subagent',
+      'settings-preset-sync',
       'history-nav',
       'transcript-stability',
       'session-switch-race',

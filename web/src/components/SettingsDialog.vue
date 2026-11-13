@@ -13,6 +13,7 @@ import {
 } from '../api'
 import type { PluginLoadError, RoleSettingsPatch, SettingsPatch } from '../api'
 import { effortSupported } from '../modelEfforts'
+import { applyRolePatch } from '../rolePresetSync'
 import type { ProviderPreset, RoleSettingsView } from '../types'
 import { clickInModalBody } from '../modal'
 import { applyThemeAttribute, readThemeMode, resolveDark, saveThemeMode } from '../themeMode'
@@ -436,17 +437,17 @@ onBeforeUnmount(() => {
 })
 
 function updateSenior(patch: Partial<RoleForm>) {
-  Object.assign(senior, patch)
+  applyRolePatch(senior, patch, providers.value)
   if ('providerRef' in patch || 'model' in patch) scheduleEffortOptions('senior')
 }
 
 function updateJunior(patch: Partial<RoleForm>) {
-  Object.assign(junior, patch)
+  applyRolePatch(junior, patch, providers.value)
   if ('providerRef' in patch || 'model' in patch) scheduleEffortOptions('junior')
 }
 
 function updateSubagent(patch: Partial<RoleForm>) {
-  Object.assign(subagent, patch)
+  applyRolePatch(subagent, patch, providers.value)
   if ('providerRef' in patch || 'model' in patch) scheduleEffortOptions('subagent')
 }
 
