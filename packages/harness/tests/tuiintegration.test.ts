@@ -1905,3 +1905,190 @@ test("O2: a follow-up is queued with 1 pending and delivered only at the child's
     cleanup();
   }
 });
+
+test("two concurrent parent and child approvals stay answerable: the queue keeps both and promotes by approval_id", async () => {
+  const { sessionsDir, workspace, sessionFile, cleanup } = helperRoot();
+  try {
+    // Work mode: the junior executes nothing; the SENIOR VERIFY loop then
+    // spawns a BACKGROUND helper (its write parks a child-tagged request) and
+    // immediately parks its own shell request — two approvals are live at
+    // once, in either arrival order.
+    const child = new RecordingMock([
+      { tool: "workspace_write_file", args: { path: "child.txt", content: "from child" } },
+      { text: "child done" },
+    ]);
+    const senior = new RecordingMock([
+      {
+        tool: SUBAGENT_TOOL_NAME,
+        args: { task: "Write child.txt.", label: "writer helper", background: true },
+      },
+      { tool: "workspace_run_shell", args: { command: "echo from-parent" } },
+      { text: "verify done" },
+    ]);
+    const { app, input, output } = startApp({
+      cfg: resolveConfig({ provider: "mock", sessionFile }),
+      sessionsDir,
+      workspaceRoot: workspace,
+      providerOverrides: { senior, junior: new MockProvider() },
+      subagentProviderFactory: () => child,
+    });
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+    output.resize(140, 60);
+    input.type("/mode work");
+    input.enter();
+    assert.ok(await waitFor(() => textOf(output).includes("mode: work")));
+    input.type("verify the notes");
+    input.enter();
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("(2 pending)"), 30_000),
+      "both requests are parked and the status bar reports the pending count",
+    );
+    const first = lastFrameText(output);
+    const firstIsChild = first.includes("child.txt");
+    const firstIsShell = first.includes("from-parent");
+    assert.ok(
+      firstIsChild !== firstIsShell,
+      "the visible panel names exactly one of the two requests",
+    );
+    if (firstIsChild) assert.match(first, /helper: writer helper/);
+    assert.ok(first.includes("APPROVAL REQUIRED"));
+
+    // Deny the visible head: the other request must be promoted untouched.
+    input.key("n");
+    assert.ok(
+      await waitFor(
+        () =>
+          lastFrameText(output).includes("APPROVAL REQUIRED") &&
+          lastFrameText(output).includes(firstIsChild ? "from-parent" : "child.txt"),
+        30_000,
+      ),
+      `the queued ${firstIsChild ? "shell" : "child write"} request is promoted by approval_id, never clobbered`,
+    );
+    if (!firstIsChild) assert.match(lastFrameText(output), /helper: writer helper/);
+
+    // Deny the promoted request too: both answers reached the right ids and
+    // the turn unwinds.
+    input.key("n");
+    assert.ok(
+      await waitFor(() => textOf(output).includes("decision:"), 30_000),
+      "both denied requests resolved and the turn completed",
+    );
+    assert.ok(!lastFrameText(output).includes("APPROVAL REQUIRED"));
+    assert.equal(await quit(input, app), 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test("O2: a bracketed paste into the open follow-up draft is one sanitized line and writes no parent envelope", async () => {  const { sessionsDir, workspace, sessionFile, cleanup } = helperRoot();
+  try {
+    const child = new GatedChildProvider();
+    const senior = new RecordingMock([
+      { tool: SUBAGENT_TOOL_NAME, args: { task: "Inspect the notes file.", label: "gated helper" } },
+    ]);
+    const { app, input, output } = startApp({
+      cfg: resolveConfig({ provider: "mock", sessionFile }),
+      sessionsDir,
+      workspaceRoot: workspace,
+      providerOverrides: { senior, junior: new MockProvider() },
+      subagentProviderFactory: () => child,
+    });
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+    output.resize(140, 60);
+    input.type("inspect the notes");
+    input.enter();
+    assert.ok(
+      await waitFor(() => /helpers 1 running/.test(textOf(output)), 30_000),
+      "the live helper shows in the status bar",
+    );
+    input.key("y", { ctrl: true, raw: "" });
+    assert.ok(await waitFor(() => lastFrameText(output).includes("HELPERS · 1 total")));
+    input.enter();
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("HELPER · running")),
+      "Enter opens the live child's transcript",
+    );
+    const before = fs.readFileSync(sessionFile);
+
+    input.key("m", { raw: "m" });
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("Enter send · Esc cancel")),
+      "m opens the one-line draft",
+    );
+    // A multi-line paste lands in the draft with every line break as a space.
+    input.paste("also check\nthe config\r\nplease");
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("message: also check the config please")),
+      "the draft shows the pasted text as one line",
+    );
+    const frame = lastFrameText(output);
+    assert.ok(!frame.includes("also check\nthe config"), "no newline reaches the frame");
+    assert.deepEqual(
+      fs.readFileSync(sessionFile),
+      before,
+      "pasting into the draft wrote no parent envelope",
+    );
+
+    // Esc cancels only the draft; the run is still live behind the gate.
+    input.key("escape");
+    assert.ok(
+      await waitFor(() => !lastFrameText(output).includes("message: also check the config please")),
+      "Esc cancels the pasted draft",
+    );
+    assert.ok(lastFrameText(output).includes("HELPER ·"), "the detail stays open after Esc");
+    assert.deepEqual(
+      fs.readFileSync(sessionFile),
+      before,
+      "the parent transcript is byte-identical across the paste interaction",
+    );
+    child.openGate();
+    assert.ok(
+      await waitFor(() => textOf(output).includes("decision:"), 30_000),
+      "the parent turn completes once the gate opens",
+    );
+    assert.equal(await quit(input, app), 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a model-supplied multiline helper label is normalized to one line at the source and in the UI", async () => {
+  const { sessionsDir, workspace, sessionFile, cleanup } = helperRoot();
+  try {
+    const child = new RecordingMock([{ text: "The notes file says hello." }]);
+    const senior = new RecordingMock([
+      {
+        tool: SUBAGENT_TOOL_NAME,
+        args: { task: "Inspect the notes file.", label: "line one\nline two" },
+      },
+    ]);
+    const { app, input, output } = startApp({
+      cfg: resolveConfig({ provider: "mock", sessionFile }),
+      sessionsDir,
+      workspaceRoot: workspace,
+      providerOverrides: { senior, junior: new MockProvider() },
+      subagentProviderFactory: () => child,
+    });
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+    output.resize(140, 60);
+    input.type("inspect the notes");
+    input.enter();
+    assert.ok(
+      await waitFor(() => textOf(output).includes("decision:"), 30_000),
+      "the turn completed",
+    );
+    // Source proof: the durable child log recorded the collapsed label.
+    const logName = fs.readdirSync(path.join(sessionsDir, "subagents"))[0]!;
+    const meta = JSON.parse(
+      fs.readFileSync(path.join(sessionsDir, "subagents", logName), "utf8").split("\n")[0]!,
+    ) as { label: string };
+    assert.equal(meta.label, "line one line two");
+    // UI proof: the list shows the collapsed label; the frame has no stray row.
+    input.key("y", { ctrl: true, raw: "" });
+    assert.ok(await waitFor(() => lastFrameText(output).includes("HELPERS · 1 total")));
+    assert.match(lastFrameText(output), /line one line two/);
+    assert.equal(await quit(input, app), 0);
+  } finally {
+    cleanup();
+  }
+});
