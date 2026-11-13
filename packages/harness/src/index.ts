@@ -621,6 +621,20 @@ export {
   type AfterToolCallEvent,
 } from "./plugins.ts";
 export {
+  BUNDLE_MANIFEST_FILE,
+  BUNDLE_MANIFEST_MAX_BYTES,
+  BUNDLE_MARKDOWN_MAX_BYTES,
+  BUNDLE_NAME_RE,
+  discoverPluginBundles,
+  loadPluginBundle,
+  bundleSkillRoots,
+  mergeBundleSkills,
+  mergeBundleCommands,
+  type PluginBundleManifest,
+  type LoadedPluginBundle,
+  type PluginBundleDiscovery,
+} from "./pluginbundle.ts";
+export {
   createServer,
   newSessionName,
   type ServerOptions,

@@ -19,7 +19,9 @@ Local map for the package sources. Project rules live in
 - `cli.ts`, `clihelp.ts`, `clilayout.ts`, `clistyle.ts`, `output.ts`,
   `completions.ts`, `doctor.ts` — CLI surface.
 - Tool-facing modules: `workspace*.ts`, `shell.ts`, `mcp.ts`, `plugins.ts`,
-  `skills.ts`, `commands.ts`, `toolschema.ts`, `permissions.ts`, `spill.ts`.
+  `pluginbundle.ts` (declarative no-code bundles: `plugin.json` manifests
+  feeding the commands/skills engines), `skills.ts`, `commands.ts`,
+  `toolschema.ts`, `permissions.ts`, `spill.ts`.
 - `repeatguard.ts` — advisory repeat-tool-call guard (deepseek-harness port),
   one instance per tool loop: default thresholds `[3, 5, 8]`, model-facing
   reminder only, `TWO_BROTHERS_REPEAT_GUARD=off` / `repeatToolGuard: false`

@@ -358,9 +358,14 @@ export function expandCommand(command: Command, input: string): string {
  *
  * Leading whitespace is allowed; the name is lowercased for catalogue lookup.
  * The name must be the first token and follow the same charset as discovery
- * (`[A-Za-z0-9][A-Za-z0-9_-]*`), so `/usr/bin` or `/-x` is not a command.
- * `args` is the remainder with leading/trailing whitespace removed; inner
- * whitespace is preserved. `/name` with no arguments yields `args: ""`.
+ * (`[A-Za-z0-9][A-Za-z0-9_-]*`), so `/usr/bin` or `/-x` is not a command. A
+ * bundle-namespaced command carries one optional `:segment`
+ * (`/bundle:command args`) — declarative plugin bundles namespace their
+ * commands this way (`src/pluginbundle.ts`), and the segment uses the same
+ * charset, so a bare trailing `/name:` or a `: args` gap is not a command and
+ * falls through to the task path. `args` is the remainder with
+ * leading/trailing whitespace removed; inner whitespace is preserved.
+ * `/name` with no arguments yields `args: ""`.
  * No root resolution or catalogue lookup happens here — the wiring lane
  * resolves the name against its `CommandCatalog` (an unknown name is its
  * problem to report).
@@ -368,7 +373,9 @@ export function expandCommand(command: Command, input: string): string {
 export function matchCommand(input: string): { name: string; args: string } | null {
   const line = input.replace(/^\s+/, "");
   if (!line.startsWith("/")) return null;
-  const match = /^([A-Za-z0-9][A-Za-z0-9_-]*)(?:\s+([\s\S]*))?$/.exec(line.slice(1));
+  const match = /^([A-Za-z0-9][A-Za-z0-9_-]*(?::[A-Za-z0-9][A-Za-z0-9_-]*)?)(?:\s+([\s\S]*))?$/.exec(
+    line.slice(1),
+  );
   if (match === null) return null;
   return { name: match[1].toLowerCase(), args: (match[2] ?? "").trim() };
 }

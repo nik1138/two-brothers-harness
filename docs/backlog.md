@@ -1722,6 +1722,47 @@ What landed, as recorded behavior:
 - No new runtime dependency, no protocol/schema/`typescript/` change, no new
   write route, no automatic save or background sync, no shipped snapshot.
 
+## Shipped 2026-11-13 (declarative plugin bundles)
+
+A plugin can now be **data instead of code**: `plugins/<name>/plugin.json`
+declares a slash-command directory and/or a skills root that the existing
+discovery engines consume, and nothing inside a bundle directory is ever
+imported or executed on load/activation. Sources: `src/pluginbundle.ts`
+(`discoverPluginBundles`, `loadPluginBundle`, `bundleSkillRoots`,
+`mergeBundleSkills`, `mergeBundleCommands`), manager integration in
+`src/plugins.ts`; tests: `tests/pluginbundle.test.ts`.
+
+- **Manifest contract.** `plugin.json` ≤ 64 KiB, a JSON object whose `name`
+  matches `^[a-z0-9_-]+$` and the directory name; optional `description` /
+  `version` (reported verbatim by the API). `commands` / `skills` are
+  bundle-relative `./` paths, resolved and **realpath-confined** to the
+  bundle directory — absolute paths, `../` traversal and escaping symlinks
+  fail the bundle; missing/non-directory targets are info diagnostics.
+  Code-plugin runtime fields (`tools`, `hooks`, `mcpServers`/`mcp_servers`,
+  `options`, `register`, `configSchema`) are info diagnostics and ignored;
+  unknown fields are ignored silently.
+- **No execution.** Loading parses the manifest with `JSON.parse` only; a
+  bundle cannot register tools, hooks, MCP servers or per-plugin options and
+  takes no `register(ctx)` — proven by a side-effect-marker test.
+- **Commands** are namespaced `<bundle>:<command>` and reuse the command
+  engine unchanged (literal expansion, `argument-hint`, `mode` override on
+  run submission); `matchCommand` accepts one optional colon segment.
+  **Skills** ride with bundle roots after the operator roots, so an operator
+  skill shadows a same-named bundle skill; role scoping and `<skill>`
+  invocation delivery are the existing `skills.ts` behavior.
+- **Caps and collisions, fail-soft.** Bundle markdowns (command templates,
+  `SKILL.md`) over 64 KiB are skipped with a diagnostic; the bundle stays
+  active. A code plugin wins a same-name bundle collision (the bundle is
+  skipped with a diagnostic).
+- **Surfaces.** `PluginManager` loads/reloads bundles with the code plugins;
+  `GET /api/plugins` gains the additive `kind` (`"code"`/`"bundle"`, bundle
+  entries also carry `version`) and bundle load notes ride the existing
+  additive `diagnostics`; `GET /api/skills` / `GET /api/commands` include the
+  bundle contributions and run submission expands `/bundle:command` tasks;
+  CLI (`run`/`chat`) and the TUI fold bundle skills/commands into their
+  catalogs with `--verbose` bundle counts. No protocol/session-envelope
+  change, no web source change, no new runtime dependency.
+
 ## Open items (deferred)
 
 - **OAuth-only subscription sign-in (large)** — GitHub Copilot, OpenAI Codex
