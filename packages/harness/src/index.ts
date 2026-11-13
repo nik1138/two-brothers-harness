@@ -306,6 +306,7 @@ export {
   classifyProviderErrorContext,
   classifyProviderError,
   ProviderContextOverflowError,
+  ProviderBlockedError,
   BaseHttpProvider,
   OpenAICompatibleProvider,
   ANTHROPIC_VERSION,
