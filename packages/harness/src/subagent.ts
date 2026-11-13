@@ -55,6 +55,23 @@ export const SUBAGENT_MAX_ITERATIONS = 6;
 export const SUBAGENT_RESULT_MAX_CHARS = 12_000;
 /** Per-line bound for stored tool results and activity events. */
 export const SUBAGENT_TOOL_RESULT_MAX_CHARS = 4_000;
+/** One queued follow-up is bounded (the steering vocabulary). */
+export const SUBAGENT_FOLLOWUP_TEXT_MAX_CHARS = 4_000;
+/** Pending follow-ups per child (the steering queue bound). */
+export const SUBAGENT_FOLLOWUP_QUEUE_MAX = 8;
+/**
+ * Follow-ups applied to one child, however many arrive. Reaching the cap turns
+ * the rest into counted drops: the queue never grows the child unboundedly.
+ */
+export const SUBAGENT_MAX_FOLLOWUPS_PER_CHILD = 8;
+/**
+ * Char heuristic for a child's isolated conversation (sum of message contents).
+ * A child has no compaction (no summarizer role, shared context or session
+ * store), so a follow-up that would push past this budget is refused/counted
+ * instead of delivered. 80 000 fits a normal child (task + bounded tool results
+ * + one answer) plus eight 4 000-char follow-ups.
+ */
+export const SUBAGENT_CONTEXT_MAX_CHARS = 80_000;
 
 /** The three workspace reads a helper may always use. */
 export const SUBAGENT_READ_TOOL_NAMES: ReadonlySet<string> = new Set([
@@ -114,6 +131,32 @@ export type SubagentActivityKind = "message" | "tool" | "status";
  */
 export type SubagentCancelledBy = "operator" | "senior" | "parent_run" | "restart";
 
+/**
+ * Who sent a follow-up: the operator (web drawer, any live child) or the
+ * Senior (the model-facing tools, a later slice). Never the child itself.
+ */
+export type SubagentFollowUpFrom = "operator" | "senior";
+
+/**
+ * One queued follow-up, delivered as an ordinary user turn in the child's own
+ * conversation at its next provider step (never into the brothers' transcript).
+ */
+export interface SubagentFollowUp {
+  text: string;
+  from: SubagentFollowUpFrom;
+  at: number;
+}
+
+/** The bounded queue result for a send attempt. */
+export type SubagentFollowUpSendResult =
+  | { ok: true; pending: number }
+  | {
+      ok: false;
+      reason: "invalid_text" | "queue_full" | "not_running" | "context_full";
+      /** Present for `context_full`: the child's estimated conversation size. */
+      chars?: number;
+    };
+
 /** One display-only activity row in the parent tree and child header. */
 export interface SubagentActivity {
   kind: SubagentActivityKind;
@@ -129,6 +172,11 @@ export interface SubagentMessageEntry {
   type: "message" | "tool";
   /** Message role; tool rows omit it. */
   role?: "user" | "assistant";
+  /**
+   * Additive: on a delivered follow-up's user row, who sent it. Absent on the
+   * initial task row, so phase-1/2 logs stay byte-identical.
+   */
+  origin?: SubagentFollowUpFrom;
   text?: string;
   tool?: string;
   status?: "started" | "completed" | "error";
@@ -203,10 +251,9 @@ export interface SubagentEndpoint {
 /**
  * The public handle the server keeps so the web can reach one live child.
  *
- * A1 exposes the child-scoped interrupt; every member describes the child
- * honestly (no transient "interrupting" status — the terminal event and the
- * `end` row are the truth). The follow-up members land with the follow-up
- * slice.
+ * It exposes the child-scoped interrupt and the bounded follow-up queue; every
+ * member describes the child honestly (no transient "interrupting" status — the
+ * terminal event and the `end` row are the truth).
  */
 export interface SubagentControlHandle {
   readonly id: string;
@@ -221,6 +268,14 @@ export interface SubagentControlHandle {
    * child already settled or was already interrupted.
    */
   interrupt(by: "operator" | "senior"): boolean;
+  /**
+   * Queue one bounded follow-up for the child's next step. Never reports
+   * `delivered`: an accepted text is queued, and the child's next provider step
+   * (step >= 1, never inside a parked approval wait) is the delivery point.
+   */
+  send(text: unknown, from: SubagentFollowUpFrom): SubagentFollowUpSendResult;
+  /** Follow-ups still queued (never negative; 0 once the child settled). */
+  pendingFollowUps(): number;
   status(): SubagentStatus;
 }
 
@@ -392,8 +447,20 @@ export class SubagentStore {
       usage?: UsageTotals;
       /** Additive: set only for a cancelled child (omitted otherwise). */
       cancelled_by?: SubagentCancelledBy;
+      /**
+       * Additive: written only when at least one follow-up was queued for this
+       * child. A follow-up-free child's `end` row keeps its exact old shape.
+       */
+      followups?: { delivered: number; dropped: number };
     },
   ): void {
+    const followups =
+      result.followups !== undefined
+        ? {
+            delivered: Math.max(0, intOf(result.followups.delivered)),
+            dropped: Math.max(0, intOf(result.followups.dropped)),
+          }
+        : undefined;
     this.appendLine(id, {
       type: "end",
       status: result.status,
@@ -403,6 +470,10 @@ export class SubagentStore {
         : {}),
       ...(result.error !== undefined ? { error: textOf(result.error, 2_000) } : {}),
       ...(result.cancelled_by !== undefined ? { cancelled_by: result.cancelled_by } : {}),
+      ...(followups !== undefined &&
+      followups.delivered + followups.dropped > 0
+        ? { followups }
+        : {}),
       ...(result.usage !== undefined ? { usage: result.usage } : {}),
     });
   }
@@ -573,7 +644,17 @@ export class SubagentStore {
       const role = raw.role === "user" ? "user" : "assistant";
       const text = textOf(raw.text, SUBAGENT_RESULT_MAX_CHARS);
       if (text === "") return null;
-      return { type: "message", role, text, at: intOf(raw.at) };
+      // Additive and tolerant: an unknown/absent origin is simply absent, so
+      // old logs read exactly as before.
+      const origin =
+        raw.origin === "operator" || raw.origin === "senior" ? raw.origin : undefined;
+      return {
+        type: "message",
+        role,
+        ...(origin !== undefined ? { origin } : {}),
+        text,
+        at: intOf(raw.at),
+      };
     }
     if (raw.type === "tool") {
       const tool = textOf(raw.tool, 200);
@@ -658,6 +739,18 @@ export type SubagentRunnerEvent =
     }
   | { kind: "status"; status: SubagentStatus; at: number };
 
+/**
+ * The exact text a follow-up adds to the child's conversation. It is not a
+ * protocol marker: the child context is isolated and is never rendered into the
+ * brothers' transcript.
+ */
+export function subagentFollowUpMessage(
+  followup: Pick<SubagentFollowUp, "text" | "from">,
+): string {
+  const who = followup.from === "operator" ? "the operator" : "the Senior";
+  return `Follow-up from ${who}:\n${followup.text}`;
+}
+
 export interface SubagentRunOptions {
   id: string;
   task: string;
@@ -669,6 +762,19 @@ export interface SubagentRunOptions {
   maxIterations?: number;
   onEvent?: (event: SubagentRunnerEvent) => void;
   onTranscript?: (entry: SubagentTranscriptEntry) => void;
+  /**
+   * Return-and-clear drain of queued follow-ups. Called at most once per
+   * provider step, and only for step >= 1: the previous message is then a tool
+   * result, so the appended user turn never makes two consecutive user turns
+   * (R5). The queue itself lives in the harness, so the runner stays pure.
+   */
+  takeFollowUps?: () => SubagentFollowUp[];
+  /**
+   * Live estimate of the child conversation size in chars (the sum of message
+   * contents). The harness keeps it on the child control so a send can be
+   * refused honestly while the runner owns the conversation.
+   */
+  onContextChars?: (chars: number) => void;
 }
 
 export interface SubagentRunResult {
@@ -679,6 +785,11 @@ export interface SubagentRunResult {
   usage: UsageTotals;
   durationMs: number;
   toolCalls: number;
+  /**
+   * Additive: present only when at least one follow-up was queued for this
+   * child, so a follow-up-free child keeps the exact pre-A2 result shape.
+   */
+  followups?: { delivered: number; dropped: number };
 }
 
 function providerUsage(provider: Provider): UsageTotals {
@@ -746,6 +857,67 @@ export async function runSubagent(options: SubagentRunOptions): Promise<Subagent
     at: startedAt,
   });
 
+  // The child conversation's own char estimate (the budget heuristic). It
+  // includes the system prompt; the harness mirrors it onto the control so a
+  // queued send can be refused before it would ever overflow the child.
+  const contextChars = (): number =>
+    messages.reduce((total, message) => total + message.content.length, 0);
+  options.onContextChars?.(contextChars());
+  let followUpsDelivered = 0;
+  let followUpsDropped = 0;
+  /** One broken drain callback disables further drains (fail-soft, like steering). */
+  let followUpsFailed = false;
+
+  /**
+   * Deliver the queued follow-ups for this step. One drain per step,
+   * return-and-clear; never called for step 0 (the previous message would be
+   * the task, making two consecutive user turns — malformed for Anthropic and
+   * Google). Multiple texts join one user turn for the same reason, while each
+   * keeps its own durable child-log row. A text that would push the conversation
+   * past {@link SUBAGENT_CONTEXT_MAX_CHARS} is counted as dropped; since the
+   * context only grows, the rest of that drain is dropped with it.
+   */
+  const drainFollowUps = (): void => {
+    const take = options.takeFollowUps;
+    if (take === undefined || followUpsFailed) return;
+    let drained: SubagentFollowUp[];
+    try {
+      drained = take();
+    } catch {
+      followUpsFailed = true;
+      return;
+    }
+    if (!Array.isArray(drained) || drained.length === 0) return;
+    const blocks: string[] = [];
+    let estimate = contextChars();
+    for (let index = 0; index < drained.length; index += 1) {
+      if (followUpsDelivered >= SUBAGENT_MAX_FOLLOWUPS_PER_CHILD) {
+        followUpsDropped += drained.length - index;
+        break;
+      }
+      const followup = drained[index]!;
+      const text = subagentFollowUpMessage(followup);
+      const cost = text.length + (blocks.length > 0 ? 2 : 0);
+      if (estimate + cost > SUBAGENT_CONTEXT_MAX_CHARS) {
+        followUpsDropped += drained.length - index;
+        break;
+      }
+      blocks.push(text);
+      estimate += cost;
+      followUpsDelivered += 1;
+      transcript(options, {
+        type: "message",
+        role: "user",
+        origin: followup.from,
+        text: followup.text,
+        at: followup.at,
+      });
+    }
+    if (blocks.length === 0) return;
+    messages.push({ role: "user", content: blocks.join("\n\n") });
+    options.onContextChars?.(contextChars());
+  };
+
   let text = "";
   let status: Exclude<SubagentStatus, "running"> = "completed";
   let error: string | undefined;
@@ -778,6 +950,12 @@ export async function runSubagent(options: SubagentRunOptions): Promise<Subagent
       let finished = false;
       for (let step = 0; step < maxIterations && !finished; step += 1) {
         if (options.signal?.aborted) throw new ProviderAbortError();
+        // Keep the send-time estimate honest: the previous step's tool results
+        // are already in the conversation at this point.
+        options.onContextChars?.(contextChars());
+        // Between-step delivery point (R5): step >= 1 means the previous
+        // message is a tool result, never the task.
+        if (step >= 1) drainFollowUps();
         const response = await chatWithTools(messages, options.tools, {
           signal: options.signal,
           responseKind: "subagent",
@@ -884,6 +1062,9 @@ export async function runSubagent(options: SubagentRunOptions): Promise<Subagent
     usage,
     durationMs: Math.max(0, Date.now() - startedAt),
     toolCalls,
+    ...(followUpsDelivered + followUpsDropped > 0
+      ? { followups: { delivered: followUpsDelivered, dropped: followUpsDropped } }
+      : {}),
   };
 }
 

@@ -24,6 +24,7 @@ import "./subagent.test.ts";
 import "./subagentmutating.test.ts";
 import "./subagentapprovals.test.ts";
 import "./subagentcontrols.test.ts";
+import "./subagentfollowups.test.ts";
 import "./anthropiccache.test.ts";
 import "./usagecache.test.ts";
 import "./retryregistry.test.ts";

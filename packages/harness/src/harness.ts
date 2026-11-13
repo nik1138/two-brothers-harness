@@ -260,6 +260,9 @@ import {
   SUBAGENT_APPROVAL_COMMAND_MAX_CHARS,
   SUBAGENT_APPROVAL_REASON_MAX_CHARS,
   SUBAGENT_APPROVAL_TARGET_MAX_CHARS,
+  SUBAGENT_CONTEXT_MAX_CHARS,
+  SUBAGENT_FOLLOWUP_QUEUE_MAX,
+  SUBAGENT_FOLLOWUP_TEXT_MAX_CHARS,
   SUBAGENT_MAX_LABEL_CHARS,
   SUBAGENT_MAX_TASK_CHARS,
   SUBAGENT_READ_TOOL_NAMES,
@@ -268,10 +271,14 @@ import {
   SUBAGENT_TOOL_DESCRIPTION,
   SUBAGENT_TOOL_NAME,
   SUBAGENT_TOOL_PARAMETERS,
+  subagentFollowUpMessage,
   type SubagentApprovalStatus,
   type SubagentCancelledBy,
   type SubagentControlHandle,
   type SubagentEndpoint,
+  type SubagentFollowUp,
+  type SubagentFollowUpFrom,
+  type SubagentFollowUpSendResult,
   type SubagentSettings,
   type SubagentStatus,
   type SubagentTranscriptEntry,
@@ -1420,6 +1427,13 @@ interface ChildControl {
   cancelledBy: "operator" | "senior" | null;
   /** Live status for the handle; set to its terminal value before release. */
   status: SubagentStatus;
+  /** Follow-ups accepted but not yet delivered (bounded, drained between steps). */
+  followups: SubagentFollowUp[];
+  /** Delivered / dropped follow-up counts for the durable `end` row. */
+  delivered: number;
+  dropped: number;
+  /** Latest child-conversation size estimate (chars) for the send-time guard. */
+  contextChars: number;
 }
 
 export class TwoBrothersHarness {
@@ -2360,7 +2374,7 @@ export class TwoBrothersHarness {
    * The read-only handle the server registers for one live child. `interrupt`
    * aborts the child's own controller only (never the parent run); it is
    * idempotent and reports false once the child settled or was already
-   * interrupted.
+   * interrupted. `send` queues one bounded follow-up for the child's next step.
    */
   private childControlHandle(control: ChildControl): SubagentControlHandle {
     return {
@@ -2377,8 +2391,46 @@ export class TwoBrothersHarness {
         control.controller.abort();
         return true;
       },
+      send: (text, from) => this.queueFollowUp(control, text, from),
+      pendingFollowUps: () => control.followups.length,
       status: () => control.status,
     };
+  }
+
+  /**
+   * Queue one follow-up on a live child. Bounds mirror operator steering:
+   * trimmed non-empty strings of at most {@link SUBAGENT_FOLLOWUP_TEXT_MAX_CHARS},
+   * at most {@link SUBAGENT_FOLLOWUP_QUEUE_MAX} pending. An accepted text is
+   * only QUEUED — the child reads it at its next provider step (step >= 1, never
+   * inside a parked approval wait). A text that would push the child past
+   * {@link SUBAGENT_CONTEXT_MAX_CHARS} is refused honestly with the estimate,
+   * because a child has no compaction. Never reports `delivered`.
+   */
+  private queueFollowUp(
+    control: ChildControl,
+    text: unknown,
+    from: SubagentFollowUpFrom,
+  ): SubagentFollowUpSendResult {
+    if (control.status !== "running" || control.controller.signal.aborted) {
+      return { ok: false, reason: "not_running" };
+    }
+    if (from !== "operator" && from !== "senior") {
+      return { ok: false, reason: "invalid_text" };
+    }
+    if (typeof text !== "string") return { ok: false, reason: "invalid_text" };
+    const trimmed = text.trim();
+    if (trimmed === "" || trimmed.length > SUBAGENT_FOLLOWUP_TEXT_MAX_CHARS) {
+      return { ok: false, reason: "invalid_text" };
+    }
+    if (control.followups.length >= SUBAGENT_FOLLOWUP_QUEUE_MAX) {
+      return { ok: false, reason: "queue_full" };
+    }
+    const cost = subagentFollowUpMessage({ text: trimmed, from }).length;
+    if (control.contextChars + cost > SUBAGENT_CONTEXT_MAX_CHARS) {
+      return { ok: false, reason: "context_full", chars: control.contextChars };
+    }
+    control.followups.push({ text: trimmed, from, at: Date.now() });
+    return { ok: true, pending: control.followups.length };
   }
 
   /**
@@ -2455,6 +2507,10 @@ export class TwoBrothersHarness {
       controller: new AbortController(),
       cancelledBy: null,
       status: "running",
+      followups: [],
+      delivered: 0,
+      dropped: 0,
+      contextChars: 0,
     };
     const parentSignal = signal;
     const childSignal =
@@ -2549,6 +2605,32 @@ export class TwoBrothersHarness {
       started_at: startedAt,
     });
 
+    // Follow-ups are drained by the runner at its between-step seam (step >= 1
+    // only); the queue stays on this control and a broken drain disables
+    // further drains with one warning, never a child failure.
+    let followUpsFailed = false;
+    const takeFollowUps = (): SubagentFollowUp[] => {
+      if (followUpsFailed) return [];
+      try {
+        return control.followups.splice(0);
+      } catch (exc) {
+        followUpsFailed = true;
+        this.subagentWarnings.push(
+          `subagent follow-up drain failed for ${id}: ${exc instanceof Error ? exc.message : String(exc)}; continuing without follow-ups`,
+        );
+        return [];
+      }
+    };
+    // Any follow-up still queued when the child settles was never delivered;
+    // it is counted as dropped so no acceptance stays silently unaccounted.
+    const settleFollowUps = (): { delivered: number; dropped: number } | undefined => {
+      control.dropped += control.followups.length;
+      control.followups.length = 0;
+      return control.delivered + control.dropped > 0
+        ? { delivered: control.delivered, dropped: control.dropped }
+        : undefined;
+    };
+
     try {
       const result = await runSubagent({
         id,
@@ -2558,6 +2640,10 @@ export class TwoBrothersHarness {
         tools: childTools,
         systemPrompt,
         signal: childSignal,
+        takeFollowUps,
+        onContextChars: (chars) => {
+          control.contextChars = chars;
+        },
         ...(storeFailed
           ? {}
           : {
@@ -2597,6 +2683,9 @@ export class TwoBrothersHarness {
         },
       });
       const endedAt = Date.now();
+      control.delivered += result.followups?.delivered ?? 0;
+      control.dropped += result.followups?.dropped ?? 0;
+      const followups = settleFollowUps();
       const report = result.text.slice(0, SUBAGENT_RESULT_MAX_CHARS);
       // A child interrupt always settles `cancelled` with the honest cause,
       // even when the abort landed between the last provider step and the loop
@@ -2626,6 +2715,7 @@ export class TwoBrothersHarness {
             ...(outcomeStatus === "completed" ? { result: report } : {}),
             ...(outcomeError !== undefined ? { error: sanitizeOutput(outcomeError) } : {}),
             ...(cancelledBy !== undefined ? { cancelled_by: cancelledBy } : {}),
+            ...(followups !== undefined ? { followups } : {}),
             usage: result.usage,
           });
         } catch (exc) {
@@ -2660,6 +2750,7 @@ export class TwoBrothersHarness {
         usage: result.usage,
         duration_ms: result.durationMs,
         tool_calls: result.toolCalls,
+        ...(followups !== undefined ? { followups } : {}),
       };
       // Only the PARENT signal unwinds the parent run; a child interrupt must
       // leave the parent's next step running (R1).
@@ -2670,12 +2761,15 @@ export class TwoBrothersHarness {
       const message = exc instanceof Error ? exc.message : String(exc);
       const endedAt = Date.now();
       control.status = "failed";
+      // Unexpected unwind: queued follow-ups are undelivered and counted.
+      const followups = settleFollowUps();
       if (!storeFailed) {
         try {
           settings.store.finish(id, {
             status: "failed",
             ended_at: endedAt,
             error: message,
+            ...(followups !== undefined ? { followups } : {}),
           });
         } catch {
           // the warning was already recorded on begin failure; never mask the child error
@@ -2698,6 +2792,7 @@ export class TwoBrothersHarness {
         model,
         status: "failed",
         error: message,
+        ...(followups !== undefined ? { followups } : {}),
       });
     } finally {
       // Release the control on every settle path (including a parent unwind):
