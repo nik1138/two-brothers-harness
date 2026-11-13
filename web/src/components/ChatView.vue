@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { computed, defineComponent, h, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import type { PropType, VNode } from 'vue'
-import { NButton } from 'naive-ui'
+import { NButton, NPopover } from 'naive-ui'
 import { formatTime, SPEAKER_LABELS, speakerActivityLabel, speakerInitial } from '../chat'
 import type { ChatGroup, ChatMessage, Speaker } from '../chat'
 import { findMatches, nextMatch, prevMatch } from '../find'
 import type { FindMatch } from '../find'
 import { buildFoldRows } from '../folding'
 import type { FoldRenderRow } from '../folding'
+import { operatorMessagesOf, planRevealGrowth } from '../historyNav'
+import type { HistoryNavEntry } from '../historyNav'
 import {
   createTranscriptSliceMemo,
   initialTranscriptWindow,
@@ -116,6 +118,7 @@ function onScroll() {
   const el = scrollEl.value
   if (!el) return
   nearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 120
+  updateActiveHistoryTarget()
 }
 
 /** Keep the transcript pinned when chrome (the find bar) changes its height. */
@@ -358,6 +361,9 @@ watch(
   () => {
     windowState.value = initialTranscriptWindow(props.timeline.length)
     windowAnnouncement.value = ''
+    // a reused instance must not leak navigator state across sessions either
+    historyOpen.value = false
+    activeHistoryId.value = null
   },
 )
 
@@ -630,26 +636,16 @@ function paintFindHighlights() {
 }
 
 /**
- * Bring the active match into view with `block: 'nearest'` semantics (a Range
- * has no scrollIntoView): only move the transcript when the match is outside
- * the visible band, and align it to the near edge instead of centering it.
- * Smooth scrolling is skipped under `prefers-reduced-motion: reduce`.
+ * Bring a target rect into view with `block: 'nearest'` semantics (also used
+ * for the user-message navigator): only move the transcript when the target
+ * is outside the visible band, and align it to the near edge instead of
+ * centering it. Smooth scrolling is skipped under `prefers-reduced-motion:
+ * reduce`.
  */
-function revealActiveMatch() {
-  const match = findActiveIndex.value >= 0 ? findResults[findActiveIndex.value] : undefined
+function scrollRectIntoBand(target: DOMRect) {
   const el = scrollEl.value
-  if (!match || !el) return
-  const range = findRange(match)
-  if (!range) return
-  const rect = range.getBoundingClientRect()
+  if (!el) return
   const view = el.getBoundingClientRect()
-  // A match inside a collapsed detail (e.g. a tool result) has an empty rect;
-  // fall back to the owning block so at least its card is revealed.
-  const block = findBlocks?.[match.blockIndex]
-  const target =
-    rect.width > 0 || rect.height > 0 ? rect : (block?.el.getBoundingClientRect() ?? null)
-  if (!target) return
-
   let delta = 0
   if (target.top < view.top + FIND_SCROLL_PAD) {
     delta = target.top - view.top - FIND_SCROLL_PAD
@@ -660,6 +656,27 @@ function revealActiveMatch() {
   const top = Math.max(0, Math.min(el.scrollTop + delta, el.scrollHeight - el.clientHeight))
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
   el.scrollTo({ top, behavior: reduceMotion ? 'auto' : 'smooth' })
+}
+
+/**
+ * Bring the active match into view with `block: 'nearest'` semantics (a Range
+ * has no scrollIntoView): only move the transcript when the match is outside
+ * the visible band, and align it to the near edge instead of centering it.
+ */
+function revealActiveMatch() {
+  const match = findActiveIndex.value >= 0 ? findResults[findActiveIndex.value] : undefined
+  const el = scrollEl.value
+  if (!match || !el) return
+  const range = findRange(match)
+  if (!range) return
+  const rect = range.getBoundingClientRect()
+  // A match inside a collapsed detail (e.g. a tool result) has an empty rect;
+  // fall back to the owning block so at least its card is revealed.
+  const block = findBlocks?.[match.blockIndex]
+  const target =
+    rect.width > 0 || rect.height > 0 ? rect : (block?.el.getBoundingClientRect() ?? null)
+  if (!target) return
+  scrollRectIntoBand(target)
 }
 
 /** Re-match the cached blocks; `resetActive` selects the first match afresh. */
@@ -797,6 +814,127 @@ watch(expandedFolds, invalidateFindBlocks)
 
 /** Shell hooks (session switches remount this component; keeps the bar scriptable). */
 defineExpose({ openFind, closeFind })
+
+// -- user-message navigator (jump to your messages) ---------------------------------
+// Secondary navigation, on demand: a popover lists every operator message from
+// the FULL projected timeline (historyNav.ts enumerates messages, not groups),
+// the newest-200 window notwithstanding. Choosing one grows the paged window
+// until the target row renders (planRevealGrowth, bounded for a live session),
+// then reuses the find bar's nearest-band scroll math and focuses the bubble
+// (tabindex="-1"). The active entry tracks the reader's position through the
+// existing passive scroll hook and is mirrored by aria-current on the list
+// item; the visual active state never relies on color alone.
+
+const historyEntries = computed(() => operatorMessagesOf(props.timeline))
+const historyOpen = ref(false)
+const historyTrigger = ref<HTMLButtonElement | null>(null)
+const historyPanel = ref<HTMLElement | null>(null)
+/** Entry id at the reader's position (first visible user message), if any. */
+const activeHistoryId = ref<string | null>(null)
+/** Polite jump announcement; the region lives beside the stream one. */
+const historyAnnouncement = ref('')
+
+const HISTORY_MENU_STYLE = { padding: '0.3rem', width: 'min(22rem, calc(100vw - 2rem))' }
+/** Re-plan rounds while revealing: a live append can re-hide the target. */
+const HISTORY_LIVE_GROWTH_ATTEMPTS = 4
+
+function onHistoryShow(show: boolean) {
+  historyOpen.value = show
+  if (!show) {
+    // light dismissal (outside click / Escape): return focus to the trigger
+    historyTrigger.value?.focus()
+    return
+  }
+  void nextTick(() => {
+    const wanted = activeHistoryId.value ?? historyEntries.value[0]?.id ?? null
+    if (wanted === null) return
+    historyPanel.value
+      ?.querySelector<HTMLButtonElement>(`[data-history-nav-item="${wanted}"]`)
+      ?.focus()
+  })
+}
+
+function onHistoryKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape') {
+    e.preventDefault()
+    e.stopPropagation()
+    historyOpen.value = false
+    historyTrigger.value?.focus()
+    return
+  }
+  if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
+  const items = [
+    ...(historyPanel.value?.querySelectorAll<HTMLButtonElement>('.history-nav-item') ?? []),
+  ]
+  if (items.length === 0) return
+  e.preventDefault()
+  const at = items.findIndex((el) => el === document.activeElement)
+  const next = e.key === 'ArrowDown' ? (at + 1) % items.length : at <= 0 ? items.length - 1 : at - 1
+  items[next]?.focus()
+}
+
+/** Escape while the trigger holds focus (the panel is teleported, so the
+ *  panel-level keydown never sees it). */
+function onHistoryTriggerKeydown(e: KeyboardEvent) {
+  if (e.key !== 'Escape' || !historyOpen.value) return
+  e.preventDefault()
+  historyOpen.value = false
+  historyTrigger.value?.focus()
+}
+
+function historyTargetEl(entry: HistoryNavEntry): HTMLElement | null {
+  return (
+    scrollEl.value?.querySelector<HTMLElement>(`[data-history-nav-target="${entry.seq}"]`) ?? null
+  )
+}
+
+async function jumpToHistoryEntry(entry: HistoryNavEntry) {
+  historyOpen.value = false
+  // Grow the paged window until the target row renders. Each round re-plans
+  // against the current row count: a live session appending rows could
+  // otherwise re-hide the target forever, so the attempt count bounds the
+  // chase and gives up non-intrusively.
+  for (let attempt = 0; attempt < HISTORY_LIVE_GROWTH_ATTEMPTS; attempt += 1) {
+    const plan = planRevealGrowth(props.timeline.length, entry.rowIndex, windowState.value)
+    if (plan.activations === 0) break
+    windowState.value = plan.state
+    await nextTick()
+  }
+  if (entry.rowIndex < transcriptWindow(props.timeline.length, windowState.value).start) return
+  await nextTick()
+  const el = historyTargetEl(entry)
+  if (!el) return
+  // nearest-band scroll + programmatic focus: preventScroll keeps the focus
+  // call from fighting the smooth scroll, and nothing here touches the
+  // near-bottom pin state, so a reader parked at the bottom is moved only by
+  // the jump's own scroll.
+  scrollRectIntoBand(el.getBoundingClientRect())
+  el.focus({ preventScroll: true })
+  // The jumped-to message is the current one until the reader scrolls: the
+  // scroll hook recomputes it on the next scroll event, and the target is the
+  // first visible message at rest.
+  activeHistoryId.value = entry.id
+  historyAnnouncement.value = `Jumped to your message ${entry.index + 1} of ${historyEntries.value.length}.`
+}
+
+// Active-entry tracking rides the existing passive scroll hook: the current
+// message is the first user message with any part visible below the top edge
+// of the transcript (the reader's position). A jump sets the target directly;
+// the next scroll event confirms it, because the target is then the first
+// visible message.
+
+function updateActiveHistoryTarget(): void {
+  const root = scrollEl.value
+  if (!root) return
+  const viewTop = root.getBoundingClientRect().top
+  for (const el of root.querySelectorAll<HTMLElement>('[data-history-nav-target]')) {
+    if (el.getBoundingClientRect().bottom > viewTop + 1) {
+      const seq = Number(el.dataset.historyNavTarget)
+      if (Number.isFinite(seq)) activeHistoryId.value = `op-${seq}`
+      return
+    }
+  }
+}
 
 // -- per-bubble copy ----------------------------------------------------------
 
@@ -1114,7 +1252,62 @@ watch(
         ><AppIcon name="x" /></button>
       </div>
     </div>
-    <ContextMeter :count="contextCount" />
+    <div class="transcript-chrome">
+      <div class="transcript-chrome-meter">
+        <ContextMeter :count="contextCount" />
+      </div>
+      <n-popover
+        v-model:show="historyOpen"
+        trigger="click"
+        placement="bottom-end"
+        :content-style="HISTORY_MENU_STYLE"
+        @update:show="onHistoryShow"
+      >
+        <template #trigger>
+          <button
+            ref="historyTrigger"
+            type="button"
+            class="history-nav-trigger"
+            :aria-expanded="historyOpen"
+            aria-controls="history-nav-panel"
+            :aria-label="`Your messages (${historyEntries.length})`"
+            :title="`Jump to one of your ${historyEntries.length} message${historyEntries.length === 1 ? '' : 's'}`"
+            @keydown="onHistoryTriggerKeydown"
+          >
+            <AppIcon name="inbox" :size="14" />
+            <span class="history-nav-trigger-count" aria-hidden="true">{{ historyEntries.length }}</span>
+          </button>
+        </template>
+        <div
+          id="history-nav-panel"
+          ref="historyPanel"
+          class="history-nav"
+          role="navigation"
+          aria-label="Your messages"
+          @keydown="onHistoryKeydown"
+        >
+          <p v-if="historyEntries.length === 0" class="history-nav-empty">
+            No messages from you in this session yet.
+          </p>
+          <ul v-else class="history-nav-list">
+            <li v-for="entry in historyEntries" :key="entry.id">
+              <button
+                type="button"
+                class="history-nav-item"
+                :class="{ 'history-nav-item-active': entry.id === activeHistoryId }"
+                :aria-current="entry.id === activeHistoryId ? 'true' : undefined"
+                :data-history-nav-item="entry.id"
+                @click="jumpToHistoryEntry(entry)"
+              >
+                <span class="history-nav-index" aria-hidden="true">{{ entry.index + 1 }}</span>
+                <span class="history-nav-excerpt">{{ entry.excerpt || '(no text)' }}</span>
+                <time v-if="entry.time" class="history-nav-time">{{ entry.time }}</time>
+              </button>
+            </li>
+          </ul>
+        </div>
+      </n-popover>
+    </div>
     <div
       ref="scrollEl"
       class="chat-scroll"
@@ -1267,6 +1460,8 @@ watch(
               <article
                 class="bubble"
                 :class="{ 'bubble-highlight': m.highlight, 'bubble-continuation': j > 0 }"
+                :tabindex="row.entry.group.author === 'operator' ? -1 : undefined"
+                :data-history-nav-target="row.entry.group.author === 'operator' && m.kind === 'message' ? m.seq : undefined"
               >
                 <header v-if="m.title || m.verdict || m.highlight" class="bubble-meta">
                   <h3 v-if="m.title" class="bubble-title">{{ m.title }}</h3>
@@ -1475,6 +1670,7 @@ watch(
       aria-atomic="true"
     >{{ windowAnnouncement }}</p>
     <p class="visually-hidden" role="status" aria-live="polite">{{ streamAnnouncement }}</p>
+    <p class="visually-hidden" role="status" aria-live="polite">{{ historyAnnouncement }}</p>
   </div>
 </template>
 
@@ -1488,6 +1684,58 @@ watch(
   width: 100%;
   display: flex;
   flex-direction: column;
+}
+
+/* Chrome band above the transcript: the context meter keeps its centered
+   column while the user-message navigator trigger sits compactly at the
+   right edge, vertically aligned with the meter's first line. */
+.transcript-chrome {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  flex: none;
+  width: 100%;
+}
+
+.transcript-chrome-meter {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.history-nav-trigger {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.22rem;
+  height: 24px;
+  margin: var(--space-2) var(--space-4) 0 0;
+  padding: 0 0.4rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-panel);
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease;
+}
+
+.history-nav-trigger:hover {
+  color: var(--text-primary);
+  background: var(--surface-hover);
+}
+
+.history-nav-trigger:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.history-nav-trigger[aria-expanded='true'] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-text);
 }
 
 .bubble-wrap {
