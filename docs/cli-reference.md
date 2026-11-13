@@ -1018,6 +1018,8 @@ but stores `meta.json` and `events.jsonl` inside
 | `GET /api/runs/{run_id}/events?after=N` | SSE of typed runtime events (`run_status`, `envelope`, `tool_started`, `tool_completed`, `approval_requested`, `approval_resolved`, `approval_auto_allowed`, `approval_auto_denied`, `todo_updated`, `prompt_audit`, `reasoning`, `usage`, `subagent_started`, `subagent_activity`, `subagent_completed`, `steering_dropped`, `auto_route`, `run_error`, `run_end`); reconnectable via `after`. `approval_requested` additively carries `reason` and a bounded `detail` (`{kind, diff?, addedLines?, removedLines?, command?, truncated?}` preview) when the request has one; `todo_updated` carries the model's complete sanitized plan snapshot; `steering_dropped` carries `{dropped, applied, limit}` when a 200-accepted steer later hit the per-run envelope cap; `auto_route` carries `{route, reason, requested: "auto", downgraded_from?}` once per auto run, before the `[[AUTO ROUTE]]` marker envelope. When the run was started with `stream_tokens`, the same stream additionally carries ephemeral named `token` frames (`event: token`, data `{type, run_id, role, kind: "text"\\|"thinking", delta, at}`) with no SSE id — they are live-only, never persisted and never replayed |
 | `GET /api/runs/{run_id}/approvals`, `POST /api/runs/{run_id}/approvals/{id}` | list/answer pending operator approvals (`{"allow": bool, "scope"?: "once" \| "session"}` → `{approval_id, decision, scope}`; `scope` defaults to `once`, an invalid value or `session` with a deny is a 400, an unknown/already-resolved approval id is a 404). See the session-scope paragraph below |
 | `GET /api/providers`, `POST /api/providers`, `PUT /api/providers/{seed}`, `POST /api/providers/{name}/reset`, `POST /api/providers/{name}/discover`, `DELETE /api/providers/{name}` | provider presets (the curated seed table: hosted providers, subscription plans, LM Studio, custom). `GET` returns `{name, base_url, api_key_set, kind, models}` plus additive `seed` (the name comes from the built-in seed table) and `customized` (a stored override of that name exists), so a client can tell a pristine seed from an edited/custom entry; a positive preset `context_window` (tokens, used only as a compaction fallback) is exposed additively, while `0`/absent stays unknown and omitted so pre-wave presets keep the exact old shape. `POST` creates a custom provider (409 on a duplicate name, including a seed name); `PUT` updates it, and on a seed name materializes a stored override (blank `base_url` is a 400); both accept `context_window` as a positive safe integer; an explicit `0` clears it, an absent/null field on an update leaves the stored value untouched (a create starts without one), and negative/float/string/boolean/unsafe values are a `400` before any write; `DELETE` removes a stored preset/override and clears any role `provider_ref` that pointed at it (a pristine seed is a 404); `POST /api/providers/{name}/reset` restores a customized built-in seed without clearing role references (see below); `POST /api/providers/{name}/discover` probes a draft endpoint for its model list without saving (see the discovery paragraph below). Keys are never returned — responses carry `api_key_set` only. The Settings → Providers tab is the operator UI for these routes |
+| `GET /api/models-dev/providers` | read-only provider summaries from the public models.dev catalog (the same in-memory fetch the effort route uses; no snapshot is shipped). `200 {source, fetched_at, truncated, providers}` where `source` is `network`/`cache`/`stale`/`curated`, `fetched_at` is the last successful fetch (epoch ms, `null` when curated/never) and each provider is `{id, name, api, env, kind, kind_source, rejected, reject_reason, needs_base_url, model_count, families}` — `api` is a usable http(s) base URL or `null`, `env` carries variable NAMES only (≤ 3), `kind_source` is `type`/`npm`/`id`/`guessed`, and `families` counts `openai-compatible`/`anthropic`/`google`/`unsupported` (≤ 400 rows, sorted by display name then id; a cap hit sets `truncated`). The summary is always `200`: with no snapshot (offline, first fetch failed, or `disabled: true` from `TWO_BROTHERS_MODEL_EFFORTS=off`) it answers `source:"curated"` from the built-in seed table with `upstream_error` and/or `disabled:true`. Cache policy: 1 h TTL, 60 s failure back-off, 10 s timeout, single-flight, stale-on-error (`source:"stale"` serves the previous snapshot plus `upstream_error`; a good snapshot is never replaced by a failed/empty one). No keys are read or sent; read-only |
+| `GET /api/models-dev/providers/{id}` | one catalog provider's bounded detail (`200 {source, fetched_at, provider}`; ≤ 300 models sorted by id): `provider` is the summary fields plus `truncated` and `models: [{id, name, kind, mixed_family, base_url, context_window, reasoning, efforts}]`. `kind` is the model's resolved wire family (`null` = a protocol Two Brothers does not implement), `mixed_family` marks a model served on another family's endpoint, `base_url` carries that endpoint override only when it differs from the provider `api`, `context_window` is `0` when unknown, and `efforts` is the same normalized list `/api/model-efforts` returns. `id` is URL-decoded, trimmed and lowercased, and must match `/^[a-z0-9][a-z0-9._-]{0,99}$/` (`400 {"detail":"invalid catalog provider id"}` otherwise). Unknown id in a live/stale snapshot → `404 {"detail":"not found","code":"catalog-provider-not-found"}`; with no snapshot at all, a seed id answers `200` curated (with `disabled:true` when the live fetch is off) and any other id → `503 {"detail":"models.dev catalog unavailable","code":"catalog-unavailable","upstream_error":"…"}` (the only 5xx). Both routes are read-only: they never call `requireWritableSettings()` and never touch `settings.json`, so they keep working under a newer-schema/read-only document |
 | `GET /api/plugins` | discovered plugins (`name`, `description`, `roles`, load `errors`, `diagnostics`) |
 | `GET /api/skills` | discovered skills metadata (`name`, `description`, `scope`, `tools`, `file`) — never bodies |
 | `GET /api/commands` | discovered slash-command metadata (`name`, `description`, `argumentHint`, `mode?`, `file`) plus the additive first-party `baseCommands` list (`name`, `aliases`, `description`, `argumentHint`, `kind: "prompt"\|"action"`, `action?`, `requiresArguments`, `priority`) — never bodies |
@@ -1145,6 +1147,35 @@ non-2xx, unparseable payload) `502` with the provider's message. Only the
 openai-compatible adapter exposes `GET {base}/models`. The server route is the
 same one the web Settings → Providers **Refresh models** button calls; the
 offline equivalent is `two-brothers models --base-url <url>`.
+
+**models.dev catalog browse.** Settings → Providers → **Browse models.dev…**
+reads the public catalog through the two read-only routes above. No snapshot
+is shipped and nothing syncs in the background: the backend fetches
+`https://models.dev/api.json` lazily, builds one compact index (the raw ~6 MB
+document is dropped) and caches it for an hour with a 60 s failure back-off, a
+10 s timeout, single-flight and stale-on-error. When the catalog is
+unreachable the summary still answers from the built-in seed table
+(`source:"curated"`, labelled in the UI), so the dialog never breaks Settings;
+a provider id that exists only in the live catalog is an honest 503 instead.
+The public catalog is not one wire family: the OpenCode Go entry routes some
+models to Anthropic and Google endpoints through per-model `provider.api`
+overrides. Wire families are therefore inferred per provider and per model
+(explicit `type`, then the SDK `npm` marker, then the id), proprietary
+protocols are rejected, and an unknown npm is guessed OpenAI-compatible with a
+visible `guessed` source. The dialog groups the model list by family and
+imports one family at a time: the suggested name gains a
+`-anthropic`/`-google`/`-openai` suffix for a secondary family, the family's
+base URL (the provider `api` or the first model override) prefills the Add
+form, and a model on a protocol we do not speak is listed as not importable
+and never offered. Nothing is preselected — **Select all** or per-model
+toggles choose the import, and an empty selection is refused with an inline
+notice. Importing only prefills the existing Add-provider form (name, base
+URL, kind, models, and the smallest positive context window of the selection);
+nothing is saved until **Add provider** posts to `POST /api/providers`, and
+the catalog never supplies a key. An imported preset stores the catalog
+provider id as an additive `catalog_id`, so `/api/model-efforts` keeps
+returning the model's declared levels after the preset is renamed; `PUT`
+accepts or clears it, and manual/legacy presets resolve exactly as before.
 
 **Session-scope approvals.** `POST /api/runs/{run_id}/approvals/{id}` answers a
 pending operator approval with `{"allow": bool, "scope"?: "once" | "session"}`
@@ -1959,7 +1990,10 @@ them):
   seed can be reset to its canonical default from Settings → Providers
   without touching the Senior/Junior role assignments, and **Refresh models**
   probes the current draft's OpenAI-compatible endpoint through
-  `POST /api/providers/{name}/discover` without saving anything.
+  `POST /api/providers/{name}/discover` without saving anything, and
+  **Browse models.dev…** prefills the Add form from the public catalog
+  (read-only summary/detail routes, curated seed fallback offline, one wire
+  family per import; nothing is saved until **Add provider**).
 - **Session-scope approvals** — an approval card's **Always allow this session**
   decision remembers an `(action, target)` pair for that session
   (`{"scope": "session"}` on the approval route, persisted in

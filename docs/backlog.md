@@ -1671,25 +1671,59 @@ Tests: `tests/autoroute.test.ts` (31), `tests/solo.test.ts` (24),
   `packages/harness/tests/tuikeys.test.ts`, `scripts/smoke-test.ps1`; docs
   `docs/testing.md`, `packages/harness/e2e/AGENTS.md`, `scripts/AGENTS.md`.
 
+## Shipped 2026-11-13 (models.dev catalog browse/import)
+
+Todo item 5 is shipped: Settings → Providers → **Browse models.dev…** reads the
+public catalog through two read-only routes — `GET /api/models-dev/providers`
+(bounded summaries, ≤ 400) and `GET /api/models-dev/providers/{id}` (≤ 300
+models with a per-model resolved wire family) — and prefills the existing
+Add-provider form. The browse routes write nothing and no new write route
+exists; saving still goes through `POST /api/providers`.
+
+What landed, as recorded behavior:
+
+- **One shared download.** `src/modelcatalog.ts` owns one compact index built
+  per successful fetch (the raw ~6 MB document is dropped) and serves it to
+  `/api/model-efforts` and both browse routes. Cache: 1 h TTL, 60 s failure
+  back-off, 10 s timeout, single-flight, stale-on-error (`source:"stale"` plus
+  `upstream_error`), payload guards; every failure is fail-soft.
+- **Curated fallback.** With no snapshot (offline, first fetch failed, or
+  `TWO_BROTHERS_MODEL_EFFORTS=off`) the summary is a `200 source:"curated"`
+  view built from `seedPresets()` — no shipped snapshot — and a detail id that
+  exists only in the live catalog answers `503 catalog-unavailable`. The UI
+  labels the fallback.
+- **Wire-family inference** (`inferProviderKind`/`inferModelKind`): explicit
+  `type` → SDK `npm` markers → id markers; proprietary protocols rejected
+  (`bedrock`/`cohere`/`vertex`/`azure`/`cloudflare`/…); unknown npm guessed
+  OpenAI-compatible with a visible `guessed` source.
+- **Mixed-family split (OpenCode Go).** The detail exposes each model's
+  resolved `kind`, `mixed_family` and per-model `base_url`; the dialog groups
+  models by family, imports one family at a time, suffixes a secondary
+  family's suggested name (`opencode-go-anthropic`, `-google`) and never
+  offers a protocol we do not speak.
+- **Import = prefill only.** The dialog preselects NO models (owner decision
+  §15.6): explicit **Select all** / per-model toggles choose the import, and an
+  empty selection is refused with an inline notice. The Add card gains one
+  field — **Context window (tokens)** in Advanced — prefilled with the smallest
+  positive window of the selection; the operator presses **Add provider** as
+  before. No key is ever requested or supplied by the catalog.
+- **`catalog_id` provenance** (owner decision §15.5). Imported presets store
+  the catalog provider id (additive, invisible field; `POST`/`PUT` accept it
+  and `PUT` clears it), so `/api/model-efforts` keeps resolving after a rename;
+  manual/legacy presets resolve exactly as before through the name/alias path.
+- **Tests** are hermetic: `tests/fixtures/models-dev.json`, an extended
+  `tests/modelcatalog.test.ts` and a `models-dev catalog` section in
+  `tests/server.test.ts` (route shapes, one-fetch sharing, curated/400/404/503
+  mapping, settings byte-identical, no key material, `catalog_id` flows), plus
+  `web/tests/modelsDev.test.ts`, `web/tests/modelsDevWiring.test.ts` and
+  `web/tests/providerSettings.test.ts` additions. No browser E2E scenario in
+  this slice (the catalog URL is a constant; the design defers a hermetic
+  scenario until a URL override lands).
+- No new runtime dependency, no protocol/schema/`typescript/` change, no new
+  write route, no automatic save or background sync, no shipped snapshot.
+
 ## Open items (deferred)
 
-- **models.dev catalog browse/import (medium)** — kimi-code fetches
-  `https://models.dev/api.json` (10-minute cache, 10-second timeout) and falls
-  back to a release-build snapshot; its provider manager lists catalog
-  providers, infers the wire family from `type`/`npm`/id, imports the selected
-  models, rejects proprietary protocols, and asks for a base URL when the
-  catalog has none. Our seed table now covers the common subscription plans,
-  but a catalog browser would scale beyond it. Proposed first slice: a
-  read-only `GET /api/models-dev/providers` summary endpoint and
-  `GET /api/models-dev/providers/{id}` model list (server-side cache, no key
-  handling), then reuse the existing `POST /api/providers` create path by
-  prefilling the Add-provider form; no new write route and no runtime
-  dependency on models.dev. Keep a curated snapshot or seed fallback for
-  offline use. Do not assume one catalog provider is one wire family: OpenCode
-  Go routes some models to Anthropic/Google endpoints through per-model
-  `provider.api` overrides, while our preset is one wire family. The public
-  catalog is ~6 MB / ~9 000 models, so never ship it whole or fetch it on every
-  settings render. Tests need an injected fetch and a fixed fixture.
 - **OAuth-only subscription sign-in (large)** — GitHub Copilot, OpenAI Codex
   (ChatGPT Plus/Pro) and the Kimi Code managed login use OAuth/device-code
   flows and token refresh, not a static API key. Supporting them means a login

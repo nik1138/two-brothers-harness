@@ -35,7 +35,8 @@ The script runs:
     recall, the approval-policy model, the design-token layer, mid-run steering,
     session fork/rewind, run-scoped file undo, the HTML export helpers,
     transcript windowing and the run-cost footer, the persisted compaction card,
-    the tab-title model and the fork-from-here request model)
+    the tab-title model, the models.dev catalog browse model and the
+    fork-from-here request model)
 11. the `web/` build
 
 Expected final line: `SMOKE TEST: PASS`. It is an offline pre-flight, not the
@@ -202,7 +203,19 @@ local fake endpoint, no real network): the stored/env-backed key used only for
 the preset's own URL, the different-URL-with-saved-key 400, a one-shot typed key
 that is never stored or echoed, an empty answer that leaves the catalog intact,
 the unsupported-wire-kind 400, unknown-provider 404/invalid-body 400 and the
-clean upstream 502 (suite now 65 tests). The `allow_session` approval scope is
+clean upstream 502 (suite now 70 tests). The models.dev catalog browse/import
+slice is hermetic through an injected fetch and the fixed
+`tests/fixtures/models-dev.json`: `tests/modelcatalog.test.ts` (now 27 tests —
+index building, the provider/model inference matrix, mixed-family overrides and
+base URLs, catalog filtering and caps, curated seed fallback, TTL/cache,
+single-flight, stale-on-error, failure back-off, timeout, disabled mode and
+malformed payloads) plus a `models-dev catalog` section in
+`tests/server.test.ts` (summary/detail shapes, one download shared by the three
+routes, 400/404/503 mapping, curated/disabled fallbacks, settings.json
+byte-identical before/after both GETs, no key material, and the `catalog_id`
+rename/reset/delete/legacy flows). No test touches the network or the default
+catalog; the browser matrix is unchanged (no new scenario in this slice —
+the catalog URL is a module constant). The `allow_session` approval scope is
 covered across layers: `tests/approvalbrokerdeny.test.ts` (28 tests — a
 seeded pair auto-allows without parking with one event per call, the check
 precedes the denial cap, one-shot counters are untouched, an aborted run still

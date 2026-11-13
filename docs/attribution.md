@@ -44,9 +44,9 @@ No source code is copied from these references — only wire shapes and design
 conventions, recorded in this index (most adapted modules also name their
 upstream in a header comment). `NOTICE` changes only for a substantial block
 (`NOTICE` is unchanged by the 2026-11-07 surface adaptations, the wave-23 ones
-below, the wave-25 tab-title/signal design-only adaptations, and the wave-26
-copy/title/notification, external-editor and fork-from-here ones — no block was
-copied).
+below, the wave-25 tab-title/signal design-only adaptations, the wave-26
+copy/title/notification, external-editor and fork-from-here ones, and the
+models.dev catalog-manager convention — no block was copied).
 
 | Project | Here | What was adopted |
 |---|---|---|
@@ -78,6 +78,7 @@ copied).
 | kimi-code, opencode | `packages/harness/src/sessionrewind.ts`, `src/sessionfork.ts`, `src/metadata.ts`, `web/src/sessionFork.ts` | The conversation-undo cut rules (`agent-core-v2/src/agent/undo/undoService.ts`, `contextMemory/contextOps.ts` `computeUndoCut`, the compaction floor and honest requested-vs-undoable reporting) and the fork UX (`docs/en/guides/sessions.md` `/fork`; opencode `Session.fork` boundary before/through — wave 26 adds the transcript's fork-at-this-message `{seq}` entry point on the same prefix-copy model) translated to a flat dense-`seq` JSONL prefix copy with a local `parent` sidecar link. Design only, no code copied. |
 | pi | `packages/harness/src/sessionsearch.ts` (`sessionToHtmlString`) | The self-contained single-file session export inspiration (`coding-agent/src/core/export-html`: inlined template/CSS/JS, vendored highlight.js/marked). The templates and bundled third-party libraries were not copied: our renderer is hand-rolled HTML with an inline stylesheet and escaped plain text; no code copied. |
 | deepseek-harness, opencode | `web/src/messageQuote.ts`, `web/src/components/ChatView.vue`, `web/src/components/Composer.vue` | The message-quote idea: a selection-aware transcript action that falls back to the whole message and appends ordinary Markdown (one `> ` prefix per line) to the composer, from deepseek-harness `packages/session/message-quotes` (`quote-text.ts`, `QuoteSelection.tsx`) and opencode's `SessionUserComment` quote shape (`packages/session-ui/src/actions.ts`). Our block formatting, 4 000-character cap with truncation marker, surrogate-safe cut, append-only draft semantics and selection-intersection rule are local; no code copied. |
+| kimi-code, opencode | `packages/harness/src/modelcatalog.ts`, `src/server.ts`, `src/settings_store.ts`, `web/src/modelsDev.ts`, `web/src/components/settings/ModelsDevBrowser.vue` | The catalog provider-manager convention: provider summaries and per-model lists read from one cached models.dev document, wire-family inference from an explicit `type` / SDK `npm` marker / provider id with proprietary protocols rejected, per-model `provider.api` base-URL overrides (the OpenCode Go mixed-family case), and prefilling the Add-provider form rather than writing a preset directly. Our cache policy (1 h TTL, 60 s failure back-off, stale-on-error, curated seed fallback), route shapes, per-family import split with default-none selection and the additive `catalog_id` provenance are local design; no code copied (design-only convention). |
 
 ## Other MIT references
 

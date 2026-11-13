@@ -276,7 +276,13 @@ the same hero appears inside a selected session that has no transcript yet.
    the control answers honestly (unsupported) for Anthropic/Gemini, and a
    saved/env-backed key is only used when the probed URL is the preset's own
    endpoint — otherwise type the key for that probe. The offline equivalent is
-   `node dist/cli.js models --base-url <url>`. Settings → **Appearance** sets
+   `node dist/cli.js models --base-url <url>`. **Browse models.dev…** (next to
+   **+ Add provider**) prefills the same Add form from the public models.dev
+   catalog: it groups the provider's models by wire family (with a
+   `-anthropic`/`-google` name suffix for a secondary family), carries the
+   models you tick, the smallest selected context window, and an invisible
+   `catalog_id`, and nothing is saved until you press **Add provider**.
+   Settings → **Appearance** sets
    the theme and the Comfortable/Compact density for this device, and picks
    the accent theme (Blue default, or Violet/Teal/Amber) — the accent applies
    immediately and is remembered for the next visit. The same panel's **Role
