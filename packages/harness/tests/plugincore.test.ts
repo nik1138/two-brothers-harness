@@ -1,8 +1,10 @@
 /**
  * Plugin-core extensions: per-tool scope opt-in (with the legacy positional
  * `role` mapping + deprecation note), the typed fail-soft hook registry,
- * dispatch-time argument validation, per-tool timeouts, and per-plugin
- * options validated against an optional exported `configSchema`.
+ * dispatch-time argument validation, per-tool timeouts (a declared
+ * `timeoutMs` override or the 60 s default, cooperative through the
+ * handler's `AbortSignal`), and per-plugin options validated against an
+ * optional exported `configSchema`.
  *
  * Fixture plugins are written to temp dirs at runtime and loaded through the
  * real dynamic-import path, like tests/plugins.test.ts.
@@ -486,6 +488,100 @@ test("a declared timeoutMs bounds the handler fail-softly", async () => {
   assert.equal(await asHarnessTool(ctx._tools[1]).execute({}), "quick");
 });
 
+test("a tool without timeoutMs is bounded by the 60s default deadline", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"], now: 0 });
+  try {
+    const ctx = new PluginContext("unit");
+    ctx.add_tool("hangs", () => new Promise(() => {}));
+    let settled = false;
+    const pending = Promise.resolve(asHarnessTool(ctx._tools[0]).execute({})).then((value) => {
+      settled = true;
+      return value;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(settled, false);
+    // one millisecond before the deadline the tool is still pending…
+    t.mock.timers.tick(59_999);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(settled, false);
+    // …and at the 60s mark it fails soft, without any real waiting.
+    t.mock.timers.tick(1);
+    const result = await pending;
+    assert.equal(settled, true);
+    assert.equal(result, "plugin tool error: timed out after 60000 ms");
+  } finally {
+    t.mock.timers.reset();
+  }
+});
+
+test("a declared timeoutMs overrides the default deadline exactly", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"], now: 0 });
+  try {
+    const ctx = new PluginContext("unit");
+    ctx.add_tool("slow", () => new Promise(() => {}), { timeoutMs: 5_000 });
+    let settled = false;
+    const pending = Promise.resolve(asHarnessTool(ctx._tools[0]).execute({})).then((value) => {
+      settled = true;
+      return value;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    t.mock.timers.tick(4_999);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(settled, false);
+    t.mock.timers.tick(1);
+    assert.equal(await pending, "plugin tool error: timed out after 5000 ms");
+    assert.equal(settled, true);
+  } finally {
+    t.mock.timers.reset();
+  }
+});
+
+test("the deadline aborts the handler's signal cooperatively (timeout = cancel channel)", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"], now: 0 });
+  try {
+    let seen: AbortSignal | undefined;
+    const ctx = new PluginContext("unit");
+    ctx.add_tool("coop", (_args, signal) => {
+      seen = signal;
+      return new Promise(() => {});
+    });
+    const pending = asHarnessTool(ctx._tools[0]).execute({});
+    t.mock.timers.tick(60_000);
+    const result = await pending;
+    assert.equal(result, "plugin tool error: timed out after 60000 ms");
+    assert.ok(seen, "the handler received a signal");
+    assert.equal(seen?.aborted, true);
+  } finally {
+    t.mock.timers.reset();
+  }
+});
+
+test("a handler that rejects after the deadline is never an unhandled rejection", async () => {
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => {
+    unhandled.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const ctx = new PluginContext("unit");
+    ctx.add_tool(
+      "late",
+      () =>
+        new Promise((_, reject) => {
+          setTimeout(() => reject(new Error("late boom")), 30);
+        }),
+      { timeoutMs: 5 },
+    );
+    const result = await asHarnessTool(ctx._tools[0]).execute({});
+    assert.equal(result, "plugin tool error: timed out after 5 ms");
+    // let the detached handler's late rejection land, if it ever does
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
 test("asHarnessTool forwards the abort signal to the handler and workspace_shell", async () => {
   const controller = new AbortController();
   let handlerSignal: AbortSignal | undefined;
@@ -533,8 +629,15 @@ test("asHarnessTool forwards the abort signal to the handler and workspace_shell
   controller.abort();
   const result = await pending;
 
-  assert.equal(handlerSignal, controller.signal);
-  assert.equal(shellSignal, controller.signal);
+  // The handler no longer receives the caller's signal by identity: dispatch
+  // hands it a combined signal (caller cancel + tool deadline). What the
+  // contract guarantees is propagation — an abort of the caller's signal
+  // aborts the signal the handler (and the shell it forwards it to) sees.
+  assert.ok(handlerSignal);
+  assert.equal(handlerSignal?.aborted, true);
+  assert.ok(shellSignal);
+  assert.equal(shellSignal?.aborted, true);
+  assert.notEqual(handlerSignal, controller.signal);
   assert.deepEqual(calls, [{ command: "would-block", timeout: 7 }]);
   assert.match(result, /"status":"cancelled"/);
   assert.match(result, /"cancelled":true/);
