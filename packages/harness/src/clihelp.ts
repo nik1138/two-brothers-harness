@@ -728,6 +728,7 @@ defineCommand({
     "skills-dir",
     "commands-dir",
     "workspace",
+    "sessions-dir",
     "keys-file",
     "keys-watch",
     "stream-tokens",
@@ -737,6 +738,7 @@ defineCommand({
   acceptedFlags: [
     ...SHARED_FLAGS,
     "workspace",
+    "sessions-dir",
     "keys-file",
     "keys-watch",
     "thinking-budget",
@@ -746,6 +748,10 @@ defineCommand({
     mode: "cooperation mode consult|work|auto (print/json are run output modes)",
     workspace:
       "confined workspace root for this TUI run (workspace tools + operator approvals)",
+    "sessions-dir":
+      "sessions directory for this TUI process (session JSONL files, settings, " +
+      "runtime sidecars; the TUI holds the store's single-writer lock there; " +
+      "default <cwd>/sessions)",
     "keys-file":
       "user-authored JSON with chord overrides for the palette, help and draft-stash " +
       "commands (env TWO_BROTHERS_TUI_KEYS_FILE; missing file = defaults; invalid file " +

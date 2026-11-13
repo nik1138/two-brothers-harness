@@ -667,11 +667,22 @@ test("CLI: run/serve help and the full reference document --approval-mode and it
   // The TUI applies the saved approval_policy through `/permission` and also
   // accepts the same per-process pin as serve. This test harness is not a TTY,
   // so a valid pin reaches the honest interactive-terminal refusal (exit 2)
-  // while an invalid mode is a usage error before that.
+  // while an invalid mode is a usage error before that. The valid-pin call
+  // acquires the store's single-writer lock before the refusal, so it points
+  // `--sessions-dir` at per-test temp storage (a live `serve` may hold the
+  // default directory's lock).
   const tuiInvalid = makeIO();
   assert.equal(await main(["tui", "--approval-mode", "nope"], tuiInvalid), 2);
   assert.match(tuiInvalid.err[0]!, /^\[error\] invalid approval mode: nope/);
-  const tui = makeIO();
-  assert.equal(await main(["tui", "--approval-mode", "ask"], tui), 2);
-  assert.match(tui.err.join("\n"), /needs an interactive terminal/);
+  const sessionsDir = tmpdir();
+  try {
+    const tui = makeIO();
+    assert.equal(
+      await main(["tui", "--approval-mode", "ask", "--sessions-dir", sessionsDir.root], tui),
+      2,
+    );
+    assert.match(tui.err.join("\n"), /needs an interactive terminal/);
+  } finally {
+    sessionsDir.cleanup();
+  }
 });
