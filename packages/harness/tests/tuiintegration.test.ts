@@ -14,7 +14,7 @@ import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 
 import { resolveConfig } from "../src/config.ts";
 import { RuntimeSettings } from "../src/runtime.ts";
@@ -129,6 +129,19 @@ function startApp(extra: Partial<Parameters<typeof runTuiApp>[0]> = {}): Harness
 }
 
 const textOf = (output: FakeOutput): string => stripAnsi(output.data);
+
+// startApp's default sessionsDir names a deliberately nonexistent directory;
+// the app's store writer lock (src/sessionlayout.ts) creates it on acquire
+// and only the lock file is removed on release. Snapshot its absence at load
+// and remove the artifact once every test in this file has run — never touch
+// a directory that pre-existed.
+const defaultSessionsDir = path.join(process.cwd(), "does-not-exist-tui-sessions");
+const defaultSessionsDirPreExisting = fs.existsSync(defaultSessionsDir);
+after(() => {
+  if (!defaultSessionsDirPreExisting) {
+    fs.rmSync(defaultSessionsDir, { recursive: true, force: true });
+  }
+});
 
 /** A MockProvider that records the exact belt each tool-loop call offered. */
 class RecordingMock extends MockProvider {
