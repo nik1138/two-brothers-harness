@@ -755,9 +755,12 @@ const NON_RETRYABLE_PROVIDER_LIMIT_PATTERN = providerErrorPattern([
  * body-level verdict wins over an unusual HTTP status, e.g. a proxy that
  * relays an upstream outage as 400.
  */
+// The Anthropic status is optional: a mid-stream `error` event carries an
+// error TYPE but no HTTP status, so the adapter labels it
+// `Anthropic API error (api_error): …` (see AnthropicProvider.streamEvent).
 const PROVIDER_TRANSIENT_ERROR_PATTERN = new RegExp(
   [
-    "Anthropic API error \\d+ \\((?:overloaded_error|rate_limit_error|api_error)\\)",
+    "Anthropic API error(?: \\d+)? \\((?:overloaded_error|rate_limit_error|api_error)\\)",
     "Google API error \\d+ \\((?:RESOURCE_EXHAUSTED|UNAVAILABLE|INTERNAL|DEADLINE_EXCEEDED|ABORTED|UNKNOWN)\\)",
   ].join("|"),
   "i",
@@ -825,6 +828,9 @@ const RETRYABLE_TRANSPORT_PATTERN = providerErrorPattern([
   "ResourceExhausted",
   "subscription_sharing_usage_unavailable",
   "subscription_sharing_user_unavailable",
+  // A stream that outgrows the byte cap is a transport anomaly (the wording
+  // matches the cap error thrown from consumeStream).
+  "exceeded the \\d+-byte cap",
 ]);
 
 /** Raised when the run's cancel signal fires; never retried, never swallowed. */
@@ -1106,8 +1112,8 @@ export async function listModels(
       throw new Error(`cannot reach ${url}: ${describeFetchError(exc)}`);
     }
     if (!response.ok) {
-      const detail = await response.text().catch(() => "");
-      const body = detail.trim().slice(0, 300) || response.statusText || "(no body)";
+      const detail = (await readBodyCapped(response, MAX_ERROR_BODY_BYTES)).trim();
+      const body = detail.slice(0, 300) || response.statusText || "(no body)";
       throw new Error(`HTTP ${response.status} from ${url}: ${body}`);
     }
     let payload: unknown;
@@ -1249,6 +1255,74 @@ function parseSseFrame(block: string): SseFrame | null {
  * than growing without bound.
  */
 const MAX_JSON_FALLBACK_CHARS = 1_000_000;
+
+/**
+ * Defensive byte caps on transport reads (not payload limits): a healthy
+ * completion stays far below every one of them, and a pathological peer
+ * cannot make an attempt grow memory without bound.
+ */
+
+/**
+ * Cap on the total body bytes of one streamed attempt. The per-attempt
+ * timeout bounds a stalled stream; this bounds a stream that keeps sending.
+ * A stream past the cap is a transport anomaly: the reader is cancelled and
+ * the failure classifies retryably (`exceeded the <N>-byte cap` matches the
+ * transport wording of `PROVIDER_ERROR_REGISTRY`).
+ */
+export const MAX_STREAM_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Cap on the error body of a non-OK response that is read for classification
+ * and diagnostics. The read stops at the cap (the reader is cancelled so the
+ * connection is released) and the kept prefix is marked as clipped.
+ */
+export const MAX_ERROR_BODY_BYTES = 256 * 1024;
+
+/**
+ * Cap on the provider detail embedded in a thrown error's message. The full
+ * detail is still parsed by `describeError` (a JSON error body keeps its
+ * `error.type`/`error.message` extraction); only the text that rides the
+ * thrown message is clipped, with an explicit marker.
+ */
+export const MAX_ERROR_DETAIL_CHARS = 2048;
+
+/**
+ * Read a response body with a byte cap: accumulates decoded text until
+ * `maxBytes` is exceeded, then cancels the reader (releasing the connection)
+ * and marks the kept prefix as clipped. Empty-body responses yield "".
+ */
+async function readBodyCapped(response: Response, maxBytes: number): Promise<string> {
+  const body = response.body;
+  if (body === null) return "";
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  let bytes = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > maxBytes) {
+        text += `<clipped: error body over ${maxBytes} bytes>`;
+        break;
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  return text;
+}
+
+/** Clip the provider detail embedded in a thrown message (few KB max). */
+function clipErrorDetail(message: string): string {
+  if (message.length <= MAX_ERROR_DETAIL_CHARS) return message;
+  return (
+    message.slice(0, MAX_ERROR_DETAIL_CHARS) +
+    ` … <clipped ${message.length - MAX_ERROR_DETAIL_CHARS} chars>`
+  );
+}
 
 /**
  * Shared HTTP plumbing for the fetch-based providers: the owned retry loop
@@ -1535,7 +1609,9 @@ export abstract class BaseHttpProvider implements Provider {
    * JSON completion (never an SSE frame — some gateways mislabel it), the
    * buffered body is parsed and returned like a non-streaming response. An
    * empty or non-JSON no-frame stream keeps the historical empty result; a
-   * normal SSE stream (frames seen) is untouched.
+   * normal SSE stream (frames seen) is untouched. The whole body is bounded
+   * by `MAX_STREAM_BYTES`: past the cap the attempt fails as a retryable
+   * transport error instead of accumulating without limit.
    */
   private async consumeStream(response: Response, options?: ChatOptions): Promise<unknown> {
     const body = response.body;
@@ -1562,6 +1638,8 @@ export abstract class BaseHttpProvider implements Provider {
     let finished = false;
     /** SSE frames handed to the adapter so far (DONE excluded). */
     let framesSeen = 0;
+    /** Body bytes consumed so far; bounded by MAX_STREAM_BYTES. */
+    let bytesSeen = 0;
     /** Body text seen before the first frame, for the JSON fallback; bounded. */
     let unframed = "";
     let unframedOverflow = false;
@@ -1589,6 +1667,15 @@ export abstract class BaseHttpProvider implements Provider {
       while (!finished) {
         const { value, done } = await reader.read();
         if (done) break;
+        bytesSeen += value.byteLength;
+        if (bytesSeen > MAX_STREAM_BYTES) {
+          // A stream that outgrows the byte cap is a transport anomaly: the
+          // reader is cancelled by the finally below and the wording matches
+          // the registry's transport rules (retryable).
+          throw new Error(
+            `stream from ${this.streamUrl()} exceeded the ${MAX_STREAM_BYTES}-byte cap`,
+          );
+        }
         const chunk = decoder.decode(value, { stream: true });
         buffer += chunk;
         rememberUnframed(chunk);
@@ -1646,21 +1733,22 @@ export abstract class BaseHttpProvider implements Provider {
         signal: controller.signal,
       });
       if (!response.ok) {
-        const detail = await response.text().catch(() => "");
+        const detail = await readBodyCapped(response, MAX_ERROR_BODY_BYTES);
         const { message, overflow } = this.describeError(
           response.status,
           detail,
           response.statusText,
         );
-        if (overflow) throw new ProviderContextOverflowError(response.status, message);
+        const clipped = clipErrorDetail(message);
+        if (overflow) throw new ProviderContextOverflowError(response.status, clipped);
         const { retryable, reason } = classifyProviderErrorContext({
           status: response.status,
-          message,
+          message: clipped,
           headers: response.headers,
         });
         throw new ProviderHttpError(
           response.status,
-          message,
+          clipped,
           retryable,
           reason,
           retryable ? retryAfterSecondsFromHeaders(response.headers) : undefined,
@@ -1933,10 +2021,16 @@ interface AnthropicContentBlock {
  * back FIRST, verbatim (`{type: "thinking", thinking, signature}` or
  * `{type: "redacted_thinking", data}`), before the text and `tool_use` blocks —
  * the Messages API rejects a tool loop whose signed blocks were dropped or
- * altered. The blocks are replayed exactly as received (never re-sanitized or
- * trimmed) and other adapters never look at them.
+ * altered. A thinking block WITHOUT a signature is the inverse hazard: the
+ * API rejects an unsigned `thinking` block on the next request, so it is
+ * dropped from replay (never echoed) and reported once through
+ * `onUnsignedThinking`. The blocks are otherwise replayed exactly as received
+ * (never re-sanitized or trimmed) and other adapters never look at them.
  */
-function anthropicMessages(messages: ChatMessage[]): {
+function anthropicMessages(
+  messages: ChatMessage[],
+  onUnsignedThinking?: () => void,
+): {
   system: string;
   messages: Array<Record<string, unknown>>;
 } {
@@ -1955,6 +2049,12 @@ function anthropicMessages(messages: ChatMessage[]): {
         if (thinking.redacted !== undefined) {
           blocks.push({ type: "redacted_thinking", data: thinking.redacted });
         } else {
+          if (!thinking.signature) {
+            // Echoing an unsigned thinking block fails the next request with
+            // a 400; drop it and report honestly (the caller warns once).
+            onUnsignedThinking?.();
+            continue;
+          }
           blocks.push({
             type: "thinking",
             thinking: thinking.text,
@@ -2151,6 +2251,7 @@ export class AnthropicProvider extends BaseHttpProvider {
   /** Effective extended-thinking budget; undefined = thinking not requested. */
   readonly thinkingBudgetTokens?: number;
   private thinkingCapWarned = false;
+  private unsignedThinkingWarned = false;
 
   constructor(cfg: ModelProviderConfig) {
     super(cfg);
@@ -2189,6 +2290,21 @@ export class AnthropicProvider extends BaseHttpProvider {
       );
     }
     return raised;
+  }
+
+  /**
+   * One stderr diagnostic per provider for thinking blocks dropped from
+   * replay because the provider never signed them (echoing one fails the next
+   * request with a 400). Honest, not silent — and capped so a stubborn
+   * endpoint cannot flood the log.
+   */
+  private warnUnsignedThinking(): void {
+    if (this.unsignedThinkingWarned) return;
+    this.unsignedThinkingWarned = true;
+    this.onWarning(
+      "[warn] dropping an unsigned Anthropic thinking block from replay; " +
+        "the provider did not sign it, so echoing it would fail the next request",
+    );
   }
 
   async chat(
@@ -2235,8 +2351,11 @@ export class AnthropicProvider extends BaseHttpProvider {
       const error = isRecord(parsed.error) ? parsed.error : {};
       const label = typeof error.type === "string" ? error.type : "stream_error";
       const text = typeof error.message === "string" ? error.message : frame.data;
-      // Registry wording ("overloaded", "rate limit", …) classifies this.
-      throw new Error(`Anthropic stream error (${label}): ${text}`);
+      // Match the registry's Anthropic transient wording (no HTTP status
+      // exists mid-stream, so the status group is optional there):
+      // overloaded_error / rate_limit_error / api_error classify retryable,
+      // anything else falls through to the remaining registry rules.
+      throw new Error(`Anthropic API error (${label}): ${text}`);
     }
     if (type === "message_start") {
       const message = isRecord(parsed.message) ? parsed.message : {};
@@ -2369,7 +2488,9 @@ export class AnthropicProvider extends BaseHttpProvider {
     messages: ChatMessage[],
     tools: Tool[] | undefined,
   ): Record<string, unknown> {
-    const { system, messages: wire } = anthropicMessages(messages);
+    const { system, messages: wire } = anthropicMessages(messages, () =>
+      this.warnUnsignedThinking(),
+    );
     // Explicit prompt caching (see ANTHROPIC_CACHE_CONTROL): mark the newest
     // conversation turn on every attempt, streaming included — requestBody is
     // shared by both wire paths.

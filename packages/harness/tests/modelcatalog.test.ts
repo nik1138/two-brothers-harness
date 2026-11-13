@@ -659,6 +659,27 @@ test("payload guards: an over-32 MiB response is a fail-soft failure", async () 
   assert.match(snapshot.upstream_error ?? "", /too large/);
 });
 
+test("payload guards: a chunked response over 32 MiB (no content-length) fails mid-stream", async () => {
+  // No content-length header: the byte cap must be enforced on the streamed
+  // chunks themselves, not on the declared size.
+  const chunk = new Uint8Array(4 * 1024 * 1024).fill(0x61);
+  const fetchImpl = (async () =>
+    new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (let i = 0; i < 9; i += 1) controller.enqueue(chunk);
+          controller.close();
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    )) as typeof fetch;
+  const cat = new ModelsDevCatalog({ fetchImpl, now: () => 1_000 });
+  const snapshot = await cat.providers();
+  assert.equal(snapshot.source, "curated");
+  assert.match(snapshot.upstream_error ?? "", /too large/);
+  assert.equal(snapshot.upstream_error?.includes("33554432"), true);
+});
+
 test("timeout: an aborted fetch takes the failure path (no hang)", async () => {
   const cat = new ModelEffortCatalog({
     fetchImpl: ((_url: string | URL | Request, init?: RequestInit) =>
