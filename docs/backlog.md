@@ -1796,11 +1796,28 @@ Tests: `tests/autoroute.test.ts` (31), `tests/solo.test.ts` (24),
   queued texts are dropped and counted. The drawer gains the follow-up field
   (Enter sends, Shift+Enter inserts a newline, Escape never discards a typed
   draft); a 404 from an old backend hides the whole control family with one
-  inline sentence. Remaining phases: the model-facing `send_message` /
-  `interrupt_agent` / `list_agents`/`subagent_report` tools with opt-in
-  background children (slice B), async completion/wake (the parent currently
-  waits for the bounded report), a TUI tree, forked-context children, deeper
-  nesting, per-call model/effort overrides (the operator's Settings → Models &
+  inline sentence.
+  **Slice B (opt-in background children + the model-facing control surface)
+  shipped 2026-11-13 for `serve`/web:** `subagent({background:true})` returns
+  `{status:"started"}` before the child settles, and the parent's next provider
+  call proceeds while the helper runs (the synchronous default — absent or
+  `background:false` — stays byte-identical, gated by a golden fixture captured
+  before the change). The Senior gains four helper-control tools, added only
+  when `HarnessOptions.subagents` is set and never on a child or the Junior:
+  `list_agents` (bounded rows with no task text), `send_message` (queued, never
+  "delivered"), `interrupt_agent` and `subagent_report` (an honest running
+  status, then the full bounded report, idempotent). A report reaches the parent
+  only as the tool result of an explicit `subagent_report` call: poll-only, no
+  wake, no envelope, no new run status and no `waiting_for_child`. A shared
+  control-call budget (40 per run) and the `maxActive` cap (4, the 5th spawn
+  names `list_agents`) keep polling and fan-out bounded; every still-running
+  background child is cancelled at run end (`cancelled_by:"parent_run"`, one
+  `subagent_completed` before `run_end`, bounded 2 s settle grace), and
+  `RunManager.stop` reaps the same way. `background` is additive on `meta`,
+  `SubagentInfo` and `subagent_started`, and the drawer shows a `Background`
+  badge. Remaining phases: async completion/wake (delivery stays poll-only),
+  a TUI tree, forked-context children, deeper nesting, per-call model/effort
+  overrides (the operator's Settings → Models &
   roles → Subagent route already fixes the child route) and cost/cache roll-up
   into the parent view. The protocol stays unchanged; children are internal
   executions, not second protocol peers.
