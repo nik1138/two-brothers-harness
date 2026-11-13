@@ -216,10 +216,6 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-test.ps1
 Expected final line: `SMOKE TEST: PASS`. What's covered where:
 [docs/testing.md](docs/testing.md).
 
-Real-model evidence: a consult cycle with two local LM Studio models
-(`LMSTUDIO-TRANSCRIPT.md`) and a full cooperation cycle with `spark-x2.6` via
-the DSH `xhtoken` provider (`SPARK-TRANSCRIPT.md`).
-
 ## Repository layout
 
 | Path | Contents |
@@ -236,7 +232,6 @@ the DSH `xhtoken` provider (`SPARK-TRANSCRIPT.md`).
 | [`docs/`](docs/) | one flat documentation set, indexed by [docs/README.md](docs/README.md) |
 | [`docs/history/`](docs/history/) | historical records: port plan, CLI and web-UI audits, verification log |
 | `research/` | local-only research notes + vendored MIT reference clones (gitignored — never published) |
-| [`SPARK-TRANSCRIPT.md`](SPARK-TRANSCRIPT.md) / [`LMSTUDIO-TRANSCRIPT.md`](LMSTUDIO-TRANSCRIPT.md) | captured real-model cooperation cycles (evidence) |
 | [`AGENTS.md`](AGENTS.md) | instructions for coding agents |
 
 ## Documentation
