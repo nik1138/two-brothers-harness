@@ -339,6 +339,8 @@ import { SpillStore } from "./spill.ts";
 import { RunApprovalBroker, RuntimeEventStore } from "./runevents.ts";
 import {
   isSubagentId,
+  SUBAGENT_FOLLOWUP_QUEUE_MAX,
+  SUBAGENT_FOLLOWUP_TEXT_MAX_CHARS,
   SubagentStore,
   type SubagentControlHandle,
   type SubagentControlSink,
@@ -2382,6 +2384,61 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       // settled child. An id the store never saw stays an honest 404.
       if (state.subagents.get(id) === null) throw new HttpError(404, "not found");
       return { subagent_id: id, status: "already_finished" };
+    }),
+  );
+
+  /**
+   * Operator follow-up for one live helper (A2). Body `{text}`; the answer is
+   * always `status:"queued"` with the current pending count — never
+   * "delivered": the child reads it at its own next provider step (step >= 1,
+   * never inside a parked approval wait). 400 for a non-string/blank/oversized
+   * text, 404 for an invalid or never-seen child id, 409 when the child already
+   * finished, its queue is full, or its context is full (a child has no
+   * compaction). A follow-up never answers, denies or withdraws an approval.
+   */
+  routes.push(
+    compileRoute("POST", "/api/subagents/{id}/messages", async (ctx) => {
+      const id = ctx.params.id;
+      if (!isSubagentId(id)) throw new HttpError(404, "not found");
+      const body = await ctx.json();
+      const text = body.text;
+      if (typeof text !== "string") {
+        throw new HttpError(400, "text must be a string");
+      }
+      const trimmed = text.trim();
+      if (trimmed === "") throw new HttpError(400, "text must be a non-empty string");
+      if (trimmed.length > SUBAGENT_FOLLOWUP_TEXT_MAX_CHARS) {
+        throw new HttpError(
+          400,
+          `text is too long (max ${SUBAGENT_FOLLOWUP_TEXT_MAX_CHARS} chars)`,
+        );
+      }
+      const control = state.childControls.get(id);
+      if (control === undefined) {
+        // A settled child is a real 409; an id the store never saw is a 404.
+        if (state.subagents.get(id) === null) throw new HttpError(404, "not found");
+        throw new HttpError(409, "helper already finished");
+      }
+      const result = control.send(trimmed, "operator");
+      if (result.ok) {
+        return { subagent_id: id, status: "queued", pending: result.pending };
+      }
+      switch (result.reason) {
+        case "not_running":
+          throw new HttpError(409, "helper already finished");
+        case "queue_full":
+          throw new HttpError(
+            409,
+            `follow-up queue is full (${SUBAGENT_FOLLOWUP_QUEUE_MAX} pending)`,
+          );
+        case "context_full":
+          throw new HttpError(
+            409,
+            `helper context is full (${result.chars ?? 0} chars)`,
+          );
+        default:
+          throw new HttpError(400, "text must be a non-empty string");
+      }
     }),
   );
 

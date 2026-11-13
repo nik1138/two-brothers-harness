@@ -10,11 +10,13 @@
  */
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
+import * as http from "node:http";
+import type { AddressInfo } from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 
-import { resolveConfig } from "../src/config.ts";
+import { resolveConfig, type Config } from "../src/config.ts";
 import { SharedContext, type ChatMessage } from "../src/context.ts";
 import { TwoBrothersHarness } from "../src/harness.ts";
 import {
@@ -32,6 +34,11 @@ import {
   type ToolChatResponse,
 } from "../src/provider.ts";
 import { RunApprovalBroker } from "../src/runevents.ts";
+import {
+  createServer,
+  type ServerHandle,
+  type ServerOptions,
+} from "../src/server.ts";
 import { SessionStore } from "../src/session.ts";
 import {
   SUBAGENT_CONTEXT_MAX_CHARS,
@@ -576,3 +583,425 @@ test("a follow-up that would overflow the child context is dropped and counted; 
   }
 });
 
+
+// ---------------------------------------------------------------------------
+// serve: POST /api/subagents/{id}/messages
+// ---------------------------------------------------------------------------
+
+interface RunningServer {
+  base: string;
+  handle: ServerHandle;
+  dir: string;
+  close(): Promise<void>;
+}
+
+async function startServer(options: ServerOptions = {}): Promise<RunningServer> {
+  const tmp = tmpdir("tb-subfollow-serve-");
+  const sessionsDir = options.sessionsDir ? path.resolve(options.sessionsDir) : tmp.root;
+  const effective: ServerOptions = {
+    configFactory: (): Config => mockConfig(),
+    webDist: null,
+    ...options,
+    sessionsDir,
+  };
+  const handle = createServer(effective);
+  const server = await handle.listen("127.0.0.1", 0);
+  const port = (server.address() as AddressInfo).port;
+  return {
+    base: `http://127.0.0.1:${port}`,
+    handle,
+    dir: sessionsDir,
+    close: async () => {
+      await handle.close();
+      tmp.cleanup();
+    },
+  };
+}
+
+async function api(
+  base: string,
+  method: string,
+  route: string,
+  body?: unknown,
+): Promise<{ status: number; body: AnyRecord }> {
+  const init: RequestInit = { method };
+  if (body !== undefined) {
+    init.headers = { "Content-Type": "application/json" };
+    init.body = JSON.stringify(body);
+  }
+  const res = await fetch(base + route, init);
+  const text = await res.text();
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = text;
+  }
+  return { status: res.status, body: parsed as AnyRecord };
+}
+
+const post = (base: string, route: string, body?: unknown) =>
+  api(base, "POST", route, body);
+const get = (base: string, route: string) => api(base, "GET", route);
+
+/** SSE reader: collects `data:` events until `stop` holds or the stream ends. */
+function sseEvents(
+  base: string,
+  route: string,
+  stop: (events: AnyRecord[]) => boolean = () => false,
+  timeoutMs = 20000,
+): Promise<AnyRecord[]> {
+  return new Promise((resolve, reject) => {
+    const events: AnyRecord[] = [];
+    const req = http.get(base + route, (res) => {
+      if (res.statusCode !== 200) {
+        reject(new Error(`SSE GET ${route} -> HTTP ${res.statusCode}`));
+        res.resume();
+        return;
+      }
+      let buf = "";
+      let done = false;
+      const finish = (): void => {
+        if (!done) {
+          done = true;
+          resolve(events);
+        }
+      };
+      res.on("data", (chunk: Buffer) => {
+        buf += chunk.toString("utf-8");
+        let idx: number;
+        while ((idx = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, idx);
+          buf = buf.slice(idx + 1);
+          if (line.startsWith("data: ")) {
+            events.push(JSON.parse(line.slice(6)) as AnyRecord);
+            if (stop(events)) {
+              res.destroy();
+              finish();
+              return;
+            }
+          }
+        }
+      });
+      res.on("end", finish);
+      res.on("error", finish);
+    });
+    req.on("error", (exc) => {
+      if (events.length > 0 && stop(events)) resolve(events);
+      else reject(exc);
+    });
+    setTimeout(() => {
+      req.destroy();
+      reject(new Error(`SSE ${route} timed out; last events: ${JSON.stringify(events.slice(-3))}`));
+    }, timeoutMs).unref();
+  });
+}
+
+function runUntilEnd(base: string, runId: string, after = 0): Promise<AnyRecord[]> {
+  return sseEvents(base, `/api/runs/${runId}/events?after=${after}`, (events) =>
+    events.some((event) => event.type === "run_end"),
+  );
+}
+
+interface HelperModel {
+  baseUrl: string;
+  /** Every request body the child provider received, in order. */
+  requests: AnyRecord[];
+  close(): Promise<void>;
+}
+
+/**
+ * A scripted OpenAI-compatible helper route: the first call asks for one
+ * workspace write (which parks on the parent run), the call after its tool
+ * result reports. Requests are recorded so a test can prove WHEN a follow-up
+ * reached the child conversation.
+ */
+async function startHelperModel(report = "Wrote e2e-helper.txt."): Promise<HelperModel> {
+  const requests: AnyRecord[] = [];
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      let body: Record<string, any> = {};
+      try {
+        body = JSON.parse(Buffer.concat(chunks).toString("utf-8")) as Record<string, any>;
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "invalid JSON" } }));
+        return;
+      }
+      requests.push(body);
+      const messages = Array.isArray(body.messages) ? body.messages : [];
+      const hasToolResult = messages.some(
+        (message: Record<string, unknown>) => message.role === "tool",
+      );
+      const toolCalls = hasToolResult
+        ? []
+        : [
+            {
+              id: "helper-call-1",
+              type: "function",
+              function: {
+                name: "workspace_write_file",
+                arguments: JSON.stringify({
+                  path: "e2e-helper.txt",
+                  content: "hello from the helper\n",
+                }),
+              },
+            },
+          ];
+      const content = hasToolResult ? report : "";
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          id: "chatcmpl-helper",
+          object: "chat.completion",
+          created: Math.floor(Date.now() / 1000),
+          model: String(body.model ?? "e2e-helper"),
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content, tool_calls: toolCalls },
+              finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop",
+            },
+          ],
+          usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+        }),
+      );
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const port = (server.address() as AddressInfo).port;
+  return {
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    requests,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
+async function configureHelper(srv: RunningServer, model: { baseUrl: string }): Promise<void> {
+  const put = await api(srv.base, "PUT", "/api/settings", {
+    subagent: {
+      provider: "openai",
+      base_url: model.baseUrl,
+      api_key: "helper-test-key",
+      model: "e2e-helper",
+    },
+  });
+  assert.equal(put.status, 200);
+}
+
+async function registerWorkspace(srv: RunningServer, root: string): Promise<string> {
+  const ws = await post(srv.base, "/api/workspaces", { path: root, name: "e2e-helper" });
+  assert.equal(ws.status, 201);
+  return String(ws.body.id);
+}
+
+async function startRun(
+  srv: RunningServer,
+  workspaceId: string,
+  session: string,
+): Promise<string> {
+  const started = await post(srv.base, "/api/runs", {
+    task: "Do the scripted E2E task",
+    mode: "consult",
+    provider: "mock",
+    workspace_id: workspaceId,
+    session,
+  });
+  assert.equal(started.status, 202);
+  return String(started.body.run_id);
+}
+
+/** One configured server + workspace + a run that parks its helper on a write. */
+async function parkedChildServer(model: HelperModel): Promise<{
+  srv: RunningServer;
+  ws: { root: string; cleanup: () => void };
+  runId: string;
+  childId: string;
+  approvalId: string;
+  events: AnyRecord[];
+}> {
+  const srv = await startServer({
+    providerOverrides: {
+      senior: new RecordingSenior([
+        { tool: SUBAGENT_TOOL_NAME, args: { task: "Write the helper note." } },
+      ]),
+      junior: new MockProvider(),
+    },
+  });
+  const ws = tmpdir("tb-subfollow-serve-ws-");
+  try {
+    await configureHelper(srv, model);
+    const wsId = await registerWorkspace(srv, ws.root);
+    const runId = await startRun(srv, wsId, "followup-route");
+    const events = await sseEvents(
+      srv.base,
+      `/api/runs/${runId}/events?after=0`,
+      (all) => all.some((event) => event.type === "approval_requested"),
+      15000,
+    );
+    const requested = events.find((event) => event.type === "approval_requested") as AnyRecord;
+    assert.ok(requested);
+    return {
+      srv,
+      ws,
+      runId,
+      childId: String(requested.subagent_id),
+      approvalId: String(requested.approval_id),
+      events,
+    };
+  } catch (exc) {
+    await srv.close();
+    ws.cleanup();
+    throw exc;
+  }
+}
+
+test("messages route: queued 200, bounded 400s, honest 404/409s, and released after settle", async () => {
+  const model = await startHelperModel();
+  const run = await parkedChildServer(model);
+  try {
+    const { srv, childId } = run;
+    // A parked child is exactly the case the composer is enabled for; the
+    // follow-up is queued and never reported as delivered.
+    for (let index = 1; index <= SUBAGENT_FOLLOWUP_QUEUE_MAX; index += 1) {
+      const accepted = await post(srv.base, `/api/subagents/${childId}/messages`, {
+        text: `Follow-up ${index}`,
+      });
+      assert.equal(accepted.status, 200);
+      assert.deepEqual(accepted.body, {
+        subagent_id: childId,
+        status: "queued",
+        pending: index,
+      });
+    }
+    const full = await post(srv.base, `/api/subagents/${childId}/messages`, {
+      text: "one too many",
+    });
+    assert.equal(full.status, 409);
+    assert.equal(full.body.detail, "follow-up queue is full (8 pending)");
+
+    // Bounded body validation with exact details.
+    const nonString = await post(srv.base, `/api/subagents/${childId}/messages`, { text: 42 });
+    assert.equal(nonString.status, 400);
+    assert.equal(nonString.body.detail, "text must be a string");
+    const empty = await post(srv.base, `/api/subagents/${childId}/messages`, { text: "   " });
+    assert.equal(empty.status, 400);
+    assert.equal(empty.body.detail, "text must be a non-empty string");
+    const tooLong = await post(srv.base, `/api/subagents/${childId}/messages`, {
+      text: "x".repeat(SUBAGENT_FOLLOWUP_TEXT_MAX_CHARS + 1),
+    });
+    assert.equal(tooLong.status, 400);
+    assert.equal(tooLong.body.detail, "text is too long (max 4000 chars)");
+
+    // Honest 404s: invalid and never-seen ids (never a path).
+    const malformed = await post(srv.base, "/api/subagents/not-an-id/messages", { text: "hi" });
+    assert.equal(malformed.status, 404);
+    const unknown = await post(
+      srv.base,
+      "/api/subagents/sub-0000000000000000/messages",
+      { text: "hi" },
+    );
+    assert.equal(unknown.status, 404);
+
+    // The queued texts are not in the transcript yet (the child is parked).
+    const whileParked = await get(srv.base, `/api/subagents/${childId}`);
+    assert.equal(whileParked.status, 200);
+    assert.equal(
+      whileParked.body.subagent.transcript.some(
+        (entry: AnyRecord) => entry.type === "message" && entry.origin,
+      ),
+      false,
+    );
+
+    // Interrupt: the queue is dropped and counted; a settled child is a 409.
+    assert.equal((await post(srv.base, `/api/subagents/${childId}/interrupt`)).status, 200);
+    const rest = await runUntilEnd(srv.base, run.runId, run.events.length);
+    assert.equal(rest.at(-1)?.type, "run_end");
+    assert.equal(rest.at(-1)?.status, "completed");
+    const settled = await post(srv.base, `/api/subagents/${childId}/messages`, { text: "late" });
+    assert.equal(settled.status, 409);
+    assert.equal(settled.body.detail, "helper already finished");
+
+    const log = logRows(new SubagentStore(path.join(srv.dir, "subagents")), childId);
+    assert.deepEqual(log.find((row) => row.type === "end")?.followups, {
+      delivered: 0,
+      dropped: SUBAGENT_FOLLOWUP_QUEUE_MAX,
+    });
+    // A second run never resurrects a settled child.
+    const reopened = await post(srv.base, `/api/subagents/${childId}/messages`, { text: "again" });
+    assert.equal(reopened.status, 409);
+  } finally {
+    await run.srv.close();
+    await model.close();
+    run.ws.cleanup();
+  }
+});
+
+test("messages route: a queued follow-up reaches the child after the approval, one origin row", async () => {
+  const report = "Wrote e2e-helper.txt; read the follow-up.";
+  const model = await startHelperModel(report);
+  const run = await parkedChildServer(model);
+  try {
+    const { srv, childId } = run;
+    assert.equal(model.requests.length, 1, "the child is parked on its first step");
+    const queued = await post(srv.base, `/api/subagents/${childId}/messages`, {
+      text: "Prefer notes.txt.",
+    });
+    assert.equal(queued.status, 200);
+    assert.deepEqual(queued.body, { subagent_id: childId, status: "queued", pending: 1 });
+    // Not delivered while parked: no second child provider request.
+    assert.equal(model.requests.length, 1);
+
+    const allowed = await post(
+      srv.base,
+      `/api/runs/${run.runId}/approvals/${run.approvalId}`,
+      { allow: true },
+    );
+    assert.equal(allowed.status, 200);
+    const rest = await runUntilEnd(srv.base, run.runId, run.events.length);
+    assert.equal(rest.at(-1)?.type, "run_end");
+    assert.equal(rest.at(-1)?.status, "completed");
+
+    // The follow-up arrived at the child's next step, after the tool result.
+    assert.equal(model.requests.length, 2);
+    const stepTwo = model.requests[1]!;
+    const messages = stepTwo.messages as AnyRecord[];
+    const last = messages[messages.length - 1]!;
+    assert.equal(last.role, "user");
+    assert.match(String(last.content), /^Follow-up from the operator:\nPrefer notes\.txt\.$/);
+    assert.equal(messages[messages.length - 2]?.role, "tool");
+
+    // Drawer data: the durable user row carries the additive origin, and the
+    // end row reports the delivery.
+    const detail = await get(srv.base, `/api/subagents/${childId}`);
+    assert.equal(detail.status, 200);
+    const originRow = detail.body.subagent.transcript.find(
+      (entry: AnyRecord) => entry.type === "message" && entry.origin === "operator",
+    );
+    assert.ok(originRow);
+    assert.equal(originRow.text, "Prefer notes.txt.");
+    assert.equal(detail.body.subagent.status, "completed");
+    const log = logRows(new SubagentStore(path.join(srv.dir, "subagents")), childId);
+    assert.deepEqual(log.find((row) => row.type === "end")?.followups, {
+      delivered: 1,
+      dropped: 0,
+    });
+    // No new subagent event type: the stream keeps started/activity/completed.
+    const types = new Set(
+      [...run.events, ...rest]
+        .filter((event) => String(event.type).startsWith("subagent_"))
+        .map((event) => event.type),
+    );
+    assert.deepEqual([...types].sort(), [
+      "subagent_activity",
+      "subagent_completed",
+      "subagent_started",
+    ]);
+  } finally {
+    await run.srv.close();
+    await model.close();
+    run.ws.cleanup();
+  }
+});
