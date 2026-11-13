@@ -5,6 +5,7 @@
  *   node tests/run-all.ts
  */
 import "./protocol.test.ts";
+import "./config.test.ts";
 import "./harness.test.ts";
 import "./payloadrepair.test.ts";
 import "./relaxedparse.test.ts";

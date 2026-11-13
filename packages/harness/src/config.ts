@@ -65,7 +65,19 @@ export interface Config {
   juniorSystem: string;
   maxRounds: number;
   temperature: number;
+  /**
+   * Per-attempt provider timeout in seconds. Must be a finite integer >= 0
+   * (0 stays legal: existing test seams and `TWO_BROTHERS_TIMEOUT=0` pin an
+   * immediate timeout); `resolveConfig` rejects anything else before a run.
+   */
   timeout: number;
+  /**
+   * Retries after a failed model call. Must be a finite integer between 0
+   * and {@link MAX_CONFIG_RETRIES}: the provider precomputes a backoff delay
+   * array of `retries` entries, so an unbounded value could allocate an
+   * enormous array before the first request. `resolveConfig` rejects
+   * anything else before a run.
+   */
   retries: number;
   mode: "consult" | "work" | "auto";
   verbose: boolean;
@@ -178,6 +190,15 @@ export const DEFAULTS: Omit<Config, "seniorSystem" | "juniorSystem"> = {
   approvalMode: DEFAULT_APPROVAL_MODE,
 };
 
+/**
+ * Upper bound for `--retries` / `TWO_BROTHERS_RETRIES`. The provider
+ * precomputes a backoff delay array with `retries` entries before its first
+ * request, so an unbounded value could allocate an enormous array (and a
+ * runaway backoff schedule) from a single typo. `resolveConfig` rejects
+ * values above this cap.
+ */
+export const MAX_CONFIG_RETRIES = 32;
+
 const ENV_KEYS: Record<string, string> = {
   provider: "TWO_BROTHERS_PROVIDER",
   kind: "TWO_BROTHERS_PROVIDER_KIND",
@@ -249,6 +270,20 @@ function coerce(field: string, value: unknown): unknown {
       String(value).trim().toLowerCase() === "1" ||
       String(value).trim().toLowerCase() === "yes" ||
       String(value).trim().toLowerCase() === "on";
+  }
+  // `--timeout` and `--retries` feed the provider retry loop (its backoff
+  // schedule is an array of `retries` delays), so they parse strictly: a
+  // silently truncated "2.5" or "12abc" must not become a config the
+  // operator never wrote — the central check in `resolveConfig` rejects what
+  // this yields. Every other int field keeps the tolerant parseInt.
+  if (field === "timeout" || field === "retries") {
+    const text = String(value).trim();
+    if (text === "") return Number.NaN;
+    const parsed = Number(text);
+    // On failure keep the operator's original spelling (a string): the
+    // rejection below renders it, so the error names what was actually
+    // written instead of a coerced shadow like "1e+100".
+    return Number.isInteger(parsed) ? parsed : text;
   }
   if ((INT_FIELDS as readonly string[]).includes(field)) return Number.parseInt(String(value), 10);
   if ((FLOAT_FIELDS as readonly string[]).includes(field)) return Number.parseFloat(String(value));
@@ -519,7 +554,45 @@ export function resolveConfig(args: Args = {}): Config {
         `${ANTHROPIC_MIN_THINKING_BUDGET} tokens; --thinking-budget <n>)`,
     );
   }
+  // Per-attempt timeout and the retry budget feed the provider's retry loop
+  // (its backoff schedule is an array of `retries` delays), so both must be
+  // finite integers in range. Without this, a bare parseInt let "abc" become
+  // NaN — silently zero retries, or a timeout the registry could not classify
+  // — and an enormous retries value could allocate a huge backoff array
+  // before the first request. 0 stays legal for both (single attempt /
+  // existing test seams).
+  if (
+    typeof cfg.timeout !== "number" ||
+    !Number.isInteger(cfg.timeout) ||
+    cfg.timeout < 0
+  ) {
+    throw new Error(
+      `invalid timeout: ${configErrorValue(cfg.timeout)} ` +
+        "(use a non-negative integer of seconds; --timeout <s> / TWO_BROTHERS_TIMEOUT)",
+    );
+  }
+  if (
+    typeof cfg.retries !== "number" ||
+    !Number.isInteger(cfg.retries) ||
+    cfg.retries < 0 ||
+    cfg.retries > MAX_CONFIG_RETRIES
+  ) {
+    throw new Error(
+      `invalid retries: ${configErrorValue(cfg.retries)} ` +
+        `(use an integer from 0 to ${MAX_CONFIG_RETRIES}; ` +
+        "--retries <n> / TWO_BROTHERS_RETRIES)",
+    );
+  }
   return cfg;
+}
+
+/**
+ * Render one rejected config value inside an error message, clipped so an
+ * enormous env var cannot produce an unbounded diagnostic.
+ */
+function configErrorValue(value: unknown): string {
+  const text = typeof value === "string" ? value : String(value);
+  return text.length > 48 ? `${text.slice(0, 48)}…<clipped ${text.length} chars>` : text;
 }
 
 /**
