@@ -4,19 +4,23 @@ Local working handoff. Gitignored; not project documentation. The frozen
 historical snapshot is `docs/history/handoff.md`; this file is the current
 state for the next session.
 
-Last updated: **2026-11-14**. Final verified local checkpoint: **`3f07d316`**
-(`feat(cli): integrate strict plugin selection parity`). **Local-only —
-nothing pushed**; `origin/main` is still `7f0d2c4` (O1, CI #98 green). Since
-the 2026-11-13 O1 handoff, the O2/M/C observation-parity slices and the whole
-improvement-lane wave (cooperation correctness, LLM hardening, web fixes,
-bounded MCP/run history, plugin bundles + strict parity, E2E cleanup and
-skip-registry) were integrated onto `main`. A cleanup incident on 2026-11-14
-(**known cause: an NTFS junction traversal**) emptied `packages/harness` in
-the main checkout; tracked files were restored and deps/dist rebuilt, but
-untracked `packages/harness/sessions` content — sessions, settings incl.
-sealed keys, runtime sidecars/subagent logs — was **permanently lost**. See
-**Incident (2026-11-14)** below. The live server is intended to be rebuilt
-and restarted after the docs lane; no live state is claimed in this file.
+Last updated: **2026-11-14**. **Validated checkpoint: `3f07d316`** — every
+gate count in this file was recorded there (`feat(cli): integrate strict
+plugin selection parity`). Validation happened at that commit; local `main`
+has since moved on with **docs-only follow-ups** — `668536a`, `987f316`,
+`ba1e0e4` (only `docs/release.md` / `docs/testing.md`) — plus this handoff
+once merged. **Nothing is pushed**; `origin/main` is still `7f0d2c4` (O1,
+CI #98 green). Since the 2026-11-13 O1 handoff, the O2/M/C
+observation-parity slices and the whole improvement-lane wave (cooperation
+correctness, LLM hardening, web fixes, bounded MCP/run history, plugin
+bundles + strict parity, E2E cleanup and skip-registry) were integrated and
+validated. A cleanup incident on 2026-11-14 (**known cause: an NTFS junction
+traversal**) emptied `packages/harness` in the main checkout; tracked files
+were restored and deps/dist rebuilt, but untracked `packages/harness/sessions`
+content — sessions, settings incl. sealed keys, runtime sidecars/subagent
+logs — was **permanently lost**. See **Incident (2026-11-14)** below. The
+live server is intended to be rebuilt and restarted after the docs lane; no
+live state is claimed in this file.
 
 ## Repository at a glance
 
@@ -36,10 +40,12 @@ and restarted after the docs lane; no live state is claimed in this file.
 
 | Item | Value |
 |---|---|
-| Branch | `main`, clean, **local-only / unpushed** |
-| HEAD | local **`3f07d316`** (final checkpoint); origin/main **`7f0d2c4`** (O1, CI #98 green) |
+| Branch | `main` — **local-only / unpushed** |
+| HEAD | local **`ba1e0e4`** (docs-only follow-ups + this handoff); origin/main **`7f0d2c4`** (O1, CI #98 green) |
+| Validated checkpoint | **`3f07d316`** — all gate counts below were recorded there; the follow-ups touched docs only |
+| Docs follow-ups | `668536a` → `987f316` → `ba1e0e4` (only `docs/release.md` / `docs/testing.md`) |
 | Previous | `f946238` — O2 merge; `1cc25d4` — slice M; `02c0ad9` — slice C; `7f0d2c4` — O1 |
-| CI | runs #90–#98 success (latest pushed `7f0d2c4`); `3f07d316` unpushed — no CI yet |
+| CI | runs #90–#98 success (latest pushed `7f0d2c4`); everything past it unpushed — no CI yet |
 | Package suite (Windows) | **2 461 / 2 453 pass / 0 fail / 8 platform skips** — `npm test` AND `test:spawn` |
 | Package suite (WSL) | Node 22 + Node 24: **2 461 / 2 460 pass / 0 fail / 1 env skip**, both modes on each |
 | Web suite | **608/608** |
@@ -64,8 +70,10 @@ Live setup (intended, once the server is rebuilt):
 
 ### Final checkpoint — integrated lanes (2026-11-14)
 
-Everything below is on `main` at `3f07d316` (local-only). Themes with
-landmark commits (implementation → integration):
+The lanes below were integrated and **validated at `3f07d316`**. Local
+`main` has since added only docs follow-ups (`668536a`, `987f316`, `ba1e0e4`)
+and this handoff — no code or test changes past the validated checkpoint.
+Themes with landmark commits (implementation → integration):
 
 - **Observation parity COMPLETE:** O2 TUI helper controls (`f963707`),
   M per-call model/effort overrides (`1cc25d4`), C helper usage/cache/cost
@@ -372,8 +380,8 @@ user-profile Temp (documented in docs/testing.md).
 
 ## Subagent architecture notes for the next session
 
-- `HarnessOptions.subagents` is only set by `serve`/web; `run`/`chat`/`tui`
-  do not expose the tool.
+- `HarnessOptions.subagents` is set by `serve`/web, and by the **TUI for TUI
+  turns only**; `run`/`chat` do not expose the tool.
 - `TwoBrothersHarness.runSubagentTool` resolves the child:
   configured `settings.endpoint` → `providerFromEndpoint` (preset/manual
   route, fresh instance); otherwise the role's endpoint/shared config.
@@ -461,10 +469,11 @@ gate. Do not run the live server and the smoke gate at the same time.
 1. **Restore live state (before any live work)** — re-enter provider API
    keys in Settings (sealed keys lost in the 2026-11-14 incident), rebuild +
    `sync-web` + restart `serve` on :8600, re-create check sessions.
-2. **0.0.2 release engineering** — only with explicit permission: push
-   `main` (`3f07d316`), watch CI, bump version, curated changelog, release
-   docs, rehearsal + independent E2E lanes (browser matrix, CLI source +
-   `--dist`, packed-tarball clean install, WSL), tag/publish/promote.
+2. **0.0.2 release engineering** — only with explicit permission: push the
+   current `main` (whatever its tip is at release time), watch CI, bump
+   version, curated changelog, release docs, rehearsal + independent E2E
+   lanes (browser matrix, CLI source + `--dist`, packed-tarball clean
+   install, WSL), tag/publish/promote.
 3. **OAuth-only subscription sign-in** — large; API-key plans only today.
 4. **Per-turn cache statistics / Senior+Junior split** — small additive
    prompt-audit/usage field; the combined footer percentage already works.

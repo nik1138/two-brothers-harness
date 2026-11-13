@@ -7,16 +7,18 @@ Last updated: **2026-11-14**.
 
 ## Current state
 
-- **local `main` = `3f07d316`** — final verified checkpoint (strict plugin
-  selection parity), **local-only, NOT pushed**; `origin/main` = `7f0d2c4`
-  (O1, CI #98 green). Since the 2026-11-13 O1 wind-down, integrated on main:
-  O2 TUI helper controls (`f963707`), M per-call overrides (`1cc25d4`), C
-  helper roll-up (`02c0ad9`), and the improvement-lane wave — cooperation
-  correctness (`3be613c`), TUI helper-overlay correctness (`281f6a1`),
-  provider/transport hardening (`9b6b211`, `facb6bf`, `cd45f65`, `6b65876`),
-  web fixes (`5a8aee0`, `a850b54`, `0a33154`, `f9468f6`, `846b911`),
-  bounded MCP shutdown + run history (`fcb7377`, `9702476`), plugin
-  registration/timeouts/bundles/strict parity (`fe74921`, `029659c`,
+- **All gates were validated at `3f07d316`** (strict plugin selection parity
+  checkpoint). Local `main` now also carries **docs-only follow-ups**
+  `668536a`, `987f316`, `ba1e0e4` (only `docs/release.md` /
+  `docs/testing.md`) plus this handoff once merged — **local-only, NOT
+  pushed**; `origin/main` = `7f0d2c4` (O1, CI #98 green). Integrated and
+  validated: O2 TUI helper controls (`f963707`), M per-call overrides
+  (`1cc25d4`), C helper roll-up (`02c0ad9`), and the improvement-lane wave —
+  cooperation correctness (`3be613c`), TUI helper-overlay correctness
+  (`281f6a1`), provider/transport hardening (`9b6b211`, `facb6bf`, `cd45f65`,
+  `6b65876`), web fixes (`5a8aee0`, `a850b54`, `0a33154`, `f9468f6`,
+  `846b911`), bounded MCP shutdown + run history (`fcb7377`, `9702476`),
+  plugin registration/timeouts/bundles/strict parity (`fe74921`, `029659c`,
   `975e42e`, `dd54392`), E2E backend cleanup + skip registry (`b631530`,
   `d248e8d`), plus infra/test-isolation fixes.
 - **Incident 2026-11-14 (cause known: NTFS junction traversal):** an earlier
@@ -46,12 +48,13 @@ Last updated: **2026-11-14**.
 - [ ] **Restore live state** — re-enter provider API keys in Settings
       (sealed keys lost in the 2026-11-14 incident), rebuild + restart
       `serve` on :8600, re-create check sessions.
-- [ ] **0.0.2 release** — only with explicit owner permission. Push `main`
-      (`3f07d316`), watch CI, bump version, curate the changelog, update
-      release docs, run `scripts/release-rehearsal.ps1`, then independent
-      E2E lanes: browser matrix, CLI source + `--dist`, packed-tarball clean
-      install, WSL Linux typecheck + full suite. Tag/publish/promote only
-      after all PASS.
+- [ ] **0.0.2 release** — only with explicit owner permission. Push the
+      current `main` (whatever its tip is at release time), watch CI, bump
+      version, curate the changelog, update release docs, run
+      `scripts/release-rehearsal.ps1`, then independent E2E lanes:
+      browser matrix, CLI source + `--dist`, packed-tarball clean install,
+      WSL Linux typecheck + full suite. Tag/publish/promote only after all
+      PASS.
 - [x] **Watch CI** for `32fc970`/`7cdcdce` — DONE: both red, root cause
       `c6e41b4` (not the subagent wave), fixed and pushed as `809de6c`;
       run #90 GREEN on all three legs (2026-11-12).
@@ -79,8 +82,8 @@ Last updated: **2026-11-14**.
        `.tmp/research/subagent-observation-design.md` §14, sliced
        O1→O2→M→C, F/D carved out. **O1 SHIPPED `7f0d2c4`; O2 SHIPPED
        `f963707`; M SHIPPED `1cc25d4`; C SHIPPED `02c0ad9`** — all merged to
-       local `main` at `3f07d316`.)* **F forked-context and D depth>1 remain
-       DEFERRED** to their own designs; no new designs started.
+       local `main` and validated at `3f07d316`.)* **F forked-context and D
+       depth>1 remain DEFERRED** to their own designs; no new designs started.
 4. [x] **Real `auto` + Senior solo decision.** **SHIPPED 2026-11-13**
        (`bd5c6d7` + `dcd9f0a`; design + owner decisions:
        `.tmp/research/auto-solo-design.md`). Model-declared routing,
