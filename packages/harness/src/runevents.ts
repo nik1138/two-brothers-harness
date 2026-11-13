@@ -105,6 +105,12 @@ export interface SubagentStartedEvent extends RuntimeEventMeta {
   task: string;
   /** Epoch milliseconds, for a stable duration across reloads. */
   started_at: number;
+  /**
+   * Additive: true only for a `background:true` spawn (the parent continued
+   * without waiting). Absent for every synchronous spawn, so existing event
+   * bytes are unchanged.
+   */
+  background?: boolean;
 }
 
 /** Additive tree event: one child message/tool/status step completed. */

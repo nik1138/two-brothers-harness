@@ -227,6 +227,7 @@ import {
   CLIP_EVIDENCE_CHARS,
   REASONING_EVENT_MAX_CHARS,
   type RuntimeEvent,
+  type SubagentCompletedEvent,
 } from "./runevents.ts";
 import {
   formatSpillRead,
@@ -253,7 +254,18 @@ import {
   deriveSubagentLabel,
   newSubagentId,
   runSubagent,
+  INTERRUPT_AGENT_TOOL_DESCRIPTION,
+  INTERRUPT_AGENT_TOOL_NAME,
+  INTERRUPT_AGENT_TOOL_PARAMETERS,
+  LIST_AGENTS_TOOL_DESCRIPTION,
+  LIST_AGENTS_TOOL_NAME,
+  LIST_AGENTS_TOOL_PARAMETERS,
+  SEND_MESSAGE_TOOL_DESCRIPTION,
+  SEND_MESSAGE_TOOL_NAME,
+  SEND_MESSAGE_TOOL_PARAMETERS,
+  SUBAGENT_BACKGROUND_NOTE,
   SUBAGENT_CHILD_TOOL_NAMES,
+  SUBAGENT_CONTROL_CALL_MAX_PER_RUN,
   SUBAGENT_DEFAULT_MAX_ACTIVE,
   SUBAGENT_DEFAULT_MAX_PER_RUN,
   SUBAGENT_APPROVAL_ACTION_MAX_CHARS,
@@ -266,7 +278,11 @@ import {
   SUBAGENT_MAX_LABEL_CHARS,
   SUBAGENT_MAX_TASK_CHARS,
   SUBAGENT_READ_TOOL_NAMES,
+  SUBAGENT_REPORT_TOOL_DESCRIPTION,
+  SUBAGENT_REPORT_TOOL_NAME,
+  SUBAGENT_REPORT_TOOL_PARAMETERS,
   SUBAGENT_RESULT_MAX_CHARS,
+  SUBAGENT_SHUTDOWN_GRACE_MS,
   SUBAGENT_SYSTEM_PROMPT,
   SUBAGENT_TOOL_DESCRIPTION,
   SUBAGENT_TOOL_NAME,
@@ -279,6 +295,7 @@ import {
   type SubagentFollowUp,
   type SubagentFollowUpFrom,
   type SubagentFollowUpSendResult,
+  type SubagentRole,
   type SubagentSettings,
   type SubagentStatus,
   type SubagentTranscriptEntry,
@@ -1422,9 +1439,12 @@ interface ChildControl {
   label: string;
   background: boolean;
   startedAt: number;
+  /** The child's role/model, kept for `list_agents`/`subagent_report` rows. */
+  role: SubagentRole;
+  model: string;
   controller: AbortController;
-  /** Who interrupted this child; null until an interrupt arrives. */
-  cancelledBy: "operator" | "senior" | null;
+  /** Who ended this child early; null until an interrupt/run-end reap arrives. */
+  cancelledBy: "operator" | "senior" | "parent_run" | null;
   /** Live status for the handle; set to its terminal value before release. */
   status: SubagentStatus;
   /** Follow-ups accepted but not yet delivered (bounded, drained between steps). */
@@ -1434,6 +1454,27 @@ interface ChildControl {
   dropped: number;
   /** Latest child-conversation size estimate (chars) for the send-time guard. */
   contextChars: number;
+  /** Terminal outcome, kept for the rest of the run (`subagent_report`). */
+  outcome: SubagentOutcome | null;
+  /** True once `subagent_report` returned this child's terminal payload. */
+  reported: boolean;
+  /** True once this child's single `subagent_completed` event was emitted. */
+  terminalEmitted: boolean;
+  /** Latest bounded activity line for `list_agents` (never the task text). */
+  lastActivity: string | null;
+  /** The background settle promise; null for a synchronous child. */
+  settled: Promise<void> | null;
+}
+
+/** What one settled child leaves behind for the rest of the run. */
+interface SubagentOutcome {
+  status: Exclude<SubagentStatus, "running">;
+  report: string;
+  error?: string;
+  usage: UsageTotals;
+  durationMs: number;
+  toolCalls: number;
+  followups?: { delivered: number; dropped: number };
 }
 
 export class TwoBrothersHarness {
@@ -1453,6 +1494,14 @@ export class TwoBrothersHarness {
   private subagentRuns = 0;
   /** Children currently executing (a guard for a future parallel path). */
   private subagentActive = 0;
+  /**
+   * Every child this run spawned, keyed by id, kept for the rest of the run so
+   * the model-facing `list_agents`/`subagent_report` tools can still reach a
+   * settled child (a report is final, not unlisted). Cleared at run start.
+   */
+  private childRecords = new Map<string, ChildControl>();
+  /** Helper-control calls served this run (`SUBAGENT_CONTROL_CALL_MAX_PER_RUN`). */
+  private controlCalls = 0;
   /** Spill storage, or null when `options.spill` is unset (current clipping). */
   private readonly spillStore: SpillStore | null;
   /** Fail-soft operator-steering warnings (folded into `result.warnings`). */
@@ -2220,7 +2269,19 @@ export class TwoBrothersHarness {
       ...(this.options.tools ?? []).filter(verifyName),
       ...(this.options.seniorTools ?? []),
       ...(this.spillReadOffered() ? [this.spillReadTool()] : []),
-      ...(this.options.subagents !== undefined ? [this.subagentTool(state)] : []),
+      // Helper surface, gated exactly like the `subagent` tool itself: a
+      // surface without `HarnessOptions.subagents` (run/chat/tui) keeps a
+      // byte-identical Senior prompt, and a child's filtered belt never carries
+      // any of these names.
+      ...(this.options.subagents !== undefined
+        ? [
+            this.subagentTool(state),
+            this.listAgentsTool(),
+            this.sendMessageTool(),
+            this.interruptAgentTool(),
+            this.subagentReportTool(),
+          ]
+        : []),
       this.todoWriteTool(state),
     ];
   }
@@ -2383,18 +2444,27 @@ export class TwoBrothersHarness {
       label: control.label,
       background: control.background,
       startedAt: control.startedAt,
-      interrupt: (by) => {
-        if (control.status !== "running" || control.controller.signal.aborted) {
-          return false;
-        }
-        control.cancelledBy = by;
-        control.controller.abort();
-        return true;
-      },
+      interrupt: (by) => this.interruptChild(control, by),
       send: (text, from) => this.queueFollowUp(control, text, from),
       pendingFollowUps: () => control.followups.length,
       status: () => control.status,
     };
+  }
+
+  /**
+   * Abort one child only — never its parent run. Idempotent: false when the
+   * child already settled or was already interrupted.
+   */
+  private interruptChild(
+    control: ChildControl,
+    by: "operator" | "senior" | "parent_run",
+  ): boolean {
+    if (control.status !== "running" || control.controller.signal.aborted) {
+      return false;
+    }
+    control.cancelledBy = by;
+    control.controller.abort();
+    return true;
   }
 
   /**
@@ -2434,12 +2504,255 @@ export class TwoBrothersHarness {
   }
 
   /**
-   * Start, await, persist and report one child. Validation errors and child
-   * failures are returned as a JSON tool result (the parent model can react);
-   * an aborted parent signal is re-thrown after the child settles so the parent
-   * unwinds through the shared cancellation path. A child-scoped interrupt
-   * cancels only this child: the parent tool result is an honest `cancelled`
-   * payload and the parent run keeps going.
+   * The model-facing helper-control tools (slice B). They exist ONLY on the
+   * Senior's belt when `HarnessOptions.subagents` is set — the same gate as the
+   * `subagent` tool — so `run`/`chat`/`tui` keep a byte-identical Senior prompt,
+   * and a child's filtered belt never carries any of these names. Every result
+   * is an ordinary bounded tool result (never a new event type), so the repeat
+   * guard still sees a tight polling loop.
+   */
+  private listAgentsTool(): Tool {
+    return {
+      name: LIST_AGENTS_TOOL_NAME,
+      description: LIST_AGENTS_TOOL_DESCRIPTION,
+      parameters: LIST_AGENTS_TOOL_PARAMETERS,
+      execute: () => {
+        const refused = this.consumeControlCall(LIST_AGENTS_TOOL_NAME);
+        if (refused !== null) return refused;
+        const settings = this.options.subagents;
+        const maxPerRun = settings?.maxPerRun ?? SUBAGENT_DEFAULT_MAX_PER_RUN;
+        const maxActive = settings?.maxActive ?? SUBAGENT_DEFAULT_MAX_ACTIVE;
+        // Bounded by the per-run child cap; the task text is deliberately never
+        // included (the brief is already in the child log and the tree).
+        const controls = [...this.childRecords.values()].slice(0, Math.max(1, maxPerRun));
+        const agents = controls.map((control) => ({
+          id: control.id,
+          label: control.label,
+          status: control.status,
+          background: control.background,
+          role: control.role,
+          model: control.model,
+          elapsed_ms: Math.max(0, Date.now() - control.startedAt),
+          last_activity: control.lastActivity ?? null,
+          pending_followups: control.followups.length,
+          reported: control.reported,
+        }));
+        return JSON.stringify({
+          tool: LIST_AGENTS_TOOL_NAME,
+          scope: "helpers",
+          agents,
+          total: agents.length,
+          running: agents.filter((agent) => agent.status === "running").length,
+          limits: { max_per_run: maxPerRun, max_active: maxActive },
+          note: "A helper's report is only available through subagent_report.",
+        });
+      },
+    };
+  }
+
+  /**
+   * Queue one Senior follow-up on a live helper. Acceptance is always `queued`
+   * (never "delivered") and every refusal names the helper and the next step —
+   * the model is never told a text was read when it was not.
+   */
+  private sendMessageTool(): Tool {
+    return {
+      name: SEND_MESSAGE_TOOL_NAME,
+      description: SEND_MESSAGE_TOOL_DESCRIPTION,
+      parameters: SEND_MESSAGE_TOOL_PARAMETERS,
+      execute: (args) => {
+        const refused = this.consumeControlCall(SEND_MESSAGE_TOOL_NAME);
+        if (refused !== null) return refused;
+        const agentId = typeof args.agent_id === "string" ? args.agent_id.trim() : "";
+        const control = this.childRecords.get(agentId);
+        if (control === undefined) {
+          const count = this.childRecords.size;
+          return this.controlError(
+            SEND_MESSAGE_TOOL_NAME,
+            `send_message: unknown helper ${agentId === "" ? "(none)" : agentId}; this run has ${count} helper${count === 1 ? "" : "s"} — call list_agents`,
+          );
+        }
+        const text = typeof args.text === "string" ? args.text.trim() : "";
+        if (text === "") {
+          return this.controlError(
+            SEND_MESSAGE_TOOL_NAME,
+            "send_message: text must be a non-empty string",
+          );
+        }
+        if (text.length > SUBAGENT_FOLLOWUP_TEXT_MAX_CHARS) {
+          return this.controlError(
+            SEND_MESSAGE_TOOL_NAME,
+            `send_message: text is too long (${text.length} > ${SUBAGENT_FOLLOWUP_TEXT_MAX_CHARS} chars)`,
+          );
+        }
+        if (control.status !== "running") {
+          return this.controlError(
+            SEND_MESSAGE_TOOL_NAME,
+            `send_message: helper ${agentId} already ${control.status}; its report is final — call subagent_report`,
+          );
+        }
+        const queued = this.queueFollowUp(control, text, "senior");
+        if (queued.ok) {
+          return JSON.stringify({
+            tool: SEND_MESSAGE_TOOL_NAME,
+            agent_id: agentId,
+            status: "queued",
+            pending: queued.pending,
+            delivered_at: "the helper's next step",
+          });
+        }
+        switch (queued.reason) {
+          case "queue_full":
+            return this.controlError(
+              SEND_MESSAGE_TOOL_NAME,
+              `send_message: helper ${agentId} has ${SUBAGENT_FOLLOWUP_QUEUE_MAX} follow-ups queued; wait for a step or interrupt it`,
+            );
+          case "context_full":
+            return this.controlError(
+              SEND_MESSAGE_TOOL_NAME,
+              `send_message: helper ${agentId} context is full (${queued.chars ?? 0} chars); its report is due`,
+            );
+          case "not_running":
+            return this.controlError(
+              SEND_MESSAGE_TOOL_NAME,
+              `send_message: helper ${agentId} already finished; its report is final — call subagent_report`,
+            );
+          default:
+            return this.controlError(
+              SEND_MESSAGE_TOOL_NAME,
+              "send_message: text must be a non-empty string",
+            );
+        }
+      },
+    };
+  }
+
+  /**
+   * Stop one live helper. Returns immediately — the child's own
+   * `subagent_completed` and `end` row are the truth, read with
+   * `subagent_report`. Never touches the parent run (R1).
+   */
+  private interruptAgentTool(): Tool {
+    return {
+      name: INTERRUPT_AGENT_TOOL_NAME,
+      description: INTERRUPT_AGENT_TOOL_DESCRIPTION,
+      parameters: INTERRUPT_AGENT_TOOL_PARAMETERS,
+      execute: (args) => {
+        const refused = this.consumeControlCall(INTERRUPT_AGENT_TOOL_NAME);
+        if (refused !== null) return refused;
+        const agentId = typeof args.agent_id === "string" ? args.agent_id.trim() : "";
+        const control = this.childRecords.get(agentId);
+        if (control === undefined) {
+          return this.controlError(
+            INTERRUPT_AGENT_TOOL_NAME,
+            `interrupt_agent: unknown helper ${agentId === "" ? "(none)" : agentId}; call list_agents`,
+          );
+        }
+        const reason =
+          typeof args.reason === "string" ? clipText(sanitizeOutput(args.reason), 200) : "";
+        const interrupted = this.interruptChild(control, "senior");
+        return JSON.stringify({
+          tool: INTERRUPT_AGENT_TOOL_NAME,
+          agent_id: agentId,
+          from: "senior",
+          status: interrupted ? "interrupted" : "already_finished",
+          ...(reason !== "" ? { reason } : {}),
+        });
+      },
+    };
+  }
+
+  /**
+   * Read one helper's report. On a running helper this is an honest status, not
+   * an error; on a settled helper it is the full bounded report and asking
+   * twice returns the same text. This call is the ONLY way a helper's report
+   * enters the parent's context (no wake, no envelope).
+   */
+  private subagentReportTool(): Tool {
+    return {
+      name: SUBAGENT_REPORT_TOOL_NAME,
+      description: SUBAGENT_REPORT_TOOL_DESCRIPTION,
+      parameters: SUBAGENT_REPORT_TOOL_PARAMETERS,
+      execute: (args) => {
+        const refused = this.consumeControlCall(SUBAGENT_REPORT_TOOL_NAME);
+        if (refused !== null) return refused;
+        const agentId = typeof args.agent_id === "string" ? args.agent_id.trim() : "";
+        const control = this.childRecords.get(agentId);
+        if (control === undefined) {
+          return this.controlError(
+            SUBAGENT_REPORT_TOOL_NAME,
+            `subagent_report: unknown helper ${agentId === "" ? "(none)" : agentId}; call list_agents`,
+          );
+        }
+        if (control.status === "running") {
+          return JSON.stringify({
+            tool: SUBAGENT_REPORT_TOOL_NAME,
+            agent_id: agentId,
+            status: "running",
+            elapsed_ms: Math.max(0, Date.now() - control.startedAt),
+            last_activity: control.lastActivity ?? null,
+            pending_followups: control.followups.length,
+            note: "Not ready. Do not poll in a loop; do other work and ask again.",
+          });
+        }
+        control.reported = true;
+        const outcome = control.outcome;
+        if (outcome === null) {
+          return JSON.stringify({
+            tool: SUBAGENT_REPORT_TOOL_NAME,
+            agent_id: agentId,
+            status: control.status,
+            note: "The helper just settled; ask again for its report.",
+          });
+        }
+        return JSON.stringify({
+          tool: SUBAGENT_REPORT_TOOL_NAME,
+          subagent_id: control.id,
+          label: control.label,
+          role: control.role,
+          model: control.model,
+          status: outcome.status,
+          ...(outcome.status === "completed"
+            ? { report: outcome.report.slice(0, SUBAGENT_RESULT_MAX_CHARS) }
+            : {}),
+          ...(outcome.error !== undefined ? { error: outcome.error } : {}),
+          usage: outcome.usage,
+          duration_ms: outcome.durationMs,
+          tool_calls: outcome.toolCalls,
+          ...(outcome.followups !== undefined && outcome.followups.dropped > 0
+            ? { followups_dropped: outcome.followups.dropped }
+            : {}),
+          ...(control.background ? { background: true } : {}),
+        });
+      },
+    };
+  }
+
+  /**
+   * Charge one helper-control call to the per-run budget. Returns the honest
+   * refusal JSON once the budget is spent (and for every later call), or null
+   * when the call may be served.
+   */
+  private consumeControlCall(tool: string): string | null {
+    this.controlCalls += 1;
+    if (this.controlCalls <= SUBAGENT_CONTROL_CALL_MAX_PER_RUN) return null;
+    return this.controlError(
+      tool,
+      `helper control budget reached (${SUBAGENT_CONTROL_CALL_MAX_PER_RUN} calls this run)`,
+    );
+  }
+
+  /** One bounded model-facing control error (never a thrown tool failure). */
+  private controlError(tool: string, error: string): string {
+    return JSON.stringify({ tool, status: "error", error });
+  }
+
+  /**
+   * The model-facing `subagent` tool: spawn one isolated helper. Synchronous by
+   * default — the call waits for the bounded report and returns it. With
+   * `background:true` it returns `{status:"started"}` immediately and the report
+   * is only readable through `subagent_report`; the helper is cancelled when
+   * this run ends.
    */
   private async runSubagentTool(
     state: CooperationState,
@@ -2472,6 +2785,9 @@ export class TwoBrothersHarness {
     const rawLabel = typeof args.label === "string" ? args.label.trim() : "";
     const label = (rawLabel || deriveSubagentLabel(task)).slice(0, SUBAGENT_MAX_LABEL_CHARS);
     const role: "senior" | "junior" = args.role === "senior" ? "senior" : "junior";
+    // Opt-in per call and default false: `background` absent/false keeps the
+    // exact synchronous contract (the parent waits for the report).
+    const background = args.background === true;
     const maxPerRun = settings.maxPerRun ?? SUBAGENT_DEFAULT_MAX_PER_RUN;
     const maxActive = settings.maxActive ?? SUBAGENT_DEFAULT_MAX_ACTIVE;
     if (this.subagentRuns >= maxPerRun) {
@@ -2485,7 +2801,7 @@ export class TwoBrothersHarness {
       return JSON.stringify({
         tool: SUBAGENT_TOOL_NAME,
         status: "error",
-        error: `subagent: too many active helpers (${maxActive}); wait for one to finish`,
+        error: `subagent: too many active helpers (${maxActive}); call list_agents to see what is running (or wait for one to finish), then subagent_report or interrupt_agent`,
       });
     }
 
@@ -2496,14 +2812,16 @@ export class TwoBrothersHarness {
       settings.providerFactory?.(role) ?? this.buildSubagentProvider(role, configured);
     const startedAt = Date.now();
     // One control per child. The parent run signal decides whether the parent
-    // unwinds; the child's own controller exists so the operator (and, in a
-    // later slice, the Senior) can stop this helper without touching the run.
+    // unwinds; the child's own controller exists so the operator and the Senior
+    // can stop this helper without touching the run.
     const control: ChildControl = {
       id,
       runId: settings.runId ?? null,
       label,
-      background: false,
+      background,
       startedAt,
+      role,
+      model,
       controller: new AbortController(),
       cancelledBy: null,
       status: "running",
@@ -2511,15 +2829,74 @@ export class TwoBrothersHarness {
       delivered: 0,
       dropped: 0,
       contextChars: 0,
+      outcome: null,
+      reported: false,
+      terminalEmitted: false,
+      lastActivity: null,
+      settled: null,
     };
     const parentSignal = signal;
+    settings.controls?.register(this.childControlHandle(control));
+    this.subagentRuns += 1;
+    this.subagentActive += 1;
+    this.childRecords.set(id, control);
+    const run = this.runChild(state, { settings, control, task, provider, parentSignal });
+    if (!background) {
+      // The parent waits for the bounded report, byte-identically to before.
+      return run;
+    }
+    // The parent continues now. The settle promise is kept for the run-end
+    // reap (and for the bounded settle grace); a settle failure cannot be
+    // returned to a tool call that already answered, so it goes to the
+    // provider-warning channel instead of being swallowed.
+    control.settled = run.then(
+      () => undefined,
+      (exc) => {
+        if (exc instanceof ProviderAbortError) return; // parent unwind: already terminal
+        const message = exc instanceof Error ? exc.message : String(exc);
+        this.options.onProviderWarning?.(`subagent ${id} failed to settle: ${message}`);
+      },
+    );
+    return JSON.stringify({
+      tool: SUBAGENT_TOOL_NAME,
+      subagent_id: id,
+      label,
+      role,
+      model,
+      status: "started",
+      background: true,
+      note: SUBAGENT_BACKGROUND_NOTE,
+    });
+  }
+
+  /**
+   * Start, await, persist and report one child. Validation errors and child
+   * failures are returned as a JSON tool result (the parent model can react);
+   * an aborted parent signal is re-thrown after the child settles so the parent
+   * unwinds through the shared cancellation path. A child-scoped interrupt
+   * cancels only this child: the parent tool result is an honest `cancelled`
+   * payload and the parent run keeps going.
+   *
+   * Shared by the synchronous path (which awaits it) and the opt-in background
+   * path (which keeps the promise on the control and returns `started`), so
+   * both produce the same events, child-log rows and payload bytes.
+   */
+  private async runChild(
+    state: CooperationState,
+    params: {
+      settings: SubagentSettings;
+      control: ChildControl;
+      task: string;
+      provider: Provider;
+      parentSignal: AbortSignal | undefined;
+    },
+  ): Promise<string> {
+    const { settings, control, task, provider, parentSignal } = params;
+    const { id, label, background, startedAt, role, model } = control;
     const childSignal =
       parentSignal === undefined
         ? control.controller.signal
         : AbortSignal.any([parentSignal, control.controller.signal]);
-    settings.controls?.register(this.childControlHandle(control));
-    this.subagentRuns += 1;
-    this.subagentActive += 1;
     let storeFailed = false;
     try {
       settings.store.begin({
@@ -2530,6 +2907,7 @@ export class TwoBrothersHarness {
         model,
         task,
         started_at: startedAt,
+        ...(background ? { background: true } : {}),
       });
     } catch (exc) {
       storeFailed = true;
@@ -2603,6 +2981,7 @@ export class TwoBrothersHarness {
       model,
       task: clipText(sanitizeOutput(task), 500),
       started_at: startedAt,
+      ...(background ? { background: true } : {}),
     });
 
     // Follow-ups are drained by the runner at its between-step seam (step >= 1
@@ -2651,6 +3030,7 @@ export class TwoBrothersHarness {
             }),
         onEvent: (event) => {
           if (event.kind === "message") {
+            control.lastActivity = "message";
             this.emitRuntime({
               type: "subagent_activity",
               subagent_id: id,
@@ -2659,6 +3039,7 @@ export class TwoBrothersHarness {
               text: clipBlock(sanitizeOutput(event.text), 1_000),
             });
           } else if (event.kind === "tool") {
+            control.lastActivity = clipText(`${event.tool} ${event.status}`, 120);
             this.emitRuntime({
               type: "subagent_activity",
               subagent_id: id,
@@ -2672,6 +3053,7 @@ export class TwoBrothersHarness {
                 : {}),
             });
           } else {
+            control.lastActivity = clipText(event.status, 120);
             this.emitRuntime({
               type: "subagent_activity",
               subagent_id: id,
@@ -2698,15 +3080,29 @@ export class TwoBrothersHarness {
           : result.status;
       const cancelledBy: SubagentCancelledBy | undefined =
         outcomeStatus === "cancelled"
-          ? (control.cancelledBy ?? (parentSignal?.aborted === true ? "parent_run" : undefined))
+          ? (control.cancelledBy ??
+            (parentSignal?.aborted === true ? "parent_run" : undefined))
           : undefined;
       const outcomeError =
         cancelledBy === "operator"
           ? "interrupted by the operator"
           : cancelledBy === "senior"
             ? "interrupted by the Senior"
-            : result.error;
+            : cancelledBy === "parent_run" && parentSignal?.aborted !== true
+              ? "cancelled when the parent run ended"
+              : result.error;
       control.status = outcomeStatus;
+      // Kept for the rest of the run: `subagent_report` reads it after settle.
+      const outcome: SubagentOutcome = {
+        status: outcomeStatus,
+        report,
+        ...(outcomeError !== undefined ? { error: sanitizeOutput(outcomeError) } : {}),
+        usage: result.usage,
+        durationMs: result.durationMs,
+        toolCalls: result.toolCalls,
+        ...(followups !== undefined ? { followups } : {}),
+      };
+      control.outcome = outcome;
       if (!storeFailed) {
         try {
           settings.store.finish(id, {
@@ -2724,7 +3120,7 @@ export class TwoBrothersHarness {
           );
         }
       }
-      this.emitRuntime({
+      this.emitChildCompleted(control, {
         type: "subagent_completed",
         subagent_id: id,
         label,
@@ -2763,6 +3159,15 @@ export class TwoBrothersHarness {
       control.status = "failed";
       // Unexpected unwind: queued follow-ups are undelivered and counted.
       const followups = settleFollowUps();
+      control.outcome = {
+        status: "failed",
+        report: "",
+        error: message,
+        usage: emptyUsage(),
+        durationMs: Math.max(0, endedAt - startedAt),
+        toolCalls: 0,
+        ...(followups !== undefined ? { followups } : {}),
+      };
       if (!storeFailed) {
         try {
           settings.store.finish(id, {
@@ -2775,7 +3180,7 @@ export class TwoBrothersHarness {
           // the warning was already recorded on begin failure; never mask the child error
         }
       }
-      this.emitRuntime({
+      this.emitChildCompleted(control, {
         type: "subagent_completed",
         subagent_id: id,
         label,
@@ -2800,6 +3205,72 @@ export class TwoBrothersHarness {
       if (control.status === "running") control.status = "cancelled";
       settings.controls?.release(id);
       this.subagentActive -= 1;
+    }
+  }
+
+  /**
+   * Emit the ONE terminal `subagent_completed` event for a child. Guarded by
+   * `control.terminalEmitted`, so the run-end reap cannot double-emit when the
+   * child settles inside the shutdown grace: one resolution per child.
+   */
+  private emitChildCompleted(control: ChildControl, event: SubagentCompletedEvent): void {
+    if (control.terminalEmitted) return;
+    control.terminalEmitted = true;
+    this.emitRuntime(event);
+  }
+
+  /**
+   * Run-end cancellation (slice B): abort every still-running background child,
+   * wait at most {@link SUBAGENT_SHUTDOWN_GRACE_MS} for the children to settle
+   * (their own terminal event then lands before the caller's `run_end`), and
+   * emit one honest cancelled/`parent_run` event for a child still unwinding
+   * past the grace — the event must precede `run_end` even then, and the child
+   * keeps settling in-process (its `end` row is still written). A synchronous
+   * child is inside its tool call and is already settled here.
+   *
+   * Called from `run()`'s terminal `finally`, so every terminal path (completed,
+   * cancelled, thrown) reaps. Fail-soft: a reap never blocks the session
+   * release.
+   */
+  private async reapBackgroundChildren(): Promise<void> {
+    const pending: ChildControl[] = [];
+    for (const control of this.childRecords.values()) {
+      if (!control.background || control.status !== "running") continue;
+      this.interruptChild(control, "parent_run");
+      pending.push(control);
+    }
+    if (pending.length === 0) return;
+    await Promise.race([
+      Promise.allSettled(pending.map((control) => control.settled ?? Promise.resolve())),
+      new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, SUBAGENT_SHUTDOWN_GRACE_MS);
+        // Never keep the process alive for the grace window.
+        (timer as { unref?: () => void }).unref?.();
+      }),
+    ]);
+    const endedAt = Date.now();
+    for (const control of pending) {
+      if (control.status !== "running") continue;
+      control.status = "cancelled";
+      control.cancelledBy = "parent_run";
+      control.outcome ??= {
+        status: "cancelled",
+        report: "",
+        error: "cancelled when the parent run ended",
+        usage: emptyUsage(),
+        durationMs: Math.max(0, endedAt - control.startedAt),
+        toolCalls: 0,
+      };
+      this.emitChildCompleted(control, {
+        type: "subagent_completed",
+        subagent_id: control.id,
+        label: control.label,
+        status: "cancelled",
+        error: "cancelled when the parent run ended",
+        cancelled_by: "parent_run",
+        duration_ms: Math.max(0, endedAt - control.startedAt),
+        ended_at: endedAt,
+      });
     }
   }
 
@@ -3559,6 +4030,10 @@ export class TwoBrothersHarness {
     this.subagentWarnings = [];
     this.subagentRuns = 0;
     this.subagentActive = 0;
+    // Per-run helper registry and control budget: a new run can never reach the
+    // previous run's children (none can outlive it anyway).
+    this.childRecords = new Map<string, ChildControl>();
+    this.controlCalls = 0;
     this.steeringWarnings = [];
     this.steeringFailed = false;
     this.steeringCount = 0;
@@ -3705,6 +4180,14 @@ export class TwoBrothersHarness {
       this.emitStream({ type: "run_status", status: "failed", at: nowIso() });
       throw err;
     } finally {
+      // Run-end cancellation (slice B): every still-running background child is
+      // aborted here and settles (or gets one honest terminal event) BEFORE the
+      // caller emits `run_end`. Fail-soft: a reap never blocks the release.
+      try {
+        await this.reapBackgroundChildren();
+      } catch {
+        // the run outcome and the session release are never blocked by a reap
+      }
       await this.sessionHook("session_end", { session_id: sessionId, status });
       release();
     }

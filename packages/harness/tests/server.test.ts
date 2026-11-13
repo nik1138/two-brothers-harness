@@ -41,7 +41,15 @@ import {
   type ServerOptions,
 } from "../src/server.ts";
 import type { RunCost } from "../src/runtime.ts";
-import { newSubagentId, SUBAGENT_TOOL_NAME, SubagentStore } from "../src/subagent.ts";
+import {
+  INTERRUPT_AGENT_TOOL_NAME,
+  LIST_AGENTS_TOOL_NAME,
+  SEND_MESSAGE_TOOL_NAME,
+  SUBAGENT_REPORT_TOOL_NAME,
+  newSubagentId,
+  SUBAGENT_TOOL_NAME,
+  SubagentStore,
+} from "../src/subagent.ts";
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -1263,7 +1271,16 @@ test("prompt_audit event rides the run SSE stream, one frame per provider call",
       // the final decision stay plain. The audit reports the exact belt offered.
       assert.deepEqual(
         audit.tools,
-        index === 0 || index === 2 ? ["spill_read", SUBAGENT_TOOL_NAME] : [],
+        index === 0 || index === 2
+          ? [
+              "spill_read",
+              SUBAGENT_TOOL_NAME,
+              LIST_AGENTS_TOOL_NAME,
+              SEND_MESSAGE_TOOL_NAME,
+              INTERRUPT_AGENT_TOOL_NAME,
+              SUBAGENT_REPORT_TOOL_NAME,
+            ]
+          : [],
       );
       assert.ok(Number(audit.systemChars) > 0 && Number(audit.userChars) > 0);
       // names and lengths only — the prompt bodies never cross the wire

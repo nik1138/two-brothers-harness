@@ -73,6 +73,27 @@ export const SUBAGENT_MAX_FOLLOWUPS_PER_CHILD = 8;
  */
 export const SUBAGENT_CONTEXT_MAX_CHARS = 80_000;
 
+/**
+ * Model-facing helper-control budget, shared by `list_agents`, `send_message`,
+ * `interrupt_agent` and `subagent_report` for one run. Polling is the delivery
+ * mechanism, so it needs room: 40 is 5× the per-run child cap and still bounded.
+ * The 41st call returns one honest error and serves nothing further.
+ */
+export const SUBAGENT_CONTROL_CALL_MAX_PER_RUN = 40;
+/**
+ * Bounded settle grace at parent run end: after aborting every still-running
+ * background child the harness waits at most this long for them to unwind (so
+ * their terminal event can land before `run_end`). A child still unwinding keeps
+ * settling in-process; its `end` row is still written.
+ */
+export const SUBAGENT_SHUTDOWN_GRACE_MS = 2_000;
+
+/** Senior-only, model-facing helper-control tool names (never on a child). */
+export const LIST_AGENTS_TOOL_NAME = "list_agents";
+export const SEND_MESSAGE_TOOL_NAME = "send_message";
+export const INTERRUPT_AGENT_TOOL_NAME = "interrupt_agent";
+export const SUBAGENT_REPORT_TOOL_NAME = "subagent_report";
+
 /** The three workspace reads a helper may always use. */
 export const SUBAGENT_READ_TOOL_NAMES: ReadonlySet<string> = new Set([
   "workspace_read_file",
@@ -227,6 +248,12 @@ export interface SubagentInfo {
   usage?: UsageTotals | null;
   result?: string | null;
   error?: string | null;
+  /**
+   * Additive: true when this child was spawned with `background:true` (the
+   * parent did not wait for it). Absent for every synchronous child, so
+   * existing rows and event bytes are unchanged.
+   */
+  background?: boolean;
 }
 
 /** One child with its full bounded transcript (`GET /api/subagents/{id}`). */
@@ -418,6 +445,8 @@ export class SubagentStore {
     model: string;
     task: string;
     started_at: number;
+    /** Additive: set only for a background child (omitted otherwise). */
+    background?: boolean;
   }): void {
     this.appendLine(record.id, {
       type: "meta",
@@ -428,6 +457,7 @@ export class SubagentStore {
       model: textOf(record.model, 200),
       task: textOf(record.task, SUBAGENT_MAX_TASK_CHARS),
       started_at: intOf(record.started_at),
+      ...(record.background === true ? { background: true } : {}),
     });
   }
 
@@ -611,6 +641,9 @@ export class SubagentStore {
       usage: end === null ? null : usageOf(end.usage),
       result: end === null ? null : textOf(end.result, SUBAGENT_RESULT_MAX_CHARS),
       error: end === null ? null : textOf(end.error, 2_000),
+      // Additive and tolerant: a pre-slice-B log has no such key, so it reads
+      // exactly as before (and never gains a false `background:false`).
+      ...(meta.background === true ? { background: true } : {}),
       transcript,
     };
   }
@@ -1091,6 +1124,7 @@ export const SUBAGENT_TOOL_DESCRIPTION = [
   "The operator may configure a dedicated helper route in Settings; when set, it wins over the `role` argument.",
   "Workspace changes the helper makes are ordinary operator approvals in this run, under the same permission mode; a helper cannot widen the run's policy.",
   "It cannot spawn more subagents. Do not use it as a replacement for the Junior.",
+  "Set `background:true` to keep working while it runs: the result is then `status:\"started\"` and the report is only readable through `subagent_report`. A background helper is cancelled when this run ends, so read its report before then.",
 ].join(" ");
 
 export const SUBAGENT_TOOL_PARAMETERS: Record<string, unknown> = {
@@ -1111,8 +1145,96 @@ export const SUBAGENT_TOOL_PARAMETERS: Record<string, unknown> = {
       description:
         "Fallback model when no dedicated helper route is configured in Settings. A configured route always wins.",
     },
+    background: {
+      type: "boolean",
+      description:
+        "Run the helper in the background and return `status:\"started\"` instead of waiting for the report. The report is then only readable through `subagent_report`; the helper is cancelled when this run ends. Default false (wait for the bounded report).",
+    },
   },
   required: ["task"],
+  additionalProperties: false,
+};
+
+/**
+ * The exact honest note a background spawn returns: the report was not read
+ * and never arrives by itself, and the child does not outlive the run.
+ */
+export const SUBAGENT_BACKGROUND_NOTE =
+  "The helper runs in the background. Call subagent_report with this id to read its report; it is cancelled when this run ends.";
+
+export const LIST_AGENTS_TOOL_DESCRIPTION = [
+  "List the helpers this run spawned — not the Junior, not helpers of other runs.",
+  "One bounded row per helper: id, label, status, background flag, role, model, elapsed time, last activity, queued follow-ups and whether its report has been read. Never the task text.",
+  "Use it to find the id for send_message, interrupt_agent or subagent_report. At most 8 rows.",
+].join(" ");
+
+export const LIST_AGENTS_TOOL_PARAMETERS: Record<string, unknown> = {
+  type: "object",
+  properties: {},
+  additionalProperties: false,
+};
+
+export const SEND_MESSAGE_TOOL_DESCRIPTION = [
+  "Queue one short follow-up for a live helper.",
+  "The helper reads it as an ordinary turn at its next step (never inside a parked approval wait, never as a second consecutive task), and the text never enters this conversation.",
+  "The result says `queued` with the pending count — never `delivered`: it does not mean the helper has read or answered it. A helper that already settled refuses honestly.",
+  "Use subagent_report for the answer.",
+].join(" ");
+
+export const SEND_MESSAGE_TOOL_PARAMETERS: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    agent_id: {
+      type: "string",
+      description: "The helper id from list_agents (sub-…).",
+    },
+    text: {
+      type: "string",
+      description: "The follow-up text (at most 4000 chars).",
+    },
+  },
+  required: ["agent_id", "text"],
+  additionalProperties: false,
+};
+
+export const INTERRUPT_AGENT_TOOL_DESCRIPTION = [
+  "Stop one live helper without touching this run.",
+  "The helper settles `cancelled`; its queued follow-ups are dropped and counted, and a parked approval is withdrawn.",
+  "Returns immediately — read the outcome with subagent_report. This never cancels the parent run.",
+].join(" ");
+
+export const INTERRUPT_AGENT_TOOL_PARAMETERS: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    agent_id: {
+      type: "string",
+      description: "The helper id from list_agents (sub-…).",
+    },
+    reason: {
+      type: "string",
+      description: "Optional display-only reason (at most 200 chars).",
+    },
+  },
+  required: ["agent_id"],
+  additionalProperties: false,
+};
+
+export const SUBAGENT_REPORT_TOOL_DESCRIPTION = [
+  "Read one helper's report.",
+  "On a running helper this is an honest status (elapsed, last activity, pending follow-ups) — not an error and not the report: do other work and ask again instead of polling in a loop.",
+  "On a settled helper it is the full bounded report, and asking twice returns the same report.",
+  "A helper's report never arrives by itself: this call is the only way it enters this conversation.",
+].join(" ");
+
+export const SUBAGENT_REPORT_TOOL_PARAMETERS: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    agent_id: {
+      type: "string",
+      description: "The helper id from list_agents (sub-…).",
+    },
+  },
+  required: ["agent_id"],
   additionalProperties: false,
 };
 
