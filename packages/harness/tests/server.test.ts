@@ -22,6 +22,8 @@ import { pathToFileURL } from "node:url";
 import { isCompactionSummary } from "../src/compaction.ts";
 import { resolveConfig, type Config } from "../src/config.ts";
 import type { ChatMessage } from "../src/context.ts";
+import type { McpTransport } from "@earendil-works/pi-mcp";
+import { createInMemoryTransportPair } from "@earendil-works/pi-mcp/testing";
 import { ModelEffortCatalog, ModelsDevCatalog } from "../src/modelcatalog.ts";
 import { presetById } from "../src/presets.ts";
 import {
@@ -5223,5 +5225,94 @@ test("models-dev catalog routes serve a read-only (newer-schema) settings docume
     }
   } finally {
     tmp.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// bounded MCP run-end close: a wedged server transport must not pin the slot
+// ---------------------------------------------------------------------------
+
+/**
+ * An in-memory MCP transport pair whose client side answers `initialize` /
+ * `tools/list` (empty tool list) but whose `close()` never settles — the
+ * wedged-server defect this lane fixes.
+ */
+function wedgingMcpTransport(): McpTransport {
+  const { client, server } = createInMemoryTransportPair();
+  void server.start().catch(() => undefined);
+  server.onMessage((message) => {
+    const msg = message as Record<string, any>;
+    if (msg.id === undefined || msg.id === null) return;
+    if (msg.method === "initialize") {
+      void server.send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        result: {
+          protocolVersion: msg.params?.protocolVersion ?? "2025-11-25",
+          capabilities: { tools: {} },
+          serverInfo: { name: "wedged-mcp", version: "1.0.0" },
+        },
+      } as never);
+    } else if (msg.method === "tools/list") {
+      void server.send({ jsonrpc: "2.0", id: msg.id, result: { tools: [] } } as never);
+    } else {
+      void server.send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        error: { code: -32601, message: `method not found: ${msg.method}` },
+      } as never);
+    }
+  });
+  return {
+    start: () => client.start(),
+    send: (m) => client.send(m),
+    // the wedge: the server's close never resolves, so neither does the run's
+    close: () => new Promise<void>(() => undefined),
+    onMessage: (cb) => client.onMessage(cb),
+    onError: (cb) => client.onError(cb),
+    onClose: (cb) => client.onClose(cb),
+  };
+}
+
+test("wedged MCP client close: the run still reaches terminal state and releases the slot", async () => {
+  const tmp = tmpdir("tb-srv-mcp-close-");
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "));
+  };
+  let srv: RunningServer | null = null;
+  try {
+    const configPath = path.join(tmp.root, "mcp.json");
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({ mcpServers: { wedged: { command: "unused" } } }),
+      "utf-8",
+    );
+    srv = await startServer({
+      mcpConfig: configPath,
+      mcpLoadOptions: { transportFor: () => wedgingMcpTransport() },
+    });
+    const started = await post<Record<string, any>>(srv.base, "/api/runs", { task: "close me" });
+    assert.equal(started.status, 202);
+    const record = await waitTerminal(srv.base, String(started.body.run_id), 15_000);
+    assert.equal(record.status, "completed", "the run result is untouched by the wedged close");
+    assert.ok(
+      warnings.some((line) => line.includes("MCP client close did not settle")),
+      `expected an honest close-timeout warning, got:\n${warnings.join("\n")}`,
+    );
+    assert.ok(
+      warnings.some((line) => line.includes(`run ${String(record.session)}`)),
+      "the warning names the session it released",
+    );
+    // the slot really came free: a follow-up run on the same server completes
+    const second = await post<Record<string, any>>(srv.base, "/api/runs", { task: "again" });
+    assert.equal(second.status, 202);
+    const secondRecord = await waitTerminal(srv.base, String(second.body.run_id), 15_000);
+    assert.equal(secondRecord.status, "completed");
+  } finally {
+    console.warn = originalWarn;
+    if (srv) await srv.close();
+    else tmp.cleanup();
   }
 });

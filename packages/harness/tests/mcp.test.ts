@@ -19,13 +19,16 @@ import { createInMemoryTransportPair, type InMemoryTransport } from "@earendil-w
 import { resolveConfig } from "../src/config.ts";
 import { TwoBrothersHarness } from "../src/harness.ts";
 import {
+  closeMcpClientBounded,
   createMcpToolName,
   loadMcpTools,
   loadMcpToolSpecs,
+  MCP_CLOSE_TIMEOUT_MS,
   MCP_DEFAULT_TIMEOUT_MS,
   MCP_OUTPUT_MAX_CHARS,
   MCP_TOOL_NAME_MAX_LENGTH,
   type McpServerSpec,
+  type McpToolClient,
   type McpToolEntry,
   type McpToolSet,
 } from "../src/mcp.ts";
@@ -190,6 +193,73 @@ test("client.close() is idempotent and closes the transport", async () => {
   await mcp.client.close();
   await mcp.client.close(); // second call: no-op, still resolves
   assert.equal(fake.closed, true);
+});
+
+// ---------------------------------------------------------------------------
+// bounded run-end close (a wedged transport must not pin the caller's slot)
+// ---------------------------------------------------------------------------
+
+function activeTimeoutCount(): number {
+  return (process as unknown as { _getActiveHandles(): unknown[] })._getActiveHandles().filter(
+    (handle) => (handle as { constructor?: { name?: string } }).constructor?.name === "Timeout",
+  ).length;
+}
+
+test("bounded close: a wedged client resolves after the grace with one honest diagnostic", async () => {
+  assert.equal(MCP_CLOSE_TIMEOUT_MS, 5_000, "default grace matches serve's shutdown grace");
+  const wedged: McpToolClient = {
+    servers: ["wedged"],
+    close: () => new Promise<void>(() => undefined), // never settles
+  };
+  const diagnostics: string[] = [];
+  const started = Date.now();
+  await closeMcpClientBounded(wedged, { timeoutMs: 50, onTimeout: (line) => diagnostics.push(line) });
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed >= 45, `waited out the grace (${elapsed} ms)`);
+  assert.ok(elapsed < 5_000, `released promptly after the grace (${elapsed} ms)`);
+  assert.equal(diagnostics.length, 1, "exactly one diagnostic");
+  assert.match(diagnostics[0], /did not settle within 50 ms/);
+  assert.match(diagnostics[0], /servers: wedged/);
+  assert.match(diagnostics[0], /unwinds in the background/);
+});
+
+test("bounded close: a normal close stays immediate and silent", async () => {
+  const fake = startFakeServer(THREE_TOOLS);
+  const mcp = await loadMcpTools(configOf({ fake: { command: "unused" } }), {
+    transportFor: transportFactory(new Map([["fake", fake]])),
+  });
+  const diagnostics: string[] = [];
+  const started = Date.now();
+  await closeMcpClientBounded(mcp.client, { onTimeout: (line) => diagnostics.push(line) });
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 1_000, `normal close was not delayed (${elapsed} ms)`);
+  assert.deepEqual(diagnostics, [], "no diagnostic on a clean close");
+  assert.equal(fake.closed, true, "the transport really closed");
+});
+
+test("bounded close: a rejecting close still propagates (errors preserved)", async () => {
+  const failing: McpToolClient = {
+    servers: ["bad"],
+    close: () => Promise.reject(new Error("close blew up")),
+  };
+  const diagnostics: string[] = [];
+  await assert.rejects(
+    () => closeMcpClientBounded(failing, { timeoutMs: 50, onTimeout: (line) => diagnostics.push(line) }),
+    /close blew up/,
+  );
+  assert.deepEqual(diagnostics, [], "a fast rejection is not a timeout");
+});
+
+test("bounded close: the race timer is cleared on both paths (no lingering handle)", async () => {
+  const fast: McpToolClient = { servers: ["fast"], close: () => Promise.resolve() };
+  const wedged: McpToolClient = { servers: ["wedged"], close: () => new Promise<void>(() => undefined) };
+  const before = activeTimeoutCount();
+  await closeMcpClientBounded(fast, { timeoutMs: 10_000 });
+  const afterFast = activeTimeoutCount();
+  await closeMcpClientBounded(wedged, { timeoutMs: 20 });
+  const afterWedged = activeTimeoutCount();
+  assert.equal(afterFast, before, "fast close cleared its timer (REF'd, so it would linger if not cleared)");
+  assert.ok(afterWedged <= before, "wedged close left no timer behind");
 });
 
 test("per-request abort cancels an in-flight MCP tool call", async () => {
