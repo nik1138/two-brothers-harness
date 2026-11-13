@@ -153,7 +153,12 @@ import {
   type SpillPruneResult,
   type SpillStats,
 } from "./spill.ts";
-import { envPinnedPairs, SettingsStore } from "./settings_store.ts";
+import {
+  envPinnedPairs,
+  resolvePluginSelection,
+  SettingsStore,
+  type PluginSelection,
+} from "./settings_store.ts";
 import { WorkspaceRegistry } from "./workspace.ts";
 import {
   applyUndo,
@@ -225,6 +230,15 @@ export const OPTIONS = {
   "plugins-dir": { type: "string" as const },
   "skills-dir": { type: "string" as const, multiple: true },
   "commands-dir": { type: "string" as const, multiple: true },
+  /**
+   * The sessions directory whose `settings.json` supplies the persisted
+   * plugin selection for `run`/`chat`/`tui` (strict opt-in; default
+   * `<cwd>/sessions`). The store commands (`serve`, `sessions`, `spill`,
+   * `doctor`, `config`, `onboard`) declare their own `--sessions-dir` with
+   * the store-owning meaning. Read-only here: run/chat never take the store's
+   * single-writer lock.
+   */
+  "sessions-dir": { type: "string" as const },
 } satisfies ParseArgsOptionsConfig;
 
 /** `--help` / `-h` on every command: print the command's help, exit 0. */
@@ -272,15 +286,15 @@ const THINKING_BUDGET_OPTIONS = {
  * `tui`-only flags. Like `--dry-run` they stay out of the shared `OPTIONS`
  * table, so `run`/`chat`/`serve` reject them instead of silently ignoring
  * them. `--workspace <dir>` binds every TUI turn to one confined workspace
- * (workspace tools, operator approvals and `@path` attachments).
- * `--sessions-dir <dir>` points the TUI's session store (session JSONL files,
- * settings, runtime sidecars) at another directory — the TUI holds the
- * store's single-writer lock there, so a live `serve` on the default
- * `sessions/` directory never blocks a TUI pointed at its own.
+ * (workspace tools, operator approvals and `@path` attachments). The TUI's
+ * `--sessions-dir` lives in the shared `OPTIONS` table (run/chat/tui all
+ * read the persisted plugin selection from `<dir>/settings.json`; the TUI
+ * additionally holds the store's single-writer lock there, so a live `serve`
+ * on the default `sessions/` directory never blocks a TUI pointed at its
+ * own).
  */
 const TUI_OPTIONS = {
   workspace: { type: "string" as const },
-  "sessions-dir": { type: "string" as const },
   "keys-file": { type: "string" as const },
   "keys-watch": { type: "boolean" as const, default: false },
 } satisfies ParseArgsOptionsConfig;
@@ -743,6 +757,31 @@ export function pluginsDirForCli(
 }
 
 /**
+ * Sessions directory for the persisted settings read: `--sessions-dir` >
+ * `<cwd>/sessions`. `run`/`chat`/`tui` resolve the strict opt-in plugin
+ * selection from `<dir>/settings.json` (shared resolver, same as `serve`);
+ * the flag does NOT redirect `--session-file` — it only picks the settings
+ * store to read. Never creates the directory (a missing store reads as an
+ * empty selection) and never takes the store's single-writer lock.
+ */
+export function sessionsDirForCli(values: Record<string, any>): string {
+  const flag = typeof values["sessions-dir"] === "string" ? values["sessions-dir"].trim() : "";
+  return path.resolve(flag || path.join(process.cwd(), "sessions"));
+}
+
+/**
+ * The effective plugin selection for a run/chat/tui process: the persisted
+ * `<sessionsDir>/settings.json` list plus the `TWO_BROTHERS_PLUGINS_*` env
+ * overlay, through the same resolver `serve` uses. A missing/corrupt store
+ * resolves to an empty selection — strict opt-in means no plugin code runs.
+ */
+export function pluginSelectionForCli(values: Record<string, any>): PluginSelection {
+  return resolvePluginSelection(
+    new SettingsStore(path.join(sessionsDirForCli(values), "settings.json")),
+  );
+}
+
+/**
  * Skill roots for a run: every `--skills-dir` (repeatable), then
  * `TWO_BROTHERS_SKILLS_DIR` (roots separated by the OS path-list separator —
  * `;` on Windows, `:` elsewhere), then `<cwd>/skills` and
@@ -917,6 +956,13 @@ export function resolveTuiKeyCommandsForCli(
 export interface CliRunResources {
   /** Loaded plugin manager, or null when discovery failed (fail-soft). */
   plugins: PluginManager | null;
+  /**
+   * The effective plugin selection this process bound with: the persisted
+   * `<sessionsDir>/settings.json` list + env overlay, through the shared
+   * resolver `serve` uses. Strict opt-in — a plugin not named here was never
+   * imported (and never executed).
+   */
+  pluginSelection: PluginSelection;
   /** Discovered skills (possibly empty; diagnostics ride along). */
   skills: SkillCatalog;
 }
@@ -925,9 +971,16 @@ export interface CliRunResources {
  * Load the CLI's plugins and skills once per process (run = one; chat =
  * shared by every turn). Fail-soft by contract: a missing/broken plugins
  * directory never blocks a run, and diagnostics are printed only under
- * `--verbose` so normal output stays byte-stable. Active declarative plugin
- * bundles contribute their skills roots after the operator roots, so an
- * operator skill shadows a same-named bundle skill.
+ * `--verbose` so normal output stays byte-stable.
+ *
+ * Plugin loading is strict opt-in and server-parity: the manager imports
+ * only the plugins named by the persisted `<sessionsDir>/settings.json`
+ * selection (+ the `TWO_BROTHERS_PLUGINS_*` env overlay) — code files merely
+ * discovered in the plugins directory are never imported or executed. There
+ * are deliberately no `--plugin` flags: the persisted list (via web Settings
+ * or `PUT /api/settings`, or the env overlay) is the only opt-in. Active
+ * declarative plugin bundles contribute their skills roots after the
+ * operator roots, so an operator skill shadows a same-named bundle skill.
  */
 export async function loadRunResources(
   cfg: Config,
@@ -935,9 +988,10 @@ export async function loadRunResources(
   io: CliIO,
 ): Promise<CliRunResources> {
   const dir = pluginsDirForCli(values);
+  const pluginSelection = pluginSelectionForCli(values);
   let plugins: PluginManager | null = null;
   try {
-    plugins = await PluginManager.create(dir);
+    plugins = await PluginManager.create(dir, pluginSelection, { selectedOnly: true });
   } catch (exc) {
     if (cfg.verbose) {
       const message = exc instanceof Error ? exc.message : String(exc);
@@ -969,7 +1023,7 @@ export async function loadRunResources(
       );
     }
   }
-  return { plugins, skills };
+  return { plugins, pluginSelection, skills };
 }
 
 /**
@@ -992,11 +1046,6 @@ export function mergePluginScopes(
     senior: merge(scopes.senior, bindings.toolsByScope.senior),
     junior: merge(scopes.junior, bindings.toolsByScope.junior),
   };
-}
-
-/** The active plugin names for a CLI run: every discovered plugin (no store). */
-function activePluginNames(manager: PluginManager): string[] {
-  return [...manager.plugins.keys()];
 }
 
 /**
@@ -1261,7 +1310,7 @@ async function runOnce(
   let bindings: PluginBindings | null = null;
   if (resources?.plugins !== null && resources?.plugins !== undefined) {
     try {
-      bindings = await resources.plugins.bindingsFor(activePluginNames(resources.plugins), null);
+      bindings = await resources.plugins.bindingsFor(resources.pluginSelection, null);
       if (cfg.verbose) {
         for (const entry of bindings.diagnostics as PluginDiagnosticEntry[]) {
           io.error(`[plugin] ${entry.plugin}: ${entry.message}`);
@@ -2231,7 +2280,10 @@ async function doChat(
         mcpFile === "" ? "not configured" : `from MCP config ${path.resolve(mcpFile)}`
       }; plugin tools need a workspace-bound run`,
     );
-    io.log(`  plugins: ${pluginCount} discovered (hooks apply; plugin tools are inactive here)`);
+    io.log(
+      `  plugins: ${pluginCount} selected (persisted selection; hooks apply; ` +
+        "plugin tools are inactive here)",
+    );
   };
 
   /**
@@ -4126,7 +4178,6 @@ async function doServe(
       ...OPTIONS,
       host: { type: "string" as const },
       port: { type: "string" as const },
-      "sessions-dir": { type: "string" as const },
       workers: { type: "string" as const },
       "spill-retention-days": { type: "string" as const },
       ...APPROVAL_MODE_OPTIONS,

@@ -125,12 +125,24 @@ the protocol reference and is not modified by work here either.
    enable/disable rides `PUT /api/settings` `plugins` (the legacy per-role
    object is also accepted and merged; `{path, options}` entries reach
    `setSettings` before the reload), and a plugins-carrying settings save
-   reloads the manager. **CLI parity:** `run`/`chat`/`serve` load plugins
+   reloads the manager. **CLI parity:** `run`/`chat`/`tui` load plugins
    too (`--plugins-dir`, env `TWO_BROTHERS_PLUGINS_DIR`, default
-   `<cwd>/plugins`; pinned like every env var, never persisted). A load
+   `<cwd>/plugins`; pinned like every env var, never persisted) — with the
+   server's persisted strict opt-in selection: the effective list is
+   resolved from `<sessionsDir>/settings.json` (`--sessions-dir` on
+   `run`/`chat`, default `<cwd>/sessions`; the TUI already had the flag)
+   plus the `TWO_BROTHERS_PLUGINS_SENIOR/JUNIOR` env overlay through the
+   one shared resolver `settings_store.ts::resolvePluginSelection`, and the
+   manager imports only the selected code plugins
+   (`PluginManager` `{ selectedOnly: true }` — unselected
+   repository-discovered code is never imported or executed). There are no
+   `--plugin` flags; `{path, options}` entries carry per-plugin settings to
+   the load exactly like `serve`. Declarative bundles keep flowing through
+   the same manager (bundle skills/commands stay discovery-based; no bundle
+   code ever executes). A load
    failure is fail-soft and diagnostics print only under `--verbose`;
-   plugin tools need a workspace, so only workspace-bound `serve` runs get
-   them (the CLI has no workspace), while hooks apply everywhere.
+   plugin tools need a workspace, so only workspace-bound `serve`/TUI runs
+   get them (a bare CLI run has no workspace), while hooks apply everywhere.
    The repo example is `plugins/notes.mts`. No new runtime deps.
   **Declarative plugin bundles are shipped:** `src/pluginbundle.ts` —
   a `plugins/<name>/plugin.json` manifest (≤64 KiB, `name` matching the

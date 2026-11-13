@@ -516,7 +516,7 @@ test("chat REPL: /status and /permission report honest local state; /new refuses
     assert.match(stdout, /broker: none in the line REPL/);
     assert.match(stdout, /workspace: none — CLI runs are not workspace-bound/);
     assert.match(stdout, /tool scopes: MCP not configured/);
-    assert.match(stdout, /plugins: 0 discovered/);
+    assert.match(stdout, /plugins: 0 selected/);
 
     // /new is honest: the line REPL cannot start a fresh session in place
     assert.match(stdout, /new: the line REPL cannot start a fresh session in place/);

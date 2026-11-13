@@ -102,7 +102,12 @@ import {
   sessionToMarkdown,
   type SessionSearchDoc,
 } from "../sessionsearch.ts";
-import { envPinnedPairs } from "../settings_store.ts";
+import {
+  envPinnedPairs,
+  resolvePluginSelection,
+  SettingsStore,
+  type PluginSelection,
+} from "../settings_store.ts";
 import { discoverSkills, type SkillCatalog } from "../skills.ts";
 import {
   MENTION_MAX_FILE_CHARS,
@@ -371,6 +376,13 @@ export interface TuiIO {
 export interface TuiResources {
   /** Null when plugin discovery itself failed (fail-soft). */
   plugins: PluginManager | null;
+  /**
+   * The effective plugin selection this session binds with: the persisted
+   * `<sessionsDir>/settings.json` list + env overlay, through the shared
+   * resolver `serve` uses. Strict opt-in — a plugin not named here was never
+   * imported (and never executed).
+   */
+  pluginSelection: PluginSelection;
   skills: SkillCatalog;
   commands: CommandCatalog;
 }
@@ -985,20 +997,37 @@ export function resolveFileMentions(
 // session construction (same shape as cli.ts's chat path)
 // --------------------------------------------------------------------------- //
 
-/** Discover plugins, skills and slash commands once per TUI session. */
+/**
+ * Discover plugins, skills and slash commands once per TUI session.
+ *
+ * Plugin loading is strict opt-in and server-parity: the manager imports
+ * only the plugins named by the persisted `<sessionsDir>/settings.json`
+ * selection (+ the `TWO_BROTHERS_PLUGINS_*` env overlay, through the shared
+ * resolver) — code files merely discovered in the plugins directory are
+ * never imported or executed. There are deliberately no `--plugin` flags:
+ * the persisted list (web Settings / `PUT /api/settings`, or the env
+ * overlay) is the only opt-in.
+ */
 export async function loadTuiResources(options: {
   cfg: Config;
   io: TuiIO;
   pluginsDir?: string;
   skillsRoots?: string[];
   commandsRoots?: string[];
+  /** Sessions directory whose `settings.json` supplies the selection. */
+  sessionsDir?: string;
 }): Promise<TuiResources> {
+  const pluginSelection = resolvePluginSelection(
+    new SettingsStore(
+      path.join(options.sessionsDir ?? path.join(process.cwd(), "sessions"), "settings.json"),
+    ),
+  );
   let plugins: PluginManager | null = null;
   try {
     plugins =
       options.pluginsDir === undefined
-        ? await PluginManager.create()
-        : await PluginManager.create(options.pluginsDir);
+        ? await PluginManager.create(undefined, pluginSelection, { selectedOnly: true })
+        : await PluginManager.create(options.pluginsDir, pluginSelection, { selectedOnly: true });
   } catch (exc) {
     if (options.cfg.verbose) {
       options.io.error(
@@ -1049,7 +1078,7 @@ export async function loadTuiResources(options: {
     for (const line of skills.diagnostics) options.io.error(`[skills] ${line}`);
     for (const line of commands.diagnostics) options.io.error(`[commands] ${line}`);
   }
-  return { plugins, skills, commands };
+  return { plugins, pluginSelection, skills, commands };
 }
 
 /**
@@ -1227,7 +1256,7 @@ async function buildTurnHarness(setup: TurnSetup): Promise<TurnHarness> {
   if (setup.resources.plugins !== null) {
     try {
       bindings = await setup.resources.plugins.bindingsFor(
-        [...setup.resources.plugins.plugins.keys()],
+        setup.resources.pluginSelection,
         setup.workspace ?? null,
       );
       if (cfg.verbose) {
@@ -1574,12 +1603,16 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
     throw exc;
   }
 
+  const cwd = options.cwd ?? process.cwd();
+  const sessionsDir = options.sessionsDir ?? path.join(cwd, "sessions");
+
   const resources = await loadTuiResources({
     cfg: sessionCfg,
     io: options.io,
     ...(options.pluginsDir !== undefined ? { pluginsDir: options.pluginsDir } : {}),
     ...(options.skillsRoots !== undefined ? { skillsRoots: options.skillsRoots } : {}),
     ...(options.commandsRoots !== undefined ? { commandsRoots: options.commandsRoots } : {}),
+    sessionsDir,
   });
 
   let terminal: Terminal;
@@ -1606,8 +1639,6 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
     options.clipboard ??
     ((text) => copyToClipboard(text, { write: (sequence) => terminal.writeAttention(sequence) }));
 
-  const cwd = options.cwd ?? process.cwd();
-  const sessionsDir = options.sessionsDir ?? path.join(cwd, "sessions");
   const layout = new SessionLayout(sessionsDir);
 
   /**
