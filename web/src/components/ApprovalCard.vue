@@ -55,12 +55,15 @@ const previewOpen = ref(false)
 /**
  * Pull the card into view when it starts waiting (G-1): the operator may have
  * scrolled up to read history, and nothing else would reveal the new request.
+ * Smooth scrolling is skipped under `prefers-reduced-motion: reduce`
+ * (ChatView's idiom) so the reveal is immediate for reduced-motion users.
  */
 async function reveal() {
   await nextTick()
   const el = cardEl.value
   if (!el) return
-  el.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  el.scrollIntoView({ block: 'nearest', behavior: reduceMotion ? 'auto' : 'smooth' })
   highlighted.value = true
   if (highlightTimer !== undefined) window.clearTimeout(highlightTimer)
   highlightTimer = window.setTimeout(() => {

@@ -13,6 +13,11 @@
 //                  session without user messages shows the honest empty state
 //   approval-allow scripted fixture: approve a workspace write -> file exists, UI shows diff
 //   approval-deny  scripted fixture: deny the write -> file absent
+//   approval-reduced-motion scripted fixture under Playwright's emulated
+//                  `prefers-reduced-motion: reduce`: the reveal that pulls the
+//                  pending card into view scrolls immediately (behavior 'auto',
+//                  never 'smooth'), the fresh highlight still applies, and the
+//                  allow path still writes the file
 //   stop           scripted fixture: stop a slow run -> cancelled state
 //   mobile         390px drawer: open/close/Escape/focus and session select
 //   appearance-density mock provider: Settings -> Appearance cards stay readable
@@ -1318,6 +1323,88 @@ async function approvalFlow(runner, decision) {
     }
     consoleGuard.assertClean()
     runner.pass(`approval-${decision}`)
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(wsDir)
+    rmTree(be.dir)
+  }
+}
+
+// -- scenario: approval under reduced motion ----------------------------------------------
+// The reveal that pulls a pending approval card into view must not force smooth
+// scrolling on reduced-motion users: under Playwright's emulated
+// `prefers-reduced-motion: reduce` the card's scrollIntoView uses behavior
+// 'auto' (immediate), while the highlight/approval semantics stay intact.
+
+async function scenarioApprovalReducedMotion(runner) {
+  const wsDir = tmpDir('tb-e2e-ws-appr-rm')
+  const wsName = path.basename(wsDir)
+  const be = await startBackend({ kind: 'fixture', scenario: 'approval' })
+  const context = await browser.newContext({ reducedMotion: 'reduce' })
+  await context.addInitScript(() => {
+    const calls = []
+    window.__approvalScrollCalls = calls
+    const original = Element.prototype.scrollIntoView
+    Element.prototype.scrollIntoView = function (options) {
+      calls.push({ options: options ?? null, className: String(this.className) })
+      return original.call(this, options)
+    }
+  })
+  const page = await context.newPage()
+  const consoleGuard = attachConsoleGuard(page)
+  const helloPath = path.join(wsDir, HELLO_FILE)
+  try {
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+
+    await ensureWorkspace(page, wsDir, wsName)
+    await selectWorkspaceFilter(page, wsName)
+    await createSession(page, 'E2E approval reduced motion')
+    await sendTask(page, 'Write the hello file in the workspace', { mode: 'work' })
+
+    const card = page.locator('article.approval', { hasText: 'awaiting you' })
+    await card.first().waitFor({ timeout: 30000 })
+
+    assert.equal(
+      await page.evaluate(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches),
+      true,
+      'the scenario context must emulate prefers-reduced-motion: reduce',
+    )
+
+    // the reveal ran and honored the preference: every approval-card
+    // scrollIntoView was immediate ('auto'), never 'smooth'
+    await page.waitForFunction(() => window.__approvalScrollCalls.length > 0, null, {
+      timeout: 10000,
+    })
+    const approvalScrolls = (await page.evaluate(() => window.__approvalScrollCalls)).filter(
+      (call) => call.className.includes('approval'),
+    )
+    assert.ok(approvalScrolls.length > 0, 'the approval reveal never called scrollIntoView')
+    for (const call of approvalScrolls) {
+      assert.equal(
+        call.options?.behavior,
+        'auto',
+        `approval reveal forced behavior=${JSON.stringify(call.options?.behavior)} under reduced motion`,
+      )
+      assert.equal(call.options?.block, 'nearest')
+    }
+
+    // highlight + approval semantics are unchanged (the CSS kills only the
+    // animation under reduce, not the fresh marker)
+    await page
+      .locator('article.approval.approval-fresh')
+      .first()
+      .waitFor({ state: 'visible', timeout: 5000 })
+
+    await page
+      .locator('.approval-dock')
+      .locator('button.approval-btn', { hasText: 'Allow' })
+      .click()
+    await waitForRunEnd(page)
+    assert.ok(fs.existsSync(helloPath), `${helloPath} was not written after approval`)
+    consoleGuard.assertClean()
+    runner.pass('approval-reduced-motion')
   } finally {
     await context.close().catch(() => {})
     await killBackend(be)
@@ -6114,6 +6201,13 @@ async function main() {
         ),
       },
       {
+        label: 'approval-reduced-motion',
+        run: () => (
+          (currentRunner = makeRunner('approval-reduced-motion')),
+          scenarioApprovalReducedMotion(currentRunner)
+        ),
+      },
+      {
         label: 'stop',
         run: () => (
           (currentRunner = makeRunner('stop')),
@@ -6349,6 +6443,7 @@ async function main() {
       'resume',
       'approval-allow',
       'approval-deny',
+      'approval-reduced-motion',
       'stop',
       'mobile',
       'appearance-density',
