@@ -186,6 +186,38 @@ function clipped(value: unknown, maxChars: number): string {
 }
 
 /**
+ * Read a response body with a byte cap enforced WHILE it streams: the
+ * cumulative chunk size is compared against `maxBytes` on every read, so a
+ * chunked response without (or with a lying) `content-length` is bounded too.
+ * Past the cap the reader is cancelled — releasing the connection — and the
+ * read throws `the catalog payload is too large …` (the fail-soft path
+ * reports it as the upstream error).
+ */
+async function readBodyBytesCapped(response: Response, maxBytes: number): Promise<string> {
+  const body = response.body;
+  if (body === null) return "";
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  const chunks: string[] = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > maxBytes) {
+        throw new Error(`the catalog payload is too large (over ${maxBytes} bytes)`);
+      }
+      chunks.push(decoder.decode(value, { stream: true }));
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  chunks.push(decoder.decode());
+  return chunks.join("");
+}
+
+/**
  * A base URL we can put in front of an adapter: an http(s) URL without a
  * `${…}` placeholder, ≤ {@link MAX_URL_CHARS}. Everything else is "unknown".
  */
@@ -859,7 +891,10 @@ export class ModelsDevCatalog {
     if (Number.isFinite(declared) && declared > MAX_CATALOG_BYTES) {
       throw new Error(`the catalog payload is too large (${declared} bytes)`);
     }
-    const raw: unknown = await response.json();
+    // Enforce the cap while the body streams: content-length is a hint, not a
+    // bound (a chunked/mislabeled response may omit or understate it), so the
+    // cumulative byte count is what fails the fetch past the cap.
+    const raw = JSON.parse(await readBodyBytesCapped(response, MAX_CATALOG_BYTES)) as unknown;
     if (!isRecord(raw)) throw new Error("the catalog payload is not a JSON object");
     if (Object.keys(raw).length === 0) {
       throw new Error("the catalog payload has no providers");

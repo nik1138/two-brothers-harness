@@ -23,9 +23,13 @@ import { TwoBrothersHarness } from "../src/harness.ts";
 import {
   AnthropicProvider,
   buildProvider,
+  classifyProviderError,
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_PROVIDER_KIND,
   GoogleProvider,
+  MAX_ERROR_BODY_BYTES,
+  MAX_ERROR_DETAIL_CHARS,
+  MAX_STREAM_BYTES,
   OpenAICompatibleProvider,
   ProviderBlockedError,
   ProviderContextOverflowError,
@@ -86,6 +90,60 @@ function recordingSleeper(): { sleeper: (s: number) => Promise<void>; total: () 
       total += seconds;
     },
   };
+}
+
+/** One SSE frame block (`event:` + one `data:` JSON line). */
+function sseFrame(event: string, payload: unknown): string {
+  return `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
+}
+
+/** An SSE-streamed 200 response from raw frame blocks. */
+function sseResponse(frames: readonly string[]): Response {
+  const encoder = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const frame of frames) controller.enqueue(encoder.encode(frame));
+      controller.close();
+    },
+  });
+  return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+}
+
+/** One chunked body of `sizes` ASCII-byte chunks, for cap tests. */
+function chunkedResponse(
+  chunks: readonly number[],
+  contentType: string,
+  status = 200,
+): Response {
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const size of chunks) controller.enqueue(new Uint8Array(size).fill(0x61));
+      controller.close();
+    },
+  });
+  return new Response(body, { status, headers: { "Content-Type": contentType } });
+}
+
+/** A minimal valid OpenAI-compatible SSE completion. */
+function openAiTextSse(text: string): Response {
+  return sseResponse([
+    sseFrame("x", { choices: [{ delta: { content: text } }] }),
+    sseFrame("x", {
+      choices: [],
+      usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+    }),
+    "data: [DONE]\n\n",
+  ]);
+}
+
+/** Await a rejection and return the thrown error (fails the test otherwise). */
+async function rejectionOf(promise: Promise<unknown>): Promise<Error> {
+  try {
+    await promise;
+  } catch (err) {
+    return err as Error;
+  }
+  throw new Error("expected the promise to reject");
 }
 
 const MESSAGES: ChatMessage[] = [
@@ -989,4 +1047,150 @@ test("CLI: kind flags parse (mock run stays offline)", async () => {
   );
   assert.equal(code, 0);
   assert.match(out.join("\n"), /decision/);
+});
+
+// ---------------------------------------------------------------------------
+// transport bounds: stream byte cap, error-body cap, clipped detail
+// ---------------------------------------------------------------------------
+
+test("streaming: a stream past MAX_STREAM_BYTES fails as a retryable transport error", async () => {
+  const stub = stubFetch(() =>
+    chunkedResponse([MAX_STREAM_BYTES + 1], "text/event-stream"),
+  );
+  const provider = new OpenAICompatibleProvider({
+    ...BASE,
+    fetchImpl: stub.fetchImpl,
+    retries: 0,
+  });
+  const err = await rejectionOf(
+    provider.chat([{ role: "user", content: "u" }], "message", undefined, {
+      onDelta: () => undefined,
+    }),
+  );
+  assert.match(
+    err.message,
+    new RegExp(`failed: stream from \\S+ exceeded the ${MAX_STREAM_BYTES}-byte cap`),
+  );
+  const classification = classifyProviderError(err);
+  assert.equal(classification.retryable, true, "over-cap is a retryable transport failure");
+  assert.equal(classification.reason, "transport");
+  assert.equal(stub.requests.length, 1, "retries: 0 means a single attempt");
+});
+
+test("streaming: an over-cap stream is retried and a healthy stream completes", async () => {
+  const sleep = recordingSleeper();
+  const stub = stubFetch((_request, index) =>
+    index === 0
+      ? chunkedResponse([MAX_STREAM_BYTES + 1], "text/event-stream")
+      : openAiTextSse("ok"),
+  );
+  const provider = new OpenAICompatibleProvider({
+    ...BASE,
+    fetchImpl: stub.fetchImpl,
+    retries: 1,
+    sleeper: sleep.sleeper,
+    rng: () => 0,
+  });
+  const reply = await provider.chat([{ role: "user", content: "u" }], "message", undefined, {
+    onDelta: () => undefined,
+  });
+  assert.equal(reply, "ok");
+  assert.equal(stub.requests.length, 2, "the over-cap attempt was retried");
+});
+
+test("error body: a non-OK body read is capped and still classifies", async () => {
+  const tailNeedle = "TAIL-OF-THE-ERROR-BODY";
+  // First chunk is kept; the second pushes the read past the cap.
+  const stub = stubFetch(() =>
+    chunkedResponse([2048, MAX_ERROR_BODY_BYTES], "application/json", 429),
+  );
+  const provider = new OpenAICompatibleProvider({ ...BASE, fetchImpl: stub.fetchImpl });
+  const err = await rejectionOf(provider.chat([{ role: "user", content: "u" }]));
+  assert.equal(err instanceof ProviderHttpError, true);
+  const httpErr = err as ProviderHttpError;
+  assert.equal(httpErr.status, 429);
+  assert.equal(httpErr.retryable, true, "classification survives the capped read");
+  assert.equal(httpErr.reason, "rate-limit");
+  assert.match(
+    httpErr.message,
+    /^HTTP 429 from \S+: a{100}[\s\S]*<clipped \d+ chars>$/s,
+    "the kept prefix classifies and the message stays clipped",
+  );
+  assert.ok(
+    httpErr.message.length <= MAX_ERROR_DETAIL_CHARS + 80,
+    `the thrown message stays clipped, got ${httpErr.message.length} chars`,
+  );
+  assert.equal(
+    httpErr.message.includes(tailNeedle),
+    false,
+    "the unread tail never rides the message",
+  );
+});
+
+test("error detail: the embedded provider detail is clipped with classification intact", async () => {
+  const huge =
+    "rate-limited: ".repeat(Math.ceil(MAX_ERROR_DETAIL_CHARS / 14) + 400) +
+    "UNIQUE-TAIL-NEEDLE-THAT-MUST-NOT-RIDE-THE-MESSAGE";
+  const stub = stubFetch(() =>
+    jsonResponse(
+      { type: "error", error: { type: "rate_limit_error", message: huge } },
+      429,
+    ),
+  );
+  const provider = anthropicProvider(stub.fetchImpl);
+  const err = await rejectionOf(provider.chat([{ role: "user", content: "u" }]));
+  assert.equal(err instanceof ProviderHttpError, true);
+  const httpErr = err as ProviderHttpError;
+  assert.equal(httpErr.retryable, true);
+  assert.equal(httpErr.reason, "provider-transient", "the parsed error type still classifies");
+  assert.match(httpErr.message, /Anthropic API error 429 \(rate_limit_error\):/);
+  assert.match(err.message, /<clipped \d+ chars>/);
+  assert.ok(
+    err.message.length <= MAX_ERROR_DETAIL_CHARS + 60,
+    `the message stays a few KB, got ${err.message.length} chars`,
+  );
+  assert.equal(
+    err.message.includes(huge.slice(-40)),
+    false,
+    "the clipped tail never rides the message",
+  );
+});
+
+test("anthropic: a mid-stream api_error event is retryable (registry wording)", async () => {
+  const sleep = recordingSleeper();
+  const stub = stubFetch((_request, index) =>
+    index === 0
+      ? sseResponse([
+          sseFrame("error", {
+            type: "error",
+            error: { type: "api_error", message: "Internal server error" },
+          }),
+        ])
+      : jsonResponse({ content: [{ type: "text", text: "ok" }], usage: {} }),
+  );
+  const provider = anthropicProvider(stub.fetchImpl, { retries: 1, sleeper: sleep.sleeper });
+  const reply = await provider.chat([{ role: "user", content: "u" }], "message", undefined, {
+    onDelta: () => undefined,
+  });
+  assert.equal(reply, "ok");
+  assert.equal(stub.requests.length, 2, "the api_error stream was retried, not failed fast");
+});
+
+test("anthropic: a mid-stream overloaded_error event stays retryable", async () => {
+  const stub = stubFetch(() =>
+    sseResponse([
+      sseFrame("error", {
+        type: "error",
+        error: { type: "overloaded_error", message: "Overloaded" },
+      }),
+    ]),
+  );
+  const provider = anthropicProvider(stub.fetchImpl, { retries: 0 });
+  const err = await rejectionOf(
+    provider.chat([{ role: "user", content: "u" }], "message", undefined, {
+      onDelta: () => undefined,
+    }),
+  );
+  assert.match(err.message, /Anthropic API error \(overloaded_error\): Overloaded/);
+  assert.equal(classifyProviderError(err).retryable, true);
 });

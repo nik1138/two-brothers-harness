@@ -1274,3 +1274,71 @@ test("request-shape evidence: the exact Anthropic body with and without the opti
     "the echoed assistant turn is the recorded evidence",
   );
 });
+
+
+// ---------------------------------------------------------------------------
+// replay hardening: an unsigned thinking block never rides the next request
+// ---------------------------------------------------------------------------
+
+test("adapter: an unsigned thinking block is dropped from replay with one warning", async () => {
+  const warnings: string[] = [];
+  const stub = stubFetch(() => jsonResponse({ content: [{ type: "text", text: "ok" }], usage: {} }));
+  const provider = anthropic(stub.fetchImpl, { onWarning: (line) => warnings.push(line) });
+  const messages: ChatMessage[] = [
+    { role: "system", content: "SYS" },
+    { role: "user", content: "hello" },
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "call_1", name: "lookup", args: { q: "x" } }],
+      // The provider never signed the first block; echoing it would fail the
+      // next request with a 400. The signed block must survive verbatim.
+      thinkingBlocks: [
+        { text: "Unsigned reasoning.", signature: "" },
+        { text: "Signed reasoning.", signature: "sig-ok" },
+      ],
+    },
+    { role: "tool", content: "result text", toolCallId: "call_1" },
+  ];
+  await provider.chatWithTools(messages, TOOLS);
+  await provider.chatWithTools(messages, TOOLS);
+
+  const assistant = (stub.requests[0]!.body.messages as Array<Record<string, any>>).find(
+    (message) => message.role === "assistant",
+  );
+  assert.deepEqual(
+    assistant!.content,
+    [
+      { type: "thinking", thinking: "Signed reasoning.", signature: "sig-ok" },
+      { type: "tool_use", id: "call_1", name: "lookup", input: { q: "x" } },
+    ],
+    "only the signed thinking block is replayed, before the tool_use block",
+  );
+  assert.equal(
+    JSON.stringify(assistant!.content).includes("Unsigned reasoning."),
+    false,
+    "the unsigned block never rides the wire",
+  );
+  // The same block list is re-sent on the second call: still one warning.
+  assert.equal(warnings.length, 1, "the drop is reported exactly once per provider");
+  assert.match(warnings[0]!, /unsigned Anthropic thinking block/);
+});
+
+test("adapter: an assistant turn of only an unsigned thinking block is omitted entirely", async () => {
+  const stub = stubFetch(() => jsonResponse({ content: [{ type: "text", text: "ok" }], usage: {} }));
+  const provider = anthropic(stub.fetchImpl);
+  await provider.chat([
+    { role: "user", content: "u" },
+    {
+      role: "assistant",
+      content: "",
+      thinkingBlocks: [{ text: "Unsigned reasoning.", signature: "" }],
+    },
+  ]);
+  const messages = stub.requests[0]!.body.messages as Array<Record<string, any>>;
+  assert.equal(
+    messages.some((message) => message.role === "assistant"),
+    false,
+    "an assistant turn with no replayable block is not sent",
+  );
+});
