@@ -217,13 +217,17 @@ conversation view is a three-party group chat — you (labelled **You**), the
 Senior, and the Junior:
 
 ```powershell
+# web UI assets: the server serves the built app, so build it once first
+cd two-brothers-harness\web
+npm install && npm run build          # → web/dist
+
 # server: HTTP API + the built web app
-cd two-brothers-harness\packages\harness
+cd ..\packages\harness
 npm install && npm run build
 node dist/cli.js serve --port 8600 --sessions-dir sessions
 
-# frontend development: cd web && npm install && npm run dev
-# (Vite proxies /api to :8600; `npm run build` → web/dist is served by the server)
+# frontend development: cd web && npm run dev
+# (Vite proxies /api to :8600)
 ```
 
 Then open `http://127.0.0.1:8600`:
@@ -318,21 +322,28 @@ the same hero appears inside a selected session that has no transcript yet.
    reaches that step. Stop the active run, or reload the page (progress is
    recovered from the runtime sidecar), at any time.
    **Subagents.** While a run has a linked workspace, the Senior can hand a
-   focused side task to a read-only helper through the `subagent` tool. The
-   helper gets a fresh context and only the workspace read/list/search tools;
-   it cannot edit, run shell or spawn another helper, and it returns a bounded
-   report. Settings → **Models & roles → Subagent** gives it a dedicated
+   focused side task to a helper through the `subagent` tool. The helper gets a
+   fresh context and the workspace tool belt (reads plus write/edit/delete/
+   shell): every mutation is an ordinary operator approval on the parent run,
+   tagged with the child's identity, so the run's permission mode decides
+   exactly what a helper may do. It cannot spawn another helper, and it
+   returns a bounded report; with `background:true` the helper runs
+   concurrently — the tool returns `status:"started"` and the report is read
+   later through `subagent_report` (a background helper is cancelled when the
+   run ends). Settings → **Models & roles → Subagent** gives it a dedicated
    provider/model/effort route; leaving that route empty keeps the tool's
    Senior/Junior fallback, and a configured route wins. When one has been
    spawned, the chat header shows **Subagents · N**:
    the chip opens a live tree with each helper's status, current activity,
    elapsed time and tokens, and clicking a row opens a read-only transcript
-   drawer with the task, tool calls and final report. The parent composer is
-   inert while that drawer is open; **← Parent** or `Esc` closes it. Helper
-   transcripts live under `sessions/subagents/` and never appear in the
-   sidebar; their usage is shown in the tree/drawer, not added to the parent
-   footer. The first slice is `serve`/web only — the mutating-tool,
-   follow-up and TUI phases are still on the backlog.
+   drawer with the task, tool calls and final report. From the drawer the
+   operator can interrupt a live helper or send one bounded follow-up. The
+   parent composer is inert while that drawer is open; **← Parent** or `Esc`
+   closes it. Helper transcripts live under `sessions/subagents/` and never
+   appear in the sidebar; their usage is shown in the tree/drawer, not added
+   to the parent footer. The TUI observes live children with `Ctrl+Y` (the
+   `/agents` overlay), where the detail view's `i` interrupts the open helper
+   and `m` drafts a follow-up.
    In the composer, `@` opens a picker over shared skills and workspace files
    and `/` at the start of a line opens the command menu — built-in commands
    first (`plan`, `goal`, `feedback`, then the actions `compact`, `export`,
