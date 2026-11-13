@@ -282,6 +282,7 @@ import {
   helperDetailView,
   helperFollowUpToastText,
   helperInterruptToastText,
+  helperOneLineText,
   helperRowsFromSummaries,
   helperOverlayKey,
   helpersListView,
@@ -1919,6 +1920,15 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
    * an overlay never answers it.
    */
   let approval: ApprovalPanelState | null = null;
+  /**
+   * Arrival-order queue behind the visible approval. The broker can park a
+   * parent's request and a child-tagged request concurrently; the single
+   * visible panel (`approval`) is the first arrival and every later arrival
+   * waits here, so no request is ever clobbered or lost. A resolution is
+   * matched by `approval_id` — resolving the visible one promotes the next
+   * arrival; resolving a queued one never touches the visible panel.
+   */
+  const approvalQueue: ApprovalPanelState[] = [];
   /** The running turn's approval broker — the only approval authority. */
   let activeBroker: RunApprovalBroker | null = null;
   /**
@@ -2831,6 +2841,7 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
     const broker = activeBroker;
     activeBroker = null;
     approval = null;
+    approvalQueue.length = 0;
     broker?.denyAll(reason);
   };
 
@@ -3009,7 +3020,7 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
           broker.seedSessionAllows([...sessionAllows.keys()]);
           broker.attach((event) => {
             if (event.type === "approval_requested") {
-              approval = createApprovalPanelState({
+              const panel = createApprovalPanelState({
                 approvalId: event.approval_id,
                 action: String(event.action ?? ""),
                 ...(event.target !== undefined && event.target !== ""
@@ -3028,9 +3039,15 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
                   ? { subagentId: event.subagent_id }
                   : {}),
                 ...(event.subagent_label !== undefined && event.subagent_label !== ""
-                  ? { subagentLabel: event.subagent_label }
+                  ? { subagentLabel: helperOneLineText(event.subagent_label) }
                   : {}),
               });
+              // Arrival order, never clobbering: the visible panel is the first
+              // parked request; a concurrent parent/child request waits in the
+              // queue and is promoted when its predecessor resolves.
+              if (approval === null) approval = panel;
+              else approvalQueue.push(panel);
+              const pendingTotal = (approval === null ? 0 : 1) + approvalQueue.length;
               // The panel owns the footer; the inline picker and find bar must
               // not compete with the decision keys.
               mention = null;
@@ -3040,7 +3057,7 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
               transientHint = null;
               activity = `waiting for approval: ${event.action}${
                 event.target !== undefined && event.target !== "" ? ` ${event.target}` : ""
-              }`;
+              }${pendingTotal > 1 ? ` (${pendingTotal} pending)` : ""}`;
               updateAttentionTitle("approval");
               notifyApproval(
                 event.approval_id,
@@ -3053,13 +3070,31 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
               foldHelperRuntimeEvent(event, turnParentSession);
               render();
             } else if (event.type === "approval_resolved") {
-              const resolvedAction = approval?.item.action ?? "request";
-              approval = null;
+              // Match by approval_id: a resolution for the visible panel
+              // promotes the next arrival; a resolution for a queued request
+              // leaves the visible panel untouched. Either way every parked
+              // request stays answerable and no id is confused with another.
+              const resolvedId = event.approval_id;
+              let resolvedAction = "request";
+              if (approval !== null && approval.item.approvalId === resolvedId) {
+                resolvedAction = approval.item.action;
+                approval = approvalQueue.shift() ?? null;
+              } else {
+                const queued = approvalQueue.findIndex(
+                  (panel) => panel.item.approvalId === resolvedId,
+                );
+                if (queued >= 0) {
+                  resolvedAction = approvalQueue[queued]!.item.action;
+                  approvalQueue.splice(queued, 1);
+                }
+              }
+              const stillPending = (approval === null ? 0 : 1) + approvalQueue.length;
               activity =
                 event.reason === "cancelled"
                   ? "approval cancelled — the turn is stopping"
-                  : `approval ${String(event.decision ?? "denied")}: ${resolvedAction}`;
-              updateAttentionTitle(running ? "working" : undefined);
+                  : `approval ${String(event.decision ?? "denied")}: ${resolvedAction}` +
+                    (stillPending > 0 ? ` (${stillPending} still pending)` : "");
+              updateAttentionTitle(approval !== null ? "approval" : running ? "working" : undefined);
               foldHelperRuntimeEvent(event, turnParentSession);
               render();
             } else if (event.type === "approval_auto_allowed") {
@@ -5048,7 +5083,9 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
         if (overlay !== null) {
           // The provider form has real text fields (Base URL / model / API
           // key): paste is routed into the field editor, never the composer or
-          // history. Every other overlay ignores pastes.
+          // history. An open O2 follow-up draft takes a paste too (the overlay
+          // folds newlines to spaces and keeps the 4000-char cap). Every
+          // other overlay ignores pastes.
           if (overlay.kind === "provider") {
             const pasted = providerConnectKey(overlay.state, overlay.data, {
               name: "paste",
@@ -5056,6 +5093,15 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
             });
             overlay = { kind: "provider", state: pasted.state, data: overlay.data };
             render();
+          } else if (overlay.kind === "subagents") {
+            const result = helperOverlayKey(commands, helperRows, overlay.state, {
+              name: "paste",
+              raw: event.text,
+            });
+            if (result.action !== "none") {
+              overlay = { kind: "subagents", state: result.state };
+              render();
+            }
           }
           continue;
         }

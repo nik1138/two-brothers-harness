@@ -175,7 +175,7 @@ function activityOfEvent(
 export function helperRowsFromSummaries(list: readonly SubagentSummary[]): HelperRow[] {
   const rows = list.map((summary) => ({
     id: summary.id,
-    label: summary.label,
+    label: helperOneLineText(summary.label),
     role: roleOf(summary.role),
     model: summary.model,
     status: statusOf(summary.status),
@@ -207,7 +207,7 @@ export function foldHelperEvent(rows: readonly HelperRow[], event: RuntimeEvent)
     const index = rows.findIndex((row) => row.id === started.subagent_id);
     const next: HelperRow = {
       id: started.subagent_id,
-      label: started.label,
+      label: helperOneLineText(started.label),
       role: roleOf(started.role),
       model: started.model,
       status: "running",
@@ -421,7 +421,7 @@ export function foldHelperDetail(detail: SubagentDetail, event: RuntimeEvent): S
     if (started.subagent_id !== detail.id) return detail;
     return {
       ...detail,
-      label: started.label,
+      label: helperOneLineText(started.label),
       role: roleOf(started.role),
       model: started.model,
       status: "running",
@@ -537,6 +537,17 @@ function findOpenTool(transcript: readonly SubagentTranscriptEntry[], tool: stri
 // labels
 // --------------------------------------------------------------------------- //
 
+/**
+ * One line of display text: every line break collapses to a single space.
+ * Row labels and live activity render into single-row frames, so a
+ * model-supplied `\n` can never multiply a frame line (the views are
+ * exact-height); `harness.ts` normalizes labels at the source and this is
+ * the defensive read at the view boundary.
+ */
+export function helperOneLineText(text: string): string {
+  return text.replace(/[\r\n]+/g, " ");
+}
+
 /** Visual status marker per child lifecycle (the shared UI vocabulary). */
 export function helperStatusGlyph(status: SubagentStatus): string {
   if (status === "completed") return "✓";
@@ -569,7 +580,10 @@ export function helperActivityLabel(row: HelperRow): string {
         ? `${activity.tool} failed`
         : `using ${activity.tool}`;
   }
-  if (activity.kind === "message") return activity.text || "writing report…";
+  if (activity.kind === "message") {
+    const text = activity.text !== undefined ? helperOneLineText(activity.text) : "";
+    return text === "" ? "writing report…" : text;
+  }
   if (activity.kind === "status") {
     return activity.status === "completed"
       ? "reported"
@@ -753,9 +767,10 @@ export interface HelperOverlayKeyOptions {
  * Fold one keypress into the HELPERS overlay.
  *
  * Draft open (detail mode): every printable key edits the one-line draft
- * (capped at {@link SUBAGENT_FOLLOWUP_TEXT_MAX_CHARS}); `Enter` asks the app to
- * submit it, and `Esc` (or Ctrl+C) cancels **only the draft** — the overlay
- * stays open. A one-line draft has no newline.
+ * (capped at {@link SUBAGENT_FOLLOWUP_TEXT_MAX_CHARS}); a paste extends it
+ * with line breaks replaced by spaces (the draft stays one line); `Enter`
+ * asks the app to submit it, and `Esc` (or Ctrl+C) cancels **only the
+ * draft** — the overlay stays open. A one-line draft has no newline.
  *
  * Detail mode: `Enter` and `Esc` return to the list, PgUp/PgDn scroll the
  * transcript, `i` asks the app to interrupt the open child and `m` opens the
@@ -782,7 +797,13 @@ export function helperOverlayKey(
     if (key.name.toLowerCase() === "escape" || key.raw === "\u001b") {
       return { state: { ...state, draft: null }, action: "draft-cancel" };
     }
-    const result = handleEditorKey(state.draft, { ...key, raw: key.raw ?? "" }, {
+    // A bracketed paste extends the one-line draft: every line break becomes a
+    // space (the draft can never gain a newline) and the editor's paste path
+    // applies the 4000-char cap on a grapheme boundary. The app's paste event
+    // routes here with `name: "paste"`.
+    const editorKey =
+      key.name === "paste" ? { ...key, raw: helperOneLineText(key.raw ?? "") } : key;
+    const result = handleEditorKey(state.draft, { ...editorKey, raw: editorKey.raw ?? "" }, {
       maxChars: SUBAGENT_FOLLOWUP_TEXT_MAX_CHARS,
       maxHistory: 0,
     });
@@ -892,7 +913,7 @@ function helperRowLine(
   const rightText = clipDisplay(right, rightBudget);
   const rightWidth = rightText === "" ? 0 : displayWidth(rightText) + 2;
   const labelBudget = Math.max(1, contentWidth - 4 - rightWidth);
-  const labelText = clipDisplay(row.label, labelBudget);
+  const labelText = clipDisplay(helperOneLineText(row.label), labelBudget);
   let text = `${marker}${glyph} ${labelText}`;
   if (rightText !== "") {
     const gap = Math.max(1, contentWidth - displayWidth(text) - displayWidth(rightText));
@@ -1123,7 +1144,7 @@ export function helperDetailHeader(
   if (pending > 0) statusParts.push(`${pending} pending`);
   const connection = `${detail.model || "(model unknown)"} · ${detail.role}`;
   return [
-    detail.label || "Subagent",
+    helperOneLineText(detail.label || "Subagent"),
     connection,
     statusParts.join(" · "),
     tokens === "" ? "tokens unknown" : `tokens ${tokens}`,
@@ -1134,8 +1155,16 @@ export function helperDetailHeader(
  * Render one child's transcript into an exact `width × height` box: a four-row
  * header (label, model · role, status · elapsed, tokens), a spacer, the
  * follow-tail window of {@link helperDetailRows} and the registry-derived
- * footer. `state.scroll` is an offset from the bottom (`0` follows the tail), so
- * a live child keeps painting its newest rows without any timer.
+ * footer. `state.scroll` is an offset from the bottom in LOGICAL rows
+ * (`0` follows the tail), so a live child keeps painting its newest rows
+ * without any timer.
+ *
+ * Tail-windowing happens on PHYSICAL lines: every logical row is wrapped to
+ * the box width first, then the newest physical lines fill the transcript
+ * capacity, so `scroll = 0` always shows the newest physical line and a long
+ * wrapped row can never crowd the frame. The control answer (notice) and the
+ * open follow-up draft each reserve one row below the transcript: they are
+ * part of the O2 contract and are never sliced away by wrapping.
  */
 export function helperDetailView(
   detail: SubagentDetail,
@@ -1151,11 +1180,28 @@ export function helperDetailView(
   const commands = options.commands ?? TUI_COMMANDS;
   const contentWidth = Math.max(1, boxContentWidth(width));
   const rows = helperDetailRows(detail);
-  const capacity = Math.max(0, height - 8); // border(2) + header(4) + spacer + footer
   const offset = Math.min(Math.max(0, Math.floor(state.scroll)), rows.length);
-  const end = Math.max(0, rows.length - offset);
+
+  // Wrap first: one logical row becomes 1..n physical lines (exact-width).
+  const physical = rows.map((row) => {
+    const prefix = row.label === "" ? "" : `${row.label} · `;
+    return wrapDisplay(`${prefix}${row.text}`, contentWidth);
+  });
+  const totalPhysical = physical.reduce((sum, lines) => sum + lines.length, 0);
+  // border(2) + header(4) + spacer + footer, minus the rows the O2 answer
+  // and the open draft own below the transcript.
+  const capacity = Math.max(
+    0,
+    height - 8 - (state.notice !== null ? 1 : 0) - (state.draft !== null ? 1 : 0),
+  );
+  // The scroll offset counts logical rows; translate the tail-most `offset`
+  // rows into physical lines so both stay "offset from the tail".
+  let physicalOffset = 0;
+  for (let index = rows.length - 1; index >= 0 && index >= rows.length - offset; index -= 1) {
+    physicalOffset += physical[index]!.length;
+  }
+  const end = Math.max(0, totalPhysical - physicalOffset);
   const start = Math.max(0, end - capacity);
-  const visible = rows.slice(start, end);
 
   const header = helperDetailHeader(detail, {
     ...(options.now !== undefined ? { now: options.now } : {}),
@@ -1173,9 +1219,16 @@ export function helperDetailView(
   ];
 
   const body: string[] = [...headerRows, ""];
-  for (const row of visible) {
-    const prefix = row.label === "" ? "" : `${row.label} · `;
-    const wrapped = wrapDisplay(`${prefix}${row.text}`, contentWidth);
+  const visible: HelperDetailRow[] = [];
+  let visibleStart = rows.length;
+  let cursor = 0;
+  rows.forEach((row, index) => {
+    const lines = physical[index]!;
+    const rowStart = cursor;
+    cursor += lines.length;
+    if (lines.length === 0 || rowStart >= end || cursor <= start) return;
+    if (visible.length === 0) visibleStart = index;
+    visible.push(row);
     const tone: ThemeToken =
       row.kind === "error"
         ? "error"
@@ -1188,21 +1241,25 @@ export function helperDetailView(
               : row.kind === "empty"
                 ? "dim"
                 : "text";
-    for (const rowText of wrapped) {
+    const from = Math.max(0, start - rowStart);
+    const to = Math.min(lines.length, end - rowStart);
+    for (const rowText of lines.slice(from, to)) {
       body.push(rowText === "" ? "" : theme.paint(tone, rowText));
     }
-  }
+  });
   // The last control answer (interrupt/follow-up) rides above the footer:
   // toasts are suppressed under a modal overlay, so the overlay shows the same
   // bounded copy itself.
   if (state.notice !== null) {
     const tone: ThemeToken = state.notice.level === "warn" ? "warning" : "notice";
-    body.push(theme.paint(tone, clipDisplay(state.notice.text, contentWidth)));
+    body.push(theme.paint(tone, clipDisplay(helperOneLineText(state.notice.text), contentWidth)));
   }
   // The follow-up draft is one live row above the footer. It is a draft of a
   // queued message: nothing here appends a transcript row or claims delivery.
   if (state.draft !== null) {
-    body.push(theme.paint("focus", clipDisplay(`message: ${state.draft.text}`, contentWidth)));
+    body.push(
+      theme.paint("focus", clipDisplay(`message: ${helperOneLineText(state.draft.text)}`, contentWidth)),
+    );
   }
   while (body.length < Math.max(0, height - 3)) body.push("");
   // With the draft open, Enter submits and Esc cancels only the draft (both
@@ -1224,7 +1281,7 @@ export function helperDetailView(
     { width, title: `HELPER · ${detail.status}`, theme, tone: helperStatusTone(detail.status) },
   ).slice(0, height);
   while (boxed.length < height) boxed.push("");
-  return { lines: boxed, rows, visible, start };
+  return { lines: boxed, rows, visible, start: visibleStart };
 }
 
 /** Convenience wrapper returning only the rendered rows. */

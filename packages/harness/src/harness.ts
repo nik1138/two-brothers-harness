@@ -2841,7 +2841,11 @@ export class TwoBrothersHarness {
       });
     }
     const rawLabel = typeof args.label === "string" ? args.label.trim() : "";
-    const label = (rawLabel || deriveSubagentLabel(task)).slice(0, SUBAGENT_MAX_LABEL_CHARS);
+    // An explicit label is normalized to one line like a derived one: the
+    // label rides single-row UI frames (list rows, panels), so a model-supplied
+    // line break can never multiply a rendered row.
+    const explicitLabel = rawLabel.replace(/\s+/g, " ");
+    const label = (explicitLabel || deriveSubagentLabel(task)).slice(0, SUBAGENT_MAX_LABEL_CHARS);
     const role: "senior" | "junior" = args.role === "senior" ? "senior" : "junior";
     // Opt-in per call and default false: `background` absent/false keeps the
     // exact synchronous contract (the parent waits for the report).

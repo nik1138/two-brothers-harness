@@ -20,6 +20,7 @@ import {
   resolveTuiProviderState,
 } from "../src/tui/providers.ts";
 import { displayWidth } from "../src/tui/text.ts";
+import { wrapDisplay } from "../src/tui/screen.ts";
 import {
   approvalPanelHints,
   approvalPanelView,
@@ -1111,4 +1112,154 @@ test("O2: the overlay-scope i/m chords collide with nothing and reach no other h
     resolveKey(TUI_COMMANDS, { name: "i", raw: "i" }, "overlay")?.command.id,
     "helper-interrupt",
   );
+});
+
+// --------------------------------------------------------------------------- //
+// helper-overlay correctness: one-line frames (D1/D4), physical tail windowing
+// (D2), one-line capped paste into the draft (D5)
+// --------------------------------------------------------------------------- //
+
+test("D1: multiline helper activity collapses to one line and every list frame stays exact-height", () => {
+  const rows = helperRowsFromSummaries([
+    summary({
+      label: "line one\nline two",
+      last_activity: { kind: "message", text: "first line\nsecond line\nthird line", at: 1 },
+    }),
+  ]);
+  assert.equal(helperActivityLabel(rows[0]!), "first line second line third line");
+  for (const width of [40, 80, 120]) {
+    for (let height = 10; height <= 22; height += 1) {
+      const view = helpersListView(rows, createHelperOverlayState(rows[0]!.id), {
+        width,
+        height,
+        now: 10_000,
+      });
+      assert.equal(view.lines.length, height, `height ${height}`);
+      for (const line of view.lines) {
+        assert.ok(!line.includes("\n"), "no frame line carries a raw newline");
+        assert.equal(displayWidth(line), width, `width ${width} @ ${height}`);
+      }
+    }
+  }
+  // A live started event with a multiline label is normalized at the fold.
+  const folded = foldHelperEvent([], startedEvent({ label: "a\nb" }));
+  assert.equal(folded[0]?.label, "a b");
+});
+
+test("D4: the detail header normalizes a multiline label to one exact-height frame", () => {
+  const detail = detailWith([], { label: "task one\ntask two" });
+  assert.equal(helperDetailHeader(detail)[0], "task one task two");
+  for (const height of [10, 14, 22]) {
+    const view = helperDetailView(detail, createHelperOverlayState(detail.id), {
+      width: 60,
+      height,
+      now: 10_000,
+    });
+    assert.equal(view.lines.length, height);
+    for (const line of view.lines) assert.ok(!line.includes("\n"));
+  }
+});
+
+test("D2: a long wrapped detail shows the newest physical tail; the O2 notice and draft are never sliced away", () => {
+  const longText =
+    "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima ".repeat(4).trim();
+  const detail = detailWith(
+    [
+      { type: "message", role: "user", text: "row zero", at: 1 },
+      { type: "message", role: "assistant", text: longText, at: 2 },
+    ],
+    { result: null },
+  );
+  const state: HelperOverlayState = {
+    ...createHelperOverlayState(detail.id),
+    notice: { text: "queued · 1 pending", level: "success" },
+    draft: createHelperFollowUpDraft(),
+  };
+  const width = 40;
+  const height = 14;
+  const capacity = height - 8 - 2; // notice and draft reserve one row each
+  const wrapped = wrapDisplay(`Helper · ${longText}`, width - 2);
+  assert.ok(wrapped.length > capacity * 2, "the last row really wraps across many lines");
+
+  const view = helperDetailView(detail, state, { width, height, now: 10_000 });
+  assert.equal(view.lines.length, height);
+  for (const line of view.lines) {
+    assert.equal(displayWidth(line), width);
+    assert.ok(!line.includes("\n"));
+  }
+  const text = view.lines.join("\n");
+  // scroll = 0 shows the NEWEST PHYSICAL lines: the last wrapped segments are
+  // in the frame and the oldest wrapped segment of the long row is not.
+  for (const segment of wrapped.slice(-capacity)) {
+    assert.ok(text.includes(segment.trim()), `tail segment visible: ${segment.trim()}`);
+  }
+  assert.ok(
+    !text.includes(wrapped[0]!.slice(0, 20)),
+    "the oldest physical line of the wrapped row never crowds the tail",
+  );
+  // The O2 answer and the open draft survive the wrapping.
+  assert.ok(text.includes("queued · 1 pending"), "the notice row is reserved, not sliced");
+  assert.ok(text.includes("message:"), "the draft row is reserved, not sliced");
+  assert.equal(view.visible.at(-1)?.text, longText, "the newest logical row stays visible");
+
+  // Scrolling by one logical row steps over the whole wrapped row: the window
+  // then ends at the short row above it.
+  const scrolled = helperDetailView(
+    detail,
+    { ...state, scroll: 1 },
+    { width, height, now: 10_000 },
+  );
+  const scrolledText = scrolled.lines.join("\n");
+  assert.ok(scrolledText.includes("Task · row zero"), "the previous row is now the tail");
+  assert.ok(!scrolledText.includes(wrapped.at(-1)!.trim()), "the wrapped row stepped over");
+});
+
+test("D5: a paste into the open draft becomes one sanitized line capped at 4000 chars", () => {
+  const detail = detailWith([]);
+  let state: HelperOverlayState = {
+    selectedId: detail.id,
+    detail,
+    scroll: 0,
+    draft: null,
+    notice: null,
+  };
+  state = helperOverlayKey(TUI_COMMANDS, [], state, { name: "m", raw: "m" }).state;
+  const pasted = helperOverlayKey(TUI_COMMANDS, [], state, {
+    name: "paste",
+    raw: "line one\nline two\r\nline three",
+  });
+  assert.equal(pasted.action, "draft-edit");
+  assert.equal(pasted.state.draft?.text, "line one line two line three");
+  assert.ok(!pasted.state.draft?.text.includes("\n"), "the paste can never add a newline");
+  // The rendered draft row is a single frame line.
+  const frame = helperDetailView(detail, pasted.state, { width: 60, height: 12, now: 10_000 });
+  const draftRow = frame.lines.find((line) => line.includes("message:"));
+  assert.ok(draftRow !== undefined);
+  assert.ok(!draftRow.includes("\n"));
+
+  // The 4000-char cap holds across a paste (newline becomes one space first).
+  let capped: HelperOverlayState = {
+    selectedId: detail.id,
+    detail,
+    scroll: 0,
+    draft: null,
+    notice: null,
+  };
+  capped = helperOverlayKey(TUI_COMMANDS, [], capped, { name: "m", raw: "m" }).state;
+  capped = helperOverlayKey(TUI_COMMANDS, [], capped, {
+    name: "paste",
+    raw: `${"x".repeat(3_900)}\n${"y".repeat(3_900)}`,
+  }).state;
+  assert.equal(capped.draft?.text.length, 4_000, "the paste is capped at 4000 chars");
+  assert.ok(!capped.draft?.text.includes("\n"));
+
+  // With no draft open a paste is a no-op (the app only routes it to the draft).
+  const closed = helperOverlayKey(
+    TUI_COMMANDS,
+    [],
+    { ...state, draft: null },
+    { name: "paste", raw: "nope\nnope" },
+  );
+  assert.equal(closed.action, "none");
+  assert.equal(closed.state.draft, null);
 });
