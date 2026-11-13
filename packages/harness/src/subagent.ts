@@ -43,6 +43,13 @@ export const SUBAGENT_TOOL_NAME = "subagent";
 
 /** One delegated task is bounded; the model gets a clear error over the cap. */
 export const SUBAGENT_MAX_TASK_CHARS = 4_000;
+
+/** Per-call model id override bound: length and a model-id-safe grammar. */
+export const SUBAGENT_MODEL_MAX_CHARS = 200;
+export const SUBAGENT_MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$/;
+
+/** Per-call reasoning-effort override bound (the effort token itself is ≤32). */
+export const SUBAGENT_EFFORT_MAX_CHARS = 32;
 /** Short display label retained in the parent tree and the child header. */
 export const SUBAGENT_MAX_LABEL_CHARS = 80;
 /** Per-run child budget (the parent can delegate repeatedly, but not forever). */
@@ -1121,7 +1128,8 @@ export const SUBAGENT_TOOL_DESCRIPTION = [
   "Spawn one isolated helper for a focused side task.",
   "The helper does not see this conversation; it gets only your task brief and workspace tools, then returns a bounded report.",
   "Use it for parallel discovery, a second opinion on a file, or reading a large area without polluting this context.",
-  "The operator may configure a dedicated helper route in Settings; when set, it wins over the `role` argument.",
+  "The operator may configure a dedicated helper route in Settings; it supplies the connection and the default model, and it wins over the `role` argument.",
+  "Optional `model` and `effort` arguments refine only the model and reasoning effort for this call — never the connection: the provider, base URL and API key always come from the configured route or the role endpoint.",
   "Workspace changes the helper makes are ordinary operator approvals in this run, under the same permission mode; a helper cannot widen the run's policy.",
   "It cannot spawn more subagents. Do not use it as a replacement for the Junior.",
   "Set `background:true` to keep working while it runs: the result is then `status:\"started\"` and the report is only readable through `subagent_report`. A background helper is cancelled when this run ends, so read its report before then.",
@@ -1143,7 +1151,17 @@ export const SUBAGENT_TOOL_PARAMETERS: Record<string, unknown> = {
       type: "string",
       enum: ["senior", "junior"],
       description:
-        "Fallback model when no dedicated helper route is configured in Settings. A configured route always wins.",
+        "Fallback model when no dedicated helper route is configured in Settings. A configured route always wins; `model` may then only refine the model id for this call.",
+    },
+    model: {
+      type: "string",
+      description:
+        "Optional per-call model id override (at most 200 chars). Only the model changes — the provider, base URL and API key always come from the configured helper route or the role endpoint.",
+    },
+    effort: {
+      type: "string",
+      description:
+        'Optional per-call reasoning-effort override (a model-declared token such as "low", "high" or "max", at most 32 chars). An effort the model does not support fails the helper honestly rather than falling back.',
     },
     background: {
       type: "boolean",

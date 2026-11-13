@@ -27,7 +27,9 @@ import {
   runSubagent,
   SUBAGENT_MAX_TASK_CHARS,
   SUBAGENT_SYSTEM_PROMPT,
+  SUBAGENT_TOOL_DESCRIPTION,
   SUBAGENT_TOOL_NAME,
+  SUBAGENT_TOOL_PARAMETERS,
   SubagentStore,
 } from "../src/subagent.ts";
 import type { RuntimeEvent } from "../src/runevents.ts";
@@ -492,4 +494,28 @@ test("a failing child provider becomes a failed tool result, not a parent crash"
   } finally {
     cleanup();
   }
+});
+
+test("the tool schema and description pin the per-call override surface", () => {
+  // Two new optional properties, nothing required changes, no extra args:
+  const schema = SUBAGENT_TOOL_PARAMETERS as {
+    properties: Record<string, unknown>;
+    required: string[];
+    additionalProperties: boolean;
+  };
+  assert.deepEqual(Object.keys(schema.properties).sort(), [
+    "background",
+    "effort",
+    "label",
+    "model",
+    "role",
+    "task",
+  ]);
+  assert.deepEqual(schema.required, ["task"]);
+  assert.equal(schema.additionalProperties, false);
+  // The description states the honest rule and keeps the policy/nesting
+  // sentences byte-for-byte:
+  assert.match(SUBAGENT_TOOL_DESCRIPTION, /`model` and `effort` arguments refine only/);
+  assert.match(SUBAGENT_TOOL_DESCRIPTION, /cannot widen the run's policy/);
+  assert.match(SUBAGENT_TOOL_DESCRIPTION, /It cannot spawn more subagents\./);
 });

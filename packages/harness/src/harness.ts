@@ -197,6 +197,7 @@ import {
   renderWorkspaceInstructions,
   type WorkspaceInstructionFile,
 } from "./instructions.ts";
+import { isEffortValue, normalizeEffortValue } from "./effort.ts";
 import type { Workspace } from "./workspace.ts";
 import {
   AnthropicProvider,
@@ -210,6 +211,7 @@ import {
   ProviderAbortError,
   ProviderContextOverflowError,
   type Provider,
+  type ProviderKind,
   resolveProviderKind,
   type Tool,
   type ToolChatResponse,
@@ -273,10 +275,13 @@ import {
   SUBAGENT_APPROVAL_REASON_MAX_CHARS,
   SUBAGENT_APPROVAL_TARGET_MAX_CHARS,
   SUBAGENT_CONTEXT_MAX_CHARS,
+  SUBAGENT_EFFORT_MAX_CHARS,
   SUBAGENT_FOLLOWUP_QUEUE_MAX,
   SUBAGENT_FOLLOWUP_TEXT_MAX_CHARS,
   SUBAGENT_MAX_LABEL_CHARS,
   SUBAGENT_MAX_TASK_CHARS,
+  SUBAGENT_MODEL_MAX_CHARS,
+  SUBAGENT_MODEL_PATTERN,
   SUBAGENT_READ_TOOL_NAMES,
   SUBAGENT_REPORT_TOOL_DESCRIPTION,
   SUBAGENT_REPORT_TOOL_NAME,
@@ -1361,6 +1366,24 @@ export function approvalPair(
 }
 
 /**
+ * The wire family one endpoint build uses: a preset-carried `kind` is
+ * intrinsic to the preset's URL (it wins), otherwise the role/run-level
+ * chain applies. `resolveProviderKind` validates and throws a clear error on
+ * unknown kinds before any endpoint is contacted — shared by
+ * `providerFromEndpoint` and the per-call override synthesis so the family is
+ * computed in exactly one place.
+ */
+function resolveEndpointKind(
+  cfg: Config,
+  role: "senior" | "junior",
+  endpoint: RoleEndpoint | undefined,
+): ProviderKind {
+  return endpoint?.kind
+    ? resolveProviderKind({ kind: endpoint.kind, seniorKind: "", juniorKind: "" }, role)
+    : resolveProviderKind(cfg, role);
+}
+
+/**
  * Build one role's provider from its resolved endpoint (Stage 18 per-role
  * endpoints): `mock` endpoints get a MockProvider, `openai` endpoints an
  * HTTP provider over the endpoint's own baseUrl/apiKey/model — the adapter
@@ -1381,12 +1404,7 @@ function providerFromEndpoint(
   const provider = endpoint.provider || cfg.provider;
   if (provider === "mock") return new MockProvider();
   if (provider === "openai") {
-    // A preset kind is intrinsic to the preset URL (it wins); otherwise the
-    // role/run-level chain applies. resolveProviderKind validates and throws
-    // a clear error on unknown kinds before any endpoint is contacted.
-    const kind = endpoint.kind
-      ? resolveProviderKind({ kind: endpoint.kind, seniorKind: "", juniorKind: "" }, role)
-      : resolveProviderKind(cfg, role);
+    const kind = resolveEndpointKind(cfg, role, endpoint);
     const config = {
       provider,
       baseUrl: endpoint.baseUrl || cfg.baseUrl,
@@ -2403,33 +2421,71 @@ export class TwoBrothersHarness {
       .concat(this.spillReadOffered() ? [this.spillReadTool()] : []);
   }
 
-  /** A fresh provider for one child; keeps child usage out of the parent total. */
+  /**
+   * A fresh provider for one child; keeps child usage out of the parent total.
+   * Per-call overrides (`model`/`effort`, already validated) refine a COPY of
+   * the resolved base endpoint (the dedicated helper route, else the role
+   * endpoint): the copy changes only `model`/`effort` — provider, baseUrl,
+   * apiKey, kind and contextWindow always come from the base, never from a
+   * tool argument. With no base at all and no override, the historical
+   * `buildProvider` path stays byte-identical; with an override the
+   * connection is synthesized from the run's own `cfg` (same fields,
+   * `resolveProviderKind` family), so an argument can never move the
+   * credential or the data destination.
+   */
   private buildSubagentProvider(
     role: "senior" | "junior",
     configured?: SubagentEndpoint,
+    model?: string,
+    effort?: string,
   ): Provider {
     const warn = this.options.onProviderWarning;
-    if (configured !== undefined) {
-      const built = providerFromEndpoint(this.cfg, role, configured, warn);
+    const base: RoleEndpoint | undefined = configured ?? this.options.endpoints?.[role];
+    if (base !== undefined) {
+      const built = providerFromEndpoint(
+        this.cfg,
+        role,
+        {
+          ...base,
+          model: this.subagentModel(role, configured, model),
+          ...(effort !== undefined ? { effort } : {}),
+        },
+        warn,
+      );
       if (built !== null) return built;
     }
-    const endpoint = this.options.endpoints?.[role];
-    if (endpoint !== undefined) {
-      const built = providerFromEndpoint(this.cfg, role, endpoint, warn);
-      if (built !== null) return built;
+    if (model === undefined && effort === undefined) {
+      return buildProvider(warn ? { ...this.cfg, onWarning: warn } : this.cfg, role);
     }
+    const endpoint: RoleEndpoint = {
+      provider: this.cfg.provider,
+      baseUrl: this.cfg.baseUrl,
+      apiKey: this.cfg.apiKey,
+      kind: resolveEndpointKind(this.cfg, role, undefined),
+      model: this.subagentModel(role, configured, model),
+      ...(effort !== undefined ? { effort } : {}),
+    };
+    const built = providerFromEndpoint(this.cfg, role, endpoint, warn);
+    if (built !== null) return built;
     return buildProvider(warn ? { ...this.cfg, onWarning: warn } : this.cfg, role);
   }
 
-  /** The role's model id, for the tree row (display only). */
+  /**
+   * The model id the child actually runs, for the tree row, `list_agents` and
+   * `subagent_report` (display only). Precedence: the validated per-call
+   * override, then the resolved base endpoint's model (helper route, else
+   * role endpoint), then the run config's role model, then the role literal.
+   */
   private subagentModel(
     role: "senior" | "junior",
     configured?: SubagentEndpoint,
+    model?: string,
   ): string {
-    if (configured?.model) return configured.model;
-    const endpoint = this.options.endpoints?.[role];
+    if (model) return model;
+    const base = configured ?? this.options.endpoints?.[role];
+    if (base?.model) return base.model;
     const configuredModel =
-      endpoint?.model || (role === "senior" ? this.cfg.seniorModel : this.cfg.juniorModel);
+      role === "senior" ? this.cfg.seniorModel : this.cfg.juniorModel;
     return configuredModel || (role === "senior" ? "senior" : "junior");
   }
 
@@ -2790,6 +2846,44 @@ export class TwoBrothersHarness {
     // Opt-in per call and default false: `background` absent/false keeps the
     // exact synchronous contract (the parent waits for the report).
     const background = args.background === true;
+    // Per-call overrides are validated BEFORE any spawn or budget counter,
+    // like the task validation above: a bad value is an honest tool error and
+    // changes no counter. Only the model/effort may move — the connection is
+    // pinned in `buildSubagentProvider` (route/role endpoint, else the run's
+    // own config), so an argument can never choose a provider, base URL,
+    // API key, wire family or context window.
+    let modelOverride: string | undefined;
+    if (args.model !== undefined) {
+      if (
+        typeof args.model !== "string" ||
+        args.model.length === 0 ||
+        args.model.length > SUBAGENT_MODEL_MAX_CHARS ||
+        !SUBAGENT_MODEL_PATTERN.test(args.model)
+      ) {
+        return JSON.stringify({
+          tool: SUBAGENT_TOOL_NAME,
+          status: "error",
+          error: `subagent: \`model\` must be a non-empty model id of at most ${SUBAGENT_MODEL_MAX_CHARS} chars matching ${SUBAGENT_MODEL_PATTERN.source}`,
+        });
+      }
+      modelOverride = args.model;
+    }
+    let effortOverride: string | undefined;
+    if (args.effort !== undefined) {
+      if (
+        typeof args.effort !== "string" ||
+        args.effort.length > SUBAGENT_EFFORT_MAX_CHARS ||
+        !isEffortValue(args.effort)
+      ) {
+        return JSON.stringify({
+          tool: SUBAGENT_TOOL_NAME,
+          status: "error",
+          error: `subagent: \`effort\` must be a reasoning-effort token of at most ${SUBAGENT_EFFORT_MAX_CHARS} chars (lowercase letters, digits, "_" or "-", e.g. "low", "high")`,
+        });
+      }
+      // Store the normalized token (e.g. "HIGH" -> "high"), like settings do.
+      effortOverride = normalizeEffortValue(args.effort) ?? undefined;
+    }
     const maxPerRun = settings.maxPerRun ?? SUBAGENT_DEFAULT_MAX_PER_RUN;
     const maxActive = settings.maxActive ?? SUBAGENT_DEFAULT_MAX_ACTIVE;
     if (this.subagentRuns >= maxPerRun) {
@@ -2809,9 +2903,10 @@ export class TwoBrothersHarness {
 
     const id = newSubagentId();
     const configured = settings.endpoint;
-    const model = this.subagentModel(role, configured);
+    const model = this.subagentModel(role, configured, modelOverride);
     const provider =
-      settings.providerFactory?.(role) ?? this.buildSubagentProvider(role, configured);
+      settings.providerFactory?.(role) ??
+      this.buildSubagentProvider(role, configured, modelOverride, effortOverride);
     const startedAt = Date.now();
     // One control per child. The parent run signal decides whether the parent
     // unwinds; the child's own controller exists so the operator and the Senior
