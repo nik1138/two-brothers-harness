@@ -34,6 +34,9 @@ import {
   HELPER_SCROLL_PAGE,
   HELPER_UNKNOWN_COPY,
   createHelperOverlayState,
+  createHelperFollowUpDraft,
+  helperFollowUpToastText,
+  helperInterruptToastText,
   foldHelperDetail,
   foldHelperEvent,
   helperActivityLabel,
@@ -534,7 +537,10 @@ test("detail view is exact geometry and the header states model, status and toke
   assert.ok(text.includes("completed · 0:41"));
   assert.ok(text.includes("tokens 1.2k tok"));
   assert.ok(text.includes("Task · Read the auth module."));
-  assert.ok(text.includes("PgUp / PgDn scroll · Esc back"), "the footer derives its chords");
+  assert.ok(
+    text.includes("PgUp / PgDn scroll · i stop · m message · Esc back"),
+    "the footer derives its chords (O2 appends the child controls)",
+  );
   assert.deepEqual(helperDetailHeader(detail, { now: 10_000 }), [
     "read the auth module",
     "child-model · junior",
@@ -612,7 +618,7 @@ test("Esc layering: detail → list → closed, Enter opens the anchored selecti
     summary({ id: "sub-bbbbbbbbbbbbbbbb", label: "older", started_at: 1_000 }),
   ]);
   const detail = detailWith([{ type: "message", role: "user", text: "Task.", at: 1 }]);
-  const open: HelperOverlayState = { selectedId: "sub-bbbbbbbbbbbbbbbb", detail, scroll: 3 };
+  const open: HelperOverlayState = { selectedId: "sub-bbbbbbbbbbbbbbbb", detail, scroll: 3, draft: null, notice: null };
 
   const back = helperOverlayKey(TUI_COMMANDS, rows, open, { name: "escape", raw: "\u001b" });
   assert.equal(back.action, "back");
@@ -926,5 +932,183 @@ test("a dangling helper provider_ref warns through the merged warning channel", 
   assert.ok(
     state.warnings.some((warning) => /subagent route/i.test(warning)),
     `expected a subagent route warning, got ${JSON.stringify(state.warnings)}`,
+  );
+});
+
+// --------------------------------------------------------------------------- //
+// O2 operator controls: interrupt, follow-up draft, refusal copy, pending badge
+// --------------------------------------------------------------------------- //
+
+test("O2: interrupt toast copy names the request, never an outcome", () => {
+  assert.equal(
+    helperInterruptToastText(true),
+    "interrupting — the helper's terminal event is the truth",
+  );
+  assert.equal(helperInterruptToastText(false), "helper already finished");
+});
+
+test("O2: follow-up toast copy is the honest bounded-queue answer", () => {
+  assert.equal(helperFollowUpToastText({ ok: true, pending: 1 }), "queued · 1 pending");
+  assert.equal(helperFollowUpToastText({ ok: true, pending: 3 }), "queued · 3 pending");
+  assert.equal(
+    helperFollowUpToastText({ ok: false, reason: "not_running" }),
+    "helper already finished",
+  );
+  assert.equal(
+    helperFollowUpToastText({ ok: false, reason: "queue_full" }),
+    "queue is full (8 pending)",
+  );
+  assert.equal(
+    helperFollowUpToastText({ ok: false, reason: "context_full", chars: 80_123 }),
+    "context is full (80123 chars)",
+  );
+});
+
+test("O2: i/m resolve only in the detail; the list ignores them", () => {
+  const rows = helperRowsFromSummaries([summary({ id: "sub-aaaaaaaaaaaaaaaa" })]);
+  const detail = detailWith([{ type: "message", role: "user", text: "Task.", at: 1 }]);
+  const inDetail: HelperOverlayState = {
+    selectedId: "sub-aaaaaaaaaaaaaaaa",
+    detail,
+    scroll: 0,
+    draft: null,
+    notice: null,
+  };
+  const interrupt = helperOverlayKey(TUI_COMMANDS, rows, inDetail, { name: "i", raw: "i" });
+  assert.equal(interrupt.action, "interrupt");
+  assert.equal(interrupt.state, inDetail, "interrupt never mutates overlay state");
+  const followUp = helperOverlayKey(TUI_COMMANDS, rows, inDetail, { name: "m", raw: "m" });
+  assert.equal(followUp.action, "followup");
+  assert.notEqual(followUp.state.draft, null, "m opens the one-line draft");
+  // List mode: the overlay-scope commands exist but act on the open child, so
+  // the list leaves them untouched (and they can never reach the composer).
+  const inList = createHelperOverlayState("sub-aaaaaaaaaaaaaaaa");
+  assert.equal(helperOverlayKey(TUI_COMMANDS, rows, inList, { name: "i", raw: "i" }).action, "none");
+  assert.equal(helperOverlayKey(TUI_COMMANDS, rows, inList, { name: "m", raw: "m" }).action, "none");
+});
+
+test("O2: the follow-up draft edits printable keys and caps at 4000 chars", () => {
+  const rows: HelperRow[] = [];
+  const detail = detailWith([]);
+  let state: HelperOverlayState = { selectedId: detail.id, detail, scroll: 0, draft: null, notice: null };
+  state = helperOverlayKey(TUI_COMMANDS, rows, state, { name: "m", raw: "m" }).state;
+  for (const ch of "also check the config") {
+    state = helperOverlayKey(TUI_COMMANDS, rows, state, { name: ch, raw: ch }).state;
+  }
+  assert.equal(state.draft?.text, "also check the config");
+  // Cursor movement and deletion reuse the editor primitives unchanged.
+  state = helperOverlayKey(TUI_COMMANDS, rows, state, { name: "backspace", raw: "\u007f" }).state;
+  assert.equal(state.draft?.text, "also check the confi");
+  // The cap is the backend's SUBAGENT_FOLLOWUP_TEXT_MAX_CHARS (4000).
+  let capped: HelperOverlayState = { selectedId: detail.id, detail, scroll: 0, draft: null, notice: null };
+  capped = helperOverlayKey(TUI_COMMANDS, rows, capped, { name: "m", raw: "m" }).state;
+  for (let index = 0; index < 4_100; index += 1) {
+    capped = helperOverlayKey(TUI_COMMANDS, rows, capped, { name: "x", raw: "x" }).state;
+  }
+  assert.equal(capped.draft?.text.length, 4_000, "the draft is capped at 4000 chars");
+  // A newline can never enter the one-line draft.
+  capped = helperOverlayKey(TUI_COMMANDS, rows, capped, { name: "j", ctrl: true, raw: "\u000a" }).state;
+  assert.equal(capped.draft?.text.includes("\n"), false);
+});
+
+test("O2: Enter asks to submit the draft; Esc cancels only the draft, never the overlay", () => {
+  const detail = detailWith([{ type: "message", role: "user", text: "Task.", at: 1 }]);
+  const rows = helperRowsFromSummaries([summary({ id: detail.id })]);
+  let state: HelperOverlayState = { selectedId: detail.id, detail, scroll: 0, draft: null, notice: null };
+  state = helperOverlayKey(TUI_COMMANDS, rows, state, { name: "m", raw: "m" }).state;
+  state = helperOverlayKey(TUI_COMMANDS, rows, state, { name: "p", raw: "p" }).state;
+  const submitted = helperOverlayKey(TUI_COMMANDS, rows, state, { name: "return", raw: "\r" });
+  assert.equal(submitted.action, "draft-submit");
+  assert.equal(submitted.state.draft?.text, "p", "the submit carries the exact draft text");
+  // Esc precedence: with the draft open it cancels the draft and keeps the
+  // detail; the next Esc backs to the list; the next closes the overlay.
+  let esc = helperOverlayKey(TUI_COMMANDS, rows, state, { name: "escape", raw: "\u001b" });
+  assert.equal(esc.action, "draft-cancel");
+  assert.notEqual(esc.state.detail, null, "the detail stays open after the draft is cancelled");
+  esc = helperOverlayKey(TUI_COMMANDS, rows, esc.state, { name: "escape", raw: "\u001b" });
+  assert.equal(esc.action, "back");
+  esc = helperOverlayKey(TUI_COMMANDS, rows, esc.state, { name: "escape", raw: "\u001b" });
+  assert.equal(esc.action, "close");
+});
+
+test("O2: drafting and submitting never append a transcript row", () => {
+  const detail = detailWith([{ type: "message", role: "user", text: "Task.", at: 1 }]);
+  const rowsBefore = helperDetailRows(detail).length;
+  let state: HelperOverlayState = { selectedId: detail.id, detail, scroll: 0, draft: null, notice: null };
+  state = helperOverlayKey(TUI_COMMANDS, [], state, { name: "m", raw: "m" }).state;
+  for (const ch of "queued words") {
+    state = helperOverlayKey(TUI_COMMANDS, [], state, { name: ch, raw: ch }).state;
+  }
+  const submitted = helperOverlayKey(TUI_COMMANDS, [], state, { name: "return", raw: "\r" });
+  assert.equal(submitted.action, "draft-submit");
+  assert.equal(
+    helperDetailRows(submitted.state.detail ?? detail).length,
+    rowsBefore,
+    "no local row appears before the backend delivers the follow-up",
+  );
+  // The draft line renders in the frame; the transcript rows are untouched.
+  const view = helperDetailView(detail, state, { width: 60, height: 14, now: 10_000 });
+  assert.ok(view.lines.some((line) => line.includes("message: queued words")));
+  assert.equal(view.rows.length, rowsBefore);
+});
+
+test("O2: the detail header carries the live pending badge from pendingFollowUps()", () => {
+  const detail = detailWith([], { status: "running", ended_at: undefined });
+  assert.deepEqual(helperDetailHeader(detail, { now: 5_000, pending: 0 })[2], "running · 0:04");
+  assert.equal(
+    helperDetailHeader(detail, { now: 5_000, pending: 2 })[2],
+    "running · 0:04 · 2 pending",
+  );
+  const view = helperDetailView(detail, createHelperOverlayState(detail.id), {
+    width: 60,
+    height: 14,
+    now: 5_000,
+    pending: 1,
+  });
+  assert.ok(view.lines.some((line) => line.includes("running · 0:04 · 1 pending")));
+});
+
+test("O2: with the draft open the footer derives Enter send · Esc cancel", () => {
+  const detail = detailWith([]);
+  const state: HelperOverlayState = {
+    selectedId: detail.id,
+    detail,
+    scroll: 0,
+    draft: createHelperFollowUpDraft(),
+    notice: null,
+  };
+  const view = helperDetailView(detail, state, { width: 60, height: 12, now: 10_000 });
+  assert.ok(view.lines.some((line) => line.includes("Enter send · Esc cancel")));
+  // Without a draft the O2 controls join the O1 footer.
+  const plain = helperDetailView(detail, createHelperOverlayState(detail.id), {
+    width: 60,
+    height: 12,
+    now: 10_000,
+  });
+  assert.ok(plain.lines.some((line) => /i stop · m message/.test(line)));
+});
+
+test("O2: the overlay-scope i/m chords collide with nothing and reach no other handler", () => {
+  const seen = new Map<string, string>();
+  for (const command of TUI_COMMANDS) {
+    if (command.when !== "overlay") continue;
+    for (const chord of command.keys ?? []) {
+      const label = chord.name
+        + (chord.ctrl === true ? "+ctrl" : "")
+        + (chord.shift === true ? "+shift" : "")
+        + (chord.alt === true ? "+alt" : "");
+      assert.equal(seen.has(label), false, `overlay chord ${label} is bound twice`);
+      seen.set(label, command.id);
+    }
+  }
+  assert.equal(seen.get("i"), "helper-interrupt");
+  assert.equal(seen.get("m"), "helper-followup");
+  // Overlay keys are resolved in overlay scope only: app scope must not see
+  // them (no key stealing from the composer while no overlay is up).
+  assert.equal(resolveKey(TUI_COMMANDS, { name: "i", raw: "i" }, "app"), null);
+  assert.equal(resolveKey(TUI_COMMANDS, { name: "m", raw: "m" }, "app"), null);
+  assert.equal(
+    resolveKey(TUI_COMMANDS, { name: "i", raw: "i" }, "overlay")?.command.id,
+    "helper-interrupt",
   );
 });

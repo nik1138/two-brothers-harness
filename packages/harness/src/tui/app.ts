@@ -280,6 +280,8 @@ import {
   foldHelperEvent,
   helperCounts,
   helperDetailView,
+  helperFollowUpToastText,
+  helperInterruptToastText,
   helperRowsFromSummaries,
   helperOverlayKey,
   helpersListView,
@@ -2479,6 +2481,9 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
             height: boxH,
             theme,
             commands,
+            // Live queued follow-ups from the child's control handle; a
+            // settled/missing child reads 0, so the badge is simply absent.
+            pending: childControls.get(overlay.state.detail.id)?.pendingFollowUps() ?? 0,
           }).lines;
     }
     const boxW = Math.max(30, Math.min(Math.max(columns - 8, 30), 72));
@@ -2549,7 +2554,7 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
   }
 
   // --------------------------------------------------------------------- //
-  // helper subagents (slice O1: observation only)
+  // helper subagents (O1 observation; O2 operator controls)
   // --------------------------------------------------------------------- //
 
   /** This session's helper parent identity (the child log's `parent_session`). */
@@ -2638,6 +2643,44 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
     }
     overlay = { kind: "subagents", state: { ...state, selectedId: id, detail, scroll: 0 } };
     render();
+  };
+
+  /**
+   * O2 interrupt: ask the open child's control handle to abort — the child
+   * only, never the parent run. There is no optimistic status flip: the copy
+   * names the request and the child's terminal event is the truth. A `false`
+   * answer (settled/already-interrupted) or a missing handle (the child of a
+   * previous process, or never live) reads "helper already finished". The
+   * answer is an overlay notice (toasts are suppressed under a modal overlay).
+   */
+  const interruptHelper = (
+    id: string,
+  ): { text: string; level: "info" | "warn" | "success" } => {
+    const handle = childControls.get(id);
+    const accepted = handle !== undefined && handle.interrupt("operator");
+    return { text: helperInterruptToastText(accepted), level: accepted ? "info" : "warn" };
+  };
+
+  /**
+   * O2 follow-up: submit the trimmed one-line draft through the child's
+   * control handle. The answer is rendered exactly as the bounded queue
+   * reports it — `queued · N pending`, or the honest refusal; `null` means an
+   * all-whitespace draft sent nothing (the previous notice is kept). Nothing
+   * is appended to the transcript here and "delivered" is never claimed: the
+   * delivered row appears in the child log only when the child's next
+   * provider step consumes the queue.
+   */
+  const submitHelperFollowUp = (
+    id: string,
+    draft: string,
+  ): { text: string; level: "info" | "warn" | "success" } | null => {
+    const text = draft.trim();
+    if (text === "") return null;
+    const handle = childControls.get(id);
+    const result = handle !== undefined
+      ? handle.send(text, "operator")
+      : ({ ok: false, reason: "not_running" } as const);
+    return { text: helperFollowUpToastText(result), level: result.ok ? "success" : "warn" };
   };
 
   const onStreamEvent = (event: StreamEvent): void => {
@@ -4747,9 +4790,11 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
       return;
     }
     if (overlay.kind === "subagents") {
-      // One `HELPERS` branch: Esc layering is detail → list → closed, Enter opens
-      // the id-anchored selection (or returns from the detail), PgUp/PgDn scroll
-      // the open transcript. The list's own Ctrl+Y (`agents`) toggles it closed.
+      // One `HELPERS` branch: Esc layering is detail → list → closed (with a
+      // draft open, Esc cancels only the draft), Enter opens the id-anchored
+      // selection (or returns from the detail), PgUp/PgDn scroll the open
+      // transcript, `i` interrupts the open child and `m` drafts a follow-up.
+      // The list's own Ctrl+Y (`agents`) toggles it closed.
       const result = helperOverlayKey(commands, helperRows, overlay.state, key);
       if (result.action === "close") {
         overlay = null;
@@ -4760,6 +4805,40 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
         const id = result.state.selectedId;
         if (id === null) return;
         openHelperDetail(id, result.state);
+        return;
+      }
+      if (result.action === "interrupt") {
+        if (overlay.state.detail !== null) {
+          const notice = interruptHelper(overlay.state.detail.id);
+          overlay = { kind: "subagents", state: { ...overlay.state, notice } };
+        }
+        render();
+        return;
+      }
+      if (result.action === "followup") {
+        // Opening the draft clears the previous control answer.
+        overlay = {
+          kind: "subagents",
+          state: { ...result.state, notice: null },
+        };
+        render();
+        return;
+      }
+      if (result.action === "draft-edit" || result.action === "draft-cancel") {
+        overlay = { kind: "subagents", state: result.state };
+        render();
+        return;
+      }
+      if (result.action === "draft-submit") {
+        const id = overlay.state.detail?.id;
+        const draft = result.state.draft?.text ?? "";
+        const base = { ...result.state, draft: null };
+        const notice = id !== undefined ? submitHelperFollowUp(id, draft) : null;
+        overlay = {
+          kind: "subagents",
+          state: { ...base, ...(notice !== null ? { notice } : {}) },
+        };
+        render();
         return;
       }
       overlay = { kind: "subagents", state: result.state };

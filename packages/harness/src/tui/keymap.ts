@@ -364,6 +364,30 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
     when: "overlay",
     palette: false,
   },
+  // O2: operator controls over the open helper child. Overlay scope, so only
+  // the HELPERS overlay handler resolves them — the palette/help/picker
+  // handlers match their own list commands and send every other printable key
+  // to their query, so these can never steal typing. `i`/`m` are unbound in
+  // the overlay scope today; both are documented (key guide) but palette-hidden
+  // (they act on the open child, not on a palette row).
+  {
+    id: "helper-interrupt",
+    title: "Interrupt helper",
+    description: "Interrupt the open helper — the child only, never the parent run.",
+    group: "Cooperation",
+    keys: [{ name: "i" }],
+    when: "overlay",
+    palette: false,
+  },
+  {
+    id: "helper-followup",
+    title: "Message helper",
+    description: "Queue a one-line follow-up for the open helper's next step.",
+    group: "Cooperation",
+    keys: [{ name: "m" }],
+    when: "overlay",
+    palette: false,
+  },
   // The inline `/` command and `@skill:` mention pickers are a typing mode of
   // the composer, so their keys live in their own scope and can never collide
   // with prompt history, overlay movement or the find bar.

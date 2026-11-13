@@ -1874,6 +1874,31 @@ What landed, as recorded behavior:
   forked-context children, deeper nesting, per-call model/effort overrides (the
   operator's Settings → Models & roles → Subagent route already fixes the child
   route) and cost/cache roll-up into the parent view. The protocol stays
+  **Slice O2 (TUI helper controls) shipped 2026-11-13:** inside the open
+  child transcript, `i` interrupts the helper through the same in-process
+  `SubagentControlHandle` the web routes use (`interrupt("operator")` — the
+  child only, never the parent run) and `m` drafts a one-line follow-up in
+  the overlay's own editor state (cap 4000 chars, newline disabled),
+  submitted with `Enter` through `handle.send(text, "operator")`. The row
+  never flips optimistically — the copy says `interrupting — the helper's
+  terminal event is the truth` and the terminal event settles it; a
+  settled/missing child reads `helper already finished`. An accepted send
+  reads `queued · N pending` with a live `N pending` header badge from
+  `pendingFollowUps()`; refusals read `queue is full (8 pending)` /
+  `context is full (NNN chars)`. The transcript gains no local row and
+  delivery is never claimed — the `Follow-up · operator` log row appears
+  only when the child's next provider step consumes the queue. `Esc`
+  cancels only the draft, then layers detail → list → closed as before.
+  Both controls are overlay-scope registry commands (palette-hidden,
+  documented in the key guide), resolved only inside the HELPERS overlay —
+  no global dispatch, no key stealing, no new timer; the answers render as
+  an in-overlay notice because toasts are suppressed under modal overlays.
+  A parent transcript is byte-identical across every control interaction
+  (integration-asserted). Tests: `tests/tuihelpers.test.ts` (copy, draft
+  cap, Esc precedence, pending badge, chord collisions),
+  `tests/tuikeymap.test.ts`, `tests/tuiintegration.test.ts` (interrupt a
+  hanging child with the parent completing; queue → deliver at the child's
+  next step).
   unchanged; children are internal executions, not second protocol peers.
 - **Stacked-dialog mask-click (web, non-blocker)** — **blocked on upstream**
   (evidence updated 2026-11-08): naive-ui fires `mask-click` for clicks that
