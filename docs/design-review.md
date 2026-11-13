@@ -29,9 +29,9 @@ An honest critique of the current version and what to improve.
 - **Executable delegation (v0.3)**: with `--mcp-config`, the junior receives
   MCP tools in `work` mode and performs real work instead of only describing
   it.
-- **Evidence**: a full cycle on a real `spark-x2.6` is captured in
-  [`SPARK-TRANSCRIPT.md`](../SPARK-TRANSCRIPT.md) (the replay script lived
-  in the removed prototype tree).
+- **Evidence**: a full cycle on a real `spark-x2.6` was captured in
+  `SPARK-TRANSCRIPT.md` (the replay script lived in the removed prototype
+  tree); the capture remains in git history at commit `157c952`.
 - **A local coding workspace (v1)**: the web backend gives the junior confined
   filesystem/shell tools rooted at an operator-registered directory; reads
   auto-allow, mutations and shell commands pause the run on an operator

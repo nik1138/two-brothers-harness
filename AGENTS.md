@@ -32,7 +32,8 @@ where product work happens:
 
 The original Python prototype was removed from the repository on 2026-11-04;
 its history is in git history, and the captured `SPARK-TRANSCRIPT.md` /
-`LMSTUDIO-TRANSCRIPT.md` runs remain as evidence.
+`LMSTUDIO-TRANSCRIPT.md` runs also remain in git history at commit
+`157c952` as evidence.
 
 ## Repository Layout
 
@@ -50,8 +51,7 @@ its history is in git history, and the captured `SPARK-TRANSCRIPT.md` /
 | `docs/` | documentation, one flat set by topic; `docs/README.md` is the index (`quickstart.md`, `cli-reference.md`, `plugins.md`, `testing.md`, `backlog.md`, `design-review.md`) |
 | `docs/history/` | historical records, content frozen: `ts-rewrite-plan.md`, `cli-audit.md`, `web-ui-audit.md`, `handoff.md` |
 | `research/` | **local-only, gitignored** — research notes + vendored MIT reference clones (pi, kimi-code, deepseek-harness, opencode); never committed or published |
-| `SPARK-TRANSCRIPT.md` | captured real-model cooperation cycle (evidence) |
-| `LMSTUDIO-TRANSCRIPT.md` | LM Studio run evidence (`spark-x2.6-4b@q4_k_m` + `lfm3-1.7b`) |
+| captured `SPARK-TRANSCRIPT.md` / `LMSTUDIO-TRANSCRIPT.md` runs | removed from the working tree; remain in git history at commit `157c952` (evidence) |
 
 Every major tree has a short `AGENTS.md`: `packages/harness/` plus
 `packages/harness/src/`, `packages/harness/tests/`, `packages/harness/e2e/`,

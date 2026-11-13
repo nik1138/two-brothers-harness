@@ -1213,7 +1213,8 @@ Without the flag it prints `SKIP real (set TWO_BROTHERS_REAL_E2E=1)`.
 `spark-x2.6` is only reachable through the DSH `xhtoken` provider; it has no
 HTTP endpoint, and direct internet access from the sandbox is blocked. The full
 cycle on it was run through a `subagent` and captured in
-[`SPARK-TRANSCRIPT.md`](../SPARK-TRANSCRIPT.md).
+`SPARK-TRANSCRIPT.md`; the capture remains in git history at commit
+`157c952`.
 
 ## What is not covered by tests
 
