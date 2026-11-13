@@ -9,10 +9,10 @@ Local map for the repository gates and release tooling. Root rules:
   mock run, hermetic CLI E2E, fault injection, hermetic server E2E, reference
   selftest, web tests and build.
 - `e2e-test.ps1` — browser-E2E wrapper (builds web when stale, installs E2E
-  deps, runs `e2e/web-freshness.test.mjs` and `e2e/run.mjs`; its `finally`
-  sweeps orphaned E2E-pattern backend processes — this repo's `cli.js serve`
-  with a `--sessions-dir` under the E2E temp root, and the scripted fixture —
-  as a safety net for a force-killed runner).
+  deps, runs `e2e/web-freshness.test.mjs`, `e2e/skip-registry.test.mjs` and
+  `e2e/run.mjs`; its `finally` sweeps orphaned E2E-pattern backend processes —
+  this repo's `cli.js serve` with a `--sessions-dir` under the E2E temp root,
+  and the scripted fixture — as a safety net for a force-killed runner).
 - `release-rehearsal.ps1` — pre-push rehearsal: clean tree, build + dependency
   gate, smoke, tarball smoke, `pack:check`, browser E2E.
 - `check-pinned-deps.mjs` — exact-version guard for runtime dependencies.

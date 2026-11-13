@@ -183,6 +183,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { chromium } from 'playwright'
 
 import { ensurePackagedWebFresh } from './web-freshness.mjs'
+import { HERMETIC_LABELS, hermeticResultNames } from './scenario-registry.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.dirname(HERE)
@@ -6452,6 +6453,10 @@ async function main() {
   // server (fixtures/scripted-server.mjs, always present).
   const blocks = []
   if (tsAvailable) {
+    // The executed block list and the missing-backend SKIP report are both
+    // derived from HERMETIC_LABELS (scenario-registry.mjs); the deepEqual
+    // below fails loudly when this table and the registry disagree, so a
+    // scenario added to the table cannot be silently omitted from the skips.
     const hermetic = [
       {
         label: 'chat/resume',
@@ -6713,6 +6718,11 @@ async function main() {
         ),
       },
     ]
+    assert.deepEqual(
+      hermetic.map((block) => block.label),
+      [...HERMETIC_LABELS],
+      'e2e/run.mjs hermetic table must match e2e/scenario-registry.mjs exactly (same order)',
+    )
     blocks.push(...hermetic.filter((block) => scenarioSelected(block.label)))
     if (realEnabled && scenarioSelected('real')) {
       blocks.push({
@@ -6726,42 +6736,12 @@ async function main() {
   }
 
   if (!tsAvailable) {
-    for (const name of [
-      'chat',
-      'resume',
-      'approval-allow',
-      'approval-deny',
-      'approval-reduced-motion',
-      'stop',
-      'mobile',
-      'appearance-density',
-      'appearance-accent',
-      'appearance-roles',
-      'keybindings',
-      'provider-reset',
-      'folding',
-      'plan-dock',
-      'composer-seats',
-      'hero-starters',
-      'composer-recall',
-      'approval-reason',
-      'tool-preview',
-      'workspace-drag',
-      'reasoning-replay',
-      'cooperation-surfaces',
-      'auto-solo',
-      'tab-title',
-      'settings-advanced',
-      'settings-subagent',
-      'settings-preset-sync',
-      'history-nav',
-      'transcript-stability',
-      'session-switch-race',
-      'subagent-switch-race',
-      'reconnect-exhaustion',
-      'stop-switch-leak',
-      'real',
-    ].filter(scenarioSelected)) {
+    // No built backend: every hermetic scenario is reported as SKIP, derived
+    // from the same registry the runner executes (each block contributes its
+    // result name(s) — 'chat/resume' contributes two: chat and resume), plus
+    // the opt-in 'real' scenario. Deriving instead of listing keeps the
+    // report in sync when scenarios are added.
+    for (const name of [...hermeticResultNames(), 'real'].filter(scenarioSelected)) {
       results.push({
         name,
         status: 'SKIP',

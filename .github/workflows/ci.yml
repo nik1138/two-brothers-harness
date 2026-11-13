@@ -113,11 +113,12 @@ jobs:
         run: npm run build
         working-directory: web
 
-      # The browser-E2E packaged-web freshness guard is plain node:test with no
-      # dependencies and no browser (the Playwright suite itself stays manual),
-      # so its staleness/auto-sync logic is proven here on a clean checkout.
-      - name: Browser-E2E freshness unit tests
-        run: node --test e2e/web-freshness.test.mjs
+      # The browser-E2E packaged-web freshness guard and the missing-backend
+      # SKIP-registry parity guard are plain node:test with no dependencies
+      # and no browser (the Playwright suite itself stays manual), so their
+      # logic is proven here on a clean checkout.
+      - name: Browser-E2E unit tests (freshness + skip registry)
+        run: node --test e2e/web-freshness.test.mjs e2e/skip-registry.test.mjs
 
       # Release rehearsal: `npm pack` (whose prepack runs build + sync-web),
       # install the tarball in a fresh temp dir, then exercise the installed
@@ -249,8 +250,9 @@ jobs:
         run: npm run build
         working-directory: web
 
-      # The browser-E2E packaged-web freshness guard is plain node:test with no
-      # dependencies and no browser (the Playwright suite itself stays manual),
-      # so its staleness/auto-sync logic is proven here on a clean checkout too.
-      - name: Browser-E2E freshness unit tests
-        run: node --test e2e/web-freshness.test.mjs
+      # The browser-E2E packaged-web freshness guard and the missing-backend
+      # SKIP-registry parity guard are plain node:test with no dependencies
+      # and no browser (the Playwright suite itself stays manual), so their
+      # logic is proven here on a clean checkout too.
+      - name: Browser-E2E unit tests (freshness + skip registry)
+        run: node --test e2e/web-freshness.test.mjs e2e/skip-registry.test.mjs
