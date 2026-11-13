@@ -55,6 +55,7 @@ import {
   type McpToolSet,
 } from "../mcp.ts";
 import { PluginManager, type PluginBindings } from "../plugins.ts";
+import { bundleSkillRoots, mergeBundleCommands } from "../pluginbundle.ts";
 import {
   DEFAULT_APPROVAL_MODE,
   Decision,
@@ -992,8 +993,29 @@ export async function loadTuiResources(options: {
   skillsRoots?: string[];
   commandsRoots?: string[];
 }): Promise<TuiResources> {
-  const skills = discoverSkills(options.skillsRoots ?? []);
-  const commands = discoverCommands(options.commandsRoots ?? []);
+  let plugins: PluginManager | null = null;
+  try {
+    plugins =
+      options.pluginsDir === undefined
+        ? await PluginManager.create()
+        : await PluginManager.create(options.pluginsDir);
+  } catch (exc) {
+    if (options.cfg.verbose) {
+      options.io.error(
+        `[plugin] cannot load ${options.pluginsDir ?? "(default)"}: ${messageOf(exc)}`,
+      );
+    }
+  }
+  // Bundle skills ride after the operator roots (operator shadows bundle);
+  // bundle commands arrive namespaced `<bundle>:<command>`.
+  const skills = discoverSkills([
+    ...(options.skillsRoots ?? []),
+    ...bundleSkillRoots(plugins?.bundles.values() ?? []),
+  ]);
+  const commands = mergeBundleCommands(
+    discoverCommands(options.commandsRoots ?? []),
+    plugins?.bundles.values() ?? [],
+  );
   // A native registry command always wins its own name (see `keymap.ts`): a
   // discovered `<name>.md` template reusing a native slash name (`provider.md`,
   // `help.md`, …) would either shadow the native surface in the palette/help/
@@ -1014,25 +1036,15 @@ export async function loadTuiResources(options: {
       (command) => !nativeSlashTokens.has(command.name.toLowerCase()),
     );
   }
-  let plugins: PluginManager | null = null;
-  try {
-    plugins =
-      options.pluginsDir === undefined
-        ? await PluginManager.create()
-        : await PluginManager.create(options.pluginsDir);
-  } catch (exc) {
-    if (options.cfg.verbose) {
-      options.io.error(
-        `[plugin] cannot load ${options.pluginsDir ?? "(default)"}: ${messageOf(exc)}`,
-      );
-    }
-  }
   if (options.cfg.verbose) {
     for (const entry of plugins?.errors ?? []) {
       options.io.error(`[plugin] ${entry.plugin}: ${entry.error}`);
     }
     for (const entry of plugins?.diagnostics ?? []) {
       options.io.error(`[plugin] ${entry.plugin}: ${entry.message}`);
+    }
+    if (plugins !== null && plugins.bundles.size > 0) {
+      options.io.error(`[plugin] ${plugins.bundles.size} bundle(s) active`);
     }
     for (const line of skills.diagnostics) options.io.error(`[skills] ${line}`);
     for (const line of commands.diagnostics) options.io.error(`[commands] ${line}`);

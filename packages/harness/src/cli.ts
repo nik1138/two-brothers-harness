@@ -114,6 +114,7 @@ import {
   type PluginBindings,
   type PluginDiagnosticEntry,
 } from "./plugins.ts";
+import { bundleSkillRoots, mergeBundleCommands } from "./pluginbundle.ts";
 import {
   buildProvider,
   ANTHROPIC_MIN_THINKING_BUDGET,
@@ -924,14 +925,15 @@ export interface CliRunResources {
  * Load the CLI's plugins and skills once per process (run = one; chat =
  * shared by every turn). Fail-soft by contract: a missing/broken plugins
  * directory never blocks a run, and diagnostics are printed only under
- * `--verbose` so normal output stays byte-stable.
+ * `--verbose` so normal output stays byte-stable. Active declarative plugin
+ * bundles contribute their skills roots after the operator roots, so an
+ * operator skill shadows a same-named bundle skill.
  */
 export async function loadRunResources(
   cfg: Config,
   values: Record<string, any>,
   io: CliIO,
 ): Promise<CliRunResources> {
-  const skills = discoverSkills(skillsRootsForCli(values));
   const dir = pluginsDirForCli(values);
   let plugins: PluginManager | null = null;
   try {
@@ -942,6 +944,11 @@ export async function loadRunResources(
       io.error(`[plugin] cannot load ${dir}: ${message}`);
     }
   }
+  const operatorSkillRoots = skillsRootsForCli(values);
+  const skills = discoverSkills([
+    ...operatorSkillRoots,
+    ...bundleSkillRoots(plugins?.bundles.values() ?? []),
+  ]);
   if (cfg.verbose) {
     for (const entry of plugins?.errors ?? []) io.error(`[plugin] ${entry.plugin}: ${entry.error}`);
     for (const entry of plugins?.diagnostics ?? []) {
@@ -950,9 +957,16 @@ export async function loadRunResources(
     if (plugins !== null && plugins.plugins.size > 0) {
       io.error(`[plugin] ${plugins.plugins.size} loaded from ${dir}`);
     }
+    if (plugins !== null && plugins.bundles.size > 0) {
+      io.error(`[plugin] ${plugins.bundles.size} bundle(s) active`);
+    }
     for (const line of skills.diagnostics) io.error(`[skills] ${line}`);
     if (skills.skills.length > 0) {
-      io.error(`[skills] ${skills.skills.length} discovered from ${skillsRootsForCli(values).join(", ")}`);
+      const bundleRoots = bundleSkillRoots(plugins?.bundles.values() ?? []);
+      io.error(
+        `[skills] ${skills.skills.length} discovered from ` +
+          [...operatorSkillRoots, ...bundleRoots].join(", "),
+      );
     }
   }
   return { plugins, skills };
@@ -2088,15 +2102,25 @@ async function doChat(
   // like the resources above; every turn forwards the same choice.
   const mcpConfig = mcpConfigFromValues(values);
   // Slash commands are discovered once per REPL session (a new `<name>.md`
-  // needs a new session, unlike the per-turn plugin collection).
+  // needs a new session, unlike the per-turn plugin collection). Active
+  // declarative plugin bundles contribute namespaced `<bundle>:<command>`
+  // entries on top of the operator roots.
   const commandRoots = commandsRootsForCli(values);
-  const commands = discoverCommands(commandRoots);
+  const operatorCommands = discoverCommands(commandRoots);
+  const commands = mergeBundleCommands(
+    operatorCommands,
+    resources.plugins?.bundles.values() ?? [],
+  );
   if (cfg.verbose) {
     for (const line of commands.diagnostics) io.error(`[commands] ${line}`);
-    if (commands.commands.length > 0) {
+    if (operatorCommands.commands.length > 0) {
       io.error(
-        `[commands] ${commands.commands.length} discovered from ${commandRoots.join(", ")}`,
+        `[commands] ${operatorCommands.commands.length} discovered from ${commandRoots.join(", ")}`,
       );
+    }
+    const bundleCommandCount = commands.commands.length - operatorCommands.commands.length;
+    if (bundleCommandCount > 0) {
+      io.error(`[commands] ${bundleCommandCount} bundle command(s) active`);
     }
   }
   // One line per discovered command: `name — description (argument-hint)`.

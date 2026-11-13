@@ -5,7 +5,10 @@ Status: implemented in the **TypeScript package** —
 `packages/harness/tests/plugins.test.ts` (v1 surface),
 `packages/harness/tests/plugincore.test.ts` (scopes, hooks, validation,
 options) and `packages/harness/tests/integration.test.ts` (wiring into the
-cooperative run). This is where new plugin work lands. The original prototype's
+cooperative run). Declarative bundles live in
+`packages/harness/src/pluginbundle.ts` with tests in
+`packages/harness/tests/pluginbundle.test.ts`. This is where new plugin work
+lands. The original prototype's
 Python implementation was removed from the repository on 2026-11-04 (it lives
 in git history); its plugin contract is recorded in the divergences section
 below. The repo example is `plugins/notes.mts`; the loader does not read `.py`
@@ -136,6 +139,69 @@ Loading rules:
 - No new runtime dependencies: a plugin may use only Node's standard library
   **and** the packages the harness already pins (e.g. `zod`). There is no
   plugin-level dependency installation.
+
+## Declarative plugin bundles (no code)
+
+A **bundle** is a plugin without code: a directory `plugins/<name>/` whose
+`plugin.json` manifest declares a slash-command directory and/or a skills
+root that the existing discovery engines consume. Loading a bundle never
+imports or evaluates anything inside its directory — the manifest is parsed
+with `JSON.parse` and its paths are realpath-confined, so a bundle gets the
+command/skill surfaces only. Sources: `packages/harness/src/pluginbundle.ts`
+with tests in `packages/harness/tests/pluginbundle.test.ts`.
+
+Manifest contract (`plugin.json`):
+
+```json
+{
+  "name": "standup",
+  "description": "Daily standup helpers",
+  "version": "1.0.0",
+  "commands": "./commands",
+  "skills": "./skills"
+}
+```
+
+- At most **64 KiB**; a larger manifest fails the bundle (listed in
+  `GET /api/plugins` `errors[]`).
+- `name` (required) must match `^[a-z0-9_-]+$` and equal the directory
+  name. `description` and `version` are optional strings.
+- `commands` / `skills` are optional bundle-relative directory paths that
+  **must start with `./`**. They are resolved against the bundle directory
+  and realpath-confined: an absolute path, `../` traversal or an escaping
+  symlink fails the bundle; a missing/non-directory target is an info
+  diagnostic and the field is ignored.
+- Runtime fields from the code-plugin surface (`tools`, `hooks`,
+  `mcpServers`/`mcp_servers`, `options`, `register`, `configSchema`) are
+  **info diagnostics and ignored** — bundles never execute code, register
+  tools, hooks or MCP servers, and take no per-plugin options. Unknown fields
+  are ignored silently.
+
+Contribution rules:
+
+- **Commands** are discovered from the bundle's `commands` directory and
+  namespaced `<bundle>:<command>` (`/standup:triage the reports`). Expansion
+  (`$ARGUMENTS`, `$1`..`$9`, `$$`), `argument-hint` and `mode` behave exactly
+  like operator commands — including the `mode` override on run submission —
+  because the bundle reuses `commands.ts` unchanged. The namespace can never
+  collide with an operator command (their names never carry `:`).
+- **Skills** are discovered from the bundle's `skills` root with bundle roots
+  ordered **after** the operator roots, so an operator skill shadows a
+  same-named bundle skill (first root wins, one diagnostic). Role scoping,
+  prompt advertisement and `<skill>`-invocation delivery are the existing
+  `skills.ts` behavior.
+- A bundle markdown file (command template or `SKILL.md`) over **64 KiB** is
+  skipped with a diagnostic; the bundle stays active (fail-soft).
+- A bundle directory named the same as a code plugin file
+  (`plugins/notes.mts` vs `plugins/notes/`) loses: the code plugin keeps the
+  name and the bundle is skipped with a diagnostic.
+- Reloads ride the same path as code plugins (server start, a settings save
+  carrying `plugins`, CLI process start); bundle load notes surface in
+  `GET /api/plugins` `diagnostics` and in the CLI/TUI under `--verbose`.
+
+Bundles are local and trusted-by-operator like code plugins, but the
+no-execution rule makes them the right shape for sharing command/skill packs
+without reviewing executable code.
 
 ## Scopes: shared by default, per-tool opt-in
 
@@ -291,11 +357,14 @@ Settings entries may carry per-plugin settings:
   `TWO_BROTHERS_PLUGINS_DIR`, else `<cwd>/plugins` for the CLI; the server
   keeps its module-relative default unless one of those is set.
 - **API.**
-  - `GET /api/plugins` → `{plugins: [{name, description, roles}], errors:
-    [{plugin, error}]}`. `roles` stays `["shared"]` for any tool-carrying
-    plugin (`[]` when it registered none). When there are notes, an
-    additive `diagnostics: string[]` field carries load-time notes plus
-    the last run's binding notes (`plugin: message`); it is omitted when
+  - `GET /api/plugins` → `{plugins: [{name, description, roles, kind}],
+    errors: [{plugin, error}]}`. `roles` stays `["shared"]` for any
+    tool-carrying code plugin (`[]` when it registered none, and for bundles).
+    The additive `kind` is `"code"` or `"bundle"`; bundle entries also carry
+    their manifest `version`. When there are notes, an additive `diagnostics:
+    string[]` field carries load-time notes plus the last run's binding notes
+    (`plugin: message`) — bundle load notes (runtime-field info, missing path
+    targets, code-plugin collisions) ride the same list; it is omitted when
     empty so the shipped fields stay byte-compatible.
   - `GET /api/settings` and the `PUT` response carry the effective shared
     selection under the top-level `plugins` key. `PUT /api/settings`

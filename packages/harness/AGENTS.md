@@ -132,6 +132,21 @@ the protocol reference and is not modified by work here either.
    plugin tools need a workspace, so only workspace-bound `serve` runs get
    them (the CLI has no workspace), while hooks apply everywhere.
    The repo example is `plugins/notes.mts`. No new runtime deps.
+  **Declarative plugin bundles are shipped:** `src/pluginbundle.ts` —
+  a `plugins/<name>/plugin.json` manifest (≤64 KiB, `name` matching the
+  safe directory) declares a `./`-relative commands dir and/or skills root,
+  realpath-confined to the bundle (escapes fail the bundle); runtime fields
+  (`tools`/`hooks`/`mcpServers`/`options`/`register`/`configSchema`) are info
+  diagnostics and ignored, unknown fields silently so; **no code inside a
+  bundle ever executes**. `PluginManager` loads bundles beside the code
+  plugins (code plugin wins a same-name collision) and reloads them together;
+  bundle commands are namespaced `<bundle>:<command>` (the command engine's
+  expansion/`mode` reused; `matchCommand` takes one optional colon segment);
+  bundle skill roots order **after** operator roots (operator shadows
+  bundle); bundle markdowns over 64 KiB skip fail-soft. `GET /api/plugins`
+  gains the additive `kind` (`"code"`/`"bundle"`, bundles also report
+  `version`); server/CLI/TUI catalogs fold bundles in. Tests:
+  `tests/pluginbundle.test.ts`. No new runtime deps.
    **Per-role provider endpoints are shipped (Stage 18):**
    `runtime.ts::resolveRoleEndpoints` (precedence per role: role env pair >
    shared env pair > named preset `provider_ref` > role manual fields;

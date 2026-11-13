@@ -48,6 +48,13 @@
  *   the name. Never persisted — re-registered on every load, like pi
  *   (research/harnesses/plugins-pi.md R6).
  *
+ * **Declarative bundles** (`src/pluginbundle.ts`): a `plugins/<name>/plugin.json`
+ *   manifest declares a slash-command directory and/or a skills root that the
+ *   existing discovery engines consume. Loading a bundle never imports or
+ *   evaluates anything in its directory, bundle paths are realpath-confined,
+ *   and a code plugin with the same name wins the collision. See
+ *   `pluginbundle.ts` for the manifest contract.
+ *
  * Structured tool arguments: a tool registered with `{ parameters }` gets its
  * model-supplied arguments validated by `validateToolArgs` (the
  * `src/toolschema.ts` subset validator) before its handler runs; invalid
@@ -105,6 +112,7 @@ import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { isValidMcpServerName, mcpServerSpecIssue } from "./mcp.ts";
+import { discoverPluginBundles, type LoadedPluginBundle } from "./pluginbundle.ts";
 import type { Tool } from "./provider.ts";
 import { validateArgs, type JsonSchemaSubset } from "./toolschema.ts";
 import type { Workspace, WorkspaceResult } from "./workspace.ts";
@@ -1225,6 +1233,12 @@ export class PluginManager {
   errors: PluginErrorEntry[] = [];
   /** Load-time notes (deprecations, rejected options) across plugins. */
   diagnostics: PluginDiagnosticEntry[] = [];
+  /**
+   * Active declarative bundles (`plugins/<name>/plugin.json`), keyed by name.
+   * Loaded alongside the code plugins on every reload; a code plugin with the
+   * same name wins the collision and the bundle is skipped with a diagnostic.
+   */
+  bundles = new Map<string, LoadedPluginBundle>();
   private loadCount = 0;
   private reloadTail: Promise<void> = Promise.resolve();
 
@@ -1268,9 +1282,27 @@ export class PluginManager {
       this.loadCount,
       this.settings,
     );
+    const discovered = discoverPluginBundles(this.pluginsDir);
     this.plugins = plugins;
     this.errors = errors;
     this.diagnostics = diagnostics;
+    this.bundles = new Map();
+    for (const [name, bundle] of discovered.bundles) {
+      if (this.plugins.has(name)) {
+        // Code plugin wins the same-name collision (owner decision for the
+        // bundle slice): the bundle is skipped, with a note explaining why.
+        this.diagnostics.push({
+          plugin: name,
+          message:
+            `declarative bundle ${JSON.stringify(name)} ignored: a code plugin with the ` +
+            "same name is loaded and wins",
+        });
+        continue;
+      }
+      this.bundles.set(name, bundle);
+    }
+    for (const entry of discovered.diagnostics) this.diagnostics.push(entry);
+    this.errors.push(...discovered.errors);
     for (const entry of this.errors) {
       console.warn(`[two-brothers] plugin "${entry.plugin}" unavailable: ${entry.error}`);
     }
@@ -1280,21 +1312,48 @@ export class PluginManager {
    * The `GET /api/plugins` payload (names and descriptions only).
    *
    * `roles` is the historical shared view and stays byte-compatible with the
-   * shipped API: a plugin with at least one tool reports `["shared"]`, a
-   * plugin that registered nothing reports `[]`. Reporting real per-tool
+   * shipped API: a code plugin with at least one tool reports `["shared"]`, a
+   * plugin that registered nothing reports `[]` — and a declarative bundle
+   * (which never registers tools) reports `[]` too. Reporting real per-tool
    * scopes here is an integration-lane change (the scopes themselves live on
    * `LoadedPlugin.tools[*].scope` and in `bindingsFor`'s buckets).
+   *
+   * Additive `kind` discriminates the two plugin kinds (`"code"` | `"bundle"`)
+   * and bundles carry their manifest `version` — old consumers ignore both.
    */
   describe(): {
-    plugins: Array<{ name: string; description: string; roles: string[] }>;
+    plugins: Array<{
+      name: string;
+      description: string;
+      roles: string[];
+      kind: "code" | "bundle";
+      version?: string;
+    }>;
     errors: PluginErrorEntry[];
   } {
-    const items: Array<{ name: string; description: string; roles: string[] }> = [];
+    const items: Array<{
+      name: string;
+      description: string;
+      roles: string[];
+      kind: "code" | "bundle";
+      version?: string;
+    }> = [];
     for (const name of [...this.plugins.keys()].sort()) {
       const loaded = this.plugins.get(name) as LoadedPlugin;
       const roles = loaded.tools.length > 0 ? ["shared"] : [];
-      items.push({ name, description: loaded.description, roles });
+      items.push({ name, description: loaded.description, roles, kind: "code" });
     }
+    for (const name of [...this.bundles.keys()].sort()) {
+      const bundle = this.bundles.get(name) as LoadedPluginBundle;
+      items.push({
+        name,
+        description: bundle.description,
+        roles: [],
+        kind: "bundle",
+        version: bundle.version,
+      });
+    }
+    items.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     return { plugins: items, errors: [...this.errors] };
   }
 

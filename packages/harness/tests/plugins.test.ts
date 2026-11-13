@@ -756,6 +756,7 @@ interface PluginInfo {
   name: string;
   description: string;
   roles: string[];
+  kind?: string;
 }
 
 interface PluginsView {
@@ -774,7 +775,8 @@ test("GET /api/plugins lists discovered plugins and load errors", async () => {
       const entry = res.body.plugins.find((p) => p.name === "good");
       assert.equal(entry?.description, "A good test plugin");
       assert.deepEqual(entry?.roles, ["shared"]);
-      assert.deepEqual(Object.keys(entry ?? {}).sort(), ["description", "name", "roles"]);
+      assert.deepEqual(Object.keys(entry ?? {}).sort(), ["description", "kind", "name", "roles"]);
+      assert.equal(entry?.kind, "code");
     } finally {
       await srv.close();
     }

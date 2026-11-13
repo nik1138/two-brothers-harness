@@ -95,7 +95,10 @@
  * - `GET /api/plugins` lists the plugins discovered by the PluginManager
  *   (`src/plugins.ts`, the plugins.py port) plus load errors, and additively
  *   `diagnostics` (load-time notes plus the last run's binding notes) when
- *   non-empty. The shared enable/disable list rides `PUT /api/settings`
+ *   non-empty. Each entry carries the additive `kind` (`"code"` for
+ *   ES-module plugins, `"bundle"` for declarative `plugin.json` bundles,
+ *   which also report their manifest `version`). The shared enable/disable
+ *   list rides `PUT /api/settings`
  *   under `plugins` (one list for both brothers — owner decision 2026-11-03;
  *   the legacy per-role object is still accepted and merged; entries may be
  *   `{path, options}` and are handed to `setSettings` before the reload).
@@ -104,9 +107,13 @@
  *   plugin hook registry.
  * - `GET /api/skills` lists discovered skills (name, description, scope,
  *   tools, file) with discovery diagnostics — metadata only, never bodies.
+ *   Active declarative bundles contribute their skills roots after the
+ *   operator roots, so an operator skill shadows a same-named bundle skill.
  * - `GET /api/commands` lists discovered slash commands (name, description,
  *   argumentHint, optional mode, file) with the same kind of diagnostics —
- *   metadata only, never the template bodies. Additively it carries the
+ *   metadata only, never the template bodies. Bundle commands are namespaced
+ *   `<bundle>:<command>` and expand exactly like operator commands on run
+ *   submission. Additively it carries the
  *   first-party catalogue in `baseCommands` (`basecommands.ts`: name, aliases,
  *   description, argumentHint, kind, action?, requiresArguments, priority —
  *   always present, bodies never); a base `prompt` command expands exactly like
@@ -269,6 +276,7 @@ import {
 } from "./basecommands.ts";
 import { compactContext, type CompactionSettings } from "./compaction.ts";
 import { discoverCommands, expandCommand, matchCommand, type CommandCatalog } from "./commands.ts";
+import { mergeBundleCommands, mergeBundleSkills } from "./pluginbundle.ts";
 import { SharedContext } from "./context.ts";
 import { normalizeEffortValue } from "./effort.ts";
 import { CATALOG_PROVIDER_ID_RE, ModelsDevCatalog, type ModelEffortCatalog } from "./modelcatalog.ts";
@@ -1263,14 +1271,19 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
 
   // Skill discovery is re-run on demand (a run, `GET /api/skills`), so a new
   // `SKILL.md` needs no server restart. Missing roots are skipped silently by
-  // `discoverSkills`; the catalog is fail-soft either way.
+  // `discoverSkills`; the catalog is fail-soft either way. Active declarative
+  // bundles contribute their skills roots after the operator roots, so an
+  // operator skill shadows a same-named bundle skill.
   const skillsDirs = options.skillsDirs ?? defaultSkillsRoots();
-  const skillCatalog = (): SkillCatalog => discoverSkills(skillsDirs);
+  const skillCatalog = (): SkillCatalog =>
+    mergeBundleSkills(discoverSkills(skillsDirs), plugins.bundles.values());
 
   // Slash-command discovery is on demand too (`GET /api/commands`), so a new
   // `<name>.md` needs no server restart. A missing root is skipped silently.
+  // Bundle commands arrive namespaced `<bundle>:<command>`.
   const commandsDirs = options.commandsDirs ?? defaultCommandsRoots();
-  const commandCatalog = (): CommandCatalog => discoverCommands(commandsDirs);
+  const commandCatalog = (): CommandCatalog =>
+    mergeBundleCommands(discoverCommands(commandsDirs), plugins.bundles.values());
   // Model effort metadata and the models.dev catalog browse view share one
   // lazy, cached download; the provider-list route awaits it, and a failed
   // fetch leaves `model_efforts` absent on every provider while the browse
@@ -2256,6 +2269,10 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     let task = req.task;
     let modeOverride: "consult" | "work" | "auto" | undefined;
 
+    // Slash expansion and skill mentions consult the catalogs, which fold in
+    // the active plugin bundles — wait for the (fail-soft) plugin load so a
+    // bundle is never invisible to an early submission.
+    await state.pluginsReady;
     const invocation = matchCommand(task);
     if (invocation !== null) {
       const command = commandCatalog().commands.find((entry) => entry.name === invocation.name);
@@ -3385,9 +3402,12 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   // -- routes: skills -------------------------------------------------------------
 
   routes.push(
-    compileRoute("GET", "/api/skills", () => {
+    compileRoute("GET", "/api/skills", async () => {
+      await state.pluginsReady;
       // Metadata only — the skill bodies stay out of the response; they are
       // injected on demand (`renderSkillBody`) and never echoed wholesale.
+      // Bundle skills ride the same catalog (their roots came after the
+      // operator roots, so operators shadow bundles).
       const catalog = skillCatalog();
       return {
         skills: catalog.skills.map((skill) => ({
@@ -3405,12 +3425,14 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   // -- routes: slash commands -----------------------------------------------------
 
   routes.push(
-    compileRoute("GET", "/api/commands", () => {
+    compileRoute("GET", "/api/commands", async () => {
+      await state.pluginsReady;
       // Metadata only — the template bodies stay out of the response; the
       // REPL expands one on demand (`expandCommand`). `baseCommands` is the
       // additive first-party catalogue (also present with no command roots):
       // prompt commands expand on submission, action commands are performed by
-      // a surface and are a 400 when submitted as a task.
+      // a surface and are a 400 when submitted as a task. Bundle commands are
+      // namespaced `<bundle>:<command>` and expand like operator commands.
       const catalog = commandCatalog();
       return {
         commands: catalog.commands.map((command) => ({
