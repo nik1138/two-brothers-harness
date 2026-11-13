@@ -7,6 +7,9 @@
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { test } from "node:test";
 
 import { resolveConfig } from "../src/config.ts";
@@ -610,20 +613,29 @@ test("printableChar accepts text and rejects control/modified keys", () => {
 // ---------------------------------------------------------------------------
 
 test("runTuiApp: non-TTY stdin exits 2 with a clean message and no escape codes", async () => {
-  const io = makeIO();
-  const cfg = resolveConfig({ provider: "mock" });
-  const code = await runTuiApp({
-    cfg,
-    io,
-    input: { isTTY: false } as unknown as NodeJS.ReadStream,
-    output: { isTTY: false } as unknown as NodeJS.WriteStream,
-  });
-  assert.equal(code, 2);
-  assert.equal(io.out.join(""), "", "nothing is rendered to stdout");
-  const stderr = io.err.join("\n");
-  assert.match(stderr, /needs an interactive terminal/);
-  assert.ok(!stderr.includes(ESC), "no escape byte in the error path");
-  assert.ok(!stderr.includes(ANSI.altScreenOn));
+  // Own sessions dir: the app acquires the store's single-writer lock before
+  // the non-TTY refusal, so a temp dir keeps this hermetic even while a live
+  // `serve` holds the lock on the default `sessions/` directory.
+  const sessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), "tb-tui-nontty-sessions-"));
+  try {
+    const io = makeIO();
+    const cfg = resolveConfig({ provider: "mock" });
+    const code = await runTuiApp({
+      cfg,
+      io,
+      sessionsDir,
+      input: { isTTY: false } as unknown as NodeJS.ReadStream,
+      output: { isTTY: false } as unknown as NodeJS.WriteStream,
+    });
+    assert.equal(code, 2);
+    assert.equal(io.out.join(""), "", "nothing is rendered to stdout");
+    const stderr = io.err.join("\n");
+    assert.match(stderr, /needs an interactive terminal/);
+    assert.ok(!stderr.includes(ESC), "no escape byte in the error path");
+    assert.ok(!stderr.includes(ANSI.altScreenOn));
+  } finally {
+    fs.rmSync(sessionsDir, { recursive: true, force: true });
+  }
 });
 
 test("main: --help lists tui and tui --help prints the key guide", async () => {
@@ -704,44 +716,52 @@ async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<boo
 }
 
 test("runTuiApp: a typed task runs a mock turn, renders a decision and restores the screen", async () => {
-  const input = new FakeInput();
-  const output = new FakeOutput();
-  const io = makeIO();
-  const app = runTuiApp({
-    cfg: resolveConfig({ provider: "mock" }),
-    io,
-    input: input as unknown as NodeJS.ReadStream,
-    output: output as unknown as NodeJS.WriteStream,
-    pluginsDir: `${process.cwd()}/does-not-exist-tui-plugins`,
-  });
-
-  assert.ok(
-    await waitFor(() => {
-      const text = stripAnsi(output.data);
-      return text.includes("Two Brothers") && text.includes("WORKSPACE");
-    }, 5_000),
-    "welcome screen renders the product title and workspace row",
-  );
-  for (const char of "hello") input.emit("keypress", char, { name: char, ctrl: false });
-  input.emit("keypress", "\r", { name: "return", ctrl: false });
-  assert.ok(
-    await waitFor(() => output.data.includes("decision:"), 30_000),
-    "the mock turn rendered a decision",
-  );
-  input.emit("keypress", "\u0003", { name: "c", ctrl: true });
-  input.emit("keypress", "\u0003", { name: "c", ctrl: true });
-
-  const code = await new Promise<number | "timeout">((resolve) => {
-    const timer = setTimeout(() => resolve("timeout"), 10_000);
-    app.then((value) => {
-      clearTimeout(timer);
-      resolve(value);
+  // Own sessions dir: a full app turn writes session files and holds the
+  // store's single-writer lock, so the dir must be per-test temp storage.
+  const sessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), "tb-tui-typed-sessions-"));
+  try {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    const io = makeIO();
+    const app = runTuiApp({
+      cfg: resolveConfig({ provider: "mock" }),
+      io,
+      sessionsDir,
+      input: input as unknown as NodeJS.ReadStream,
+      output: output as unknown as NodeJS.WriteStream,
+      pluginsDir: `${process.cwd()}/does-not-exist-tui-plugins`,
     });
-  });
-  assert.equal(code, 0);
-  assert.ok(output.data.includes(ANSI.altScreenOff), "the alternate screen is left");
-  assert.ok(output.data.includes(ANSI.showCursor), "the cursor is restored");
-  const text = stripAnsi(output.data);
-  assert.ok(text.includes("hello"), "the submitted task is in the transcript");
-  assert.ok(text.includes("senior"), "a senior line is in the transcript");
+
+    assert.ok(
+      await waitFor(() => {
+        const text = stripAnsi(output.data);
+        return text.includes("Two Brothers") && text.includes("WORKSPACE");
+      }, 5_000),
+      "welcome screen renders the product title and workspace row",
+    );
+    for (const char of "hello") input.emit("keypress", char, { name: char, ctrl: false });
+    input.emit("keypress", "\r", { name: "return", ctrl: false });
+    assert.ok(
+      await waitFor(() => output.data.includes("decision:"), 30_000),
+      "the mock turn rendered a decision",
+    );
+    input.emit("keypress", "\u0003", { name: "c", ctrl: true });
+    input.emit("keypress", "\u0003", { name: "c", ctrl: true });
+
+    const code = await new Promise<number | "timeout">((resolve) => {
+      const timer = setTimeout(() => resolve("timeout"), 10_000);
+      app.then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      });
+    });
+    assert.equal(code, 0);
+    assert.ok(output.data.includes(ANSI.altScreenOff), "the alternate screen is left");
+    assert.ok(output.data.includes(ANSI.showCursor), "the cursor is restored");
+    const text = stripAnsi(output.data);
+    assert.ok(text.includes("hello"), "the submitted task is in the transcript");
+    assert.ok(text.includes("senior"), "a senior line is in the transcript");
+  } finally {
+    fs.rmSync(sessionsDir, { recursive: true, force: true });
+  }
 });

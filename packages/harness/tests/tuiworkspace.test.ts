@@ -69,21 +69,31 @@ async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<boo
 // --------------------------------------------------------------------------- //
 
 test("tui --workspace: an invalid root is a clear exit-2 startup error", async () => {
-  const err: string[] = [];
-  const code = await runTuiApp({
-    cfg: resolveConfig({ provider: "mock" }),
-    io: { log: () => {}, error: (line) => err.push(line) },
-    workspaceRoot: path.join(os.tmpdir(), "tb-tui-missing-workspace-root"),
-    input: { isTTY: false } as unknown as NodeJS.ReadStream,
-    output: { isTTY: false } as unknown as NodeJS.WriteStream,
-  });
-  assert.equal(code, 2);
-  assert.ok(err.length > 0, "the error is reported on the CLI sink");
-  assert.match(err.join("\n"), /workspace root does not exist/);
+  // Own sessions dir: the app acquires the store's single-writer lock before
+  // the workspace validation, so a temp dir keeps this hermetic even while a
+  // live `serve` holds the lock on the default `sessions/` directory.
+  const sessionsDir = tempDir("tb-tui-ws-invalid-sessions-");
+  try {
+    const err: string[] = [];
+    const code = await runTuiApp({
+      cfg: resolveConfig({ provider: "mock" }),
+      io: { log: () => {}, error: (line) => err.push(line) },
+      workspaceRoot: path.join(os.tmpdir(), "tb-tui-missing-workspace-root"),
+      sessionsDir,
+      input: { isTTY: false } as unknown as NodeJS.ReadStream,
+      output: { isTTY: false } as unknown as NodeJS.WriteStream,
+    });
+    assert.equal(code, 2);
+    assert.ok(err.length > 0, "the error is reported on the CLI sink");
+    assert.match(err.join("\n"), /workspace root does not exist/);
+  } finally {
+    fs.rmSync(sessionsDir, { recursive: true, force: true });
+  }
 });
 
 test("tui --workspace: a file (not a directory) is refused with exit 2", async () => {
   const root = tempDir("tb-tui-workspace-file-");
+  const sessionsDir = tempDir("tb-tui-ws-file-sessions-");
   try {
     const file = path.join(root, "plain.txt");
     fs.writeFileSync(file, "x\n");
@@ -92,6 +102,7 @@ test("tui --workspace: a file (not a directory) is refused with exit 2", async (
       cfg: resolveConfig({ provider: "mock" }),
       io: { log: () => {}, error: (line) => err.push(line) },
       workspaceRoot: file,
+      sessionsDir,
       input: { isTTY: false } as unknown as NodeJS.ReadStream,
       output: { isTTY: false } as unknown as NodeJS.WriteStream,
     });
@@ -99,6 +110,7 @@ test("tui --workspace: a file (not a directory) is refused with exit 2", async (
     assert.match(err.join("\n"), /not a directory/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(sessionsDir, { recursive: true, force: true });
   }
 });
 

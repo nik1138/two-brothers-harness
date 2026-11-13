@@ -271,9 +271,14 @@ const THINKING_BUDGET_OPTIONS = {
  * table, so `run`/`chat`/`serve` reject them instead of silently ignoring
  * them. `--workspace <dir>` binds every TUI turn to one confined workspace
  * (workspace tools, operator approvals and `@path` attachments).
+ * `--sessions-dir <dir>` points the TUI's session store (session JSONL files,
+ * settings, runtime sidecars) at another directory — the TUI holds the
+ * store's single-writer lock there, so a live `serve` on the default
+ * `sessions/` directory never blocks a TUI pointed at its own.
  */
 const TUI_OPTIONS = {
   workspace: { type: "string" as const },
+  "sessions-dir": { type: "string" as const },
   "keys-file": { type: "string" as const },
   "keys-watch": { type: "boolean" as const, default: false },
 } satisfies ParseArgsOptionsConfig;
@@ -2487,6 +2492,10 @@ async function doTui(
   }
   const initialTask = positionals.join(" ").trim();
   const workspace = typeof values.workspace === "string" ? values.workspace.trim() : "";
+  // `--sessions-dir <dir>` overrides the default `<cwd>/sessions` store for this
+  // TUI process (the store whose single-writer lock the TUI holds).
+  const sessionsDir =
+    typeof values["sessions-dir"] === "string" ? values["sessions-dir"].trim() : "";
   // A `--approval-mode`/env value pins the policy for THIS TUI process only
   // (never persisted): without one the saved `approval_policy` setting is read
   // per turn and `/permission` writes it. The pin is reported honestly in the
@@ -2516,6 +2525,7 @@ async function doTui(
     skillsRoots: skillsRootsForCli(values),
     commandsRoots: commandsRootsForCli(values),
     ...(workspace !== "" ? { workspaceRoot: workspace } : {}),
+    ...(sessionsDir !== "" ? { sessionsDir } : {}),
     ...(pinnedApprovalMode !== undefined ? { approvalMode: pinnedApprovalMode } : {}),
     ...(mcpConfig !== undefined ? { mcpConfig } : {}),
     ...(streamTokensForCli(values) ? { streamTokens: true } : {}),
