@@ -51,7 +51,9 @@ import {
   validateProviderBaseUrl,
 } from '../../providerSettings'
 import type { ProviderDiscoveryState, ProviderDraft, ProviderView } from '../../providerSettings'
+import { importAnnouncement, type CatalogImport } from '../../modelsDev'
 import AppDialog from '../AppDialog.vue'
+import ModelsDevBrowser from './ModelsDevBrowser.vue'
 
 /**
  * Settings → Providers as an identity-only master list with the selected
@@ -158,17 +160,36 @@ const addBaseUrl = ref('')
 const addApiKey = ref('')
 const addModels = ref<string[]>([])
 const addKind = ref(PROVIDER_KIND_DEFAULT)
+const addContextWindow = ref('')
 const addNameError = ref<string | null>(null)
 const addBaseUrlError = ref<string | null>(null)
+const addContextWindowError = ref<string | null>(null)
 const addFormError = ref<string | null>(null)
+/**
+ * Catalog provenance carried invisibly by the Add form (no operator-facing
+ * field). Set by a models.dev import; absent on manual providers.
+ */
+const addCatalogId = ref<string | null>(null)
+const browseOpen = ref(false)
 
 const rowEls = new Map<string, HTMLButtonElement>()
 const sectionRoot = ref<HTMLElement | null>(null)
 const detailHeading = ref<HTMLElement | null>(null)
 const baseUrlInput = ref<InputInst | null>(null)
 const addNameInput = ref<InputInst | null>(null)
+const addApiKeyInput = ref<InputInst | null>(null)
+const addCard = ref<HTMLElement | null>(null)
 const discardButton = ref<HTMLButtonElement | null>(null)
 const deleteCancelButton = ref<HTMLButtonElement | null>(null)
+
+const providerNames = computed(() => views.value.map((provider) => provider.name))
+const browseDisabled = computed(
+  () =>
+    busy.value ||
+    addBusy.value ||
+    pendingReset.value !== null ||
+    discovering.value,
+)
 
 const effectiveLoading = computed(() => props.loading === true && views.value.length === 0)
 
@@ -625,13 +646,33 @@ async function confirmReset(): Promise<void> {
   }
 }
 
-function openAdd(): void {
+function openAdd(prefill?: CatalogImport): void {
   if (addBusy.value || busy.value || pendingReset.value) return
   addOpen.value = true
   addNameError.value = null
   addBaseUrlError.value = null
+  addContextWindowError.value = null
   addFormError.value = null
-  void nextTick(() => addNameInput.value?.focus())
+  if (prefill) {
+    // Catalog prefill: every field stays editable; the key is never supplied.
+    addName.value = prefill.name
+    addBaseUrl.value = prefill.base_url
+    addKind.value = prefill.kind || PROVIDER_KIND_DEFAULT
+    addModels.value = cleanModelList(prefill.models)
+    addApiKey.value = ''
+    addContextWindow.value =
+      prefill.context_window > 0 ? String(prefill.context_window) : ''
+    addCatalogId.value = prefill.catalog_id
+  } else {
+    addCatalogId.value = null
+  }
+  void nextTick(() => {
+    addCard.value?.scrollIntoView({ block: 'nearest' })
+    // A catalog import starts with the API key (the only field the catalog
+    // cannot fill); a manual Add starts with the name.
+    if (prefill) addApiKeyInput.value?.focus()
+    else addNameInput.value?.focus()
+  })
 }
 
 function closeAdd(): void {
@@ -642,8 +683,11 @@ function closeAdd(): void {
   addApiKey.value = ''
   addModels.value = []
   addKind.value = PROVIDER_KIND_DEFAULT
+  addContextWindow.value = ''
+  addCatalogId.value = null
   addNameError.value = null
   addBaseUrlError.value = null
+  addContextWindowError.value = null
   addFormError.value = null
 }
 
@@ -655,6 +699,27 @@ function onAddKindChange(value: string): void {
   addKind.value = value || PROVIDER_KIND_DEFAULT
 }
 
+function onAddContextWindowChange(value: string): void {
+  addContextWindow.value = value
+  addContextWindowError.value = null
+}
+
+function openBrowse(): void {
+  if (browseDisabled.value) return
+  browseOpen.value = true
+}
+
+function closeBrowse(): void {
+  browseOpen.value = false
+}
+
+/** One import only prefills the Add card; nothing is saved until Add provider. */
+function handleCatalogImport(payload: CatalogImport): void {
+  browseOpen.value = false
+  openAdd(payload)
+  announce(importAnnouncement(payload.models.length, payload.catalog_id))
+}
+
 async function submitAdd(): Promise<void> {
   if (addBusy.value || busy.value || pendingReset.value) return
   const validation = validateAddProviderForm(
@@ -663,8 +728,10 @@ async function submitAdd(): Promise<void> {
   )
   addNameError.value = validation?.name ?? null
   addBaseUrlError.value = validation?.baseUrl ?? null
+  const window = parseProviderContextWindow(addContextWindow.value)
+  addContextWindowError.value = window.error
   addFormError.value = null
-  if (validation) return
+  if (validation || window.error) return
   addBusy.value = true
   try {
     const body: ProviderCreateRequest = {
@@ -674,6 +741,9 @@ async function submitAdd(): Promise<void> {
     }
     if (addApiKey.value.trim()) body.api_key = addApiKey.value.trim()
     if (addModels.value.length) body.models = cleanModelList(addModels.value)
+    // 0/empty = unknown; the field is only sent when the operator set a window.
+    if (window.value > 0) body.context_window = window.value
+    if (addCatalogId.value) body.catalog_id = addCatalogId.value
     const created = await createProvider(body)
     announce(`Added ${created.name}.`)
     closeAdd()
@@ -1078,10 +1148,21 @@ async function submitAdd(): Promise<void> {
       <p class="providers-note">Environment pins override presets for that role (see Advanced).</p>
 
       <div v-if="!addOpen" class="provider-add-row">
-        <n-button attr-type="button" dashed @click="openAdd">+ Add provider</n-button>
+        <n-button attr-type="button" dashed @click="openAdd()">+ Add provider</n-button>
+        <n-button
+          attr-type="button"
+          class="provider-browse-button"
+          :disabled="browseDisabled"
+          @click="openBrowse"
+        >
+          Browse models.dev…
+        </n-button>
       </div>
+      <p v-if="!addOpen" class="provider-add-note">
+        Browse the public models.dev catalog to prefill a provider. Nothing is saved until you add it.
+      </p>
 
-      <div v-else class="provider-add" @keydown.esc.stop="closeAdd">
+      <div v-else ref="addCard" class="provider-add" @keydown.esc.stop="closeAdd">
         <h3 class="provider-add-title">Add provider</h3>
         <label class="provider-field">
           <span class="provider-field-label">Name (Provider ID)</span>
@@ -1116,6 +1197,7 @@ async function submitAdd(): Promise<void> {
             API key <span class="provider-optional">(optional)</span>
           </span>
           <n-input
+            ref="addApiKeyInput"
             v-model:value="addApiKey"
             type="password"
             show-password-on="click"
@@ -1151,6 +1233,31 @@ async function submitAdd(): Promise<void> {
               size="small"
               @update:value="onAddKindChange"
             />
+          </label>
+          <label class="provider-field provider-advanced-field">
+            <span class="provider-field-label">Context window (tokens)</span>
+            <n-input
+              :value="addContextWindow"
+              :status="addContextWindowError ? 'error' : undefined"
+              :input-props="{
+                inputmode: 'numeric',
+                'aria-invalid': addContextWindowError ? 'true' : undefined,
+              }"
+              :disabled="addBusy"
+              placeholder="tokens; 0 = unknown"
+              @update:value="onAddContextWindowChange"
+              @keydown.enter.prevent="submitAdd"
+            />
+            <span v-if="addContextWindowError" class="provider-field-error" role="alert">
+              {{ addContextWindowError }}
+            </span>
+            <span v-else-if="addCatalogId" class="provider-field-note">
+              Context window is the smallest window among the selected models; edit or clear it
+              if that is not what you want.
+            </span>
+            <span v-else class="provider-field-note">
+              Used as a compaction fallback for this provider. 0 = unknown.
+            </span>
           </label>
         </details>
         <div v-if="addFormError" class="provider-add-error" role="alert">{{ addFormError }}</div>
@@ -1208,6 +1315,17 @@ async function submitAdd(): Promise<void> {
         </n-button>
       </template>
     </AppDialog>
+
+    <!-- Mounted only while open: the first catalog fetch happens on open, never
+         on a Settings render. Import prefills the Add card above and saves
+         nothing. -->
+    <ModelsDevBrowser
+      v-if="browseOpen"
+      :show="browseOpen"
+      :existing-names="providerNames"
+      @close="closeBrowse"
+      @import="handleCatalogImport"
+    />
 
     <p :id="announcementId" class="visually-hidden" role="status" aria-live="polite">
       {{ announcement }}
@@ -1748,6 +1866,15 @@ async function submitAdd(): Promise<void> {
 
 .provider-add-row {
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.provider-add-note {
+  margin: 0;
+  font-size: 0.7rem;
+  line-height: 1.4;
+  color: var(--text-tertiary);
 }
 
 .provider-add {

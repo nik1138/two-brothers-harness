@@ -902,6 +902,12 @@ export interface ProviderPreset {
    */
   context_window?: number
   /**
+   * Additive (`GET /api/providers`): the models.dev provider id this preset was
+   * imported from. Absent on manual/legacy presets; it only drives catalog
+   * effort lookups, so the UI carries it invisibly (no editable field).
+   */
+  catalog_id?: string
+  /**
    * Additive (`GET /api/providers`): the name comes from the built-in seed
    * table. Older backends omit it — treat a missing flag as `false`.
    */

@@ -826,6 +826,8 @@ export interface ProviderCreateRequest {
   models?: string[]
   /** Context window in tokens; 0/absent = unknown. */
   context_window?: number
+  /** Additive: the models.dev provider id this preset was imported from. */
+  catalog_id?: string
 }
 
 export interface ProviderPatchRequest {
@@ -836,6 +838,8 @@ export interface ProviderPatchRequest {
   models?: string[]
   /** Context window in tokens; 0 clears it (unknown). */
   context_window?: number
+  /** Omitted keeps the provenance; null clears it. */
+  catalog_id?: string | null
 }
 
 export async function listProviders(): Promise<ProviderPreset[]> {
@@ -934,4 +938,89 @@ export async function discoverProviderModels(
     ...(typeof body?.base_url === 'string' ? { base_url: body.base_url } : {}),
     ...(typeof body?.kind === 'string' ? { kind: body.kind } : {}),
   }
+}
+
+// -- models.dev catalog browse (read-only) -------------------------------------
+
+/** Listed models per wire family as the backend reports them. */
+export interface ModelsDevFamilies {
+  'openai-compatible': number
+  anthropic: number
+  google: number
+  unsupported: number
+}
+
+/** One provider row of `GET /api/models-dev/providers` (no model arrays). */
+export interface ModelsDevProviderSummary {
+  id: string
+  name: string
+  /** Usable base URL, or null when the catalog entry has none. */
+  api: string | null
+  /** Env-var NAMES only (display; never values). */
+  env: string[]
+  /** Resolved wire family; null when the entry is not importable. */
+  kind: string | null
+  kind_source: string | null
+  rejected: boolean
+  reject_reason: string | null
+  needs_base_url: boolean
+  model_count: number
+  families: ModelsDevFamilies
+}
+
+/** One model row of `GET /api/models-dev/providers/{id}`. */
+export interface ModelsDevModelEntry {
+  id: string
+  name: string
+  /** Resolved family; null = unsupported protocol. */
+  kind: string | null
+  mixed_family: boolean
+  base_url: string | null
+  /** Context window in tokens; 0 = unknown. */
+  context_window: number
+  reasoning: boolean
+  efforts: string[]
+}
+
+/** One provider's detail (summary fields plus the bounded model list). */
+export interface ModelsDevProviderDetail extends ModelsDevProviderSummary {
+  truncated: boolean
+  models: ModelsDevModelEntry[]
+}
+
+/** `GET /api/models-dev/providers` body. */
+export interface ModelsDevProvidersResponse {
+  source: string
+  fetched_at: number | null
+  upstream_error?: string
+  disabled?: boolean
+  truncated: boolean
+  providers: ModelsDevProviderSummary[]
+}
+
+/** `GET /api/models-dev/providers/{id}` body. */
+export interface ModelsDevProviderDetailResponse {
+  source: string
+  fetched_at: number | null
+  upstream_error?: string
+  disabled?: boolean
+  provider: ModelsDevProviderDetail
+}
+
+/**
+ * Read-only provider summaries from the models.dev catalog. The backend does
+ * the fetch (server-side, no credentials) and falls back to the curated seed
+ * list when the catalog is unreachable; normalization lives in `modelsDev.ts`.
+ */
+export async function listModelsDevProviders(): Promise<ModelsDevProvidersResponse> {
+  return request<ModelsDevProvidersResponse>('/api/models-dev/providers')
+}
+
+/** Read-only detail of one catalog provider (its models and wire families). */
+export async function getModelsDevProvider(
+  id: string,
+): Promise<ModelsDevProviderDetailResponse> {
+  return request<ModelsDevProviderDetailResponse>(
+    `/api/models-dev/providers/${encodeURIComponent(id)}`,
+  )
 }

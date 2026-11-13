@@ -625,3 +625,57 @@ test('discovery never applies by itself: only the explicit merge changes a list'
     'fresh-model',
   ])
 })
+
+// -- models.dev catalog prefill (Add form) -------------------------------------
+
+test('a catalog prefill passes the Add-form validation unchanged', () => {
+  // The browser suggests a sanitized, family-suffixed, collision-free name;
+  // the Add form accepts it as-is and still lets the operator edit it.
+  const prefill = {
+    name: 'opencode-go-anthropic',
+    baseUrl: 'https://opencode.ai/inference/go/anthropic/v1',
+  }
+  assert.equal(validateAddProviderForm(prefill, ['opencode-go']), null)
+  // The browser dedupes a taken name before prefilling, and that deduped name
+  // passes this validation too (the operator can still edit it).
+  assert.equal(
+    validateAddProviderForm({ ...prefill, name: 'opencode-go-anthropic-2' }, [
+      'opencode-go',
+      'opencode-go-anthropic',
+    ]),
+    null,
+  )
+  assert.match(
+    validateAddProviderForm(prefill, ['OpenCode-Go-Anthropic'])?.name ?? '',
+    /already uses this ID/,
+  )
+  // An editable name that a later edit breaks is still rejected.
+  assert.match(
+    validateAddProviderForm({ ...prefill, name: 'Opencode-Go' }, [])?.name ?? '',
+    /lowercase letters/,
+  )
+  assert.match(
+    validateAddProviderForm({ ...prefill, baseUrl: '' }, [])?.baseUrl ?? '',
+    /must not be empty/,
+  )
+  assert.match(
+    validateAddProviderForm({ ...prefill, baseUrl: 'ftp://nope' }, [])?.baseUrl ?? '',
+    /http:\/\/ or https:\/\//,
+  )
+})
+
+test('the new Add-form context-window field parses like the detail field', () => {
+  // The catalog prefill carries the smallest selected window; the Add form
+  // parses it with the same strict rule and only sends a positive value.
+  assert.deepEqual(parseProviderContextWindow('200000'), { value: 200000, error: null })
+  assert.deepEqual(parseProviderContextWindow(''), { value: 0, error: null })
+  assert.deepEqual(parseProviderContextWindow('0'), { value: 0, error: null })
+  assert.equal(parseProviderContextWindow('1.5').error !== null, true)
+  assert.equal(parseProviderContextWindow('-1').error !== null, true)
+  assert.equal(parseProviderContextWindow('1e6').error !== null, true)
+  assert.equal(parseProviderContextWindow('lots').error !== null, true)
+  assert.equal(providerContextWindowOf(0), 0)
+  assert.equal(providerContextWindowOf(200000), 200000)
+  assert.equal(providerContextWindowOf('200000'), 0)
+})
+
