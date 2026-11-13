@@ -121,6 +121,22 @@
 //                  valid save persists the `compaction` section through the
 //                  real /api/settings route (and sessions/settings.json) and
 //                  survives a reload
+//   settings-subagent mock provider: Settings → Subagent surfaces the persisted
+//                  helper-route default with honest "no helper model" copy and
+//                  the provider-less warning (offline, no model run)
+//   session-switch-race mock provider: with session A's detail response held,
+//                  a rapid A→B switch keeps B on screen — the stale A load must
+//                  not commit selection/transcript
+//   subagent-switch-race mock provider: with helper A's detail response held,
+//                  opening A then B keeps B's drawer — the stale A detail/error
+//                  must not overwrite the newer selection
+//   reconnect-exhaustion scripted fixture: with every run-event stream request
+//                  aborted, reconnect exhaustion must not invent "completed" —
+//                  the run stays live and stoppable while the backend works,
+//                  then settles on the real terminal status
+//   stop-switch-leak scripted fixture: with A's stop response held, switching
+//                  to session B must not inherit A's stopping state — B's Stop
+//                  control stays enabled and B's run keeps running
 //   real           opt-in (TWO_BROTHERS_REAL_E2E=1): real models via LM Studio
 //
 // Backend: every scenario runs against the TypeScript server
@@ -5465,6 +5481,297 @@ async function scenarioReal(runner) {
   }
 }
 
+// -- scenario: async lifecycle races (review defects) -------------------------------------
+//
+// Four focused regressions for confirmed App.vue async-lifecycle defects. Each
+// uses Playwright route interception to make one response deterministic (a held
+// session/subagent GET, an aborted run-event stream, a held stop POST) — no
+// backend or fixture changes are needed.
+
+/** Escape one literal for an interpolated RegExp source. */
+function reEscape(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * Rapid A->B session switch with A's detail response held: only the newest
+ * load may commit events/selection. On the defect, A's late response
+ * re-selected A and repainted its transcript over B.
+ */
+async function scenarioSessionSwitchRace(runner) {
+  const be = await startBackend({ kind: 'mock' })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  try {
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await createSession(page, 'Race Alpha')
+    await sendTask(page, 'e2e-race-alpha task')
+    await waitForRunEnd(page)
+    await createSession(page, 'Race Beta')
+    await sendTask(page, 'e2e-race-beta task')
+    await waitForRunEnd(page)
+
+    const sessions = await (await fetch(`${be.base}/api/sessions`)).json()
+    const nameOf = (title) => sessions.find((s) => s.title === title)?.name
+    const alpha = nameOf('Race Alpha')
+    const beta = nameOf('Race Beta')
+    assert.ok(alpha && beta, `both race sessions exist (${JSON.stringify(sessions)})`)
+
+    const row = (title) => page.locator('.session-row').filter({ hasText: title })
+    const chatTitle = () => page.locator('.chat-title').innerText()
+
+    // sanity: a normal click on Alpha loads its transcript
+    await row('Race Alpha').click()
+    await waitFor(async () => (await chatTitle()).trim() === 'Race Alpha', {
+      desc: 'Alpha rendered on a normal switch',
+    })
+
+    // the race: Alpha's session GET is held; Alpha is clicked, then Beta
+    await page.route(new RegExp(`/api/sessions/${reEscape(alpha)}$`), async (route) => {
+      await sleep(2500)
+      await route.continue()
+    })
+    await row('Race Alpha').click()
+    await row('Race Beta').click()
+    // Alpha's held response lands at ~2.5 s; a stale commit would flip the view
+    await sleep(3500)
+    assert.equal((await chatTitle()).trim(), 'Race Beta', 'stale Alpha load switched the session')
+    const chatText = await page.locator('.chat-scroll').innerText()
+    assert.match(chatText, /e2e-race-beta/)
+    assert.ok(
+      !chatText.includes('e2e-race-alpha'),
+      'stale Alpha load overwrote Beta transcript',
+    )
+    consoleGuard.assertClean()
+    runner.pass('session-switch-race')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(be.dir)
+  }
+}
+
+/**
+ * Helper A->B switch with A's detail response held: only the newest open may
+ * commit the drawer. On the defect, A's late detail replaced B's drawer
+ * content (or A's late error painted over B).
+ */
+async function scenarioSubagentSwitchRace(runner) {
+  const be = await startBackend({ kind: 'mock' })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  try {
+    const created = await apiCall(be.base, 'POST', '/api/sessions', {
+      title: 'E2E helper race session',
+    })
+    assert.ok(created.json?.name, `create session -> HTTP ${created.status}`)
+    const session = created.json.name
+    const now = Date.now()
+    const child = (id, label, marker, startedAgo) =>
+      [
+        { type: 'meta', id, parent_session: session, label, role: 'junior', model: 'e2e-junior', task: `${label} task`, started_at: now - startedAgo },
+        { type: 'message', role: 'user', text: `${label} task`, at: now - startedAgo },
+        { type: 'message', role: 'assistant', text: `${label} report ${marker}`, at: now - startedAgo + 1000 },
+        { type: 'end', status: 'completed', ended_at: now - startedAgo + 2000, result: `${label} report ${marker}`, usage: { model_calls: 1, input_tokens: 10, output_tokens: 5, cached_tokens: 0, cache_write_tokens: 0 } },
+      ]
+    const storeDir = path.join(be.dir, 'subagents')
+    fs.mkdirSync(storeDir, { recursive: true })
+    for (const [id, label, marker, ago] of [
+      // child ids must satisfy the backend's sub-[a-f0-9]{8,32} shape
+      ['sub-aaaa1111', 'Alpha helper', 'ALPHA_RACE_MARKER', 5000],
+      ['sub-bbbb2222', 'Beta helper', 'BETA_RACE_MARKER', 3000],
+    ]) {
+      fs.writeFileSync(
+        path.join(storeDir, `${id}.jsonl`),
+        child(id, label, marker, ago)
+          .map((r) => JSON.stringify(r))
+          .join('\n') + '\n',
+        'utf-8',
+      )
+    }
+
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await page
+      .locator('nav[aria-label="Sessions"]')
+      .getByText('E2E helper race session', { exact: true })
+      .click()
+    const chip = page.locator('.subagent-chip')
+    await chip.waitFor({ state: 'visible', timeout: 10000 })
+    await chip.click()
+    const tree = page.locator('#subagent-tree')
+    await tree.waitFor({ state: 'visible' })
+    const rows = tree.locator('.subagent-tree-row')
+    assert.equal(await rows.count(), 2)
+
+    // hold Alpha's detail GET, then open Alpha followed immediately by Beta
+    await page.route(new RegExp(`/api/subagents/sub-aaaa1111$`), async (route) => {
+      await sleep(2500)
+      await route.continue()
+    })
+    await rows.filter({ hasText: 'Alpha helper' }).click()
+    await rows.filter({ hasText: 'Beta helper' }).click()
+    // Alpha's held response lands at ~2.5 s; a stale commit would replace B
+    await sleep(3500)
+    const drawer = page.locator('.subagent-view')
+    await drawer.waitFor({ state: 'visible', timeout: 10000 })
+    const drawerText = (await drawer.innerText()).replace(/\s+/g, ' ')
+    assert.match(drawerText, /BETA_RACE_MARKER/, 'Beta drawer is rendered')
+    assert.ok(
+      !drawerText.includes('ALPHA_RACE_MARKER'),
+      'stale Alpha detail overwrote the Beta drawer',
+    )
+    assert.ok(!/not found/i.test(drawerText), 'stale Alpha error painted over the Beta drawer')
+    consoleGuard.assertClean()
+    runner.pass('subagent-switch-race')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(be.dir)
+  }
+}
+
+/**
+ * Run-event stream reconnect exhaustion while the backend is still working:
+ * every /events request is aborted, the app burns its fast retry budget and
+ * must reconcile against the run record — the run stays live (never an
+ * invented "completed") and remains stoppable, reconnects continue on a slow
+ * record-reconciled cadence, and the UI settles on the real terminal status
+ * (cancelled) — not a fabricated completion.
+ */
+async function scenarioReconnectExhaustion(runner) {
+  const be = await startBackend({ kind: 'fixture', scenario: 'slow' })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  try {
+    // every run-event stream request fails: reconnects burn the fast budget
+    let eventsRequests = 0
+    await page.route('**/api/runs/*/events*', (route) => {
+      eventsRequests += 1
+      route.abort()
+    })
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await createSession(page, 'E2E reconnect')
+    await sendTask(page, 'e2e reconnect task')
+    const stopBtn = page.locator('form[aria-label="New task"] button:has-text("Stop")')
+    await stopBtn.waitFor({ timeout: 30000 })
+    // 6 fast reconnects at ~1.2 s exhaust the budget ~8 s after the first
+    // connect; base finalized the run as "completed" at that point (and, via
+    // the instant pool re-adoption, restarted the fast cycle every ~8 s)
+    await sleep(9000)
+    // the Stop control must still be there, live and clickable — base had
+    // already finalized the run as "completed" at this point
+    const liveStop = page.locator('form[aria-label="New task"] button:has-text("Stop")')
+    assert.equal(await liveStop.count(), 1, 'run must still be live after reconnect exhaustion (no invented completed)')
+    assert.equal(
+      (await liveStop.innerText()).trim(),
+      'Stop',
+      'the control must offer Stop, not a terminal label',
+    )
+    assert.match(
+      await page.locator('.activity-line').innerText(),
+      /queued|working/i,
+      'the run is still presented as active',
+    )
+    // the sharpened discriminator: after the budget is gone the app must
+    // reconnect on a SLOW record-reconciled cadence (~1 per 5 s), not restart
+    // the ~1.2 s fast cycle (base: ~8 stream requests per 10 s window)
+    const before = eventsRequests
+    await sleep(10000)
+    const slowCadence = eventsRequests - before
+    assert.ok(
+      slowCadence > 0 && slowCadence <= 4,
+      `reconnects after exhaustion must use the slow cadence (got ${slowCadence} requests in 10 s)`,
+    )
+    await stopBtn.click()
+    await page
+      .locator('.toast', { hasText: 'Run stopped' })
+      .first()
+      .waitFor({ timeout: 20000 })
+    const runs = await (await fetch(`${be.base}/api/runs`)).json()
+    assert.ok(
+      runs.length > 0 && runs.every((r) => r.status === 'cancelled'),
+      `backend run records must report the real terminal status: ${JSON.stringify(runs.map((r) => r.status))}`,
+    )
+    // the scenario itself aborts every run-event stream: Chromium logs one
+    // "Failed to load resource" console error per aborted fetch
+    consoleGuard.assertClean([/Failed to load resource/])
+    runner.pass('reconnect-exhaustion')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(be.dir)
+  }
+}
+
+/**
+ * Stop A, switch to B while A's stop request is still in flight (held): the
+ * stopping state belongs to A's run id and must not leak — B's Stop control
+ * stays enabled with the working activity line, and A still finalizes as
+ * cancelled in the background.
+ */
+async function scenarioStopSwitchLeak(runner) {
+  const be = await startBackend({ kind: 'fixture', scenario: 'slow' })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  try {
+    // hold every stop response: the leak window is between clicking Stop and
+    // the backend's answer, when a session switch lands
+    await page.route('**/api/runs/*/stop', async (route) => {
+      await sleep(2500)
+      await route.continue()
+    })
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await createSession(page, 'Leak Alpha')
+    await sendTask(page, 'e2e leak alpha task')
+    const stopBtn = page.locator('form[aria-label="New task"] button:has-text("Stop")')
+    await stopBtn.waitFor({ timeout: 30000 })
+    await createSession(page, 'Leak Beta')
+    await sendTask(page, 'e2e leak beta task')
+    await stopBtn.waitFor({ timeout: 30000 })
+
+    const row = (title) => page.locator('.session-row').filter({ hasText: title })
+    const chatTitle = () => page.locator('.chat-title').innerText()
+    await row('Leak Alpha').click()
+    await waitFor(async () => (await chatTitle()).trim() === 'Leak Alpha', {
+      desc: 'Alpha rendered',
+    })
+    await stopBtn.click()
+    // while Alpha's stop is held, switch to Beta
+    await row('Leak Beta').click()
+    await waitFor(async () => (await chatTitle()).trim() === 'Leak Beta', {
+      desc: 'Beta rendered',
+    })
+    const activity = (await page.locator('.activity-line').innerText()).replace(/\s+/g, ' ')
+    assert.ok(!/stopping/i.test(activity), `Beta mislabeled by Alpha's stop: "${activity}"`)
+    assert.match(activity, /queued|working/i, 'Beta still shows its own run state')
+    const betaStop = page.locator('form[aria-label="New task"] button:has-text("Stop")')
+    assert.equal(await betaStop.count(), 1, 'Beta Stop control is present')
+    assert.equal((await betaStop.innerText()).trim(), 'Stop', "Alpha's stop must not flip Beta's control")
+    assert.equal(await betaStop.isEnabled(), true, "Alpha's stop must not disable Beta's Stop")
+
+    // let Alpha's held stop answer land: A finalizes as cancelled unattended
+    await sleep(3500)
+    const sessions = await (await fetch(`${be.base}/api/sessions`)).json()
+    const nameOf = (title) => sessions.find((s) => s.title === title)?.name
+    const runs = await (await fetch(`${be.base}/api/runs`)).json()
+    const statusOf = (title) => runs.find((r) => r.session === nameOf(title))?.status
+    assert.equal(statusOf('Leak Alpha'), 'cancelled', "Alpha's stop must land as cancelled")
+    assert.equal(statusOf('Leak Beta'), 'running', "Alpha's stop must not touch Beta's run")
+
+    await betaStop.click()
+    await page
+      .locator('.toast', { hasText: 'Run stopped' })
+      .first()
+      .waitFor({ timeout: 20000 })
+    consoleGuard.assertClean()
+    runner.pass('stop-switch-leak')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(be.dir)
+  }
+}
+
 // -- runner -----------------------------------------------------------------------------
 
 function makeRunner(blockName) {
@@ -5702,6 +6009,34 @@ async function main() {
           scenarioSettingsSubagent(currentRunner)
         ),
       },
+      {
+        label: 'session-switch-race',
+        run: () => (
+          (currentRunner = makeRunner('session-switch-race')),
+          scenarioSessionSwitchRace(currentRunner)
+        ),
+      },
+      {
+        label: 'subagent-switch-race',
+        run: () => (
+          (currentRunner = makeRunner('subagent-switch-race')),
+          scenarioSubagentSwitchRace(currentRunner)
+        ),
+      },
+      {
+        label: 'reconnect-exhaustion',
+        run: () => (
+          (currentRunner = makeRunner('reconnect-exhaustion')),
+          scenarioReconnectExhaustion(currentRunner)
+        ),
+      },
+      {
+        label: 'stop-switch-leak',
+        run: () => (
+          (currentRunner = makeRunner('stop-switch-leak')),
+          scenarioStopSwitchLeak(currentRunner)
+        ),
+      },
     ]
     blocks.push(...hermetic.filter((block) => scenarioSelected(block.label)))
     if (realEnabled && scenarioSelected('real')) {
@@ -5741,6 +6076,10 @@ async function main() {
       'auto-solo',
       'tab-title',
       'settings-advanced',
+      'session-switch-race',
+      'subagent-switch-race',
+      'reconnect-exhaustion',
+      'stop-switch-leak',
       'real',
     ].filter(scenarioSelected)) {
       results.push({

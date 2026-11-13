@@ -278,7 +278,16 @@ const submitResult = ref<{ token: number; accepted: boolean } | null>(null)
 const steerResult = ref<{ token: number; accepted: boolean } | null>(null)
 /** Pending steer count echoed by the last accepted steer (honest composer copy). */
 const steerPending = ref(0)
-const stopping = ref(false)
+/**
+ * Run a stop request is currently unwinding, by run id. Keyed (not a plain
+ * boolean) so stopping run A can never disable the Stop control or label the
+ * activity line of session B after a switch.
+ */
+const stoppingRunId = ref<string | null>(null)
+/** True while a stop request is in flight for the run currently followed. */
+const stopping = computed(
+  () => stoppingRunId.value !== null && stoppingRunId.value === activeRun.value?.run_id,
+)
 const errors = ref<string[]>([])
 /** One submitted run request, retained so a failure can be retried verbatim. */
 interface RunRequestState {
@@ -1244,6 +1253,12 @@ let maxSeq = 0
 let runtimeSeen = new Set<string>()
 
 const MAX_RECONNECTS = 6
+/**
+ * After the fast retry budget is gone, a still-active run keeps this slow
+ * reconnect cadence (reconciled against the run record each round) instead of
+ * being finalized with an invented status.
+ */
+const SLOW_RECONNECT_MS = 5000
 
 function getLastEventId(runId: string): number {
   return lastEventIdByRun.get(runId) ?? 0
@@ -1480,27 +1495,44 @@ function subagentActivityLabel(row: SubagentInfo): string {
   return subagentActivityText(row.last_activity, row.status)
 }
 
+/**
+ * Monotonic helper-open token and the id it belongs to: only the newest open
+ * may commit its detail/error/loading state, so a slow response (or failure)
+ * for helper A can never overwrite a newer selection of helper B.
+ */
+let subagentRequest = 0
+let pendingSubagentId: string | null = null
+
 /** Open one helper's isolated transcript; the tree panel closes first. */
 async function openSubagent(id: string) {
+  const request = ++subagentRequest
+  pendingSubagentId = id
   subagentsOpen.value = false
   subagentError.value = ''
   subagentLoading.value = true
   viewedSubagent.value = null
   try {
     const detail = await getSubagent(id)
+    // a newer open superseded this one: never clobber its drawer state
+    if (request !== subagentRequest || pendingSubagentId !== id) return
     if (detail === null) {
       subagentError.value = 'Subagent transcript not found.'
       return
     }
     viewedSubagent.value = detail
   } catch (e) {
+    if (request !== subagentRequest || pendingSubagentId !== id) return
     subagentError.value = errText(e)
   } finally {
-    subagentLoading.value = false
+    // only the newest open owns the loading flag
+    if (request === subagentRequest && pendingSubagentId === id) subagentLoading.value = false
   }
 }
 
 function closeSubagent() {
+  // invalidate any in-flight open so its late response commits nothing
+  subagentRequest += 1
+  pendingSubagentId = null
   viewedSubagent.value = null
   subagentLoading.value = false
   subagentError.value = ''
@@ -1613,7 +1645,7 @@ function finalizeRun(runId: string, status: RunStatus, error: string | null) {
   }
   // the operator watched this run end — it is read, not "unread" on the next switch
   markSeen(entry.session)
-  stopping.value = false
+  if (stoppingRunId.value === runId) stoppingRunId.value = null
   runStartedAt.value = null
   if (status === 'failed') reportError(error ?? 'Run failed')
   else if (status === 'cancelled') reportError('Run stopped')
@@ -1769,8 +1801,10 @@ function scheduleReconnect(runId: string) {
   const attempts = getReconnectAttempts(runId) + 1
   setReconnectAttempts(runId, attempts)
   if (attempts > MAX_RECONNECTS) {
-    reportError('Lost the live event stream for this run')
-    finalizeRun(runId, 'completed', null)
+    // the fast retry budget is gone: reconcile once against the run record —
+    // a terminal status is only ever taken from the backend, never invented
+    if (attempts === MAX_RECONNECTS + 1) reportError('Lost the live event stream for this run')
+    reconcileDroppedStream(runId)
     return
   }
   reconnectTimer = setTimeout(() => {
@@ -1787,6 +1821,39 @@ function scheduleReconnect(runId: string) {
       })
       .catch(() => connectEvents(runId))
   }, 1200)
+}
+
+/**
+ * Final reconciliation once the fast retry budget is gone. The run record is
+ * the only honest source of the run's state: a still-active run keeps a slow
+ * reconnect cadence (the next cycle reconciles again), a terminal record
+ * finalizes the run with that real status, and a failed probe keeps the slow
+ * cadence — the app never finalizes a run the backend still reports active.
+ */
+function reconcileDroppedStream(runId: string) {
+  getRun(runId)
+    .then((rec) => {
+      if (activeRun.value?.run_id !== runId) return
+      // the terminal record is also the source of the unread timestamp
+      recordLastRun(rec)
+      if (rec.status === 'queued' || rec.status === 'running' || rec.status === 'waiting') {
+        slowReconnect(runId)
+      } else {
+        finalizeRun(runId, rec.status, rec.error ?? null)
+      }
+    })
+    .catch(() => {
+      if (activeRun.value?.run_id !== runId) return
+      slowReconnect(runId)
+    })
+}
+
+/** One slow reconnect round after the fast retry budget is gone. */
+function slowReconnect(runId: string) {
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null
+    connectEvents(runId)
+  }, SLOW_RECONNECT_MS)
 }
 
 // -- adopted-run clock ------------------------------------------------------
@@ -2030,8 +2097,16 @@ async function refreshWorkspaces(silent = true) {
   }
 }
 
+/**
+ * Monotonic session-load token: only the newest load may commit events,
+ * selection, loading and seen state, so a slow response for session A can
+ * never overwrite a newer switch to session B.
+ */
+let sessionLoadRequest = 0
+
 /** Session pick or create: close the mobile drawer, then load. */
 async function loadSession(name: string) {
+  const request = ++sessionLoadRequest
   // a session choice (row click or create) dismisses the mobile drawer
   if (drawerQuery?.matches && !sidebarCollapsed.value) sidebarCollapsed.value = true
   // never show the previous session's live draft while this one loads
@@ -2044,6 +2119,8 @@ async function loadSession(name: string) {
       getSessionRuntimeEvents(name).catch(() => ({ name, events: [] as RunEvent[] })),
       listSessionSubagents(name).catch(() => [] as SubagentInfo[]),
     ])
+    // a newer load superseded this one: its commits are the only ones that count
+    if (request !== sessionLoadRequest) return
     events.value = detail.events
     maxSeq = detail.events.reduce((m, e) => Math.max(m, e.seq), 0)
     setRuntimeHistory(runtime.events)
@@ -2056,9 +2133,11 @@ async function loadSession(name: string) {
     // the run record is the only place a failure survives a reload (G-5)
     syncRunOutcome(name)
   } catch (e) {
-    reportError(errText(e))
+    // a superseded load's failure is noise for the session now on screen
+    if (request === sessionLoadRequest) reportError(errText(e))
   } finally {
-    loading.value = false
+    // only the newest load owns the loading flag
+    if (request === sessionLoadRequest) loading.value = false
   }
 }
 
@@ -2113,7 +2192,9 @@ async function startNewRun(payload: {
         ...liveRuns.value,
         [res.session]: { run_id: res.run_id, session: res.session, status: res.status },
       }
-      stopping.value = false
+      // no stop can be in flight for this session here — its run would still
+      // be live — and another session's in-flight stop (keyed by run id) must
+      // survive this branch, so stoppingRunId needs no reset
       runStartedAt.value = Date.now()
       if (res.session !== selected.value) {
         // a fresh session: the stream will replay everything from the start
@@ -2216,15 +2297,17 @@ async function resolveApproval(
 async function requestStop() {
   const run = activeRun.value
   if (!run || stopping.value) return
-  stopping.value = true
+  stoppingRunId.value = run.run_id
   try {
     const res = await stopRun(run.run_id)
     // a queued run is cancelled immediately; a running run unwinds and the
-    // run_end event finishes the flow. Tokens may stall mid-stop: drop the draft.
-    resetStreamingDraft()
+    // run_end event finishes the flow. Tokens may stall mid-stop: drop the
+    // draft (only if we still follow this run — a switch must not clear the
+    // new session's just-started draft).
+    if (activeRun.value?.run_id === run.run_id) resetStreamingDraft()
     if (res.status === 'cancelled') finalizeRun(run.run_id, 'cancelled', null)
   } catch (e) {
-    stopping.value = false
+    if (stoppingRunId.value === run.run_id) stoppingRunId.value = null
     reportError(errText(e))
   }
 }
