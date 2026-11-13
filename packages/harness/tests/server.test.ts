@@ -22,7 +22,8 @@ import { pathToFileURL } from "node:url";
 import { isCompactionSummary } from "../src/compaction.ts";
 import { resolveConfig, type Config } from "../src/config.ts";
 import type { ChatMessage } from "../src/context.ts";
-import { ModelEffortCatalog } from "../src/modelcatalog.ts";
+import { ModelEffortCatalog, ModelsDevCatalog } from "../src/modelcatalog.ts";
+import { presetById } from "../src/presets.ts";
 import {
   MockProvider,
   UsageTracker,
@@ -4302,5 +4303,506 @@ test("auto run: legacy sync POST /api/run routes the same way (parity)", async (
     assert.equal(ran.body.decision.decision, "D");
   } finally {
     await srv.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// models.dev catalog (read-only browse/import)
+// ---------------------------------------------------------------------------
+
+const CATALOG_FIXTURE = JSON.parse(
+  fs.readFileSync(new URL("./fixtures/models-dev.json", import.meta.url), "utf-8"),
+) as Record<string, unknown>;
+
+/** A fixture-serving fetch that counts downloads (no network). */
+function catalogFetch(
+  payload: unknown = CATALOG_FIXTURE,
+): { fetchImpl: typeof fetch; calls: () => number } {
+  let calls = 0;
+  return {
+    calls: () => calls,
+    fetchImpl: (async () => {
+      calls += 1;
+      return new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch,
+  };
+}
+
+function fixtureModelsDev(now = 1_000): {
+  catalog: ModelsDevCatalog;
+  calls: () => number;
+} {
+  const source = catalogFetch();
+  return {
+    catalog: new ModelsDevCatalog({ fetchImpl: source.fetchImpl, now: () => now }),
+    calls: source.calls,
+  };
+}
+
+test("models-dev catalog: summary/detail shapes, caps and a read-only settings file", async () => {
+  const { catalog, calls } = fixtureModelsDev();
+  const srv = await startServer({ modelsDev: catalog });
+  try {
+    // A stored key proves the catalog responses never echo settings material.
+    const secret = "catalog-secret-4e1f";
+    const created = await post<Record<string, any>>(srv.base, "/api/providers", {
+      name: "keyed",
+      base_url: "http://127.0.0.1:9/v1",
+      api_key: secret,
+    });
+    assert.equal(created.status, 201);
+    const settingsPath = path.join(srv.dir, "settings.json");
+    const before = fs.readFileSync(settingsPath, "utf-8");
+
+    const summary = await get<Record<string, any>>(srv.base, "/api/models-dev/providers");
+    assert.equal(summary.status, 200);
+    assert.equal(summary.body.source, "network");
+    assert.equal(summary.body.fetched_at, 1_000);
+    assert.equal(summary.body.truncated, false);
+    assert.equal(summary.body.upstream_error, undefined);
+    assert.equal(summary.body.disabled, undefined);
+    assert.deepEqual(Object.keys(summary.body), [
+      "source",
+      "fetched_at",
+      "truncated",
+      "providers",
+    ]);
+    const providers = summary.body.providers as Array<Record<string, any>>;
+    assert.ok(providers.length > 0);
+    const go = providers.find((provider) => provider.id === "opencode-go");
+    assert.ok(go);
+    assert.deepEqual(Object.keys(go ?? {}), [
+      "id",
+      "name",
+      "api",
+      "env",
+      "kind",
+      "kind_source",
+      "rejected",
+      "reject_reason",
+      "needs_base_url",
+      "model_count",
+      "families",
+    ]);
+    assert.deepEqual(go?.families, {
+      "openai-compatible": 3,
+      anthropic: 2,
+      google: 1,
+      unsupported: 1,
+    });
+    assert.equal(go?.model_count, 7);
+    assert.equal(go?.needs_base_url, false);
+    assert.equal("models" in (go ?? {}), false);
+    assert.ok(!JSON.stringify(summary.body).includes(secret));
+
+    const detail = await get<Record<string, any>>(
+      srv.base,
+      "/api/models-dev/providers/opencode-go",
+    );
+    assert.equal(detail.status, 200);
+    assert.equal(detail.body.source, "cache");
+    assert.equal(detail.body.fetched_at, 1_000);
+    assert.deepEqual(Object.keys(detail.body), ["source", "fetched_at", "provider"]);
+    const provider = detail.body.provider as Record<string, any>;
+    assert.deepEqual(Object.keys(provider), [
+      "id",
+      "name",
+      "api",
+      "env",
+      "kind",
+      "kind_source",
+      "rejected",
+      "reject_reason",
+      "needs_base_url",
+      "model_count",
+      "families",
+      "truncated",
+      "models",
+    ]);
+    assert.equal(provider.id, "opencode-go");
+    assert.equal(provider.kind_source, "npm");
+    assert.equal(provider.truncated, false);
+    const models = provider.models as Array<Record<string, any>>;
+    assert.deepEqual(Object.keys(models[0] ?? {}), [
+      "id",
+      "name",
+      "kind",
+      "mixed_family",
+      "base_url",
+      "context_window",
+      "reasoning",
+      "efforts",
+    ]);
+    assert.deepEqual(
+      models.map((model) => model.id),
+      [
+        "bedrock-model",
+        "claude-haiku-5-5",
+        "claude-opus-5",
+        "deepseek-v4.1-flash",
+        "gemini-3-pro",
+        "glm-5.2",
+        "unknown-npm-model",
+      ],
+    );
+    const haiku = models.find((model) => model.id === "claude-haiku-5-5");
+    assert.equal(haiku?.kind, "anthropic");
+    assert.equal(haiku?.mixed_family, true);
+    assert.equal(haiku?.base_url, "https://opencode.ai/inference/go/anthropic/v1");
+    assert.equal(haiku?.context_window, 1_000_000);
+    assert.deepEqual(
+      models.find((model) => model.id === "glm-5.2")?.efforts,
+      ["high", "max"],
+    );
+    assert.equal(models.find((model) => model.id === "bedrock-model")?.kind, null);
+    assert.ok(!JSON.stringify(detail.body).includes(secret));
+
+    // an uppercase id is normalized and the canonical id comes back
+    const upper = await get<Record<string, any>>(
+      srv.base,
+      "/api/models-dev/providers/OPENCODE-GO",
+    );
+    assert.equal(upper.status, 200);
+    assert.equal(upper.body.provider.id, "opencode-go");
+
+    // within the TTL the summary is a memory read
+    const cached = await get<Record<string, any>>(srv.base, "/api/models-dev/providers");
+    assert.equal(cached.body.source, "cache");
+
+    // read-only proof: both GETs left settings.json byte-identical, one fetch
+    assert.equal(fs.readFileSync(settingsPath, "utf-8"), before);
+    assert.equal(calls(), 1);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("models-dev catalog: one download serves summary, detail and effort routes", async () => {
+  const { catalog, calls } = fixtureModelsDev(5_000);
+  const srv = await startServer({ modelsDev: catalog });
+  try {
+    assert.equal((await get(srv.base, "/api/models-dev/providers")).status, 200);
+    assert.equal(
+      (await get(srv.base, "/api/models-dev/providers/zai-coding-plan")).status,
+      200,
+    );
+    const effort = await get<Record<string, any>>(
+      srv.base,
+      "/api/model-efforts?provider=zai-coding-plan&model=glm-5.3",
+    );
+    assert.equal(effort.status, 200);
+    assert.deepEqual(effort.body.efforts, ["low", "high"]);
+    assert.equal(calls(), 1, "one catalog download serves all three routes");
+  } finally {
+    await srv.close();
+  }
+});
+
+test("models-dev catalog: 400/404/503 and the curated/disabled fallbacks", async () => {
+  const { catalog } = fixtureModelsDev();
+  const healthy = await startServer({ modelsDev: catalog });
+  try {
+    const malformed = await get<Record<string, any>>(
+      healthy.base,
+      "/api/models-dev/providers/Bad%20Id",
+    );
+    assert.equal(malformed.status, 400);
+    assert.equal(malformed.body.detail, "invalid catalog provider id");
+
+    const missing = await get<Record<string, any>>(
+      healthy.base,
+      "/api/models-dev/providers/no-such-provider",
+    );
+    assert.equal(missing.status, 404);
+    assert.equal(missing.body.code, "catalog-provider-not-found");
+    assert.equal(missing.body.detail, "not found");
+
+    // read-only routes: a write method on the path is a 405, never a write
+    assert.equal((await post(healthy.base, "/api/models-dev/providers", {})).status, 405);
+
+    // A live snapshot answers 404 for an id it does not carry — the curated
+    // seed fallback is only for the no-snapshot case.
+    const seedMissing = await get<Record<string, any>>(
+      healthy.base,
+      "/api/models-dev/providers/lmstudio",
+    );
+    assert.equal(seedMissing.status, 404);
+    assert.equal(seedMissing.body.code, "catalog-provider-not-found");
+  } finally {
+    await healthy.close();
+  }
+
+  // First fetch failed (offline): the summary and seed details stay usable.
+  const offline = await startServer({
+    modelsDev: new ModelsDevCatalog({
+      fetchImpl: (async () => {
+        throw new Error("HTTP 503");
+      }) as typeof fetch,
+      now: () => 1_000,
+    }),
+  });
+  try {
+    const summary = await get<Record<string, any>>(offline.base, "/api/models-dev/providers");
+    assert.equal(summary.status, 200);
+    assert.equal(summary.body.source, "curated");
+    assert.equal(summary.body.fetched_at, null);
+    assert.equal(summary.body.upstream_error, "HTTP 503");
+    assert.equal(summary.body.disabled, undefined);
+    assert.ok(
+      (summary.body.providers as Array<{ id: string }>).some(
+        (provider) => provider.id === "lmstudio",
+      ),
+    );
+
+    const seed = await get<Record<string, any>>(offline.base, "/api/models-dev/providers/lmstudio");
+    assert.equal(seed.status, 200);
+    assert.equal(seed.body.source, "curated");
+    assert.equal(seed.body.upstream_error, "HTTP 503");
+    assert.deepEqual(
+      (seed.body.provider.models as Array<{ id: string }>).map((model) => model.id),
+      presetById("lmstudio")?.models,
+    );
+
+    // an id that exists only in the unreachable live catalog is a 503
+    const unavailable = await get<Record<string, any>>(
+      offline.base,
+      "/api/models-dev/providers/zai-coding-plan",
+    );
+    assert.equal(unavailable.status, 503);
+    assert.equal(unavailable.body.code, "catalog-unavailable");
+    assert.equal(unavailable.body.detail, "models.dev catalog unavailable");
+    assert.equal(unavailable.body.upstream_error, "HTTP 503");
+  } finally {
+    await offline.close();
+  }
+
+  // A disabled catalog answers curated with the flag and never fetches.
+  const disabledFetch = catalogFetch();
+  const disabled = await startServer({
+    modelsDev: new ModelsDevCatalog({ fetchImpl: disabledFetch.fetchImpl, enabled: false }),
+  });
+  try {
+    const summary = await get<Record<string, any>>(disabled.base, "/api/models-dev/providers");
+    assert.equal(summary.status, 200);
+    assert.equal(summary.body.source, "curated");
+    assert.equal(summary.body.disabled, true);
+    const seed = await get<Record<string, any>>(disabled.base, "/api/models-dev/providers/openai");
+    assert.equal(seed.status, 200);
+    assert.equal(seed.body.source, "curated");
+    assert.equal(seed.body.disabled, true);
+    const unavailable = await get<Record<string, any>>(
+      disabled.base,
+      "/api/models-dev/providers/zai-coding-plan",
+    );
+    assert.equal(unavailable.status, 503);
+    assert.equal(unavailable.body.code, "catalog-unavailable");
+    assert.equal(disabledFetch.calls(), 0, "a disabled catalog never fetches");
+  } finally {
+    await disabled.close();
+  }
+});
+
+test("provider catalog_id: survives flows, drives efforts and clears on demand", async () => {
+  const tmp = tmpdir("tb-catalog-id-");
+  try {
+    const { catalog } = fixtureModelsDev();
+    const srv = await startServer({ sessionsDir: tmp.root, modelsDev: catalog });
+    try {
+      // Import-shaped create: the preset name differs from the catalog id.
+      const imported = await post<Record<string, any>>(srv.base, "/api/providers", {
+        name: "renamed-go",
+        base_url: "https://opencode.ai/inference/go/openai/v1",
+        kind: "openai-compatible",
+        models: ["glm-5.2"],
+        context_window: 131072,
+        catalog_id: "opencode-go",
+      });
+      assert.equal(imported.status, 201);
+      assert.equal(imported.body.provider.catalog_id, "opencode-go");
+      assert.equal(imported.body.provider.context_window, 131072);
+
+      const listed = (await get<Record<string, any>>(srv.base, "/api/providers")).body
+        .providers as Array<Record<string, any>>;
+      assert.equal(
+        listed.find((preset) => preset.name === "renamed-go")?.catalog_id,
+        "opencode-go",
+      );
+      assert.ok(
+        !("catalog_id" in (listed.find((preset) => preset.name === "openai") ?? {})),
+        "a seed without provenance keeps the old response shape",
+      );
+
+      // The stored catalog id wins over the (renamed) preset name.
+      const viaCatalog = await get<Record<string, any>>(
+        srv.base,
+        "/api/model-efforts?provider=renamed-go&model=glm-5.2",
+      );
+      assert.deepEqual(viaCatalog.body.efforts, ["high", "max"]);
+      assert.equal(viaCatalog.body.provider, "renamed-go");
+
+      // A legacy preset without catalog_id resolves exactly as today (alias).
+      const legacy = await get<Record<string, any>>(
+        srv.base,
+        "/api/model-efforts?provider=zai-coding&model=glm-5.3",
+      );
+      assert.deepEqual(legacy.body.efforts, ["low", "high"]);
+
+      // The stored catalog_id wins over the name-alias table: a customized seed
+      // whose name maps elsewhere still resolves through its provenance.
+      const aliased = await api<Record<string, any>>(srv.base, "PUT", "/api/providers/kimi-coding", {
+        catalog_id: "opencode-go",
+      });
+      assert.equal(aliased.status, 200);
+      const viaAlias = await get<Record<string, any>>(
+        srv.base,
+        "/api/model-efforts?provider=kimi-coding&model=glm-5.2",
+      );
+      assert.deepEqual(viaAlias.body.efforts, ["high", "max"]);
+
+      // PUT without the field keeps it.
+      const kept = await api<Record<string, any>>(srv.base, "PUT", "/api/providers/renamed-go", {
+        models: ["glm-5.2", "deepseek-v4.1-flash"],
+      });
+      assert.equal(kept.status, 200);
+      assert.equal(kept.body.provider.catalog_id, "opencode-go");
+
+      // Resetting another provider rewrites the list; provenance survives.
+      const customizedSeed = await api(srv.base, "PUT", "/api/providers/openai", {
+        models: ["gpt-4o"],
+      });
+      assert.equal(customizedSeed.status, 200);
+      const reset = await post<Record<string, any>>(srv.base, "/api/providers/openai/reset");
+      assert.equal(reset.status, 200);
+      const afterReset = (await get<Record<string, any>>(srv.base, "/api/providers")).body
+        .providers as Array<Record<string, any>>;
+      assert.equal(
+        afterReset.find((preset) => preset.name === "renamed-go")?.catalog_id,
+        "opencode-go",
+      );
+      const onDisk = JSON.parse(
+        fs.readFileSync(path.join(tmp.root, "settings.json"), "utf-8"),
+      ) as Record<string, any>;
+      assert.equal(
+        (onDisk.providers as Array<Record<string, any>>).find(
+          (preset) => preset.name === "renamed-go",
+        )?.catalog_id,
+        "opencode-go",
+      );
+
+      // An explicit null clears the provenance; the name is then no catalog id.
+      const cleared = await api<Record<string, any>>(srv.base, "PUT", "/api/providers/renamed-go", {
+        catalog_id: null,
+      });
+      assert.equal(cleared.status, 200);
+      assert.ok(!("catalog_id" in cleared.body.provider));
+      const afterClear = await get<Record<string, any>>(
+        srv.base,
+        "/api/model-efforts?provider=renamed-go&model=glm-5.2",
+      );
+      assert.deepEqual(afterClear.body.efforts, []);
+
+      // Invalid catalog ids are 400s and change nothing.
+      for (const bad of ["Bad Id", "x".repeat(101), 7, "-leading"]) {
+        const res = await post(srv.base, "/api/providers", {
+          name: `bad-${String(bad).replace(/[^a-z0-9]/gi, "")}`,
+          base_url: "http://127.0.0.1:9/v1",
+          catalog_id: bad,
+        });
+        assert.equal(res.status, 400, `catalog_id=${String(bad)}`);
+      }
+
+      // Deleting the preset removes the provenance with it.
+      await api(srv.base, "PUT", "/api/providers/renamed-go", { catalog_id: "opencode-go" });
+      assert.equal((await api(srv.base, "DELETE", "/api/providers/renamed-go")).status, 200);
+      const gone = (await get<Record<string, any>>(srv.base, "/api/providers")).body
+        .providers as Array<Record<string, any>>;
+      assert.equal(gone.some((preset) => preset.name === "renamed-go"), false);
+      assert.equal(
+        fs.readFileSync(path.join(tmp.root, "settings.json"), "utf-8").includes('"renamed-go"'),
+        false,
+      );
+    } finally {
+      await srv.close();
+    }
+
+    // Persisted across a restart, not just in memory.
+    const first = await startServer({
+      sessionsDir: tmp.root,
+      modelsDev: fixtureModelsDev().catalog,
+    });
+    try {
+      const created = await post<Record<string, any>>(first.base, "/api/providers", {
+        name: "restart-go",
+        base_url: "https://opencode.ai/inference/go/openai/v1",
+        catalog_id: "opencode-go",
+      });
+      assert.equal(created.status, 201);
+    } finally {
+      await first.close();
+    }
+    const second = await startServer({
+      sessionsDir: tmp.root,
+      modelsDev: fixtureModelsDev().catalog,
+    });
+    try {
+      const listed = (await get<Record<string, any>>(second.base, "/api/providers")).body
+        .providers as Array<Record<string, any>>;
+      assert.equal(
+        listed.find((preset) => preset.name === "restart-go")?.catalog_id,
+        "opencode-go",
+      );
+      const eff = await get<Record<string, any>>(
+        second.base,
+        "/api/model-efforts?provider=restart-go&model=glm-5.2",
+      );
+      assert.deepEqual(eff.body.efforts, ["high", "max"]);
+    } finally {
+      await second.close();
+    }
+  } finally {
+    tmp.cleanup();
+  }
+});
+
+test("models-dev catalog routes serve a read-only (newer-schema) settings document", async () => {
+  const tmp = tmpdir("tb-catalog-readonly-");
+  try {
+    const settingsPath = path.join(tmp.root, "settings.json");
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({ version: 2, senior: { model: "future-model" } }),
+      "utf-8",
+    );
+    const { catalog } = fixtureModelsDev();
+    const srv = await startServer({ sessionsDir: tmp.root, modelsDev: catalog });
+    try {
+      const before = fs.readFileSync(settingsPath, "utf-8");
+      const summary = await get<Record<string, any>>(srv.base, "/api/models-dev/providers");
+      assert.equal(summary.status, 200);
+      const detail = await get<Record<string, any>>(
+        srv.base,
+        "/api/models-dev/providers/opencode-go",
+      );
+      assert.equal(detail.status, 200);
+      assert.equal(fs.readFileSync(settingsPath, "utf-8"), before);
+      // ...while a provider write still refuses (409): the routes are read-only.
+      assert.equal(
+        (
+          await post(srv.base, "/api/providers", {
+            name: "blocked",
+            base_url: "https://blocked.example/v1",
+          })
+        ).status,
+        409,
+      );
+      assert.equal(fs.readFileSync(settingsPath, "utf-8"), before);
+    } finally {
+      await srv.close();
+    }
+  } finally {
+    tmp.cleanup();
   }
 });

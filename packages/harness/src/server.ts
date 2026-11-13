@@ -254,7 +254,7 @@ import { compactContext, type CompactionSettings } from "./compaction.ts";
 import { discoverCommands, expandCommand, matchCommand, type CommandCatalog } from "./commands.ts";
 import { SharedContext } from "./context.ts";
 import { normalizeEffortValue } from "./effort.ts";
-import { ModelEffortCatalog } from "./modelcatalog.ts";
+import { CATALOG_PROVIDER_ID_RE, ModelsDevCatalog, type ModelEffortCatalog } from "./modelcatalog.ts";
 import { estimateRunCostFromUsage } from "./cost.ts";
 import { TwoBrothersHarness, type HarnessResult, type ToolScopes } from "./harness.ts";
 import {
@@ -719,6 +719,7 @@ function publicProvider(preset: {
   kind: string;
   models: string[];
   context_window?: number;
+  catalog_id?: string;
 }): {
   name: string;
   base_url: string;
@@ -726,6 +727,7 @@ function publicProvider(preset: {
   kind: string;
   models: string[];
   context_window?: number;
+  catalog_id?: string;
 } {
   return {
     name: preset.name,
@@ -739,6 +741,11 @@ function publicProvider(preset: {
     Number.isSafeInteger(preset.context_window) &&
     preset.context_window > 0
       ? { context_window: preset.context_window }
+      : {}),
+    // Additive catalog provenance: omitted for manual/legacy presets, so their
+    // response shape is unchanged.
+    ...(typeof preset.catalog_id === "string" && preset.catalog_id
+      ? { catalog_id: preset.catalog_id }
       : {}),
   };
 }
@@ -756,6 +763,7 @@ function publicPreset(preset: Preset): ReturnType<typeof publicProvider> {
     kind: preset.kind,
     models: preset.models,
     context_window: preset.context_window,
+    catalog_id: preset.catalog_id,
   });
 }
 
@@ -837,6 +845,32 @@ function providerContextWindowPatch(body: Record<string, unknown>): number | und
   return value;
 }
 
+/**
+ * Strict provider-preset `catalog_id` from a request body.
+ *
+ * Returns `undefined` when the field is absent (leave the stored value
+ * unchanged), `null` when it is explicitly cleared, and the bounded lowercase
+ * id otherwise. A non-string or out-of-grammar value is a 400: the import
+ * form carries this id invisibly, so a bad value is a client bug rather than
+ * operator data.
+ */
+function providerCatalogIdPatch(
+  body: Record<string, unknown>,
+): string | null | undefined {
+  if (!("catalog_id" in body)) return undefined;
+  const value = body.catalog_id;
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") {
+    throw new HttpError(400, "catalog_id must be a models.dev catalog provider id");
+  }
+  const id = value.trim().toLowerCase();
+  if (id === "") return null;
+  if (!CATALOG_PROVIDER_ID_RE.test(id)) {
+    throw new HttpError(400, "catalog_id must be a models.dev catalog provider id");
+  }
+  return id;
+}
+
 // ---------------------------------------------------------------------------
 // Server factory
 // ---------------------------------------------------------------------------
@@ -907,10 +941,13 @@ export interface ServerOptions {
    */
   spillRetentionDays?: number;
   /**
-   * Test/integration hook: model reasoning metadata source. Defaults to a
-   * lazily fetched, in-memory models.dev catalog; tests inject a fixture so
-   * the provider list never touches the network.
+   * Test/integration hook: the shared models.dev catalog. One instance serves
+   * `/api/model-efforts` and the two read-only browse routes, so the ~6 MB
+   * document is downloaded once. Defaults to a lazily fetched, in-memory
+   * catalog; tests inject a fixture fetch so nothing touches the network.
    */
+  modelsDev?: ModelsDevCatalog;
+  /** @deprecated use `modelsDev` (same type, kept for one release). */
   modelEfforts?: ModelEffortCatalog;
 }
 
@@ -1188,11 +1225,14 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   // `<name>.md` needs no server restart. A missing root is skipped silently.
   const commandsDirs = options.commandsDirs ?? defaultCommandsRoots();
   const commandCatalog = (): CommandCatalog => discoverCommands(commandsDirs);
-  // Model effort metadata is lazy and cached; the provider-list route awaits
-  // it, and a failed fetch leaves `model_efforts` absent on every provider.
-  const modelEfforts =
+  // Model effort metadata and the models.dev catalog browse view share one
+  // lazy, cached download; the provider-list route awaits it, and a failed
+  // fetch leaves `model_efforts` absent on every provider while the browse
+  // routes fall back to the curated seed view.
+  const modelsDev =
+    options.modelsDev ??
     options.modelEfforts ??
-    new ModelEffortCatalog({ enabled: process.env.TWO_BROTHERS_MODEL_EFFORTS !== "off" });
+    new ModelsDevCatalog({ enabled: process.env.TWO_BROTHERS_MODEL_EFFORTS !== "off" });
 
   const state: ServerState = {
     sessionsDir,
@@ -1228,6 +1268,27 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       throw new SettingsSchemaVersionError(schema.version);
     }
     throw new SettingsReadOnlyError(schema.reason ?? "the file could not be read");
+  }
+
+  /**
+   * The models.dev provider id behind one preset name. A preset imported from
+   * the catalog stores its stable `catalog_id`, so a rename (the preset name
+   * is the operator's own) keeps resolving model-declared effort levels;
+   * manual and legacy presets have no id and resolve by name exactly as
+   * before (the alias table inside the catalog still applies). Fail-soft: a
+   * settings read problem falls back to the name.
+   */
+  function catalogIdForProvider(name: string): string {
+    const wanted = name.trim().toLowerCase();
+    if (!wanted) return name;
+    try {
+      const preset = state.settingsStore
+        .readProviders()
+        .find((entry) => entry.name.trim().toLowerCase() === wanted);
+      return preset?.catalog_id ?? name;
+    } catch {
+      return name;
+    }
   }
 
   /**
@@ -3260,13 +3321,19 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     compileRoute("GET", "/api/model-efforts", async (ctx) => {
       // Model-declared reasoning levels from models.dev (cached in memory).
       // A failed/offline fetch returns `{reasoning:false, efforts:[]}`; the
-      // UI then offers no effort control rather than inventing one.
+      // UI then offers no effort control rather than inventing one. A preset's
+      // stored `catalog_id` wins over its (possibly renamed) display name.
       const provider = (ctx.query.get("provider") ?? "").trim();
       const model = (ctx.query.get("model") ?? "").trim();
       if (!provider || !model) {
         throw new HttpError(400, "provider and model are required");
       }
-      return { provider, model, ...(await modelEfforts.efforts(provider, model)) };
+      const catalogProvider = catalogIdForProvider(provider);
+      return {
+        provider,
+        model,
+        ...(await modelsDev.efforts(catalogProvider, model)),
+      };
     }),
   );
 
@@ -3284,6 +3351,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       const kind = optionalString(body, "kind") ?? PROVIDER_KIND_DEFAULT;
       const models = cleanModelList(body.models);
       const contextWindow = providerContextWindowPatch(body);
+      const catalogId = providerCatalogIdPatch(body);
       const presets = state.settingsStore.readProviders();
       // Duplicates against the merged view: a seeded name is customized with
       // PUT (which materializes a stored override), not created twice.
@@ -3297,6 +3365,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         kind,
         models,
         ...(contextWindow !== undefined && contextWindow > 0 ? { context_window: contextWindow } : {}),
+        ...(catalogId !== undefined && catalogId !== null ? { catalog_id: catalogId } : {}),
       });
       state.settingsStore.write(state.settings.snapshot(), undefined, presets);
       return new Respond(201, { provider: publicProvider(presets[presets.length - 1]) });
@@ -3330,6 +3399,9 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
           ...(typeof seed.context_window === "number" && seed.context_window > 0
             ? { context_window: seed.context_window }
             : {}),
+          ...(typeof seed.catalog_id === "string" && seed.catalog_id
+            ? { catalog_id: seed.catalog_id }
+            : {}),
         });
         index = presets.length - 1;
       }
@@ -3357,6 +3429,12 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         // 0 clears the preset window (unknown); a positive value overrides it.
         if (contextWindow > 0) presets[index].context_window = contextWindow;
         else delete presets[index].context_window;
+      }
+      const catalogId = providerCatalogIdPatch(body);
+      if (catalogId !== undefined) {
+        // An explicit null/empty clears the provenance; omitted keeps it.
+        if (catalogId !== null) presets[index].catalog_id = catalogId;
+        else delete presets[index].catalog_id;
       }
       state.settingsStore.write(state.settings.snapshot(), undefined, presets);
       // The response mirrors GET's merged view: a seed override keeps its
@@ -3492,6 +3570,40 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       // catalog on it. `base_url`/`kind` are additive echoes so a client can
       // show what was actually probed.
       return { models, base_url: baseUrl, kind };
+    }),
+  );
+
+  // -- routes: models.dev catalog (read-only browse) ------------------------------
+
+  // Both routes are read-only: they never call requireWritableSettings(), never
+  // touch state.settingsStore and never write (a read-only/newer-schema
+  // settings document still browses). They are served from the shared catalog
+  // instance above, so they cost no extra download next to /api/model-efforts.
+  routes.push(
+    compileRoute("GET", "/api/models-dev/providers", async () => modelsDev.providers()),
+  );
+
+  routes.push(
+    compileRoute("GET", "/api/models-dev/providers/{id}", async (ctx) => {
+      // The router already URL-decoded the segment; normalize and validate.
+      const id = ctx.params.id.trim().toLowerCase();
+      if (!CATALOG_PROVIDER_ID_RE.test(id)) {
+        throw new HttpError(400, "invalid catalog provider id");
+      }
+      const detail = await modelsDev.provider(id);
+      if (detail !== null) return detail;
+      // No detail: a curated summary means there is no live snapshot at all,
+      // so the id can only exist in the unreachable live catalog (503); any
+      // live/stale snapshot means the id is genuinely unknown (404).
+      const summary = await modelsDev.providers();
+      if (summary.source === "curated") {
+        return new Respond(503, {
+          detail: "models.dev catalog unavailable",
+          code: "catalog-unavailable",
+          upstream_error: summary.upstream_error ?? "the models.dev catalog is unavailable",
+        });
+      }
+      return new Respond(404, { detail: "not found", code: "catalog-provider-not-found" });
     }),
   );
 

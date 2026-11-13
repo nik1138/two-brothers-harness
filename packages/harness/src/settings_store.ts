@@ -12,7 +12,7 @@
  *     read()           -> {senior: {provider, model, base_url, api_key, ...}, ...}
  *     readSubagent()   -> {provider, model, base_url, api_key, provider_ref, effort?}
  *     readPlugins()    -> [name, ...]                        // one shared list
- *     readProviders()  -> [{name, base_url, api_key, kind, models, context_window?}, ...]   // key decrypted
+ *     readProviders()  -> [{name, base_url, api_key, kind, models, context_window?, catalog_id?}, ...]   // key decrypted
  *     readApprovalPolicy() -> "ask" | "readonly" | "edits" | "allow-all"
  *     readCompaction() -> {threshold_chars?, threshold_tokens?, ...}  // budgets
  *     write(settings, plugins?, providers?, subagent?)       // api_key in
@@ -149,16 +149,39 @@ export interface ProviderPreset {
    * dropped (unknown), never coerced.
    */
   context_window?: number;
+  /**
+   * Additive models.dev provider id this preset was imported from (snake_case
+   * like the other persisted fields). Absent on manual/legacy presets. It lets
+   * `/api/model-efforts` keep resolving model-declared levels after the preset
+   * is renamed, because the catalog id is stable while the preset name is the
+   * operator's own. Bounded by {@link PROVIDER_CATALOG_ID_RE}; a value that
+   * does not match is dropped on read (never coerced).
+   */
+  catalog_id?: string;
 }
 
 /** Preset `kind` default — additive field, tolerant at the boundary. */
 export const PROVIDER_KIND_DEFAULT = "openai-compatible";
+
+/**
+ * One models.dev catalog provider id: bounded, lowercase, URL-safe. This is
+ * both the route id grammar and the persisted `catalog_id` grammar, so the
+ * settings store and the catalog routes can never disagree.
+ */
+export const PROVIDER_CATALOG_ID_RE = /^[a-z0-9][a-z0-9._-]{0,99}$/;
 
 /** One usable preset context window: a positive safe integer, else unknown. */
 function providerContextWindow(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0
     ? value
     : undefined;
+}
+
+/** One usable preset `catalog_id`: a bounded catalog id, else absent. */
+function providerCatalogId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const id = value.trim().toLowerCase();
+  return PROVIDER_CATALOG_ID_RE.test(id) ? id : undefined;
 }
 
 /** Max session-allowed pairs persisted per session (oldest dropped first). */
@@ -689,6 +712,7 @@ export class SettingsStore {
       kind: string;
       models: string[];
       context_window?: number;
+      catalog_id?: string;
     }> = [];
     for (const item of section) {
       if (!isRecord(item)) continue;
@@ -703,6 +727,7 @@ export class SettingsStore {
         kind: asNonEmptyString(item.kind) ?? PROVIDER_KIND_DEFAULT,
         models: asStringList(item.models),
         context_window: providerContextWindow(item.context_window),
+        catalog_id: providerCatalogId(item.catalog_id),
       });
     }
     const unsealed = unsealMany(
@@ -716,6 +741,7 @@ export class SettingsStore {
       kind: k.kind,
       models: [...k.models],
       ...(k.context_window !== undefined ? { context_window: k.context_window } : {}),
+      ...(k.catalog_id !== undefined ? { catalog_id: k.catalog_id } : {}),
     }));
   }
 
@@ -955,6 +981,11 @@ export class SettingsStore {
         // 0/absent/invalid clears it (the preset then behaves as unknown).
         const contextWindow = providerContextWindow(item.context_window);
         if (contextWindow !== undefined) preset.context_window = contextWindow;
+        // Additive catalog provenance: a bounded catalog id survives every
+        // rewrite of the provider list (like the context window), so a rename
+        // keeps resolving model-declared efforts.
+        const catalogId = providerCatalogId(item.catalog_id);
+        if (catalogId !== undefined) preset.catalog_id = catalogId;
         const key = item.api_key;
         if (typeof key === "string" && key) {
           pending.push({ holder: preset });

@@ -272,6 +272,11 @@ export function mergeSeedPresets(stored: readonly ProviderPreset[] = []): Preset
       preset.context_window > 0
         ? { context_window: preset.context_window }
         : {}),
+      // Catalog provenance survives the merge too, so a renamed import keeps
+      // resolving model-declared efforts and a PUT round-trip never drops it.
+      ...(typeof preset.catalog_id === "string" && preset.catalog_id
+        ? { catalog_id: preset.catalog_id }
+        : {}),
     };
     const index = indexByName.get(copy.name.toLowerCase());
     if (index === undefined) {
