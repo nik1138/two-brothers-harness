@@ -527,8 +527,8 @@ hint clears on its own).
 | `Esc` | Close the overlay and restore the previous focus. In the helpers overlay: child transcript → helper list → closed. |
 | `Ctrl+Y` | With the helpers overlay open, close it (it toggles the overlay it opens). |
 | `PgUp` / `PgDn` | Inside an open helper transcript, page backwards/forwards; the window follows the tail until you scroll back. |
-| `I` | Inside an open helper transcript: interrupt that helper (the child only, never the parent run). The row keeps its live status — the helper's terminal event is the truth. |
-| `M` | Inside an open helper transcript: draft a one-line follow-up (capped at 4000 chars); `Enter` queues it for the helper's next step, `Esc` cancels only the draft. |
+| `i` | Inside an open helper transcript: interrupt that helper (the child only, never the parent run). The row keeps its live status — the helper's terminal event is the truth. |
+| `m` | Inside an open helper transcript: draft a one-line follow-up (capped at 4000 chars); `Enter` queues it for the helper's next step, `Esc` cancels only the draft. |
 | `Tab` / `Shift+Tab` | In the `/`, `@skill:` and workspace-file pickers: accept / dismiss (the text input keeps focus; Left/Right keep editing the draft). |
 
 Overlays receive keys before the composer: while one is open, `Up`/`Down` move
