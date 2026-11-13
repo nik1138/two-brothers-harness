@@ -1746,10 +1746,17 @@ Junior never receives it, and a child cannot receive it either (no recursion).
   bounded report as the tool result; the full bounded transcript is persisted
   for the UI.
 - **Arguments:** `{"task": "self-contained brief", "label?": "short tree
-  label", "role?": "senior" | "junior"}`. `task` is required and capped at
+  label", "role?": "senior" | "junior", "model?": "model-id",
+  "effort?": "reasoning-effort token"}`. `task` is required and capped at
   4 000 chars; the label defaults to the task's first line; `role` defaults to
   `junior` (cheaper) and `role: "senior"` uses the stronger Senior model. A
-  dedicated helper route configured in Settings always wins over `role`.
+  dedicated helper route configured in Settings always wins over `role`. The
+  optional `model` (≤200 chars, a model-id-safe grammar) and `effort`
+  (≤32 chars, a model-declared token such as `low`/`high`/`max`, stored
+  lowercase) refine only the model and reasoning effort for that one call —
+  the provider, base URL and API key always come from the route or role
+  endpoint, never from an argument. The resolved model is what the tree,
+  drawer, `list_agents` and `subagent_report` show.
 - **Settings route:** Settings → **Models & roles** has a third **Subagent**
   card. It accepts the same provider preset / manual connection, model, base
   URL, API key and model-declared effort as a role, persisted in the top-level
@@ -1796,9 +1803,8 @@ Junior never receives it, and a child cannot receive it either (no recursion).
   logs use the session's sidecar key (or one per-process `tui-<hex>.jsonl` for
   an in-memory session) and nothing the overlay does touches the brothers'
   transcript.
-- **Not in this slice:** forked-context children, deeper nesting, per-call
-  model/effort overrides (the operator's Settings route already fixes the child
-  route) and a helper usage/cache/cost roll-up into the parent footer.
+- **Not in this slice:** forked-context children, deeper nesting and a helper
+  usage/cache/cost roll-up into the parent footer.
   `run`/`chat` do not enable the tier.
 
 ## Workspace instructions (TS package)

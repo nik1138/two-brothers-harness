@@ -82,11 +82,14 @@
 //                          helper-write: work-mode run whose junior delivers a
 //                                    report without tools, then the senior
 //                                    verify call asks for one `subagent`
-//                                    delegation; requests carrying the helper
-//                                    model (`--helper-model`) are the child and
-//                                    write `e2e-helper.txt` before their final
-//                                    report, so the operator approval is a real
-//                                    child-tagged request.
+//                                    delegation carrying `model: --helper-model`
+//                                    (a per-call override; at the default it
+//                                    equals the route's model, so nothing
+//                                    observable changes); requests carrying the
+//                                    helper model (`--helper-model`) are the
+//                                    child and write `e2e-helper.txt` before
+//                                    their final report, so the operator
+//                                    approval is a real child-tagged request.
 //                          auto-solo: auto-mode run whose senior routing call
 //                                    (the request tail carries `Requested
 //                                    payload: route`) declares the solo route,
@@ -558,11 +561,15 @@ function decide(body) {
     // so the harness' tool loop ends and the review step begins
     if (OPTS.scenario === 'helper-write') {
       // First verify round: spawn exactly one helper (the child write parks on
-      // the operator). After its tool result the loop gets a plain summary.
+      // the operator). The delegation carries `model: OPTS.helperModel` — a
+      // per-call override; at the default it equals the route's model, so the
+      // other helper-write scenarios resolve the same child unchanged. After
+      // its tool result the loop gets a plain summary.
       if (toolResults === 0) {
         return toolCall('subagent', {
           task: `Write ${HELPER_FILE} with a short greeting.`,
           label: 'Write helper file',
+          model: OPTS.helperModel,
         })
       }
       return {

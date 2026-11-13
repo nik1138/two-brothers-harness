@@ -21,6 +21,7 @@ import "./adapters.test.ts";
 import "./effort.test.ts";
 import "./modelcatalog.test.ts";
 import "./subagent.test.ts";
+import "./subagentoverrides.test.ts";
 import "./subagentmutating.test.ts";
 import "./subagentapprovals.test.ts";
 import "./subagentcontrols.test.ts";

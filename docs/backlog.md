@@ -1871,9 +1871,8 @@ What landed, as recorded behavior:
   new timer, no new flag/env, no protocol change; tests
   `tests/tuihelpers.test.ts` plus `tuiintegration`/`tuikeymap` cases.
   Remaining phases: async completion/wake (delivery stays poll-only),
-  forked-context children, deeper nesting, per-call model/effort overrides (the
-  operator's Settings → Models & roles → Subagent route already fixes the child
-  route) and cost/cache roll-up into the parent view. The protocol stays
+  forked-context children, deeper nesting and cost/cache roll-up into the
+  parent view. The protocol stays
   **Slice O2 (TUI helper controls) shipped 2026-11-13:** inside the open
   child transcript, `i` interrupts the helper through the same in-process
   `SubagentControlHandle` the web routes use (`interrupt("operator")` — the
@@ -1900,6 +1899,26 @@ What landed, as recorded behavior:
   hanging child with the parent completing; queue → deliver at the child's
   next step).
   unchanged; children are internal executions, not second protocol peers.
+  **Slice M (per-call `model`/`effort` overrides) shipped 2026-11-13:** the
+  `subagent` tool gains optional `model` (non-empty, ≤200 chars,
+  `^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$`) and `effort` (≤32 chars, a
+  model-declared token, stored normalized) arguments. Resolution: the
+  validated override wins, else the dedicated helper route's model, else the
+  role endpoint's, else the run config's role model. The connection is pinned:
+  the provider, base URL, API key, wire family (`kind`) and context window
+  always come from the resolved route/role endpoint — with no endpoint at all,
+  an override synthesizes the connection from the run's own config — so an
+  argument can choose which model runs on the operator's connection, never
+  whose connection. Both arguments are validated before the per-run/active
+  budget counters: an invalid value is a bounded JSON tool error with no spawn
+  and no counter change. The resolved model flows through `control.model` to
+  the tool result, `subagent_started`, `list_agents`, `subagent_report` and
+  the tree/drawer; without an override every one of those bytes (and the wire
+  request) is unchanged. No Settings toggle, no allowlist, no protocol or
+  event-shape change. Tests: `tests/subagentoverrides.test.ts` (14);
+  `tests/subagent.test.ts` pins; the hermetic browser `subagent-mutation`
+  scenario delegates with `e2e-helper-fast` and asserts the drawer shows the
+  override.
 - **Stacked-dialog mask-click (web, non-blocker)** — **blocked on upstream**
   (evidence updated 2026-11-08): naive-ui fires `mask-click` for clicks that
   land inside a stacked second dialog, so every dialog's handler must ignore

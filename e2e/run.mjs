@@ -452,11 +452,14 @@ function tsEnv(overrides = {}) {
  *   lingerMs optional --linger-ms forwarded to the fixture (slow's first
  *            answer delay; folding's second-run deliverable delay; cooperation's
  *            `e2e-steer` opening delay)
+ *   helperModel optional --helper-model forwarded to the fixture (the
+ *            `helper-write` delegation's per-call model override and the child
+ *            request's model id; default leaves the fixture's `e2e-helper`)
  * The returned handle may carry a `modelServer` (fixture runs) that
  * killBackend() tears down with the backend itself, plus its `modelBase`
  * (the OpenAI-compatible `/v1` URL a helper route can point at).
  */
-async function startBackend({ kind, scenario, lingerMs }) {
+async function startBackend({ kind, scenario, lingerMs, helperModel }) {
   const port = await freePort()
   const dir = tmpDir('tb-e2e-ts')
   let modelServer = null
@@ -468,6 +471,8 @@ async function startBackend({ kind, scenario, lingerMs }) {
     const modelPort = await freePort()
     const modelArgs = [NODE_SCRIPTED, '--port', String(modelPort), '--scenario', scenario]
     if (Number.isFinite(lingerMs)) modelArgs.push('--linger-ms', String(lingerMs))
+    if (typeof helperModel === 'string' && helperModel !== '')
+      modelArgs.push('--helper-model', helperModel)
     modelServer = spawnServer(modelArgs, 'ts-model')
     await waitForModelServer(modelPort)
     modelBase = `http://127.0.0.1:${modelPort}/v1`
@@ -2694,10 +2699,17 @@ async function scenarioSubagents(runner) {
 async function scenarioSubagentMutation(runner) {
   const HELPER_FILE = 'e2e-helper.txt'
   const HELPER_LABEL = 'Write helper file'
+  // The delegation refines the route's model per call; the drawer must show
+  // the model that actually ran, not the route default.
+  const HELPER_MODEL_FAST = 'e2e-helper-fast'
   const SESSION_TITLE = 'E2E helper mutation'
   const wsDir = tmpDir('tb-e2e-ws-submut')
   const wsName = path.basename(wsDir)
-  const be = await startBackend({ kind: 'fixture', scenario: 'helper-write' })
+  const be = await startBackend({
+    kind: 'fixture',
+    scenario: 'helper-write',
+    helperModel: HELPER_MODEL_FAST,
+  })
   const { context, page, consoleGuard } = await newScenarioPage()
   const helperPath = path.join(wsDir, HELPER_FILE)
   try {
@@ -2770,6 +2782,20 @@ async function scenarioSubagentMutation(runner) {
     await tree.locator('.subagent-tree-row').first().click()
     const drawer = page.locator('.subagent-view')
     await drawer.waitFor({ state: 'visible', timeout: 15000 })
+    // The drawer footer shows the model that actually ran (`role · model`):
+    // the per-call override (e2e-helper-fast), not the route default.
+    const modelLine = (
+      await drawer.locator('.subagent-view-foot span').first().innerText()
+    ).replace(/\s+/g, ' ')
+    assert.ok(
+      modelLine.includes(HELPER_MODEL_FAST),
+      `the drawer must show the override model (got "${modelLine}")`,
+    )
+    assert.doesNotMatch(
+      modelLine,
+      /e2e-helper(?!-fast)/,
+      `the drawer must not show the route default as the ran model (got "${modelLine}")`,
+    )
     const approvalRow = drawer.locator('.subagent-approval.is-allowed')
     await approvalRow.first().waitFor({ timeout: 15000 })
     const approvalText = (await approvalRow.first().innerText()).replace(/\s+/g, ' ')
