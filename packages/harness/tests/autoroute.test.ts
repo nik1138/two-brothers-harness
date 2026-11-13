@@ -375,6 +375,21 @@ test("autoroute fail-closed: a still-bad repair reply degrades once, never loops
   assert.equal(result.autoRoute!.route, "consult");
 });
 
+test("autoroute fail-closed: exactly one auto-route warning when the reply is unstructured and no workspace is bound", async () => {
+  // The degradation (fail-closed consult) and the G1 downgrade (work without
+  // a workspace) are two distinct warnings; an unstructured reply must never
+  // produce both — one honest degradation warning, and no downgradedFrom
+  // because the route never was work.
+  const senior = makeProvider("senior", { scripts: { route: ["prose", "prose"] } });
+  const harness = new TwoBrothersHarness(cfg("auto"), {
+    senior: senior.provider,
+    junior: makeProvider("junior").provider,
+  });
+  const result = await harness.run(TASK);
+  assert.deepEqual(result.warnings, [DEGRADED_WARNING]);
+  assert.deepEqual(result.autoRoute, { route: "consult", reason: "unstructured model reply for route" });
+});
+
 // ---------------------------------------------------------------------------
 // relaxed strict parse — valid shapes never repair
 // ---------------------------------------------------------------------------

@@ -590,6 +590,41 @@ test("cancel mid-run returns the partial envelopes", async () => {
   assert.equal(result.context.events.length, 3);
 });
 
+test("cancel after a revise round reports the rounds completed before the stop", async () => {
+  const controller = new AbortController();
+  let reviewCalls = 0;
+  const senior: Provider = {
+    async chat(messages: ChatMessage[], responseKind = "message"): Promise<string> {
+      if (responseKind === "review") {
+        reviewCalls += 1;
+        if (reviewCalls === 2) {
+          // the revise round completed (junior_revise already counted it);
+          // the operator stops the run at this next review call
+          controller.abort();
+          throw new ProviderAbortError();
+        }
+        return '{"verdict": "revise", "notes": "needs rework", "points": []}';
+      }
+      return new MockProvider().chat(messages, responseKind);
+    },
+  };
+  const harness = new TwoBrothersHarness(cfg({ mode: "consult", maxRounds: 3 }), {
+    senior,
+    signal: controller.signal,
+  });
+  const result = await harness.run("rework then stop");
+  assert.equal(result.cancelled, true);
+  // one full revise iteration finished before the stop; the cancelled result
+  // must report it, not zero
+  assert.equal(result.rounds, 1);
+  // the in-flight review envelope is never appended: the stop took effect
+  // inside that node's provider call
+  assert.deepEqual(
+    kinds(result),
+    ["message", "consult", "proposal", "review", "proposal"],
+  );
+});
+
 // ---------------------------------------------------------------------------
 // same-session serialization (RunManager rule, ported as an in-process mutex)
 // ---------------------------------------------------------------------------

@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 
 import { TwoBrothersHarness, sanitizePayload } from "../src/harness.ts";
 import { resolveConfig } from "../src/config.ts";
-import { MockProvider } from "../src/provider.ts";
+import { MockProvider, type Provider } from "../src/provider.ts";
 import type { ChatMessage } from "../src/context.ts";
 
 class ReviseProvider {
@@ -140,4 +140,33 @@ test("config flag overrides env", () => {
 
 test("invalid mode throws", () => {
   assert.throws(() => resolveConfig({ mode: "bad" }), /invalid mode/);
+});
+
+test("a reused harness does not leak lastErrors from a previous run", async () => {
+  // Run 1 drives the senior's consult reply into the tolerant-degradation
+  // path ("unstructured model reply" lands on the harness's lastErrors);
+  // run 2 on the SAME harness instance must start with that per-run state
+  // reset, so its errors stay empty.
+  let run = 0;
+  const senior: Provider = {
+    async chat(messages: ChatMessage[], responseKind = "message"): Promise<string> {
+      if (responseKind === "consult" && run === 1) return "prose instead of JSON";
+      return new MockProvider().chat(messages, responseKind);
+    },
+  };
+  const harness = new TwoBrothersHarness(resolveConfig({ provider: "mock", mode: "consult" }), {
+    senior,
+  });
+  run = 1;
+  const first = await harness.run("first run");
+  assert.ok(first.errors.includes("unstructured model reply for consult"));
+  run = 2;
+  const second = await harness.run("second run");
+  assert.equal(second.cancelled, false);
+  assert.deepEqual(
+    second.errors.filter((error) => error.includes("unstructured model reply")),
+    [],
+    "run 2 must not inherit run 1's degradation warnings",
+  );
+  assert.ok(second.decision.decision);
 });

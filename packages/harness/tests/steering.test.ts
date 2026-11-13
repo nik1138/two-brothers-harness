@@ -53,6 +53,7 @@ import { createServer, type ServerHandle, type ServerOptions } from "../src/serv
 import type { RuntimeEvent } from "../src/runevents.ts";
 import { SessionStore } from "../src/session.ts";
 import { SharedContext } from "../src/context.ts";
+import { isCompactionSummary } from "../src/compaction.ts";
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -351,6 +352,102 @@ test("tool-loop iterations drain steering and the next tool request sees it", as
   assert.equal(steerEnvelopes.length, 1);
   assert.equal(result.context.renderTranscript().split("[[OPERATOR STEER]]").length - 1, 1);
   assert.equal(result.messages.filter((message) => message.kind === "deliverable").length, 1);
+});
+
+test("a steer at the senior_open→junior_answer boundary keeps the work-mode deliverable", async () => {
+  const senior = new ScriptedProvider();
+  const junior = new ScriptedProvider({
+    tools: {
+      deliverable: [
+        { toolCalls: [toolCall("call-1", "notes")] },
+        { text: validReply("deliverable") },
+      ],
+    },
+  });
+  let calls = 0;
+  const harness = new TwoBrothersHarness(cfg({ mode: "work" }), {
+    senior,
+    junior,
+    toolScopes: { junior: [fakeTool("notes")], senior: [fakeTool("check")] },
+    steering: () => {
+      calls += 1;
+      // Boundary 1 (senior_open), boundary 2 (junior_answer): the steer lands
+      // right after the delegation envelope. The junior's node kind must
+      // follow the run mode, not the steer tail, so the answer is still the
+      // work-mode deliverable and the senior verification still runs.
+      if (calls === 2) return ["remember: keep the public API stable"];
+      return [];
+    },
+  });
+  const result = await harness.run("do the work");
+
+  // task, delegation, steer, deliverable, review, decision (the verify node
+  // appends no envelope — its evidence rides inside the review points).
+  assert.deepEqual(
+    result.messages.map((message) => message.kind),
+    ["message", "delegation", "message", "deliverable", "review", "decision"],
+  );
+  assert.equal(
+    result.messages.filter((message) => message.kind === "proposal").length,
+    0,
+    "a steer tail must never flip the work-mode answer into a proposal",
+  );
+  // The junior's mutating belt ran...
+  assert.equal(junior.toolsCalls("deliverable").length, 2);
+  // ...and the senior's verification pass executed (the only senior
+  // tools-channel call in this run).
+  assert.equal(senior.toolsCalls("deliverable").length, 1);
+  const steerIndex = result.messages.findIndex((message) =>
+    String(message.payload.text ?? "").startsWith(STEERING_PREFIX),
+  );
+  const deliverableIndex = result.messages.findIndex((message) => message.kind === "deliverable");
+  assert.ok(steerIndex > 0 && steerIndex < deliverableIndex);
+  assert.deepEqual(result.errors, []);
+});
+
+test("a compaction summary as the context tail still yields the work-mode deliverable", async () => {
+  // The senior's delegation is oversized for the compaction budget, so the
+  // auto-trigger at the node boundary before junior_answer folds it with a
+  // split-payload cut — the compaction summary becomes the context tail
+  // exactly when the junior's node chooses its reply kind. The kind must
+  // follow the run mode, not the summary tail.
+  const senior = new ScriptedProvider({
+    chat: {
+      delegation: [
+        JSON.stringify({
+          work: "do the work",
+          acceptance: ["done"],
+          return: "deliverable",
+          notes: `pad ${"z".repeat(6000)}`,
+        }),
+      ],
+      compaction: ["## Goal\nShip it.\n\n## Next Steps\n1. Merge"],
+    },
+  });
+  const junior = new ScriptedProvider({
+    tools: {
+      deliverable: [{ text: validReply("deliverable") }],
+    },
+  });
+  const harness = new TwoBrothersHarness(cfg({ mode: "work" }), {
+    senior,
+    junior,
+    toolScopes: { junior: [fakeTool("notes")] },
+    compaction: { thresholdChars: 400, keepRecentChars: 100 },
+  });
+  const result = await harness.run("do the work");
+
+  assert.ok(
+    result.messages.some((message) => message.kind === "deliverable"),
+    "the compaction-summary tail must not flip the work-mode answer into a proposal",
+  );
+  assert.equal(
+    result.messages.filter((message) => message.kind === "proposal").length,
+    0,
+  );
+  assert.equal(junior.toolsCalls("deliverable").length, 1);
+  assert.equal(result.context.events.filter(isCompactionSummary).length, 1);
+  assert.deepEqual(result.errors, []);
 });
 
 test("a throwing steering callback is fail-soft: one warning, no envelope, the run completes", async () => {
