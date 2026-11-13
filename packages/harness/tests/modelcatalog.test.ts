@@ -663,7 +663,16 @@ test("timeout: an aborted fetch takes the failure path (no hang)", async () => {
   const cat = new ModelEffortCatalog({
     fetchImpl: ((_url: string | URL | Request, init?: RequestInit) =>
       new Promise<Response>((_resolve, reject) => {
-        init?.signal?.addEventListener("abort", () => reject(new Error("aborted by timeout")));
+        // Ref'd keep-alive: an abort-signal-only pending promise lets Node 22's
+        // runner settle it as "still pending" when the event loop empties
+        // before the product's AbortSignal.timeout timer fires (that timer is
+        // unref'd; see the cited hazard in src/tui/clipboard.ts). The abort
+        // below clears this handle, so it cannot outlive the bounded wait.
+        const keepAlive = setTimeout(() => undefined, 1_000);
+        init?.signal?.addEventListener("abort", () => {
+          clearTimeout(keepAlive);
+          reject(new Error("aborted by timeout"));
+        });
       })) as typeof fetch,
     now: () => 1_000,
     timeoutMs: 20,
