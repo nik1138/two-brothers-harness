@@ -1,0 +1,248 @@
+{
+  "openai": {
+    "name": "OpenAI",
+    "npm": "@ai-sdk/openai",
+    "api": "https://api.openai.com/v1",
+    "env": ["OPENAI_API_KEY"],
+    "models": {
+      "gpt-4o": {
+        "name": "GPT-4o",
+        "family": "gpt",
+        "attachment": true,
+        "reasoning": false,
+        "tool_call": true,
+        "modalities": { "input": ["text", "image"], "output": ["text"] },
+        "limit": { "context": 128000, "output": 16384 }
+      },
+      "o3": {
+        "name": "o3",
+        "family": "o",
+        "reasoning": true,
+        "reasoning_options": [{ "type": "effort", "values": ["low", "medium", "high"] }],
+        "tool_call": true,
+        "modalities": { "input": ["text"], "output": ["text"] },
+        "limit": { "context": 200000, "output": 100000 }
+      },
+      "text-embedding-3-small": {
+        "name": "text-embedding-3-small",
+        "family": "text-embedding",
+        "reasoning": false,
+        "modalities": { "input": ["text"], "output": ["text"] },
+        "limit": { "context": 8191, "output": 8191 }
+      },
+      "gpt-4o-mini-legacy": {
+        "name": "GPT-4o mini (legacy)",
+        "status": "deprecated",
+        "reasoning": false,
+        "limit": { "context": 128000 }
+      },
+      "gpt-image-1": {
+        "name": "GPT Image 1",
+        "reasoning": false,
+        "modalities": { "input": ["text"], "output": ["image"] },
+        "limit": { "context": 32000 }
+      }
+    }
+  },
+  "anthropic": {
+    "name": "Anthropic",
+    "npm": "@ai-sdk/anthropic",
+    "api": "https://api.anthropic.com",
+    "env": ["ANTHROPIC_API_KEY"],
+    "models": {
+      "claude-sonnet-4-5": {
+        "name": "Claude Sonnet 4.5",
+        "family": "claude",
+        "reasoning": true,
+        "reasoning_options": [{ "type": "budget_tokens", "min": 1024, "max": 32000 }],
+        "tool_call": true,
+        "limit": { "context": 200000, "output": 64000 }
+      },
+      "claude-haiku-4-5": {
+        "name": "Claude Haiku 4.5",
+        "family": "claude",
+        "reasoning": false,
+        "limit": { "context": 200000, "output": 8192 }
+      }
+    }
+  },
+  "google": {
+    "name": "Google",
+    "npm": "@ai-sdk/google",
+    "api": "https://generativelanguage.googleapis.com/v1beta",
+    "env": ["GEMINI_API_KEY"],
+    "models": {
+      "gemini-2.5-pro": {
+        "name": "Gemini 2.5 Pro",
+        "family": "gemini",
+        "reasoning": true,
+        "reasoning_options": [{ "type": "budget_tokens", "min": 128, "max": 32768 }],
+        "limit": { "context": 1048576, "output": 65536 }
+      },
+      "gemini-2.5-flash": {
+        "name": "Gemini 2.5 Flash",
+        "family": "gemini",
+        "reasoning": false,
+        "limit": { "context": 1048576, "output": 65536 }
+      }
+    }
+  },
+  "amazon-bedrock": {
+    "name": "Amazon Bedrock",
+    "npm": "@ai-sdk/amazon-bedrock",
+    "api": "",
+    "env": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION"],
+    "models": {
+      "anthropic.claude-sonnet-4-5": {
+        "name": "Claude Sonnet 4.5 (Bedrock)",
+        "reasoning": true,
+        "limit": { "context": 200000 }
+      }
+    }
+  },
+  "placeholder-api": {
+    "name": "Placeholder API",
+    "npm": "@ai-sdk/some-future-gateway",
+    "api": "https://${GATEWAY_HOST}/v1",
+    "env": ["GATEWAY_API_KEY"],
+    "models": {
+      "gateway-chat-1": {
+        "name": "Gateway Chat 1",
+        "reasoning": false,
+        "limit": { "context": 65536 }
+      },
+      "gateway-chat-1-preview": {
+        "name": "Gateway Chat 1 Preview",
+        "status": "alpha",
+        "limit": { "context": 65536 }
+      }
+    }
+  },
+  "no-models": {
+    "name": "No Models",
+    "npm": "@ai-sdk/openai-compatible",
+    "api": "https://no-models.example/v1"
+  },
+  "weird-protocol": {
+    "name": "Weird Protocol",
+    "type": "weird-protocol",
+    "api": "https://weird.example/v1",
+    "models": {
+      "weird-chat": { "name": "Weird Chat", "limit": { "context": 32000 } }
+    }
+  },
+  "typed-anthropic": {
+    "name": "Typed Anthropic",
+    "type": "anthropic",
+    "api": "https://typed-anthropic.example",
+    "models": {
+      "typed-sonnet": {
+        "name": "Typed Sonnet",
+        "reasoning": true,
+        "reasoning_options": [{ "type": "effort", "values": ["low", "high"] }],
+        "limit": { "context": 200000 }
+      }
+    }
+  },
+  "some-anthropic-clone": {
+    "name": "Some Anthropic Clone",
+    "api": "https://clone.example/v1",
+    "models": {
+      "clone-model": { "name": "Clone Model", "limit": { "context": 100000 } },
+      "clone-model-lite": { "name": "Clone Model Lite" }
+    }
+  },
+  "opencode-go": {
+    "name": "OpenCode Go",
+    "npm": "@ai-sdk/openai-compatible",
+    "api": "https://opencode.ai/inference/go/openai/v1",
+    "env": ["OPENCODE_API_KEY", "OPENCODE_ZEN_KEY", "IGNORED_FOURTH_KEY", "IGNORED_FIFTH_KEY"],
+    "models": {
+      "glm-5.2": {
+        "name": "GLM 5.2",
+        "family": "glm",
+        "reasoning": true,
+        "reasoning_options": [{ "type": "effort", "values": ["high", "max"] }],
+        "limit": { "context": 200000, "output": 128000 }
+      },
+      "deepseek-v4.1-flash": {
+        "name": "DeepSeek V4.1 Flash",
+        "family": "deepseek",
+        "reasoning": true,
+        "reasoning_options": [{ "type": "effort", "values": ["low", "high", "max"] }],
+        "limit": { "context": 1000000, "output": 128000 }
+      },
+      "claude-haiku-5-5": {
+        "name": "Claude Haiku 5.5",
+        "family": "claude",
+        "reasoning": true,
+        "reasoning_options": [{ "type": "budget_tokens", "min": 1024, "max": 32000 }],
+        "provider": {
+          "npm": "@ai-sdk/anthropic",
+          "api": "https://opencode.ai/inference/go/anthropic/v1"
+        },
+        "limit": { "context": 1000000, "output": 64000 }
+      },
+      "claude-opus-5": {
+        "name": "Claude Opus 5",
+        "family": "claude",
+        "reasoning": true,
+        "reasoning_options": [{ "type": "effort", "values": ["low", "medium", "high", "xhigh", "max"] }],
+        "provider": {
+          "npm": "@ai-sdk/anthropic",
+          "api": "https://opencode.ai/inference/go/anthropic/v1"
+        },
+        "limit": { "context": 200000, "output": 128000 }
+      },
+      "gemini-3-pro": {
+        "name": "Gemini 3 Pro",
+        "family": "gemini",
+        "reasoning": true,
+        "reasoning_options": [{ "type": "budget_tokens", "min": 128, "max": 32768 }],
+        "provider": {
+          "npm": "@ai-sdk/google",
+          "api": "https://opencode.ai/inference/go/google/v1beta"
+        },
+        "limit": { "context": 1048576, "output": 65536 }
+      },
+      "bedrock-model": {
+        "name": "Bedrock Model",
+        "provider": { "npm": "@ai-sdk/amazon-bedrock" },
+        "limit": { "context": 200000 }
+      },
+      "unknown-npm-model": {
+        "name": "Unknown npm Model",
+        "provider": { "npm": "@ai-sdk/mystery" },
+        "limit": { "context": 32000 }
+      },
+      "opencode-embed": {
+        "name": "OpenCode Embedding",
+        "family": "embedding",
+        "reasoning": false,
+        "limit": { "context": 8192 }
+      }
+    }
+  },
+  "unknown-npm": {
+    "name": "Unknown npm",
+    "npm": "@ai-sdk/mystery",
+    "api": "https://mystery.example/v1",
+    "models": {
+      "mystery-model": { "name": "Mystery Model", "limit": { "context": 32000 } }
+    }
+  },
+  "zai-coding-plan": {
+    "name": "Z.AI Coding Plan",
+    "npm": "@ai-sdk/openai-compatible",
+    "api": "https://api.z.ai/api/coding/paas/v4",
+    "env": ["ZHIPU_API_KEY"],
+    "models": {
+      "glm-5.3": {
+        "name": "GLM 5.3",
+        "reasoning": true,
+        "reasoning_options": [{ "type": "effort", "values": ["low", "high"] }],
+        "limit": { "context": 200000 }
+      }
+    }
+  }
+}
