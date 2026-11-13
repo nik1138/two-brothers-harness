@@ -1226,6 +1226,145 @@ async function scenarioHistoryNav(runner) {
   }
 }
 
+// -- scenario: transcript scroll stability --------------------------------------------
+//
+// Regression: with more rows than the render window and earlier history
+// loaded, a live append advances the window start and unmounts the top rows
+// without scroll compensation, yanking the reader. The transcript is seeded
+// through the on-disk store (400 rows), the reader loads one earlier chunk
+// (window = 300 rows) and scrolls away from the bottom; a live mock run then
+// appends rows. The anchored row must keep its viewport position.
+
+async function scenarioTranscriptStability(runner) {
+  const be = await startBackend({ kind: 'mock' })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  /** seq of user message i (1-based): the seed writes two envelopes per turn. */
+  const userSeq = (i) => 2 * i - 1
+  const ANCHOR_TURN = 75
+  try {
+    const created = await apiCall(be.base, 'POST', '/api/sessions', {
+      title: 'E2E transcript stability',
+    })
+    assert.ok(created.json?.name, `create session -> HTTP ${created.status}`)
+    const session = created.json.name
+    const rows = []
+    const t0 = Date.UTC(2026, 10, 10, 12, 0, 0)
+    let seq = 1
+    for (let i = 1; i <= 200; i += 1) {
+      const text = `Stability probe ${String(i).padStart(3, '0')} — alpha bravo charlie delta echo`
+      rows.push({
+        v: 1,
+        id: `msg-${seq}`,
+        seq,
+        ts: new Date(t0 + (seq - 1) * 30_000).toISOString(),
+        from: 'user',
+        to: 'senior',
+        kind: 'message',
+        payload: { text },
+      })
+      seq += 1
+      rows.push({
+        v: 1,
+        id: `msg-${seq}`,
+        seq,
+        ts: new Date(t0 + (seq - 1) * 30_000).toISOString(),
+        from: 'senior',
+        to: 'user',
+        kind: 'message',
+        payload: { text: `Acknowledged probe ${i}.` },
+      })
+      seq += 1
+    }
+    fs.writeFileSync(
+      path.join(be.dir, session),
+      rows.map((row) => JSON.stringify(row)).join('\n') + '\n',
+      'utf-8',
+    )
+
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await page
+      .locator('nav[aria-label="Sessions"]')
+      .getByText('E2E transcript stability', { exact: true })
+      .click()
+    await page.locator('.chat-scroll').waitFor()
+
+    // 400 rows hide the oldest 200 behind "show earlier"
+    const earlier = page.locator('button.show-earlier')
+    await earlier.waitFor({ state: 'visible' })
+    assert.match(await earlier.innerText(), /\(200 more\)/, 'the seed hides 200 rows')
+
+    // load one chunk: the window renders rows 101..400
+    await earlier.click()
+    await waitFor(async () => /\(100 more\)/.test(await earlier.innerText()), {
+      desc: 'one earlier chunk to load',
+    })
+
+    // anchor on a row safely below the top chunk a few appends will unmount,
+    // parked a quarter viewport down, away from the bottom pin
+    const anchorSeq = String(userSeq(ANCHOR_TURN))
+    const anchor = page.locator(`[data-history-nav-target="${anchorSeq}"]`)
+    await anchor.waitFor({ state: 'visible' })
+    const measure = () =>
+      page.evaluate((s) => {
+        const sc = document.querySelector('.chat-scroll')
+        const a = sc?.querySelector(`[data-history-nav-target="${s}"]`)
+        if (!sc || !a) return null
+        return {
+          offset: a.getBoundingClientRect().top - sc.getBoundingClientRect().top,
+          fromBottom: sc.scrollHeight - sc.scrollTop - sc.clientHeight,
+        }
+      }, anchorSeq)
+    await page.evaluate((s) => {
+      const sc = document.querySelector('.chat-scroll')
+      const a = sc.querySelector(`[data-history-nav-target="${s}"]`)
+      const delta = a.getBoundingClientRect().top - sc.getBoundingClientRect().top
+      sc.scrollTop = sc.scrollTop + delta - sc.clientHeight * 0.25
+    }, anchorSeq)
+    const before = await measure()
+    assert.ok(before, 'anchor measurable before the run')
+    assert.ok(
+      before.fromBottom > 200,
+      `the reader must be away from the bottom before the run (fromBottom ${before.fromBottom})`,
+    )
+
+    // a live run appends envelopes; the window start advances and the top
+    // rows unmount — the anchored row must not move in the viewport
+    await sendTask(page, 'Stability live append probe')
+    await waitForRunEnd(page)
+    const decision = page.locator('.chat-group.side-senior .bubble.bubble-highlight')
+    await decision.waitFor({ timeout: 15000 })
+    const labelBefore = '(100 more)'
+    await waitFor(async () => (await earlier.innerText()) !== labelBefore, {
+      desc: 'live growth to advance the window (top rows unmounted)',
+    })
+
+    await anchor.waitFor({ state: 'visible' })
+    const after = await measure()
+    assert.ok(after, 'anchor still rendered after the run')
+    assert.ok(
+      Math.abs(after.offset - before.offset) <= 1,
+      `the anchored row must keep its viewport position ` +
+        `(before ${before.offset.toFixed(2)}, after ${after.offset.toFixed(2)})`,
+    )
+    assert.ok(
+      after.fromBottom > 200,
+      `the reader must not be yanked toward the bottom (fromBottom ${after.fromBottom})`,
+    )
+    assert.match(await anchor.innerText(), /Stability probe 075/, 'the anchor row is intact')
+
+    // the transcript is still paged and honest after the growth
+    assert.match(await earlier.innerText(), /Show earlier messages \(\d+ more\)/)
+
+    consoleGuard.assertClean()
+    runner.pass('transcript-stability')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(be.dir)
+  }
+}
+
 /** Assert a locator's box lies fully inside the viewport (nothing clipped
  *  by composer/footer chrome). */
 async function assertFullyVisible(page, locator, label) {
@@ -6424,6 +6563,13 @@ async function main() {
           scenarioHistoryNav(currentRunner)
         ),
       },
+      {
+        label: 'transcript-stability',
+        run: () => (
+          (currentRunner = makeRunner('transcript-stability')),
+          scenarioTranscriptStability(currentRunner)
+        ),
+      },
     ]
     blocks.push(...hermetic.filter((block) => scenarioSelected(block.label)))
     if (realEnabled && scenarioSelected('real')) {
@@ -6466,6 +6612,7 @@ async function main() {
       'settings-advanced',
       'settings-subagent',
       'history-nav',
+      'transcript-stability',
       'session-switch-race',
       'subagent-switch-race',
       'reconnect-exhaustion',
