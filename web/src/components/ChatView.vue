@@ -386,6 +386,59 @@ async function showEarlier() {
   if (el) el.scrollTop = Math.max(0, el.scrollHeight - fromBottom)
 }
 
+/**
+ * A live append grows the transcript past page + loaded rows, so the window
+ * advances: the oldest rendered rows unmount and everything below shifts up,
+ * yanking the reader mid-sentence. Compensate like showEarlier does for a
+ * prepend — keep the first surviving row at its viewport offset — but only
+ * while the reader is away from the bottom; near-bottom readers keep the
+ * pin-to-bottom watchers. Element identity is the anchor (not a row count),
+ * so fold-group boundaries cannot miscount the unmounted prefix.
+ *
+ * scrollTop quantizes to whole pixels while row geometry is fractional, so
+ * the compensation tracks an unquantized "virtual" scroll position across
+ * cycles: folding each exact (float) shift into it bounds the error at one
+ * rounding instead of accumulating a fraction per appended envelope. A
+ * reader-initiated scroll re-baselines the virtual position.
+ */
+let virtualScrollTop: number | null = null
+let appliedScrollTop: number | null = null
+watch(
+  () => windowView.value.start,
+  async (next, prev) => {
+    if (next <= prev) return
+    const el = scrollEl.value
+    if (!el || nearBottom.value) return
+    if (
+      virtualScrollTop === null ||
+      appliedScrollTop === null ||
+      Math.abs(el.scrollTop - appliedScrollTop) > 1
+    ) {
+      virtualScrollTop = el.scrollTop
+    }
+    const before = new Set(el.children)
+    const viewportBefore = new Map(
+      [...el.children].map((child) => {
+        const rect = (child as HTMLElement).getBoundingClientRect()
+        return [child, rect.top - el.getBoundingClientRect().top]
+      }),
+    )
+    await nextTick()
+    const scrollerTop = el.getBoundingClientRect().top
+    for (const child of el.children) {
+      if (!(child instanceof HTMLElement)) continue
+      if (!before.has(child)) break
+      if (child.classList.contains('show-earlier')) continue
+      const offsetBefore = viewportBefore.get(child) ?? 0
+      const delta = child.getBoundingClientRect().top - scrollerTop - offsetBefore
+      virtualScrollTop = Math.max(0, virtualScrollTop + delta)
+      el.scrollTop = virtualScrollTop
+      appliedScrollTop = el.scrollTop
+      break
+    }
+  },
+)
+
 // -- step folding ------------------------------------------------------------
 // Older completed-run tool/audit cards collapse into one muted disclosure row
 // (folding.ts owns the projection and its truthful counts). The followed run and
