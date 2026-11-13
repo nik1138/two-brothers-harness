@@ -17,9 +17,19 @@ import * as path from "node:path";
 import { test } from "node:test";
 
 import { resolveConfig } from "../src/config.ts";
-import { MockProvider, type Provider } from "../src/provider.ts";
+import { RuntimeSettings } from "../src/runtime.ts";
+import { SettingsStore } from "../src/settings_store.ts";
+import { MockProvider, type Provider, type Tool, type ToolChatOptions, type ToolChatResponse } from "../src/provider.ts";
 import { toNdjsonLine, type ToolCallStreamEvent } from "../src/runstream.ts";
 import { CANCELLED_TURN_HINT, awaitTurnDrain, runTuiApp, type TuiIO } from "../src/tui/app.ts";
+import {
+  SUBAGENT_CHILD_TOOL_NAMES,
+  SUBAGENT_TOOL_NAME,
+  SubagentStore,
+} from "../src/subagent.ts";
+import {
+  HELPERS_MEMORY_COPY,
+} from "../src/tui/view/helpers.ts";
 import {
   loadTuiKeyCommands,
   resolveTuiCommands,
@@ -119,6 +129,20 @@ function startApp(extra: Partial<Parameters<typeof runTuiApp>[0]> = {}): Harness
 }
 
 const textOf = (output: FakeOutput): string => stripAnsi(output.data);
+
+/** A MockProvider that records the exact belt each tool-loop call offered. */
+class RecordingMock extends MockProvider {
+  seenToolNames: string[][] = [];
+
+  override async chatWithTools(
+    messages: Parameters<MockProvider["chatWithTools"]>[0],
+    tools: Tool[],
+    options: ToolChatOptions = {},
+  ): Promise<ToolChatResponse> {
+    this.seenToolNames.push(tools.map((tool) => tool.name));
+    return super.chatWithTools(messages, tools, options);
+  }
+}
 
 /** The newest fully rendered frame (rows joined with newlines). */
 const lastFrameText = (output: FakeOutput): string =>
@@ -783,7 +807,7 @@ test("a discovered provider.md can never shadow the native /provider connect sur
 });
 
 test("injected key overrides: a rebound palette chord opens it and the default chord is dead", async () => {
-  const resolved = resolveTuiCommands({ palette: [{ name: "y", ctrl: true }] });
+  const resolved = resolveTuiCommands({ palette: [{ name: "l", ctrl: true }] });
   assert.deepEqual(resolved.diagnostics, []);
   const { app, input, output } = startApp({ commands: resolved.commands });
   assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
@@ -793,8 +817,8 @@ test("injected key overrides: a rebound palette chord opens it and the default c
     false,
     "Ctrl+P no longer opens the palette",
   );
-  input.key("y", { ctrl: true });
-  assert.ok(await waitFor(() => textOf(output).includes("COMMANDS")), "Ctrl+Y opens the palette");
+  input.key("l", { ctrl: true });
+  assert.ok(await waitFor(() => textOf(output).includes("COMMANDS")), "Ctrl+L opens the palette");
   assert.match(textOf(output), /Command palette/);
   input.key("escape");
   assert.ok(await waitFor(() => !lastFrameText(output).includes("COMMANDS")));
@@ -804,7 +828,7 @@ test("injected key overrides: a rebound palette chord opens it and the default c
 test("injected key overrides: help moves chords and the overlay lists the effective ones", async () => {
   const resolved = resolveTuiCommands({
     help: [{ name: "f2" }],
-    palette: [{ name: "y", ctrl: true }],
+    palette: [{ name: "l", ctrl: true }],
   });
   assert.deepEqual(resolved.diagnostics, []);
   const { app, input, output } = startApp({ commands: resolved.commands });
@@ -858,7 +882,7 @@ test("/keys show and /keys reload reflect and live-apply keys-file edits", async
   const source: TuiKeysSource = { path: keysFile, origin: "env" };
   fs.writeFileSync(
     keysFile,
-    `${JSON.stringify({ version: 1, bindings: { palette: ["ctrl+y"] } }, null, 2)}\n`,
+    `${JSON.stringify({ version: 1, bindings: { palette: ["ctrl+l"] } }, null, 2)}\n`,
     "utf8",
   );
   const initial = loadTuiKeyCommands(source);
@@ -875,7 +899,7 @@ test("/keys show and /keys reload reflect and live-apply keys-file edits", async
     // `/keys show` reports the captured source and the effective chords.
     input.type("/keys show");
     input.enter();
-    assert.ok(await waitFor(() => textOf(output).includes("keys: palette Ctrl+Y")));
+    assert.ok(await waitFor(() => textOf(output).includes("keys: palette Ctrl+L")));
     assert.ok(
       await waitFor(() => /keys file:[\s\S]{0,400}\(env\)[\s\S]{0,60}loaded/.test(textOf(output))),
       "the source is reported honestly",
@@ -890,7 +914,7 @@ test("/keys show and /keys reload reflect and live-apply keys-file edits", async
     );
 
     // The startup override works and the default palette chord is dead.
-    input.key("y", { ctrl: true });
+    input.key("l", { ctrl: true });
     assert.ok(await waitFor(() => lastFrameText(output).includes("COMMANDS")));
     input.key("escape");
     assert.ok(await waitFor(() => !lastFrameText(output).includes("COMMANDS")));
@@ -905,7 +929,7 @@ test("/keys show and /keys reload reflect and live-apply keys-file edits", async
     fs.writeFileSync(
       keysFile,
       `${JSON.stringify(
-        { version: 1, bindings: { palette: ["ctrl+y"], help: ["f2"] } },
+        { version: 1, bindings: { palette: ["ctrl+l"], help: ["f2"] } },
         null,
         2,
       )}\n`,
@@ -930,7 +954,7 @@ test("/keys show and /keys reload reflect and live-apply keys-file edits", async
     );
 
     // The palette listing uses the effective help chord too.
-    input.key("y", { ctrl: true });
+    input.key("l", { ctrl: true });
     assert.ok(await waitFor(() => lastFrameText(output).includes("COMMANDS")));
     assert.ok(await waitFor(() => lastFrameText(output).includes("F2")), "palette lists F2");
     input.key("escape");
@@ -966,7 +990,7 @@ test("--keys-watch: valid edits live-reload; invalid and absent changes keep the
   const source: TuiKeysSource = { path: keysFile, origin: "env" };
   fs.writeFileSync(
     keysFile,
-    `${JSON.stringify({ version: 1, bindings: { palette: ["ctrl+y"] } }, null, 2)}\n`,
+    `${JSON.stringify({ version: 1, bindings: { palette: ["ctrl+l"] } }, null, 2)}\n`,
     "utf8",
   );
   const initial = loadTuiKeyCommands(source);
@@ -982,7 +1006,7 @@ test("--keys-watch: valid edits live-reload; invalid and absent changes keep the
     assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
 
     // The startup override is active and /keys show reports the watcher state.
-    input.key("y", { ctrl: true });
+    input.key("l", { ctrl: true });
     assert.ok(await waitFor(() => lastFrameText(output).includes("COMMANDS")));
     input.key("escape");
     assert.ok(await waitFor(() => !lastFrameText(output).includes("COMMANDS")));
@@ -1014,11 +1038,11 @@ test("--keys-watch: valid edits live-reload; invalid and absent changes keep the
     assert.match(lastFrameText(output), /F2/, "the palette lists the effective help chord");
     input.key("escape");
     assert.ok(await waitFor(() => !lastFrameText(output).includes("COMMANDS")));
-    input.key("y", { ctrl: true });
+    input.key("l", { ctrl: true });
     assert.equal(
       await waitFor(() => lastFrameText(output).includes("COMMANDS"), 300),
       false,
-      "Ctrl+Y is dead after the auto-reload",
+      "Ctrl+L is dead after the auto-reload",
     );
     input.key("f2");
     assert.ok(await waitFor(() => lastFrameText(output).includes("HELP")), "F2 opens help");
@@ -1290,4 +1314,249 @@ test("Ctrl+G refuses while a turn runs and while an overlay owns the keyboard", 
   assert.equal(spawns.length, 0, "an open overlay never hands the terminal away");
   input.key("escape");
   assert.equal(await quit(input, app), 0);
+});
+
+// --------------------------------------------------------------------------- //
+// helper subagents (slice O1): observation parity over the assembled app
+// --------------------------------------------------------------------------- //
+
+/** A temp workspace + sessions directory for a helper-observing TUI turn. */
+function helperRoot(): { root: string; sessionsDir: string; workspace: string; sessionFile: string; cleanup: () => void } {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-tui-helpers-"));
+  const sessionsDir = path.join(root, "sessions");
+  const workspace = path.join(root, "workspace");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  fs.mkdirSync(workspace, { recursive: true });
+  fs.writeFileSync(path.join(workspace, "notes.txt"), "hello from the notes file\n", "utf8");
+  return {
+    root,
+    sessionsDir,
+    workspace,
+    sessionFile: path.join(sessionsDir, "parent.jsonl"),
+    cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
+  };
+}
+
+test("a TUI turn delegates: the helper appears, its transcript opens, and the parent transcript never changes a byte", async () => {
+  const { sessionsDir, workspace, sessionFile, cleanup } = helperRoot();
+  const child = new RecordingMock([
+    { tool: "workspace_read_file", args: { path: "notes.txt" } },
+    { text: "The notes file says hello." },
+  ]);
+  const senior = new RecordingMock([
+    { tool: SUBAGENT_TOOL_NAME, args: { task: "Inspect the notes file.", label: "notes helper" } },
+  ]);
+  const { app, input, output } = startApp({
+    cfg: resolveConfig({ provider: "mock", sessionFile }),
+    sessionsDir,
+    workspaceRoot: workspace,
+    providerOverrides: { senior, junior: new MockProvider() },
+    subagentProviderFactory: () => child,
+  });
+  try {
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+    output.resize(140, 60);
+    input.type("inspect the notes");
+    input.enter();
+    assert.ok(
+      await waitFor(() => /helpers 1 (running|done)/.test(textOf(output)), 30_000),
+      "the status bar shows the live helper",
+    );
+    assert.ok(await waitFor(() => textOf(output).includes("decision:"), 30_000), "the turn completed");
+
+    // The child is a leaf: its belt carries workspace tools only, never the
+    // spawn/control tools or the plan tool (depth stays 1).
+    const belt = child.seenToolNames.at(-1) ?? [];
+    assert.ok(belt.includes("workspace_read_file"), "the child got the workspace read");
+    for (const name of SUBAGENT_CHILD_TOOL_NAMES) assert.ok(belt.includes(name) || name === "spill_read");
+    for (const control of [SUBAGENT_TOOL_NAME, "list_agents", "send_message", "interrupt_agent", "subagent_report"]) {
+      assert.equal(belt.includes(control), false, `a child belt never carries ${control}`);
+    }
+    assert.equal(belt.includes("todo_write"), false, "the plan tool is the brothers' belt only");
+
+    // OBSERVATION PROOF: the parent transcript is a separate contract. Snapshot
+    // it after the turn, then open/list/scroll/close the helper surfaces, and
+    // compare bytes — viewing a child appends no envelope.
+    const before = fs.readFileSync(sessionFile);
+    assert.ok(before.length > 0, "the parent session file holds the turn's envelopes");
+    const parentEnvelopes = before.toString("utf8").trim().split(/\r?\n/);
+    assert.ok(parentEnvelopes.length >= 5, "the cooperation cycle was persisted");
+    const childLogs = fs.readdirSync(path.join(sessionsDir, "subagents"));
+    assert.equal(childLogs.length, 1, "the child log is durable, separate state");
+    input.key("y", { ctrl: true, raw: "\u0019" });
+    assert.ok(await waitFor(() => lastFrameText(output).includes("HELPERS · 1 total")), "Ctrl+Y opens the list");
+    assert.match(lastFrameText(output), /notes helper/);
+    assert.match(lastFrameText(output), /completed/);
+    input.enter();
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("HELPER · completed")),
+      "Enter opens the child transcript",
+    );
+    const detail = lastFrameText(output);
+    assert.match(detail, /Task · Inspect the notes file\./);
+    assert.match(detail, /Tool · workspace_read_file · completed/);
+    assert.match(detail, /notes file says hello/i);
+    input.key("pageup", { raw: "\u001b[5~" });
+    input.key("escape");
+    assert.ok(await waitFor(() => !lastFrameText(output).includes("HELPER · completed")), "Esc returns to the list");
+    assert.ok(lastFrameText(output).includes("HELPERS · 1 total"), "the list is back");
+    input.key("escape");
+    assert.ok(
+      await waitFor(() => !lastFrameText(output).includes("HELPERS · 1 total")),
+      "Esc closes the overlay (the side panel's own HELPERS row stays)",
+    );
+    const after = fs.readFileSync(sessionFile);
+    assert.deepEqual(after, before, "the parent transcript is byte-identical after observing the helper");
+
+    // The child report never entered the brothers' transcript (it arrived only
+    // as the Senior's `subagent` tool result, which is not an envelope).
+    assert.equal(before.toString("utf8").includes("The notes file says hello."), false);
+
+    // No new timer/handle leaks: the app exits exactly as before.
+    assert.equal(await quit(input, app), 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a helper write parks a child-tagged approval and the panel names the helper", async () => {
+  const { sessionsDir, workspace, sessionFile, cleanup } = helperRoot();
+  const child = new RecordingMock([
+    { tool: "workspace_write_file", args: { path: "out.txt", content: "done" } },
+    { text: "Wrote the file." },
+  ]);
+  const senior = new RecordingMock([
+    { tool: SUBAGENT_TOOL_NAME, args: { task: "Write out.txt.", label: "writer helper" } },
+  ]);
+  const { app, input, output } = startApp({
+    cfg: resolveConfig({ provider: "mock", sessionFile }),
+    sessionsDir,
+    workspaceRoot: workspace,
+    providerOverrides: { senior, junior: new MockProvider() },
+    subagentProviderFactory: () => child,
+  });
+  try {
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+    output.resize(140, 60);
+    input.type("write the file");
+    input.enter();
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("APPROVAL REQUIRED"), 30_000),
+      "the child's write parked on the parent broker",
+    );
+    assert.match(lastFrameText(output), /helper: writer helper/, "the panel names who asked");
+    assert.ok(
+      lastFrameText(output).includes("Allow once") && lastFrameText(output).includes("Deny"),
+      "the decision keys are unchanged",
+    );
+    input.key("n");
+    assert.ok(
+      await waitFor(() => !lastFrameText(output).includes("APPROVAL REQUIRED"), 30_000),
+      "the deny answered the request",
+    );
+    assert.ok(await waitFor(() => textOf(output).includes("decision:"), 30_000), "the turn completed");
+    assert.equal(await quit(input, app), 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test("Ctrl+Y is an honest empty state in memory; a seeded child log lists in a file-backed session", async () => {
+  // 1) In-memory session: only live helpers exist and the note says so.
+  const memory = startApp();
+  assert.ok(await waitFor(() => textOf(memory.output).includes("Two Brothers")));
+  memory.input.key("y", { ctrl: true, raw: "\u0019" });
+  assert.ok(
+    await waitFor(() => lastFrameText(memory.output).includes("HELPERS · 0 total")),
+    "Ctrl+Y opens even with no helpers",
+  );
+  assert.ok(lastFrameText(memory.output).includes(HELPERS_MEMORY_COPY));
+  memory.input.key("y", { ctrl: true, raw: "\u0019" });
+  assert.ok(
+    await waitFor(() => !lastFrameText(memory.output).includes("HELPERS ·")),
+    "Ctrl+Y toggles the overlay closed",
+  );
+  assert.equal(await quit(memory.input, memory.app), 0);
+
+  // 2) File-backed session: a child log the previous run wrote is listed.
+  const { sessionsDir, sessionFile, cleanup } = helperRoot();
+  try {
+    const store = new SubagentStore(path.join(sessionsDir, "subagents"));
+    const id = "sub-0123456789abcdef";
+    store.begin({
+      id,
+      parent_session: path.basename(sessionFile),
+      label: "seeded helper",
+      role: "junior",
+      model: "child-model",
+      task: "A seeded child log.",
+      started_at: 1_000,
+    });
+    store.finish(id, { status: "completed", ended_at: 2_000, result: "done" });
+    const { app, input, output } = startApp({
+      cfg: resolveConfig({ provider: "mock", sessionFile }),
+      sessionsDir,
+    });
+    try {
+      assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+      input.key("y", { ctrl: true, raw: "\u0019" });
+      assert.ok(
+        await waitFor(() => lastFrameText(output).includes("HELPERS · 1 total")),
+        "the store-backed helper is listed",
+      );
+      assert.match(lastFrameText(output), /seeded helper/);
+      assert.equal(await quit(input, app), 0);
+    } finally {
+      // app already exited; rm below
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test("the configured helper route reaches the TUI turn harness (R15)", async () => {
+  const { sessionsDir, workspace, sessionFile, cleanup } = helperRoot();
+  try {
+    // Persist the operator's dedicated helper route through the same store the
+    // provider layer reads; provider "mock" keeps the whole check hermetic.
+    const store = new SettingsStore(path.join(sessionsDir, "settings.json"));
+    new RuntimeSettings(store).updateSubagent({
+      provider: "mock",
+      model: "helper-route-model",
+      base_url: "",
+      api_key: "",
+      provider_ref: "",
+    });
+    const senior = new RecordingMock([
+      { tool: SUBAGENT_TOOL_NAME, args: { task: "Inspect the notes file.", label: "routed helper" } },
+    ]);
+    // No subagentProviderFactory: the child provider must be built from the
+    // resolved route, exactly like a serve child.
+    const { app, input, output } = startApp({
+      cfg: resolveConfig({ provider: "mock", sessionFile }),
+      sessionsDir,
+      workspaceRoot: workspace,
+      providerOverrides: { senior, junior: new MockProvider() },
+    });
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+    output.resize(140, 60);
+    input.type("inspect the notes");
+    input.enter();
+    assert.ok(await waitFor(() => textOf(output).includes("decision:"), 30_000), "the turn completed");
+    input.key("y", { ctrl: true, raw: "\u0019" });
+    assert.ok(await waitFor(() => lastFrameText(output).includes("HELPERS · 1 total")));
+    assert.match(lastFrameText(output), /routed helper/);
+    input.enter();
+    assert.ok(await waitFor(() => lastFrameText(output).includes("HELPER · completed")));
+    assert.match(
+      lastFrameText(output),
+      /helper-route-model · junior/,
+      "the child ran on the operator's configured helper route model",
+    );
+    input.key("escape");
+    input.key("escape");
+    assert.equal(await quit(input, app), 0);
+  } finally {
+    cleanup();
+  }
 });

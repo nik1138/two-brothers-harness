@@ -173,6 +173,12 @@ export interface SidePanelMcp {
   pluginServers?: number;
 }
 
+/** Helper-subagent presence for this session (the separate helper surface). */
+export interface SidePanelHelpers {
+  total: number;
+  running: number;
+}
+
 /** Discovery counts the app already knows at session start. */
 export interface SidePanelDiscovery {
   plugins?: SidePanelPlugins;
@@ -207,6 +213,11 @@ export interface SidePanelState {
   /** Null is the honest unknown price; undefined means "not measured yet". */
   cost?: number | null;
   elapsedMs?: number;
+  /**
+   * Helper-subagent counts. Absent (the default without helpers) renders no
+   * row; helper usage is never merged into the brothers' CONTEXT/TOKENS/COST.
+   */
+  helpers?: SidePanelHelpers;
   compaction?: SidePanelCompaction;
   discovery?: SidePanelDiscovery;
 }
@@ -398,8 +409,21 @@ export function sidePanelEntries(
       tone: "muted",
     },
     { label: "MCP", value: mcpValue(state.discovery?.mcp), tone: "muted" },
-    { label: "", value: "", tone: "dim" },
   ];
+  // The helper surface is a separate tier: shown only once this session has a
+  // helper, and never folded into the brothers' CONTEXT/TOKENS/COST rows.
+  // Absent, the rows below are exactly the pre-helper document (one spacer
+  // before the key tips), so a run without helpers renders byte-identically.
+  const helpers = state.helpers;
+  if (helpers !== undefined && helpers.total > 0) {
+    const running = Math.max(0, Math.min(helpers.total, helpers.running));
+    rows.push({
+      label: "HELPERS",
+      value: `${running} running · ${helpers.total} total`,
+      tone: running > 0 ? "warning" : "muted",
+    });
+  }
+  rows.push({ label: "", value: "", tone: "dim" });
   for (const tip of sidePanelKeyTips(commands)) rows.push({ label: "", value: tip, tone: "dim" });
   return rows;
 }

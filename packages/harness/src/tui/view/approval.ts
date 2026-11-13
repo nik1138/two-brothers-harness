@@ -44,6 +44,14 @@ export interface ApprovalPanelItem {
   reason?: string;
   /** Additive bounded preview populated by `workspace.ts`. */
   detail?: ApprovalDetail;
+  /**
+   * Additive helper identity: set only when an isolated subagent's tool call
+   * parked this request. Display only — the decision keys, hints and the
+   * session-allow pair are unchanged, so a brother's own approval renders
+   * byte-identically when the fields are absent.
+   */
+  subagentId?: string;
+  subagentLabel?: string;
 }
 
 /** The three operator decisions, in display/selection order. */
@@ -259,6 +267,18 @@ export function approvalPanelView(
   }
   if (item.reason !== undefined && item.reason !== "") {
     pushWrapped(item.reason, "muted", MAX_DETAIL_ROWS);
+  }
+  // Helper identity, whenever a child parked the request: the operator must be
+  // able to tell who asked. A brother's own approval carries no such fields and
+  // renders exactly as before.
+  const helperLabel =
+    item.subagentLabel !== undefined && item.subagentLabel !== ""
+      ? item.subagentLabel
+      : item.subagentId !== undefined && item.subagentId !== ""
+        ? item.subagentId
+        : "";
+  if (helperLabel !== "") {
+    rows.push(theme.paint("dim", `helper: ${sanitizeDisplayText(helperLabel)}`));
   }
   const summary = detailSummary(item);
   if (summary !== "") rows.push(theme.paint("dim", summary));

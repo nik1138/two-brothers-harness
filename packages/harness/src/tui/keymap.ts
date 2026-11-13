@@ -314,9 +314,22 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
     palette: false,
   },
   {
+    id: "agents",
+    title: "Helpers",
+    description: "Inspect the Senior's helper subagents and open a child transcript.",
+    group: "Cooperation",
+    slash: "agents",
+    // Ctrl+Y: unused by the editor and the app, one control byte, and outside
+    // the terminal's XON/XOFF pair (Ctrl+Q / Ctrl+S). App scope and NOT
+    // idle-only: the helper list must open exactly while a turn (and therefore
+    // any live helper) runs.
+    keys: [{ name: "y", ctrl: true }],
+    when: "app",
+  },
+  {
     id: "list-move",
     title: "Move selection",
-    description: "Move the highlighted row in a palette, help or picker.",
+    description: "Move the highlighted row in a palette, help, picker or helper list.",
     group: "Lists",
     keys: [{ name: "up" }, { name: "down" }],
     when: "overlay",
@@ -337,6 +350,17 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
     description: "Dismiss the overlay and restore the previous focus.",
     group: "Lists",
     keys: [{ name: "escape" }],
+    when: "overlay",
+    palette: false,
+  },
+  {
+    id: "helper-scroll",
+    title: "Scroll helper transcript",
+    description: "Page through the open helper's transcript (the list keeps its own keys).",
+    group: "Lists",
+    // Page keys: the app-level transcript scroll lives in the `transcript`
+    // scope, so this overlay-scope binding cannot shadow it.
+    keys: [{ name: "pageup" }, { name: "pagedown" }],
     when: "overlay",
     palette: false,
   },

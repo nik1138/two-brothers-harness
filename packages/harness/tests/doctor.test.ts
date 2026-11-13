@@ -740,7 +740,7 @@ test("tui-keys: a valid file passes with the effective chord summary", async () 
       keysPath,
       JSON.stringify({
         version: 1,
-        bindings: { palette: ["ctrl+y"], help: ["f2"], stash: ["ctrl+u"] },
+        bindings: { palette: ["ctrl+l"], help: ["f2"], stash: ["ctrl+u"] },
       }),
     );
     const report = await runDoctor(
@@ -749,11 +749,11 @@ test("tui-keys: a valid file passes with the effective chord summary", async () 
     const check = requireCheck(report, "tui-keys");
     assert.equal(check.status, "pass");
     assert.ok((check.detail ?? "").includes(keysPath));
-    assert.match(check.detail ?? "", /palette Ctrl\+Y/);
+    assert.match(check.detail ?? "", /palette Ctrl\+L/);
     assert.match(check.detail ?? "", /help F2/);
     assert.match(check.detail ?? "", /stash Ctrl\+U/);
     const line = formatDoctorReport(report).find((text) => text.startsWith("[pass] TUI keys file"));
-    assert.match(line ?? "", / — .*palette Ctrl\+Y/);
+    assert.match(line ?? "", / — .*palette Ctrl\+L/);
   });
 });
 

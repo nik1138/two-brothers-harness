@@ -1849,12 +1849,32 @@ What landed, as recorded behavior:
   `subagent_completed` before `run_end`, bounded 2 s settle grace), and
   `RunManager.stop` reaps the same way. `background` is additive on `meta`,
   `SubagentInfo` and `subagent_started`, and the drawer shows a `Background`
-  badge. Remaining phases: async completion/wake (delivery stays poll-only),
-  a TUI tree, forked-context children, deeper nesting, per-call model/effort
-  overrides (the operator's Settings → Models &
-  roles → Subagent route already fixes the child route) and cost/cache roll-up
-  into the parent view. The protocol stays unchanged; children are internal
-  executions, not second protocol peers.
+  badge.
+  **Slice O1 (TUI helper observation) shipped 2026-11-13:** a TUI turn now
+  enables the same helper tier in process (`HarnessOptions.subagents` with the
+  process-wide `SubagentStore`, a live-child control registry and the
+  operator's Settings → Subagent route resolved through
+  `resolveSubagentEndpoint`, ending the silent route divergence from `serve`),
+  and observes it without touching the brothers' transcript. `Ctrl+Y` /
+  `/agents` (app scope, not idle-only) opens a modal `HELPERS` overlay: a
+  newest-first list (status glyph, label, elapsed, live activity, tokens, 20
+  rows plus `+N older`) and the selected child's bounded transcript
+  (task/replies/tool previews/approvals/follow-up origin/report, newest 400
+  rows, follow-tail with PgUp/PgDn). `Esc` layers child → list → closed; an
+  in-memory session is live-only and says so. A live helper adds one
+  `helpers N running · M done` status-bar segment after `cost` and a side-panel
+  `HELPERS` row (both byte-absent without helpers), and a child-tagged approval
+  names the helper in one dim `helper: <label>` row (decision keys unchanged).
+  A startup orphan sweep under the writer lock prevents phantom `running`
+  helpers. The views read the child store in process, append no envelope and
+  change no transcript byte; child usage stays out of the parent numbers. No
+  new timer, no new flag/env, no protocol change; tests
+  `tests/tuihelpers.test.ts` plus `tuiintegration`/`tuikeymap` cases.
+  Remaining phases: async completion/wake (delivery stays poll-only),
+  forked-context children, deeper nesting, per-call model/effort overrides (the
+  operator's Settings → Models & roles → Subagent route already fixes the child
+  route) and cost/cache roll-up into the parent view. The protocol stays
+  unchanged; children are internal executions, not second protocol peers.
 - **Stacked-dialog mask-click (web, non-blocker)** — **blocked on upstream**
   (evidence updated 2026-11-08): naive-ui fires `mask-click` for clicks that
   land inside a stacked second dialog, so every dialog's handler must ignore

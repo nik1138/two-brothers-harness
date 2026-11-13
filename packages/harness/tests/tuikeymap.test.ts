@@ -440,3 +440,66 @@ test("help renders exact geometry, grouped rows and empty/no-match views", () =>
   const empty = helpView(TUI_COMMANDS, createHelpState(), [], { width: 50, height: 5 });
   assert.match(empty.lines[2], /No commands registered/);
 });
+
+test("agents is an app-scope Ctrl+Y command, listed once and resolvable as /agents", () => {
+  const command = findCommand(TUI_COMMANDS, "agents");
+  assert.ok(command, "the registry has an agents command");
+  assert.equal(command.group, "Cooperation");
+  assert.equal(command.when, "app");
+  assert.equal(command.idleOnly, undefined, "the helper list opens while a turn runs");
+  assert.equal(formatKeys(command), "Ctrl+Y");
+  assert.equal(
+    TUI_COMMANDS.filter((entry) => formatKeys(entry) === "Ctrl+Y").length,
+    1,
+    "the chord is registered exactly once",
+  );
+  assert.equal(
+    isCommandEnabled(command, { running: true }),
+    true,
+    "idle-only commands are refused mid-turn; agents is not one",
+  );
+  assert.equal(findSlashCommand(TUI_COMMANDS, "agents")?.id, "agents");
+  assert.equal(resolveKey(TUI_COMMANDS, key("y", "\u0019", { ctrl: true }))?.command.id, "agents");
+  for (const context of ["overlay", "find", "mention", "approval"] as const) {
+    assert.equal(
+      resolveKey(TUI_COMMANDS, key("y", "\u0019", { ctrl: true }), context),
+      null,
+      `agents is not offered in the ${context} scope`,
+    );
+  }
+
+  const paletteRows = entries().filter((entry) => entry.id === "agents");
+  const helpRows = documented().filter((entry) => entry.id === "agents");
+  assert.equal(paletteRows.length, 1, "the palette lists helpers once");
+  assert.equal(helpRows.length, 1, "help lists helpers once");
+  assert.equal(paletteRows[0]?.keys, "Ctrl+Y");
+  assert.equal(paletteRows[0]?.slash, "/agents");
+  assert.equal(entries(true).find((entry) => entry.id === "agents")?.disabled, false);
+  const helpText = tuiHelpLines(TUI_COMMANDS, { commands: templates }).join("\n");
+  assert.equal(helpText.match(/Ctrl\+Y/g)?.length, 1, "the CLI key guide spells it once");
+});
+
+test("helper-scroll is overlay-scope PgUp/PgDn and never shadows transcript scrolling", () => {
+  const command = findCommand(TUI_COMMANDS, "helper-scroll");
+  assert.ok(command, "the registry has a helper-scroll command");
+  assert.equal(command.group, "Lists");
+  assert.equal(command.when, "overlay");
+  assert.equal(formatKeys(command), "PgUp / PgDn");
+  assert.equal(paletteEntries(TUI_COMMANDS).some((entry) => entry.id === "helper-scroll"), false);
+  assert.ok(documentEntries(TUI_COMMANDS).some((entry) => entry.id === "helper-scroll"));
+
+  assert.equal(
+    resolveKey(TUI_COMMANDS, key("pageup", "\u001b[5~"), "overlay")?.command.id,
+    "helper-scroll",
+  );
+  assert.equal(
+    resolveKey(TUI_COMMANDS, key("pagedown", "\u001b[6~"), "overlay")?.command.id,
+    "helper-scroll",
+  );
+  // In the app scope the page keys keep paging the transcript.
+  assert.equal(resolveKey(TUI_COMMANDS, key("pageup", "\u001b[5~"))?.command.id, "scroll");
+  // No other overlay command claims the page keys.
+  const overlayChords = TUI_COMMANDS.filter((entry) => (entry.when ?? "always") === "overlay")
+    .flatMap((entry) => formatKeys(entry) === "PgUp / PgDn" ? [entry.id] : []);
+  assert.deepEqual(overlayChords, ["helper-scroll"]);
+});

@@ -143,7 +143,7 @@ test("chord grammar: non-string specs are rejected instead of coerced", () => {
 
 test("document: valid versioned bindings parse into chord objects", () => {
   const parsed = parseTuiKeysDocument(
-    doc({ palette: ["ctrl+y"], help: ["f2", "shift+f1"], stash: ["ctrl+u"] }),
+    doc({ palette: ["ctrl+l"], help: ["f2", "shift+f1"], stash: ["ctrl+u"] }),
     "tui-keys.json",
   );
   assert.deepEqual(parsed.diagnostics, []);
@@ -167,7 +167,7 @@ test("document: corrupt JSON, wrong version and wrong shapes are rejected with a
     JSON.stringify({ bindings: {} }),
     JSON.stringify({ version: TUI_KEYS_VERSION, bindings: [] }),
     JSON.stringify({ version: TUI_KEYS_VERSION, bindings: "palette" }),
-    JSON.stringify({ version: TUI_KEYS_VERSION, bindings: { palette: "ctrl+y" } }),
+    JSON.stringify({ version: TUI_KEYS_VERSION, bindings: { palette: "ctrl+l" } }),
     JSON.stringify({ version: TUI_KEYS_VERSION, bindings: { palette: [] } }),
     JSON.stringify({ version: TUI_KEYS_VERSION, bindings: { palette: [42] } }),
     JSON.stringify({ version: TUI_KEYS_VERSION, bindings: { palette: ["ctrl++p"] } }),
@@ -181,11 +181,11 @@ test("document: corrupt JSON, wrong version and wrong shapes are rejected with a
 
 test("document: a UTF-8 BOM from a Windows editor is tolerated", () => {
   const parsed = parseTuiKeysDocument(
-    `\uFEFF${doc({ palette: ["ctrl+y"] })}`,
+    `\uFEFF${doc({ palette: ["ctrl+l"] })}`,
     "keys.json",
   );
   assert.deepEqual(parsed.diagnostics, []);
-  assert.deepEqual(parsed.bindings.palette, [chord("y", { ctrl: true })]);
+  assert.deepEqual(parsed.bindings.palette, [chord("l", { ctrl: true })]);
 });
 
 test("document: too many chords for one command is rejected", () => {
@@ -213,11 +213,11 @@ test("file: a missing default path means defaults silently; an explicit missing 
 });
 
 test("file: valid, corrupt and oversized files read fail-soft", () => {
-  const good = tempFile("keys.json", doc({ palette: ["ctrl+y"] }));
+  const good = tempFile("keys.json", doc({ palette: ["ctrl+l"] }));
   const goodRead = readTuiKeysFile(good.file);
   assert.equal(goodRead.found, true);
   assert.deepEqual(goodRead.diagnostics, []);
-  assert.deepEqual(goodRead.bindings.palette, [chord("y", { ctrl: true })]);
+  assert.deepEqual(goodRead.bindings.palette, [chord("l", { ctrl: true })]);
 
   const corrupt = tempFile("keys.json", "{oops");
   const corruptRead = readTuiKeysFile(corrupt.file);
@@ -258,14 +258,14 @@ test("resolve: no bindings returns the untouched registry", () => {
 test("resolve: a valid override replaces only the allowlisted command's keys", () => {
   const before = formatKeys({ keys: TUI_COMMANDS.find((command) => command.id === "palette")?.keys });
   const resolved = resolveTuiCommands({
-    palette: [chord("y", { ctrl: true })],
+    palette: [chord("l", { ctrl: true })],
     help: [chord("f2")],
     stash: [chord("u", { ctrl: true })],
   });
   assert.deepEqual(resolved.diagnostics, []);
   assert.notEqual(resolved.commands, TUI_COMMANDS, "resolved commands are a fresh array");
   const byId = (commands: readonly TuiCommand[], id: string) => commands.find((command) => command.id === id);
-  assert.equal(byId(resolved.commands, "palette")?.keys?.[0]?.name, "y");
+  assert.equal(byId(resolved.commands, "palette")?.keys?.[0]?.name, "l");
   assert.equal(byId(resolved.commands, "help")?.keys?.[0]?.name, "f2");
   assert.equal(byId(resolved.commands, "stash")?.keys?.[0]?.name, "u");
   // Non-overridden commands (and their objects) are untouched.
@@ -276,31 +276,31 @@ test("resolve: a valid override replaces only the allowlisted command's keys", (
 });
 
 test("resolve: labels, matching, hints, palette and help all derive the effective chord", () => {
-  const resolved = resolveTuiCommands({ palette: [chord("y", { ctrl: true })], help: [chord("f2")] });
+  const resolved = resolveTuiCommands({ palette: [chord("l", { ctrl: true })], help: [chord("f2")] });
   assert.deepEqual(resolved.diagnostics, []);
   const commands = resolved.commands;
-  assert.equal(formatKeys({ keys: commands.find((command) => command.id === "palette")?.keys }), "Ctrl+Y");
-  assert.equal(resolveKey(commands, { name: "y", ctrl: true })?.command.id, "palette");
+  assert.equal(formatKeys({ keys: commands.find((command) => command.id === "palette")?.keys }), "Ctrl+L");
+  assert.equal(resolveKey(commands, { name: "l", ctrl: true })?.command.id, "palette");
   assert.equal(resolveKey(commands, { name: "p", ctrl: true }), null, "the default chord is dead");
   const tipHints = Array.from({ length: 12 }, (_, step) => rotatingFooterTip(commands, step));
-  assert.ok(tipHints.some((hint) => /Ctrl\+Y/.test(hint)), "some rotation step shows the effective palette chord");
+  assert.ok(tipHints.some((hint) => /Ctrl\+L/.test(hint)), "some rotation step shows the effective palette chord");
   const palette = paletteEntries(commands).find((entry) => entry.id === "palette");
-  assert.equal(palette?.keys, "Ctrl+Y");
+  assert.equal(palette?.keys, "Ctrl+L");
   const helpRows = documentEntries(commands);
   assert.equal(helpRows.find((entry) => entry.id === "help")?.keys, "F2");
   const helpText = tuiHelpLines(commands).join("\n");
-  assert.match(helpText, /Ctrl\+Y/);
+  assert.match(helpText, /Ctrl\+L/);
   assert.match(helpText, /F2/);
   assert.doesNotMatch(helpText, /Ctrl\+P/, "the dead default chord is not advertised");
 });
 
 test("resolve: unknown and non-allowlisted command ids are diagnosed; defaults stay in force", () => {
-  const unknown = resolveTuiCommands({ nope: [chord("y", { ctrl: true })] });
+  const unknown = resolveTuiCommands({ nope: [chord("l", { ctrl: true })] });
   assert.equal(unknown.commands, TUI_COMMANDS);
   assert.match(unknown.diagnostics[0] ?? "", /unknown TUI command/);
 
   for (const id of ["exit", "cancel", "find", "approval-allow"]) {
-    const resolved = resolveTuiCommands({ [id]: [chord("y", { ctrl: true })] });
+    const resolved = resolveTuiCommands({ [id]: [chord("l", { ctrl: true })] });
     assert.equal(resolved.commands, TUI_COMMANDS, id);
     assert.equal(resolved.diagnostics.length, 1, id);
     assert.match(resolved.diagnostics[0] ?? "", /not a rebindable/, id);
@@ -334,13 +334,13 @@ test("resolve: unmodified typing keys are refused", () => {
 });
 
 test("resolve: duplicate chords within one command and across commands are refused", () => {
-  const same = resolveTuiCommands({ palette: [chord("y", { ctrl: true }), chord("y", { ctrl: true })] });
+  const same = resolveTuiCommands({ palette: [chord("l", { ctrl: true }), chord("l", { ctrl: true })] });
   assert.equal(same.commands, TUI_COMMANDS);
   assert.match(same.diagnostics[0] ?? "", /duplicate/);
 
   const across = resolveTuiCommands({
-    palette: [chord("y", { ctrl: true })],
-    help: [chord("y", { ctrl: true })],
+    palette: [chord("l", { ctrl: true })],
+    help: [chord("l", { ctrl: true })],
   });
   assert.equal(across.commands, TUI_COMMANDS);
   assert.match(across.diagnostics[0] ?? "", /already used by/);
@@ -375,10 +375,10 @@ test("resolve: multiple valid chords per command are kept in order", () => {
 });
 
 test("resolveTuiCommandsFromFile: valid file applies, missing file keeps defaults", () => {
-  const valid = tempFile("keys.json", doc({ palette: ["ctrl+y"] }));
+  const valid = tempFile("keys.json", doc({ palette: ["ctrl+l"] }));
   const fromFile = resolveTuiCommandsFromFile(valid.file, { explicit: true });
   assert.deepEqual(fromFile.diagnostics, []);
-  assert.equal(formatKeys({ keys: fromFile.commands.find((command) => command.id === "palette")?.keys }), "Ctrl+Y");
+  assert.equal(formatKeys({ keys: fromFile.commands.find((command) => command.id === "palette")?.keys }), "Ctrl+L");
 
   const missing = path.join(valid.dir, "absent.json");
   const missingFile = resolveTuiCommandsFromFile(missing, { explicit: true });
@@ -468,7 +468,7 @@ test("CLI resolution: --keys-watch flag or the boolean env enables watching (pin
 
 test("CLI resolution: flag beats env beats the default path; explicit problems are diagnosed", () => {
   const home = mkdtempSync(path.join(tmpdir(), "tui-keys-home-"));
-  const flagFile = tempFile("flag.json", doc({ palette: ["ctrl+y"] }));
+  const flagFile = tempFile("flag.json", doc({ palette: ["ctrl+l"] }));
   const envFile = tempFile("env.json", doc({ palette: ["ctrl+h"] }));
 
   assert.deepEqual(tuiKeysFileForCli({}, {}, home), {
@@ -514,14 +514,14 @@ test("CLI resolution: flag beats env beats the default path; explicit problems a
     home,
   );
   assert.deepEqual(resolved.diagnostics, []);
-  assert.equal(formatKeys({ keys: resolved.commands.find((command) => command.id === "palette")?.keys }), "Ctrl+Y");
+  assert.equal(formatKeys({ keys: resolved.commands.find((command) => command.id === "palette")?.keys }), "Ctrl+L");
 
   for (const temp of [flagFile, envFile, corrupt]) rmSync(temp.dir, { recursive: true, force: true });
   rmSync(home, { recursive: true, force: true });
 });
 
 test("CLI: help tui resolves the env/default keys file and matches tui --help", async () => {
-  const good = tempFile("good.json", doc({ palette: ["ctrl+y"], help: ["f2"], stash: ["ctrl+u"] }));
+  const good = tempFile("good.json", doc({ palette: ["ctrl+l"], help: ["f2"], stash: ["ctrl+u"] }));
   const bad = tempFile("bad.json", "{oops");
   const previous = process.env.TWO_BROTHERS_TUI_KEYS_FILE;
   try {
@@ -531,7 +531,7 @@ test("CLI: help tui resolves the env/default keys file and matches tui --help", 
     assert.equal(await main(["help", "tui"], helpIo), 0);
     assert.deepEqual(helpIo.err, [], "help tui keeps stderr clean for a valid file");
     const helpText = helpIo.out.join("\n");
-    assert.match(helpText, /Ctrl\+Y/, "help tui shows the effective palette chord");
+    assert.match(helpText, /Ctrl\+L/, "help tui shows the effective palette chord");
     assert.match(helpText, /F2/, "help tui shows the effective help chord");
     assert.doesNotMatch(helpText, /Ctrl\+P/, "the dead default chord is not advertised");
     assert.match(helpText, /--keys-file/, "the footer explains the flag context");
@@ -606,13 +606,13 @@ test("describeTuiKeys: effective chords, source origin and last diagnostics, nev
   assert.match(defaults[2] ?? "", /^keys watch: off /, "watch is off by default");
   assert.equal(defaults.length, 3, "no diagnostics line when the load was clean");
 
-  const overridden = resolveTuiCommands({ palette: [chord("y", { ctrl: true })] }).commands;
+  const overridden = resolveTuiCommands({ palette: [chord("l", { ctrl: true })] }).commands;
   const loaded = describeTuiKeys(overridden, {
     source: { path: "/etc/two-brothers/keys.json", origin: "env" },
     state: "loaded",
     diagnostics: [],
   });
-  assert.match(loaded[0] ?? "", /palette Ctrl\+Y/);
+  assert.match(loaded[0] ?? "", /palette Ctrl\+L/);
   assert.match(loaded[1] ?? "", /\(env\) — loaded$/);
 
   const failed = describeTuiKeys(overridden, {
@@ -635,7 +635,7 @@ test("describeTuiKeys: effective chords, source origin and last diagnostics, nev
 
 test("describeTuiKeys: all six load-state/override combinations are covered and honest", () => {
   const source: TuiKeysSource = { path: "/tmp/tui-keys.json", origin: "flag" };
-  const overridden = resolveTuiCommands({ palette: [chord("y", { ctrl: true })] }).commands;
+  const overridden = resolveTuiCommands({ palette: [chord("l", { ctrl: true })] }).commands;
   const matrix: Array<{
     state: TuiKeysLoadState;
     commands: readonly TuiCommand[];
@@ -699,7 +699,7 @@ test("reloadTuiCommands: success swaps the table; failure or absence keeps the l
   const dir = mkdtempSync(path.join(tmpdir(), "tui-reload-"));
   const file = path.join(dir, "keys.json");
   const source: TuiKeysSource = { path: file, origin: "env" };
-  const previous = resolveTuiCommands({ palette: [chord("y", { ctrl: true })] }).commands;
+  const previous = resolveTuiCommands({ palette: [chord("l", { ctrl: true })] }).commands;
   try {
     // Absent explicit file: keep the previous table, one honest diagnostic.
     const absent = reloadTuiCommands(source, previous);
@@ -768,7 +768,7 @@ test("watch: a valid change live-loads through the reload path and reports exact
   const dir = mkdtempSync(path.join(tmpdir(), "tui-watch-"));
   const file = path.join(dir, "keys.json");
   const source: TuiKeysSource = { path: file, origin: "env" };
-  writeFileSync(file, doc({ palette: ["ctrl+y"] }), "utf8");
+  writeFileSync(file, doc({ palette: ["ctrl+l"] }), "utf8");
   let commands: readonly TuiCommand[] = loadTuiKeyCommands(source).commands;
   const results: TuiKeysLoadResult[] = [];
   const watcher = watchTuiKeysFile(source, {
@@ -809,7 +809,7 @@ test("watch: an invalid change keeps the last good table, warns once, and recove
   const dir = mkdtempSync(path.join(tmpdir(), "tui-watch-bad-"));
   const file = path.join(dir, "keys.json");
   const source: TuiKeysSource = { path: file, origin: "flag" };
-  writeFileSync(file, doc({ palette: ["ctrl+y"] }), "utf8");
+  writeFileSync(file, doc({ palette: ["ctrl+l"] }), "utf8");
   let commands: readonly TuiCommand[] = loadTuiKeyCommands(source).commands;
   const results: TuiKeysLoadResult[] = [];
   const watcher = watchTuiKeysFile(source, {
@@ -855,7 +855,7 @@ test("watch: an absent path loads when created and reports absence when deleted"
   const source: TuiKeysSource = { path: file, origin: "default" };
   // The session's last good table (e.g. defaults loaded before the file existed).
   let commands: readonly TuiCommand[] = resolveTuiCommands({
-    palette: [chord("y", { ctrl: true })],
+    palette: [chord("l", { ctrl: true })],
   }).commands;
   const results: TuiKeysLoadResult[] = [];
   const watcher = watchTuiKeysFile(source, {
@@ -894,7 +894,7 @@ test("watch: stop() unwatches, drops a pending reload and is idempotent", async 
   const dir = mkdtempSync(path.join(tmpdir(), "tui-watch-stop-"));
   const file = path.join(dir, "keys.json");
   const source: TuiKeysSource = { path: file, origin: "env" };
-  writeFileSync(file, doc({ palette: ["ctrl+y"] }), "utf8");
+  writeFileSync(file, doc({ palette: ["ctrl+l"] }), "utf8");
   const results: TuiKeysLoadResult[] = [];
   const watcher = watchTuiKeysFile(source, {
     current: () => TUI_COMMANDS,
@@ -926,7 +926,7 @@ test("watch: rapid writes inside the debounce window coalesce into one reload", 
   const dir = mkdtempSync(path.join(tmpdir(), "tui-watch-coalesce-"));
   const file = path.join(dir, "keys.json");
   const source: TuiKeysSource = { path: file, origin: "env" };
-  writeFileSync(file, doc({ palette: ["ctrl+y"] }), "utf8");
+  writeFileSync(file, doc({ palette: ["ctrl+l"] }), "utf8");
   const results: TuiKeysLoadResult[] = [];
   const watcher = watchTuiKeysFile(source, {
     current: () => TUI_COMMANDS,
@@ -939,13 +939,13 @@ test("watch: rapid writes inside the debounce window coalesce into one reload", 
     await waitForWatchBaseline(10);
     writeFileSync(file, doc({ palette: ["ctrl+u"] }), "utf8");
     await sleep(60);
-    writeFileSync(file, doc({ palette: ["ctrl+y"] }), "utf8");
+    writeFileSync(file, doc({ palette: ["ctrl+l"] }), "utf8");
     assert.ok(await waitUntil(() => results.length > 0), "the burst reloads");
     await sleep(350);
     assert.equal(results.length, 1, "one coalesced reload, not one per write");
     assert.equal(
       formatKeys({ keys: results[0]?.commands.find((command) => command.id === "palette")?.keys }),
-      "Ctrl+Y",
+      "Ctrl+L",
       "the reload sees the final file content",
     );
   } finally {

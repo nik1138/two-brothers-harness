@@ -43,10 +43,12 @@ import { mergeSeedPresets, presetApiKey, presetById, type Preset } from "../pres
 import { DEFAULT_PROVIDER_KIND } from "../provider.ts";
 import {
   resolveRoleEndpoints,
+  resolveSubagentEndpoint,
   RuntimeSettings,
   type RoleEndpoint,
   type RoleEndpoints,
   type RuntimeSettingsSnapshot,
+  type RuntimeSubagentSnapshot,
 } from "../runtime.ts";
 import {
   envPinnedPairs,
@@ -106,6 +108,14 @@ export interface TuiProviderState {
   presets: Preset[];
   /** Effective endpoints handed to the harness / provider construction. */
   endpoints: RoleEndpoints;
+  /**
+   * The operator's dedicated helper route (Settings → Models & roles →
+   * Subagent), resolved with the same `resolveSubagentEndpoint` call shape
+   * `serve` uses. `null` when no route is configured, so the harness keeps its
+   * `role` argument fallback. Without this the TUI would silently ignore the
+   * configured helper route while a `serve` child uses it.
+   */
+  subagentEndpoint: RoleEndpoint | null;
   /** Non-fatal resolution warnings (dangling refs, …) — shown honestly. */
   warnings: string[];
   /** Set when the settings file could not be read (fail-soft, never thrown). */
@@ -120,6 +130,11 @@ export interface ResolveTuiProviderOptions {
   env?: NodeJS.ProcessEnv;
   /** `/models` picker choices for this TUI process; never persisted. */
   modelOverrides?: Partial<Record<"senior" | "junior", string>>;
+  /**
+   * The persisted helper-route section (`sessions/settings.json` → `subagent`).
+   * Absent means no route was ever configured.
+   */
+  subagentSnapshot?: Partial<RuntimeSubagentSnapshot>;
   /** Fail-soft load note carried into the state. */
   loadError?: string;
 }
@@ -301,11 +316,26 @@ export function resolveTuiProviderState(options: ResolveTuiProviderOptions): Tui
       juniorModel: options.cfg.juniorModel,
     },
   );
+  // Dedicated helper route: no per-role env pair; a named preset or the route's
+  // manual fields win, with the run-level provider/model fallbacks. An absent
+  // route leaves the harness's `role` argument fallback intact (serve parity).
+  const subagentWarnings: string[] = [];
+  const subagentEndpoint = resolveSubagentEndpoint(
+    options.subagentSnapshot,
+    resolvablePresets(presets, env),
+    {
+      provider: options.cfg.provider,
+      seniorModel: options.cfg.seniorModel,
+      juniorModel: options.cfg.juniorModel,
+    },
+    subagentWarnings,
+  );
   return {
     snapshot,
     presets,
     endpoints,
-    warnings: [...endpoints.warnings],
+    subagentEndpoint,
+    warnings: [...endpoints.warnings, ...subagentWarnings],
     ...(options.loadError !== undefined ? { loadError: options.loadError } : {}),
   };
 }
@@ -324,9 +354,12 @@ export function loadTuiProviderState(options: {
 }): TuiProviderState {
   let snapshot: RuntimeSettingsSnapshot = emptyRuntimeSnapshot();
   let storedPresets: ProviderPreset[] = [];
+  let subagentSnapshot: Partial<RuntimeSubagentSnapshot> = {};
   let loadError: string | undefined;
   try {
-    snapshot = new RuntimeSettings(options.store).snapshot();
+    const settings = new RuntimeSettings(options.store);
+    snapshot = settings.snapshot();
+    subagentSnapshot = settings.snapshotSubagent();
   } catch (exc) {
     loadError = `cannot read role settings: ${messageOf(exc)}`;
   }
@@ -339,6 +372,7 @@ export function loadTuiProviderState(options: {
     snapshot,
     storedPresets,
     cfg: options.cfg,
+    subagentSnapshot,
     ...(options.env !== undefined ? { env: options.env } : {}),
     ...(options.modelOverrides !== undefined ? { modelOverrides: options.modelOverrides } : {}),
     ...(loadError !== undefined ? { loadError } : {}),

@@ -2270,9 +2270,11 @@ export class TwoBrothersHarness {
       ...(this.options.seniorTools ?? []),
       ...(this.spillReadOffered() ? [this.spillReadTool()] : []),
       // Helper surface, gated exactly like the `subagent` tool itself: a
-      // surface without `HarnessOptions.subagents` (run/chat/tui) keeps a
+      // surface without `HarnessOptions.subagents` (`run`/`chat`) keeps a
       // byte-identical Senior prompt, and a child's filtered belt never carries
-      // any of these names.
+      // any of these names. The TUI enables the gate for its own turns, so its
+      // Senior prompt gains the helper tool line (a documented, intentional
+      // difference from `run`/`chat`).
       ...(this.options.subagents !== undefined
         ? [
             this.subagentTool(state),

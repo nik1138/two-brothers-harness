@@ -294,6 +294,7 @@ from the registry at runtime. The TUI is Ctrl-based: terminals do not deliver
 |---|---|
 | `Ctrl+P` | Command palette: search every command, key binding and slash template. |
 | `?` or `F1` | Keyboard help: a filterable list of every command and key. `?` opens it only while the composer is empty — with text there it types a literal question mark; `F1` always opens it. |
+| `Ctrl+Y` / `/agents` | Helpers: the Senior's helper subagents for this session (status, live activity, elapsed time, tokens), with the selected child's transcript one `Enter` away. Opens (and closes) while a turn runs; `Esc` closes it. The same list is the **Helpers** row in the `Ctrl+P` palette. |
 
 ### Rebinding the three global chords
 
@@ -302,7 +303,7 @@ reference (`?`/`F1`) and the draft stash (`Ctrl+O`) — can be rebound from a
 versioned JSON file:
 
 ```json
-{"version": 1, "bindings": {"palette": ["ctrl+y"], "help": ["f2"], "stash": ["ctrl+u"]}}
+{"version": 1, "bindings": {"palette": ["ctrl+l"], "help": ["f2"], "stash": ["ctrl+u"]}}
 ```
 
 Point the TUI at it with `tui --keys-file <path>` or
@@ -433,6 +434,40 @@ a turn/compaction runs or an overlay, find bar or approval owns the keyboard.
 | (plan dock) | A model-written plan shows above the composer (`✓` completed / `▸` in progress / `○` pending, at most four rows plus a `+N more` tail). Display-only: no key answers it and the composer keeps its normal keys. |
 | (status bar) | The second status row rotates one registry-derived discoverability tip per accepted turn (`Ctrl+T fold tool output`, `Ctrl+F find in transcript`, `Ctrl+P commands`, …) and can briefly show a transient hint instead. Tips and hints only describe existing bindings — they add none. |
 
+### Helper subagents (`Ctrl+Y` / `/agents`)
+
+A TUI turn runs on the same helper tier as a `serve`/web run: the Senior may
+delegate a focused side task to an isolated helper (its own conversation and
+provider, so its usage never enters the brothers' numbers). `Ctrl+Y` (or
+`/agents`, or the palette's **Helpers** row) opens the observer overlay, also
+while a turn runs, which is when a live helper exists.
+
+- **List** — newest first: status glyph (`●` running, `✓` completed, `✕`
+  failed, `⊘` cancelled), label, elapsed time, live activity and (when
+  settled) tokens; a session with more than 20 helpers ends with
+  `+N older (not shown)`. An empty session says whether it simply has not
+  delegated yet or is in-memory (an in-memory session never lists a previous
+  run's helper logs — only its live helpers appear).
+- **Detail** — `Enter` opens the selected child: label, model · role, status ·
+  elapsed (plus `background` when set), tokens, then the bounded transcript
+  (task, helper replies, tool calls with a short preview, approvals, and
+  `Follow-up · operator`/`Follow-up · Senior` rows) and any error or final
+  report. The transcript keeps the newest 400 rows and follows the tail;
+  `PgUp`/`PgDn` page back, and `Esc` (or `Enter`) returns to the list.
+  `Esc` layers detail → list → closed.
+
+The list is rebuilt from the child logs when it opens and after each completion,
+and live `subagent_*` events only update the activity line — a row never
+appears in the brothers' transcript. While a helper exists the status bar gains
+one `helpers N running · M done` segment after `cost`, and the side panel a
+`HELPERS` row; both are absent (byte-identical frames) when there are no
+helpers. A helper's workspace write/edit/delete/shell request parks on the
+normal approval panel, which adds one dim `helper: <label>` row so the operator
+knows who asked; the decision keys and the session-allow rules are unchanged.
+The helper list reads the durable child store directly (no HTTP), and no new
+timer is involved: the existing repaint while a turn runs refreshes the live
+labels.
+
 ### Permissions and approvals (workspace-bound runs)
 
 A run started with `tui --workspace <dir>` pauses on a workspace mutation or
@@ -478,8 +513,10 @@ hint clears on its own).
 | Keys | Action |
 |---|---|
 | `Up` / `Down` | Move the highlighted row. |
-| `Enter` | Open or run the highlighted item; a disabled row refuses and says why. |
-| `Esc` | Close the overlay and restore the previous focus. |
+| `Enter` | Open or run the highlighted item; a disabled row refuses and says why. In the helpers overlay it opens the selected child, and inside a child transcript it returns to the list. |
+| `Esc` | Close the overlay and restore the previous focus. In the helpers overlay: child transcript → helper list → closed. |
+| `Ctrl+Y` | With the helpers overlay open, close it (it toggles the overlay it opens). |
+| `PgUp` / `PgDn` | Inside an open helper transcript, page backwards/forwards; the window follows the tail until you scroll back. |
 | `Tab` / `Shift+Tab` | In the `/`, `@skill:` and workspace-file pickers: accept / dismiss (the text input keeps focus; Left/Right keep editing the draft). |
 
 Overlays receive keys before the composer: while one is open, `Up`/`Down` move
@@ -490,7 +527,8 @@ before it can cancel a turn.
 
 Every registry command also has a typed slash form — even when it has no
 chord — and all are searchable in `Ctrl+P`: `/palette`, `/help` (`/h`),
-`/commands`, `/find [query]`, `/retry`, `/stash`, `/exit` (`/quit`, `/q`),
+`/commands`, `/find [query]`, `/agents`, `/retry`, `/stash`, `/exit` (`/quit`,
+`/q`),
 `/mode consult|work`, `/models`, `/sessions`, `/theme dark|light|system`,
 `/settings` (provider summary, effective permission preset, and **Connect
 provider…** / **Permissions…** actions), `/provider` (the provider connect

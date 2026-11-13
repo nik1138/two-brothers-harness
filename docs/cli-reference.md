@@ -208,7 +208,25 @@ visual-row truncation follows pi's visual-truncate approach (MIT — see
 as a compact display-only panel (✓/▸/○ markers, at most four rows plus an
 honest `+N more` tail — see
 [Plan and todo function](#plan-and-todo-function-ts-package));
-it takes no keys. Slash input: `/mode consult|work|auto`, `/models`,
+it takes no keys. **Helper subagents.** A TUI turn enables the same helper tier
+`serve` uses (the `subagent` tool plus the four helper-control tools on the
+Senior's belt), so the Senior may delegate a focused side task to an isolated
+helper. `Ctrl+Y` (or `/agents`, or the palette's **Helpers** row) opens a
+read-only observer overlay while the turn runs and after it settles: a
+newest-first list (status glyph, label, elapsed time, live activity, tokens;
+`+N older (not shown)` past 20 rows) and, on `Enter`, the selected child's
+bounded transcript (task, replies, tool calls with a short preview, approvals,
+follow-up origin, final report/error). `Esc` layers child → list → closed; the
+helper route is the operator's Settings → **Models & roles** → **Subagent**
+connection, resolved exactly like `serve`. The overlay reads the child logs
+from `<sessions-dir>/subagents/` in process — it appends no envelope and
+changes no transcript byte, and a child's usage is never merged into the
+status bar's token/cost numbers. A live helper adds one
+`helpers N running · M done` status-bar segment after `cost` and a `HELPERS`
+row in the side panel (both absent without helpers); a helper mutation parks on
+the ordinary approval panel with one dim `helper: <label>` row. Without a
+session file (`--session-file`) the list is live-only and says so; a
+file-backed session lists the children of previous runs. Slash input: `/mode consult|work|auto`, `/models`,
 `/sessions`, `/theme dark|light|system`, `/settings` (provider summary,
 effective permission preset and the **Connect provider…** / **Permissions…**
 actions), `/provider` (the provider connect surface — see
@@ -1711,19 +1729,22 @@ enables the senior verify pass:
   also writes each plan snapshot to the same sidecar (`todo_updated` only), so
   a restart with the same `--session-file` replays the plan.
 
-## Subagents (serve/web, TS package)
+## Subagents (serve, web and TUI, TS package)
 
-A `serve`/web run enables one read-only helper tier below the brothers. The
-Senior's tool belt gains a `subagent` tool; the Junior never receives it, and a
-child cannot receive it either (no recursion).
+A `serve`/web/TUI run enables one helper tier below the brothers. The Senior's
+tool belt gains a `subagent` tool (plus the four helper-control tools); the
+Junior never receives it, and a child cannot receive it either (no recursion).
 
 - **What the child is:** one isolated single-role helper with its own
   conversation and a fresh provider instance, so its usage never enters the
-  parent run's footer. It gets only `workspace_read_file`,
-  `workspace_list_dir`, `workspace_search_text` and (when configured)
-  `spill_read`; it cannot write, edit, delete, run shell, or ask the operator a
-  question. It returns a bounded report as the tool result; the full bounded
-  transcript is persisted for the UI.
+  parent run's footer. Without a workspace it gets only
+  `workspace_read_file`, `workspace_list_dir`, `workspace_search_text` and
+  (when configured) `spill_read`; a workspace-bound child gets those three
+  reads plus `write`/`edit`/`delete`/`shell`, whose mutations park on the
+  parent run's ordinary approval panel (tagged with the helper's identity).
+  It cannot ask the operator a question and cannot spawn helpers. It returns a
+  bounded report as the tool result; the full bounded transcript is persisted
+  for the UI.
 - **Arguments:** `{"task": "self-contained brief", "label?": "short tree
   label", "role?": "senior" | "junior"}`. `task` is required and capped at
   4 000 chars; the label defaults to the task's first line; `role` defaults to
@@ -1758,12 +1779,27 @@ child cannot receive it either (no recursion).
   calls and final report. The parent composer is inert while the drawer is
   open; **← Parent** or `Esc` closes it. The tree is reloaded from the routes
   after a restart, so completed helpers remain inspectable.
-- **Not in this slice:** mutating child tools (no child approval routing yet),
-  follow-up messages or interruption, a TUI tree, async completion/wake (the
-  parent waits for the bounded report), forked-context children, deeper
-  nesting, per-call model/effort overrides (the operator's Settings route
-  already fixes the child route) and cost/cache roll-up into the parent footer.
-  `run`/`chat`/`tui` do not expose the tool in this slice.
+- **TUI:** a TUI turn enables the same tier in process (it holds the sessions
+  store's single-writer lock and has no HTTP client, so it spawns and observes
+  its own children rather than a `serve`'s). `Ctrl+Y` / `/agents` opens the
+  `HELPERS` overlay: a newest-first list rebuilt from
+  `<sessions-dir>/subagents/` when it opens and after each completion (live
+  `subagent_*` events supply the activity line), and a child transcript view
+  with the task, replies, tool previews, approvals, follow-up origins and the
+  final report. `Esc` layers child → list → closed, `PgUp`/`PgDn` page the
+  transcript, and an in-memory session lists only its live helpers. A helper
+  adds a `helpers N running · M done` status-bar segment and a side-panel
+  `HELPERS` row; without helpers both are absent. The startup orphan sweep runs
+  once under the writer lock, so a crashed run's unfinished child log is shown
+  as `cancelled` instead of a phantom `running`. The TUI's Senior prompt gains
+  the helper tool line (`run`/`chat` prompts stay byte-identical), its child
+  logs use the session's sidecar key (or one per-process `tui-<hex>.jsonl` for
+  an in-memory session) and nothing the overlay does touches the brothers'
+  transcript.
+- **Not in this slice:** forked-context children, deeper nesting, per-call
+  model/effort overrides (the operator's Settings route already fixes the child
+  route) and a helper usage/cache/cost roll-up into the parent footer.
+  `run`/`chat` do not enable the tier.
 
 ## Workspace instructions (TS package)
 

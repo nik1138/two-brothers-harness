@@ -26,7 +26,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 
 import { discoverCommands, expandCommand, matchCommand, type Command, type CommandCatalog } from "../commands.ts";
 import { findBaseCommand, type BaseCommand } from "../basecommands.ts";
@@ -72,7 +72,13 @@ import {
 import type { Message } from "../protocol.ts";
 import { RunApprovalBroker, RuntimeEventStore } from "../runevents.ts";
 import type { RuntimeEvent } from "../runevents.ts";
-import type { RoleEndpoints } from "../runtime.ts";
+import type { RoleEndpoint, RoleEndpoints } from "../runtime.ts";
+import {
+  SubagentStore,
+  type SubagentControlHandle,
+  type SubagentControlSink,
+  type SubagentRole,
+} from "../subagent.ts";
 import { Workspace } from "../workspace.ts";
 import { sanitizeTodos, type TodoItem } from "../todos.ts";
 import {
@@ -268,6 +274,20 @@ import {
   type ApprovalPanelState,
 } from "./view/approval.ts";
 import { sessionSidecarKey, todosFromRuntimeEvents, todoPanelView } from "./view/todo.ts";
+import {
+  createHelperOverlayState,
+  foldHelperDetail,
+  foldHelperEvent,
+  helperCounts,
+  helperDetailView,
+  helperRowsFromSummaries,
+  helperOverlayKey,
+  helpersListView,
+  HELPER_UNKNOWN_COPY,
+  isHelperRuntimeEvent,
+  type HelperOverlayState,
+  type HelperRow,
+} from "./view/helpers.ts";
 import { persistTodoSnapshot } from "./todoPersist.ts";
 import { loadSessionReasoning, type ReplayedReasoning } from "./reasoningPersist.ts";
 import {
@@ -420,6 +440,15 @@ export interface TuiAppOptions {
    * builds each role's provider from the resolved endpoint.
    */
   providerOverrides?: { senior?: Provider; junior?: Provider };
+  /**
+   * Test/embedding seam: the provider factory a TUI helper child uses instead
+   * of the endpoint-built one (`SubagentSettings.providerFactory`). The CLI
+   * never sets it, so the real product always builds a child provider from the
+   * resolved helper route (Settings → Subagent, else the requested role's
+   * endpoint). Tests inject a scripted/mock provider here so a TUI turn that
+   * delegates never touches the network.
+   */
+  subagentProviderFactory?: (role: SubagentRole) => Provider;
   /** Injection seams for tests/embedding; default to the process streams. */
   input?: NodeJS.ReadStream;
   output?: NodeJS.WriteStream;
@@ -1145,6 +1174,22 @@ interface TurnSetup {
   onRuntimeEvent?: (event: RuntimeEvent) => void;
   onStreamEvent: (event: StreamEvent) => void;
   onWarning: (line: string) => void;
+  /**
+   * The process-wide helper store (`<sessionsDir>/subagents`). A TUI turn always
+   * enables `HarnessOptions.subagents`, so its Senior reaches the same helper
+   * tier `serve` runs: the store is the durable truth the overlay reads.
+   */
+  subagentStore?: SubagentStore;
+  /** Parent identity of this turn's child logs (session key, else `tui-*.jsonl`). */
+  parentSession?: string;
+  /** The operator's dedicated helper route; absent keeps the role fallback. */
+  subagentEndpoint?: RoleEndpoint | null;
+  /** Live-child registry (register on spawn, release on settle). */
+  controls?: SubagentControlSink;
+  /** Test/embedding child provider seam; the CLI never passes one. */
+  subagentProviderFactory?: (role: SubagentRole) => Provider;
+  /** Run id the child handles report (`null` when unknown). */
+  runId?: string | null;
 }
 
 interface TurnHarness {
@@ -1228,6 +1273,26 @@ async function buildTurnHarness(setup: TurnSetup): Promise<TurnHarness> {
     ...(setup.providers?.senior !== undefined ? { senior: setup.providers.senior } : {}),
     ...(setup.providers?.junior !== undefined ? { junior: setup.providers.junior } : {}),
     ...(setup.steering !== undefined ? { steering: setup.steering } : {}),
+    // The TUI's helper tier (slice O1): the same `HarnessOptions.subagents`
+    // gate `serve` uses, so the Senior's belt gains `subagent` + the four
+    // control tools and its child logs land in the process-wide store. An
+    // embedded caller that supplies no store keeps the pre-helper prompt.
+    ...(setup.subagentStore !== undefined && setup.parentSession !== undefined
+      ? {
+          subagents: {
+            store: setup.subagentStore,
+            parentSession: setup.parentSession,
+            ...(setup.subagentEndpoint !== undefined && setup.subagentEndpoint !== null
+              ? { endpoint: setup.subagentEndpoint }
+              : {}),
+            ...(setup.controls !== undefined ? { controls: setup.controls } : {}),
+            ...(setup.subagentProviderFactory !== undefined
+              ? { providerFactory: setup.subagentProviderFactory }
+              : {}),
+            runId: setup.runId ?? null,
+          },
+        }
+      : {}),
     onProviderWarning: setup.onWarning,
   });
   return { harness, mcp };
@@ -1260,6 +1325,7 @@ type Overlay =
       onAccept: (item: PickerItem) => void;
     }
   | { kind: "provider"; state: ProviderConnectState; data: ProviderConnectData }
+  | { kind: "subagents"; state: HelperOverlayState }
   | { kind: "dialog"; state: DialogState; onAction: (id: string) => void };
 
 interface UsageSnapshot {
@@ -1525,6 +1591,41 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
   const layout = new SessionLayout(sessionsDir);
 
   /**
+   * The process-wide helper tier (slice O1). The TUI spawns its own children in
+   * process — it cannot observe a `serve`'s (it holds the sessions store's
+   * single-writer lock and has no HTTP client) — so it owns the same
+   * `SubagentStore`, a live-child control registry and one parent identity for
+   * an in-memory session. The startup orphan sweep runs once here, inside the
+   * writer lock, so a crash that left a child log without an `end` row cannot
+   * survive as a phantom `running` helper. Fail-soft: the sweep already skips
+   * unreadable logs and never throws, and the extra guard keeps a broken store
+   * from failing startup.
+   */
+  const subagentStore = new SubagentStore(path.join(sessionsDir, "subagents"));
+  try {
+    subagentStore.reconcileOrphans();
+  } catch {
+    // fail-soft: a startup sweep never blocks the TUI
+  }
+  /** Live children this process spawned (the future control-point of slice O2). */
+  const childControls = new Map<string, SubagentControlHandle>();
+  const subagentControls: SubagentControlSink = {
+    register: (handle) => {
+      childControls.set(handle.id, handle);
+    },
+    release: (id) => {
+      childControls.delete(id);
+    },
+  };
+  /**
+   * Parent identity for an in-memory session (`D5`): one per process, so its
+   * child logs are durable but never attributed to another session and never
+   * listed (the store is not read for an in-memory session). A file-backed
+   * session uses its sidecar key, recomputed per turn.
+   */
+  const memoryParentSession = `tui-${randomBytes(4).toString("hex")}.jsonl`;
+
+  /**
    * Persisted provider settings + the effective per-role endpoints (the same
    * `SettingsStore`/`RuntimeSettings`/`resolveRoleEndpoints` stack `serve`
    * uses; see `providers.ts`). Loaded once at startup and re-resolved before
@@ -1704,6 +1805,25 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
   // by this TUI's own turns); live writes replace it, persist it and are
   // remembered across session switches.
   let todos: TodoItem[] = planForSession(sessionCfg.sessionFile);
+  /**
+   * The session's helper rows (newest first): the store's summaries for a
+   * file-backed session, live-event rows only for an in-memory one (`D5`). The
+   * store is the authority when the overlay opens and after each completed
+   * child; events only supply live activity. Nothing here is ever merged into
+   * the brothers' usage/context numbers.
+   */
+  let helperRows: HelperRow[] =
+    sessionCfg.sessionFile === ""
+      ? []
+      : (() => {
+          try {
+            return helperRowsFromSummaries(
+              subagentStore.list(sessionSidecarKey(sessionCfg.sessionFile, sessionsDir)),
+            );
+          } catch {
+            return [];
+          }
+        })();
   // Persisted reasoning of the session being opened: a read-only sidecar
   // replay shown as bounded `THINKING (replayed)` blocks (streaming-only
   // records; a non-streaming run simply has none).
@@ -2113,6 +2233,7 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
   const statusState = (): StatusBarState => {
     const hints = statusHints();
     const [seniorRole, juniorRole] = providerSummaries();
+    const helpers = helperCounts(helperRows);
     const transient = transientHintFor({
       approvalParked: approval !== null,
       ...(transientHint !== null ? { transient: transientHint.text } : {}),
@@ -2137,6 +2258,9 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
           }
         : {}),
       cost,
+      ...(helpers.total > 0
+        ? { helpersRunning: helpers.running, helpersTotal: helpers.total }
+        : {}),
       ...(running
         ? { elapsedMs: Date.now() - turnStartedAt }
         : lastElapsedMs !== undefined
@@ -2197,6 +2321,7 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
 
   const sidePanelState = (): SidePanelState => {
     const [seniorRole, juniorRole] = providerSummaries();
+    const helpers = helperCounts(helperRows);
     // One shared provider label when both roles agree; otherwise say so
     // honestly instead of pretending one provider covers both.
     const provider =
@@ -2226,6 +2351,7 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
           }
         : {}),
       cost,
+      ...(helpers.total > 0 ? { helpers } : {}),
       ...(running
         ? { elapsedMs: Date.now() - turnStartedAt }
         : lastElapsedMs !== undefined
@@ -2335,6 +2461,26 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
         commands,
       }).lines;
     }
+    if (overlay.kind === "subagents") {
+      // The design's helper geometry: a wider box than the palette so a row can
+      // carry its label, elapsed time and live activity at 80 columns.
+      const boxW = Math.max(40, Math.min(Math.max(columns - 4, 40), 84));
+      const boxH = Math.max(10, Math.min(Math.max(rows - 4, 10), 22));
+      return overlay.state.detail === null
+        ? helpersListView(helperRows, overlay.state, {
+            width: boxW,
+            height: boxH,
+            theme,
+            commands,
+            inMemory: sessionCfg.sessionFile === "",
+          }).lines
+        : helperDetailView(overlay.state.detail, overlay.state, {
+            width: boxW,
+            height: boxH,
+            theme,
+            commands,
+          }).lines;
+    }
     const boxW = Math.max(30, Math.min(Math.max(columns - 8, 30), 72));
     const boxH = Math.max(8, Math.min(Math.max(rows - 6, 8), 20));
     return dialogView(overlay.state, { width: boxW, height: boxH, theme }).lines;
@@ -2401,6 +2547,98 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
         : null;
     }
   }
+
+  // --------------------------------------------------------------------- //
+  // helper subagents (slice O1: observation only)
+  // --------------------------------------------------------------------- //
+
+  /** This session's helper parent identity (the child log's `parent_session`). */
+  const helperParentSession = (): string =>
+    sessionCfg.sessionFile !== ""
+      ? sessionSidecarKey(sessionCfg.sessionFile, sessionsDir)
+      : memoryParentSession;
+
+  /**
+   * Refresh the cached rows from the durable store. Never called for an
+   * in-memory session: its child logs exist but are not attributable to a
+   * listed session, so only its live event rows are shown (`D5`). Fail-soft: a
+   * store read error keeps the current rows.
+   */
+  const refreshHelperRows = (): void => {
+    if (sessionCfg.sessionFile === "") return;
+    try {
+      helperRows = helperRowsFromSummaries(subagentStore.list(helperParentSession()));
+    } catch {
+      // keep the live rows
+    }
+  };
+
+  /**
+   * Fold one helper-relevant runtime event into the list (and the open child
+   * transcript). Only events of the session currently on screen fold, so a
+   * turn that keeps unwinding after a resume can never attribute its children
+   * to the new session. After a completion the store is re-read as the truth
+   * (one bounded scan, bounded by the per-run child cap).
+   */
+  const foldHelperRuntimeEvent = (event: RuntimeEvent, turnParent: string): void => {
+    if (sessionCfg.sessionFile !== "" && helperParentSession() !== turnParent) return;
+    if (!isHelperRuntimeEvent(event)) return;
+    const previousRows = helperRows;
+    helperRows = foldHelperEvent(previousRows, event);
+    if (overlay?.kind === "subagents" && overlay.state.detail !== null) {
+      const detail = foldHelperDetail(overlay.state.detail, event);
+      if (detail !== overlay.state.detail) {
+        overlay = { kind: "subagents", state: { ...overlay.state, detail } };
+      }
+    }
+    if (event.type === "subagent_completed") refreshHelperRows();
+    render();
+  };
+
+  /** The session-switch reset: a new session's helpers are not the old ones'. */
+  const resetHelperRows = (): void => {
+    helperRows =
+      sessionCfg.sessionFile === ""
+        ? []
+        : (() => {
+            try {
+              return helperRowsFromSummaries(
+                subagentStore.list(sessionSidecarKey(sessionCfg.sessionFile, sessionsDir)),
+              );
+            } catch {
+              return [];
+            }
+          })();
+    if (overlay?.kind === "subagents") overlay = null;
+  };
+
+  /** Open the HELPERS list (or toggle it closed through the same chord). */
+  const openHelpersOverlay = (): void => {
+    if (overlay?.kind === "subagents") {
+      overlay = null;
+      render();
+      return;
+    }
+    refreshHelperRows();
+    overlay = {
+      kind: "subagents",
+      state: createHelperOverlayState(helperRows[0]?.id ?? null),
+    };
+    render();
+  };
+
+  /** Open one child transcript from the store; a stale id is reported honestly. */
+  const openHelperDetail = (id: string, state: HelperOverlayState): void => {
+    const detail = subagentStore.get(id);
+    if (detail === null) {
+      pushToast("info", HELPER_UNKNOWN_COPY);
+      overlay = { kind: "subagents", state };
+      render();
+      return;
+    }
+    overlay = { kind: "subagents", state: { ...state, selectedId: id, detail, scroll: 0 } };
+    render();
+  };
 
   const onStreamEvent = (event: StreamEvent): void => {
     // Live usage arrives once per cooperation node; project it immediately so
@@ -2701,6 +2939,13 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
     // session while the run is still unwinding, and a late plan write must be
     // attributed to (and only displayed for) the session that produced it.
     const turnSessionFile = sessionCfg.sessionFile;
+    // The helper parent identity of THIS turn (recomputed from the session
+    // active at turn start): a resume mid-run must not attribute the children
+    // to the newly opened session.
+    const turnParentSession =
+      turnSessionFile !== ""
+        ? sessionSidecarKey(turnSessionFile, sessionsDir)
+        : memoryParentSession;
     // One run id per turn: every plan snapshot this turn persists shares it.
     const turnRunId = `tui-${randomUUID()}`;
     turnDone = (async () => {
@@ -2734,6 +2979,14 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
                   ? { reason: event.reason }
                   : {}),
                 ...(event.detail !== undefined ? { detail: event.detail } : {}),
+                // Helper identity (additive): a child-tagged request names the
+                // helper on the panel; a brother's own approval stays unchanged.
+                ...(event.subagent_id !== undefined && event.subagent_id !== ""
+                  ? { subagentId: event.subagent_id }
+                  : {}),
+                ...(event.subagent_label !== undefined && event.subagent_label !== ""
+                  ? { subagentLabel: event.subagent_label }
+                  : {}),
               });
               // The panel owns the footer; the inline picker and find bar must
               // not compete with the decision keys.
@@ -2751,6 +3004,10 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
                 String(event.action ?? "approval"),
                 event.target,
               );
+              // Child-tagged approvals are broker events in-process (they are
+              // not part of the harness's typed `onEvent` stream), so the helper
+              // tree folds them here through the same pure fold.
+              foldHelperRuntimeEvent(event, turnParentSession);
               render();
             } else if (event.type === "approval_resolved") {
               const resolvedAction = approval?.item.action ?? "request";
@@ -2760,6 +3017,7 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
                   ? "approval cancelled — the turn is stopping"
                   : `approval ${String(event.decision ?? "denied")}: ${resolvedAction}`;
               updateAttentionTitle(running ? "working" : undefined);
+              foldHelperRuntimeEvent(event, turnParentSession);
               render();
             } else if (event.type === "approval_auto_allowed") {
               pushToast(
@@ -2797,6 +3055,16 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
           cfg: sessionCfg,
           mode: turnMode,
           endpoints: turnProviders.endpoints,
+          subagentStore,
+          parentSession: turnParentSession,
+          ...(turnProviders.subagentEndpoint !== null
+            ? { subagentEndpoint: turnProviders.subagentEndpoint }
+            : {}),
+          controls: subagentControls,
+          ...(options.subagentProviderFactory !== undefined
+            ? { subagentProviderFactory: options.subagentProviderFactory }
+            : {}),
+          runId: turnRunId,
           resources,
           ...(options.mcpConfig !== undefined ? { mcpConfig: options.mcpConfig } : {}),
           spillRoot: path.join(sessionsDir, "spill"),
@@ -2829,7 +3097,11 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
                 todos = snapshot;
                 render();
               }
+              return;
             }
+            // Helper tree (slice O1): live subagent events only ever update the
+            // helper rows/overlay — never the brothers' transcript or usage.
+            foldHelperRuntimeEvent(event, turnParentSession);
           },
           onWarning,
         });
@@ -3380,6 +3652,9 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
               todos = planForSession(sessionFile);
               // Read-only replay of the session's persisted reasoning records.
               loadSessionReasoningFor(sessionFile);
+              // Helpers belong to one session: reload this session's rows (and
+              // close a stale HELPERS overlay) rather than showing the old ones.
+              resetHelperRows();
               toolExpansion = new Set<string>();
               // A session switch resets the draft but not durable prompt
               // history or the in-memory stash slot.
@@ -3877,6 +4152,8 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
     sessionCfg = { ...sessionCfg, resume: false };
     model = createTuiModel();
     todos = [];
+    // A fresh session has no helpers and no helper overlay.
+    resetHelperRows();
     // A fresh in-memory session has no sidecar, so no reasoning replay either.
     replayedReasoning = [];
     hiddenReplayedReasoning = 0;
@@ -4306,6 +4583,9 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
       case "find":
         openFindBar(args);
         return true;
+      case "agents":
+        openHelpersOverlay();
+        return true;
       default:
         return false;
     }
@@ -4466,6 +4746,26 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
       render();
       return;
     }
+    if (overlay.kind === "subagents") {
+      // One `HELPERS` branch: Esc layering is detail → list → closed, Enter opens
+      // the id-anchored selection (or returns from the detail), PgUp/PgDn scroll
+      // the open transcript. The list's own Ctrl+Y (`agents`) toggles it closed.
+      const result = helperOverlayKey(commands, helperRows, overlay.state, key);
+      if (result.action === "close") {
+        overlay = null;
+        render();
+        return;
+      }
+      if (result.action === "open") {
+        const id = result.state.selectedId;
+        if (id === null) return;
+        openHelperDetail(id, result.state);
+        return;
+      }
+      overlay = { kind: "subagents", state: result.state };
+      if (result.action !== "none") render();
+      return;
+    }
     const result = handleDialogKey(overlay.state, key);
     if (result.action === "close") {
       overlay = null;
@@ -4512,6 +4812,9 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
         return true;
       case "find":
         openFindBar();
+        return true;
+      case "agents":
+        openHelpersOverlay();
         return true;
       case "copy":
         copyLastReply();

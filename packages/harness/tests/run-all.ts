@@ -111,6 +111,7 @@ import "./tuibasecommands.test.ts";
 import "./tuithinking.test.ts";
 import "./tuiworkspace.test.ts";
 import "./tuitodo.test.ts";
+import "./tuihelpers.test.ts";
 import "./tuiproviders.test.ts";
 import "./approvalmodes.test.ts";
 import "./cliproviderprovenance.test.ts";

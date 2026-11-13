@@ -47,6 +47,14 @@ export interface StatusBarState {
   cachedTokens?: number;
   /** Null is an honest unknown price; undefined omits the cost segment. */
   cost?: number | null;
+  /**
+   * Helper-subagent counts for this session. Both absent (the default for
+   * every run without helpers) renders no segment, so frames stay
+   * byte-identical; helper usage is deliberately never merged into the
+   * brothers' token/cost numbers.
+   */
+  helpersRunning?: number;
+  helpersTotal?: number;
   elapsedMs?: number;
   /** The rotating projection hint (or the app's composed tool-fold hint). */
   hints?: string;
@@ -180,6 +188,18 @@ export function statusBarSegments(
     second.push({
       text: amount === null ? "cost unknown" : `cost ${amount}`,
       tone: amount === null ? "warning" : "muted",
+    });
+  }
+  const helperTotal = state.helpersTotal ?? 0;
+  if (helperTotal > 0) {
+    const running = Math.max(0, Math.min(helperTotal, state.helpersRunning ?? 0));
+    const done = helperTotal - running;
+    const parts = [running > 0 ? `${running} running` : "", done > 0 ? `${done} done` : ""].filter(
+      (part) => part !== "",
+    );
+    second.push({
+      text: `helpers ${parts.join(" · ")}`,
+      tone: running > 0 ? "warning" : "muted",
     });
   }
   if (state.elapsedMs !== undefined) {
