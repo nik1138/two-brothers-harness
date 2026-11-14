@@ -270,9 +270,18 @@ function focusListFallback() {
   // A newer fallback (or unmount) invalidates this whole poll chain.
   clearFallbackTimers()
   const generation = fallbackGeneration
+  // Focus ownership at schedule time. The poll below may only move focus
+  // while it is still unclaimed: the deleted row's control detaches during
+  // the async re-list and the browser parks focus on <body>, which counts as
+  // unclaimed. Any other element means the operator (or another control)
+  // owns focus now, so a late poll must stand down instead of stealing it.
+  const owner = document.activeElement
   const deadline = Date.now() + 800
   const tryFocus = () => {
     if (generation !== fallbackGeneration) return
+    const current = document.activeElement
+    const unclaimed = owner === null || (!owner.isConnected && current === document.body)
+    if (current !== owner && !unclaimed) return
     const target =
       document.querySelector<HTMLElement>('.session-item') ??
       document.querySelector<HTMLElement>('.session-search-input')

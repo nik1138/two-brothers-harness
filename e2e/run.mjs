@@ -3053,6 +3053,147 @@ async function scenarioSettingsQuality(runner) {
       'a hidden models-pane input must not hold focus',
     )
 
+    // -- fix 4 (C4): the deletion focus-fallback poll must never steal focus
+    //    after the sidebar unmounted, nor when the operator moved focus while
+    //    a poll was still pending. Playwright's frozen clock makes the poll
+    //    deterministic: real Node-side waits still let the app's fetch-driven
+    //    re-render land, while the fake timers only fire on runFor().
+    await reopened.getByRole('button', { name: 'Close settings' }).click()
+    await reopened.waitFor({ state: 'hidden' })
+    // install() alone keeps following real time; pauseAt(current) freezes it,
+    // so the pending poll below only fires when runFor() advances the clock.
+    await page.clock.install()
+    await page.clock.pauseAt(new Date())
+
+    // DOM-level helpers: locator auto-wait polls via rAF, which the frozen
+    // clock stops, so clicks/focus go through evaluate.
+    const flushUi = () =>
+      page.evaluate(
+        () =>
+          new Promise((resolve) => {
+            // chained microtasks let Vue's scheduler flush its queued renders
+            let chain = Promise.resolve()
+            for (let i = 0; i < 10; i += 1) chain = chain.then(() => {})
+            chain.then(resolve)
+          }),
+      )
+    const domClick = (selector) =>
+      page.evaluate((sel) => {
+        const el = document.querySelector(sel)
+        if (!el) return false
+        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+        return true
+      }, selector)
+    const focusIsOnSelect = () =>
+      page.evaluate(
+        () =>
+          document.activeElement instanceof HTMLSelectElement &&
+          document.activeElement.classList.contains('workspace-select'),
+      )
+    /** Delete a session row through its two-step menu; returns false if a
+     *  control was missing (the caller asserts). */
+    const deleteSessionRow = async (title) => {
+      const opened = await page.evaluate((t) => {
+        const row = [...document.querySelectorAll('.session-row')].find((entry) =>
+          entry.textContent.includes(t),
+        )
+        const trigger = row?.querySelector('.row-menu-trigger')
+        if (!trigger) return false
+        trigger.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+        return true
+      }, title)
+      assert.ok(opened, `row menu trigger for "${title}"`)
+      await flushUi()
+      assert.ok(
+        await domClick('.row-menu-item[data-menu-action="delete"]:not(.is-confirm)'),
+        'the Delete menu item',
+      )
+      await flushUi()
+      assert.ok(
+        await domClick('.row-menu-item.is-confirm[data-menu-action="delete"]'),
+        'the Delete confirmation item',
+      )
+    }
+
+    // -- C4 case 1 (unmount): delete the only session and let the deletion
+    //    land (the emit schedules the fallback poll while the sidebar is still
+    //    mounted), THEN collapse the sidebar while the poll is pending, and
+    //    re-expand. The stale poll (unpatched: never cancelled on unmount)
+    //    fires once the clock advances and steals focus into the search box;
+    //    the fixed code cancelled it.
+    await deleteSessionRow('Quality probe session')
+    await waitFor(
+      async () => page.evaluate(() => document.querySelectorAll('.session-item').length === 0),
+      { desc: 'the deletion to land before collapsing (poll now pending)' },
+    )
+    assert.ok(await domClick('button[aria-label="Collapse sidebar"]'), 'the collapse button')
+    await flushUi()
+    assert.ok(await domClick('button.sidebar-expand'), 'the expand button')
+    await flushUi()
+    await waitFor(
+      async () =>
+        page.evaluate(
+          () =>
+            document.querySelectorAll('.session-item').length === 0 &&
+            document.querySelector('.sidebar .empty-state') !== null,
+        ),
+      { desc: 'the emptied session list after re-expanding' },
+    )
+    assert.ok(await domClick('button[aria-label="Search sessions"]'), 'the Search action')
+    await flushUi()
+    await page.evaluate(() => {
+      document.querySelector('select.workspace-select')?.focus()
+    })
+    assert.ok(await focusIsOnSelect(), 'the workspace filter select must hold focus')
+    await page.clock.runFor(1000)
+    assert.ok(
+      await focusIsOnSelect(),
+      'a fallback poll pending at unmount must not steal focus after re-expand',
+    )
+
+    // -- normal recovery still works: with rows on screen and untouched
+    //    focus, the poll lands on the first session row.
+    for (const title of ['Quality fallback one', 'Quality fallback two']) {
+      const created = await apiCall(be.base, 'POST', '/api/sessions', { title })
+      assert.equal(created.status, 201, `POST session ${title} -> HTTP ${created.status}`)
+    }
+    assert.ok(await domClick('button[aria-label="Refresh session list"]'), 'the refresh button')
+    await waitFor(
+      async () => page.evaluate(() => document.querySelectorAll('.session-item').length === 2),
+      { desc: 'both fallback sessions in the list' },
+    )
+    await deleteSessionRow('Quality fallback one')
+    await waitFor(
+      async () => page.evaluate(() => document.querySelectorAll('.session-item').length === 1),
+      { desc: 'one session left after the deletion' },
+    )
+    await page.clock.runFor(200)
+    assert.ok(
+      await page.evaluate(
+        () =>
+          document.activeElement instanceof HTMLElement &&
+          document.activeElement.classList.contains('session-item'),
+      ),
+      'untouched focus must still recover to the first session row',
+    )
+
+    // -- C4 case 2 (no unmount): the operator moves focus while the poll is
+    //    pending; a late poll must stand down instead of overriding.
+    await deleteSessionRow('Quality fallback two')
+    await waitFor(
+      async () => page.evaluate(() => document.querySelectorAll('.session-item').length === 0),
+      { desc: 'the list to empty after the second deletion' },
+    )
+    await page.evaluate(() => {
+      document.querySelector('select.workspace-select')?.focus()
+    })
+    assert.ok(await focusIsOnSelect(), 'the select must hold focus before the clock advances')
+    await page.clock.runFor(1000)
+    assert.ok(
+      await focusIsOnSelect(),
+      'a pending poll must not override an operator focus change',
+    )
+
     consoleGuard.assertClean([/Failed to load resource/])
     runner.pass('settings-quality')
   } finally {
