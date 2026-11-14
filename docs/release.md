@@ -38,7 +38,7 @@ workaround to their web-build stages only).
    captured output tail and exit 1: clean tree → candidate build +
    `npm run check` → `scripts/smoke-test.ps1` (`SMOKE TEST: PASS`) →
    `node scripts/tarball-smoke.mjs` (`TARBALL SMOKE: PASS (7/7)`) and
-   `npm run pack:check` → `scripts/e2e-test.ps1` (38 PASS / 0 FAIL / 1 SKIP;
+   `npm run pack:check` → `scripts/e2e-test.ps1` (39 PASS / 0 FAIL / 1 SKIP;
    needs system Edge, not run in CI) → final clean-tree check.
 
    Fast iterations: `-SkipBrowser` (skip the system-Edge pass) and
@@ -53,20 +53,24 @@ workaround to their web-build stages only).
    lane must report its command, count and PASS; one FAIL blocks publishing.
    The rehearsal above is the single-machine counterpart, not a replacement.
 
-   Final gate evidence, validated at commit `3f07d316` on Windows: package
-   suite **2 461 tests — 2 453 pass, 0 fail, 8 skips** in both `npm test` and
-   `npm run test:spawn`; web suite **608/608**; hermetic CLI E2E **19/19** on
-   sources and **19/19** on `dist`; browser matrix **38 PASS / 0 FAIL / 1
-   opt-in `real` SKIP** (raw log — 37 hermetic scenario blocks, the
+   Final gate evidence, validated at commit `3fe647f` on Windows: package
+   suite **2 483 tests — 2 475 pass, 0 fail, 8 skips** in both `npm test` and
+   `npm run test:spawn`; web suite **642/642**; hermetic CLI E2E **19/19** on
+   sources and **19/19** on `dist`; browser matrix **39 PASS / 0 FAIL / 1
+   opt-in `real` SKIP** (raw log — 38 hermetic scenario blocks, the
    `chat/resume` block reporting chat and resume as separate lines);
-   browser-E2E helper tests **18/18**; tarball smoke **7/7** with
+   browser-E2E helper tests **20/20** (14 freshness + 6 registry); tarball
+   smoke **7/7** with
    `pack:check` passing; offline smoke **PASS** (fault injection 7/7,
    hermetic server suites 4/4). The WSL Linux pass at these counts also
-   completed at `3f07d316`: on Ubuntu, both Node 22.22.2 and 24.16.0 passed
+   completed at `3fe647f`: on Ubuntu, both Node 22.22.2 and 24.16.0 passed
    `npm run typecheck`, and `npm test` and `npm run test:spawn` each ran
-   2 461 tests — 2 460 pass, 0 fail, 1 intentional Windows-only skip; the
+   2 483 tests — 2 482 pass, 0 fail, 1 intentional Windows-only skip; the
    hermetic server E2E passed 4/4 (the live suites skipped because the local
-   endpoint lacked the required model).
+   endpoint lacked the required model). The WSL Node 22 run on a `/mnt/c`
+   worktree hit a post-test socket `TypeError` in teardown with zero failed
+   assertions — the identical suite passed clean on a native ext4 worktree;
+   the WSL Node 24 run saw one TUI timing flake that passed on rerun.
 4. Push and confirm CI green on the ubuntu Node 22/24 matrix and the
    `windows-latest` Node 24 leg.
 5. Only then follow the publishing checklist below (tag + workflow).
