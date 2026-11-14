@@ -4,23 +4,33 @@ Local working handoff. Gitignored; not project documentation. The frozen
 historical snapshot is `docs/history/handoff.md`; this file is the current
 state for the next session.
 
-Last updated: **2026-11-14**. **Validated checkpoint: `3f07d316`** — every
-gate count in this file was recorded there (`feat(cli): integrate strict
-plugin selection parity`). Validation happened at that commit; local `main`
-has since moved on with **docs-only follow-ups** — `668536a`, `987f316`,
-`ba1e0e4` (only `docs/release.md` / `docs/testing.md`) — plus this handoff
-once merged. **Nothing is pushed**; `origin/main` is still `7f0d2c4` (O1,
-CI #98 green). Since the 2026-11-13 O1 handoff, the O2/M/C
-observation-parity slices and the whole improvement-lane wave (cooperation
+Last updated: **2026-11-14**. **Validated checkpoint: `3fe647f`** — every
+gate count in this file was recorded there (`test(e2e): integrate web build
+fail fast handling`, the last code commit of the quality wave). Validation
+happened at that commit; local `main` has since moved on with **docs-only
+follow-ups** — `30056eb`, `c52554a` (only `todo.md` checkpoint records) —
+plus this handoff once merged. **Nothing is pushed, tagged, or published**;
+`origin/main` is still `7f0d2c4` (O1, CI #98 green) and local `main` is
+**111 commits ahead**. Since the 2026-11-13 O1 handoff, the O2/M/C
+observation-parity slices, the whole improvement-lane wave (cooperation
 correctness, LLM hardening, web fixes, bounded MCP/run history, plugin
-bundles + strict parity, E2E cleanup and skip-registry) were integrated and
-validated. A cleanup incident on 2026-11-14 (**known cause: an NTFS junction
+bundles + strict parity, E2E cleanup and skip-registry), and the full
+code-quality wave (chat/composer, TUI, settings, workspace/CLI/subagent
+resource bounds, MCP init bound, backend steering/SSE/mutex safety, E2E
+fail-fast) were integrated and validated. Every reviewed audit finding is
+now **integrated or explicitly deferred** (structural/hypothesis deferrals
+with technical reasons: `todo.md`). A cleanup incident on 2026-11-14
+(**known cause: an NTFS junction
 traversal**) emptied `packages/harness` in the main checkout; tracked files
 were restored and deps/dist rebuilt, but untracked `packages/harness/sessions`
 content — sessions, settings incl. sealed keys, runtime sidecars/subagent
 logs — was **permanently lost**. See **Incident (2026-11-14)** below. The
-live server is intended to be rebuilt and restarted after the docs lane; no
-live state is claimed in this file.
+live server was **rebuilt and restarted on 2026-11-14** (verified by the
+server lane on `c52554a`): PID 247580 runs
+`node dist/cli.js serve --port 8600 --sessions-dir sessions`, serving the
+current `web/dist` byte-identically; `GET /` and `GET /api/sessions` (empty
+`[]`) return 200, and a full process scan shows no stray/test backends.
+Provider keys are still missing (owner task, below).
 
 ## Repository at a glance
 
@@ -41,23 +51,23 @@ live state is claimed in this file.
 | Item | Value |
 |---|---|
 | Branch | `main` — **local-only / unpushed** |
-| HEAD | local **`ba1e0e4`** (docs-only follow-ups + this handoff); origin/main **`7f0d2c4`** (O1, CI #98 green) |
-| Validated checkpoint | **`3f07d316`** — all gate counts below were recorded there; the follow-ups touched docs only |
-| Docs follow-ups | `668536a` → `987f316` → `ba1e0e4` (only `docs/release.md` / `docs/testing.md`) |
-| Previous | `f946238` — O2 merge; `1cc25d4` — slice M; `02c0ad9` — slice C; `7f0d2c4` — O1 |
+| HEAD | local **`c52554a`** (docs-only `todo.md` checkpoint records + this handoff); origin/main **`7f0d2c4`** (O1, CI #98 green); local-only, **111 commits ahead** |
+| Validated checkpoint | **`3fe647f`** — all gate counts below were recorded there; the follow-ups touched `todo.md` only |
+| Docs follow-ups | `30056eb` → `c52554a` (only `todo.md`); earlier wave docs: `668536a` → `987f316` → `ba1e0e4` (`docs/release.md` / `docs/testing.md`) |
+| Previous | `3f07d316` — strict plugin parity; `f946238` — O2 merge; `1cc25d4` — slice M; `02c0ad9` — slice C; `7f0d2c4` — O1 |
 | CI | runs #90–#98 success (latest pushed `7f0d2c4`); everything past it unpushed — no CI yet |
-| Package suite (Windows) | **2 461 / 2 453 pass / 0 fail / 8 platform skips** — `npm test` AND `test:spawn` |
-| Package suite (WSL) | Node 22 + Node 24: **2 461 / 2 460 pass / 0 fail / 1 env skip**, both modes on each |
-| Web suite | **608/608** |
+| Package suite (Windows) | **2 483 / 2 475 pass / 0 fail / 8 platform skips** — `npm test` AND `test:spawn` |
+| Package suite (WSL) | Node 22.22.2 + Node 24.16.0: **2 483 / 2 482 pass / 0 fail / 1 env skip**, both modes on each, + typecheck PASS + hermetic server E2E 4/4 (see caveats below) |
+| Web suite | **642/642** + `npm run build` PASS |
 | CLI E2E | **19/19 source + 19/19 `--dist`** |
 | Smoke gate | **PASS** — incl. fault-injection 7/7 and hermetic server E2E 4/4 |
 | Hermetic server E2E | **4/4** (also inside the smoke gate and the WSL pass) |
-| Browser E2E | **38 hermetic PASS / 0 FAIL / 1 opt-in `real` SKIP** + helpers suite **18/18** |
+| Browser E2E | **39 hermetic PASS / 0 FAIL / 1 opt-in `real` SKIP** + helpers suite **20/20** |
 | Tarball | **7/7 + pack check PASS** |
-| Live server | not running; intended to be rebuilt/restarted from `packages/harness` after the docs lane |
+| Live server | **running** — PID 247580 `node dist/cli.js serve --port 8600 --sessions-dir sessions` (graceful restart of PID 226508); `GET /` 200, `GET /api/sessions` 200 `[]`; served HTML/JS/CSS byte-identical to fresh `web/dist`; process scan clean (only zen-proxy + this server); sessions/settings untouched; **provider keys still to be re-entered by the owner** |
 | Release | no version bump, tag, or publish in this wave; 0.0.1 is the published version |
 
-Live setup (intended, once the server is rebuilt):
+Live setup (verified on the running server, 2026-11-14):
 
 - Senior: `opencode-go / deepseek-v4.1-flash`
 - Junior: LM Studio `lfm3-1.7b` (`http://192.168.31.123:1234/v1`)
@@ -65,15 +75,19 @@ Live setup (intended, once the server is rebuilt):
   fallback). Set it in Settings → Models & roles → Subagent if you want a
   pinned helper model.
 - **Settings were lost in the 2026-11-14 incident** — the sealed provider
-  API keys must be re-entered before any live run; no live sessions or
-  helper transcripts survive.
+  API keys must still be re-entered (owner task) before any live run; no
+  live sessions or helper transcripts survive. Sessions/settings were
+  untouched by the restart.
 
 ### Final checkpoint — integrated lanes (2026-11-14)
 
-The lanes below were integrated and **validated at `3f07d316`**. Local
-`main` has since added only docs follow-ups (`668536a`, `987f316`, `ba1e0e4`)
-and this handoff — no code or test changes past the validated checkpoint.
-Themes with landmark commits (implementation → integration):
+The lanes below were integrated and **validated at `3f07d316`** (the
+strict-plugin-parity checkpoint that preceded the quality wave). A second
+wave — the code-quality audits and their fixes — was integrated afterwards
+and is validated at the current checkpoint **`3fe647f`** (see the next
+subsection). Local `main` has since added only `todo.md` docs records
+(`30056eb`, `c52554a`) and this handoff — no code or test changes past the
+validated checkpoint. Themes with landmark commits (implementation → integration):
 
 - **Observation parity COMPLETE:** O2 TUI helper controls (`f963707`),
   M per-call model/effort overrides (`1cc25d4`), C helper usage/cache/cost
@@ -106,6 +120,37 @@ Themes with landmark commits (implementation → integration):
   writer-lock artifact cleanup (`cc1d791`), transcript-evidence removal
   (`67fb3e0`), README rewrite (`c04f1e9`, `bbb6dca`).
 
+### Final checkpoint — code-quality wave (2026-11-14)
+
+Four read-only audits (TUI, web chat/composer, web settings/navigation,
+backend/runtime) plus a remaining-core audit (CLI, workspace edit-diff,
+settings-write, config, subagent runner, runstream, instructions, MCP)
+produced a risk-ranked queue. **Every reviewed finding is now integrated or
+explicitly deferred**; the deferrals (hypotheses BE-F6b/CHAT-F4/SET-H1/SET-H2/
+TUI-H1–H4, design questions BE-F5, structural candidates TUI-R1–R5/R7,
+CHAT-R1–R4, SET-S1/S2/S4/S5, BE-R1–R5) carry technical reasons in `todo.md`.
+Merge commits (implementation → integration), all validated at `3fe647f`:
+
+- **`17867f9`** chat/composer + transcript-find correctness (CHAT-F1–F3)
+- **`1eef5fe`** TUI compaction guard + linear-time block ids (TUI-B1/B2)
+- **`7f28044`** TUI helper-fold decomposition slice R6 (accepted structural slice)
+- **`99a108b`** settings/sidebar state correctness (SET-C1–C6)
+- **`d0b851b`** web `fsPath.ts` extraction + tests (accepted structural slice S3)
+- **`e1b6eeb`** steering-drain preservation, SSE backpressure, session-mutex
+  cleanup, Google `maxTokens` (BE-F1/F2/F3/F6a)
+- **`67ccba1`** bounded workspace large-file reads/diffs (CORE-F1/F2)
+- **`3009748`** bounded MCP initialization/tool discovery (CORE-F3)
+- **`52fbfa5`** bounded session listing + clipped child tool results (CORE-F4/F5)
+- **`3fe647f`** browser E2E fail-fast on web-build failure (E2E-G1)
+
+Verification caveats (environment, not product failures — see `todo.md` for
+detail): WSL Node 22 on `/mnt/c` `npm test` exited 1 *after all assertions
+passed* on a post-test HTTP-socket `TypeError`; the standalone file ran
+48/48 and an identical full suite on a native ext4 checkout ran
+2 483/2 482/0 fail/1 skip exit 0, pinning the caveat to `/mnt/c`. WSL Node
+24 initial runs on `/mnt/c` hit a bounded TUI timing flake
+(`tuiintegration:1460`); bounded reruns passed.
+
 ### Incident (2026-11-14): main-checkout `packages/harness` emptied
 
 - **Cause (known):** an earlier cleanup traversed an **NTFS junction** and
@@ -120,9 +165,10 @@ Themes with landmark commits (implementation → integration):
   including **sealed provider API keys**, runtime event sidecars, and
   `subagents/` child logs. These local-only files have no backup.
 - **Consequences:** no live sessions/history survive; provider keys must be
-  re-entered in Settings; the serve writer lock and the live :8600 server are
-  gone. The server is intended to be rebuilt and restarted after the docs
-  lane.
+  re-entered in Settings. The serve writer lock and the live :8600 server
+  were lost in the incident but have since been **rebuilt and restarted**
+  (verified 2026-11-14 — see Current state); sessions/settings were
+  untouched by the restart.
 - **Prevention:** never point recursive cleanup/delete tools at the repo
   root, worktree parents, or any path that can contain NTFS junctions; keep
   destructive commands inside one known directory.
@@ -466,19 +512,28 @@ gate. Do not run the live server and the smoke gate at the same time.
 
 ## Next moves
 
-1. **Restore live state (before any live work)** — re-enter provider API
-   keys in Settings (sealed keys lost in the 2026-11-14 incident), rebuild +
-   `sync-web` + restart `serve` on :8600, re-create check sessions.
+1. **Re-enter provider API keys (owner, before any live run)** — the
+   server itself is **restored and verified running** (PID 247580 on
+   :8600, current `web/dist` served byte-identically, empty sessions API —
+   see Current state); what remains of the 2026-11-14 incident loss is the
+   sealed provider keys and any check sessions. Re-enter keys in Settings,
+   then re-create check sessions.
 2. **0.0.2 release engineering** — only with explicit permission: push the
-   current `main` (whatever its tip is at release time), watch CI, bump
-   version, curated changelog, release docs, rehearsal + independent E2E
-   lanes (browser matrix, CLI source + `--dist`, packed-tarball clean
-   install, WSL), tag/publish/promote.
+   current `main` (whatever its tip is at release time; local-only, 111
+   commits ahead of `origin/main`), watch CI, bump version, curated
+   changelog, release docs, rehearsal + independent E2E lanes (browser
+   matrix, CLI source + `--dist`, packed-tarball clean install, WSL). The
+   final gate evidence for the current tree is already recorded above
+   (validated at `3fe647f`).
 3. **OAuth-only subscription sign-in** — large; API-key plans only today.
 4. **Per-turn cache statistics / Senior+Junior split** — small additive
    prompt-audit/usage field; the combined footer percentage already works.
 5. **Deferred, designs pending (do NOT start without a go-ahead):**
-   forked-context children (F), depth > 1 (D).
+   forked-context children (F), depth > 1 (D). Quality-wave structural
+   candidates (TUI-R1–R5/R7, CHAT-R1–R4, SET-S1/S2/S4/S5, BE-R1–R5) and
+   unconfirmed hypotheses (CHAT-F4, SET-H1/H2, TUI-H1–H4, BE-F5/BE-F6b)
+   stay deferred with technical reasons in `todo.md` — revisit only with a
+   concrete correctness/performance payoff or a reproduced symptom.
 6. Minor/blocked: TUI keybinding editor, stacked-dialog mask click
    (upstream naive-ui), WAN/long-soak (manual).
 
