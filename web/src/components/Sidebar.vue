@@ -249,12 +249,39 @@ function toggleExpand(key: string) {
 
 // -- deletion focus fallback ---------------------------------------------------
 
+/**
+ * Live fallback timers plus a generation counter: clearing bumps the
+ * generation, so a superseded or post-unmount poll can never fire and steal
+ * focus from wherever the operator (or a newer fallback) put it.
+ */
+let fallbackGeneration = 0
+let fallbackTimers: number[] = []
+
+function clearFallbackTimers() {
+  fallbackGeneration += 1
+  for (const timer of fallbackTimers) window.clearTimeout(timer)
+  fallbackTimers = []
+}
+
 /** Focus the first session row, or the search box on an empty list. The list
  * re-renders after the parent's async re-list, so poll briefly instead of a
  * single nextTick. */
 function focusListFallback() {
+  // A newer fallback (or unmount) invalidates this whole poll chain.
+  clearFallbackTimers()
+  const generation = fallbackGeneration
+  // Focus ownership at schedule time. The poll below may only move focus
+  // while it is still unclaimed: the deleted row's control detaches during
+  // the async re-list and the browser parks focus on <body>, which counts as
+  // unclaimed. Any other element means the operator (or another control)
+  // owns focus now, so a late poll must stand down instead of stealing it.
+  const owner = document.activeElement
   const deadline = Date.now() + 800
   const tryFocus = () => {
+    if (generation !== fallbackGeneration) return
+    const current = document.activeElement
+    const unclaimed = owner === null || (!owner.isConnected && current === document.body)
+    if (current !== owner && !unclaimed) return
     const target =
       document.querySelector<HTMLElement>('.session-item') ??
       document.querySelector<HTMLElement>('.session-search-input')
@@ -262,9 +289,9 @@ function focusListFallback() {
       target.focus()
       return
     }
-    if (Date.now() < deadline) window.setTimeout(tryFocus, 100)
+    if (Date.now() < deadline) fallbackTimers.push(window.setTimeout(tryFocus, 100))
   }
-  window.setTimeout(tryFocus, 50)
+  fallbackTimers.push(window.setTimeout(tryFocus, 50))
 }
 
 function onRowDeleted(name: string) {
@@ -349,6 +376,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   narrowViewport?.removeEventListener('change', onViewportChange)
+  clearFallbackTimers()
 })
 </script>
 
@@ -490,10 +518,26 @@ onUnmounted(() => {
         </div>
 
         <div v-else-if="filteredSessions.length === 0" class="empty-state">
-          <p class="empty-state-title">No sessions match “{{ query.trim() }}”</p>
-          <div class="empty-state-actions">
-            <button type="button" class="empty-secondary" @click="clearSearch">Clear search</button>
-          </div>
+          <template v-if="searching">
+            <p class="empty-state-title">No sessions match “{{ query.trim() }}”</p>
+            <div class="empty-state-actions">
+              <button type="button" class="empty-secondary" @click="clearSearch">
+                Clear search
+              </button>
+            </div>
+          </template>
+          <template v-else>
+            <p class="empty-state-title">No sessions in {{ filteredWorkspaceName }}</p>
+            <div class="empty-state-actions">
+              <button
+                type="button"
+                class="empty-secondary"
+                @click="emit('filterWorkspace', 'all')"
+              >
+                Show all workspaces
+              </button>
+            </div>
+          </template>
         </div>
 
         <template v-else>

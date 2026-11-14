@@ -10,6 +10,7 @@ import {
   PROVIDER_KIND_DEFAULT,
   apiKeyPlaceholder,
   apiKeyStateLabel,
+  applyProviderDelete,
   applyProviderReset,
   applyProviderUpdate,
   cleanModelList,
@@ -226,6 +227,24 @@ test('providerUsageBadges maps role refs case-insensitively', () => {
   assert.deepEqual(providerUsageBadges(view({ name: '' }), { senior: '' }), [])
 })
 
+test('providerUsageBadges includes the optional subagent helper ref', () => {
+  const provider = view({ name: 'DeepSeek' })
+  // all three roles point at the provider: Senior, Junior, then Subagent
+  assert.deepEqual(
+    providerUsageBadges(provider, {
+      senior: 'deepseek',
+      junior: 'deepseek',
+      subagent: 'deepseek',
+    }),
+    ['Senior', 'Junior', 'Subagent'],
+  )
+  // subagent-only usage still earns a badge (helper route has its own provider_ref)
+  assert.deepEqual(providerUsageBadges(provider, { subagent: ' DEEPSEEK ' }), ['Subagent'])
+  assert.deepEqual(providerUsageBadges(provider, { subagent: 'openai' }), [])
+  assert.deepEqual(providerUsageBadges(provider, { subagent: null }), [])
+  assert.deepEqual(providerUsageBadges(provider, { subagent: '' }), [])
+})
+
 test('providerDeleteAllowed: only stored (non-seed) providers may be deleted', () => {
   assert.equal(providerDeleteAllowed({ seed: false }), true)
   assert.equal(providerDeleteAllowed({ seed: true }), false)
@@ -245,6 +264,60 @@ test('providerDeleteImpact names the roles that will switch to Manual', () => {
     providerDeleteImpact(['Senior', 'Junior']),
     'Senior and Junior use this provider. They will switch to Manual.',
   )
+  assert.equal(
+    providerDeleteImpact(['Subagent']),
+    'Subagent uses this provider. It will switch to Manual.',
+  )
+  assert.equal(
+    providerDeleteImpact(['Senior', 'Junior', 'Subagent']),
+    'Senior, Junior and Subagent use this provider. They will switch to Manual.',
+  )
+})
+
+test('applyProviderDelete removes a preset immediately, case-insensitively', () => {
+  const alpha: ProviderPreset = {
+    name: 'alpha',
+    base_url: 'https://alpha.example/v1',
+    api_key_set: false,
+    kind: 'openai-compatible',
+    models: ['a-1'],
+  }
+  const beta: ProviderPreset = {
+    name: 'Beta',
+    base_url: 'https://beta.example/v1',
+    api_key_set: true,
+    kind: 'openai-compatible',
+    models: ['b-1'],
+  }
+  const gamma: ProviderPreset = {
+    name: 'gamma',
+    base_url: 'https://gamma.example/v1',
+    api_key_set: false,
+    kind: 'openai-compatible',
+    models: [],
+  }
+  const list = [alpha, beta, gamma]
+
+  // 'BETA' matches 'Beta' case-insensitively; order of the survivors is kept
+  const after = applyProviderDelete(list, 'BETA')
+  assert.deepEqual(
+    after.map((provider) => provider.name),
+    ['alpha', 'gamma'],
+  )
+  assert.notEqual(after, list, 'the result must be a fresh array')
+  assert.equal(list.length, 3, 'the input list must not be mutated')
+
+  // unknown names are a no-op (fresh array, same entries)
+  const untouched = applyProviderDelete(list, 'delta')
+  assert.deepEqual(
+    untouched.map((provider) => provider.name),
+    ['alpha', 'Beta', 'gamma'],
+  )
+
+  // empty/blank names never wipe the list
+  assert.equal(applyProviderDelete(list, '').length, 3)
+  assert.equal(applyProviderDelete(list, '   ').length, 3)
+  assert.deepEqual(applyProviderDelete([], 'alpha'), [])
 })
 
 // -- drafts & dirty tracking --------------------------------------------------

@@ -53,6 +53,8 @@ export interface ProviderDraft {
 export interface ProviderRoleRefs {
   senior?: string | null
   junior?: string | null
+  /** Optional dedicated helper route (older backends omit it). */
+  subagent?: string | null
 }
 
 /** Add-card draft, unwrapped from the form refs for validation. */
@@ -207,16 +209,20 @@ export function providerResetAllowed(
   return providerIsCustomizedSeed(provider)
 }
 
+/** A role whose `provider_ref` points at a provider (helper route included). */
+export type ProviderUsageRole = 'Senior' | 'Junior' | 'Subagent'
+
 /** Roles whose `provider_ref` points at this provider (case-insensitive). */
 export function providerUsageBadges(
   provider: Pick<ProviderView, 'name'>,
   refs: ProviderRoleRefs,
-): Array<'Senior' | 'Junior'> {
+): ProviderUsageRole[] {
   const name = provider.name.trim().toLowerCase()
   if (!name) return []
-  const out: Array<'Senior' | 'Junior'> = []
+  const out: ProviderUsageRole[] = []
   if (text(refs.senior).toLowerCase() === name) out.push('Senior')
   if (text(refs.junior).toLowerCase() === name) out.push('Junior')
+  if (text(refs.subagent).toLowerCase() === name) out.push('Subagent')
   return out
 }
 
@@ -277,7 +283,7 @@ export function providerDeleteAllowed(
 }
 
 /** Impact sentence for the Delete confirmation, naming the affected roles. */
-export function providerDeleteImpact(roles: readonly ('Senior' | 'Junior')[]): string {
+export function providerDeleteImpact(roles: readonly ProviderUsageRole[]): string {
   if (!roles.length) return 'No role uses this provider. Its base URL, key and models are removed.'
   const tail = roles[roles.length - 1]!
   const names = roles.length === 1 ? tail : `${roles.slice(0, -1).join(', ')} and ${tail}`
@@ -389,6 +395,21 @@ export function applyProviderUpdate(
       context_window: providerContextWindowOf(saved.context_window),
     }
   })
+}
+
+/**
+ * Optimistic removal right after a successful DELETE, before the reconciling
+ * refresh lands: filters the deleted preset out case-insensitively so a failed
+ * refresh cannot leave the deleted row visible and editable. A blank/unknown
+ * name is a no-op (the refresh stays the source of truth).
+ */
+export function applyProviderDelete(
+  providers: readonly ProviderPreset[],
+  name: unknown,
+): ProviderPreset[] {
+  const removed = text(name).toLowerCase()
+  if (!removed) return [...providers]
+  return providers.filter((provider) => text(provider.name).toLowerCase() !== removed)
 }
 
 /** Merge a reset response, replacing stale override flags with the pristine flags. */

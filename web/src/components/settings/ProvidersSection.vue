@@ -19,6 +19,7 @@ import {
   PROVIDER_KINDS,
   apiKeyPlaceholder,
   apiKeyStateLabel,
+  applyProviderDelete,
   applyProviderReset,
   applyProviderUpdate,
   cleanModelList,
@@ -50,7 +51,12 @@ import {
   validateAddProviderForm,
   validateProviderBaseUrl,
 } from '../../providerSettings'
-import type { ProviderDiscoveryState, ProviderDraft, ProviderView } from '../../providerSettings'
+import type {
+  ProviderDiscoveryState,
+  ProviderDraft,
+  ProviderUsageRole,
+  ProviderView,
+} from '../../providerSettings'
 import { importAnnouncement, type CatalogImport } from '../../modelsDev'
 import AppDialog from '../AppDialog.vue'
 import ModelsDevBrowser from './ModelsDevBrowser.vue'
@@ -77,6 +83,8 @@ const props = defineProps<{
   /** Current role connection refs, so rows can show "Used by" badges. */
   seniorProviderRef?: string | null
   juniorProviderRef?: string | null
+  /** Optional dedicated helper route ref (older backends omit the section). */
+  subagentProviderRef?: string | null
 }>()
 
 const emit = defineEmits<{
@@ -109,6 +117,7 @@ const usageRoles = computed(() =>
     ? providerUsageBadges(openProvider.value, {
         senior: props.seniorProviderRef,
         junior: props.juniorProviderRef,
+        subagent: props.subagentProviderRef,
       })
     : [],
 )
@@ -332,10 +341,11 @@ function useDiscoveredModels(): void {
   )
 }
 
-function roleBadges(provider: ProviderView): Array<'Senior' | 'Junior'> {
+function roleBadges(provider: ProviderView): ProviderUsageRole[] {
   return providerUsageBadges(provider, {
     senior: props.seniorProviderRef,
     junior: props.juniorProviderRef,
+    subagent: props.subagentProviderRef,
   })
 }
 
@@ -424,7 +434,9 @@ function closeDetail(restoreRowFocus = true): void {
 /** Row activation: open, close (one open at a time), or ask before discarding. */
 function toggleRow(name: string, viaKeyboard = false): void {
   if (busy.value || addBusy.value || pendingReset.value) return
-  activeName.value = name
+  // Never move the roving activeName before the dirty-edit guard: it only
+  // changes when a detail actually opens (openDetail), so a blocked click
+  // (discard prompt) leaves focus/tabindex on the currently open row.
   if (openName.value === name) {
     if (draftDirty.value) {
       pendingClose.value = 'close'
@@ -564,6 +576,9 @@ async function confirmDelete(): Promise<void> {
   try {
     await deleteProvider(provider.name)
     emit('deleted', provider.name)
+    // Optimistic removal: if the reconciling refresh below fails, the deleted
+    // row must still disappear (a stale list must not keep it editable).
+    emit('update:providers', applyProviderDelete(props.providers, provider.name))
     announce(`Deleted ${provider.name}.`)
     const removedName = provider.name
     pendingDelete.value = false
@@ -818,7 +833,9 @@ async function submitAdd(): Promise<void> {
               v-for="role in roleBadges(provider)"
               :key="role"
               class="provider-role"
-              :class="role === 'Senior' ? 'is-senior' : 'is-junior'"
+              :class="
+                role === 'Senior' ? 'is-senior' : role === 'Junior' ? 'is-junior' : 'is-subagent'
+              "
               role="img"
               :aria-label="`Used by ${role}`"
               :title="`Used by the ${role} role`"
@@ -1507,6 +1524,10 @@ async function submitAdd(): Promise<void> {
 
 .provider-role.is-junior {
   color: var(--junior);
+}
+
+.provider-role.is-subagent {
+  color: var(--accent);
 }
 
 .provider-row-tag {

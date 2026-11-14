@@ -471,9 +471,16 @@ function onProviderDeleted(name: string) {
 watch(loading, async (isLoading) => {
   if (isLoading || !settingsLoaded.value) return
   await nextTick()
-  // `autofocus` only applies at parse time; this form mounts after the data
-  // load completes, so focus the first field (Senior connection) programmatically
-  panelRef.value?.querySelector<HTMLElement>('.role-card input')?.focus()
+  if (activeId.value === 'models') {
+    // `autofocus` only applies at parse time; this form mounts after the data
+    // load completes, so focus the first field (Senior connection) programmatically
+    panelRef.value?.querySelector<HTMLElement>('.role-card input')?.focus()
+  } else {
+    // The models pane is hidden via v-show on every other section, so its
+    // role-card input is not focusable; land on the active nav button instead.
+    const index = sections.findIndex((section) => section.id === activeId.value)
+    navRefs.value[index]?.focus()
+  }
 })
 
 onMounted(async () => {
@@ -819,6 +826,7 @@ async function save() {
                 :loading="providersLoading"
                 :senior-provider-ref="senior.providerRef"
                 :junior-provider-ref="junior.providerRef"
+                :subagent-provider-ref="subagentSupported ? subagent.providerRef : null"
                 @update:providers="onProvidersUpdated"
                 @deleted="onProviderDeleted"
               />
