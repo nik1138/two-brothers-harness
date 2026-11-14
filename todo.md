@@ -72,8 +72,9 @@ candidate. Fix lanes `quality-tui-fixes`, `quality-chat-fixes`,
 `quality-settings-fixes`, `quality-backend-fixes` are open from `d98ec79`
 — a started lane is **not** a shipped fix; statuses below track evidence,
 not intention. The remaining-core audit (CLI / workspace edit-diff /
-settings-write / config / subagent runner / runstream / instructions) is
-still running and is marked AUDIT PENDING. The paused OAuth (item 6),
+settings-write / config / subagent runner / runstream / instructions +
+the MCP timeout verdict) is **complete** — its conclusions are recorded
+below as CORE-F1..F5 plus no-finding notes. The paused OAuth (item 6),
 cache statistics (item 7), and TUI keybinding-editor items are **outside
 this goal**.
 
@@ -94,8 +95,8 @@ TUI `model.ts` (1000) (finding TUI-B2 listed below); web
 specifically clean); backend `runtime.ts` (1263),
 `runevents.ts` (1187), `sessionlayout.ts` (988), `compaction.ts` (637),
 `session.ts` (458), provider retry/registry internals — no findings.
-`settings_store.ts` (1142) and `mcp.ts` (634) are audit-pending (see
-below).
+`settings_store.ts` (1142) — no finding; `mcp.ts` (634) —
+timeout verdict recorded below (residual gap CORE-F3).
 
 ### Risk-ranked findings queue
 
@@ -150,16 +151,49 @@ DEFERRED:
   change / cosmetic — throttle or revisit only if profiling or a real
   symptom justifies.
 
-AUDIT PENDING (remaining-core audit still running — no conclusions invented):
+AUDIT COMPLETE (remaining-core audit finished 2026-11-14; risk-ranked
+findings CORE-F1..F5 — none counts as done until its lane lands with
+green gates; the four original quality fix lanes are based on `d98ec79`,
+the new workspace/MCP/CLI-subagent lanes on docs-only main `36ca83c`):
 
-- **BE-F4** — MCP `connect`/`listTools` have no timeout (`mcp.ts:588-601`);
-  the follow-up audit is checking the locally installed pi-mcp source
-  for a built-in connect timeout before a verdict is recorded.
-- **settings_store** write path; **config.ts** `validateRunConfig`;
-  **workspace.ts** edit-diff internals; **subagent.ts** runner;
-  **runstream.ts**; **instructions.ts**; CLI periphery
-  (`doctor`, `completions`, `configview`, `modelcatalog`) — read at
-  docstring/grep level only.
+| ID | Sev | Finding | Evidence | Status |
+|---|---|---|---|---|
+| CORE-F1 | Medium | `write_file`/`edit_file` read and diff unbounded file content: no size bound before `readFileSync` + full `SequenceMatcher` diff on e.g. a 300 MB file (all sibling mutation paths are bounded; write/edit are the only unbounded ones) | `packages/harness/src/workspace.ts:1591-1604`, `1641-1657` | FIX LANE IN PROGRESS (`quality-workspace-bounds`) |
+| CORE-F2 | Medium-low | `read_file` whole-file mode buffers the entire file into a JS string before clipping — one tool call on a multi-GB file can OOM the harness | `packages/harness/src/workspace.ts:1415-1417` | FIX LANE IN PROGRESS (`quality-workspace-bounds`) |
+| CORE-F3 | Medium-low | MCP `connect()` can hang forever on the `notifications/initialized` POST (streamable-HTTP only; stdio unaffected): no notification timeout path in pi-mcp, so a server answering `initialize` then never responding to the POST pins the run before its first envelope. The original broad "no connect timeout" hypothesis was **mostly refuted** by local pi-mcp evidence: every JSON-RPC request is bounded by a 30 s default timeout (`timeoutMs` fallback `client.js:263`, `DEFAULT_REQUEST_TIMEOUT_MS` `client.js:3`), `initialize`/`tools/list` both go through it, and `transport.start()` is not a hang vector | `packages/harness/src/mcp.ts:600-601`; pi-mcp 1.5.0 `dist/client.js:145`, `dist/transports/streamable-http.js:165-198` | FIX LANE IN PROGRESS (`quality-mcp-connect`) |
+| CORE-F4 | Low | `sessions list` fully reads and parses every session file and retains every event (`SCAN_LIMIT` bounds only the title head); hundreds of MB with many large JSONL sessions | `packages/harness/src/cli.ts:2665-2734` | FIX LANE IN PROGRESS (`quality-cli-subagent-bounds`) |
+| CORE-F5 | Low | Subagent child conversation stores unclipped tool results (`messages.push` uses the full result; the 4 000-char clip applies only to the emitted copy) — the runner doesn't enforce its own documented bound | `packages/harness/src/subagent.ts:1170-1171` | FIX LANE IN PROGRESS (`quality-cli-subagent-bounds`) |
+
+No-finding conclusions from the same audit (full reads, not grep-level):
+
+- **settings_store** write path — no finding (atomic tmp+rename, schema
+  version refusal, fail-closed unreadable handling, env-pin stripping,
+  bounded pair keys; the fixed `.tmp` name is safe under the
+  single-writer lock).
+- **config.ts** `validateRunConfig`/`resolveConfig` — no finding (strict
+  timeout/retries validation, capped error rendering, per-role endpoint
+  checks, compaction merge provenance).
+- **runstream.ts** — no finding (two-pass clipping terminates; the
+  degraded truncated fallback is bounded).
+- **instructions.ts** — no finding (lstat + `O_NOFOLLOW` closes the
+  symlink TOCTOU; reads bounded by `fstat` size).
+- **CLI dispatch** (`main`, all `do*` handlers, `runOnce`) and periphery
+  (`doctor`, `completions`, `configview`, `modelcatalog`) — no finding
+  (doctor probe double-raced with `clearTimeout` in `finally`, never
+  echoes file bytes/keys; models.dev catalog has hard fetch timeout +
+  cumulative byte cap + single-flight).
+- **workspace.ts** edit-diff *correctness* and the mutation queue — no
+  finding (tiered matching, BOM/line-ending preservation, `finally`
+  release, no reordering hazard; Windows casing/8.3 confinement
+  canonicalized). CORE-F1/F2 are bounds gaps, not correctness bugs.
+- **MCP timeout verdict** — recorded against the locally installed
+  `@earendil-works/pi-mcp@1.5.0` source (no network): broad hypothesis
+  mostly refuted (30 s per-request timeout covers `initialize` and
+  `tools/list`; `start()` not a hang vector; OAuth token fetch
+  unreachable since no auth provider is configured). Residual gap is
+  CORE-F3 only. Secondary note: `listTools` pagination is capped at 1000
+  pages × 30 s — a pathological listing could stretch to ~8 h; not
+  realistically exploitable, awareness only.
 
 CANDIDATE (structural, behavior-preserving, not yet accepted):
 
@@ -175,8 +209,10 @@ CANDIDATE (structural, behavior-preserving, not yet accepted):
 - **SET-S1–S5** — extract `ProviderAddCard`/`ProviderDetailCard`;
   `useEffortOptions` composable + pure `buildSettingsPatch`; `fsPath.ts`
   + `sidebarGroups.ts` pure modules with tests; shared `errText`.
-  **S3 (`fsPath.ts` extraction + tests) — REFACTOR LANE IN PROGRESS**
-  (`quality-workspace-paths`); the rest remain unaccepted candidates.
+  **S3 (`fsPath.ts` extraction + tests) — INTEGRATED**
+  (implementation `db14655`, merge `d0b851b`; independent acceptance:
+  web suite 615/615, `npm run build` PASS); the rest remain unaccepted
+  candidates.
 - **BE-R1–R5** — `harness-subagents.ts` slice; `provider/` module split;
   server route-group functions; `workspace-edit.ts`; CLI per-command
   modules (existing `doSessions`/`doSpill`/`doConfig` pattern).
