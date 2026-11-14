@@ -830,6 +830,74 @@ test("resolveSubagentEndpoint: absent, preset, manual and dangling routes", () =
   assert.match(warnings[0] ?? "", /subagent route.*no matching preset/);
 });
 
+test("resolveSubagentEndpoint: empty model stays empty (the junior default is the harness's job)", () => {
+  const presets = [
+    {
+      name: "acme",
+      base_url: "https://acme.test/v1",
+      api_key: "preset-key",
+      kind: "anthropic",
+    },
+  ];
+
+  // Connection-only manual route: the route resolves, the model stays
+  // honestly empty — inheritance from the Junior role happens at spawn time
+  // in the harness, never in this resolver.
+  const manual = resolveSubagentEndpoint(
+    { base_url: "http://127.0.0.1:9/v1", api_key: "manual-key", model: "" },
+    presets,
+    { provider: "openai", juniorModel: "junior-current" },
+  );
+  assert.ok(manual);
+  assert.equal(manual.model, "");
+  assert.equal(manual.baseUrl, "http://127.0.0.1:9/v1");
+  assert.equal(manual.apiKey, "manual-key");
+  assert.equal(manual.provider, "openai");
+
+  // An explicit route model is carried through unchanged.
+  const explicit = resolveSubagentEndpoint(
+    { base_url: "http://127.0.0.1:9/v1", model: "helper-model" },
+    presets,
+    { provider: "openai", juniorModel: "junior-current" },
+  );
+  assert.ok(explicit);
+  assert.equal(explicit.model, "helper-model");
+
+  // A preset connection with no route model: connection from the preset,
+  // model still empty.
+  const preset = resolveSubagentEndpoint(
+    { provider_ref: "acme" },
+    presets,
+    { provider: "openai", juniorModel: "junior-current" },
+  );
+  assert.ok(preset);
+  assert.equal(preset.baseUrl, "https://acme.test/v1");
+  assert.equal(preset.apiKey, "preset-key");
+  assert.equal(preset.kind, "anthropic");
+  assert.equal(preset.model, "");
+
+  // The resolver never manufactures a route out of an empty section — the
+  // harness's `role` argument fallback (and its junior model default) stay
+  // intact.
+  assert.equal(
+    resolveSubagentEndpoint({}, presets, { juniorModel: "junior-current" }),
+    null,
+  );
+  assert.equal(
+    resolveSubagentEndpoint({ provider: "openai" }, presets, { juniorModel: "j" }),
+    null,
+  );
+
+  // The route's own provider still beats the run-level default.
+  const ownProvider = resolveSubagentEndpoint(
+    { provider: "mock", base_url: "http://127.0.0.1:9/v1" },
+    presets,
+    { provider: "openai", juniorModel: "junior-current" },
+  );
+  assert.ok(ownProvider);
+  assert.equal(ownProvider.provider, "mock");
+});
+
 test("RuntimeSettings persists and masks the dedicated subagent route", () => {
   const { root, cleanup } = tmpdir();
   try {

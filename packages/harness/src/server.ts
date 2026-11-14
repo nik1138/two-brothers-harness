@@ -1466,8 +1466,10 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       if (warn) console.warn(`[two-brothers] ${warning}`);
     }
     // Dedicated helper route: no per-role env pair; a named preset or the
-    // route's manual fields win, with the run-level provider/model fallbacks.
-    // An absent route leaves the harness's `role` argument fallback intact.
+    // route's manual fields win, with the run-level provider fallback. The
+    // route's model is carried exactly as configured (empty stays empty) —
+    // the junior-model default is applied by the harness at spawn time. An
+    // absent route leaves the harness's `role` argument fallback intact.
     const subagentWarnings: string[] = [];
     const subagentEndpoint = resolveSubagentEndpoint(
       state.settings.snapshotSubagent(),

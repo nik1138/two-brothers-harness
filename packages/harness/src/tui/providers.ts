@@ -317,8 +317,10 @@ export function resolveTuiProviderState(options: ResolveTuiProviderOptions): Tui
     },
   );
   // Dedicated helper route: no per-role env pair; a named preset or the route's
-  // manual fields win, with the run-level provider/model fallbacks. An absent
-  // route leaves the harness's `role` argument fallback intact (serve parity).
+  // manual fields win, with the run-level provider fallback. The route's model
+  // is carried exactly as configured (empty stays empty) — the harness applies
+  // the junior-model default at spawn time. An absent route leaves the
+  // harness's `role` argument fallback intact (serve parity).
   const subagentWarnings: string[] = [];
   const subagentEndpoint = resolveSubagentEndpoint(
     options.subagentSnapshot,
