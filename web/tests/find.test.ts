@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { performance } from 'node:perf_hooks'
 import { test } from 'node:test'
 
-import { findInvalidationRevision, findMatches, nextMatch, prevMatch } from '../src/find.ts'
+import { findInvalidationKey, findMatches, nextMatch, prevMatch } from '../src/find.ts'
 import type { FindBlock, FindInvalidationInput } from '../src/find.ts'
 
 const blocks = (...texts: string[]): FindBlock[] => texts.map((text) => ({ text }))
@@ -177,8 +177,8 @@ test('large input: the scan stays linear in total text size', () => {
   assert.ok(largeMs < 5000, `5.6M-character scan took ${largeMs.toFixed(1)}ms`)
 })
 
-// -- findInvalidationRevision (the find cache's freshness key) ----------------
-// ChatView's single find-cache watcher fires on revisions of this key, so the
+// -- findInvalidationKey (the find cache's freshness key) ---------------------
+// ChatView's single find-cache watcher fires when this key changes, so the
 // fold-affecting reactive inputs (visibleTimeline, auditVisible, expandedFolds,
 // liveRunId, dockedApprovalId) cannot be omitted silently: every input is a
 // required property of FindInvalidationInput at the component's call site.
@@ -193,92 +193,110 @@ function invalidationBase(): FindInvalidationInput {
   }
 }
 
-test('invalidation revision: identical inputs stay on the same revision', () => {
-  const first = findInvalidationRevision(invalidationBase())
-  assert.equal(findInvalidationRevision(invalidationBase()), first, 'repeat call')
+test('invalidation key: identical inputs produce an identical key', () => {
+  const first = findInvalidationKey(invalidationBase())
+  assert.equal(findInvalidationKey(invalidationBase()), first, 'repeat call')
   assert.equal(
-    findInvalidationRevision({ ...invalidationBase(), timeline: [], liveRunId: undefined }),
+    findInvalidationKey({ ...invalidationBase(), timeline: [], liveRunId: undefined }),
     first,
     'null and undefined liveRunId normalize the same',
   )
 })
 
-test('invalidation revision: a new visible timeline identity bumps the revision', () => {
-  const first = findInvalidationRevision(invalidationBase())
-  const next = findInvalidationRevision({ ...invalidationBase(), timeline: [{ text: 'a' }] })
-  assert.notEqual(next, first)
-  assert.ok(next > first, 'revisions grow monotonically')
+test('invalidation key: A -> B -> A returns to the same key as the first A', () => {
+  const a = invalidationBase()
+  const b = { ...invalidationBase(), liveRunId: 'run-1' }
+  const keyA = findInvalidationKey(a)
+  assert.notEqual(findInvalidationKey(b), keyA)
+  assert.equal(findInvalidationKey(a), keyA, 'no history: the second A matches the first')
 })
 
-test('invalidation revision: the same timeline identity re-read keeps the revision', () => {
+test('invalidation key: a new visible timeline identity changes the key', () => {
+  const first = findInvalidationKey(invalidationBase())
+  assert.notEqual(findInvalidationKey({ ...invalidationBase(), timeline: [{ text: 'a' }] }), first)
+})
+
+test('invalidation key: the same timeline identity re-read keeps the key', () => {
   const timeline = [{ text: 'a' }]
-  const first = findInvalidationRevision({ ...invalidationBase(), timeline })
-  assert.equal(findInvalidationRevision({ ...invalidationBase(), timeline }), first)
+  const first = findInvalidationKey({ ...invalidationBase(), timeline })
+  assert.equal(findInvalidationKey({ ...invalidationBase(), timeline }), first)
   // identity-based on purpose (same contract as the former direct
   // `watch(visibleTimeline, ...)`): in-place content edits of the same array
   // do not invalidate
   timeline.push({ text: 'b' })
-  assert.equal(findInvalidationRevision({ ...invalidationBase(), timeline }), first)
+  assert.equal(findInvalidationKey({ ...invalidationBase(), timeline }), first)
 })
 
-test('invalidation revision: auditVisible toggle bumps the revision', () => {
-  const first = findInvalidationRevision(invalidationBase())
-  assert.notEqual(
-    findInvalidationRevision({ ...invalidationBase(), auditVisible: true }),
-    first,
-  )
+test('invalidation key: auditVisible toggle changes the key', () => {
+  const first = findInvalidationKey(invalidationBase())
+  assert.notEqual(findInvalidationKey({ ...invalidationBase(), auditVisible: true }), first)
 })
 
-test('invalidation revision: expandedFolds are content-compared', () => {
-  const first = findInvalidationRevision({
-    ...invalidationBase(),
-    expandedFolds: new Set(['a', 'b']),
-  })
+test('invalidation key: expandedFolds are content-compared', () => {
+  const first = findInvalidationKey({ ...invalidationBase(), expandedFolds: new Set(['a', 'b']) })
   assert.equal(
-    findInvalidationRevision({ ...invalidationBase(), expandedFolds: new Set(['a', 'b']) }),
+    findInvalidationKey({ ...invalidationBase(), expandedFolds: new Set(['a', 'b']) }),
     first,
     'a fresh Set with the same ids must not invalidate',
   )
   assert.equal(
-    findInvalidationRevision({ ...invalidationBase(), expandedFolds: new Set(['b', 'a']) }),
+    findInvalidationKey({ ...invalidationBase(), expandedFolds: new Set(['b', 'a']) }),
     first,
     'order-insensitive',
   )
   assert.notEqual(
-    findInvalidationRevision({ ...invalidationBase(), expandedFolds: new Set(['a', 'c']) }),
+    findInvalidationKey({ ...invalidationBase(), expandedFolds: new Set(['a', 'c']) }),
     first,
-    'a different id set bumps the revision',
+    'a different id set changes the key',
   )
 })
 
-test('invalidation revision: liveRunId changes bump the revision', () => {
-  const first = findInvalidationRevision(invalidationBase())
-  const followed = findInvalidationRevision({ ...invalidationBase(), liveRunId: 'run-1' })
+test('invalidation key: liveRunId changes change the key', () => {
+  const first = findInvalidationKey(invalidationBase())
+  const followed = findInvalidationKey({ ...invalidationBase(), liveRunId: 'run-1' })
   assert.notEqual(followed, first)
   assert.notEqual(
-    findInvalidationRevision({ ...invalidationBase(), liveRunId: 'run-2' }),
+    findInvalidationKey({ ...invalidationBase(), liveRunId: 'run-2' }),
     followed,
   )
 })
 
-test('invalidation revision: dockedApprovalId changes bump the revision', () => {
-  const first = findInvalidationRevision(invalidationBase())
-  const docked = findInvalidationRevision({ ...invalidationBase(), dockedApprovalId: 'ap-1' })
+test('invalidation key: dockedApprovalId changes change the key', () => {
+  const first = findInvalidationKey(invalidationBase())
+  const docked = findInvalidationKey({ ...invalidationBase(), dockedApprovalId: 'ap-1' })
   assert.notEqual(docked, first)
   assert.notEqual(
-    findInvalidationRevision({ ...invalidationBase(), dockedApprovalId: 'ap-2' }),
+    findInvalidationKey({ ...invalidationBase(), dockedApprovalId: 'ap-2' }),
     docked,
   )
 })
 
-test('invalidation revision: changing one input leaves the other inputs independent', () => {
-  const first = findInvalidationRevision({
+test('invalidation key: id contents cannot collide across segments', () => {
+  // fold ids that concatenate to the same string must still separate
+  assert.notEqual(
+    findInvalidationKey({ ...invalidationBase(), expandedFolds: new Set(['ab']) }),
+    findInvalidationKey({ ...invalidationBase(), expandedFolds: new Set(['a', 'b']) }),
+  )
+  // a liveRunId must not be able to pose as a dockedApprovalId (or vice versa)
+  assert.notEqual(
+    findInvalidationKey({ ...invalidationBase(), liveRunId: 'x' }),
+    findInvalidationKey({ ...invalidationBase(), dockedApprovalId: 'x' }),
+  )
+  // ids resembling the JSON framing must not break the key
+  assert.notEqual(
+    findInvalidationKey({ ...invalidationBase(), liveRunId: '","' }),
+    findInvalidationKey({ ...invalidationBase(), liveRunId: '","' , dockedApprovalId: 'z' }),
+  )
+})
+
+test('invalidation key: changing one input leaves the other inputs independent', () => {
+  const first = findInvalidationKey({
     ...invalidationBase(),
     liveRunId: 'run-1',
     dockedApprovalId: 'ap-1',
   })
   assert.equal(
-    findInvalidationRevision({
+    findInvalidationKey({
       ...invalidationBase(),
       liveRunId: 'run-1',
       dockedApprovalId: 'ap-1',
@@ -287,7 +305,7 @@ test('invalidation revision: changing one input leaves the other inputs independ
     first,
   )
   assert.notEqual(
-    findInvalidationRevision({
+    findInvalidationKey({
       ...invalidationBase(),
       liveRunId: 'run-1',
       dockedApprovalId: 'ap-1',

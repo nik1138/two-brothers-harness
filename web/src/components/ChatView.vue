@@ -4,7 +4,7 @@ import type { PropType, VNode } from 'vue'
 import { NButton, NPopover } from 'naive-ui'
 import { formatTime, SPEAKER_LABELS, speakerActivityLabel, speakerInitial } from '../chat'
 import type { ChatGroup, ChatMessage, Speaker } from '../chat'
-import { findInvalidationRevision, findMatches, nextMatch, prevMatch } from '../find'
+import { findInvalidationKey, findMatches, nextMatch, prevMatch } from '../find'
 import type { FindMatch } from '../find'
 import { buildFoldRows } from '../folding'
 import type { FoldRenderRow } from '../folding'
@@ -861,8 +861,8 @@ function invalidateFindBlocks(): void {
  * is a required property of `FindInvalidationInput` in find.ts, so a missing
  * dependency is a type error at this call site, not a silent ghost-match bug.
  */
-const findInvalidationKey = computed(() =>
-  findInvalidationRevision({
+const findCacheKey = computed(() =>
+  findInvalidationKey({
     timeline: visibleTimeline.value,
     auditVisible: auditVisible.value,
     expandedFolds: expandedFolds.value,
@@ -874,7 +874,7 @@ const findInvalidationKey = computed(() =>
 // Any change to the inputs above appends/replaces/removes rendered rows, so
 // the cached searchable blocks are dropped (the idempotent nextTick
 // re-collection inside invalidateFindBlocks is preserved).
-watch(findInvalidationKey, invalidateFindBlocks)
+watch(findCacheKey, invalidateFindBlocks)
 
 /** Shell hooks (session switches remount this component; keeps the bar scriptable). */
 defineExpose({ openFind, closeFind })

@@ -238,12 +238,11 @@ function normalizeCount(count: number): number {
 
 // -- cache invalidation key ---------------------------------------------------
 // ChatView keeps the DOM-derived searchable blocks in a cache; the watcher
-// feeding `invalidateFindBlocks` fires on revisions of the key below, so the
+// feeding `invalidateFindBlocks` fires when the key below changes, so the
 // key must name every reactive input that re-folds or re-renders the
 // transcript. All five are REQUIRED properties: forgetting one is a type
 // error at the component's call site, not a silent ghost-match bug.
 
-const KEY_SEPARATOR = ''
 const identityIds = new WeakMap<object, number>()
 let nextIdentityId = 1
 
@@ -279,33 +278,25 @@ export interface FindInvalidationInput {
   readonly dockedApprovalId: string | null | undefined
 }
 
-const revisions = new Map<string, number>()
-let nextRevision = 1
-
 /**
- * A monotonically increasing revision for each distinct combination of the
- * invalidation inputs: same inputs -> same revision (repeat calls included),
- * any input change -> a greater revision. Pure apart from the memo tables,
- * which only ever grow by distinct keys.
+ * A bounded, collision-safe key over the invalidation inputs: equal content
+ * yields an equal key, any actual input change yields a different key. There
+ * is no numeric ordering and no history — A -> B -> A returns the same key
+ * as the first A. The timeline enters by identity (a WeakMap token, so dead
+ * timelines are collected), the fold ids sorted; the segments are one
+ * JSON.stringify, which separators cannot be spoofed by id contents.
  */
-export function findInvalidationRevision(input: FindInvalidationInput): number {
+export function findInvalidationKey(input: FindInvalidationInput): string {
   const timeline = Array.isArray(input.timeline) ? input.timeline : []
   const folds =
     input.expandedFolds && typeof input.expandedFolds.values === 'function'
       ? [...input.expandedFolds].sort()
       : []
-  const key = [
+  return JSON.stringify([
     timeline.length === 0 ? 0 : identityToken(timeline),
-    input.auditVisible === true ? 1 : 0,
-    folds.join(KEY_SEPARATOR),
-    input.liveRunId ?? '',
-    input.dockedApprovalId ?? '',
-  ].join(KEY_SEPARATOR)
-  let revision = revisions.get(key)
-  if (revision === undefined) {
-    revision = nextRevision
-    nextRevision += 1
-    revisions.set(key, revision)
-  }
-  return revision
+    input.auditVisible === true,
+    folds,
+    input.liveRunId ?? null,
+    input.dockedApprovalId ?? null,
+  ])
 }
