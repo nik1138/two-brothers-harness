@@ -11,13 +11,6 @@
 //                  entry mirrored by aria-current (non-color cue), jumping to a
 //                  hidden message grows the window until it renders, and a
 //                  session without user messages shows the honest empty state
-//   stream-scroll  scripted fixture: a run streams a ~3 KB padded payload in
-//                  small delayed SSE chunks (a ~25 ms token cadence) so the
-//                  transcript keeps producing token frames; wheeling up
-//                  cancels the
-//                  bottom pin immediately and stay-cancelled while tokens
-//                  arrive, wheeling back down re-engages and holds it, and
-//                  PageUp from a focused transcript control cancels it too
 //   approval-allow scripted fixture: approve a workspace write -> file exists, UI shows diff
 //   approval-deny  scripted fixture: deny the write -> file absent
 //   approval-reduced-motion scripted fixture under Playwright's emulated
@@ -163,8 +156,8 @@
 //                  control stays enabled and B's run keeps running
 //   stream-follow  scripted fixture: seeded 200-turn session with all history
 //                  loaded (window starts at row 0, so every live append
-//                  unmounts a top row); the fixture answers every consult call
-//                  with genuinely paced SSE content chunks, so the run's
+//                  unmounts a top row); the fixture paces the run's senior
+//                  opening as genuinely paced SSE content chunks, so the run's
 //                  .stream-md draft grows frame by frame (the built-in mock
 //                  provider finishes a whole run between two animation frames
 //                  and never renders a stream). A reader who wheeled up keeps
@@ -547,7 +540,7 @@ function tsEnv(overrides = {}) {
  * killBackend() tears down with the backend itself, plus its `modelBase`
  * (the OpenAI-compatible `/v1` URL a helper route can point at).
  */
-async function startBackend({ kind, scenario, lingerMs, helperModel }) {
+async function startBackend({ kind, scenario, lingerMs, helperModel, streamChunkMs }) {
   const port = await freePort()
   const dir = tmpDir('tb-e2e-ts')
   // Every handle spawned below; on failure the scenario never sees a backend
@@ -564,6 +557,7 @@ async function startBackend({ kind, scenario, lingerMs, helperModel }) {
       const modelPort = await freePort()
       const modelArgs = [NODE_SCRIPTED, '--port', String(modelPort), '--scenario', scenario]
       if (Number.isFinite(lingerMs)) modelArgs.push('--linger-ms', String(lingerMs))
+      if (Number.isFinite(streamChunkMs)) modelArgs.push('--stream-chunk-ms', String(streamChunkMs))
       if (typeof helperModel === 'string' && helperModel !== '')
         modelArgs.push('--helper-model', helperModel)
       modelServer = spawnServer(modelArgs, 'ts-model')
@@ -1443,150 +1437,13 @@ async function scenarioTranscriptStability(runner) {
   }
 }
 
-// -- scenario: stream-scroll ----------------------------------------------------
-// Live follow-mode regression. While a run streams token frames, wheeling away
-// from the bottom must cancel the bottom pin immediately and stay cancelled;
-// wheeling back down must re-engage it and hold the pin; PageUp from a focused
-// transcript control cancels too. The scripted `stream` fixture answers with
-// valid payloads padded to ~3 KB (under the harness' 4096-token output cap),
-// streamed as small SSE chunks with a delay between them, so the transcript
-// grows continuously across each provider call. Against the pre-fix code the
-// streaming watcher's nextTick pin lands between the wheel's scroll and its
-// asynchronous scroll event, re-pinning the transcript before onScroll sees
-// the new position — with a token frame every ~25 ms, at least one of the 25
-// wheel notches below is eaten in practice, so follow mode stays stuck on.
-
-async function scenarioStreamScroll(runner) {
-  const be = await startBackend({ kind: 'fixture', scenario: 'stream' })
-  const { context, page, consoleGuard } = await newScenarioPage()
-  try {
-    await page.goto(be.base)
-    await page.locator('nav[aria-label="Sessions"]').waitFor()
-    await createSession(page, 'E2E stream scroll')
-    await sendTask(page, 'Talk through the scripted plan at length')
-
-    const scroller = page.locator('.chat-scroll')
-    await scroller.waitFor()
-    const measure = () =>
-      page.evaluate(() => {
-        const sc = document.querySelector('.chat-scroll')
-        if (!sc) return null
-        return {
-          scrollHeight: sc.scrollHeight,
-          scrollTop: sc.scrollTop,
-          clientHeight: sc.clientHeight,
-          fromBottom: sc.scrollHeight - sc.scrollTop - sc.clientHeight,
-        }
-      })
-
-    // the run must produce a scrollable transcript that sits pinned at the
-    // bottom before any gesture; the assertions below are positional (what
-    // the bottom pin does to the reader), not growth-based
-    await waitFor(
-      async () => {
-        const m = await measure()
-        return m && m.scrollHeight - m.clientHeight > 600 && m.fromBottom < 60 ? m : null
-      },
-      {
-        timeout: 30000,
-        interval: 100,
-        desc: 'a scrollable transcript pinned at the bottom while streaming',
-      },
-    )
-
-    // 1) wheel up across the streaming window: every notch must move the
-    //    reader away from the bottom and stay there. Pre-fix, the streaming
-    //    watcher's nextTick pin lands between the wheel's scroll and its
-    //    asynchronous scroll event, so an eaten notch snaps fromBottom back
-    //    to ~0 within one token frame — with a ~20 ms frame cadence, at least
-    //    one of the 25 notches is eaten near-deterministically.
-    const box = await scroller.boundingBox()
-    assert.ok(box, 'transcript has a bounding box')
-    const cx = box.x + box.width / 2
-    const cy = box.y + box.height / 2
-    await page.mouse.move(cx, cy)
-    // the pointer keeps moving between notches: a headless page produces no
-    // compositor frames without input, and the app's token batch only
-    // flushes on animation frames — frozen frames would freeze the draft
-    // (and with it the whole race) in this environment.
-    for (let i = 0; i < 25; i += 1) {
-      await page.mouse.move(cx + (i % 2), cy)
-      await page.mouse.wheel(0, -400)
-      await sleep(140)
-      const m = await measure()
-      assert.ok(
-        m.fromBottom >= 200,
-        `wheel notch ${i + 1}/25 while tokens stream must move the reader away from the bottom ` +
-          `(fromBottom ${m.fromBottom})`,
-      )
-    }
-
-    // 2) follow must stay cancelled while token frames keep arriving
-    for (let i = 0; i < 6; i += 1) {
-      await page.mouse.move(cx + (i % 2), cy)
-      const m = await measure()
-      assert.ok(
-        m.fromBottom >= 200,
-        `follow must stay cancelled while tokens keep arriving ` +
-          `(sample ${i + 1}/6 fromBottom ${m.fromBottom})`,
-      )
-      await sleep(280)
-    }
-
-    // 3) wheel back down to the bottom: follow re-engages and holds the pin
-    for (let i = 0; i < 40; i += 1) {
-      await page.mouse.wheel(0, 600)
-      await sleep(60)
-      if ((await measure()).fromBottom < 60) break
-    }
-    await waitFor(async () => (await measure()).fromBottom < 60, {
-      desc: 'wheeling down to the bottom to re-engage follow',
-    })
-    for (let i = 0; i < 4; i += 1) {
-      const m = await measure()
-      assert.ok(
-        m.fromBottom < 60,
-        `follow must hold the pin at the bottom (sample ${i + 1}/4 fromBottom ${m.fromBottom})`,
-      )
-      await sleep(250)
-    }
-
-    // 4) keyboard: PageUp from a focused transcript control cancels follow too
-    const bubble = page.locator('.bubble-wrap').first()
-    await bubble.waitFor({ state: 'visible' })
-    await bubble.hover()
-    const copyButton = page.locator('.bubble-copy').first()
-    await copyButton.waitFor({ state: 'visible' })
-    await copyButton.click()
-    await page.keyboard.press('PageUp')
-    for (let i = 0; i < 4; i += 1) {
-      const m = await measure()
-      if (m.fromBottom >= 200) break
-      await sleep(200)
-    }
-    const afterPageUp = await measure()
-    assert.ok(
-      afterPageUp.fromBottom >= 200,
-      `PageUp must cancel the bottom pin while tokens stream ` +
-        `(fromBottom ${afterPageUp.fromBottom})`,
-    )
-
-    consoleGuard.assertClean()
-    runner.pass('stream-scroll')
-  } finally {
-    await context.close().catch(() => {})
-    await killBackend(be)
-    rmTree(be.dir)
-  }
-}
-
 // -- scenario: streaming scroll follow ------------------------------------------------
 //
 // Companion to transcript-stability for the streaming phase of a run. The
 // transcript is seeded through the on-disk store (200 turns -> 400 rows) and
 // the reader pages in all of it, so the rendered window starts at row 0 and
-// every live append unmounts a top row. The scripted model server answers
-// every consult call with genuinely paced SSE content chunks (see
+// every live append unmounts a top row. The scripted model server paces the
+// run's senior opening as genuinely paced SSE content chunks (see
 // fixtures/scripted-server.mjs), so the run's ephemeral `.stream-md` draft
 // grows over hundreds of milliseconds while an in-page sampler records one
 // sample per animation frame: the draft's text length, the anchored row's
@@ -1603,7 +1460,7 @@ async function scenarioStreamScroll(runner) {
 //      every streamed frame finds the reader pinned at the bottom.
 
 async function scenarioStreamFollow(runner) {
-  const be = await startBackend({ kind: 'fixture', scenario: 'stream-scroll' })
+  const be = await startBackend({ kind: 'fixture', scenario: 'stream-follow' })
   const { context, page, consoleGuard } = await newScenarioPage()
   /** seq of user message i (1-based): the seed writes two envelopes per turn. */
   const userSeq = (i) => 2 * i - 1
@@ -1892,7 +1749,14 @@ async function scenarioStreamFollow(runner) {
 // the bottom while rows arrive).
 
 async function scenarioStreamFollowTouch(runner) {
-  const be = await startBackend({ kind: 'fixture', scenario: 'stream-follow' })
+  // 250 ms per chunk: the swipe gesture plus its scroll-event delivery must
+  // complete well inside one chunk period, so a token pin can never fire
+  // mid-gesture and cancel the touch scroll (see the fixture's --stream-chunk-ms)
+  const be = await startBackend({
+    kind: 'fixture',
+    scenario: 'stream-follow',
+    streamChunkMs: 250,
+  })
   const context = await browser.newContext({
     viewport: { width: 390, height: 844 },
     hasTouch: true,
@@ -7718,13 +7582,6 @@ async function main() {
         run: () => (
           (currentRunner = makeRunner('transcript-stability')),
           scenarioTranscriptStability(currentRunner)
-        ),
-      },
-      {
-        label: 'stream-scroll',
-        run: () => (
-          (currentRunner = makeRunner('stream-scroll')),
-          scenarioStreamScroll(currentRunner)
         ),
       },
       {

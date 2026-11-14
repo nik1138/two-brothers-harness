@@ -50,7 +50,6 @@ export const HERMETIC_LABELS = Object.freeze([
   'stop-switch-leak',
   'history-nav',
   'transcript-stability',
-  'stream-scroll',
   'stream-follow',
   'stream-follow-touch',
 ])
