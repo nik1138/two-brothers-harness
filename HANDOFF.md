@@ -77,9 +77,11 @@ Live setup (verified on the running server, 2026-11-14):
 
 - Senior: `opencode-go / deepseek-v4.1-flash`
 - Junior: LM Studio `lfm3-1.7b` (`http://192.168.31.123:1234/v1`)
-- Subagent route: **empty** (helpers keep the tool's Senior/Junior `role`
-  fallback). Set it in Settings → Models & roles → Subagent if you want a
-  pinned helper model.
+- Subagent route: **empty** — helpers therefore run the Junior role's current
+  model (per-call `model` override > explicit route model > Junior model,
+  unconditionally; the tool's `role` argument selects persona/connection
+  only, never the model). Set it in Settings → Models & roles → Subagent if
+  you want a pinned helper model.
 - **Settings were lost in the 2026-11-14 incident** — the sealed provider
   API keys must still be re-entered (owner task) before any live run; no
   live sessions or helper transcripts survive. Sessions/settings were
@@ -242,8 +244,9 @@ user-profile Temp (documented in docs/testing.md).
 - Persisted as the top-level `subagent` section of `sessions/settings.json`;
   the key is sealed at rest like role keys.
 - `GET/PUT /api/settings` carry `subagent` additively.
-- A configured route **wins over the tool's `role` argument**. An empty route
-  keeps the Senior/Junior fallback.
+- A configured route **wins over the tool's `role` argument**. An empty
+  route keeps the Junior role's current model as the helper default (see the
+  superseded note below).
 - Deleting a provider clears a matching helper `provider_ref`; role and
   provider saves preserve the section.
 - Backend pieces: `SettingsStore.readSubagent` / optional fourth `write`
@@ -257,6 +260,11 @@ user-profile Temp (documented in docs/testing.md).
   `tests/subagent.test.ts`, `tests/server.test.ts`,
   `web/tests/settingsSubagent.test.ts`, and the `settings-subagent` browser
   scenario.
+- **Superseded (2026-11-14):** at `32fc970` an empty route kept the
+  Senior/Junior `role` fallback — the tool's `role` argument then also chose
+  the helper's model. The model resolution is now absolute for every helper
+  role: per-call `model` override > explicit subagent-route model > the
+  Junior role's current model; `role` selects persona/connection only.
 
 ### 3. Subagent phase 2, slice 1 — mutating helpers (`d1518a9` + `c445eee`)
 

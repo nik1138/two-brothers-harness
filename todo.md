@@ -111,8 +111,9 @@ Shipped on the integrate-goal line (`main..6052ff7`); recorded on
       `c6e41b4` (not the subagent wave), fixed and pushed as `809de6c`;
       run #90 GREEN on all three legs (2026-11-12).
 - [ ] Optional: set the live subagent route to a deliberate model in
-      Settings → Models & roles → Subagent (currently empty, so helpers keep
-      the Senior/Junior `role` fallback).
+      Settings → Models & roles → Subagent (currently empty, so helpers run
+      the Junior role's current model — per-call override > route model >
+      Junior model; `role` picks persona/connection only).
 
 ## Next engineering work (priority order)
 
