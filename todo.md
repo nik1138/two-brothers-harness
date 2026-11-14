@@ -152,8 +152,9 @@ DEFERRED:
   symptom justifies.
 
 AUDIT COMPLETE (remaining-core audit finished 2026-11-14; risk-ranked
-findings CORE-F1..F5 with fix lanes open from `d98ec79` — none counts
-as done until its lane lands with green gates):
+findings CORE-F1..F5 — none counts as done until its lane lands with
+green gates; the four original quality fix lanes are based on `d98ec79`,
+the new workspace/MCP/CLI-subagent lanes on docs-only main `36ca83c`):
 
 | ID | Sev | Finding | Evidence | Status |
 |---|---|---|---|---|
@@ -208,8 +209,10 @@ CANDIDATE (structural, behavior-preserving, not yet accepted):
 - **SET-S1–S5** — extract `ProviderAddCard`/`ProviderDetailCard`;
   `useEffortOptions` composable + pure `buildSettingsPatch`; `fsPath.ts`
   + `sidebarGroups.ts` pure modules with tests; shared `errText`.
-  **S3 (`fsPath.ts` extraction + tests) — REFACTOR LANE IN PROGRESS**
-  (`quality-workspace-paths`); the rest remain unaccepted candidates.
+  **S3 (`fsPath.ts` extraction + tests) — INTEGRATED**
+  (implementation `db14655`, merge `d0b851b`; independent acceptance:
+  web suite 615/615, `npm run build` PASS); the rest remain unaccepted
+  candidates.
 - **BE-R1–R5** — `harness-subagents.ts` slice; `provider/` module split;
   server route-group functions; `workspace-edit.ts`; CLI per-command
   modules (existing `doSessions`/`doSpill`/`doConfig` pattern).
