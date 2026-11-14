@@ -516,6 +516,33 @@ test("google: an explicit /v1beta base is used as-is; models/ prefix is normaliz
   );
 });
 
+test("google: non-finite maxTokens is rejected, never serialized as null", async () => {
+  // `JSON.stringify(Infinity)` is `null`: a non-finite cap must not reach the
+  // wire as `"maxOutputTokens": null`. The Anthropic adapter already guards
+  // with `Number.isFinite`; Google must behave the same way.
+  const stub = stubFetch(() =>
+    jsonResponse({
+      candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+    }),
+  );
+  for (const bad of [Infinity, -Infinity, NaN]) {
+    const provider = googleProvider(stub.fetchImpl, { maxTokens: bad });
+    assert.equal(provider.maxTokens, undefined, `${String(bad)} must not become a wire cap`);
+    await provider.chat([{ role: "user", content: "u" }]);
+    assert.equal(
+      stub.requests.at(-1)!.body.generationConfig.maxOutputTokens,
+      undefined,
+      `${String(bad)} must not serialize onto the wire`,
+    );
+  }
+  // Finite caps are still honored (truncated like the other adapters).
+  const finite = googleProvider(stub.fetchImpl, { maxTokens: 777.9 });
+  assert.equal(finite.maxTokens, 777);
+  await finite.chat([{ role: "user", content: "u" }]);
+  assert.equal(stub.requests.at(-1)!.body.generationConfig.maxOutputTokens, 777);
+});
+
 // ---------------------------------------------------------------------------
 // Google response + usage
 // ---------------------------------------------------------------------------

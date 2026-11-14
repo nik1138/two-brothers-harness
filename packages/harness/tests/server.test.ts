@@ -1275,6 +1275,94 @@ test("run events SSE reconnect with after=N replays only the tail", async () => 
   }
 });
 
+test("run events SSE replay waits for socket drain under backpressure", async () => {
+  const srv = await startServer();
+  const originalWrite = http.ServerResponse.prototype.write;
+  try {
+    const started = await post<Record<string, any>>(srv.base, "/api/runs", {
+      task: "backpressure task",
+    });
+    const runId = String(started.body.run_id);
+    await waitTerminal(srv.base, runId);
+    const record = srv.handle.state.runs.get(runId)!;
+    const totalFrames = record.events.length;
+    assert.ok(totalFrames >= 4, "the run buffered enough typed events to replay");
+
+    // Deterministic backpressure: the first two replayed event frames are
+    // handed to the socket but reported as not flushed. A real kernel buffer
+    // fills on a slow consumer; here the false return value stands in for it,
+    // so the server must pause the replay until the socket emits "drain".
+    let withheld = 2;
+    const stalled: { res: http.ServerResponse | null } = { res: null };
+    (http.ServerResponse.prototype as { write: unknown }).write = function (
+      this: http.ServerResponse,
+      chunk: unknown,
+      ...rest: unknown[]
+    ): boolean {
+      const flushed = (originalWrite as (...args: unknown[]) => boolean).apply(this, [chunk, ...rest]);
+      if (withheld > 0 && typeof chunk === "string" && chunk.startsWith("id: ")) {
+        withheld -= 1;
+        stalled.res = this;
+        return false;
+      }
+      return flushed;
+    };
+
+    const seen: number[] = [];
+    let lastFrame = "";
+    const streamDone = new Promise<void>((resolve, reject) => {
+      const req = http.get(`${srv.base}/api/runs/${runId}/events?after=0`, (res) => {
+        let buffer = "";
+        res.on("data", (chunk: Buffer) => {
+          buffer += chunk.toString("utf-8");
+          let index = buffer.indexOf("\n\n");
+          while (index !== -1) {
+            const frame = buffer.slice(0, index);
+            buffer = buffer.slice(index + 2);
+            const idLine = frame.split("\n").find((line) => line.startsWith("id: "));
+            if (idLine !== undefined) {
+              seen.push(Number(idLine.slice(3).trim()));
+              lastFrame = frame;
+            }
+            index = buffer.indexOf("\n\n");
+          }
+        });
+        res.on("end", () => resolve());
+      });
+      req.on("error", reject);
+    });
+
+    // The first false write stalls the replay after frame 1: no further
+    // event frames may be pushed until the socket drains.
+    const deadline1 = Date.now() + 5000;
+    while (stalled.res === null && Date.now() < deadline1) await sleep(10);
+    assert.ok(stalled.res !== null, "the replay reached the first false write");
+    await sleep(300);
+    assert.deepEqual(seen, [1], "replay pauses until drain, no unbounded push");
+
+    // Draining resumes the replay; the second false write stalls it again.
+    stalled.res!.emit("drain");
+    const deadline2 = Date.now() + 5000;
+    while (withheld > 0 && Date.now() < deadline2) await sleep(10);
+    assert.equal(withheld, 0, "the replay reached the second false write");
+    await sleep(300);
+    assert.deepEqual(seen, [1, 2], "second stall honors backpressure too");
+
+    // After the final drain the whole tail replays in order and ends.
+    stalled.res!.emit("drain");
+    await streamDone;
+    assert.deepEqual(
+      seen,
+      Array.from({ length: totalFrames }, (_, i) => i + 1),
+      "every buffered frame replayed, in id order, with none lost",
+    );
+    assert.ok(lastFrame.includes('"type":"run_end"'), "run_end is still the last frame");
+  } finally {
+    http.ServerResponse.prototype.write = originalWrite;
+    await srv.close();
+  }
+});
+
 test("prompt_audit event rides the run SSE stream, one frame per provider call", async () => {
   const srv = await startServer();
   try {

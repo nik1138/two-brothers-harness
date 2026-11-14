@@ -486,7 +486,7 @@ test("a malformed (non-list) steering return is fail-soft too", async () => {
   assert.match(result.warnings[0]!, /did not return a list/);
 });
 
-test("steering is capped per run and stops being read after the cap", async () => {
+test("steering is capped per run: past-cap texts are still drained and reported as dropped", async () => {
   let calls = 0;
   const events: RuntimeEvent[] = [];
   const harness = new TwoBrothersHarness(cfg(), {
@@ -503,23 +503,135 @@ test("steering is capped per run and stops being read after the cap", async () =
     result.messages.filter((message) => String(message.payload.text ?? "").startsWith(STEERING_PREFIX)).length,
     MAX_STEERING_ENVELOPES_PER_RUN,
   );
-  assert.equal(result.warnings.length, 1);
-  assert.match(result.warnings[0]!, new RegExp(`at most ${MAX_STEERING_ENVELOPES_PER_RUN}`));
-  // The cap is run-lifetime: once reached the callback is not read again, so a
-  // runaway producer can never grow the context.
-  assert.equal(calls, 1);
+  // The callback stays readable at every boundary even after the cap: it is a
+  // return-and-clear drain, so skipping reads would strand accepted texts in
+  // the queue instead of accounting for them.
+  assert.equal(calls, 4);
+  assert.equal(result.warnings.length, 4);
+  for (const warning of result.warnings) {
+    assert.match(warning, new RegExp(`at most ${MAX_STEERING_ENVELOPES_PER_RUN}`));
+  }
   // A drop is never silent: the additive typed event names exactly how many
-  // valid texts were discarded (20 offered, 16 applied) and the cap. The run
-  // record's public view aggregates it as `steering_dropped`, so an HTTP
+  // valid texts were discarded at each drain (20 offered, 16 applied at the
+  // first boundary = 4 dropped; each later boundary drains 20 more, all
+  // dropped). The run record's public view aggregates the sum, so an HTTP
   // consumer that only polls the run learns a 200-accepted text was dropped.
   const dropped = events.filter((event) => event.type === "steering_dropped");
-  assert.equal(dropped.length, 1);
+  assert.equal(dropped.length, 4);
+  assert.equal(
+    dropped.reduce((sum, event) => sum + (event as { dropped: number }).dropped, 0),
+    4 + 3 * 20,
+  );
   assert.deepEqual({ ...dropped[0] }, {
     type: "steering_dropped",
     dropped: 20 - MAX_STEERING_ENVELOPES_PER_RUN,
     applied: MAX_STEERING_ENVELOPES_PER_RUN,
     limit: MAX_STEERING_ENVELOPES_PER_RUN,
   });
+});
+
+test("steering accepted past the run cap is drained and accounted, never stranded in the queue", async () => {
+  // The serve wiring: the harness's steering callback IS the run record's
+  // return-and-clear queue drain. Texts POSTed after the cap was reached must
+  // still be read (drained to empty) and reported via steering_dropped —
+  // never left pending until finish() silently drops them.
+  const record = new RunRecord("run-cap", "s.jsonl", "cap me");
+  const events: RuntimeEvent[] = [];
+  let parked = 0;
+  const releases: Array<() => void> = [];
+  const started: Array<() => void> = [];
+  const gate = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const index = parked;
+    parked += 1;
+    let release!: () => void;
+    const wait = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    releases[index] = release;
+    started[index]?.();
+    await wait;
+    return fn();
+  };
+  const innerSenior = new ScriptedProvider();
+  const innerJunior = new ScriptedProvider();
+  const senior: Provider = {
+    chat: (messages, responseKind) => gate(() => innerSenior.chat(messages, responseKind)),
+  };
+  const junior: Provider = {
+    chat: (messages, responseKind) => gate(() => innerJunior.chat(messages, responseKind)),
+  };
+  const entered = (n: number): Promise<void> =>
+    new Promise<void>((resolve) => {
+      if (n <= parked) resolve();
+      else started[n - 1] = resolve;
+    });
+  const release = (n: number): void => {
+    releases[n - 1]?.();
+  };
+  const steerBatch = (prefix: string): void => {
+    for (let i = 0; i < STEER_QUEUE_MAX; i += 1) {
+      assert.equal(record.steer(`${prefix} ${i}`), true);
+    }
+    assert.equal(record.pendingSteering, STEER_QUEUE_MAX);
+  };
+  const applied = (): number =>
+    envelopes.filter(
+      (message) => String(message.payload?.text ?? "").startsWith(STEERING_PREFIX),
+    ).length;
+
+  const envelopes: Array<{ payload?: { text?: unknown } }> = [];
+  const harness = new TwoBrothersHarness(cfg(), {
+    senior,
+    junior,
+    onEvent: (event) => {
+      events.push(event);
+      // Mirror the serve wiring (`onEvent: onEnvelope`): typed runtime events
+      // land in the record's event log, where public() aggregates them.
+      record.events.push(event);
+    },
+    onEnvelope: (message) => envelopes.push(message as { payload?: { text?: unknown } }),
+    steering: () => record.drainSteering(),
+  });
+
+  // Batch A is queued before the run; batches B and C are HTTP-accepted while
+  // later model calls are parked. Boundary 1 applies A (8), boundary 2 applies
+  // B (16 = cap), boundary 3 drains C with nothing applicable.
+  steerBatch("A");
+  const run = harness.run("cap me");
+  await entered(1); // boundary 1 drained A
+  assert.equal(record.pendingSteering, 0);
+  steerBatch("B");
+  release(1);
+  await entered(2); // boundary 2 drained B
+  assert.equal(record.pendingSteering, 0);
+  assert.equal(applied(), 16);
+  steerBatch("C");
+  release(2);
+  await entered(3); // boundary 3 drained C: everything past the cap dropped
+  assert.equal(record.pendingSteering, 0, "past-cap texts are drained, not stranded");
+  release(3);
+  await entered(4);
+  release(4);
+  const result = await run;
+
+  assert.equal(result.cancelled, false);
+  assert.equal(applied(), MAX_STEERING_ENVELOPES_PER_RUN);
+  const dropped = events.filter((event) => event.type === "steering_dropped");
+  assert.equal(dropped.length, 1);
+  assert.deepEqual({ ...dropped[0] }, {
+    type: "steering_dropped",
+    dropped: STEER_QUEUE_MAX,
+    applied: MAX_STEERING_ENVELOPES_PER_RUN,
+    limit: MAX_STEERING_ENVELOPES_PER_RUN,
+  });
+  assert.equal(record.public().steering_dropped, STEER_QUEUE_MAX);
+  assert.equal(record.pendingSteering, 0);
+  // Terminal transition (what RunManager does at run end): a later steer is
+  // refused and no pending text is reported.
+  record.finish();
+  assert.equal(record.steer("too late"), false);
+  assert.equal(record.public().steering_pending, undefined);
+  assert.ok(result.warnings.some((warning) => warning.includes(`at most ${MAX_STEERING_ENVELOPES_PER_RUN}`)));
 });
 
 test("a terminal record clears its steering queue and refuses late texts", () => {

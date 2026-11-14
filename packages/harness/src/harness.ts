@@ -855,6 +855,15 @@ const fileSessionTails = new Map<string, Promise<void>>();
 const contextSessionTails = new WeakMap<SharedContext, Promise<void>>();
 
 /**
+ * Number of settled per-session tail promises the file-keyed mutex map still
+ * holds. Internal test seam for the leak regression — deliberately NOT
+ * re-exported from `index.ts` (not public API).
+ */
+export function fileSessionTailsSize(): number {
+  return fileSessionTails.size;
+}
+
+/**
  * Acquire the in-process mutex for `ctx`'s session: keyed by the session
  * file path when the context persists to one, otherwise by context identity.
  * Concurrent `run()` calls on the same session queue up (never interleave);
@@ -863,16 +872,25 @@ const contextSessionTails = new WeakMap<SharedContext, Promise<void>>();
 function acquireSession(ctx: SharedContext): Promise<() => void> {
   let get: () => Promise<void> | undefined;
   let set: (tail: Promise<void>) => void;
+  let clear: (tail: Promise<void>) => void;
   if (ctx.store !== null) {
     const key = `file:${ctx.store.path}`;
     get = () => fileSessionTails.get(key);
     set = (tail) => {
       fileSessionTails.set(key, tail);
     };
+    clear = (tail) => {
+      // Delete only while the key still maps to THIS tail: a later run may
+      // already have queued its own tail for the same session file.
+      if (fileSessionTails.get(key) === tail) fileSessionTails.delete(key);
+    };
   } else {
     get = () => contextSessionTails.get(ctx);
     set = (tail) => {
       contextSessionTails.set(ctx, tail);
+    };
+    clear = (tail) => {
+      if (contextSessionTails.get(ctx) === tail) contextSessionTails.delete(ctx);
     };
   }
   const prev = get() ?? Promise.resolve();
@@ -880,7 +898,15 @@ function acquireSession(ctx: SharedContext): Promise<() => void> {
   const current = new Promise<void>((resolve) => {
     releaseFn = resolve;
   });
-  set(prev.then(() => current));
+  const tail = prev.then(() => current);
+  set(tail);
+  // A settled run must not leave its promise in the module-level map forever:
+  // drop the key once this tail settles (fulfilled or rejected). The
+  // identity check inside `clear` keeps the delete safe against a newer tail.
+  const settled = (): void => {
+    clear(tail);
+  };
+  tail.then(settled, settled);
   return prev.then(() => releaseFn);
 }
 
@@ -1767,19 +1793,23 @@ export class TwoBrothersHarness {
    *
    * Contract: at most one callback invocation per boundary (the callback is a
    * return-and-clear drain, preserving submission order); nothing is appended
-   * after the run is cancelled (`signal` aborted) or when the run-lifetime cap
-   * is reached; empty/non-string entries are ignored; a throwing callback or a
-   * non-array return is fail-soft (one warning, never a run failure) and
-   * disables further drains for the run — a permanently broken callback is not
-   * hammered at every boundary. The appended texts are returned so a tool loop
-   * can re-render its opening transcript; the shared context alone does not
-   * reach the next request of an already-built tool conversation.
+   * after the run is cancelled (`signal` aborted); empty/non-string entries are
+   * ignored; a throwing callback or a non-array return is fail-soft (one
+   * warning, never a run failure) and disables further drains for the run — a
+   * permanently broken callback is not hammered at every boundary. Once the
+   * run-lifetime cap is reached the callback is STILL invoked at every
+   * boundary: the drain is return-and-clear, so skipping reads would strand
+   * HTTP-accepted texts in the queue where they would vanish at run end;
+   * drained texts past the cap are accounted by the same `steering_dropped`
+   * event + warning as a mid-drain cap hit, and nothing is appended. The
+   * appended texts are returned so a tool loop can re-render its opening
+   * transcript; the shared context alone does not reach the next request of
+   * an already-built tool conversation.
    */
   private drainSteering(state: CooperationState): string[] {
     const steering = this.options.steering;
     if (steering === undefined || this.steeringFailed) return [];
     if (this.options.signal?.aborted) return []; // a stopped run appends nothing
-    if (this.steeringCount >= MAX_STEERING_ENVELOPES_PER_RUN) return [];
     let drained: unknown;
     try {
       drained = steering();
