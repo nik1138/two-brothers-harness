@@ -2714,7 +2714,9 @@ export class GoogleProvider extends BaseHttpProvider {
   constructor(cfg: ModelProviderConfig) {
     super(cfg);
     this.maxTokens =
-      cfg.maxTokens !== undefined && cfg.maxTokens > 0 ? Math.trunc(cfg.maxTokens) : undefined;
+      cfg.maxTokens !== undefined && Number.isFinite(cfg.maxTokens) && cfg.maxTokens > 0
+        ? Math.trunc(cfg.maxTokens)
+        : undefined;
   }
 
   async chat(

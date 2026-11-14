@@ -4180,13 +4180,28 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       });
       // The loop replays the buffered tail, keeps the connection alive with
       // comment frames, and closes once run_end has been delivered (the
-      // client may reconnect with ?after=N).
+      // client may reconnect with ?after=N). A false `write` means the socket
+      // buffer is full: pause the replay until "drain" (or until the request
+      // closes) so a slow consumer is never flooded by an unbounded burst.
+      const drainOrClose = (): Promise<void> =>
+        new Promise((resolve) => {
+          const done = (): void => {
+            ctx.res.off("drain", done);
+            ctx.req.off("close", done);
+            resolve();
+          };
+          ctx.res.once("drain", done);
+          ctx.req.once("close", done);
+        });
       void (async () => {
         try {
           while (!closed) {
             while (sent < record.events.length) {
               sent += 1;
-              ctx.res.write(`id: ${sent}\ndata: ${JSON.stringify(record.events[sent - 1])}\n\n`);
+              const flushed = ctx.res.write(
+                `id: ${sent}\ndata: ${JSON.stringify(record.events[sent - 1])}\n\n`,
+              );
+              if (!flushed && !closed) await drainOrClose();
             }
             if (record.isDone && sent >= record.events.length) break;
             ctx.res.write(": keepalive\n\n");

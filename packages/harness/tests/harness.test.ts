@@ -3,10 +3,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { TwoBrothersHarness, sanitizePayload } from "../src/harness.ts";
+import { TwoBrothersHarness, sanitizePayload, fileSessionTailsSize } from "../src/harness.ts";
 import { resolveConfig } from "../src/config.ts";
 import { MockProvider, type Provider } from "../src/provider.ts";
 import type { ChatMessage } from "../src/context.ts";
+import { SharedContext } from "../src/context.ts";
+import { SessionStore } from "../src/session.ts";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
 class ReviseProvider {
   async chat(messages: ChatMessage[], responseKind = "message"): Promise<string> {
@@ -169,4 +174,32 @@ test("a reused harness does not leak lastErrors from a previous run", async () =
     "run 2 must not inherit run 1's degradation warnings",
   );
   assert.ok(second.decision.decision);
+});
+
+test("the session-file mutex removes its tail entry once the run settles", async () => {
+  // `fileSessionTails` is module-level: without cleanup every run on a
+  // persisted session file leaves one settled promise behind forever.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tb-mutex-"));
+  try {
+    const file = path.join(dir, "session.jsonl");
+    const makeCtx = (): SharedContext => new SharedContext(new SessionStore(file));
+    const run = (task: string, ctx: SharedContext) =>
+      new TwoBrothersHarness(resolveConfig({ provider: "mock", mode: "consult" })).run(task, ctx);
+    // The mutex entry is dropped in a promise reaction on the settled tail,
+    // one macrotask after the run promise resolves.
+    const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(fileSessionTailsSize(), 0);
+    await run("one", makeCtx());
+    await settle();
+    assert.equal(fileSessionTailsSize(), 0, "a settled run removes its tail entry");
+
+    // Two contexts on the SAME session file serialize through one key; both
+    // runs settle and neither entry may survive.
+    await Promise.all([run("two", makeCtx()), run("three", makeCtx())]);
+    await settle();
+    assert.equal(fileSessionTailsSize(), 0, "concurrent same-file runs leave no entry");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
