@@ -7,20 +7,25 @@ Last updated: **2026-11-14**.
 
 ## Current state
 
-- **All gates were validated at `3f07d316`** (strict plugin selection parity
-  checkpoint). Local `main` now also carries **docs-only follow-ups**
-  `668536a`, `987f316`, `ba1e0e4` (only `docs/release.md` /
-  `docs/testing.md`) plus this handoff once merged — **local-only, NOT
-  pushed**; `origin/main` = `7f0d2c4` (O1, CI #98 green). Integrated and
-  validated: O2 TUI helper controls (`f963707`), M per-call overrides
-  (`1cc25d4`), C helper roll-up (`02c0ad9`), and the improvement-lane wave —
-  cooperation correctness (`3be613c`), TUI helper-overlay correctness
-  (`281f6a1`), provider/transport hardening (`9b6b211`, `facb6bf`, `cd45f65`,
-  `6b65876`), web fixes (`5a8aee0`, `a850b54`, `0a33154`, `f9468f6`,
-  `846b911`), bounded MCP shutdown + run history (`fcb7377`, `9702476`),
-  plugin registration/timeouts/bundles/strict parity (`fe74921`, `029659c`,
-  `975e42e`, `dd54392`), E2E backend cleanup + skip registry (`b631530`,
-  `d248e8d`), plus infra/test-isolation fixes.
+- **All gates were validated at `3fe647f`** (final code commit of the
+  quality wave — E2E fail-fast). Local `main` now also carries **docs-only
+  follow-ups** `30056eb`, `c52554a` (only `todo.md` checkpoint records)
+  plus this handoff once merged — **local-only, NOT pushed**; local `main`
+  is **111 commits ahead** of `origin/main` = `7f0d2c4` (O1, CI #98
+  green). Integrated and validated: O2 TUI helper controls (`f963707`),
+  M per-call overrides (`1cc25d4`), C helper roll-up (`02c0ad9`), the
+  improvement-lane wave — cooperation correctness (`3be613c`), TUI
+  helper-overlay correctness (`281f6a1`), provider/transport hardening
+  (`9b6b211`, `facb6bf`, `cd45f65`, `6b65876`), web fixes (`5a8aee0`,
+  `a850b54`, `0a33154`, `f9468f6`, `846b911`), bounded MCP shutdown + run
+  history (`fcb7377`, `9702476`), plugin registration/timeouts/bundles/
+  strict parity (`fe74921`, `029659c`, `975e42e`, `dd54392`), E2E backend
+  cleanup + skip registry (`b631530`, `d248e8d`) — and the full
+  code-quality wave with merge SHAs `17867f9` (chat), `1eef5fe` (TUI
+  fixes), `7f28044` (TUI fold), `99a108b` (settings), `d0b851b` (fsPath),
+  `e1b6eeb` (backend), `67ccba1` (workspace), `3009748` (MCP), `52fbfa5`
+  (CLI/subagent), `3fe647f` (E2E fail-fast). Every reviewed audit finding
+  is **integrated or explicitly deferred** (technical reasons below).
 - **Incident 2026-11-14 (cause known: NTFS junction traversal):** an earlier
   cleanup emptied main-checkout `packages/harness`; tracked files were
   restored, deps/dist rebuilt, gates re-run green — but untracked
@@ -35,12 +40,18 @@ Last updated: **2026-11-14**.
   O1 (`7f0d2c4`) + **O2 (`f963707`) + M (`1cc25d4`) + C (`02c0ad9`)**.
   **F forked-context + D depth>1 DEFERRED** to their own designs; no new
   designs started.
-- Verified at `3f07d316`: package **2 461 / 2 453 pass / 0 fail / 8 skips**
-  (`npm test` and `test:spawn`, Windows); WSL Node 22 + 24 each **2 461 /
-  2 460 / 0 fail / 1 skip** in both modes + hermetic server 4/4; web
-  **608/608**; CLI E2E **19/19 source + dist**; browser raw log **38
-  hermetic PASS / 0 FAIL / 1 real SKIP** + helpers **18/18**; tarball
-  **7/7 + pack check**; smoke **PASS** (faults 7/7, hermetic server 4/4).
+- Verified at `3fe647f`: package **2 483 / 2 475 pass / 0 fail / 8 skips**
+  (`npm test` and `test:spawn`, Windows); WSL Node 22.22.2 + 24.16.0 each
+  **2 483 / 2 482 / 0 fail / 1 skip** in both modes + typecheck PASS +
+  hermetic server 4/4; web **642/642 + build PASS**; CLI E2E **19/19
+  source + dist**; browser **39 hermetic PASS / 0 FAIL / 1 real SKIP** +
+  helpers **20/20**; tarball **7/7 + pack check**; smoke **PASS** (faults
+  7/7, hermetic server 4/4). Environment caveats (not product failures):
+  WSL22 `/mnt/c` `npm test` exit 1 after all assertions passed (post-test
+  HTTP-socket `TypeError`; standalone file 48/48 and an identical native
+  ext4 full suite 2 483/2 482/0 fail/1 skip exit 0 pin it to `/mnt/c`);
+  WSL24 initial `/mnt/c` runs hit a bounded TUI timing flake
+  (`tuiintegration:1460`), bounded reruns passed.
 - No version bump, tag, or publish in this wave; nothing pushed.
 
 ## Owner / release gates
@@ -64,8 +75,8 @@ Last updated: **2026-11-14**.
 
 ## Next engineering work (priority order)
 
-**Active cycle — code-quality/correctness queue (2026-11-14).** Four
-read-only audits ran against `d98ec79`: TUI, web chat/composer, web
+**Active cycle — code-quality/correctness queue (2026-11-14) — COMPLETE.**
+Four read-only audits ran against `d98ec79`: TUI, web chat/composer, web
 settings/navigation, backend/runtime. The risk-ranked queue below
 condenses every confirmed finding, hypothesis, deferral, and structural
 candidate. Fix lanes `quality-tui-fixes`, `quality-chat-fixes`,
@@ -73,10 +84,10 @@ candidate. Fix lanes `quality-tui-fixes`, `quality-chat-fixes`,
 — a started lane is **not** a shipped fix; statuses below track evidence,
 not intention. All reviewed code/test-infrastructure findings are now
 **integrated or explicitly deferred** (INTEGRATED rows carry SHAs and
-acceptance counts). Final verification is **IN PROGRESS** on exact
-commit `3fe647f8901dcd99b953c6f9105c498fa31609e3` — final counts are
-recorded only when the parent supplies them. The prechecks below remain
-historical evidence only, **not** final gates. The remaining-core audit (CLI / workspace edit-diff /
+acceptance counts). Final verification is **COMPLETE** on exact commit
+`3fe647f8901dcd99b953c6f9105c498fa31609e3` — the final gate block is
+below; the prechecks beneath it remain historical evidence only. The
+remaining-core audit (CLI / workspace edit-diff /
 settings-write / config / subagent runner / runstream / instructions +
 the MCP timeout verdict) is **complete** — its conclusions are recorded
 below as CORE-F1..F5 plus no-finding notes. The paused OAuth (item 6),
@@ -160,8 +171,9 @@ DEFERRED:
 AUDIT COMPLETE (remaining-core audit finished 2026-11-14; risk-ranked
 findings CORE-F1..F5 — all five are now INTEGRATED with independent
 acceptance and merges to local main; lanes were based on `d98ec79` or
-docs-only `36ca83c` as noted per row; final release gates on integrated
-main have **not** been run yet):
+docs-only `36ca83c` as noted per row; the final release gates on the
+integrated tree have since been run and recorded in the FINAL GATES
+block above):
 
 | ID | Sev | Finding | Evidence | Status |
 |---|---|---|---|---|
@@ -202,9 +214,31 @@ No-finding conclusions from the same audit (full reads, not grep-level):
   pages × 30 s — a pathological listing could stretch to ~8 h; not
   realistically exploitable, awareness only.
 
+FINAL GATES (verified on `3fe647f8901dcd99b953c6f9105c498fa31609e3`, the
+final code checkpoint; docs commits `30056eb`, `c52554a` after it touch
+`todo.md` only):
+
+- **Windows package** — `npm test` and `test:spawn` each **2 483 total /
+  2 475 pass / 0 fail / 8 platform skips**.
+- **WSL Node 22.22.2 and 24.16.0** — typecheck PASS; both modes each
+  **2 483 / 2 482 pass / 0 fail / 1 env skip**; hermetic server E2E 4/4.
+  Environment caveats, not product failures: WSL22 `/mnt/c` `npm test`
+  exited 1 **after all assertions passed** on a post-test HTTP-socket
+  `TypeError`; the standalone file ran 48/48 and an identical full suite
+  on a native ext4 checkout ran 2 483/2 482/0 fail/1 skip with exit 0 —
+  pinning the caveat to `/mnt/c`, not the product. WSL24 initial `/mnt/c`
+  runs hit a bounded TUI timing flake at `tuiintegration:1460`; bounded
+  reruns passed.
+- **Web** — **642/642** + `npm run build` PASS.
+- **CLI E2E** — **19/19 source + 19/19 `--dist`**.
+- **Offline smoke gate** — **PASS** (package as above, web 642/642,
+  CLI 19/19, fault-injection 7/7, hermetic server 4/4).
+- **Browser E2E** — **39 hermetic PASS / 0 FAIL / 1 opt-in `real` SKIP** +
+  helpers suite **20/20**.
+- **Tarball** — **7/7 + pack:check PASS**.
+
 PRECHECK (historical verification evidence on integrated trees only —
-**not** final gates; final verification is in progress on
-`3fe647f8901dcd99b953c6f9105c498fa31609e3`):
+**not** final gates; the FINAL GATES block above supersedes):
 
 - **At `17867f9`** — backend typecheck PASS; package both modes
   2480/2472/0 fail/8 skip; CLI source + dist 19/19 each; web 640/640,
