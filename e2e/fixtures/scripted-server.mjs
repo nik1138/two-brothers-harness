@@ -122,10 +122,9 @@
 //                          (every request aborts the moment the harness stops
 //                          the run)
 //   --stream-chunk-ms MS   stream-follow: delay between paced SSE content
-//                          chunks (default 50; the touch lane passes 250 so
-//                          the swipe gesture and its scroll-event delivery
-//                          complete well inside one chunk period and a token
-//                          pin can never fire mid-gesture)
+//                          chunks (default 50; the touch scenario pins 12 so
+//                          a token lands inside the gesture's
+//                          application/scroll-event race window)
 //
 // Every run a scenario drives is inferred from the transcript as a whole: a
 // request with no envelope events starts a run, and a run appended after the
@@ -440,11 +439,17 @@ const REASONING_SHORT = 'Weighing the scripted proposal before the senior decisi
 /** Chunk sizing: small enough that the browser backend consumes a delta stream. */
 const STREAM_FOLLOW_CHUNK_CHARS = 48
 /**
- * The consult ask is deliberately long (~2.6k chars => ~55 chunks => seconds
- * of streaming, e.g. >4s at the touch lane's 250 ms cadence) so the
- * transcript keeps growing well past the browser's gesture.
+/**
+ * The consult ask is deliberately long (~28.6k chars => ~600 chunks => ~10 s
+ * at the touch lane's pinned 12 ms cadence; ~30 s at the default 50 ms) so the
+ * transcript keeps growing through the whole gesture and the post-gesture
+ * growth assertions. The touch cadence sits at the frame floor: on the
+ * unfixed web app a streaming token's bottom pin re-arms follow mode whenever
+ * it lands between the gesture's scroll application and its asynchronously
+ * dispatched scroll event (~one frame); the original 250 ms let the scroll
+ * event win the race almost every time and the re-pin never manifested.
  */
-const STREAM_FOLLOW_ASK = `Stream-follow probe ${'alpha bravo charlie delta '.repeat(100)}trim.`
+const STREAM_FOLLOW_ASK = `Stream-follow probe ${'alpha bravo charlie delta '.repeat(1100)}trim.`
 
 /**
  * The reasoning text this call should stream, by the node kind the reply
@@ -857,33 +862,34 @@ function sendPacedStreamedCompletion(req, res, body, decision) {
   })
   const chunks = chunksOf(String(decision.content ?? ''), STREAM_FOLLOW_CHUNK_CHARS)
   let index = 0
-  let timer = null
-  let closed = false
-  const tail = () => {
+  const finish = () => {
     res.write(streamFrame(model, {}, decision.toolCalls.length > 0 ? 'tool_calls' : 'stop'))
     res.write(streamUsageFrame(model))
     res.write('data: [DONE]\n\n')
     res.end()
   }
-  const step = () => {
-    timer = null
-    if (closed) return
-    if (index >= chunks.length) {
-      tail()
+  const timer = setInterval(() => {
+    if (res.writableEnded) {
+      clearInterval(timer)
       return
     }
-    res.write(streamFrame(model, { content: chunks[index] }))
-    index += 1
-    timer = setTimeout(step, OPTS.streamChunkMs)
-  }
-  // a stopped run aborts the fetch: drop the pending chunk and end quietly so
-  // the harness' cancellation unwinds immediately (the linger contract)
-  req.on('close', () => {
-    closed = true
-    if (timer !== null) clearTimeout(timer)
+    if (index < chunks.length) {
+      res.write(streamFrame(model, { content: chunks[index] }))
+      index += 1
+    } else {
+      clearInterval(timer)
+      finish()
+    }
+  }, OPTS.streamChunkMs)
+  reqCloseEndsPacedStream(res, timer)
+}
+
+/** Stop the pacing timer and end quietly when the client aborts the stream. */
+function reqCloseEndsPacedStream(res, timer) {
+  res.on('close', () => {
+    clearInterval(timer)
     if (!res.writableEnded) res.end()
   })
-  step()
 }
 
 function readJson(req) {

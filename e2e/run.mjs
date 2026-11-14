@@ -167,10 +167,12 @@
 //                  cross-process polling cannot bracket a live stream)
 //   stream-follow-touch scripted `stream-follow` fixture: a paced SSE stream
 //                  grows the transcript live on a hasTouch 390x844 context; a
-//                  native CDP touch swipe up the history (5 moves, ~300px,
-//                  <300ms) must scroll the reader away from the bottom and
-//                  clear the pin — subsequent token/scrollHeight growth then
-//                  leaves scrollTop stable within ±1px, while the pre-swipe
+//                  native CDP touch swipe up the history must clear the pin —
+//                  while the finger is held still, live growth must never
+//                  yank the reader back to the bottom (the unfixed app
+//                  re-pins within one ~12 ms chunk period), and subsequent
+//                  token/scrollHeight growth must leave the reader's anchored
+//                  row in place while the bottom edge recedes; the pre-swipe
 //                  phase proves at-bottom streaming still follows
 //   real           opt-in (TWO_BROTHERS_REAL_E2E=1): real models via LM Studio
 //
@@ -536,6 +538,9 @@ function tsEnv(overrides = {}) {
  *   helperModel optional --helper-model forwarded to the fixture (the
  *            `helper-write` delegation's per-call model override and the child
  *            request's model id; default leaves the fixture's `e2e-helper`)
+ *   streamChunkMs optional --stream-chunk-ms forwarded to the fixture (the
+ *            `stream-follow` paced opening's chunk cadence; the touch scenario
+ *            pins it explicitly)
  * The returned handle may carry a `modelServer` (fixture runs) that
  * killBackend() tears down with the backend itself, plus its `modelBase`
  * (the OpenAI-compatible `/v1` URL a helper route can point at).
@@ -560,6 +565,7 @@ async function startBackend({ kind, scenario, lingerMs, helperModel, streamChunk
       if (Number.isFinite(streamChunkMs)) modelArgs.push('--stream-chunk-ms', String(streamChunkMs))
       if (typeof helperModel === 'string' && helperModel !== '')
         modelArgs.push('--helper-model', helperModel)
+      if (Number.isFinite(streamChunkMs)) modelArgs.push('--stream-chunk-ms', String(streamChunkMs))
       modelServer = spawnServer(modelArgs, 'ts-model')
       spawned.push(modelServer)
       await waitForModelServer(modelPort)
@@ -1741,21 +1747,76 @@ async function scenarioStreamFollow(runner) {
 //
 // Touch lane for the streaming-scroll regression: with a paced scripted stream
 // (fixtures/scripted-server.mjs, scenario `stream-follow`) growing the
-// transcript live, a native touch swipe up the history (CDP
-// Input.dispatchTouchEvent, hasTouch 390x844 context, 5 moves totaling ~300px
-// under 300ms) must clear the bottom pin; subsequent token/scrollHeight growth
-// then leaves scrollTop stable within ±1px. The pre-swipe phase also proves
-// that normal at-bottom streaming still follows (the pin keeps the reader at
-// the bottom while rows arrive).
+// transcript live on a frame-floor cadence, a native touch swipe up the
+// history (CDP Input.dispatchTouchEvent, hasTouch 390x844 context) must clear
+// the bottom pin for good, and the live growth that follows must leave the
+// reader parked.
+//
+// Why the fast cadence: on the unfixed app the follow flag is recomputed only
+// inside the asynchronously dispatched scroll handler, so a streaming token's
+// bottom pin re-arms follow whenever it lands between the gesture's scroll
+// application and that scroll event (~one frame). At the old 250 ms cadence
+// the scroll event won that race nearly every time — the swipe escaped follow
+// by luck and the scenario passed vacuously on the unfixed base. At ~12 ms
+// (client-observed ~17 ms) a token lands in the race window of essentially
+// every gesture, and the re-pin becomes directly observable: while the finger
+// is held still up-history, a token pin yanks the reader back to the bottom
+// within one chunk period. Each swipe round therefore holds the finger still
+// and polls for that yank — a bounded, observation-driven check with no
+// wall-clock assertion on the gesture — and several independent rounds make a
+// lucky-escape vacuous pass astronomically unlikely instead of the default.
+//
+// On the fixed app the gesture handlers disengage follow synchronously from
+// the touchmove itself, so pins stand down from the first move on, every
+// round's hold observes the reader staying parked while the transcript grows,
+// and the post-growth assertions measure a genuinely settled position (two
+// stable readings, never a fixed sleep). Those tail assertions anchor on a
+// visible user row: window recycling rewrites scrollTop to preserve the
+// reader's view during massive growth, so the honest invariant is the anchor
+// row's viewport offset (plus the bottom edge receding), not a constant
+// scrollTop.
+
+/** Two consecutive scrollTop readings `stableMs` apart within `tolerance` px
+ *  (bounded by `timeout`): the scroll position has actually settled, whatever
+ *  the machine's gesture/inertia timing. */
+async function waitForScrollQuiescence(
+  measure,
+  { stableMs = 100, tolerance = 0.5, timeout = 5000, desc = 'the scroll position to settle' } = {},
+) {
+  const start = Date.now()
+  let prev = await measure()
+  while (Date.now() - start < timeout) {
+    await sleep(stableMs)
+    const cur = await measure()
+    if (Math.abs(cur.scrollTop - prev.scrollTop) <= tolerance) return cur
+    prev = cur
+  }
+  throw new Error(
+    `timeout (${timeout} ms) waiting for ${desc}: scrollTop keeps moving (last ${prev.scrollTop})`,
+  )
+}
+
+/** Poll while the finger is held still after a swipe round. On the unfixed app
+ *  a token pin re-pins the transcript within one chunk period (the autoscroll
+ *  re-pin bug); on the fixed app the reader only drifts further up-history as
+ *  the transcript grows. Returns the yanked measurement or null. */
+async function pollForGestureRePin(measure, fromBottom, { windowMs = 500, intervalMs = 25, thresholdPx = 60 } = {}) {
+  const start = Date.now()
+  while (Date.now() - start < windowMs) {
+    await sleep(intervalMs)
+    const m = await measure()
+    if (fromBottom(m) < thresholdPx) return m
+  }
+  return null
+}
 
 async function scenarioStreamFollowTouch(runner) {
-  // 250 ms per chunk: the swipe gesture plus its scroll-event delivery must
-  // complete well inside one chunk period, so a token pin can never fire
-  // mid-gesture and cancel the touch scroll (see the fixture's --stream-chunk-ms)
+  // Frame-floor cadence: keeps a live token in the application/scroll-event
+  // race window on the unfixed app (see the scenario header and the fixture).
   const be = await startBackend({
     kind: 'fixture',
     scenario: 'stream-follow',
-    streamChunkMs: 250,
+    streamChunkMs: 12,
   })
   const context = await browser.newContext({
     viewport: { width: 390, height: 844 },
@@ -1826,7 +1887,7 @@ async function scenarioStreamFollowTouch(runner) {
     await page.locator('.chat-scroll').waitFor()
 
     // the seeded transcript is tall and lands bottom-pinned
-    const seeded = await waitFor(
+    await waitFor(
       async () => {
         const m = await measure()
         return m.scrollHeight - m.clientHeight > 900 ? m : null
@@ -1844,7 +1905,7 @@ async function scenarioStreamFollowTouch(runner) {
     // -- at-bottom streaming follows: the pin tracks live growth -------------
     await sendTask(page, 'Stream-follow touch probe')
     await page.locator('.stream-live').waitFor({ timeout: 30000 })
-    const grown = await waitFor(
+    await waitFor(
       async () => {
         const m = await measure()
         return m.scrollHeight >= landed.scrollHeight + 120 ? m : null
@@ -1859,83 +1920,118 @@ async function scenarioStreamFollowTouch(runner) {
     // -- native touch swipe up the history ------------------------------------
     // A downward finger drag inside .chat-scroll reveals earlier messages
     // (scrollTop decreases); the gesture is a native touch sequence, not a
-    // wheel event or a programmatic scrollTop assignment.
+    // wheel event or a programmatic scrollTop assignment. Each round moves the
+    // finger a little and then holds it still while polling for the re-pin:
+    // the unfixed app yanks the reader back to the bottom within one chunk
+    // period, which is the bug this scenario exists to catch.
     const box = await page.locator('.chat-scroll').boundingBox()
     assert.ok(box, '.chat-scroll must have a bounding box')
     const startX = box.x + box.width / 2
-    const startY = box.y + box.height * 0.4
-    const SWIPE_PX = 300
-    const MOVES = 5
+    let fingerY = box.y + box.height * 0.4
     const cdp = await page.context().newCDPSession(page)
-    const preSwipe = await measure()
-    const gestureStart = Date.now()
+    const ROUND_MOVES = 4
+    const ROUND_PX = 100
+    const ROUNDS = 5
     await cdp.send('Input.dispatchTouchEvent', {
       type: 'touchStart',
-      touchPoints: [{ x: startX, y: startY, id: 1 }],
+      touchPoints: [{ x: startX, y: fingerY, id: 1 }],
     })
-    for (let i = 1; i <= MOVES; i += 1) {
-      await cdp.send('Input.dispatchTouchEvent', {
-        type: 'touchMove',
-        touchPoints: [{ x: startX, y: startY + (SWIPE_PX / MOVES) * i, id: 1 }],
-      })
-      await sleep(12)
+    for (let round = 1; round <= ROUNDS; round += 1) {
+      for (let i = 1; i <= ROUND_MOVES; i += 1) {
+        fingerY += ROUND_PX / ROUND_MOVES
+        await cdp.send('Input.dispatchTouchEvent', {
+          type: 'touchMove',
+          touchPoints: [{ x: startX, y: fingerY, id: 1 }],
+        })
+        await sleep(25)
+      }
+      const yanked = await pollForGestureRePin(measure, fromBottom, { windowMs: 500 })
+      if (yanked) {
+        assert.fail(
+          `round ${round}: live token growth re-pinned the transcript mid-gesture ` +
+            `(reader yanked to ${fromBottom(yanked).toFixed(1)}px from the bottom while the ` +
+            'finger was held still) — the autoscroll re-pin bug',
+        )
+      }
     }
+    // the finger rested through every hold, so the gesture carries no fling
+    // velocity; end it and let the scroll position settle for real (two stable
+    // readings) before the parked baseline is measured
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
-    const gestureMs = Date.now() - gestureStart
-    assert.ok(gestureMs < 300, `the swipe must complete under 300ms (took ${gestureMs}ms)`)
+    const settled = await waitForScrollQuiescence(measure, { desc: 'the swipe to settle' })
+    assert.ok(
+      fromBottom(settled) > 150,
+      `the swipe must park the reader away from the bottom (fromBottom ${fromBottom(settled)})`,
+    )
 
-    const swiped = await waitFor(
-      async () => {
-        const m = await measure()
-        return preSwipe.scrollTop - m.scrollTop >= 150 ? m : null
-      },
-      { timeout: 10000, desc: 'the touch swipe to scroll up-history (scrollTop -150px)' },
+    // anchor on the topmost visible user row: growth below the parked reader
+    // slides the rendered window and rewrites scrollTop to keep that row's
+    // viewport position, so the honest invariant is the ANCHOR staying put
+    // (and the bottom edge receding), not a constant scrollTop
+    const anchorSeq = await page.evaluate(() => {
+      const sc = document.querySelector('.chat-scroll')
+      const scTop = sc.getBoundingClientRect().top
+      for (const el of sc.querySelectorAll('[data-history-nav-target]')) {
+        const offset = el.getBoundingClientRect().top - scTop
+        if (offset > -50 && offset < sc.clientHeight * 0.6) {
+          return el.getAttribute('data-history-nav-target')
+        }
+      }
+      return null
+    })
+    assert.ok(anchorSeq, 'a visible user row must anchor the parked reader')
+    const measureAnchor = () =>
+      page.evaluate((s) => {
+        const sc = document.querySelector('.chat-scroll')
+        const a = sc?.querySelector(`[data-history-nav-target="${s}"]`)
+        if (!sc || !a) return null
+        const r = a.getBoundingClientRect()
+        return {
+          offset: r.top - sc.getBoundingClientRect().top,
+          fromBottom: sc.scrollHeight - sc.scrollTop - sc.clientHeight,
+          scrollHeight: sc.scrollHeight,
+        }
+      }, anchorSeq)
+    const parked = await measureAnchor()
+    assert.ok(parked, 'the anchor row must be measured')
+
+    // -- subsequent live growth must not move the reader ----------------------------
+    // While the paced stream keeps appending rows, the anchored row must keep
+    // its viewport offset (the bottom pin cleared on the reader's own gesture
+    // and token growth never yanks the transcript), and the bottom edge must
+    // recede as the transcript grows. A re-pin would collapse fromBottom back
+    // toward zero — the same bug the rounds catch mid-gesture.
+    const grown = await (async () => {
+      const start = Date.now()
+      while (Date.now() - start < 20000) {
+        await sleep(50)
+        const m = await measureAnchor()
+        assert.ok(m, 'the anchor row unmounted during live growth')
+        assert.ok(
+          m.fromBottom >= 60,
+          `live growth re-pinned the transcript (fromBottom collapsed to ${m.fromBottom.toFixed(1)}px)`,
+        )
+        if (m.scrollHeight >= parked.scrollHeight + 150) return m
+      }
+      throw new Error('timeout (20000 ms) waiting for the live stream to keep growing the transcript')
+    })()
+    assert.ok(
+      Math.abs(grown.offset - parked.offset) <= 2,
+      `live growth moved the anchored row: offset ${parked.offset.toFixed(2)} -> ${grown.offset.toFixed(2)}`,
     )
     assert.ok(
-      fromBottom(swiped) > 150,
-      `the swipe must park the reader away from the bottom (fromBottom ${fromBottom(swiped)})`,
+      grown.fromBottom >= parked.fromBottom + 100,
+      `live growth must push the bottom edge further away (fromBottom ${parked.fromBottom.toFixed(1)} -> ${grown.fromBottom.toFixed(1)})`,
     )
 
-    // The synthetic swipe can leave a compositor fling gliding after touchEnd
-    // (observed ~1.3s of continued upward scroll on this machine); the parked
-    // baseline must be captured after the fling settles, or the glide would be
-    // misread as an app-side yank during the growth assertion below.
-    const flingSettled = await waitFor(
-      async () => {
-        const a = await measure()
-        await sleep(150)
-        const b = await measure()
-        return Math.abs(a.scrollTop - b.scrollTop) <= 1 ? b : null
-      },
-      { timeout: 5000, interval: 50, desc: 'the post-swipe fling to settle' },
-    )
-
-    // -- subsequent growth must not move the reader ----------------------------
-    // While the paced stream keeps appending rows, scrollTop must stay within
-    // ±1px of where the swipe left it: the bottom pin cleared on the reader's
-    // own gesture and token growth never yanks the transcript.
-    const parkedScrollTop = flingSettled.scrollTop
-    const parkedScrollHeight = flingSettled.scrollHeight
-    let latest = swiped
-    await waitFor(
-      async () => {
-        latest = await measure()
-        return latest.scrollHeight >= parkedScrollHeight + 150
-      },
-      { timeout: 20000, interval: 50, desc: 'the live stream to keep growing the transcript' },
-    )
-    assert.ok(
-      Math.abs(latest.scrollTop - parkedScrollTop) <= 1,
-      `streaming growth yanked the reader: scrollTop ${parkedScrollTop} -> ${latest.scrollTop} ` +
-        `(scrollHeight ${parkedScrollHeight} -> ${latest.scrollHeight})`,
-    )
-
-    // the run-end reload must not move the parked reader either
+    // the run-end envelope burst must not move the parked reader either
     await waitForRunEnd(page)
-    const settled = await measure()
+    await waitForScrollQuiescence(measure, { desc: 'the run-end reload to settle' })
+    const settledEnd = await measureAnchor()
+    assert.ok(settledEnd, 'the anchor row must survive the run-end reload')
     assert.ok(
-      Math.abs(settled.scrollTop - parkedScrollTop) <= 1,
-      `the run-end reload moved the reader: scrollTop ${parkedScrollTop} -> ${settled.scrollTop}`,
+      Math.abs(settledEnd.offset - grown.offset) <= 2,
+      `the run-end reload moved the anchored row: offset ${grown.offset.toFixed(2)} -> ${settledEnd.offset.toFixed(2)}`,
     )
 
     consoleGuard.assertClean()
