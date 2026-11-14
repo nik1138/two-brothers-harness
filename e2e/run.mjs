@@ -2859,6 +2859,210 @@ async function scenarioProviderReset(runner) {
   }
 }
 
+// -- scenario: Settings + sidebar quality fixes --------------------------------
+// Hermetic regression cover for six statically confirmed UI bugs:
+//   1. ProvidersSection.confirmDelete: a successful DELETE followed by a failed
+//      list refresh must still remove the row (optimistic filtered update).
+//   2. Sidebar workspace-filter empty state: workspace-specific copy and a
+//      working "Show all workspaces" action; search empty behavior unchanged.
+//   3. providerUsageBadges/providerDeleteImpact must count the optional
+//      subagent helper ref (badges + delete impact copy).
+//   5. ProvidersSection.toggleRow: a blocked click (dirty-edit guard) must not
+//      move the roving tabindex before the detail actually opens.
+//   6. SettingsDialog post-load focus: a non-models initial section lands on
+//      the active nav button, not a hidden .role-card input (models keeps its
+//      first-field autofocus).
+// The backend is the deterministic mock; the failing refresh is injected with
+// a Playwright route abort, so nothing here touches a model endpoint.
+
+async function scenarioSettingsQuality(runner) {
+  const be = await startBackend({ kind: 'mock' })
+  const wsDir = tmpDir('tb-e2e-quality-ws')
+  const wsName = path.basename(wsDir)
+  const ALPHA = 'quality-alpha'
+  const BETA = 'quality-beta'
+  const { context, page, consoleGuard } = await newScenarioPage()
+  try {
+    // -- API setup: two custom providers; only the subagent helper uses beta.
+    for (const [name, model] of [
+      [ALPHA, 'alpha-model'],
+      [BETA, 'beta-model'],
+    ]) {
+      const created = await apiCall(be.base, 'POST', '/api/providers', {
+        name,
+        base_url: `https://${name}.example/v1`,
+        kind: 'openai-compatible',
+        models: [model],
+      })
+      assert.equal(created.status, 201, `POST provider ${name} -> HTTP ${created.status}: ${created.text}`)
+    }
+    const configured = await apiCall(be.base, 'PUT', '/api/settings', {
+      subagent: { provider_ref: BETA, model: 'helper-e2e-model' },
+    })
+    assert.equal(configured.status, 200, `PUT settings -> HTTP ${configured.status}: ${configured.text}`)
+
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await createSession(page, 'Quality probe session')
+
+    // -- fix 2: workspace-filter empty state gets its own copy + a working
+    //    "Show all workspaces"; the search empty state keeps "Clear search".
+    await ensureWorkspace(page, wsDir, wsName)
+    await selectWorkspaceFilter(page, wsName)
+    const sidebarEmpty = page.locator('.sidebar .empty-state')
+    await waitFor(async () => (await sidebarEmpty.count()) === 1, {
+      desc: 'the workspace-filter empty state',
+    })
+    assert.ok(
+      (await sidebarEmpty.locator('.empty-state-title').innerText()).includes(`No sessions in ${wsName}`),
+      'workspace-filter empty copy must name the workspace, not the search',
+    )
+    assert.equal(
+      await sidebarEmpty.getByRole('button', { name: 'Clear search' }).count(),
+      0,
+      'workspace-filter empty state must not offer the dead Clear search',
+    )
+    await sidebarEmpty.getByRole('button', { name: 'Show all workspaces' }).click()
+    await waitFor(
+      async () =>
+        (await page.locator('select[title="Filter sessions by workspace"]').inputValue()) === 'all',
+      { desc: 'the workspace filter back to all' },
+    )
+
+    // search with no matches keeps the search copy and a working Clear search
+    await page.click('button[aria-label="Search sessions"]')
+    const searchInput = page.locator('input.session-search-input')
+    await searchInput.fill('zzz-no-such-session')
+    await waitFor(
+      async () =>
+        (await sidebarEmpty.locator('.empty-state-title').innerText()).includes('No sessions match'),
+      { desc: 'the search empty copy' },
+    )
+    await sidebarEmpty.getByRole('button', { name: 'Clear search' }).click()
+    assert.equal(await searchInput.inputValue(), '', 'Clear search must empty the query')
+    await page.click('button[aria-label="Close search"]')
+
+    // -- fix 6 (preserved): opening Settings on Models & roles focuses the
+    //    first role-card field after the load.
+    await page.locator('.sidebar-footer .footer-action').click()
+    const dialog = page.locator('[role="dialog"][aria-labelledby="settings-dialog-title"]')
+    await dialog.waitFor({ state: 'visible' })
+    await waitFor(
+      async () => (await dialog.locator('.role-card--senior input:focus').count()) === 1,
+      { desc: 'models autofocus to land in the Senior role card' },
+    )
+
+    // -- fix 3: the subagent-only provider gets a Subagent badge on its row.
+    await dialog.getByRole('button', { name: 'Providers', exact: true }).click()
+    const pane = dialog.locator('[role="region"][aria-label="Providers"]')
+    await pane.waitFor({ state: 'visible' })
+    const rowFor = (name) =>
+      pane.locator('.provider-row').filter({
+        has: page.locator('.provider-row-name', { hasText: new RegExp(`^${name}$`) }),
+      })
+    const alphaRow = rowFor(ALPHA)
+    const betaRow = rowFor(BETA)
+    await betaRow.waitFor()
+    assert.deepEqual(
+      (await betaRow.locator('.provider-role').allInnerTexts()).map((text) => text.trim()),
+      ['Subagent'],
+      'subagent-only usage must badge the row',
+    )
+    assert.equal(
+      await alphaRow.locator('.provider-role').count(),
+      0,
+      'an unused provider must stay unbadged',
+    )
+
+    // -- fix 5: a blocked click on another row (dirty-edit guard) shows the
+    //    discard prompt but must not move the roving tabindex.
+    await alphaRow.click()
+    const detail = pane.locator('.provider-detail')
+    await detail.waitFor()
+    const baseInput = detail.locator('label.provider-field', { hasText: 'Base URL' }).locator('input')
+    await baseInput.fill('https://dirty-edit.invalid/v1')
+    await betaRow.click()
+    const discard = detail.locator('.provider-discard')
+    await discard.waitFor()
+    assert.equal(await alphaRow.getAttribute('tabindex'), '0', 'roving tabindex stays on the open row')
+    assert.equal(await betaRow.getAttribute('tabindex'), '-1', 'blocked click must not take tabindex')
+    await discard.getByRole('button', { name: 'Keep editing', exact: true }).click()
+    await waitFor(async () => (await discard.count()) === 0, { desc: 'the discard prompt to close' })
+
+    // -- fix 3 (detail + impact): discarding opens beta; the delete impact
+    //    names the helper route.
+    await betaRow.click()
+    await discard.waitFor()
+    await discard.getByRole('button', { name: 'Discard', exact: true }).click()
+    await waitFor(
+      async () =>
+        (await detail.locator('.provider-detail-title').innerText()).trim() === BETA,
+      { desc: 'the beta detail to open after discarding' },
+    )
+    assert.deepEqual(
+      (await detail.locator('.provider-badge.is-role').allInnerTexts()).map((text) => text.trim()),
+      ['Used by Subagent'],
+    )
+    await detail.getByRole('button', { name: 'Delete', exact: true }).click()
+    const impact = detail.locator('.provider-delete-impact')
+    await impact.waitFor()
+    assert.match(
+      (await impact.innerText()).trim(),
+      /Subagent uses this provider\. It will switch to Manual\./,
+      'the delete impact must name the subagent helper route',
+    )
+
+    // -- fix 1: confirm the delete with the list refresh failing afterwards;
+    //    the row must still disappear (optimistic filtered update) and the
+    //    failed refresh must still be reported.
+    await page.route('**/api/providers', (route) => {
+      if (route.request().method() === 'GET') void route.abort()
+      else void route.continue()
+    })
+    await detail.getByRole('button', { name: 'Delete provider', exact: true }).click()
+    await waitFor(async () => (await betaRow.count()) === 0, {
+      desc: 'the deleted row to disappear despite the failed refresh',
+    })
+    const listError = pane.locator('.providers-error')
+    await listError.waitFor()
+    assert.ok(
+      (await listError.innerText()).trim().length > 0,
+      'the failed reconciling refresh must surface an error',
+    )
+    await waitFor(async () => (await alphaRow.count()) === 1, {
+      desc: 'the untouched provider row to survive',
+    })
+
+    // -- fix 6 (deep link): opening Settings on a non-models section lands on
+    //    the active nav button, not a hidden .role-card input.
+    await dialog.getByRole('button', { name: 'Close settings' }).click()
+    await dialog.waitFor({ state: 'hidden' })
+    await page.locator('button.seat-button').first().click()
+    const reopened = page.locator('[role="dialog"][aria-labelledby="settings-dialog-title"]')
+    await reopened.waitFor({ state: 'visible' })
+    await waitFor(
+      async () => (await reopened.locator('.settings-nav-item:focus').count()) === 1,
+      { desc: 'post-load focus to land on the active nav button' },
+    )
+    const focusedNav = reopened.locator('.settings-nav-item:focus')
+    assert.equal((await focusedNav.innerText()).trim(), 'Permissions')
+    assert.equal(await focusedNav.getAttribute('aria-current'), 'page')
+    assert.equal(
+      await reopened.locator('.role-card input:focus').count(),
+      0,
+      'a hidden models-pane input must not hold focus',
+    )
+
+    consoleGuard.assertClean([/Failed to load resource/])
+    runner.pass('settings-quality')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(be.dir)
+    rmTree(wsDir)
+  }
+}
+
 // -- scenario: step folding -----------------------------------------------------------
 //
 // Two work-mode runs whose junior writes two `todo_write` plans each: every run
@@ -6673,6 +6877,13 @@ async function main() {
         run: () => (
           (currentRunner = makeRunner('settings-preset-sync')),
           scenarioSettingsPresetSync(currentRunner)
+        ),
+      },
+      {
+        label: 'settings-quality',
+        run: () => (
+          (currentRunner = makeRunner('settings-quality')),
+          scenarioSettingsQuality(currentRunner)
         ),
       },
       {
