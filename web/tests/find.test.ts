@@ -5,8 +5,8 @@ import assert from 'node:assert/strict'
 import { performance } from 'node:perf_hooks'
 import { test } from 'node:test'
 
-import { findMatches, nextMatch, prevMatch } from '../src/find.ts'
-import type { FindBlock } from '../src/find.ts'
+import { findInvalidationRevision, findMatches, nextMatch, prevMatch } from '../src/find.ts'
+import type { FindBlock, FindInvalidationInput } from '../src/find.ts'
 
 const blocks = (...texts: string[]): FindBlock[] => texts.map((text) => ({ text }))
 
@@ -175,4 +175,124 @@ test('large input: the scan stays linear in total text size', () => {
       `(small=${smallMs.toFixed(1)}ms, large=${largeMs.toFixed(1)}ms)`,
   )
   assert.ok(largeMs < 5000, `5.6M-character scan took ${largeMs.toFixed(1)}ms`)
+})
+
+// -- findInvalidationRevision (the find cache's freshness key) ----------------
+// ChatView's single find-cache watcher fires on revisions of this key, so the
+// fold-affecting reactive inputs (visibleTimeline, auditVisible, expandedFolds,
+// liveRunId, dockedApprovalId) cannot be omitted silently: every input is a
+// required property of FindInvalidationInput at the component's call site.
+
+function invalidationBase(): FindInvalidationInput {
+  return {
+    timeline: [],
+    auditVisible: false,
+    expandedFolds: new Set(),
+    liveRunId: null,
+    dockedApprovalId: null,
+  }
+}
+
+test('invalidation revision: identical inputs stay on the same revision', () => {
+  const first = findInvalidationRevision(invalidationBase())
+  assert.equal(findInvalidationRevision(invalidationBase()), first, 'repeat call')
+  assert.equal(
+    findInvalidationRevision({ ...invalidationBase(), timeline: [], liveRunId: undefined }),
+    first,
+    'null and undefined liveRunId normalize the same',
+  )
+})
+
+test('invalidation revision: a new visible timeline identity bumps the revision', () => {
+  const first = findInvalidationRevision(invalidationBase())
+  const next = findInvalidationRevision({ ...invalidationBase(), timeline: [{ text: 'a' }] })
+  assert.notEqual(next, first)
+  assert.ok(next > first, 'revisions grow monotonically')
+})
+
+test('invalidation revision: the same timeline identity re-read keeps the revision', () => {
+  const timeline = [{ text: 'a' }]
+  const first = findInvalidationRevision({ ...invalidationBase(), timeline })
+  assert.equal(findInvalidationRevision({ ...invalidationBase(), timeline }), first)
+  // identity-based on purpose (same contract as the former direct
+  // `watch(visibleTimeline, ...)`): in-place content edits of the same array
+  // do not invalidate
+  timeline.push({ text: 'b' })
+  assert.equal(findInvalidationRevision({ ...invalidationBase(), timeline }), first)
+})
+
+test('invalidation revision: auditVisible toggle bumps the revision', () => {
+  const first = findInvalidationRevision(invalidationBase())
+  assert.notEqual(
+    findInvalidationRevision({ ...invalidationBase(), auditVisible: true }),
+    first,
+  )
+})
+
+test('invalidation revision: expandedFolds are content-compared', () => {
+  const first = findInvalidationRevision({
+    ...invalidationBase(),
+    expandedFolds: new Set(['a', 'b']),
+  })
+  assert.equal(
+    findInvalidationRevision({ ...invalidationBase(), expandedFolds: new Set(['a', 'b']) }),
+    first,
+    'a fresh Set with the same ids must not invalidate',
+  )
+  assert.equal(
+    findInvalidationRevision({ ...invalidationBase(), expandedFolds: new Set(['b', 'a']) }),
+    first,
+    'order-insensitive',
+  )
+  assert.notEqual(
+    findInvalidationRevision({ ...invalidationBase(), expandedFolds: new Set(['a', 'c']) }),
+    first,
+    'a different id set bumps the revision',
+  )
+})
+
+test('invalidation revision: liveRunId changes bump the revision', () => {
+  const first = findInvalidationRevision(invalidationBase())
+  const followed = findInvalidationRevision({ ...invalidationBase(), liveRunId: 'run-1' })
+  assert.notEqual(followed, first)
+  assert.notEqual(
+    findInvalidationRevision({ ...invalidationBase(), liveRunId: 'run-2' }),
+    followed,
+  )
+})
+
+test('invalidation revision: dockedApprovalId changes bump the revision', () => {
+  const first = findInvalidationRevision(invalidationBase())
+  const docked = findInvalidationRevision({ ...invalidationBase(), dockedApprovalId: 'ap-1' })
+  assert.notEqual(docked, first)
+  assert.notEqual(
+    findInvalidationRevision({ ...invalidationBase(), dockedApprovalId: 'ap-2' }),
+    docked,
+  )
+})
+
+test('invalidation revision: changing one input leaves the other inputs independent', () => {
+  const first = findInvalidationRevision({
+    ...invalidationBase(),
+    liveRunId: 'run-1',
+    dockedApprovalId: 'ap-1',
+  })
+  assert.equal(
+    findInvalidationRevision({
+      ...invalidationBase(),
+      liveRunId: 'run-1',
+      dockedApprovalId: 'ap-1',
+      auditVisible: false,
+    }),
+    first,
+  )
+  assert.notEqual(
+    findInvalidationRevision({
+      ...invalidationBase(),
+      liveRunId: 'run-1',
+      dockedApprovalId: 'ap-1',
+      expandedFolds: new Set(['fold-9']),
+    }),
+    first,
+  )
 })

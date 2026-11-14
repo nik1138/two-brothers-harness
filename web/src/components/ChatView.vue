@@ -4,7 +4,7 @@ import type { PropType, VNode } from 'vue'
 import { NButton, NPopover } from 'naive-ui'
 import { formatTime, SPEAKER_LABELS, speakerActivityLabel, speakerInitial } from '../chat'
 import type { ChatGroup, ChatMessage, Speaker } from '../chat'
-import { findMatches, nextMatch, prevMatch } from '../find'
+import { findInvalidationRevision, findMatches, nextMatch, prevMatch } from '../find'
 import type { FindMatch } from '../find'
 import { buildFoldRows } from '../folding'
 import type { FoldRenderRow } from '../folding'
@@ -854,23 +854,27 @@ function invalidateFindBlocks(): void {
   })
 }
 
-// A live update appends/replaces rows, so the rendered text changed.
-watch(visibleTimeline, invalidateFindBlocks)
+/**
+ * The find cache's freshness key: every reactive input that re-folds or
+ * re-renders the transcript — visible timeline rows, the prompt-audit
+ * preference, expanded fold groups, the followed run, the docked approval —
+ * is a required property of `FindInvalidationInput` in find.ts, so a missing
+ * dependency is a type error at this call site, not a silent ghost-match bug.
+ */
+const findInvalidationKey = computed(() =>
+  findInvalidationRevision({
+    timeline: visibleTimeline.value,
+    auditVisible: auditVisible.value,
+    expandedFolds: expandedFolds.value,
+    liveRunId: props.liveRunId,
+    dockedApprovalId: props.dockedApprovalId,
+  }),
+)
 
-// Toggling the audit preference changes the rendered transcript without
-// changing visibleTimeline: hidden audits must drop out of find results (and
-// reappear when shown).
-watch(auditVisible, invalidateFindBlocks)
-
-// Expanding/collapsing a fold group adds or removes its rows from the DOM.
-watch(expandedFolds, invalidateFindBlocks)
-
-// Following a different run or docking another approval re-folds rows
-// (foldRows depends on both) without changing visibleTimeline: the cached
-// blocks must be re-collected or matches point at text that left the DOM and
-// scrolling reaches into detached nodes.
-watch(() => props.liveRunId, invalidateFindBlocks)
-watch(() => props.dockedApprovalId, invalidateFindBlocks)
+// Any change to the inputs above appends/replaces/removes rendered rows, so
+// the cached searchable blocks are dropped (the idempotent nextTick
+// re-collection inside invalidateFindBlocks is preserved).
+watch(findInvalidationKey, invalidateFindBlocks)
 
 /** Shell hooks (session switches remount this component; keeps the bar scriptable). */
 defineExpose({ openFind, closeFind })
