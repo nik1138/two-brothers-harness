@@ -535,6 +535,12 @@ async function showEarlier() {
  * cycles: folding each exact (float) shift into it bounds the error at one
  * rounding instead of accumulating a fraction per appended envelope. A
  * reader-initiated scroll re-baselines the virtual position.
+ *
+ * The survivor search must skip top chrome (the "show earlier" button)
+ * before testing element identity: a window advance that moves the start
+ * past the fully loaded page re-inserts that button as a brand-new first
+ * DOM child, and breaking on the new identity would forfeit the
+ * compensation entirely.
  */
 let virtualScrollTop: number | null = null
 let appliedScrollTop: number | null = null
@@ -562,8 +568,8 @@ watch(
     const scrollerTop = el.getBoundingClientRect().top
     for (const child of el.children) {
       if (!(child instanceof HTMLElement)) continue
-      if (!before.has(child)) break
       if (child.classList.contains('show-earlier')) continue
+      if (!before.has(child)) break
       const offsetBefore = viewportBefore.get(child) ?? 0
       const delta = child.getBoundingClientRect().top - scrollerTop - offsetBefore
       virtualScrollTop = Math.max(0, virtualScrollTop + delta)
