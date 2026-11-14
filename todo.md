@@ -30,8 +30,12 @@ Last updated: **2026-11-14**.
   cleanup emptied main-checkout `packages/harness`; tracked files were
   restored, deps/dist rebuilt, gates re-run green — but untracked
   `packages/harness/sessions` (sessions, settings incl. sealed keys, runtime
-  sidecars/subagent logs) is **permanently lost**. Provider keys must be
-  re-entered; the live server is to be rebuilt/restarted after the docs lane.
+  sidecars/subagent logs) is **permanently lost**. Provider keys must still
+  be re-entered (owner task). The live server itself was **rebuilt and
+  restarted on 2026-11-14** (verified by the server lane on `c52554a`): PID
+  247580 `node dist/cli.js serve --port 8600 --sessions-dir sessions`,
+  `GET /` and `GET /api/sessions` (`[]`) 200, served assets byte-identical
+  to fresh `web/dist`, process scan clean, sessions/settings untouched.
   Details: `HANDOFF.md` §Incident (2026-11-14).
 - Subagent wave fully shipped: phase 1 read-only helpers (`7cdcdce`),
   settings route (`32fc970`), phase 2 mutating helpers (`d1518a9`+`c445eee`),
@@ -56,9 +60,17 @@ Last updated: **2026-11-14**.
 
 ## Owner / release gates
 
-- [ ] **Restore live state** — re-enter provider API keys in Settings
-      (sealed keys lost in the 2026-11-14 incident), rebuild + restart
-      `serve` on :8600, re-create check sessions.
+- [ ] **Re-enter provider API keys + re-create check sessions (owner)** —
+      the server half of the live-state restoration is **DONE and
+      verified** (2026-11-14, on `c52554a`): `web` + `packages/harness`
+      builds PASS, `sync-web` copied the current UI, PID 226508 gracefully
+      restarted as PID 247580 (`node dist/cli.js serve --port 8600
+      --sessions-dir sessions`), `GET /` and `GET /api/sessions` (`[]`) 200,
+      served HTML/JS/CSS byte-identical to fresh `web/dist`, process scan
+      clean (only zen-proxy + the intended server), sessions/settings
+      untouched. What remains: sealed provider keys were permanently lost
+      in the incident, so the owner must re-enter them in Settings before
+      any live run, then re-create check sessions.
 - [ ] **0.0.2 release** — only with explicit owner permission. Push the
       current `main` (whatever its tip is at release time), watch CI, bump
       version, curate the changelog, update release docs, run
@@ -355,9 +367,10 @@ descriptions preserved for future work):
 
 ## Local hygiene
 
-- [ ] **Re-enter provider API keys + rebuild live state** — sealed
-      `settings.json` was permanently lost in the 2026-11-14 incident; no
-      sessions survive either.
+- [ ] **Re-enter provider API keys + re-create sessions (owner)** —
+      sealed `settings.json` was permanently lost in the 2026-11-14
+      incident; no sessions survive either. The serve process itself is
+      restored and verified (see Owner / release gates above).
 - [ ] Delete ignored local evidence dirs/`version/`/`--version/` when done.
 - [ ] Decide whether the tarball should ship `dist/*.map` files.
 - [ ] Keep `research/`, sessions, credentials and logs out of git.

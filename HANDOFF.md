@@ -25,8 +25,12 @@ traversal**) emptied `packages/harness` in the main checkout; tracked files
 were restored and deps/dist rebuilt, but untracked `packages/harness/sessions`
 content — sessions, settings incl. sealed keys, runtime sidecars/subagent
 logs — was **permanently lost**. See **Incident (2026-11-14)** below. The
-live server is intended to be rebuilt and restarted after the docs lane; no
-live state is claimed in this file.
+live server was **rebuilt and restarted on 2026-11-14** (verified by the
+server lane on `c52554a`): PID 247580 runs
+`node dist/cli.js serve --port 8600 --sessions-dir sessions`, serving the
+current `web/dist` byte-identically; `GET /` and `GET /api/sessions` (empty
+`[]`) return 200, and a full process scan shows no stray/test backends.
+Provider keys are still missing (owner task, below).
 
 ## Repository at a glance
 
@@ -60,10 +64,10 @@ live state is claimed in this file.
 | Hermetic server E2E | **4/4** (also inside the smoke gate and the WSL pass) |
 | Browser E2E | **39 hermetic PASS / 0 FAIL / 1 opt-in `real` SKIP** + helpers suite **20/20** |
 | Tarball | **7/7 + pack check PASS** |
-| Live server | not running; intended to be rebuilt/restarted from `packages/harness` after the docs lane (separate lane; no live state claimed here) |
+| Live server | **running** — PID 247580 `node dist/cli.js serve --port 8600 --sessions-dir sessions` (graceful restart of PID 226508); `GET /` 200, `GET /api/sessions` 200 `[]`; served HTML/JS/CSS byte-identical to fresh `web/dist`; process scan clean (only zen-proxy + this server); sessions/settings untouched; **provider keys still to be re-entered by the owner** |
 | Release | no version bump, tag, or publish in this wave; 0.0.1 is the published version |
 
-Live setup (intended, once the server is rebuilt):
+Live setup (verified on the running server, 2026-11-14):
 
 - Senior: `opencode-go / deepseek-v4.1-flash`
 - Junior: LM Studio `lfm3-1.7b` (`http://192.168.31.123:1234/v1`)
@@ -71,8 +75,9 @@ Live setup (intended, once the server is rebuilt):
   fallback). Set it in Settings → Models & roles → Subagent if you want a
   pinned helper model.
 - **Settings were lost in the 2026-11-14 incident** — the sealed provider
-  API keys must be re-entered before any live run; no live sessions or
-  helper transcripts survive.
+  API keys must still be re-entered (owner task) before any live run; no
+  live sessions or helper transcripts survive. Sessions/settings were
+  untouched by the restart.
 
 ### Final checkpoint — integrated lanes (2026-11-14)
 
@@ -160,9 +165,10 @@ passed* on a post-test HTTP-socket `TypeError`; the standalone file ran
   including **sealed provider API keys**, runtime event sidecars, and
   `subagents/` child logs. These local-only files have no backup.
 - **Consequences:** no live sessions/history survive; provider keys must be
-  re-entered in Settings; the serve writer lock and the live :8600 server are
-  gone. The server is intended to be rebuilt and restarted after the docs
-  lane.
+  re-entered in Settings. The serve writer lock and the live :8600 server
+  were lost in the incident but have since been **rebuilt and restarted**
+  (verified 2026-11-14 — see Current state); sessions/settings were
+  untouched by the restart.
 - **Prevention:** never point recursive cleanup/delete tools at the repo
   root, worktree parents, or any path that can contain NTFS junctions; keep
   destructive commands inside one known directory.
@@ -506,10 +512,12 @@ gate. Do not run the live server and the smoke gate at the same time.
 
 ## Next moves
 
-1. **Restore live state (before any live work)** — re-enter provider API
-   keys in Settings (sealed keys lost in the 2026-11-14 incident), rebuild +
-   `sync-web` + restart `serve` on :8600, re-create check sessions. (Handled
-   by a separate lane; this file claims no live state.)
+1. **Re-enter provider API keys (owner, before any live run)** — the
+   server itself is **restored and verified running** (PID 247580 on
+   :8600, current `web/dist` served byte-identically, empty sessions API —
+   see Current state); what remains of the 2026-11-14 incident loss is the
+   sealed provider keys and any check sessions. Re-enter keys in Settings,
+   then re-create check sessions.
 2. **0.0.2 release engineering** — only with explicit permission: push the
    current `main` (whatever its tip is at release time; local-only, 111
    commits ahead of `origin/main`), watch CI, bump version, curated
