@@ -31,6 +31,15 @@ test('Settings owns a third helper route with its own model and effort', () => {
   assert.ok(
     section.includes('Helper subagents are isolated and request approved workspace changes.'),
   )
+  assert.ok(
+    section.includes('always inherits the current Junior model'),
+    'the note states the absolute Junior inheritance rule',
+  )
+  assert.equal(
+    section.includes('Senior/Junior fallback'),
+    false,
+    'the note no longer describes a Senior/Junior fallback',
+  )
   assert.equal(
     section.includes('read-only'),
     false,
@@ -42,6 +51,10 @@ test('Settings owns a third helper route with its own model and effort', () => {
   assert.ok(editor.includes("props.role === 'junior' ? 'Junior' : 'Subagent'"))
   assert.ok(editor.includes('Isolated helper spawned by the Senior'))
   assert.ok(editor.includes('approved workspace changes'))
+  assert.ok(
+    editor.includes('The role picks its persona, not a model'),
+    'the helper description separates persona from model inheritance',
+  )
   assert.equal(editor.includes('Read-only helper'), false)
   assert.ok(editor.includes('.role-card--subagent .role-dot'))
 

@@ -1981,6 +1981,13 @@ imported or executed on load/activation. Sources: `src/pluginbundle.ts`
   Tests: `tests/subagent.test.ts` (+4), `tests/tuihelpers.test.ts` (+5),
   `tests/tuiintegration.test.ts` (+1), `web/tests/subagents.test.ts` (+4) and
   the hermetic browser `subagents` scenario (exact aggregate + no-cost pin).
+  **Model precedence corrected 2026-11-14:** an unset helper model now always
+  inherits the current Junior model — including `role:"senior"` helpers and
+  calls with no resolved route — replacing the old per-role Senior/Junior
+  fallback; an explicit route model or a per-call `model` override still
+  wins. The web copy states the absolute Junior rule (the drawer labels the
+  persona `Senior role`/`Junior role`, never a model) and the Settings note
+  and quickstart describe the same precedence.
 - **Stacked-dialog mask-click (web, non-blocker)** — **blocked on upstream**
   (evidence updated 2026-11-08): naive-ui fires `mask-click` for clicks that
   land inside a stacked second dialog, so every dialog's handler must ignore

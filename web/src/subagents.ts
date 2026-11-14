@@ -613,8 +613,10 @@ export function subagentStatusLabel(status: SubagentStatus): string {
   return 'running'
 }
 
+/** The role picks the helper's persona, not a model: an unset model always
+ * inherits the current Junior one, so the label never says "model". */
 export function subagentRoleLabel(role: SubagentRole): string {
-  return role === 'senior' ? 'Senior model' : 'Junior model'
+  return role === 'senior' ? 'Senior role' : 'Junior role'
 }
 
 /**
