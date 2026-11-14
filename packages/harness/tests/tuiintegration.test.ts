@@ -12,10 +12,13 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
+import * as http from "node:http";
+import type { AddressInfo } from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { after, test } from "node:test";
 
+import { COMPACTION_SUMMARY_PREFIX } from "../src/compaction.ts";
 import { resolveConfig } from "../src/config.ts";
 import { RuntimeSettings } from "../src/runtime.ts";
 import { SettingsStore } from "../src/settings_store.ts";
@@ -160,6 +163,12 @@ class RecordingMock extends MockProvider {
 /** The newest fully rendered frame (rows joined with newlines). */
 const lastFrameText = (output: FakeOutput): string =>
   stripAnsi(output.data.split(ANSI.cursorHome).at(-1) ?? "");
+
+/** Non-empty JSONL lines of a session file ([] when the file is missing). */
+function sessionLines(file: string): string[] {
+  if (!fs.existsSync(file)) return [];
+  return fs.readFileSync(file, "utf8").split("\n").filter((line) => line.trim() !== "");
+}
 
 async function quit(input: FakeInput, app: Promise<number>): Promise<number> {
   // Esc precedence: close overlay → cancel a running turn → clear a draft →
@@ -1220,6 +1229,179 @@ test("/sessions picker: sidecar and derived titles with human ages, resume uncha
     );
     assert.equal(await quit(input, app), 0);
   } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("/sessions during /compact is refused: wait notice, no picker, no cross-session SUMMARY marker", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-tui-compact-resume-gate-"));
+  const sessionsDir = path.join(root, "sessions");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  const line = (
+    seq: number,
+    id: string,
+    from: "user" | "senior",
+    to: string,
+    text: string,
+  ): string =>
+    JSON.stringify({
+      v: 1,
+      id,
+      seq,
+      ts: "2026-11-14T09:00:00Z",
+      from,
+      to,
+      kind: "message",
+      payload: { text },
+    });
+  // alpha: enough envelopes for a real cut; beta: a clean second session.
+  fs.writeFileSync(
+    path.join(sessionsDir, "alpha.jsonl"),
+    `${[
+      line(1, "a1", "user", "senior", "alpha task"),
+      line(2, "a2", "senior", "user", "alpha reply one"),
+      line(3, "a3", "user", "senior", "alpha follow-up"),
+      line(4, "a4", "senior", "user", "alpha reply two"),
+      line(5, "a5", "user", "senior", "alpha last word"),
+    ].join("\n")}\n`,
+    "utf8",
+  );
+  fs.writeFileSync(
+    path.join(sessionsDir, "beta.jsonl"),
+    `${line(1, "b1", "user", "senior", "beta standalone task")}\n`,
+    "utf8",
+  );
+
+  // A loopback OpenAI-compatible endpoint that holds every chat completion
+  // until the test releases it, so /compact stays pending for the whole
+  // scenario (no model endpoint, no network beyond 127.0.0.1).
+  const SUMMARY_TEXT = "ALPHA-UNIQUE-COMPACTION-SUMMARY";
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const server = http.createServer((req, res) => {
+    req.on("data", () => {});
+    req.on("end", () => {
+      void gate.then(() => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ choices: [{ message: { content: SUMMARY_TEXT } }] }));
+      });
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+
+  const { app, input, output } = startApp({
+    sessionsDir,
+    cfg: resolveConfig({
+      provider: "openai",
+      baseUrl: `http://127.0.0.1:${port}/v1`,
+      apiKey: "test-key",
+      seniorModel: "blocked-senior",
+      juniorModel: "blocked-senior",
+      sessionFile: path.join(sessionsDir, "alpha.jsonl"),
+      resume: true,
+      compactKeepRecent: 1,
+      retries: 0,
+    }),
+  });
+  try {
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+
+    input.type("/compact");
+    input.enter();
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("compacting context…")),
+      "compaction is pending on the held endpoint",
+    );
+
+    // Reach resume through the command palette: the typed-slash path is
+    // already draft-refused while compaction runs, but the palette dispatch
+    // (idleOnly keyed on `running` only) used to open the picker mid-compact,
+    // letting the pending summary commit into the newly selected session.
+    input.key("p", { ctrl: true });
+    assert.ok(await waitFor(() => lastFrameText(output).includes("COMMANDS")));
+    input.type("sessions");
+    assert.ok(await waitFor(() => /Sessions/.test(lastFrameText(output))));
+    input.enter();
+
+    assert.ok(
+      await waitFor(() =>
+        textOf(output).includes("cannot resume a session while compaction is running"),
+      ),
+      "resume is refused with a clear wait notice",
+    );
+    assert.ok(
+      !lastFrameText(output).includes("RESUME SESSION"),
+      "the resume picker never opens during compaction",
+    );
+
+    // Let the held compaction finish: alpha's summary lands in alpha's own
+    // transcript and on-disk session — behavior beyond the guard is unchanged.
+    release();
+    assert.ok(
+      await waitFor(() => textOf(output).includes("context compacted"), 30_000),
+      "compaction completes once the endpoint answers",
+    );
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes(SUMMARY_TEXT), 5000),
+      "the fresh summary marker belongs to alpha's transcript",
+    );
+    const alphaOnDisk = sessionLines(path.join(sessionsDir, "alpha.jsonl"));
+    assert.ok(
+      alphaOnDisk.some((line) => {
+        try {
+          const parsed = JSON.parse(line) as { payload?: { text?: unknown } };
+          const text = String(parsed.payload?.text ?? "");
+          return text.startsWith(COMPACTION_SUMMARY_PREFIX) && text.includes(SUMMARY_TEXT);
+        } catch {
+          return false;
+        }
+      }),
+      "the on-disk rewrite still carries the summary envelope",
+    );
+
+    // After compaction the picker works again; resuming beta must not inherit
+    // alpha's summary marker.
+    input.type("/sessions");
+    input.key("escape"); // dismiss the inline / picker, keep the draft
+    input.enter();
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("RESUME SESSION")),
+      "the picker opens again once compaction has finished",
+    );
+    input.key("down"); // first item is alpha; move to beta
+    input.enter();
+    assert.ok(
+      await waitFor(() => /Resume "beta/.test(lastFrameText(output))),
+      "the confirmation names the beta session",
+    );
+    input.enter();
+    assert.ok(
+      await waitFor(() => textOf(output).includes("resumed beta standalone task")),
+      "beta resumes after compaction",
+    );
+    // Wait out the resume toast so the transcript rows are visible again.
+    assert.ok(
+      await waitFor(
+        () =>
+          lastFrameText(output).includes("session beta.jsonl") &&
+          !lastFrameText(output).includes("resumed beta"),
+        5000,
+      ),
+      "the beta session settles without the resume toast",
+    );
+    assert.ok(
+      !lastFrameText(output).includes(SUMMARY_TEXT),
+      "the resumed session carries no cross-session SUMMARY marker",
+    );
+
+    const code = await quit(input, app);
+    assert.equal(code, 0);
+  } finally {
+    server.closeAllConnections?.();
+    server.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

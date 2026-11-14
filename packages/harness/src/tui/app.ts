@@ -3732,6 +3732,17 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
   };
 
   const openSessionPicker = (): void => {
+    // The palette dispatch reaches this directly (idleOnly gates on `running`
+    // only), so the compacting guard lives here: a pending /compact must
+    // finish before the context it belongs to can be swapped out, or the old
+    // session's summary would commit into the newly selected session model.
+    if (compacting) {
+      baseNotice(
+        "warn",
+        "cannot resume a session while compaction is running — wait for it to finish",
+      );
+      return;
+    }
     const entries: SessionPickEntry[] = [];
     try {
       const metadata = new SessionMetadataStore(sessionsDir, layout);

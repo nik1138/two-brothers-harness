@@ -14,6 +14,7 @@ import {
   createTuiModel,
   envelopeText,
   finalizeStreamingDrafts,
+  nextBlockId,
   reduceModelEvent,
   startEnvelopeDraft,
   type DecisionBlock,
@@ -84,6 +85,48 @@ test("model: constructors preserve full text and never mutate their input", () =
   assert.equal(blockText(withNotice.blocks[1]!), `failed\n${long}`);
   assert.deepEqual(withNotice.blocks[0], withUser.blocks[0]);
   assert.equal(withNotice.nextId, 3);
+});
+
+test("model: generated block ids follow the monotonically seeded nextId sequence", () => {
+  let model = createTuiModel();
+  model = addUserBlock(model, "one");
+  model = addNotice(model, "info", "two");
+  model = addToolCall(model, { role: "junior", tool: "read" });
+  assert.deepEqual(
+    model.blocks.map((block) => block.id),
+    ["b1", "b2", "b3"],
+  );
+  assert.equal(model.nextId, 4);
+  assert.equal(nextBlockId(model), "b4");
+  // In-place reductions (tool result pairing, draft finalization) never
+  // rewind the counter, so the next generated id stays collision-free.
+  const paired = addToolResult(model, { role: "junior", tool: "read", status: "ok" });
+  assert.equal(paired.nextId, 4);
+  assert.equal(nextBlockId(paired), "b4");
+  const grown = addUserBlock(paired, "four");
+  assert.equal(grown.blocks.at(-1)?.id, "b4");
+  assert.equal(new Set(grown.blocks.map((block) => block.id)).size, grown.blocks.length);
+});
+
+test("model: createTuiModel seeds nextId past an existing b1..b5 transcript", () => {
+  const seeded = createTuiModel(
+    ["b1", "b2", "b3", "b4", "b5"].map((id, index) => ({
+      kind: "user" as const,
+      id,
+      text: `seed ${index}`,
+    })),
+  );
+  assert.equal(seeded.nextId, 6);
+  assert.equal(nextBlockId(seeded), "b6");
+  const appended = addUserBlock(seeded, "next");
+  assert.equal(appended.blocks.at(-1)?.id, "b6");
+  assert.equal(appended.nextId, 7);
+  assert.equal(nextBlockId(appended), "b7");
+  assert.equal(
+    new Set(appended.blocks.map((block) => block.id)).size,
+    appended.blocks.length,
+    "seeded and generated ids never collide",
+  );
 });
 
 test("model: streamed draft commits by identity in place with authoritative full text", () => {

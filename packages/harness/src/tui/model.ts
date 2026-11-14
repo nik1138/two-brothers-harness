@@ -193,12 +193,14 @@ export function createTuiModel(blocks: readonly TuiBlock[] = []): TuiModel {
   return { blocks: [...blocks], nextId: next };
 }
 
-/** The next generated block id (`b1`, `b2`, …), skipping used ids. */
+/**
+ * The next generated block id (`b1`, `b2`, …). `createTuiModel` seeds `nextId`
+ * past every existing `bN` id and every append bumps it, so `nextId` is always
+ * free — reading it directly keeps appends O(1) instead of rescanning all block
+ * ids per call (the old scan made transcript growth quadratic).
+ */
 export function nextBlockId(model: TuiModel): string {
-  const used = new Set(model.blocks.map((block) => block.id));
-  let index = model.nextId;
-  while (used.has(`b${index}`)) index += 1;
-  return `b${index}`;
+  return `b${model.nextId}`;
 }
 
 function appendBlock(model: TuiModel, block: TuiBlock): TuiModel {
