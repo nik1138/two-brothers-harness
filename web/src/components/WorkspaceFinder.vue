@@ -4,6 +4,7 @@ import { NButton, NInput } from 'naive-ui'
 import type { InputInst } from 'naive-ui'
 import { ApiError, browseFs, listWorkspaces } from '../api'
 import { readRecentWorkspaces, recordRecentWorkspace } from '../recents'
+import { pathCrumbs, separatorFor } from '../fsPath'
 import type { FsEntry, Workspace } from '../types'
 
 /**
@@ -47,11 +48,6 @@ const emit = defineEmits<{
   cancel: []
 }>()
 
-interface Crumb {
-  label: string
-  path: string
-}
-
 /** ids for aria-activedescendant; useId may contain characters CSS escapes. */
 const uid = useId().replace(/[^a-zA-Z0-9_-]/g, '')
 const nameId = `wsf-name-${uid}`
@@ -90,49 +86,6 @@ onBeforeUnmount(() => {
 
 function errText(e: unknown): string {
   return e instanceof ApiError ? e.message : String(e)
-}
-
-function separatorFor(path: string): string {
-  return path.includes('\\') ? '\\' : '/'
-}
-
-/** Display breadcrumbs for one absolute path of either platform. */
-function pathCrumbs(path: string): Crumb[] {
-  if (!path) return []
-  const drive = /^([A-Za-z]:)[\\/]/.exec(path)
-  if (drive) {
-    const root = `${drive[1]}\\`
-    const out: Crumb[] = [{ label: root, path: root }]
-    let acc = root
-    for (const part of path.slice(drive[0].length).split(/[\\/]+/).filter(Boolean)) {
-      acc = acc.endsWith('\\') ? `${acc}${part}` : `${acc}\\${part}`
-      out.push({ label: part, path: acc })
-    }
-    return out
-  }
-  if (path.startsWith('\\\\')) {
-    const parts = path.replace(/^\\\\/, '').split(/[\\/]+/).filter(Boolean)
-    if (!parts.length) return [{ label: path, path }]
-    const root = `\\\\${parts[0]}\\${parts[1] ?? ''}`
-    const out: Crumb[] = [{ label: root, path: root }]
-    let acc = root
-    for (const part of parts.slice(2)) {
-      acc = `${acc}\\${part}`
-      out.push({ label: part, path: acc })
-    }
-    return out
-  }
-  if (path.startsWith('/')) {
-    if (path === '/') return [{ label: '/', path: '/' }]
-    const out: Crumb[] = [{ label: '/', path: '/' }]
-    let acc = ''
-    for (const part of path.split('/').filter(Boolean)) {
-      acc = `${acc}/${part}`
-      out.push({ label: part, path: acc })
-    }
-    return out
-  }
-  return [{ label: path, path }]
 }
 
 const crumbs = computed(() => pathCrumbs(displayPath.value))
