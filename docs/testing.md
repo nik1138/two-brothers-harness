@@ -1170,7 +1170,17 @@ by the number input's native floor and sends no `PUT /api/settings`, while a
 native-valid but non-whole value is an inline `role=alert` with `aria-invalid`
 that blocks the save before any PUT; a corrected save rides the dialog's single
 Save action, persists the budgets in `sessions/settings.json`, and the
-persisted values plus their effective lines survive a reload). The offline
+persisted values plus their effective lines survive a reload), plus
+`stream-follow` (a scripted fixture seeds a 200-turn session and paces the
+run's opening as genuinely paced SSE content chunks, so the stream draft grows
+frame by frame; a reader who wheels up keeps the anchored row and its distance
+from the bottom while the draft grows, and a reader parked at the bottom
+follows the same growth — sampled in-page once per animation frame, since
+cross-process polling cannot bracket a live stream), plus
+`stream-follow-touch` (on a hasTouch 390×844 context, a native CDP touch swipe
+up the history clears the bottom pin; subsequent token/scrollHeight growth
+then leaves scrollTop stable within ±1px — quiescence and anchor stability —
+while the pre-swipe phase proves at-bottom streaming still follows). The offline
 suite now holds 38 hermetic scenario blocks; the final validated run at
 commit `3fe647f` is **39 PASS, 0 FAIL, 1 SKIP** in the raw log (the
 `chat/resume` block prints one line for chat and one for resume, so 38

@@ -90,7 +90,8 @@ The backend is the TypeScript server in `packages/harness`:
    session status, recents, density, find, search, workspace order, mentions,
    streaming, base commands, composer keys, keybindings, provider settings,
    uiPrefs, queue state, approval policy/session, folding, composer status,
-   todo, recall, tokens) as plain `node --test` via `tests/register-ts.mjs`;
+   todo, recall, tokens, follow scroll) as plain `node --test` via
+   `tests/register-ts.mjs`;
    keep it green too — the smoke test calls it. Run test files individually
    (`node --import ./tests/register-ts.mjs --test tests/drafts.test.ts`) when
    the sandbox blocks spawned test runners.

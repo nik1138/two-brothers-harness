@@ -14,7 +14,9 @@ Local map for the Vue app sources. Parent rules: `../AGENTS.md`; root rules:
   `palette.ts`, `mentions.ts`, `composerKeys.ts`, `keybindings.ts`,
   `providerSettings.ts`, `themeMode.ts`, `density.ts`, `historyNav.ts`
   (user-message navigator: operator-message extraction + window-growth
-  planning) and the other small persisted-state helpers.
+  planning), `followScroll.ts` (pure bottom-follow model for the transcript:
+  synchronous gesture-landing prediction, near-bottom/hold state) and the
+  other small persisted-state helpers.
 - `components/` — Vue components (dialogs, sidebar, chat, composer, settings);
   follow the component and class-name rules in `../AGENTS.md`.
 
