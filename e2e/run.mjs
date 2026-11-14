@@ -172,6 +172,13 @@
 //                  draft grows, then a reader parked at the bottom follows the
 //                  same growth (sampled in-page once per animation frame —
 //                  cross-process polling cannot bracket a live stream)
+//   stream-follow-touch scripted `stream-follow` fixture: a paced SSE stream
+//                  grows the transcript live on a hasTouch 390x844 context; a
+//                  native CDP touch swipe up the history (5 moves, ~300px,
+//                  <300ms) must scroll the reader away from the bottom and
+//                  clear the pin — subsequent token/scrollHeight growth then
+//                  leaves scrollTop stable within ±1px, while the pre-swipe
+//                  phase proves at-bottom streaming still follows
 //   real           opt-in (TWO_BROTHERS_REAL_E2E=1): real models via LM Studio
 //
 // Backend: every scenario runs against the TypeScript server
@@ -1866,6 +1873,195 @@ async function scenarioStreamFollow(runner) {
 
     consoleGuard.assertClean()
     runner.pass('stream-follow')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(be.dir)
+  }
+}
+
+// -- scenario: streaming follow under a native touch swipe --------------------------------
+//
+// Touch lane for the streaming-scroll regression: with a paced scripted stream
+// (fixtures/scripted-server.mjs, scenario `stream-follow`) growing the
+// transcript live, a native touch swipe up the history (CDP
+// Input.dispatchTouchEvent, hasTouch 390x844 context, 5 moves totaling ~300px
+// under 300ms) must clear the bottom pin; subsequent token/scrollHeight growth
+// then leaves scrollTop stable within ±1px. The pre-swipe phase also proves
+// that normal at-bottom streaming still follows (the pin keeps the reader at
+// the bottom while rows arrive).
+
+async function scenarioStreamFollowTouch(runner) {
+  const be = await startBackend({ kind: 'fixture', scenario: 'stream-follow' })
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+  })
+  const page = await context.newPage()
+  const consoleGuard = attachConsoleGuard(page)
+  const measure = () =>
+    page.evaluate(() => {
+      const el = document.querySelector('.chat-scroll')
+      return {
+        scrollTop: el.scrollTop,
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight,
+      }
+    })
+  const fromBottom = (m) => m.scrollHeight - m.scrollTop - m.clientHeight
+  try {
+    // seed a scrollable transcript: 60 operator/senior turns stay inside the
+    // newest-200 window (no paging compensation involved) and are tall enough
+    // to remain >150px of history above the fold after the swipe
+    const created = await apiCall(be.base, 'POST', '/api/sessions', {
+      title: 'E2E stream follow touch',
+    })
+    assert.ok(created.json?.name, `create session -> HTTP ${created.status}`)
+    const session = created.json.name
+    const rows = []
+    const t0 = Date.UTC(2026, 10, 10, 12, 0, 0)
+    let seq = 1
+    for (let i = 1; i <= 60; i += 1) {
+      const text = `Touch probe ${String(i).padStart(3, '0')} — alpha bravo charlie delta echo`
+      rows.push({
+        v: 1,
+        id: `msg-${seq}`,
+        seq,
+        ts: new Date(t0 + (seq - 1) * 30_000).toISOString(),
+        from: 'user',
+        to: 'senior',
+        kind: 'message',
+        payload: { text },
+      })
+      seq += 1
+      rows.push({
+        v: 1,
+        id: `msg-${seq}`,
+        seq,
+        ts: new Date(t0 + (seq - 1) * 30_000).toISOString(),
+        from: 'senior',
+        to: 'user',
+        kind: 'message',
+        payload: { text: `Acknowledged probe ${i}.` },
+      })
+      seq += 1
+    }
+    fs.writeFileSync(
+      path.join(be.dir, session),
+      rows.map((row) => JSON.stringify(row)).join('\n') + '\n',
+      'utf-8',
+    )
+
+    await page.goto(be.base)
+    // below 768px the sidebar starts closed: open the drawer to reach the seed
+    await page.locator('button[aria-label="Show sessions"]').click()
+    await page
+      .locator('nav[aria-label="Sessions"]')
+      .getByText('E2E stream follow touch', { exact: true })
+      .click()
+    await page.locator('.chat-scroll').waitFor()
+
+    // the seeded transcript is tall and lands bottom-pinned
+    const seeded = await waitFor(
+      async () => {
+        const m = await measure()
+        return m.scrollHeight - m.clientHeight > 900 ? m : null
+      },
+      { desc: 'the seeded transcript to exceed the viewport' },
+    )
+    const landed = await waitFor(
+      async () => {
+        const m = await measure()
+        return fromBottom(m) <= 1 ? m : null
+      },
+      { desc: 'the seeded transcript to land bottom-pinned' },
+    )
+
+    // -- at-bottom streaming follows: the pin tracks live growth -------------
+    await sendTask(page, 'Stream-follow touch probe')
+    await page.locator('.stream-live').waitFor({ timeout: 30000 })
+    const grown = await waitFor(
+      async () => {
+        const m = await measure()
+        return m.scrollHeight >= landed.scrollHeight + 120 ? m : null
+      },
+      { timeout: 20000, desc: 'the paced stream to grow the transcript' },
+    )
+    await waitFor(
+      async () => (await measure().then(fromBottom)) <= 1,
+      { timeout: 5000, desc: 'the bottom pin to track the streaming growth' },
+    )
+
+    // -- native touch swipe up the history ------------------------------------
+    // A downward finger drag inside .chat-scroll reveals earlier messages
+    // (scrollTop decreases); the gesture is a native touch sequence, not a
+    // wheel event or a programmatic scrollTop assignment.
+    const box = await page.locator('.chat-scroll').boundingBox()
+    assert.ok(box, '.chat-scroll must have a bounding box')
+    const startX = box.x + box.width / 2
+    const startY = box.y + box.height * 0.4
+    const SWIPE_PX = 300
+    const MOVES = 5
+    const cdp = await page.context().newCDPSession(page)
+    const preSwipe = await measure()
+    const gestureStart = Date.now()
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchStart',
+      touchPoints: [{ x: startX, y: startY, id: 1 }],
+    })
+    for (let i = 1; i <= MOVES; i += 1) {
+      await cdp.send('Input.dispatchTouchEvent', {
+        type: 'touchMove',
+        touchPoints: [{ x: startX, y: startY + (SWIPE_PX / MOVES) * i, id: 1 }],
+      })
+      await sleep(12)
+    }
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    const gestureMs = Date.now() - gestureStart
+    assert.ok(gestureMs < 300, `the swipe must complete under 300ms (took ${gestureMs}ms)`)
+
+    const swiped = await waitFor(
+      async () => {
+        const m = await measure()
+        return preSwipe.scrollTop - m.scrollTop >= 150 ? m : null
+      },
+      { timeout: 10000, desc: 'the touch swipe to scroll up-history (scrollTop -150px)' },
+    )
+    assert.ok(
+      fromBottom(swiped) > 150,
+      `the swipe must park the reader away from the bottom (fromBottom ${fromBottom(swiped)})`,
+    )
+
+    // -- subsequent growth must not move the reader ----------------------------
+    // While the paced stream keeps appending rows, scrollTop must stay within
+    // ±1px of where the swipe left it: the bottom pin cleared on the reader's
+    // own gesture and token growth never yanks the transcript.
+    const parkedScrollTop = swiped.scrollTop
+    const parkedScrollHeight = swiped.scrollHeight
+    let latest = swiped
+    await waitFor(
+      async () => {
+        latest = await measure()
+        return latest.scrollHeight >= parkedScrollHeight + 150
+      },
+      { timeout: 20000, interval: 50, desc: 'the live stream to keep growing the transcript' },
+    )
+    assert.ok(
+      Math.abs(latest.scrollTop - parkedScrollTop) <= 1,
+      `streaming growth yanked the reader: scrollTop ${parkedScrollTop} -> ${latest.scrollTop} ` +
+        `(scrollHeight ${parkedScrollHeight} -> ${latest.scrollHeight})`,
+    )
+
+    // the run-end reload must not move the parked reader either
+    await waitForRunEnd(page)
+    const settled = await measure()
+    assert.ok(
+      Math.abs(settled.scrollTop - parkedScrollTop) <= 1,
+      `the run-end reload moved the reader: scrollTop ${parkedScrollTop} -> ${settled.scrollTop}`,
+    )
+
+    consoleGuard.assertClean()
+    runner.pass('stream-follow-touch')
   } finally {
     await context.close().catch(() => {})
     await killBackend(be)
@@ -7536,6 +7732,13 @@ async function main() {
         run: () => (
           (currentRunner = makeRunner('stream-follow')),
           scenarioStreamFollow(currentRunner)
+        ),
+      },
+      {
+        label: 'stream-follow-touch',
+        run: () => (
+          (currentRunner = makeRunner('stream-follow-touch')),
+          scenarioStreamFollowTouch(currentRunner)
         ),
       },
     ]

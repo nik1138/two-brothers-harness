@@ -30,6 +30,7 @@
 //                          | cooperation | title | list | helper-write | auto-solo
 //                          | stream
 //                          | stream-scroll
+//                          | stream-follow
 //                          (default: approval)
 //                          approval: one workspace_write_file call, then the
 //                                    deliverable after the tool result; the first
@@ -118,6 +119,13 @@
 //                                    animation frames and never renders a
 //                                    stream); the browser scenario asserts
 //                                    scroll anchoring during the growth
+//                          stream-follow: consult-mode run whose senior opening
+//                                    is answered with genuine SSE
+//                                    `delta.content` chunks on a fixed cadence
+//                                    (not one burst), so the browser can swipe
+//                                    mid-stream and watch the transcript grow
+//                                    deterministically; every later call of
+//                                    the cycle keeps the fast JSON reply
 //   --senior-model NAME    default: e2e-senior
 //   --junior-model NAME    default: e2e-junior
 //   --helper-model NAME    default: e2e-helper (the helper route's model)
@@ -434,6 +442,29 @@ const REASONING_LONG = 'LONG_REASONING_HEAD ' + 'x'.repeat(12_000) + ' LONG_REAS
 /** Review/decision nodes stream a short, clean thinking record. */
 const REASONING_SHORT = 'Weighing the scripted proposal before the senior decision.'
 
+// -- stream-follow scenario -------------------------------------------------
+//
+// The touch/scroll browser lanes need a run whose live token stream keeps
+// growing the transcript for seconds, so the reader can swipe mid-stream and
+// watch growth afterwards. The mock provider answers in one burst and raw
+// sleeps in the browser would be timing guesses; instead the senior opening
+// of a new task streams genuine SSE `delta.content` chunks on a fixed cadence.
+// Every later call of the cycle keeps the historical fast JSON reply.
+
+/** Chunk sizing: small enough that the browser backend consumes a delta stream. */
+const STREAM_FOLLOW_CHUNK_CHARS = 48
+/**
+ * ~250 ms per chunk: the browser's swipe gesture (~150ms) plus its scroll-event
+ * delivery must complete well inside one chunk period, so a token pin can never
+ * fire mid-gesture and cancel the touch scroll (the 80ms cadence raced it).
+ */
+const STREAM_FOLLOW_CHUNK_MS = 250
+/**
+ * The consult ask is deliberately long (~2.6k chars => ~55 chunks => >4s of
+ * streaming) so the transcript keeps growing well past the browser's swipe.
+ */
+const STREAM_FOLLOW_ASK = `Stream-follow probe ${'alpha bravo charlie delta '.repeat(100)}trim.`
+
 /**
  * The reasoning text this call should stream, by the node kind the reply
  * answers (the same inference `decide()` already makes for the payload).
@@ -728,6 +759,13 @@ function decide(body) {
   // mock provider finishes a whole run between two animation frames and never
   // renders a stream at all). Keep the prose marker in sync with ../run.mjs.
   if (OPTS.scenario === 'stream-scroll') reply.pacedStream = true
+  // stream-follow: pace ONLY the senior opening of a new task as genuine SSE
+  // content chunks; the rest of the cycle keeps the fast JSON replies, so the
+  // transcript keeps growing for seconds while the browser swipes mid-stream
+  if (OPTS.scenario === 'stream-follow' && body.stream === true && role === 'senior' && newTask) {
+    reply.content = JSON.stringify({ ...payloadFor('consult'), ask: STREAM_FOLLOW_ASK })
+    reply.pacedStream = true
+  }
   // folding determinism: open each run on a fresh second so its tool loop (and
   // therefore its fold group) cannot straddle an envelope timestamp boundary
   if (OPTS.scenario === 'folding' && role === 'senior' && newTask) {
@@ -959,7 +997,6 @@ function sendPacedStreamedCompletion(req, res, body, decision) {
 
 function readJson(req) {
   return new Promise((resolve, reject) => {
-    const chunks = []
     req.on('data', (chunk) => chunks.push(chunk))
     req.on('end', () => {
       try {
