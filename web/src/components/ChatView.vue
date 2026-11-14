@@ -865,6 +865,13 @@ watch(auditVisible, invalidateFindBlocks)
 // Expanding/collapsing a fold group adds or removes its rows from the DOM.
 watch(expandedFolds, invalidateFindBlocks)
 
+// Following a different run or docking another approval re-folds rows
+// (foldRows depends on both) without changing visibleTimeline: the cached
+// blocks must be re-collected or matches point at text that left the DOM and
+// scrolling reaches into detached nodes.
+watch(() => props.liveRunId, invalidateFindBlocks)
+watch(() => props.dockedApprovalId, invalidateFindBlocks)
+
 /** Shell hooks (session switches remount this component; keeps the bar scriptable). */
 defineExpose({ openFind, closeFind })
 

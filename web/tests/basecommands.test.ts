@@ -12,6 +12,7 @@ import {
   DISCOVERED_COMMAND_GROUP_LABEL,
   MODE_COMMAND_USAGE,
   baseCommandMatchesQuery,
+  commandLineSpan,
   commandSectionCount,
   commandUsageLine,
   findBaseCommand,
@@ -430,4 +431,61 @@ test('ComposerCommandRequest carries the catalogs and the composer mode', () => 
   }
   assert.equal(isBaseCommandAction(request.action), true)
   assert.equal(request.baseCommands.length, 1)
+})
+
+// -- commandLineSpan: the span picker activation dispatches -------------------
+// Enter on a typed `/name args` line consumes the whole line and hands the
+// args to the action; clicking the same row in the picker must dispatch the
+// same span (args included), never just the token up to the caret.
+
+test('commandLineSpan: args typed after the token ride along', () => {
+  assert.deepEqual(commandLineSpan('/export report.md', 0), {
+    start: 0,
+    end: '/export report.md'.length,
+    typed: { token: 'export', args: 'report.md' },
+  })
+})
+
+test('commandLineSpan: the trigger start anchors the span, not the caret', () => {
+  // the caret may sit mid-line (right after the token), but the span always
+  // starts at the `/` trigger and covers the args after it
+  assert.deepEqual(commandLineSpan('/export report.md', 0), {
+    start: 0,
+    end: '/export report.md'.length,
+    typed: { token: 'export', args: 'report.md' },
+  })
+})
+
+test('commandLineSpan: only the command line is consumed from multiline text', () => {
+  const text = 'intro\n/export out.txt\nafter'
+  const start = text.indexOf('/export')
+  assert.deepEqual(commandLineSpan(text, start), {
+    start,
+    end: start + '/export out.txt'.length,
+    typed: { token: 'export', args: 'out.txt' },
+  })
+})
+
+test('commandLineSpan: no args yields an empty args string', () => {
+  assert.deepEqual(commandLineSpan('/export', 0), {
+    start: 0,
+    end: 7,
+    typed: { token: 'export', args: '' },
+  })
+})
+
+test('commandLineSpan: bare slash and unparseable spans still report the span', () => {
+  assert.deepEqual(commandLineSpan('/', 0), { start: 0, end: 1, typed: null })
+  assert.deepEqual(commandLineSpan('/ out.txt', 0), { start: 0, end: 9, typed: null })
+})
+
+test('commandLineSpan: multiple words after the name stay in the args', () => {
+  assert.deepEqual(commandLineSpan('/export a b c', 0).typed, { token: 'export', args: 'a b c' })
+})
+
+test('commandLineSpan: malformed input is clamped, not thrown', () => {
+  assert.deepEqual(commandLineSpan(null, 0), { start: 0, end: 0, typed: null })
+  assert.deepEqual(commandLineSpan('/x', -3), { start: 0, end: 2, typed: { token: 'x', args: '' } })
+  assert.deepEqual(commandLineSpan('/x', 99), { start: 2, end: 2, typed: null })
+  assert.deepEqual(commandLineSpan('/x', Number.NaN), { start: 0, end: 2, typed: { token: 'x', args: '' } })
 })
