@@ -86,19 +86,24 @@ Largest production files (corrected line counts, 2026-11-14):
 `packages/harness/src/workspace.ts` 2070,
 `web/src/components/settings/ProvidersSection.vue` 1914,
 `packages/harness/src/tui/view/helpers.ts` 1461. Other large components
-were reviewed for workflow coverage with **no findings**: TUI
-`keymap.ts` (1041), `model.ts` (1000), palette/approval views,
-`terminal.ts`, `steering.ts`; web `SettingsDialog.vue` (1235),
-`WorkspaceFinder.vue` (1085), `Sidebar.vue` (973) lifecycle/guards;
-backend `runtime.ts` (1263), `runevents.ts` (1187),
-`settings_store.ts` (1142), `sessionlayout.ts` (988),
-`compaction.ts` (637), `mcp.ts` (634), `session.ts` (458), provider
-retry/registry internals.
+were reviewed for workflow coverage: TUI `keymap.ts` (1041),
+`model.ts` (1000), palette/approval views, `terminal.ts`, `steering.ts`
+— no findings; web `SettingsDialog.vue` (1235), `WorkspaceFinder.vue`
+(1085), `Sidebar.vue` (973) (findings listed below; `WorkspaceFinder`
+lifecycle/guards specifically clean); backend `runtime.ts` (1263),
+`runevents.ts` (1187), `sessionlayout.ts` (988), `compaction.ts` (637),
+`session.ts` (458), provider retry/registry internals — no findings.
+`settings_store.ts` (1142) and `mcp.ts` (634) are audit-pending (see
+below).
 
 ### Risk-ranked findings queue
 
-Confirmed findings, by severity — all have a fix lane open from `d98ec79`
-but none counts as done until the lane lands with green gates:
+Confirmed findings, by severity. The rows marked FIX LANE IN
+PROGRESS have a fix lane open from `d98ec79`; none counts as done until
+the lane lands with green gates. The Google-`maxTokens` nit (BE-F6a) was
+only optionally assigned; the `prompt_tokens` nit (BE-F6b) has no lane.
+Unconfirmed hypotheses (CHAT-F4, SET-H1) were explicitly excluded from
+the implementation lanes — they are deferred, not in flight.
 
 | ID | Sev | Finding | Evidence | Status |
 |---|---|---|---|---|
@@ -116,14 +121,16 @@ but none counts as done until the lane lands with green gates:
 | CHAT-F3 | Low | Picker-click on a base action silently drops text typed after the token (`args: ''` hardcoded); Enter path on identical text consumes it | `web/src/components/Composer.vue:1203-1218` | FIX LANE IN PROGRESS |
 | BE-F2 | Low | SSE replay loop never checks `write()` backpressure; slow consumer lets Node buffer unboundedly | `packages/harness/src/server.ts:4184-4194` | FIX LANE IN PROGRESS |
 | BE-F3 | Low | In-process session mutex map (`fileSessionTails`) never shrinks; long-lived serve/TUI leaks entries across sessions | `packages/harness/src/harness.ts:854-885` | FIX LANE IN PROGRESS |
-| BE-F6 | Negligible | `GoogleProvider` accepts `maxTokens = Infinity` (serializes as `null` on the wire); `emitUsageIfChanged` omits `prompt_tokens` from the diff | `provider.ts:2716-2717`, `harness.ts:4230-4245` | FIX LANE IN PROGRESS |
+| BE-F6a | Negligible | `GoogleProvider` accepts `maxTokens = Infinity` (serializes as `null` on the wire) | `provider.ts:2716-2717` | FIX LANE IN PROGRESS (optionally assigned) |
+| BE-F6b | Negligible | `emitUsageIfChanged` omits `prompt_tokens` from the usage diff | `harness.ts:4230-4245` | NOT ASSIGNED — no lane |
 
-Hypotheses to confirm inside the lanes before fixing:
+Hypotheses — explicitly excluded from the implementation lanes;
+unconfirmed (not reproduced), deferred rather than in flight:
 
 | ID | Sev | Finding | Evidence | Status |
 |---|---|---|---|---|
-| CHAT-F4 | Low | "Response complete" announced when a run errors or is stopped (live-region misannounce for screen-reader users) | `web/src/components/ChatView.vue:1228-1234` | FIX LANE IN PROGRESS (hypothesis — confirm streaming-error clear first) |
-| SET-H1 | Low | Effort clear from an in-flight models.dev fetch can land after `save()` and blank the form's effort for the next save | `web/src/components/SettingsDialog.vue:393-421` | FIX LANE IN PROGRESS (hypothesis — race not reproduced) |
+| CHAT-F4 | Low | "Response complete" announced when a run errors or is stopped (live-region misannounce for screen-reader users) | `web/src/components/ChatView.vue:1228-1234` | DEFERRED / NOT REPRODUCED |
+| SET-H1 | Low | Effort clear from an in-flight models.dev fetch can land after `save()` and blank the form's effort for the next save | `web/src/components/SettingsDialog.vue:393-421` | DEFERRED / NOT REPRODUCED |
 
 DEFERRED:
 
@@ -145,7 +152,8 @@ DEFERRED:
 AUDIT PENDING (remaining-core audit still running — no conclusions invented):
 
 - **BE-F4** — MCP `connect`/`listTools` have no timeout (`mcp.ts:588-601`);
-  whether pi-mcp carries its own connect timeout is unverifiable offline.
+  the follow-up audit is checking the locally installed pi-mcp source
+  for a built-in connect timeout before a verdict is recorded.
 - **settings_store** write path; **config.ts** `validateRunConfig`;
   **workspace.ts** edit-diff internals; **subagent.ts** runner;
   **runstream.ts**; **instructions.ts**; CLI periphery
@@ -157,13 +165,17 @@ CANDIDATE (structural, behavior-preserving, not yet accepted):
 - **TUI-R1–R7** — idle-gate `dispatchEntry` parity; `usageFields()`
   dedup; `scrollByPages()`; shared text-projection helpers model/app;
   `pluginStats()`; split `foldHelperDetail`; uniform render-ownership
-  for overlay openers.
+  for overlay openers. **R6 (`foldHelperDetail` split) — REFACTOR LANE
+  IN PROGRESS** (`quality-tui-fold-refactor`); the rest remain
+  unaccepted candidates.
 - **CHAT-R1–R4** — extract `ModelSwitchMenu.vue`; `useTranscriptFind`
   composable; `MarkdownBody.vue` island; one `routeDescription()`
   helper.
 - **SET-S1–S5** — extract `ProviderAddCard`/`ProviderDetailCard`;
   `useEffortOptions` composable + pure `buildSettingsPatch`; `fsPath.ts`
   + `sidebarGroups.ts` pure modules with tests; shared `errText`.
+  **S3 (`fsPath.ts` extraction + tests) — REFACTOR LANE IN PROGRESS**
+  (`quality-workspace-paths`); the rest remain unaccepted candidates.
 - **BE-R1–R5** — `harness-subagents.ts` slice; `provider/` module split;
   server route-group functions; `workspace-edit.ts`; CLI per-command
   modules (existing `doSessions`/`doSpill`/`doConfig` pattern).
