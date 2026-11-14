@@ -106,15 +106,17 @@ Shipped on the integrate-goal line (`main..6052ff7`); recorded on
 
 - [ ] **Re-enter provider API keys + re-create check sessions (owner)** —
       the server half of the live-state restoration is **DONE and
-      verified** (2026-11-14, on `c52554a`): `web` + `packages/harness`
-      builds PASS, `sync-web` copied the current UI, PID 226508 gracefully
-      restarted as PID 247580 (`node dist/cli.js serve --port 8600
-      --sessions-dir sessions`), `GET /` and `GET /api/sessions` (`[]`) 200,
-      served HTML/JS/CSS byte-identical to fresh `web/dist`, process scan
-      clean (only zen-proxy + the intended server), sessions/settings
-      untouched. What remains: sealed provider keys were permanently lost
+      re-verified live** (2026-11-14, on main `92af62a` — docs-only after
+      the gated code merge `9f353c4`): package + web builds PASS,
+      `sync-web` byte-identical to the current UI, one intended backend
+      running: PID 271100 `node dist/cli.js serve --port 8600
+      --sessions-dir sessions`, `GET /` and `GET /api/sessions` 200 with
+      both preserved user sessions (…4176c1 and …066581),
+      process scan clean (exactly one intended server), sessions/settings
+      preserved. What remains: sealed provider keys were permanently lost
       in the incident, so the owner must re-enter them in Settings before
-      any live run, then re-create check sessions.
+      any live run, then re-create check sessions. (The separate real
+      streaming UI validation is still open — not claimed here.)
 - [ ] **0.0.2 release** — only with explicit owner permission. Push the
       current `main` (whatever its tip is at release time), watch CI, bump
       version, curate the changelog, update release docs, run

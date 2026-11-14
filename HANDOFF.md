@@ -70,7 +70,7 @@ below).
 | Hermetic server E2E | **4/4** (also inside the smoke gate and the WSL pass) |
 | Browser E2E | **full 40-block matrix: 41 PASS lines / 0 FAIL / 1 opt-in `real` SKIP** + helpers suite **20/20** — validated at `9f353c4` |
 | Tarball | **7/7 + pack check PASS** — last run at `3fe647f`; **not re-run in the goal-wave final gate** |
-| Live server | **running** — PID 247580 `node dist/cli.js serve --port 8600 --sessions-dir sessions` (graceful restart of PID 226508), verified **before the goal-integration wave** (server lane on `c52554a`): `GET /` 200, `GET /api/sessions` 200 `[]`; served HTML/JS/CSS byte-identical to fresh `web/dist` at that time; process scan clean (only zen-proxy + this server); sessions/settings untouched; **provider keys still to be re-entered by the owner**; not re-verified in the goal-wave final gate (this lane makes no server claims) |
+| Live server | **running** — PID 271100 `node dist/cli.js serve --port 8600 --sessions-dir sessions`, **re-verified live 2026-11-14 on main `92af62a`** (docs-only after the gated code merge `9f353c4`): package + web rebuilt, `sync-web` byte-identical; `GET /` 200, `GET /api/sessions` 200 with both preserved user sessions (…4176c1 and …066581); process scan shows exactly one intended backend; sessions/settings preserved; **provider keys still to be re-entered by the owner** (live streaming UI validation is a separate, still-open item) |
 | Release | no version bump, tag, or publish in this wave; 0.0.1 is the published version |
 
 Live setup (verified on the running server, 2026-11-14):
