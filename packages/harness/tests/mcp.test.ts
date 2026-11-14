@@ -1005,4 +1005,3 @@ test("connect deadline: the per-server timeoutMs setting bounds initialization w
     await mcp.client.close();
   }
 });
-
