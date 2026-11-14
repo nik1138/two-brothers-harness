@@ -73,10 +73,9 @@ candidate. Fix lanes `quality-tui-fixes`, `quality-chat-fixes`,
 — a started lane is **not** a shipped fix; statuses below track evidence,
 not intention. Several lanes have since **landed and been independently
 accepted/merged** (marked INTEGRATED with SHAs and acceptance counts);
-SET-C1..C6 is now the only unintegrated fix branch (C4 follow-up in
-progress). Integrated web precheck at `17867f9`: web 640/640 (includes
-fsPath tests), build PASS, six focused browser scenarios PASS — a
-precheck, **not** the final browser matrix. The remaining-core audit (CLI / workspace edit-diff /
+SET-C1..C6 is the last fix branch in final acceptance (at `30830523`).
+Integrated prechecks are recorded below — evidence, **not** the final
+release gates on the eventual final commit. The remaining-core audit (CLI / workspace edit-diff /
 settings-write / config / subagent runner / runstream / instructions +
 the MCP timeout verdict) is **complete** — its conclusions are recorded
 below as CORE-F1..F5 plus no-finding notes. The paused OAuth (item 6),
@@ -119,13 +118,13 @@ lanes — deferred, not in flight.
 | TUI-B1 | Low-Med | Resume is reachable during an active `/compact`; the old session's summary commits into the new session's transcript (display corruption only, no on-disk damage) | `packages/harness/src/tui/app.ts:3961-4024`, `3734-3823` | INTEGRATED — `6a4bebc`, merge `1eef5fe`; acceptance focused 109/109, package both modes 2464/2456/0 fail/8 skip, CLI 19/19, faults 7/7 |
 | BE-F1 | Low-Med | Steering past `MAX_STEERING_ENVELOPES_PER_RUN` is silently dropped: steers already accepted with HTTP 200 vanish at `finish()` with no `steering_dropped` event (contradicts "a drop is never silent") | `packages/harness/src/harness.ts:1782` | INTEGRATED — impl `8ff2d61`, merge `e1b6eeb`; acceptance 181 focused, full 2465/2457/0 fail/8 skip, CLI 19/19 |
 | TUI-B2 | Med (perf) | `nextBlockId` rescans all block ids per new block — O(n²) transcript growth; collision-skip loop is provably dead work | `packages/harness/src/tui/model.ts:196-202` | INTEGRATED — `6a4bebc`, merge `1eef5fe`; acceptance focused 109/109, package both modes 2464/2456/0 fail/8 skip, CLI 19/19, faults 7/7 |
-| SET-C1 | Low-Med | Deleted provider row survives a failed refetch (UI shows it cleared, editing it 404s) | `web/src/components/settings/ProvidersSection.vue:559-585` | FIX FOLLOW-UP IN PROGRESS — reviewer accepted C1/C2/C3/C5/C6; **none integrated** |
+| SET-C1 | Low-Med | Deleted provider row survives a failed refetch (UI shows it cleared, editing it 404s) | `web/src/components/settings/ProvidersSection.vue:559-585` | FINAL ACCEPTANCE IN PROGRESS at `30830523` — previously accepted; **not integrated** |
 | CHAT-F2 | Med-Low | Find-in-transcript cache not invalidated on `liveRunId`/`dockedApprovalId` change: ghost matches + transcript yanked to top | `web/src/components/ChatView.vue:858-866` | INTEGRATED — `3b93640` + `6c9303e` + `215a512`, merge `17867f9`; acceptance full web 633/633, build PASS, focused find/folding 36/36, browser neighbors green |
-| SET-C2 | Low | Wrong empty state under a workspace filter ("No sessions match" + dead "Clear search"; no way back to All workspaces) | `web/src/components/Sidebar.vue:492-497` | FIX FOLLOW-UP IN PROGRESS — reviewer accepted; none integrated |
-| SET-C3 | Low | Subagent role invisible in provider usage badges / delete-impact copy ("No role uses this provider") though the backend clears the subagent ref on delete | `ProvidersSection.vue:107-115`, `web/src/providerSettings.ts:211-286`, `packages/harness/src/server.ts:3619-3624` | FIX FOLLOW-UP IN PROGRESS — reviewer accepted; none integrated |
-| SET-C4 | Low | Deletion focus-fallback timers (up to ~8 × 800 ms) not cancelled on unmount; a late tick can steal focus | `web/src/components/Sidebar.vue:255-268` | FIX FOLLOW-UP IN PROGRESS — deterministic browser regression + residual focus case being fixed; none integrated |
-| SET-C5 | Low (a11y) | Roving tabindex moves before the dirty-edit guard resolves; "Keep editing" leaves tab order off the open provider | `web/src/components/settings/ProvidersSection.vue:425-441` | FIX FOLLOW-UP IN PROGRESS — reviewer accepted; none integrated |
-| SET-C6 | Low | Settings post-load autofocus targets a `v-show`-hidden pane on deep-link open; no element receives focus | `web/src/components/SettingsDialog.vue:471-477` | FIX FOLLOW-UP IN PROGRESS — reviewer accepted; none integrated |
+| SET-C2 | Low | Wrong empty state under a workspace filter ("No sessions match" + dead "Clear search"; no way back to All workspaces) | `web/src/components/Sidebar.vue:492-497` | FINAL ACCEPTANCE IN PROGRESS at `30830523` — previously accepted; **not integrated** |
+| SET-C3 | Low | Subagent role invisible in provider usage badges / delete-impact copy ("No role uses this provider") though the backend clears the subagent ref on delete | `ProvidersSection.vue:107-115`, `web/src/providerSettings.ts:211-286`, `packages/harness/src/server.ts:3619-3624` | FINAL ACCEPTANCE IN PROGRESS at `30830523` — previously accepted; **not integrated** |
+| SET-C4 | Low | Deletion focus-fallback timers (up to ~8 × 800 ms) not cancelled on unmount; a late tick can steal focus | `web/src/components/Sidebar.vue:255-268` | FINAL ACCEPTANCE IN PROGRESS at `30830523` — red/green unmount and no-unmount coverage in place; **not integrated** |
+| SET-C5 | Low (a11y) | Roving tabindex moves before the dirty-edit guard resolves; "Keep editing" leaves tab order off the open provider | `web/src/components/settings/ProvidersSection.vue:425-441` | FINAL ACCEPTANCE IN PROGRESS at `30830523` — previously accepted; **not integrated** |
+| SET-C6 | Low | Settings post-load autofocus targets a `v-show`-hidden pane on deep-link open; no element receives focus | `web/src/components/SettingsDialog.vue:471-477` | FINAL ACCEPTANCE IN PROGRESS at `30830523` — previously accepted; **not integrated** |
 | CHAT-F3 | Low | Picker-click on a base action silently drops text typed after the token (`args: ''` hardcoded); Enter path on identical text consumes it | `web/src/components/Composer.vue:1203-1218` | INTEGRATED — `3b93640` + `6c9303e` + `215a512`, merge `17867f9`; acceptance full web 633/633, build PASS, focused find/folding 36/36, browser neighbors green |
 | BE-F2 | Low | SSE replay loop never checks `write()` backpressure; slow consumer lets Node buffer unboundedly | `packages/harness/src/server.ts:4184-4194` | INTEGRATED — impl `8ff2d61`, merge `e1b6eeb`; acceptance 181 focused, full 2465/2457/0 fail/8 skip, CLI 19/19 |
 | BE-F3 | Low | In-process session mutex map (`fileSessionTails`) never shrinks; long-lived serve/TUI leaks entries across sessions | `packages/harness/src/harness.ts:854-885` | INTEGRATED — impl `8ff2d61`, merge `e1b6eeb`; acceptance 181 focused, full 2465/2457/0 fail/8 skip, CLI 19/19 |
@@ -202,27 +201,58 @@ No-finding conclusions from the same audit (full reads, not grep-level):
   pages × 30 s — a pathological listing could stretch to ~8 h; not
   realistically exploitable, awareness only.
 
-CANDIDATE (structural, behavior-preserving, not yet accepted):
+PRECHECK (verification evidence on integrated trees — **not** the final
+release gates on the eventual final commit):
+
+- **At `17867f9`** — backend typecheck PASS; package both modes
+  2480/2472/0 fail/8 skip; CLI source + dist 19/19 each; web 640/640,
+  build PASS, six focused browser scenarios PASS.
+- **At `140d854`** — offline smoke PASS (package 2483/2475/0 fail/8
+  skip, web 640/640, CLI 19/19, faults 7/7, hermetic server 4/4);
+  tarball 7/7 + pack:check PASS; WSL Node 24.16.0 typecheck + both modes
+  2483/2482/0 fail/1 skip + hermetic server 4/4.
+- **At `1eef5fe`** — browser 38 hermetic PASS / 0 FAIL / 1 opt-in real
+  SKIP + helpers 18/18.
+- WSL Node 22 pass **pending**.
+
+Gate finding from the browser precheck:
+
+| ID | Sev | Finding | Evidence | Status |
+|---|---|---|---|---|
+| E2E-G1 | Low-Med | `scripts/e2e-test.ps1` did not check the web build exit code, so an EPERM build failure continued and was masked by a recovery ENOENT — the browser matrix can run against a missing/stale `dist` | `scripts/e2e-test.ps1` build step (found by browser precheck) | FIX LANE IN PROGRESS (`quality-e2e-build-exit`); final gate reliability requires it or an explicit deferral |
+
+CANDIDATE (structural, behavior-preserving — remaining groups DEFERRED,
+descriptions preserved for future work):
 
 - **TUI-R1–R7** — idle-gate `dispatchEntry` parity; `usageFields()`
   dedup; `scrollByPages()`; shared text-projection helpers model/app;
   `pluginStats()`; split `foldHelperDetail`; uniform render-ownership
   for overlay openers. **R6 (`foldHelperDetail` split) — INTEGRATED**
   (impl `1c600e2`, merge `7f28044`; acceptance 46/46 focused, full
-  2461/2453/0 fail/8 skip); the rest remain unaccepted candidates.
+  2461/2453/0 fail/8 skip). **R1–R5, R7 — DEFERRED:** broad extraction
+  risk is not justified without a concrete correctness/performance
+  payoff in this cycle; the accepted R6 slice covers the clearest
+  low-risk boundary.
 - **CHAT-R1–R4** — extract `ModelSwitchMenu.vue`; `useTranscriptFind`
   composable; `MarkdownBody.vue` island; one `routeDescription()`
-  helper.
+  helper. **DEFERRED:** broad extraction risk is not justified without
+  a concrete correctness/performance payoff in this cycle; the accepted
+  S3 slice covers the clearest low-risk boundary.
 - **SET-S1–S5** — extract `ProviderAddCard`/`ProviderDetailCard`;
   `useEffortOptions` composable + pure `buildSettingsPatch`; `fsPath.ts`
   + `sidebarGroups.ts` pure modules with tests; shared `errText`.
   **S3 (`fsPath.ts` extraction + tests) — INTEGRATED**
   (implementation `db14655`, merge `d0b851b`; independent acceptance:
-  web suite 615/615, `npm run build` PASS); the rest remain unaccepted
-  candidates.
+  web suite 615/615, `npm run build` PASS). **S1/S2/S4/S5 — DEFERRED:**
+  broad extraction risk is not justified without a concrete
+  correctness/performance payoff in this cycle; the accepted S3 slice
+  covers the clearest low-risk boundary.
 - **BE-R1–R5** — `harness-subagents.ts` slice; `provider/` module split;
   server route-group functions; `workspace-edit.ts`; CLI per-command
   modules (existing `doSessions`/`doSpill`/`doConfig` pattern).
+  **DEFERRED:** broad extraction risk is not justified without a
+  concrete correctness/performance payoff in this cycle; the accepted
+  R6/S3 slices cover the clearest low-risk boundaries.
 
 1. [x] **Subagent phase 2 — mutating helpers.** **SHIPPED 2026-11-12**
        (`d1518a9` + `c445eee`; design + owner decisions + errata:
