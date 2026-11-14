@@ -1896,12 +1896,26 @@ async function scenarioStreamFollowTouch(runner) {
       `the swipe must park the reader away from the bottom (fromBottom ${fromBottom(swiped)})`,
     )
 
+    // The synthetic swipe can leave a compositor fling gliding after touchEnd
+    // (observed ~1.3s of continued upward scroll on this machine); the parked
+    // baseline must be captured after the fling settles, or the glide would be
+    // misread as an app-side yank during the growth assertion below.
+    const flingSettled = await waitFor(
+      async () => {
+        const a = await measure()
+        await sleep(150)
+        const b = await measure()
+        return Math.abs(a.scrollTop - b.scrollTop) <= 1 ? b : null
+      },
+      { timeout: 5000, interval: 50, desc: 'the post-swipe fling to settle' },
+    )
+
     // -- subsequent growth must not move the reader ----------------------------
     // While the paced stream keeps appending rows, scrollTop must stay within
     // ±1px of where the swipe left it: the bottom pin cleared on the reader's
     // own gesture and token growth never yanks the transcript.
-    const parkedScrollTop = swiped.scrollTop
-    const parkedScrollHeight = swiped.scrollHeight
+    const parkedScrollTop = flingSettled.scrollTop
+    const parkedScrollHeight = flingSettled.scrollHeight
     let latest = swiped
     await waitFor(
       async () => {
