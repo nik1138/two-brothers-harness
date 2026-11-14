@@ -69,9 +69,11 @@ read-only audits ran against `d98ec79`: TUI, web chat/composer, web
 settings/navigation, backend/runtime. The risk-ranked queue below
 condenses every confirmed finding, hypothesis, deferral, and structural
 candidate. Fix lanes `quality-tui-fixes`, `quality-chat-fixes`,
-`quality-settings-fixes`, `quality-backend-fixes` are open from `d98ec79`
+`quality-settings-fixes`, `quality-backend-fixes` started from `d98ec79`
 — a started lane is **not** a shipped fix; statuses below track evidence,
-not intention. The remaining-core audit (CLI / workspace edit-diff /
+not intention. Several lanes have since **landed and been independently
+accepted/merged** (marked INTEGRATED with SHAs and acceptance counts);
+the rest are in progress as their rows state. The remaining-core audit (CLI / workspace edit-diff /
 settings-write / config / subagent runner / runstream / instructions +
 the MCP timeout verdict) is **complete** — its conclusions are recorded
 below as CORE-F1..F5 plus no-finding notes. The paused OAuth (item 6),
@@ -100,31 +102,32 @@ timeout verdict recorded below (residual gap CORE-F3).
 
 ### Risk-ranked findings queue
 
-Confirmed findings, by severity. The rows marked FIX LANE IN
-PROGRESS have a fix lane open from `d98ec79`; none counts as done until
-the lane lands with green gates. The Google-`maxTokens` nit (BE-F6a) was
-only optionally assigned; the `prompt_tokens` nit (BE-F6b) has no lane.
-Unconfirmed hypotheses (CHAT-F4, SET-H1) were explicitly excluded from
-the implementation lanes — they are deferred, not in flight.
+Confirmed findings, by severity. Rows marked **INTEGRATED** landed with
+independent acceptance and a merge to local main (SHA + counts in the
+row); rows marked in progress are **not** shipped. The Google-`maxTokens`
+nit (BE-F6a) is integrated with the BE batch; the `prompt_tokens` nit
+(BE-F6b) is deferred with a technical reason (below). Unconfirmed
+hypotheses (CHAT-F4, SET-H1) remain excluded from the implementation
+lanes — deferred, not in flight.
 
 | ID | Sev | Finding | Evidence | Status |
 |---|---|---|---|---|
-| CHAT-F1 | Med-High | Welcome-screen submit never consumed: accepted text persists as draft under the newly created session and reappears on revisit (duplicate-run risk) | `web/src/components/Composer.vue:566-586`, `App.vue:2197-2214` | FIX LANE IN PROGRESS |
-| TUI-B1 | Low-Med | Resume is reachable during an active `/compact`; the old session's summary commits into the new session's transcript (display corruption only, no on-disk damage) | `packages/harness/src/tui/app.ts:3961-4024`, `3734-3823` | FIX LANE IN PROGRESS |
-| BE-F1 | Low-Med | Steering past `MAX_STEERING_ENVELOPES_PER_RUN` is silently dropped: steers already accepted with HTTP 200 vanish at `finish()` with no `steering_dropped` event (contradicts "a drop is never silent") | `packages/harness/src/harness.ts:1782` | FIX LANE IN PROGRESS |
-| TUI-B2 | Med (perf) | `nextBlockId` rescans all block ids per new block — O(n²) transcript growth; collision-skip loop is provably dead work | `packages/harness/src/tui/model.ts:196-202` | FIX LANE IN PROGRESS |
-| SET-C1 | Low-Med | Deleted provider row survives a failed refetch (UI shows it cleared, editing it 404s) | `web/src/components/settings/ProvidersSection.vue:559-585` | FIX LANE IN PROGRESS |
-| CHAT-F2 | Med-Low | Find-in-transcript cache not invalidated on `liveRunId`/`dockedApprovalId` change: ghost matches + transcript yanked to top | `web/src/components/ChatView.vue:858-866` | FIX LANE IN PROGRESS |
-| SET-C2 | Low | Wrong empty state under a workspace filter ("No sessions match" + dead "Clear search"; no way back to All workspaces) | `web/src/components/Sidebar.vue:492-497` | FIX LANE IN PROGRESS |
-| SET-C3 | Low | Subagent role invisible in provider usage badges / delete-impact copy ("No role uses this provider") though the backend clears the subagent ref on delete | `ProvidersSection.vue:107-115`, `web/src/providerSettings.ts:211-286`, `packages/harness/src/server.ts:3619-3624` | FIX LANE IN PROGRESS |
-| SET-C4 | Low | Deletion focus-fallback timers (up to ~8 × 800 ms) not cancelled on unmount; a late tick can steal focus | `web/src/components/Sidebar.vue:255-268` | FIX LANE IN PROGRESS |
-| SET-C5 | Low (a11y) | Roving tabindex moves before the dirty-edit guard resolves; "Keep editing" leaves tab order off the open provider | `web/src/components/settings/ProvidersSection.vue:425-441` | FIX LANE IN PROGRESS |
-| SET-C6 | Low | Settings post-load autofocus targets a `v-show`-hidden pane on deep-link open; no element receives focus | `web/src/components/SettingsDialog.vue:471-477` | FIX LANE IN PROGRESS |
-| CHAT-F3 | Low | Picker-click on a base action silently drops text typed after the token (`args: ''` hardcoded); Enter path on identical text consumes it | `web/src/components/Composer.vue:1203-1218` | FIX LANE IN PROGRESS |
-| BE-F2 | Low | SSE replay loop never checks `write()` backpressure; slow consumer lets Node buffer unboundedly | `packages/harness/src/server.ts:4184-4194` | FIX LANE IN PROGRESS |
-| BE-F3 | Low | In-process session mutex map (`fileSessionTails`) never shrinks; long-lived serve/TUI leaks entries across sessions | `packages/harness/src/harness.ts:854-885` | FIX LANE IN PROGRESS |
-| BE-F6a | Negligible | `GoogleProvider` accepts `maxTokens = Infinity` (serializes as `null` on the wire) | `provider.ts:2716-2717` | FIX LANE IN PROGRESS (optionally assigned) |
-| BE-F6b | Negligible | `emitUsageIfChanged` omits `prompt_tokens` from the usage diff | `harness.ts:4230-4245` | NOT ASSIGNED — no lane |
+| CHAT-F1 | Med-High | Welcome-screen submit never consumed: accepted text persists as draft under the newly created session and reappears on revisit (duplicate-run risk) | `web/src/components/Composer.vue:566-586`, `App.vue:2197-2214` | FIX/ACCEPTANCE FOLLOW-UP IN PROGRESS — fixes at `6c9303e` plus a new bounded-key follow-up; **not integrated** |
+| TUI-B1 | Low-Med | Resume is reachable during an active `/compact`; the old session's summary commits into the new session's transcript (display corruption only, no on-disk damage) | `packages/harness/src/tui/app.ts:3961-4024`, `3734-3823` | ACCEPTANCE IN PROGRESS at `6a4bebc` |
+| BE-F1 | Low-Med | Steering past `MAX_STEERING_ENVELOPES_PER_RUN` is silently dropped: steers already accepted with HTTP 200 vanish at `finish()` with no `steering_dropped` event (contradicts "a drop is never silent") | `packages/harness/src/harness.ts:1782` | INTEGRATED — impl `8ff2d61`, merge `e1b6eeb`; acceptance 181 focused, full 2465/2457/0 fail/8 skip, CLI 19/19 |
+| TUI-B2 | Med (perf) | `nextBlockId` rescans all block ids per new block — O(n²) transcript growth; collision-skip loop is provably dead work | `packages/harness/src/tui/model.ts:196-202` | ACCEPTANCE IN PROGRESS at `6a4bebc` |
+| SET-C1 | Low-Med | Deleted provider row survives a failed refetch (UI shows it cleared, editing it 404s) | `web/src/components/settings/ProvidersSection.vue:559-585` | FIX FOLLOW-UP IN PROGRESS — reviewer accepted C1/C2/C3/C5/C6; **none integrated** |
+| CHAT-F2 | Med-Low | Find-in-transcript cache not invalidated on `liveRunId`/`dockedApprovalId` change: ghost matches + transcript yanked to top | `web/src/components/ChatView.vue:858-866` | FIX/ACCEPTANCE FOLLOW-UP IN PROGRESS — fixes at `6c9303e` plus a new bounded-key follow-up; **not integrated** |
+| SET-C2 | Low | Wrong empty state under a workspace filter ("No sessions match" + dead "Clear search"; no way back to All workspaces) | `web/src/components/Sidebar.vue:492-497` | FIX FOLLOW-UP IN PROGRESS — reviewer accepted; none integrated |
+| SET-C3 | Low | Subagent role invisible in provider usage badges / delete-impact copy ("No role uses this provider") though the backend clears the subagent ref on delete | `ProvidersSection.vue:107-115`, `web/src/providerSettings.ts:211-286`, `packages/harness/src/server.ts:3619-3624` | FIX FOLLOW-UP IN PROGRESS — reviewer accepted; none integrated |
+| SET-C4 | Low | Deletion focus-fallback timers (up to ~8 × 800 ms) not cancelled on unmount; a late tick can steal focus | `web/src/components/Sidebar.vue:255-268` | FIX FOLLOW-UP IN PROGRESS — deterministic browser regression + residual focus case being fixed; none integrated |
+| SET-C5 | Low (a11y) | Roving tabindex moves before the dirty-edit guard resolves; "Keep editing" leaves tab order off the open provider | `web/src/components/settings/ProvidersSection.vue:425-441` | FIX FOLLOW-UP IN PROGRESS — reviewer accepted; none integrated |
+| SET-C6 | Low | Settings post-load autofocus targets a `v-show`-hidden pane on deep-link open; no element receives focus | `web/src/components/SettingsDialog.vue:471-477` | FIX FOLLOW-UP IN PROGRESS — reviewer accepted; none integrated |
+| CHAT-F3 | Low | Picker-click on a base action silently drops text typed after the token (`args: ''` hardcoded); Enter path on identical text consumes it | `web/src/components/Composer.vue:1203-1218` | FIX/ACCEPTANCE FOLLOW-UP IN PROGRESS — fixes at `6c9303e` plus a new bounded-key follow-up; **not integrated** |
+| BE-F2 | Low | SSE replay loop never checks `write()` backpressure; slow consumer lets Node buffer unboundedly | `packages/harness/src/server.ts:4184-4194` | INTEGRATED — impl `8ff2d61`, merge `e1b6eeb`; acceptance 181 focused, full 2465/2457/0 fail/8 skip, CLI 19/19 |
+| BE-F3 | Low | In-process session mutex map (`fileSessionTails`) never shrinks; long-lived serve/TUI leaks entries across sessions | `packages/harness/src/harness.ts:854-885` | INTEGRATED — impl `8ff2d61`, merge `e1b6eeb`; acceptance 181 focused, full 2465/2457/0 fail/8 skip, CLI 19/19 |
+| BE-F6a | Negligible | `GoogleProvider` accepts `maxTokens = Infinity` (serializes as `null` on the wire) | `provider.ts:2716-2717` | INTEGRATED — impl `8ff2d61`, merge `e1b6eeb`; acceptance 181 focused, full 2465/2457/0 fail/8 skip, CLI 19/19 |
+| BE-F6b | Negligible | `emitUsageIfChanged` omits `prompt_tokens` from the usage diff | `harness.ts:4230-4245` | DEFERRED — negligible: the counter cannot change independently under current provider accounting and no user-visible defect has been demonstrated |
 
 Hypotheses — explicitly excluded from the implementation lanes;
 unconfirmed (not reproduced), deferred rather than in flight:
@@ -152,17 +155,18 @@ DEFERRED:
   symptom justifies.
 
 AUDIT COMPLETE (remaining-core audit finished 2026-11-14; risk-ranked
-findings CORE-F1..F5 — none counts as done until its lane lands with
-green gates; the four original quality fix lanes are based on `d98ec79`,
-the new workspace/MCP/CLI-subagent lanes on docs-only main `36ca83c`):
+findings CORE-F1..F5 — all five are now INTEGRATED with independent
+acceptance and merges to local main; lanes were based on `d98ec79` or
+docs-only `36ca83c` as noted per row; final release gates on integrated
+main have **not** been run yet):
 
 | ID | Sev | Finding | Evidence | Status |
 |---|---|---|---|---|
-| CORE-F1 | Medium | `write_file`/`edit_file` read and diff unbounded file content: no size bound before `readFileSync` + full `SequenceMatcher` diff on e.g. a 300 MB file (all sibling mutation paths are bounded; write/edit are the only unbounded ones) | `packages/harness/src/workspace.ts:1591-1604`, `1641-1657` | FIX LANE IN PROGRESS (`quality-workspace-bounds`) |
-| CORE-F2 | Medium-low | `read_file` whole-file mode buffers the entire file into a JS string before clipping — one tool call on a multi-GB file can OOM the harness | `packages/harness/src/workspace.ts:1415-1417` | FIX LANE IN PROGRESS (`quality-workspace-bounds`) |
-| CORE-F3 | Medium-low | MCP `connect()` can hang forever on the `notifications/initialized` POST (streamable-HTTP only; stdio unaffected): no notification timeout path in pi-mcp, so a server answering `initialize` then never responding to the POST pins the run before its first envelope. The original broad "no connect timeout" hypothesis was **mostly refuted** by local pi-mcp evidence: every JSON-RPC request is bounded by a 30 s default timeout (`timeoutMs` fallback `client.js:263`, `DEFAULT_REQUEST_TIMEOUT_MS` `client.js:3`), `initialize`/`tools/list` both go through it, and `transport.start()` is not a hang vector | `packages/harness/src/mcp.ts:600-601`; pi-mcp 1.5.0 `dist/client.js:145`, `dist/transports/streamable-http.js:165-198` | FIX LANE IN PROGRESS (`quality-mcp-connect`) |
-| CORE-F4 | Low | `sessions list` fully reads and parses every session file and retains every event (`SCAN_LIMIT` bounds only the title head); hundreds of MB with many large JSONL sessions | `packages/harness/src/cli.ts:2665-2734` | FIX LANE IN PROGRESS (`quality-cli-subagent-bounds`) |
-| CORE-F5 | Low | Subagent child conversation stores unclipped tool results (`messages.push` uses the full result; the 4 000-char clip applies only to the emitted copy) — the runner doesn't enforce its own documented bound | `packages/harness/src/subagent.ts:1170-1171` | FIX LANE IN PROGRESS (`quality-cli-subagent-bounds`) |
+| CORE-F1 | Medium | `write_file`/`edit_file` read and diff unbounded file content: no size bound before `readFileSync` + full `SequenceMatcher` diff on e.g. a 300 MB file (all sibling mutation paths are bounded; write/edit are the only unbounded ones) | `packages/harness/src/workspace.ts:1591-1604`, `1641-1657` | INTEGRATED — impl `e9d4273` + `db934a3`, merge `67ccba1`; acceptance focused 84/83 pass/0 fail/1 skip, full 2470/2462/0 fail/8 skip; public index API unchanged after correction |
+| CORE-F2 | Medium-low | `read_file` whole-file mode buffers the entire file into a JS string before clipping — one tool call on a multi-GB file can OOM the harness | `packages/harness/src/workspace.ts:1415-1417` | INTEGRATED — impl `e9d4273` + `db934a3`, merge `67ccba1`; acceptance focused 84/83 pass/0 fail/1 skip, full 2470/2462/0 fail/8 skip; public index API unchanged after correction |
+| CORE-F3 | Medium-low | MCP `connect()` can hang forever on the `notifications/initialized` POST (streamable-HTTP only; stdio unaffected): no notification timeout path in pi-mcp, so a server answering `initialize` then never responding to the POST pins the run before its first envelope. The original broad "no connect timeout" hypothesis was **mostly refuted** by local pi-mcp evidence: every JSON-RPC request is bounded by a 30 s default timeout (`timeoutMs` fallback `client.js:263`, `DEFAULT_REQUEST_TIMEOUT_MS` `client.js:3`), `initialize`/`tools/list` both go through it, and `transport.start()` is not a hang vector | `packages/harness/src/mcp.ts:600-601`; pi-mcp 1.5.0 `dist/client.js:145`, `dist/transports/streamable-http.js:165-198` | INTEGRATED — impl `65fb2d3` + `c0515bc`, merge `3009748`; acceptance MCP 28/28, full 2465/2457/0 fail/8 skip, CLI 19/19 |
+| CORE-F4 | Low | `sessions list` fully reads and parses every session file and retains every event (`SCAN_LIMIT` bounds only the title head); hundreds of MB with many large JSONL sessions | `packages/harness/src/cli.ts:2665-2734` | INTEGRATED — impl `340f533` + `c7434a0`, merge `52fbfa5`; acceptance focused 20+15+8, full 2463/2455/0 fail/8 skip, CLI 19/19 |
+| CORE-F5 | Low | Subagent child conversation stores unclipped tool results (`messages.push` uses the full result; the 4 000-char clip applies only to the emitted copy) — the runner doesn't enforce its own documented bound | `packages/harness/src/subagent.ts:1170-1171` | INTEGRATED — impl `340f533` + `c7434a0`, merge `52fbfa5`; acceptance focused 20+15+8, full 2463/2455/0 fail/8 skip, CLI 19/19 |
 
 No-finding conclusions from the same audit (full reads, not grep-level):
 
@@ -200,9 +204,9 @@ CANDIDATE (structural, behavior-preserving, not yet accepted):
 - **TUI-R1–R7** — idle-gate `dispatchEntry` parity; `usageFields()`
   dedup; `scrollByPages()`; shared text-projection helpers model/app;
   `pluginStats()`; split `foldHelperDetail`; uniform render-ownership
-  for overlay openers. **R6 (`foldHelperDetail` split) — REFACTOR LANE
-  IN PROGRESS** (`quality-tui-fold-refactor`); the rest remain
-  unaccepted candidates.
+  for overlay openers. **R6 (`foldHelperDetail` split) — INTEGRATED**
+  (impl `1c600e2`, merge `7f28044`; acceptance 46/46 focused, full
+  2461/2453/0 fail/8 skip); the rest remain unaccepted candidates.
 - **CHAT-R1–R4** — extract `ModelSwitchMenu.vue`; `useTranscriptFind`
   composable; `MarkdownBody.vue` island; one `routeDescription()`
   helper.
