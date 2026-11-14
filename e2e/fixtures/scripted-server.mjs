@@ -28,6 +28,7 @@
 //   --port PORT            (required) TCP port to listen on
 //   --scenario NAME        approval | slow | plan | folding | delete | reasoning
 //                          | cooperation | title | list | helper-write | auto-solo
+//                          | stream (default: approval)
 //                          (default: approval)
 //                          approval: one workspace_write_file call, then the
 //                                    deliverable after the tool result; the first
@@ -98,6 +99,14 @@
 //                                    called, so the browser scenario asserts
 //                                    the route activity, the highlighted
 //                                    decision and the absence of junior rows.
+//                          stream:   every scripted reply is a valid payload
+//                                    for its node kind whose free-text field
+//                                    carries a long pad, streamed as small SSE
+//                                    content chunks with a delay between them,
+//                                    so the browser transcript grows
+//                                    continuously for seconds per call (the
+//                                    stream-scroll scenario wheels/swipes
+//                                    against that live growth)
 //   --senior-model NAME    default: e2e-senior
 //   --junior-model NAME    default: e2e-junior
 //   --helper-model NAME    default: e2e-helper (the helper route's model)
@@ -108,6 +117,11 @@
 //                          senior's opening delay for an `e2e-title` task
 //                          (every request aborts the moment the harness stops
 //                          the run)
+//   --stream-chunk-ms MS   stream: delay between SSE content chunks so the
+//                          transcript grows over seconds, not in one burst
+//                          (default 25 — the race this scenario regresses
+//                          needs a fast token cadence; every reply stays well
+//                          inside the harness' 4096-token output cap)
 //
 // Every run a scenario drives is inferred from the transcript as a whole: a
 // request with no envelope events starts a run, and a run appended after the
@@ -144,6 +158,7 @@ function parseArgs(argv) {
     juniorModel: 'e2e-junior',
     helperModel: 'e2e-helper',
     lingerMs: 30000,
+    streamChunkMs: 25,
     port: null,
   }
   for (let i = 0; i < argv.length; i += 2) {
@@ -155,6 +170,7 @@ function parseArgs(argv) {
     else if (key === '--junior-model') opts.juniorModel = value
     else if (key === '--helper-model') opts.helperModel = value
     else if (key === '--linger-ms') opts.lingerMs = Number.parseInt(value, 10)
+    else if (key === '--stream-chunk-ms') opts.streamChunkMs = Number.parseInt(value, 10)
     else {
       process.stderr.write(`unknown argument: ${key}\n`)
       process.exit(2)
@@ -432,6 +448,52 @@ function transcriptHasReasoning(messages) {
   return transcriptHasMarker(messages, REASONING_MARKER)
 }
 
+// -- stream scenario ---------------------------------------------------------
+//
+// The stream-scroll browser scenario needs a transcript that keeps growing for
+// seconds while the operator scrolls. Every scripted reply is a strict-valid
+// payload for the node kind it answers, with the kind's free-text field padded
+// to ~3 KB (the harness caps a reply at 4096 output tokens, so the payload must
+// stay well under that to remain valid JSON), and the HTTP layer streams it as
+// small SSE content chunks with a delay between them — so the run's live-token
+// frames arrive continuously across the provider call instead of in a single
+// burst. The pad is a real payload string end to end (no protocol or harness
+// special-casing).
+
+/** SSE content chunk size for the `stream` scenario (small: many token frames). */
+const STREAM_CHUNK_CHARS = 64
+
+/** The long free-text pad: kind-specific `streamPayload` spreads it in. */
+const STREAM_PAD = 'e2e-stream-scroll pad. '.repeat(125)
+
+/** The `stream` scenario's payload for one node kind (valid, padded, streamed). */
+function streamPayload(kind) {
+  switch (kind) {
+    case 'consult': {
+      const base = payloadFor('consult')
+      return { ...base, ask: `${base.ask}\n${STREAM_PAD}` }
+    }
+    case 'delegation': {
+      const base = payloadFor('delegation')
+      return { ...base, notes: STREAM_PAD }
+    }
+    case 'proposal': {
+      const base = payloadFor('proposal')
+      return { ...base, answer: `${base.answer}\n${STREAM_PAD}` }
+    }
+    case 'review': {
+      const base = payloadFor('review')
+      return { ...base, notes: `${base.notes}\n${STREAM_PAD}` }
+    }
+    case 'decision': {
+      const base = payloadFor('decision')
+      return { ...base, rationale: `${base.rationale}\n${STREAM_PAD}` }
+    }
+    default:
+      return payloadFor(kind)
+  }
+}
+
 /** One assistant reply carrying a single tool call. */
 function toolCall(name, args) {
   callCounter += 1
@@ -661,6 +723,13 @@ function decide(body) {
     const reasoning = reasoningForKind(kind)
     if (reasoning !== undefined) reply.reasoning = reasoning
   }
+  // stream-scroll: every reply is a valid padded payload for its node kind,
+  // streamed slowly (see streamPayload above), so the browser transcript
+  // grows continuously for seconds per provider call.
+  if (OPTS.scenario === 'stream') {
+    reply.content = JSON.stringify(streamPayload(kind))
+    reply.streamSlow = true
+  }
   return reply
 }
 
@@ -718,6 +787,11 @@ function chunksOf(text, size) {
  * calls), one usage chunk and `[DONE]`. The harness' OpenAI adapter reassembles
  * exactly the JSON it would have received from the non-streaming endpoint, so
  * the run behaves identically while the thinking side channel is populated.
+ *
+ * `decision.streamSlow` (the `stream` scenario) additionally interleaves a
+ * delay between small content chunks, so the token frames arrive continuously
+ * over seconds; a stopped/closed connection ends the loop quietly instead of
+ * writing into a destroyed socket.
  */
 function sendStreamedCompletion(res, body, decision) {
   const model = String(body.model ?? '')
@@ -726,22 +800,36 @@ function sendStreamedCompletion(res, body, decision) {
     'Cache-Control': 'no-cache',
     Connection: 'keep-alive',
   })
-  for (const chunk of chunksOf(String(decision.reasoning), REASONING_CHUNK_CHARS)) {
-    res.write(streamFrame(model, { reasoning_content: chunk }))
+  let closed = false
+  res.on('close', () => {
+    closed = true
+  })
+  const chunkMs = decision.streamSlow ? OPTS.streamChunkMs : 0
+  const contentChunkSize = decision.streamSlow ? STREAM_CHUNK_CHARS : REASONING_CHUNK_CHARS
+  const send = async (frames) => {
+    for (const frame of frames) {
+      if (closed) return
+      res.write(frame)
+      if (chunkMs > 0) await new Promise((resolve) => setTimeout(resolve, chunkMs))
+    }
   }
-  for (const chunk of chunksOf(String(decision.content ?? ''), REASONING_CHUNK_CHARS)) {
-    res.write(streamFrame(model, { content: chunk }))
+  const frames = []
+  for (const chunk of chunksOf(String(decision.reasoning ?? ''), REASONING_CHUNK_CHARS)) {
+    frames.push(streamFrame(model, { reasoning_content: chunk }))
+  }
+  for (const chunk of chunksOf(String(decision.content ?? ''), contentChunkSize)) {
+    frames.push(streamFrame(model, { content: chunk }))
   }
   decision.toolCalls.forEach((call, index) => {
-    res.write(
+    frames.push(
       streamFrame(model, {
         tool_calls: [{ index, id: call.id, type: 'function', function: call.function }],
       }),
     )
   })
-  res.write(streamFrame(model, {}, decision.toolCalls.length > 0 ? 'tool_calls' : 'stop'))
+  frames.push(streamFrame(model, {}, decision.toolCalls.length > 0 ? 'tool_calls' : 'stop'))
   // A final usage-only chunk mirrors OpenAI's include_usage stream shape.
-  res.write(
+  frames.push(
     'data: ' +
       JSON.stringify({
         id: 'chatcmpl-e2e-stream',
@@ -758,8 +846,16 @@ function sendStreamedCompletion(res, body, decision) {
       }) +
       '\n\n',
   )
-  res.write('data: [DONE]\n\n')
-  res.end()
+  frames.push('data: [DONE]\n\n')
+  send(frames).then(
+    () => {
+      if (!closed) res.end()
+    },
+    () => {
+      // the harness aborted the fetch mid-stream (stop / scenario teardown)
+      res.end()
+    },
+  )
 }
 
 function readJson(req) {
@@ -801,8 +897,13 @@ const server = http.createServer(async (req, res) => {
       // reasoning-replay: a streaming request whose scripted reply carries
       // thinking text is answered with real SSE (thinking chunks first, then the
       // content), so the harness' streaming path persists bounded reasoning
-      // runtime events. Everything else keeps the JSON reply.
-      if (body.stream === true && typeof decision.reasoning === 'string') {
+      // runtime events. The `stream` scenario's padded replies stream the same
+      // way so the transcript grows continuously. Everything else keeps the
+      // JSON reply.
+      if (
+        body.stream === true &&
+        (typeof decision.reasoning === 'string' || decision.streamSlow === true)
+      ) {
         sendStreamedCompletion(res, body, decision)
         return
       }
