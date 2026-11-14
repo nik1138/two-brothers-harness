@@ -161,6 +161,17 @@
 //   stop-switch-leak scripted fixture: with A's stop response held, switching
 //                  to session B must not inherit A's stopping state — B's Stop
 //                  control stays enabled and B's run keeps running
+//   stream-follow  scripted fixture: seeded 200-turn session with all history
+//                  loaded (window starts at row 0, so every live append
+//                  unmounts a top row); the fixture answers every consult call
+//                  with genuinely paced SSE content chunks, so the run's
+//                  .stream-md draft grows frame by frame (the built-in mock
+//                  provider finishes a whole run between two animation frames
+//                  and never renders a stream). A reader who wheeled up keeps
+//                  the anchored row and the distance from the bottom while the
+//                  draft grows, then a reader parked at the bottom follows the
+//                  same growth (sampled in-page once per animation frame —
+//                  cross-process polling cannot bracket a live stream)
 //   real           opt-in (TWO_BROTHERS_REAL_E2E=1): real models via LM Studio
 //
 // Backend: every scenario runs against the TypeScript server
@@ -1555,6 +1566,306 @@ async function scenarioStreamScroll(runner) {
 
     consoleGuard.assertClean()
     runner.pass('stream-scroll')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(be.dir)
+  }
+}
+
+// -- scenario: streaming scroll follow ------------------------------------------------
+//
+// Companion to transcript-stability for the streaming phase of a run. The
+// transcript is seeded through the on-disk store (200 turns -> 400 rows) and
+// the reader pages in all of it, so the rendered window starts at row 0 and
+// every live append unmounts a top row. The scripted model server answers
+// every consult call with genuinely paced SSE content chunks (see
+// fixtures/scripted-server.mjs), so the run's ephemeral `.stream-md` draft
+// grows over hundreds of milliseconds while an in-page sampler records one
+// sample per animation frame: the draft's text length, the anchored row's
+// viewport offset and the reader's distance from the bottom. Cross-process
+// polling cannot reliably bracket a live stream, so the sampler runs in the
+// page and the scenario analyzes the recorded frames:
+//
+//   1. a reader who wheeled up away from the bottom must keep the anchored
+//      row at its viewport offset while `.stream-md` grows — growth below the
+//      viewport must not yank the reader (offset stable, fromBottom never
+//      collapses toward the bottom pin) — and must still be parked after the
+//      run-end envelope burst;
+//   2. after scrolling back to the bottom, the same run shape must follow:
+//      every streamed frame finds the reader pinned at the bottom.
+
+async function scenarioStreamFollow(runner) {
+  const be = await startBackend({ kind: 'fixture', scenario: 'stream-scroll' })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  /** seq of user message i (1-based): the seed writes two envelopes per turn. */
+  const userSeq = (i) => 2 * i - 1
+  const ANCHOR_TURN = 150
+  /** Consecutive streamed frames where the draft text grew. */
+  const growthPairs = (samples) => {
+    const pairs = []
+    for (let i = 1; i < samples.length; i += 1) {
+      const prev = samples[i - 1]
+      const cur = samples[i]
+      if (cur.hasStream && prev.hasStream && cur.len > prev.len) pairs.push([prev, cur])
+    }
+    return pairs
+  }
+  try {
+    const created = await apiCall(be.base, 'POST', '/api/sessions', {
+      title: 'E2E stream follow',
+    })
+    assert.ok(created.json?.name, `create session -> HTTP ${created.status}`)
+    const session = created.json.name
+    const rows = []
+    const t0 = Date.UTC(2026, 10, 10, 12, 0, 0)
+    let seq = 1
+    for (let i = 1; i <= 200; i += 1) {
+      const text = `Stream probe ${String(i).padStart(3, '0')} — alpha bravo charlie delta echo`
+      rows.push({
+        v: 1,
+        id: `msg-${seq}`,
+        seq,
+        ts: new Date(t0 + (seq - 1) * 30_000).toISOString(),
+        from: 'user',
+        to: 'senior',
+        kind: 'message',
+        payload: { text },
+      })
+      seq += 1
+      rows.push({
+        v: 1,
+        id: `msg-${seq}`,
+        seq,
+        ts: new Date(t0 + (seq - 1) * 30_000).toISOString(),
+        from: 'senior',
+        to: 'user',
+        kind: 'message',
+        payload: { text: `Acknowledged probe ${i}.` },
+      })
+      seq += 1
+    }
+    fs.writeFileSync(
+      path.join(be.dir, session),
+      rows.map((row) => JSON.stringify(row)).join('\n') + '\n',
+      'utf-8',
+    )
+
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await page
+      .locator('nav[aria-label="Sessions"]')
+      .getByText('E2E stream follow', { exact: true })
+      .click()
+    await page.locator('.chat-scroll').waitFor()
+
+    // open all the history: two chunks bring the window start to row 0, so a
+    // live append unmounts a top row instead of merely growing the DOM
+    const earlier = page.locator('button.show-earlier')
+    await earlier.waitFor({ state: 'visible' })
+    assert.match(await earlier.innerText(), /\(200 more\)/, 'the seed hides 200 rows')
+    await earlier.click()
+    await waitFor(async () => /\(100 more\)/.test(await earlier.innerText()), {
+      desc: 'the first earlier chunk to load',
+    })
+    await earlier.click()
+    await waitFor(async () => (await earlier.count()) === 0, {
+      desc: 'the second earlier chunk to load (nothing hidden)',
+    })
+
+    // anchor on a row safely below the top rows a live run will unmount,
+    // parked a quarter viewport down, away from the bottom pin
+    const anchorSeq = String(userSeq(ANCHOR_TURN))
+    const anchor = page.locator(`[data-history-nav-target="${anchorSeq}"]`)
+    await anchor.waitFor({ state: 'visible' })
+    const measure = () =>
+      page.evaluate((s) => {
+        const sc = document.querySelector('.chat-scroll')
+        const a = sc?.querySelector(`[data-history-nav-target="${s}"]`)
+        if (!sc || !a) return null
+        return {
+          offset: a.getBoundingClientRect().top - sc.getBoundingClientRect().top,
+          fromBottom: sc.scrollHeight - sc.scrollTop - sc.clientHeight,
+        }
+      }, anchorSeq)
+    await page.evaluate((s) => {
+      const sc = document.querySelector('.chat-scroll')
+      const a = sc.querySelector(`[data-history-nav-target="${s}"]`)
+      const delta = a.getBoundingClientRect().top - sc.getBoundingClientRect().top
+      sc.scrollTop = sc.scrollTop + delta - sc.clientHeight * 0.25
+    }, anchorSeq)
+
+    // detach the bottom pin with a real wheel scroll over the transcript
+    const scBox = (await page.locator('.chat-scroll').boundingBox()) ?? {}
+    assert.ok(scBox.width > 0, 'the transcript must be wheel-scrollable')
+    await page.mouse.move(scBox.x + scBox.width / 2, scBox.y + scBox.height / 2)
+    await page.mouse.wheel(0, -600)
+    await sleep(200)
+    const parked = await measure()
+    assert.ok(parked, 'anchor measurable after the wheel')
+    assert.ok(
+      parked.fromBottom > 200,
+      `wheeling up must park the reader away from the bottom (fromBottom ${parked.fromBottom})`,
+    )
+
+    // frame-accurate in-page sampler: one sample per animation frame for the
+    // whole scenario (see the scenario header for why it lives in the page)
+    await page.evaluate((sel) => {
+      const sc = document.querySelector('.chat-scroll')
+      const samples = []
+      window.__streamScrollSamples = samples
+      const tick = () => {
+        const a = sc.querySelector(sel)
+        const md = document.querySelector('.stream-md')
+        samples.push({
+          len: md ? md.textContent.length : 0,
+          hasStream: md !== null,
+          offset: a ? a.getBoundingClientRect().top - sc.getBoundingClientRect().top : null,
+          fromBottom: sc.scrollHeight - sc.scrollTop - sc.clientHeight,
+        })
+        window.__streamScrollRaf = requestAnimationFrame(tick)
+      }
+      window.__streamScrollRaf = requestAnimationFrame(tick)
+    }, `[data-history-nav-target="${anchorSeq}"]`)
+    const peekSamples = () => page.evaluate(() => window.__streamScrollSamples)
+    const readSamples = () =>
+      page.evaluate(() => {
+        cancelAnimationFrame(window.__streamScrollRaf)
+        return window.__streamScrollSamples
+      })
+    /** Push a labelled marker into the sample stream (phase attribution). */
+    const markSample = (label) =>
+      page.evaluate((l) => {
+        window.__streamScrollSamples.push({ mark: l })
+      }, label)
+    /** Consecutive real samples whose anchored-row offset jumped (> 1.5 px). */
+    const driftEvents = (samples) => {
+      const events = []
+      let prev = null
+      let mark = 'start'
+      for (const s of samples) {
+        if (s.mark !== undefined) {
+          mark = s.mark
+          continue
+        }
+        if (s.offset === null) {
+          prev = null
+          continue
+        }
+        if (prev && Math.abs(s.offset - prev.offset) > 1.5) {
+          events.push(
+            `${mark}#${events.length} ${prev.offset.toFixed(2)}->${s.offset.toFixed(2)} ` +
+              `(stream=${s.hasStream} len=${s.len} fromBottom=${s.fromBottom.toFixed(2)})`,
+          )
+        }
+        prev = s
+      }
+      return events.slice(0, 4)
+    }
+
+    // -- phase A: a scrolled-up reader is not yanked by stream growth --------
+    await markSample('send-one')
+    await sendTask(page, 'Stream scroll probe one')
+    // wait for the run to be adopted before waiting on its end — the composer
+    // shows Send again until then, which would let waitForRunEnd pass early
+    await page
+      .locator('form[aria-label="New task"] button:has-text("Stop")')
+      .waitFor({ timeout: 30000 })
+    await waitForRunEnd(page)
+    const decision = page.locator('.chat-group.side-senior .bubble.bubble-highlight')
+    await decision.waitFor({ timeout: 15000 })
+    const samplesA = await peekSamples()
+    const markB = samplesA.length
+
+    const streamedA = samplesA.filter((s) => s.hasStream)
+    assert.ok(
+      streamedA.length >= 2,
+      `the run's stream draft was not sampled (${streamedA.length} streamed frames)`,
+    )
+    const growthA = growthPairs(samplesA)
+    assert.ok(
+      growthA.length >= 1,
+      `the stream draft never grew across sampled frames ` +
+        `(streamed frames ${streamedA.length}, lengths ${streamedA.map((s) => s.len).join(',')})`,
+    )
+    for (const [prev, cur] of growthA) {
+      assert.ok(
+        prev.offset !== null && cur.offset !== null,
+        'the anchored row unmounted while the stream grew',
+      )
+      assert.ok(
+        Math.abs(cur.offset - prev.offset) <= 1.5,
+        `stream growth moved the anchored row ` +
+          `(offset ${prev.offset.toFixed(2)} -> ${cur.offset.toFixed(2)})`,
+      )
+      assert.ok(
+        cur.fromBottom >= prev.fromBottom - 2,
+        `stream growth collapsed the distance from the bottom ` +
+          `(fromBottom ${prev.fromBottom.toFixed(2)} -> ${cur.fromBottom.toFixed(2)})`,
+      )
+    }
+    const minFromBottomA = Math.min(...streamedA.map((s) => s.fromBottom))
+    assert.ok(
+      minFromBottomA > 200,
+      `a scrolled-up reader must stay away from the bottom while streaming ` +
+        `(minimum fromBottom ${minFromBottomA.toFixed(2)})`,
+    )
+    // the run-end envelope burst (window advance + unmount) must leave the
+    // parked reader where the stream phase left them
+    const lastA = samplesA[samplesA.length - 1]
+    assert.ok(lastA.offset !== null, 'the anchored row unmounted during the run')
+    assert.ok(
+      Math.abs(lastA.offset - parked.offset) <= 3,
+      `the run must not yank the parked reader ` +
+        `(offset before ${parked.offset.toFixed(2)}, after ${lastA.offset.toFixed(2)}; ` +
+        `drift events: ${driftEvents(samplesA).join(' | ') || 'none'})`,
+    )
+    assert.match(await anchor.innerText(), /Stream probe 150/, 'the anchor row is intact')
+
+    // -- phase B: an at-bottom reader follows the same stream ----------------
+    await markSample('to-bottom')
+    await page.evaluate(() => {
+      const sc = document.querySelector('.chat-scroll')
+      sc.scrollTop = sc.scrollHeight
+    })
+    await sleep(200)
+    const bottomProbe = await page.evaluate(() => {
+      const sc = document.querySelector('.chat-scroll')
+      return sc.scrollHeight - sc.scrollTop - sc.clientHeight
+    })
+    assert.ok(bottomProbe <= 1, `the reader must be back at the bottom (fromBottom ${bottomProbe})`)
+
+    await markSample('send-two')
+    await sendTask(page, 'Stream scroll probe two')
+    // the composer shows Send again until the run is adopted — wait for the
+    // Stop control first so waitForRunEnd cannot pass in that window (the
+    // same discipline as the stop scenario)
+    await page
+      .locator('form[aria-label="New task"] button:has-text("Stop")')
+      .waitFor({ timeout: 30000 })
+    await waitForRunEnd(page)
+    await decision.first().waitFor({ timeout: 15000 })
+    const samplesB = (await readSamples()).slice(markB)
+
+    const streamedB = samplesB.filter((s) => s.hasStream)
+    assert.ok(
+      streamedB.length >= 2,
+      `the second run's stream draft was not sampled (${streamedB.length} streamed frames)`,
+    )
+    assert.ok(
+      growthPairs(samplesB).length >= 1,
+      `the second run's stream draft never grew across sampled frames ` +
+        `(lengths ${streamedB.map((s) => s.len).join(',')})`,
+    )
+    for (const s of streamedB) {
+      assert.ok(
+        s.fromBottom <= 10,
+        `an at-bottom reader must follow the stream (fromBottom ${s.fromBottom.toFixed(2)})`,
+      )
+    }
+
+    consoleGuard.assertClean()
+    runner.pass('stream-follow')
   } finally {
     await context.close().catch(() => {})
     await killBackend(be)
@@ -7218,6 +7529,13 @@ async function main() {
         run: () => (
           (currentRunner = makeRunner('stream-scroll')),
           scenarioStreamScroll(currentRunner)
+        ),
+      },
+      {
+        label: 'stream-follow',
+        run: () => (
+          (currentRunner = makeRunner('stream-follow')),
+          scenarioStreamFollow(currentRunner)
         ),
       },
     ]
