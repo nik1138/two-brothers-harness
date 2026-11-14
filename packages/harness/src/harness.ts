@@ -535,6 +535,7 @@ const USING_TOOLS_BODY = [
   "- Results must come from tool calls, not from memory or invention. When the work depends on files, directories, commands or other workspace state, call a tool and use what it returns.",
   "- On delegated work, do the work with your tools first and report afterwards. Never describe work you did not perform.",
   "- Report tool-grounded evidence in the deliverable — paths, commands and outcomes — so the senior can verify it.",
+  "- Focus on files and commands relevant to the task. Harness session storage (session files, settings, writer locks) is internal runtime state, not evidence about project goals or product requirements, unless the task explicitly concerns session storage.",
 ].join("\n");
 
 /**

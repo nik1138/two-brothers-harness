@@ -62,3 +62,23 @@ test("base prompts carry one coherent payload contract and no example fence", ()
   assert.match(prompts.junior, /proposal/);
   assert.match(prompts.junior, /deliverable/);
 });
+
+test("junior prompt requires task anchoring and run-grounded claims", () => {
+  const junior = loadPrompts().junior;
+  assert.match(junior, /Anchor the proposal to the original task/);
+  assert.match(junior, /inspect what the task concerns/);
+  assert.match(junior, /support every material claim with a path, command or observation from this run/);
+  assert.match(junior, /label inferred claims as inference/);
+  assert.match(junior, /Never derive project goals, timelines or product requirements from harness session metadata/);
+  assert.match(junior, /runtime state, not evidence/);
+  assert.match(junior, /ask one focused question instead of guessing/);
+});
+
+test("senior prompt accepts only task-answering, evidence-supported proposals", () => {
+  const senior = loadPrompts().senior;
+  assert.match(senior, /Accept a proposal only when it answers the original task/);
+  assert.match(senior, /supported by shared evidence/);
+  assert.match(senior, /successful tool reads alone do not prove relevance or correctness/);
+  assert.match(senior, /off-task, generic or unsupported proposal gets verdict revise with concrete points/);
+  assert.match(senior, /`notes` must state what you checked/);
+});

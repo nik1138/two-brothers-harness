@@ -194,6 +194,21 @@ test("an empty belt says so explicitly and omits the use-these-tools section", (
   assert.ok(!assembled.text.includes("## Using tools"));
 });
 
+test("the using-tools section scopes file access to the task and marks session storage as runtime state", () => {
+  const assembled = assembleSystemPrompt("SYSTEM BASE", [tool("workspace_read_file", "Read a file.")]);
+  assert.ok(
+    assembled.text.includes(
+      "Harness session storage (session files, settings, writer locks) is internal runtime state, not evidence about project goals or product requirements, unless the task explicitly concerns session storage.",
+    ),
+    "the scope guidance rides the using-tools section",
+  );
+  const empty = assembleSystemPrompt("SYSTEM BASE", []);
+  assert.ok(
+    !empty.text.includes("internal runtime state"),
+    "the scope guidance stays with the using-tools section, not the no-tools one",
+  );
+});
+
 test("duplicate tool definitions are listed once", () => {
   const assembled = assembleSystemPrompt("", [tool("dup"), tool("dup"), tool("other")]);
   const occurrences = assembled.text.split("- dup —").length - 1;
