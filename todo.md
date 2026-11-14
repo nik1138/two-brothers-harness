@@ -58,6 +58,35 @@ Last updated: **2026-11-14**.
   (`tuiintegration:1460`), bounded reruns passed.
 - No version bump, tag, or publish in this wave; nothing pushed.
 
+## Goal wave (2026-11-14) — records lane (base `6052ff7`)
+
+Shipped on the integrate-goal line (`main..6052ff7`); recorded on
+`docs-goal-records`:
+
+- **Scroll-follow hold + survivor compensation** (`6718060` + `27cb175`):
+  `{ nearBottom, hold }` pure follow model in `web/src/followScroll.ts` —
+  deliberate upward wheel/touch/key movement engages the hold even when the
+  landing stays in-band; the async onScroll cannot re-enable the pin; only a
+  real return to the bottom edge (2px epsilon) releases it; gesture,
+  nested-scroller, and multi-touch guards; survivor search skips re-inserted
+  show-earlier chrome (~20px first-append drift fixed); new `stream-follow`
+  + `stream-follow-touch` browser scenarios.
+- **Absolute Junior model fallback** (`20ed3cc` + `234b38e`): helper model =
+  per-call override > explicit route model (empty = unset) > the Junior
+  role's model, unconditionally; `role` selects the connection endpoint
+  only; default resolved per spawn, never written back; the wire model and
+  the reported row can never diverge.
+- Verified at `6052ff7`: package gates **2 488 total / 2 480 pass / 0 fail /
+  8 skips** in BOTH `npm test` and `test:spawn`; hermetic CLI E2E (sources)
+  **19/19**; runtime independent behavior **17/17**; web **668/668** + build
+  green; browser-E2E helpers **20/20**; focused `stream-follow` **5/5**;
+  repaired `stream-follow-touch` **10/10**; unfixed-base touch-sensitivity
+  control **10/10 FAIL** on the exact autoscroll re-pin signature.
+- **PENDING (final gate — placeholders in `HANDOFF.md`, nothing invented):**
+  the full 40-block browser matrix (expected 41 PASS lines), the `--dist`
+  CLI leg, tarball smoke, WSL pass, the offline smoke gate, and the goal
+  wave's final HEAD / validated-checkpoint fields.
+
 ## Owner / release gates
 
 - [ ] **Re-enter provider API keys + re-create check sessions (owner)** —

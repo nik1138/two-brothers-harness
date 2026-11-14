@@ -1184,10 +1184,19 @@ must reach quiescence, and subsequent token/scrollHeight growth must keep the
 topmost visible user row's viewport offset stable within ±2px while the
 bottom edge recedes — anchor-row offset stability, not a constant scrollTop —
 while the pre-swipe phase proves at-bottom streaming still follows). The offline
-suite now holds 38 hermetic scenario blocks; the final validated run at
-commit `3fe647f` is **39 PASS, 0 FAIL, 1 SKIP** in the raw log (the
-`chat/resume` block prints one line for chat and one for resume, so 38
-blocks report 39 PASS lines). The queue dock and the session-scope approval decisions
+suite now holds **40 hermetic scenario blocks** (the 38 above plus
+`stream-follow` and `stream-follow-touch`). The last **full-matrix** validated
+run remains commit `3fe647f` — **39 PASS, 0 FAIL, 1 SKIP** in the raw log over
+those 38 blocks (the `chat/resume` block prints one line for chat and one for
+resume, so 38 blocks reported 39 PASS lines); the full 40-block matrix has not
+been re-run yet and no full-matrix total is claimed for the goal-integration
+tree. Verified evidence at the goal-integration tip `6052ff7`: web suite
+**668/668** + `npm run build` green; browser-E2E helper suites **20/20**
+(14 freshness + 6 registry); focused `stream-follow` (wheel) **5/5 PASS**;
+repaired `stream-follow-touch` **10/10 PASS**; and the touch-sensitivity
+control on the unfixed base fails **10/10**, every run on the exact autoscroll
+re-pin signature, so the touch scenario provably discriminates the bug it
+guards. The queue dock and the session-scope approval decisions
 remain covered by the web unit suites, not by separate browser scenarios. The
 default suite is fully offline; the
 opt-in `real` scenario (below) reports `SKIP` unless an endpoint is configured.
