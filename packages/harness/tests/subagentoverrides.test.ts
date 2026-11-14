@@ -138,7 +138,7 @@ test("the description pins the honest override rule and keeps the policy sentenc
   assert.doesNotMatch(SUBAGENT_TOOL_DESCRIPTION, /when set, it wins/);
 });
 
-test("model resolution precedence: override, then route, then role endpoint, then config", () => {
+test("model resolution precedence: override, then route, then the junior model unconditionally", () => {
   const cfg = resolveConfig({
     provider: "mock",
     seniorModel: "cfg-senior",
@@ -150,7 +150,7 @@ test("model resolution precedence: override, then route, then role endpoint, the
     },
   });
   const inner = internals(harness);
-  // Dedicated route wins over the role endpoint and the config.
+  // Dedicated route wins over the junior default and the config.
   const route: SubagentEndpoint = {
     provider: "openai",
     baseUrl: "http://route/v1",
@@ -161,16 +161,108 @@ test("model resolution precedence: override, then route, then role endpoint, the
   // The per-call override wins over everything.
   assert.equal(inner.subagentModel("junior", route, "arg-model"), "arg-model");
   assert.equal(inner.subagentModel("senior", route, "arg-model"), "arg-model");
-  // Role endpoint when no dedicated route is configured.
+  // No route: the Junior role's current model applies to BOTH roles — the
+  // `role` argument never chooses the model.
   assert.equal(inner.subagentModel("junior"), "ep-junior");
   assert.equal(inner.subagentModel("junior", undefined, "arg-model"), "arg-model");
-  // Run config fallback for a role with no endpoint.
-  assert.equal(inner.subagentModel("senior"), "cfg-senior");
-  // Role literal when even the config has no model.
+  assert.equal(inner.subagentModel("senior"), "ep-junior");
+  // An empty route model counts as unset.
+  const emptyRoute: SubagentEndpoint = {
+    provider: "openai",
+    baseUrl: "http://route/v1",
+    apiKey: "",
+    model: "",
+  };
+  assert.equal(inner.subagentModel("senior", emptyRoute), "ep-junior");
+  // Run config fallback for a run with no endpoints at all.
+  const noEndpointHarness = new TwoBrothersHarness(cfg, {});
+  assert.equal(internals(noEndpointHarness).subagentModel("senior"), "cfg-junior");
+  // Literal fallback when even the config has no model — always the junior one.
   const bare = { ...cfg, seniorModel: "", juniorModel: "" } as Config;
   const bareHarness = new TwoBrothersHarness(bare, {});
-  assert.equal(internals(bareHarness).subagentModel("senior"), "senior");
+  assert.equal(internals(bareHarness).subagentModel("senior"), "junior");
   assert.equal(internals(bareHarness).subagentModel("junior"), "junior");
+});
+
+test("no route: role senior still runs the junior model on the senior endpoint connection", () => {
+  const cfg = resolveConfig({ provider: "mock", seniorModel: "cfg-senior" });
+  const harness = new TwoBrothersHarness(cfg, {
+    endpoints: {
+      senior: { provider: "openai", baseUrl: "http://senior/v1", apiKey: "s-key", model: "ep-senior" },
+      junior: { provider: "openai", baseUrl: "http://junior/v1", apiKey: "", model: "ep-junior" },
+    },
+  });
+  const inner = internals(harness);
+  assert.equal(inner.subagentModel("senior"), "ep-junior");
+  // The connection still follows the `role` argument — only the model is
+  // inherited from the Junior role.
+  const fields = wire(inner.buildSubagentProvider("senior", undefined));
+  assert.equal(fields.baseUrl, "http://senior/v1");
+  assert.equal(fields.apiKey, "s-key");
+  assert.equal(fields.model, "ep-junior");
+});
+
+test("a connection-only route keeps its connection while the model comes from junior", () => {
+  const cfg = resolveConfig({ provider: "mock" });
+  const harness = new TwoBrothersHarness(cfg, {
+    endpoints: {
+      junior: { provider: "openai", baseUrl: "http://junior/v1", apiKey: "", model: "ep-junior" },
+    },
+  });
+  const inner = internals(harness);
+  // Empty route model = unset: the junior model applies even for role senior.
+  const route: SubagentEndpoint = {
+    provider: "openai",
+    baseUrl: "http://route.example/v1",
+    apiKey: "route-secret",
+    model: "",
+  };
+  assert.equal(inner.subagentModel("senior", route), "ep-junior");
+  const fields = wire(inner.buildSubagentProvider("senior", route));
+  assert.equal(fields.baseUrl, "http://route.example/v1");
+  assert.equal(fields.apiKey, "route-secret");
+  assert.equal(fields.model, "ep-junior");
+});
+
+test("the inherited junior model follows the current junior endpoint between spawns", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const store = new SubagentStore(path.join(root, "subagents"));
+    const endpoints = {
+      junior: { provider: "openai", baseUrl: "http://junior/v1", apiKey: "", model: "junior-a" },
+    };
+    const harness = new TwoBrothersHarness(resolveConfig({ provider: "mock" }), {
+      endpoints,
+      subagents: {
+        store,
+        parentSession: "parent.jsonl",
+        providerFactory: () => new MockProvider([{ text: "ok" }]),
+      },
+    });
+    const tool = internals(harness).subagentTool(fakeState());
+    const first = JSON.parse(await tool.execute({ task: "First.", role: "senior" })) as {
+      status: string;
+      model?: string;
+    };
+    assert.equal(first.status, "completed");
+    assert.equal(first.model, "junior-a");
+    assert.equal(store.list("parent.jsonl")[0]?.model, "junior-a");
+    // The Junior model changed between runs (a settings save): an unset
+    // helper model follows the CURRENT junior endpoint, never a stale copy.
+    endpoints.junior.model = "junior-b";
+    const second = JSON.parse(await tool.execute({ task: "Second.", role: "senior" })) as {
+      status: string;
+      model?: string;
+    };
+    assert.equal(second.status, "completed");
+    assert.equal(second.model, "junior-b");
+    // Rows are newest-first; the earlier child's recorded model is history
+    // and stays exactly what it ran.
+    assert.equal(store.list("parent.jsonl")[0]?.model, "junior-b");
+    assert.equal(store.list("parent.jsonl")[1]?.model, "junior-a");
+  } finally {
+    cleanup();
+  }
 });
 
 test("the connection stays frozen: overrides change only model/effort on the route copy", () => {
@@ -221,6 +313,12 @@ test("no override builds the identical provider from the route or role endpoint"
   assert.equal(fromCfg.apiKey, "cfg-key");
   assert.equal(fromCfg.model, "cfg-junior");
   assert.equal(fromCfg.effort, undefined);
+  // The junior model applies unconditionally: a senior-role child with no
+  // route or override still runs the junior model on the cfg connection.
+  const fromCfgSenior = wire(inner.buildSubagentProvider("senior", undefined));
+  assert.equal(fromCfgSenior.baseUrl, "http://cfg/v1");
+  assert.equal(fromCfgSenior.apiKey, "cfg-key");
+  assert.equal(fromCfgSenior.model, "cfg-junior");
 });
 
 test("with no endpoint, an override synthesizes the connection from the run config", () => {
@@ -238,11 +336,15 @@ test("with no endpoint, an override synthesizes the connection from the run conf
   assert.equal(fields.apiKey, "cfg-key");
   assert.equal(fields.model, "m");
   assert.equal(fields.effort, "low");
-  // The no-override path stays on the historical buildProvider route.
+  // The no-override path stays on the historical buildProvider route, with
+  // the model resolved by subagentModel (the junior model unconditionally).
   const plain = internals(harness).buildSubagentProvider("junior", undefined);
   assert.ok(plain instanceof OpenAICompatibleProvider);
   assert.equal(wire(plain).model, "cfg-junior");
   assert.equal(wire(plain).effort, undefined);
+  const plainSenior = internals(harness).buildSubagentProvider("senior", undefined);
+  assert.ok(plainSenior instanceof OpenAICompatibleProvider);
+  assert.equal(wire(plainSenior).model, "cfg-junior");
   const mockHarness = new TwoBrothersHarness(resolveConfig({ provider: "mock" }), {});
   assert.ok(
     internals(mockHarness).buildSubagentProvider("senior", undefined, "m") instanceof

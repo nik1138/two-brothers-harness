@@ -1230,7 +1230,7 @@ export const SUBAGENT_TOOL_DESCRIPTION = [
   "Spawn one isolated helper for a focused side task.",
   "The helper does not see this conversation; it gets only your task brief and workspace tools, then returns a bounded report.",
   "Use it for parallel discovery, a second opinion on a file, or reading a large area without polluting this context.",
-  "The operator may configure a dedicated helper route in Settings; it supplies the connection and the default model, and it wins over the `role` argument.",
+  "The operator may configure a dedicated helper route in Settings; it supplies the connection and, when one is set, the model.",
   "Optional `model` and `effort` arguments refine only the model and reasoning effort for this call — never the connection: the provider, base URL and API key always come from the configured route or the role endpoint.",
   "Workspace changes the helper makes are ordinary operator approvals in this run, under the same permission mode; a helper cannot widen the run's policy.",
   "It cannot spawn more subagents. Do not use it as a replacement for the Junior.",
@@ -1253,7 +1253,7 @@ export const SUBAGENT_TOOL_PARAMETERS: Record<string, unknown> = {
       type: "string",
       enum: ["senior", "junior"],
       description:
-        "Fallback model when no dedicated helper route is configured in Settings. A configured route always wins; `model` may then only refine the model id for this call.",
+        "The helper's role: \"junior\" (default) or \"senior\". This selects the helper's connection endpoint (and its read tool belt without a workspace) — never the model. With no route model and no per-call `model`, the helper runs the Junior role's current model.",
     },
     model: {
       type: "string",

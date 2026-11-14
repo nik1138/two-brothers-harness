@@ -30,7 +30,13 @@ server lane on `c52554a`): PID 247580 runs
 `node dist/cli.js serve --port 8600 --sessions-dir sessions`, serving the
 current `web/dist` byte-identically; `GET /` and `GET /api/sessions` (empty
 `[]`) return 200, and a full process scan shows no stray/test backends.
-Provider keys are still missing (owner task, below).
+A goal-integration wave landed after the quality wave (transcript
+scroll-follow hold + survivor compensation; absolute Junior helper-model
+fallback) and is recorded as items 10–11 under **Recently shipped** below;
+its gate counts were verified at `6052ff7`. The full 40-block browser matrix
+and the goal wave's final HEAD/checkpoint fields are **pending the final
+gate** (placeholders below — nothing invented). Provider keys are still
+missing (owner task, below).
 
 ## Repository at a glance
 
@@ -413,6 +419,70 @@ user-profile Temp (documented in docs/testing.md).
 - **Owner wind-down: O1 is the last slice started this session.** O2 (TUI
   controls), M (per-call model/effort), C (helper usage/cost roll-up) remain NOT
   started; forked-context (F) and depth>1 (D) are deferred to their own designs.
+
+### 10. Transcript scroll-follow hold + survivor compensation (`6718060` + `27cb175`)
+
+- `6718060`: the follow boolean becomes an explicit `{ nearBottom, hold }`
+  pure model (`web/src/followScroll.ts`) — any deliberate upward
+  wheel/touch/key movement engages the hold even when the landing stays
+  inside the near-bottom band; the async onScroll honors the hold and cannot
+  re-enable the pin; only an actual return to the bottom edge (2px epsilon)
+  releases it, and movement that reaches the edge re-engages immediately.
+- Gesture guards: Ctrl+wheel zoom and horizontal-only wheels never touch
+  follow state; only a single-finger pan is tracked (a second finger resets
+  the touch baseline; touchend/touchcancel reset it); wheel/touch/key events
+  inside a nested tool/output scroller leave the transcript state alone;
+  Shift+Space predicts an upward PageUp landing. Programmatic moves
+  (show-earlier, find/history reveals) keep geometry-decided behavior and
+  supersede the hold. Listeners stay passive; measured line-height handling
+  and normal bottom following are unchanged.
+- `27cb175`: a window advance re-creates the show-earlier button as a new
+  first DOM child, which ended the stream-follow survivor search before any
+  surviving row was examined; the search now skips show-earlier chrome and
+  anchors on the first surviving transcript row, keeping the scroll
+  compensation single and exact (~20px first-append drift fixed).
+- New browser scenarios `stream-follow` (paced SSE fixture; wheel park +
+  at-bottom follow; in-page per-frame sampling) and `stream-follow-touch`
+  (native CDP swipe on a hasTouch 390×844 context; post-swipe quiescence +
+  anchor-row ±2px offset stability; 12ms pinned cadence); the duplicate
+  `--stream-chunk-ms` pass-through was dropped (`6052ff7`).
+- Verified at `6052ff7`: web suite **668/668** + `npm run build` green;
+  focused `stream-follow` (wheel) **5/5 PASS**; repaired
+  `stream-follow-touch` **10/10 PASS**; unfixed-base touch-sensitivity
+  control **10/10 FAIL**, every run on the exact autoscroll re-pin signature;
+  browser-E2E helper suites **20/20**.
+
+### 11. Absolute Junior model fallback for helper subagents (`20ed3cc` + `234b38e`)
+
+- Helper model resolution is now: per-call override > an explicit model on
+  the configured helper route (empty counts as unset) > the Junior role's
+  current model — unconditionally. The `role` argument selects the helper's
+  connection endpoint (and read belt without a workspace), never its model:
+  no-route `role: "senior"` and connection-only routes both run the Junior
+  model.
+- Only the model string is inherited; the route/role connection, connection
+  pinning, and the senior's own behavior are unchanged. The default is
+  resolved per spawn at the harness level (including the historical
+  no-endpoint provider path) and never written back to `settings.json`, so
+  the wire model and the reported row can never diverge.
+- Docs and web copy state the rule explicitly (`234b38e`: `docs/backlog.md`,
+  `docs/quickstart.md`, Models & roles UI copy); settings/subagent/TUI-helper
+  tests cover the empty-endpoint and inheritance paths.
+- Verified at `6052ff7`: package gates **2 488 total / 2 480 pass / 0 fail /
+  8 skips** in BOTH `npm test` and `npm run test:spawn` (Windows); hermetic
+  CLI E2E (sources) **19/19**; runtime independent-behavior selection
+  **17/17**.
+
+**Goal-wave evidence status (2026-11-14, records lane at `6052ff7`):**
+
+- Package gates: **2 488 total / 2 480 pass / 0 fail / 8 skips** — both
+  modes, Windows. Web suite: **668/668** + build green. Hermetic CLI E2E:
+  **19/19** sources. Runtime independent behavior: **17/17**.
+- **PENDING (final gate, do not record until run):** the full 40-block
+  browser matrix (expected 41 PASS lines), the `--dist` CLI leg, tarball
+  smoke, WSL pass, and the goal wave's final HEAD / validated-checkpoint
+  fields. The Current-state table above remains the frozen `3fe647f`
+  record.
 
 ### Earlier context (still current)
 

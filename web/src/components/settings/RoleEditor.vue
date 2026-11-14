@@ -33,7 +33,7 @@ const description = computed(() =>
     ? 'Arbitrates the exchange and makes the final decision.'
     : props.role === 'junior'
       ? 'Explores, implements, and reports back to the Senior.'
-      : 'Isolated helper spawned by the Senior; it can request approved workspace changes. A configured route here overrides the tool\'s role fallback.',
+      : 'Isolated helper spawned by the Senior; it can request approved workspace changes. The role picks its persona, not a model: with no route model here the helper always inherits the current Junior model; a configured route model or a per-call override wins.',
 )
 const presetActive = computed(() => Boolean(props.form.providerRef))
 const showEffort = computed(

@@ -387,9 +387,13 @@ export function resolveRoleEndpoints(
 /**
  * Resolve the dedicated helper route. Unlike the two protocol roles it has no
  * per-role env pair: a named preset (`provider_ref`) or the route's manual
- * fields supply the connection, with the run-level provider/model fallbacks.
- * Returns null when the operator never configured a route (no ref, base URL or
- * model), so the harness keeps its existing `role` argument fallback.
+ * fields supply the connection, with the run-level provider fallback. The
+ * resolved model is exactly what the operator configured — an empty model
+ * stays empty here; the runtime default (the Junior role's current model) is
+ * applied by the harness at spawn time, never by this resolver, so the
+ * resolved endpoint always reflects the persisted route. Returns null when
+ * the operator never configured a route (no ref, base URL or model), so the
+ * harness keeps its existing `role` argument fallback.
  */
 export function resolveSubagentEndpoint(
   settings: Partial<RuntimeSubagentSnapshot> | undefined,

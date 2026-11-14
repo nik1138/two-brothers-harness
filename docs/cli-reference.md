@@ -1755,8 +1755,11 @@ Junior never receives it, and a child cannot receive it either (no recursion).
   label", "role?": "senior" | "junior", "model?": "model-id",
   "effort?": "reasoning-effort token"}`. `task` is required and capped at
   4 000 chars; the label defaults to the task's first line; `role` defaults to
-  `junior` (cheaper) and `role: "senior"` uses the stronger Senior model. A
-  dedicated helper route configured in Settings always wins over `role`. The
+  `junior` and selects the helper's persona/connection (the role endpoint, and
+  the read tool belt without a workspace) — never the model. The model the
+  helper runs is, in order: the per-call `model` override, an explicit model
+  on a configured helper route, then the Junior role's current model —
+  unconditionally, for either `role` (empty route model counts as unset). The
   optional `model` (≤200 chars, a model-id-safe grammar) and `effort`
   (≤32 chars, a model-declared token such as `low`/`high`/`max`, stored
   lowercase) refine only the model and reasoning effort for that one call —
@@ -1767,8 +1770,12 @@ Junior never receives it, and a child cannot receive it either (no recursion).
   card. It accepts the same provider preset / manual connection, model, base
   URL, API key and model-declared effort as a role, persisted in the top-level
   `subagent` section of `sessions/settings.json` (key sealed at rest) and
-  served additively as `subagent` by `GET/PUT /api/settings`. Leaving it empty
-  keeps the `role` fallback. Deleting a provider clears a matching helper
+  served additively as `subagent` by `GET/PUT /api/settings`. Leaving the card
+  empty keeps the `role`-endpoint connection fallback; whenever the route
+  model is unset the helper runs the Junior role's current model at run time
+  (an explicit route model always wins — the inheritance is resolved per run
+  and never written back to `settings.json`). Deleting a provider clears a
+  matching helper
   `provider_ref`; role/provider saves preserve the helper section. The child
   still has only the read-only tool set regardless of the route's model.
 - **Limits:** six child tool-loop steps, eight children per parent run, four

@@ -31,6 +31,19 @@ import type { ForkAvailability } from '../sessionFork'
 import { parseMarkdown } from '../markdown'
 import type { MarkdownBlock, MarkdownInline } from '../markdown'
 import { quoteBlock, quoteTextForSelection } from '../messageQuote'
+import {
+  FALLBACK_LINE_HEIGHT_PX,
+  applyGestureFollow,
+  applyProgrammaticFollow,
+  applyScrolledFollow,
+  initialFollowState,
+  predictedScrollTopAfterTouch,
+  predictedScrollTopAfterWheel,
+  predictedScrollTopForKey,
+  trackableTouch,
+  wheelAffectsFollow,
+} from '../followScroll'
+import type { FollowState, ScrollGeometry } from '../followScroll'
 import type { StreamingBlocks } from '../streaming'
 import ToolActivity from './ToolActivity.vue'
 import ApprovalCard from './ApprovalCard.vue'
@@ -110,15 +123,132 @@ const props = defineProps<{
 const scrollEl = ref<HTMLElement | null>(null)
 /** The chord that opens find; the shell owns the reactive, rebindable value. */
 const findBinding = computed(() => props.findBinding ?? DEFAULT_KEYBINDINGS.find)
-/** Pin-to-bottom only while the user is already near the bottom; reading
- * history must not be interrupted by incoming messages. */
-const nearBottom = ref(true)
+/** Bottom-follow state (see followScroll.ts): the pin guard reads
+ * `nearBottom`; `hold` records a deliberate upward reader gesture so the
+ * asynchronously dispatched scroll event cannot re-enable the pin while the
+ * reader is parked inside the near-bottom band. Gesture handlers (wheel/
+ * touch/keyboard) update the state synchronously from the predicted landing
+ * position: the scroll event for a gesture is dispatched asynchronously,
+ * after the browser scrolls, so a streaming token's pin would otherwise land
+ * in between and undo the reader's scroll. */
+const followState = ref<FollowState>(initialFollowState())
+/** Pin-to-bottom guard read by the watchers; a computed over the state. */
+const nearBottom = computed(() => followState.value.nearBottom)
+
+function scrollGeometry(el: HTMLElement): ScrollGeometry {
+  return { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop, clientHeight: el.clientHeight }
+}
 
 function onScroll() {
   const el = scrollEl.value
   if (!el) return
-  nearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 120
+  followState.value = applyScrolledFollow(followState.value, scrollGeometry(el))
   updateActiveHistoryTarget()
+}
+
+/**
+ * Apply a deliberate reader gesture (wheel notch, touch drag, scroll key)
+ * whose landing position is known synchronously, before the browser applies
+ * the scroll. The synchronous update is the whole point: by the time the
+ * gesture's own scroll event dispatches, the next token frame's pin has
+ * already consulted this state and stood down.
+ */
+function applyPredictedFollow(predictedTop: number) {
+  const el = scrollEl.value
+  if (!el) return
+  followState.value = applyGestureFollow(followState.value, predictedTop, scrollGeometry(el))
+}
+
+/** Refresh the follow state at the moment a programmatic scroll moves the
+ * transcript: an in-flight token pin between the scroll and its asynchronous
+ * scroll event must not drag the reader back to the bottom. */
+function applyCurrentFollow(el: HTMLElement) {
+  followState.value = applyProgrammaticFollow(followState.value, scrollGeometry(el))
+}
+
+/** True when the event originates inside a nested scrollable region (a tool
+ * card's own output scroller): that region absorbs the gesture, so it must
+ * not move the transcript's follow state. The nearest scrollable ancestor of
+ * the event target has to be the transcript itself. */
+function fromNestedScroller(e: Event): boolean {
+  const el = scrollEl.value
+  const target = e.target
+  if (!el || !(target instanceof Element) || !el.contains(target)) return false
+  for (let node: Element | null = target; node && node !== el; node = node.parentElement) {
+    if (!(node instanceof HTMLElement)) continue
+    if (node.scrollHeight <= node.clientHeight) continue
+    const overflowY = window.getComputedStyle(node).overflowY
+    if (overflowY === 'auto' || overflowY === 'scroll') return true
+  }
+  return false
+}
+
+function onWheel(e: WheelEvent) {
+  const el = scrollEl.value
+  // Ctrl+wheel is zoom, and a horizontal-only gesture never moves the
+  // vertical follow state; nested tool/output scrollers keep their own
+  if (!el || !wheelAffectsFollow(e) || fromNestedScroller(e)) return
+  applyPredictedFollow(predictedScrollTopAfterWheel(e.deltaY, e.deltaMode, scrollGeometry(el), lineHeightPx(el)))
+}
+
+/** Computed line height for `deltaMode: DOM_DELTA_LINE` wheel events. */
+function lineHeightPx(el: HTMLElement): number {
+  const parsed = Number.parseFloat(getComputedStyle(el).lineHeight)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : FALLBACK_LINE_HEIGHT_PX
+}
+
+let touchStartScrollTop: number | null = null
+let touchStartClientY = 0
+
+function onTouchStart(e: TouchEvent) {
+  const el = scrollEl.value
+  if (!el || fromNestedScroller(e)) return
+  // only a single-finger pan is tracked; a second finger joining mid-gesture
+  // is ambiguous, so the baseline stays reset until a fresh touchstart
+  const touch = trackableTouch(e.touches)
+  if (!touch) return
+  touchStartScrollTop = el.scrollTop
+  touchStartClientY = touch.clientY
+}
+
+function onTouchMove(e: TouchEvent) {
+  const el = scrollEl.value
+  if (!el || touchStartScrollTop === null) return
+  const touch = trackableTouch(e.touches)
+  // a finger joined or left mid-gesture: drop the baseline instead of
+  // predicting from a stale one
+  if (!touch) {
+    touchStartScrollTop = null
+    return
+  }
+  applyPredictedFollow(
+    predictedScrollTopAfterTouch(touchStartScrollTop, touchStartClientY, touch.clientY, scrollGeometry(el)),
+  )
+}
+
+/** Gesture over (or aborted by the browser): the touch baseline must not
+ *  leak into the next gesture. */
+function onTouchEnd() {
+  touchStartScrollTop = null
+}
+
+/** Scroll keys bubble up from focused transcript controls; predict their
+ * landing position like a wheel notch so a key press away from the bottom
+ * cancels follow immediately. Editing surfaces are not scrolling, Space on a
+ * focused control activates it instead of scrolling, and keys inside a
+ * nested tool/output scroller scroll that region, not the transcript. */
+function onScrollKeydown(e: KeyboardEvent) {
+  const el = scrollEl.value
+  if (!el) return
+  const target = e.target
+  if (target instanceof HTMLElement) {
+    if (target.closest('input, textarea, select, [contenteditable="true"]')) return
+    if (e.key === ' ' && target.closest('button, a[href], summary')) return
+  }
+  const predicted = predictedScrollTopForKey(e.key, scrollGeometry(el), { shiftKey: e.shiftKey })
+  if (predicted === null) return
+  if (fromNestedScroller(e)) return
+  applyPredictedFollow(predicted)
 }
 
 /** Keep the transcript pinned when chrome (the find bar) changes its height. */
@@ -383,7 +513,12 @@ async function showEarlier() {
   windowState.value = step.state
   windowAnnouncement.value = step.announcement
   await nextTick()
-  if (el) el.scrollTop = Math.max(0, el.scrollHeight - fromBottom)
+  if (el) {
+    el.scrollTop = Math.max(0, el.scrollHeight - fromBottom)
+    // the flag must be false before this scroll's async event: an in-flight
+    // token pin would otherwise re-pin over the freshly revealed history
+    applyCurrentFollow(el)
+  }
 }
 
 /**
@@ -400,6 +535,12 @@ async function showEarlier() {
  * cycles: folding each exact (float) shift into it bounds the error at one
  * rounding instead of accumulating a fraction per appended envelope. A
  * reader-initiated scroll re-baselines the virtual position.
+ *
+ * The survivor search must skip top chrome (the "show earlier" button)
+ * before testing element identity: a window advance that moves the start
+ * past the fully loaded page re-inserts that button as a brand-new first
+ * DOM child, and breaking on the new identity would forfeit the
+ * compensation entirely.
  */
 let virtualScrollTop: number | null = null
 let appliedScrollTop: number | null = null
@@ -427,8 +568,8 @@ watch(
     const scrollerTop = el.getBoundingClientRect().top
     for (const child of el.children) {
       if (!(child instanceof HTMLElement)) continue
-      if (!before.has(child)) break
       if (child.classList.contains('show-earlier')) continue
+      if (!before.has(child)) break
       const offsetBefore = viewportBefore.get(child) ?? 0
       const delta = child.getBoundingClientRect().top - scrollerTop - offsetBefore
       virtualScrollTop = Math.max(0, virtualScrollTop + delta)
@@ -709,6 +850,14 @@ function scrollRectIntoBand(target: DOMRect) {
   const top = Math.max(0, Math.min(el.scrollTop + delta, el.scrollHeight - el.clientHeight))
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
   el.scrollTo({ top, behavior: reduceMotion ? 'auto' : 'smooth' })
+  // honest follow state before the smooth scroll's first async scroll event,
+  // so a token pin landing mid-reveal cannot override the reveal (or, near
+  // the bottom, follow re-engages once the reveal rests there)
+  followState.value = applyProgrammaticFollow(followState.value, {
+    scrollHeight: el.scrollHeight,
+    scrollTop: top,
+    clientHeight: el.clientHeight,
+  })
 }
 
 /**
@@ -969,9 +1118,9 @@ async function jumpToHistoryEntry(entry: HistoryNavEntry) {
   const el = historyTargetEl(entry)
   if (!el) return
   // nearest-band scroll + programmatic focus: preventScroll keeps the focus
-  // call from fighting the smooth scroll, and nothing here touches the
-  // near-bottom pin state, so a reader parked at the bottom is moved only by
-  // the jump's own scroll.
+  // call from fighting the smooth scroll; scrollRectIntoBand updates the
+  // follow flag synchronously, so the jump lands where intended even while
+  // token frames stream.
   scrollRectIntoBand(el.getBoundingClientRect())
   el.focus({ preventScroll: true })
   // The jumped-to message is the current one until the reader scrolls: the
@@ -1379,6 +1528,12 @@ watch(
       aria-live="polite"
       aria-label="Conversation"
       @scroll.passive="onScroll"
+      @wheel.passive="onWheel"
+      @touchstart.passive="onTouchStart"
+      @touchmove.passive="onTouchMove"
+      @touchend.passive="onTouchEnd"
+      @touchcancel.passive="onTouchEnd"
+      @keydown="onScrollKeydown"
     >
     <p v-if="loading" class="empty-hint">Loading…</p>
     <template v-else>

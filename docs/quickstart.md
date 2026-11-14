@@ -331,9 +331,10 @@ the same hero appears inside a selected session that has no transcript yet.
    concurrently — the tool returns `status:"started"` and the report is read
    later through `subagent_report` (a background helper is cancelled when the
    run ends). Settings → **Models & roles → Subagent** gives it a dedicated
-   provider/model/effort route; leaving that route empty keeps the tool's
-   Senior/Junior fallback, and a configured route wins. When one has been
-   spawned, the chat header shows **Subagents · N**:
+   provider/model/effort route; with no route model a helper always inherits
+   the current Junior model — for any role, including a Senior-role helper —
+   and an explicit route model or a per-call `model` override wins. When one
+   has been spawned, the chat header shows **Subagents · N**:
    the chip opens a live tree with each helper's status, current activity,
    elapsed time and tokens, and clicking a row opens a read-only transcript
    drawer with the task, tool calls and final report. From the drawer the

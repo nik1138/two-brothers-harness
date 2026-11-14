@@ -28,6 +28,7 @@
 //   --port PORT            (required) TCP port to listen on
 //   --scenario NAME        approval | slow | plan | folding | delete | reasoning
 //                          | cooperation | title | list | helper-write | auto-solo
+//                          | stream-follow
 //                          (default: approval)
 //                          approval: one workspace_write_file call, then the
 //                                    deliverable after the tool result; the first
@@ -98,6 +99,18 @@
 //                                    called, so the browser scenario asserts
 //                                    the route activity, the highlighted
 //                                    decision and the absence of junior rows.
+//                          stream-follow: consult-mode run whose senior opening
+//                                    carries a deliberately long ask, answered
+//                                    as genuine SSE `delta.content` chunks on
+//                                    a fixed cadence (not one burst), so the
+//                                    web transcript's `.stream-md` draft grows
+//                                    frame by frame for seconds while the
+//                                    reader wheels or swipes mid-stream (the
+//                                    built-in mock provider finishes a whole
+//                                    run between two animation frames and
+//                                    never renders a stream); every later
+//                                    call of the cycle keeps the fast JSON
+//                                    reply
 //   --senior-model NAME    default: e2e-senior
 //   --junior-model NAME    default: e2e-junior
 //   --helper-model NAME    default: e2e-helper (the helper route's model)
@@ -108,6 +121,10 @@
 //                          senior's opening delay for an `e2e-title` task
 //                          (every request aborts the moment the harness stops
 //                          the run)
+//   --stream-chunk-ms MS   stream-follow: delay between paced SSE content
+//                          chunks (default 50; the touch scenario pins 12 so
+//                          a token lands inside the gesture's
+//                          application/scroll-event race window)
 //
 // Every run a scenario drives is inferred from the transcript as a whole: a
 // request with no envelope events starts a run, and a run appended after the
@@ -144,6 +161,7 @@ function parseArgs(argv) {
     juniorModel: 'e2e-junior',
     helperModel: 'e2e-helper',
     lingerMs: 30000,
+    streamChunkMs: 50,
     port: null,
   }
   for (let i = 0; i < argv.length; i += 2) {
@@ -155,6 +173,7 @@ function parseArgs(argv) {
     else if (key === '--junior-model') opts.juniorModel = value
     else if (key === '--helper-model') opts.helperModel = value
     else if (key === '--linger-ms') opts.lingerMs = Number.parseInt(value, 10)
+    else if (key === '--stream-chunk-ms') opts.streamChunkMs = Number.parseInt(value, 10)
     else {
       process.stderr.write(`unknown argument: ${key}\n`)
       process.exit(2)
@@ -407,6 +426,31 @@ const REASONING_LONG = 'LONG_REASONING_HEAD ' + 'x'.repeat(12_000) + ' LONG_REAS
 /** Review/decision nodes stream a short, clean thinking record. */
 const REASONING_SHORT = 'Weighing the scripted proposal before the senior decision.'
 
+// -- stream-follow scenario -------------------------------------------------
+//
+// The wheel/touch browser lanes need a run whose live token stream keeps
+// growing the transcript for seconds, so the reader can gesture mid-stream
+// and watch growth afterwards. The mock provider answers in one burst and
+// raw sleeps in the browser would be timing guesses; instead the senior
+// opening of a new task carries a deliberately long ask and is streamed as
+// genuine SSE `delta.content` chunks on a fixed cadence (OPTS.streamChunkMs).
+// Every later call of the cycle keeps the historical fast JSON reply.
+
+/** Chunk sizing: small enough that the browser backend consumes a delta stream. */
+const STREAM_FOLLOW_CHUNK_CHARS = 48
+/**
+/**
+ * The consult ask is deliberately long (~28.6k chars => ~600 chunks => ~10 s
+ * at the touch lane's pinned 12 ms cadence; ~30 s at the default 50 ms) so the
+ * transcript keeps growing through the whole gesture and the post-gesture
+ * growth assertions. The touch cadence sits at the frame floor: on the
+ * unfixed web app a streaming token's bottom pin re-arms follow mode whenever
+ * it lands between the gesture's scroll application and its asynchronously
+ * dispatched scroll event (~one frame); the original 250 ms let the scroll
+ * event win the race almost every time and the re-pin never manifested.
+ */
+const STREAM_FOLLOW_ASK = `Stream-follow probe ${'alpha bravo charlie delta '.repeat(1100)}trim.`
+
 /**
  * The reasoning text this call should stream, by the node kind the reply
  * answers (the same inference `decide()` already makes for the payload).
@@ -649,6 +693,14 @@ function decide(body) {
   if (kind === 'deliverable') kind = 'proposal'
   const reply = { content: JSON.stringify(payloadFor(kind)), toolCalls: [] }
   if (linger > 0) reply.linger = linger
+  // stream-follow: pace ONLY the senior opening of a new task as genuine SSE
+  // content chunks on OPTS.streamChunkMs; the rest of the cycle keeps the fast
+  // JSON replies, so the transcript keeps growing for seconds while the
+  // browser gestures mid-stream. Keep the prose marker in sync with ../run.mjs.
+  if (OPTS.scenario === 'stream-follow' && body.stream === true && role === 'senior' && newTask) {
+    reply.content = JSON.stringify({ ...payloadFor('consult'), ask: STREAM_FOLLOW_ASK })
+    reply.pacedStream = true
+  }
   // folding determinism: open each run on a fresh second so its tool loop (and
   // therefore its fold group) cannot straddle an envelope timestamp boundary
   if (OPTS.scenario === 'folding' && role === 'senior' && newTask) {
@@ -762,6 +814,84 @@ function sendStreamedCompletion(res, body, decision) {
   res.end()
 }
 
+// -- paced stream support -----------------------------------------------------
+//
+// The browser E2E's stream-follow / stream-follow-touch scenarios drive the
+// real streaming path with a genuinely paced delta stream: the reply is
+// written as small SSE content chunks with a fixed delay between writes, so
+// the browser backend consumes the stream over seconds and the web
+// transcript's `.stream-md` draft grows frame by frame (deterministic and
+// observable, unlike the built-in mock provider, whose whole run fits between
+// two animation frames). A stopped run aborts the request: the pending timer
+// is dropped and the socket ends quietly, the same contract as `linger`.
+
+/** Final usage-only chunk, mirroring sendStreamedCompletion's include_usage shape. */
+function streamUsageFrame(model) {
+  return (
+    'data: ' +
+    JSON.stringify({
+      id: 'chatcmpl-e2e-stream',
+      object: 'chat.completion.chunk',
+      created: Math.floor(Date.now() / 1000),
+      model: '',
+      choices: [],
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 5,
+        total_tokens: 15,
+        prompt_tokens_details: { cached_tokens: 0 },
+      },
+    }) +
+    '\n\n'
+  )
+}
+
+/**
+ * Answer a streaming chat completion with paced SSE (the `stream-follow`
+ * scenario): the reply content as small `delta.content` chunks, one write per
+ * OPTS.streamChunkMs, then the finish/usage/[DONE] tail. The harness' OpenAI
+ * adapter reassembles exactly the JSON the non-streaming endpoint would have
+ * returned.
+ */
+function sendPacedStreamedCompletion(req, res, body, decision) {
+  const model = String(body.model ?? '')
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  })
+  const chunks = chunksOf(String(decision.content ?? ''), STREAM_FOLLOW_CHUNK_CHARS)
+  let index = 0
+  const finish = () => {
+    res.write(streamFrame(model, {}, decision.toolCalls.length > 0 ? 'tool_calls' : 'stop'))
+    res.write(streamUsageFrame(model))
+    res.write('data: [DONE]\n\n')
+    res.end()
+  }
+  const timer = setInterval(() => {
+    if (res.writableEnded) {
+      clearInterval(timer)
+      return
+    }
+    if (index < chunks.length) {
+      res.write(streamFrame(model, { content: chunks[index] }))
+      index += 1
+    } else {
+      clearInterval(timer)
+      finish()
+    }
+  }, OPTS.streamChunkMs)
+  reqCloseEndsPacedStream(res, timer)
+}
+
+/** Stop the pacing timer and end quietly when the client aborts the stream. */
+function reqCloseEndsPacedStream(res, timer) {
+  res.on('close', () => {
+    clearInterval(timer)
+    if (!res.writableEnded) res.end()
+  })
+}
+
 function readJson(req) {
   return new Promise((resolve, reject) => {
     const chunks = []
@@ -798,6 +928,14 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/v1/chat/completions') {
       const body = await readJson(req)
       const decision = decide(body)
+      // stream-follow: a streaming request whose reply is flagged paced is
+      // answered with genuine SSE written chunk by chunk on the scenario's
+      // cadence, so the web's live draft grows over seconds instead of
+      // arriving in a single frame
+      if (body.stream === true && decision.pacedStream === true) {
+        sendPacedStreamedCompletion(req, res, body, decision)
+        return
+      }
       // reasoning-replay: a streaming request whose scripted reply carries
       // thinking text is answered with real SSE (thinking chunks first, then the
       // content), so the harness' streaming path persists bounded reasoning

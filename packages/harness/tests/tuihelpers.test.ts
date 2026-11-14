@@ -1093,6 +1093,59 @@ test("the TUI resolves the configured helper route like serve does", () => {
   assert.equal(state.subagentEndpoint?.apiKey, "k");
 });
 
+test("the TUI helper route keeps an unset model empty; the junior endpoint carries the current model", () => {
+  const cfg = resolveConfig({ provider: "mock" });
+  // A persisted junior model (no flags) is the "current" junior model.
+  const snapshot = emptyRuntimeSnapshot();
+  snapshot.junior.model = "junior-persisted";
+  const inherited = resolveTuiProviderState({
+    snapshot,
+    storedPresets: [],
+    cfg,
+    env: {},
+    subagentSnapshot: {
+      provider: "openai",
+      model: "",
+      base_url: "http://helper.test/v1",
+      api_key: "k",
+      provider_ref: "",
+    },
+  });
+  // The route resolves with its connection and an honestly empty model; the
+  // harness inherits the junior model from the junior endpoint at spawn.
+  assert.equal(inherited.subagentEndpoint?.model, "");
+  assert.equal(inherited.subagentEndpoint?.baseUrl, "http://helper.test/v1");
+  assert.equal(inherited.subagentEndpoint?.apiKey, "k");
+  assert.equal(inherited.endpoints.junior.model, "junior-persisted");
+
+  // The current session's `/models` junior override is the current model.
+  const overridden = resolveTuiProviderState({
+    snapshot,
+    storedPresets: [],
+    cfg,
+    env: {},
+    modelOverrides: { junior: "junior-picked" },
+    subagentSnapshot: { provider: "openai", base_url: "http://helper.test/v1" },
+  });
+  assert.equal(overridden.subagentEndpoint?.model, "");
+  assert.equal(overridden.endpoints.junior.model, "junior-picked");
+
+  // An explicit route model stays untouched by the junior inheritance.
+  const explicit = resolveTuiProviderState({
+    snapshot,
+    storedPresets: [],
+    cfg,
+    env: {},
+    modelOverrides: { junior: "junior-picked" },
+    subagentSnapshot: {
+      provider: "openai",
+      model: "helper-model",
+      base_url: "http://helper.test/v1",
+    },
+  });
+  assert.equal(explicit.subagentEndpoint?.model, "helper-model");
+});
+
 test("a dangling helper provider_ref warns through the merged warning channel", () => {
   const cfg = resolveConfig({ provider: "mock" });
   const state = resolveTuiProviderState({

@@ -50,6 +50,8 @@ export const HERMETIC_LABELS = Object.freeze([
   'stop-switch-leak',
   'history-nav',
   'transcript-stability',
+  'stream-follow',
+  'stream-follow-touch',
 ])
 
 /** Result names a label contributes to the missing-backend SKIP report. */

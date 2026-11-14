@@ -2458,11 +2458,15 @@ export class TwoBrothersHarness {
    * the resolved base endpoint (the dedicated helper route, else the role
    * endpoint): the copy changes only `model`/`effort` — provider, baseUrl,
    * apiKey, kind and contextWindow always come from the base, never from a
-   * tool argument. With no base at all and no override, the historical
-   * `buildProvider` path stays byte-identical; with an override the
-   * connection is synthesized from the run's own `cfg` (same fields,
-   * `resolveProviderKind` family), so an argument can never move the
-   * credential or the data destination.
+   * tool argument. The copy's model is whatever `subagentModel` resolved
+   * (per-call override > explicit route model > the Junior role's current
+   * model), so the `role` argument moves the connection but never the model.
+   * With no base at all, the historical `buildProvider` connection path
+   * applies, with the resolved model forced on so the wire and the reported
+   * row can never diverge; with an override and no base the connection is
+   * synthesized from the run's own `cfg` (same fields, `resolveProviderKind`
+   * family), so an argument can never move the credential or the data
+   * destination.
    */
   private buildSubagentProvider(
     role: "senior" | "junior",
@@ -2486,7 +2490,9 @@ export class TwoBrothersHarness {
       if (built !== null) return built;
     }
     if (model === undefined && effort === undefined) {
-      return buildProvider(warn ? { ...this.cfg, onWarning: warn } : this.cfg, role);
+      const resolvedModel = this.subagentModel(role, configured, model);
+      const baseCfg = warn ? { ...this.cfg, onWarning: warn } : this.cfg;
+      return buildProvider({ ...baseCfg, model: resolvedModel }, role);
     }
     const endpoint: RoleEndpoint = {
       provider: this.cfg.provider,
@@ -2523,9 +2529,14 @@ export class TwoBrothersHarness {
 
   /**
    * The model id the child actually runs, for the tree row, `list_agents` and
-   * `subagent_report` (display only). Precedence: the validated per-call
-   * override, then the resolved base endpoint's model (helper route, else
-   * role endpoint), then the run config's role model, then the role literal.
+   * `subagent_report` (display only) and the provider build. Precedence: the
+   * validated per-call override, then an explicit model on the configured
+   * helper route (empty counts as unset), then the Junior role's current
+   * model — unconditionally. The `role` argument selects the child's
+   * connection endpoint (and, without a workspace, its read belt), never its
+   * model: `role: "senior"` with no explicit model still runs the Junior
+   * model. Last resort is the run config's junior model, then the literal
+   * "junior".
    */
   private subagentModel(
     role: "senior" | "junior",
@@ -2533,11 +2544,9 @@ export class TwoBrothersHarness {
     model?: string,
   ): string {
     if (model) return model;
-    const base = configured ?? this.options.endpoints?.[role];
-    if (base?.model) return base.model;
-    const configuredModel =
-      role === "senior" ? this.cfg.seniorModel : this.cfg.juniorModel;
-    return configuredModel || (role === "senior" ? "senior" : "junior");
+    if (configured?.model) return configured.model;
+    const junior = this.options.endpoints?.junior;
+    return junior?.model || this.cfg.juniorModel || "junior";
   }
 
   /**
