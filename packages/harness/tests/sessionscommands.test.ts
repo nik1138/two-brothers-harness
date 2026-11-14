@@ -18,7 +18,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 
-import { main, type CliIO } from "../src/cli.ts";
+import { main, scanSessionFile, type CliIO } from "../src/cli.ts";
 import { SessionMetadataStore } from "../src/metadata.ts";
 import { migrateFlatSessions } from "../src/sessionlayout.ts";
 import { Decision, PermissionManager, StaticBroker } from "../src/permissions.ts";
@@ -169,6 +169,69 @@ async function writeUndoFixture(dir: string): Promise<UndoFixture> {
   capture.close();
   return { sessionsDir, workspaceDir, runId, workspaceId: linked.id };
 }
+
+// ---------------------------------------------------------------------------
+// sessions list: bounded listing scan
+// ---------------------------------------------------------------------------
+
+/** A large many-envelope session: the title comes from its first operator
+ * message, and every envelope carries a ~1 KiB payload so retaining the
+ * parsed events would be measurable. */
+function writeLargeListingFixture(dir: string): { file: string; envelopes: number } {
+  const file = path.join(dir, "huge.jsonl");
+  const envelopes = 5000;
+  const lines: string[] = [];
+  lines.push(
+    sessionEnvelope(1, "user", "senior", "message", { text: "Large listing fixture task" }),
+  );
+  const filler = "y".repeat(1024);
+  for (let seq = 2; seq <= envelopes; seq += 1) {
+    lines.push(
+      sessionEnvelope(seq, "senior", "junior", "message", { text: filler }),
+    );
+  }
+  fs.writeFileSync(file, lines.join("\n") + "\n", "utf-8");
+  return { file, envelopes };
+}
+
+test("sessions list keeps exact summary fields without retaining events", async () => {
+  await withTempDir(async (dir) => {
+    const { file, envelopes } = writeLargeListingFixture(dir);
+
+    // The seam under test: the listing scan derives the same summary as the
+    // full scan but retains zero parsed envelopes.
+    const full = scanSessionFile(file, "huge.jsonl");
+    const listing = scanSessionFile(file, "huge.jsonl", { includeEvents: false });
+    assert.equal(full.events.length, envelopes);
+    assert.equal(listing.events.length, 0);
+    assert.equal(listing.name, full.name);
+    assert.equal(listing.title, full.title);
+    assert.equal(listing.count, full.count);
+    assert.equal(listing.count, envelopes);
+    assert.equal(listing.updated, full.updated);
+    assert.equal(listing.error, full.error);
+
+    // CLI output is unchanged and exact.
+    const io = makeIO();
+    const code = await main(["sessions", "--sessions-dir", dir, "--json"], io);
+    assert.equal(code, 0, io.err.join("\n"));
+    const rows = JSON.parse(io.out[0]) as Array<Record<string, unknown>>;
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].name, "huge.jsonl");
+    assert.equal(rows[0].title, full.title);
+    assert.equal(rows[0].envelopes, envelopes);
+    assert.equal(rows[0].updated, full.updated);
+    assert.equal(rows[0].error, full.error);
+
+    // `sessions show` still has every envelope (full scan path untouched).
+    const show = makeIO();
+    const showCode = await main(["sessions", "show", "huge", "--sessions-dir", dir, "--json"], show);
+    assert.equal(showCode, 0, show.err.join("\n"));
+    const shown = JSON.parse(show.out[0]) as { envelopes: number; events: unknown[] };
+    assert.equal(shown.envelopes, envelopes);
+    assert.equal(shown.events.length, envelopes);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // sessions search

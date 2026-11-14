@@ -2652,7 +2652,8 @@ interface SessionListing {
 }
 
 /** One parsed session JSONL: the listing view plus every protocol envelope
- * (needed by `sessions show`; the list command only uses the summary fields). */
+ * (needed by `sessions show` and export; the list command uses the summary
+ * fields only and scans without retaining events). */
 interface SessionScan extends SessionListing {
   events: Array<Record<string, any>>;
 }
@@ -2661,8 +2662,18 @@ interface SessionScan extends SessionListing {
  * Read and parse one session JSONL file. Never throws for IO/parse problems:
  * an unreadable file comes back with an `error`, and corrupt lines are counted
  * (the first line number is reported) while every valid object is kept.
+ *
+ * `includeEvents: false` is the listing scan: title/count/updated/error are
+ * derived exactly as in the full scan, but the parsed envelopes are not
+ * retained — a large session listing must not hold every event of every file
+ * in memory.
  */
-function scanSessionFile(filePath: string, name: string): SessionScan {
+export function scanSessionFile(
+  filePath: string,
+  name: string,
+  options: { includeEvents?: boolean } = {},
+): SessionScan {
+  const includeEvents = options.includeEvents !== false;
   const fallback = name.endsWith(".jsonl") ? name.slice(0, -".jsonl".length) : name;
   let updated = "(unknown)";
   try {
@@ -2705,7 +2716,7 @@ function scanSessionFile(filePath: string, name: string): SessionScan {
       continue;
     }
     count += 1;
-    events.push(event as Record<string, any>);
+    if (includeEvents) events.push(event as Record<string, any>);
     if (head.length < SCAN_LIMIT) head.push(event as Record<string, any>);
   }
 
@@ -2722,7 +2733,9 @@ function scanSessionFile(filePath: string, name: string): SessionScan {
 function listSessions(sessionsDir: string): SessionListing[] {
   const layout = new SessionLayout(sessionsDir);
   return layout.list().map((location) => {
-    const scan = scanSessionFile(location.sessionPath, location.name);
+    const scan = scanSessionFile(location.sessionPath, location.name, {
+      includeEvents: false,
+    });
     return {
       name: scan.name,
       title: scan.title,

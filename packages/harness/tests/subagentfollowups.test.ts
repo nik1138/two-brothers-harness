@@ -176,10 +176,13 @@ class ScriptedChildProvider implements Provider {
   calls: ChatMessage[][] = [];
   toolNames: string[][] = [];
   private readonly script: Array<
-    { tool: string; args: Record<string, unknown> } | { text: string }
+    { tool: string; args: Record<string, unknown>; content?: string } | { text: string }
   >;
 
-  constructor(script: Array<{ tool: string; args: Record<string, unknown> } | { text: string }>) {
+  constructor(script: Array<
+    | { tool: string; args: Record<string, unknown>; content?: string }
+    | { text: string }
+  >) {
     this.script = script;
   }
 
@@ -193,7 +196,7 @@ class ScriptedChildProvider implements Provider {
     const next = this.script[Math.min(this.calls.length - 1, this.script.length - 1)]!;
     if ("text" in next) return { content: next.text, toolCalls: [] };
     return {
-      content: "",
+      content: next.content ?? "",
       toolCalls: [{ id: `call-${this.calls.length}`, name: next.tool, args: next.args }],
     };
   }
@@ -571,15 +574,20 @@ test("a follow-up that would overflow the child context is dropped and counted; 
     const sink = testSink((handle) => {
       live = handle;
     });
+    // The child's own reply overfills its context (tool results are clipped to
+    // SUBAGENT_TOOL_RESULT_MAX_CHARS, so they can no longer blow the budget).
+    // The mirrored send-time estimate predates that reply, so the first send
+    // is accepted and then dropped at the delivery point; the second send is
+    // refused at once with the honest estimated size.
     const huge = "y".repeat(SUBAGENT_CONTEXT_MAX_CHARS + 10_000);
-    let sendResults: AnyRecord[] = [];
+    const sendResults: AnyRecord[] = [];
     const readTool = fakeReadTool(() => {
       const sent = live!.send("A follow-up that cannot fit.", "operator");
       sendResults.push(sent as unknown as AnyRecord);
-      return huge;
+      return "ok";
     });
     const child = new ScriptedChildProvider([
-      { tool: "workspace_read_file", args: { path: "big.txt" } },
+      { tool: "workspace_read_file", args: { path: "big.txt" }, content: huge },
       { tool: "workspace_read_file", args: { path: "big.txt" } },
       { text: "The big note is unreadable; the report is bounded." },
     ]);
@@ -598,8 +606,8 @@ test("a follow-up that would overflow the child context is dropped and counted; 
     const result = await harness.run("Plan a migration", parentContext(tmp.root));
     assert.equal(result.cancelled, false);
     const handle = sink.handles[0]!;
-    // First send was accepted (the estimate predated the huge tool result) and
-    // then dropped at the delivery point; the second send was refused at once.
+    // First send was accepted (the mirrored estimate predated the huge reply)
+    // and then dropped at the delivery point; the second send was refused at once.
     assert.equal(sendResults[0]?.ok, true);
     assert.equal(sendResults[1]?.ok, false);
     assert.equal(sendResults[1]?.reason, "context_full");

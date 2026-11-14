@@ -1167,8 +1167,8 @@ export async function runSubagent(options: SubagentRunOptions): Promise<Subagent
               resultStatus = "error";
             }
           }
-          messages.push({ role: "tool", content: result, toolCallId: call.id });
           const bounded = clipBlock(result, SUBAGENT_TOOL_RESULT_MAX_CHARS);
+          messages.push({ role: "tool", content: bounded, toolCallId: call.id });
           emit(options, {
             kind: "tool",
             tool: call.name,
