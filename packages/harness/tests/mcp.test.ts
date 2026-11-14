@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 
 import { createInMemoryTransportPair, type InMemoryTransport } from "@earendil-works/pi-mcp/testing";
+import type { JsonRpcId, McpTransport, McpTransportMessageListener } from "@earendil-works/pi-mcp";
 
 import { resolveConfig } from "../src/config.ts";
 import { TwoBrothersHarness } from "../src/harness.ts";
@@ -784,3 +785,224 @@ test("config-file timeoutMs override reaches the tool adapter", async () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// bounded initialization: initialize answered, notifications/initialized
+// never settles (pi-mcp awaits that notification POST without a timeout)
+// ---------------------------------------------------------------------------
+
+/** A deferred the test controls by hand — the wedged notification send. */
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve(value: T): void;
+  reject(reason: unknown): void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+interface HangyTransport {
+  transport: McpTransport;
+  /** The never-settled `notifications/initialized` send; tests settle it late. */
+  notification: Deferred<void>;
+  /** Did client.connect() reach the notifications/initialized send? */
+  sawInitializedNotification: boolean;
+  /** Did anyone close the transport? */
+  closed: boolean;
+}
+
+/**
+ * Fake transport modelling a streamable-HTTP server that answers
+ * `initialize` then hangs the `notifications/initialized` POST forever (no
+ * request timeout covers that notification). `closeHang` makes the
+ * transport close wedge too, for the bounded-cleanup assertion.
+ */
+function hangingInitTransport(closeHang = false): HangyTransport {
+  const notification = deferred<void>();
+  const state: HangyTransport = {
+    notification,
+    sawInitializedNotification: false,
+    closed: false,
+    transport: undefined as unknown as McpTransport,
+  };
+  const messageListeners = new Set<McpTransportMessageListener>();
+  state.transport = {
+    start: async () => {},
+    send: (message) => {
+      const msg = message as { id?: unknown; method?: string; params?: { protocolVersion?: string } };
+      if (msg.method === "initialize") {
+        const id = msg.id as JsonRpcId;
+        const protocolVersion = msg.params?.protocolVersion ?? "2025-11-25";
+        queueMicrotask(() => {
+          for (const listener of messageListeners) {
+            listener({
+              jsonrpc: "2.0",
+              id,
+              result: {
+                protocolVersion,
+                capabilities: { tools: {} },
+                serverInfo: { name: "hangy", version: "1.0.0" },
+              },
+            });
+          }
+        });
+        return Promise.resolve();
+      }
+      if (msg.method === "notifications/initialized") {
+        state.sawInitializedNotification = true;
+        return notification.promise; // never settles on its own
+      }
+      return Promise.reject(new Error(`unexpected message: ${String(msg.method)}`));
+    },
+    close: () => {
+      state.closed = true;
+      return closeHang ? new Promise<void>(() => undefined) : Promise.resolve();
+    },
+    onMessage: (listener) => {
+      messageListeners.add(listener);
+      return () => messageListeners.delete(listener);
+    },
+    onError: () => () => {},
+    onClose: () => () => {},
+  };
+  return state;
+}
+
+/** A microtask+timer flush so a late settlement is observable, if it matters. */
+const settle = async (ms = 25): Promise<void> => {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+};
+
+test("connect deadline: initialize answered but the initialized notification hangs — fail soft, healthy server still loads", async () => {
+  const good = startFakeServer(THREE_TOOLS);
+  const hangy = hangingInitTransport();
+  const started = Date.now();
+  const mcp = await loadMcpTools(
+    configOf({ slow: { command: "x" }, good: { command: "x" } }),
+    {
+      transportFor: (name) => (name === "slow" ? hangy.transport : good.client),
+      connectTimeoutMs: 50,
+    },
+  );
+  const elapsed = Date.now() - started;
+  try {
+    assert.ok(hangy.sawInitializedNotification, "the hang is the initialized notification, post-initialize");
+    assert.equal(mcp.errors.length, 1, "exactly one errors entry — no double report");
+    assert.match(mcp.errors[0], /^MCP server 'slow': initialization timed out after 50 ms/);
+    assert.match(mcp.errors[0], /connect \+ tools\/list did not settle/);
+    assert.ok(elapsed >= 40, `the deadline was waited out (${elapsed} ms)`);
+    assert.ok(elapsed < 5_000, `released promptly after the deadline (${elapsed} ms)`);
+    assert.deepEqual(mcp.client.servers, ["good"], "the wedged server did not join the client");
+    assert.equal(mcp.tools.length, 3, "healthy server's tools loaded");
+    assert.equal(hangy.closed, true, "the wedged server's client was closed");
+  } finally {
+    hangy.notification.resolve(); // let the abandoned connect unwind
+    await settle();
+    await mcp.client.close();
+  }
+});
+
+test("connect deadline: a late settlement cannot resurrect the failed server or reject unhandled", async () => {
+  const good = startFakeServer(THREE_TOOLS);
+  const hangy = hangingInitTransport();
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => {
+    unhandled.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const mcp = await loadMcpTools(
+      configOf({ slow: { command: "x" }, good: { command: "x" } }),
+      {
+        transportFor: (name) => (name === "slow" ? hangy.transport : good.client),
+        connectTimeoutMs: 50,
+      },
+    );
+    assert.equal(mcp.errors.length, 1, "the server already failed on the deadline");
+    assert.deepEqual(mcp.client.servers, ["good"]);
+
+    // the wedged notification settles late: connect completes (or fails)
+    // after loadMcpTools moved on — it must stay inert
+    hangy.notification.resolve();
+    await settle();
+    assert.deepEqual(mcp.client.servers, ["good"], "a late connect cannot join the client");
+    assert.equal(mcp.errors.length, 1, "no second report from the late settlement");
+    assert.equal(mcp.tools.length, 3, "no tools appeared from the failed server");
+    await mcp.client.close();
+
+    // and a late REJECTION is just as inert (fresh fakes: the first good
+    // transport is closed with its client)
+    const good2 = startFakeServer(THREE_TOOLS);
+    const hangy2 = hangingInitTransport();
+    const mcp2 = await loadMcpTools(configOf({ slow: { command: "x" }, good: { command: "x" } }), {
+      transportFor: (name) => (name === "slow" ? hangy2.transport : good2.client),
+      connectTimeoutMs: 50,
+    });
+    assert.equal(mcp2.errors.length, 1);
+    hangy2.notification.reject(new Error("late transport failure"));
+    await settle();
+    assert.deepEqual(mcp2.client.servers, ["good"]);
+    assert.equal(mcp2.errors.length, 1);
+    await mcp2.client.close();
+
+    assert.deepEqual(unhandled, [], "no unhandled rejection from either late settlement");
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
+test("connect deadline: the cleanup close is bounded even when the wedged transport close hangs", async () => {
+  const good = startFakeServer(THREE_TOOLS);
+  const hangy = hangingInitTransport(true); // close() never settles either
+  const before = activeTimeoutCount();
+  const started = Date.now();
+  const mcp = await loadMcpTools(
+    configOf({ slow: { command: "x" }, good: { command: "x" } }),
+    {
+      transportFor: (name) => (name === "slow" ? hangy.transport : good.client),
+      connectTimeoutMs: 50,
+    },
+  );
+  const elapsed = Date.now() - started;
+  try {
+    assert.equal(mcp.errors.length, 1, "one errors entry — the wedged close adds none");
+    assert.match(mcp.errors[0], /initialization timed out after 50 ms/);
+    // deadline (50 ms) + cleanup grace (min(5000, 50) = 50 ms), far under
+    // the production MCP_CLOSE_TIMEOUT_MS grace — the test never waits it
+    assert.ok(elapsed >= 80, `deadline and cleanup grace both waited (${elapsed} ms)`);
+    assert.ok(elapsed < 2_000, `load released despite the wedged close (${elapsed} ms)`);
+    assert.deepEqual(mcp.client.servers, ["good"]);
+    assert.equal(hangy.closed, true, "close was still attempted");
+    assert.equal(activeTimeoutCount(), before, "no lingering race timers after the bounded close");
+  } finally {
+    hangy.notification.resolve();
+    await settle();
+    await mcp.client.close();
+  }
+});
+
+test("connect deadline: the per-server timeoutMs setting bounds initialization when no override is given", async () => {
+  const hangy = hangingInitTransport();
+  const started = Date.now();
+  const mcp = await loadMcpTools(configOf({ slow: { command: "x", timeoutMs: 40 } }), {
+    transportFor: () => hangy.transport,
+  });
+  const elapsed = Date.now() - started;
+  try {
+    assert.equal(mcp.errors.length, 1);
+    assert.match(mcp.errors[0], /^MCP server 'slow': initialization timed out after 40 ms/);
+    assert.ok(elapsed >= 30 && elapsed < 5_000, `deadline came from the server entry (${elapsed} ms)`);
+  } finally {
+    hangy.notification.resolve();
+    await settle();
+    await mcp.client.close();
+  }
+});
+
