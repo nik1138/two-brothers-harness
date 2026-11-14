@@ -1178,8 +1178,11 @@ from the bottom while the draft grows, and a reader parked at the bottom
 follows the same growth — sampled in-page once per animation frame, since
 cross-process polling cannot bracket a live stream), plus
 `stream-follow-touch` (on a hasTouch 390×844 context, a native CDP touch swipe
-up the history clears the bottom pin; subsequent token/scrollHeight growth
-then leaves scrollTop stable within ±1px — quiescence and anchor stability —
+up the history clears the bottom pin: token growth while the finger is held
+still must never yank the reader back to the bottom, the post-swipe scrollTop
+must reach quiescence, and subsequent token/scrollHeight growth must keep the
+topmost visible user row's viewport offset stable within ±2px while the
+bottom edge recedes — anchor-row offset stability, not a constant scrollTop —
 while the pre-swipe phase proves at-bottom streaming still follows). The offline
 suite now holds 38 hermetic scenario blocks; the final validated run at
 commit `3fe647f` is **39 PASS, 0 FAIL, 1 SKIP** in the raw log (the

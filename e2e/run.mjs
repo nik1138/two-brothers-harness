@@ -565,7 +565,6 @@ async function startBackend({ kind, scenario, lingerMs, helperModel, streamChunk
       if (Number.isFinite(streamChunkMs)) modelArgs.push('--stream-chunk-ms', String(streamChunkMs))
       if (typeof helperModel === 'string' && helperModel !== '')
         modelArgs.push('--helper-model', helperModel)
-      if (Number.isFinite(streamChunkMs)) modelArgs.push('--stream-chunk-ms', String(streamChunkMs))
       modelServer = spawnServer(modelArgs, 'ts-model')
       spawned.push(modelServer)
       await waitForModelServer(modelPort)
