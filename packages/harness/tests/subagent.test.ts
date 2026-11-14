@@ -30,9 +30,12 @@ import {
   SUBAGENT_TOOL_DESCRIPTION,
   SUBAGENT_TOOL_NAME,
   SUBAGENT_TOOL_PARAMETERS,
+  SUBAGENT_TOOL_RESULT_MAX_CHARS,
   subagentUsageRollup,
   SubagentStore,
+  type SubagentTranscriptEntry,
 } from "../src/subagent.ts";
+import { clipBlock } from "../src/runevents.ts";
 import type { RuntimeEvent } from "../src/runevents.ts";
 
 function tmpdir(): { root: string; cleanup: () => void } {
@@ -265,6 +268,107 @@ test("the runner loops through a read-only tool and returns a bounded report", a
     );
     assert.ok(completedRow?.type === "tool");
     assert.equal(completedRow.result, "hello");
+  } finally {
+    cleanup();
+  }
+});
+
+/** First call asks for a huge read; second call reports. Captures both requests. */
+class HugeToolProvider implements Provider {
+  private readonly usage = new UsageTracker();
+  calls = 0;
+  readonly seenMessages: unknown[] = [];
+
+  usageSnapshot() {
+    return this.usage.snapshot();
+  }
+
+  async chat(): Promise<string> {
+    this.usage.record(1, 1);
+    return "plain reply";
+  }
+
+  async chatWithTools(
+    messages: Parameters<NonNullable<Provider["chatWithTools"]>>[0],
+    _tools: Tool[],
+  ): Promise<ToolChatResponse> {
+    this.calls += 1;
+    this.seenMessages.push(messages);
+    this.usage.record(10, 5, 3);
+    if (this.calls === 1) {
+      return {
+        content: "",
+        toolCalls: [{ id: "call-1", name: "big_read", args: {} }],
+      };
+    }
+    return { content: "Summarized the blob.", toolCalls: [] };
+  }
+}
+
+test("child tool results stay bounded inside the conversation, not just on the wire", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const store = new SubagentStore(path.join(root, "subagents"));
+    const id = newSubagentId();
+    store.begin({
+      id,
+      parent_session: "parent.jsonl",
+      label: "Read blob",
+      role: "junior",
+      model: "m",
+      task: "Read the blob.",
+      started_at: 1,
+    });
+    const provider = new HugeToolProvider();
+    const entries: SubagentTranscriptEntry[] = [];
+    const result = await runSubagent({
+      id,
+      task: "Read the blob.",
+      role: "junior",
+      provider,
+      tools: [fakeTool("big_read", () => "x".repeat(100_000))],
+      systemPrompt: SUBAGENT_SYSTEM_PROMPT,
+      onTranscript: (entry) => {
+        store.append(id, entry);
+        entries.push(entry);
+      },
+    });
+    store.finish(id, {
+      status: result.status,
+      ended_at: Date.now(),
+      result: result.text,
+      usage: result.usage,
+    });
+    assert.equal(result.status, "completed");
+
+    // The single bounded copy: what the next provider request carries must be
+    // exactly what the emitted/persisted transcript row carries.
+    const expected = clipBlock("x".repeat(100_000), SUBAGENT_TOOL_RESULT_MAX_CHARS);
+    assert.equal(expected.length, SUBAGENT_TOOL_RESULT_MAX_CHARS);
+    assert.equal(expected.endsWith("…"), true);
+
+    assert.equal(provider.seenMessages.length, 2);
+    const followUpRequest = provider.seenMessages[1] as Array<{
+      role: string;
+      content?: string;
+    }>;
+    const toolMessage = followUpRequest.find((message) => message.role === "tool");
+    assert.ok(toolMessage);
+    assert.equal(toolMessage.content, expected);
+
+    const completedRow = entries.find(
+      (entry) => entry.type === "tool" && entry.status === "completed",
+    );
+    assert.ok(completedRow?.type === "tool");
+    assert.equal(completedRow.result, expected);
+
+    const detail = store.get(id);
+    assert.ok(detail);
+    const persistedRow = detail.transcript.find(
+      (entry) => entry.type === "tool" && entry.status === "completed",
+    );
+    assert.ok(persistedRow?.type === "tool");
+    assert.equal(persistedRow.result, expected);
   } finally {
     cleanup();
   }
