@@ -184,3 +184,60 @@ export function clearDraft(
   delete map[id]
   saveMap(storage, map)
 }
+
+/**
+ * An accepted submission the composer is waiting to consume (the submitResult
+ * handshake). `text` is the trimmed accepted text; `sessionId` is the session
+ * selected when the submission left the box (null = welcome screen).
+ * `adoptedSessionId` is welcome-screen only: the session whose draft received
+ * the accepted text during the null -> created-session transition.
+ */
+export interface PendingAcceptedSubmit {
+  text: string
+  sessionId: string | null
+  adoptedSessionId?: string | null
+}
+
+/** What an accepted submission's outcome must clear. */
+export interface SubmitConsumptionPlan {
+  /**
+   * The box still holds the accepted text: clear the box, the unsessioned
+   * draft and the current session's saved draft.
+   */
+  clearBox: boolean
+  /** Saved drafts to drop (the old/adopted session when the box moved on). */
+  clearDrafts: string[]
+}
+
+/**
+ * Decide what an ACCEPTED submission consumes, with equality guards so text
+ * typed after the submit is never dropped:
+ *
+ * - same box, unchanged text: consume the box (and that session's draft);
+ * - same box, edited text: nothing — the newer draft stays;
+ * - selection moved to another session: drop the old session's draft only;
+ * - welcome-screen submit: the session that adopted the accepted text as its
+ *   draft gives that draft up (unless an edit already replaced it); the box
+ *   is consumed only while it still holds the accepted text.
+ *
+ * `draftOf` reads a session's saved draft (the composer passes `getDraft`).
+ */
+export function planSubmitConsumption(
+  pending: PendingAcceptedSubmit,
+  currentSessionId: string | null | undefined,
+  boxText: string,
+  draftOf: (sessionId: string) => string,
+): SubmitConsumptionPlan {
+  const current = normalizeId(currentSessionId)
+  const clearBox = boxText.trim() === pending.text
+  if (pending.sessionId !== null && pending.sessionId === current) {
+    return { clearBox, clearDrafts: clearBox ? [current] : [] }
+  }
+  if (pending.sessionId !== null) {
+    return { clearBox: false, clearDrafts: [pending.sessionId] }
+  }
+  const adopted = normalizeId(pending.adoptedSessionId)
+  const clearDrafts =
+    adopted !== null && draftOf(adopted).trim() === pending.text ? [adopted] : []
+  return { clearBox, clearDrafts }
+}

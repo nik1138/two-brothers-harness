@@ -13,6 +13,7 @@ import {
   MAX_DRAFTS,
   clearDraft,
   getDraft,
+  planSubmitConsumption,
   setDraft,
 } from '../src/drafts.ts'
 import type { StorageLike } from '../src/drafts.ts'
@@ -213,4 +214,97 @@ test('missing session id: no read, write or clear side effects', () => {
   setDraft(null, 'ignored', { storage })
   clearDraft(null, { storage })
   assert.equal(getDraft('real', { storage }), 'kept', 'existing drafts are untouched')
+})
+
+// -- accepted-submission consumption plan (the Composer submit handshake) -----
+// planSubmitConsumption is the pure seam behind Composer.vue's submitResult
+// watch: it decides which drafts/box an ACCEPTED submission consumes, with
+// equality guards so text typed after the submit is never dropped.
+
+test('planSubmitConsumption: same box, unchanged text consumes box and draft', () => {
+  const plan = planSubmitConsumption(
+    { text: 'ship it', sessionId: 's1' },
+    's1',
+    'ship it',
+    () => 'ship it',
+  )
+  assert.deepEqual(plan, { clearBox: true, clearDrafts: ['s1'] })
+})
+
+test('planSubmitConsumption: same box, edited text keeps the newer draft', () => {
+  const plan = planSubmitConsumption(
+    { text: 'ship it', sessionId: 's1' },
+    's1',
+    'ship it now',
+    () => 'ship it now',
+  )
+  assert.deepEqual(plan, { clearBox: false, clearDrafts: [] })
+})
+
+test('planSubmitConsumption: selection moved while in flight clears only the old session draft', () => {
+  const plan = planSubmitConsumption(
+    { text: 'ship it', sessionId: 's1' },
+    's2',
+    's2 draft',
+    () => 'ship it',
+  )
+  assert.deepEqual(plan, { clearBox: false, clearDrafts: ['s1'] })
+})
+
+test('planSubmitConsumption: welcome submit adopted by the created session is consumed', () => {
+  // null -> created session: adoptOrRestore persisted the accepted text as the
+  // new session's draft and left it on screen; the acceptance must consume
+  // both so a duplicate submission is impossible.
+  const plan = planSubmitConsumption(
+    { text: 'first task', sessionId: null, adoptedSessionId: 's1' },
+    's1',
+    'first task',
+    (id) => (id === 's1' ? 'first task' : ''),
+  )
+  assert.deepEqual(plan, { clearBox: true, clearDrafts: ['s1'] })
+})
+
+test('planSubmitConsumption: text typed after the welcome adoption stays', () => {
+  // The box holds newer text (clearBox false) but the adopted draft is still
+  // the accepted text — only the draft is dropped; the newer text debounces
+  // back under the session.
+  const plan = planSubmitConsumption(
+    { text: 'first task', sessionId: null, adoptedSessionId: 's1' },
+    's1',
+    'first task, please',
+    (id) => (id === 's1' ? 'first task' : ''),
+  )
+  assert.deepEqual(plan, { clearBox: false, clearDrafts: ['s1'] })
+})
+
+test('planSubmitConsumption: adopted draft already replaced by an edit is left alone', () => {
+  const plan = planSubmitConsumption(
+    { text: 'first task', sessionId: null, adoptedSessionId: 's1' },
+    's1',
+    'first task, please',
+    (id) => (id === 's1' ? 'first task, please' : ''),
+  )
+  assert.deepEqual(plan, { clearBox: false, clearDrafts: [] })
+})
+
+test('planSubmitConsumption: welcome submit with no adoption clears only the box on equality', () => {
+  // The created session already had its own draft (restoreDraft won), so
+  // nothing was adopted; a coincidentally equal box is still consumed.
+  const plan = planSubmitConsumption(
+    { text: 'first task', sessionId: null, adoptedSessionId: null },
+    's1',
+    'first task',
+    (id) => (id === 's1' ? 'pre-existing' : ''),
+  )
+  assert.deepEqual(plan, { clearBox: true, clearDrafts: [] })
+})
+
+test('planSubmitConsumption: tolerates null ids and untrimmed box text', () => {
+  const plan = planSubmitConsumption(
+    { text: 'task', sessionId: null },
+    null,
+    '  task  ',
+    () => '',
+  )
+  assert.deepEqual(plan, { clearBox: true, clearDrafts: [] })
 })

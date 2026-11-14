@@ -36,6 +36,7 @@ import { normalizeProviders } from '../providerSettings'
 import type { ProviderView } from '../providerSettings'
 import {
   MODE_COMMAND_USAGE,
+  commandLineSpan,
   commandSectionCount,
   commandUsageLine,
   isBaseCommandAction,
@@ -53,7 +54,7 @@ import {
   clampSteerPending,
 } from '../steering'
 import { composerSeats } from '../composerStatus'
-import { clearDraft, getDraft, setDraft } from '../drafts'
+import { clearDraft, getDraft, planSubmitConsumption, setDraft } from '../drafts'
 import { appendQuoteDraft, quoteDraftBase } from '../messageQuote'
 import { createRecallState, loadRecall, recordRecall, saveRecall, stepRecall } from '../recall'
 import type { RecallState } from '../recall'
@@ -440,6 +441,12 @@ let draftSaveTimer: ReturnType<typeof setTimeout> | null = null
 let restoringDraft = false
 /** Welcome-screen draft (no active session), kept in memory until submit. */
 let unsessionedDraft = ''
+/**
+ * Welcome-screen submissions only: the session whose draft received the
+ * accepted text during the null -> created-session transition (null when
+ * nothing was adopted). Lets the acceptance consume exactly that draft.
+ */
+let adoptedSubmitSession: string | null = null
 
 // -- prompt-history recall ----------------------------------------------------
 // Up/Down at the draft edges recall accepted submissions, newest first (the
@@ -494,6 +501,13 @@ function restoreDraft(sessionId: string | null | undefined) {
 function adoptOrRestore(sessionId: string) {
   if (getDraft(sessionId) === '' && task.value.trim().length > 0) {
     setDraft(sessionId, task.value)
+    // A welcome-screen submission still awaiting its outcome adopted its own
+    // text: remember the session so an accepted result can consume it there
+    // (a rejected result keeps the draft, exactly like a manual adoption).
+    const pending = pendingSubmit.value
+    if (pending && pending.sessionId === null && pending.text === task.value.trim()) {
+      adoptedSubmitSession = sessionId
+    }
     return
   }
   restoreDraft(sessionId)
@@ -569,19 +583,24 @@ watch(
     const pending = pendingSubmit.value
     if (!result || !pending || result.token !== pending.token) return
     pendingSubmit.value = null
+    const adopted = adoptedSubmitSession
+    adoptedSubmitSession = null
     if (!result.accepted) return
     // Only accepted submissions (a run the backend queued included) join the
     // recall history; a rejected request must never become recallable.
     rememberRecall(pending.text)
-    if (props.sessionId === pending.sessionId) {
-      // same box: only clear when it still holds the submitted text
-      if (task.value.trim() === pending.text) consumeComposerText()
-      return
-    }
-    // the selection moved on while the request was in flight; the accepted
-    // task's saved draft (under its old session) must not reappear later
-    if (pending.sessionId) clearDraft(pending.sessionId)
-    else unsessionedDraft = ''
+    // The consumption plan carries the equality guards: across the
+    // null -> created-session transition only the adopted accepted draft is
+    // dropped; text typed after the submit always survives.
+    const plan = planSubmitConsumption(
+      { text: pending.text, sessionId: pending.sessionId, adoptedSessionId: adopted },
+      props.sessionId,
+      task.value,
+      getDraft,
+    )
+    if (plan.clearBox) consumeComposerText()
+    for (const id of plan.clearDrafts) clearDraft(id)
+    if (pending.sessionId === null) unsessionedDraft = ''
   },
 )
 
@@ -1140,13 +1159,6 @@ function composerValue(): string {
   return inputEl.value?.value ?? task.value
 }
 
-function composerCaret(): number {
-  const el = inputEl.value
-  return el && typeof el.selectionStart === 'number'
-    ? el.selectionStart
-    : composerValue().length
-}
-
 /** Replace the consumed command span, keep any other draft text, refocus. */
 function consumeCommandSpan(start: number, caret: number): void {
   const text = composerValue()
@@ -1200,20 +1212,43 @@ function activatePickerRow(item: MentionItem | null): boolean {
   return insertPickerItem(item)
 }
 
+/**
+ * Run one picker row: action rows act/insert locally, everything else inserts.
+ * The row's span is the whole command line the `/` trigger opens (typed
+ * arguments included) — exactly what Enter on that line would dispatch — so
+ * picker activation and Enter never diverge and no text is orphaned.
+ */
 function runActionRow(item: MentionItem): boolean {
   const action = item.action
   if (action === undefined || !isBaseCommandAction(action)) return false
   const trigger = pickerTrigger.value
-  const start = trigger?.kind === 'command' ? trigger.start : 0
-  const caret = composerCaret()
+  const span = commandLineSpan(
+    composerValue(),
+    trigger?.kind === 'command' ? trigger.start : 0,
+  )
+  const args = span.typed?.args ?? ''
   closePicker()
-  consumeCommandSpan(start, caret)
   if (action === 'mode') {
-    // the cooperation mode is a composer-local control
-    openModePicker()
+    // `/mode <arg>` applies the mode; `/mode` alone opens the control; a bad
+    // argument is a usage error that keeps the draft (same as Enter dispatch).
+    const modeArg = resolveModeCommandArg(args)
+    if (modeArg.kind === 'invalid') {
+      emit('notice', `Usage: ${MODE_COMMAND_USAGE}`)
+      return true
+    }
+    consumeCommandSpan(span.start, span.end)
+    if (modeArg.kind === 'open') {
+      openModePicker()
+      return true
+    }
+    mode.value = modeArg.mode
+    const modeLabel =
+      modeArg.mode === 'work' ? 'Work' : modeArg.mode === 'auto' ? 'Auto' : 'Consult'
+    emit('notice', `Cooperation mode: ${modeLabel}`)
     return true
   }
-  emitCommandRequest(action, item.label.replace(/^\//, ''), '', item.requiresArguments === true)
+  consumeCommandSpan(span.start, span.end)
+  emitCommandRequest(action, item.label.replace(/^\//, ''), args, item.requiresArguments === true)
   return true
 }
 

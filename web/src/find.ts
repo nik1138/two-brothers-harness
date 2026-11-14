@@ -235,3 +235,68 @@ function normalizeCount(count: number): number {
   if (!Number.isFinite(count) || count <= 0) return 0
   return Math.floor(count)
 }
+
+// -- cache invalidation key ---------------------------------------------------
+// ChatView keeps the DOM-derived searchable blocks in a cache; the watcher
+// feeding `invalidateFindBlocks` fires when the key below changes, so the
+// key must name every reactive input that re-folds or re-renders the
+// transcript. All five are REQUIRED properties: forgetting one is a type
+// error at the component's call site, not a silent ghost-match bug.
+
+const identityIds = new WeakMap<object, number>()
+let nextIdentityId = 1
+
+/** Stable per-object id, so array identity (not content) can join a key. */
+function identityToken(value: object): number {
+  let id = identityIds.get(value)
+  if (id === undefined) {
+    id = nextIdentityId
+    nextIdentityId += 1
+    identityIds.set(value, id)
+  }
+  return id
+}
+
+/** Every reactive input whose change must drop the find block cache. */
+export interface FindInvalidationInput {
+  /**
+   * The visible timeline slices. Identity-based — the same contract the
+   * former direct `watch(visibleTimeline, ...)` had: the projection replaces
+   * the array whenever rows change.
+   */
+  readonly timeline: readonly unknown[] | null | undefined
+  /** Prompt-audit rows hidden or shown without touching the timeline. */
+  readonly auditVisible: boolean
+  /**
+   * Expanded fold-group ids. Content-compared: a fresh Set with the same ids
+   * must NOT invalidate (the fold state did not change).
+   */
+  readonly expandedFolds: ReadonlySet<string> | null | undefined
+  /** The run this view follows; row folding depends on it. */
+  readonly liveRunId: string | null | undefined
+  /** The approval docked above the composer; row folding depends on it. */
+  readonly dockedApprovalId: string | null | undefined
+}
+
+/**
+ * A bounded, collision-safe key over the invalidation inputs: equal content
+ * yields an equal key, any actual input change yields a different key. There
+ * is no numeric ordering and no history — A -> B -> A returns the same key
+ * as the first A. The timeline enters by identity (a WeakMap token, so dead
+ * timelines are collected), the fold ids sorted; the segments are one
+ * JSON.stringify, which separators cannot be spoofed by id contents.
+ */
+export function findInvalidationKey(input: FindInvalidationInput): string {
+  const timeline = Array.isArray(input.timeline) ? input.timeline : []
+  const folds =
+    input.expandedFolds && typeof input.expandedFolds.values === 'function'
+      ? [...input.expandedFolds].sort()
+      : []
+  return JSON.stringify([
+    timeline.length === 0 ? 0 : identityToken(timeline),
+    input.auditVisible === true,
+    folds,
+    input.liveRunId ?? null,
+    input.dockedApprovalId ?? null,
+  ])
+}

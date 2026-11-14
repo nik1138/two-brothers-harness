@@ -386,6 +386,27 @@ export function parseSubmittedCommand(value: unknown): SubmittedCommand | null {
   return { token, args: (match[2] ?? '').trim() }
 }
 
+/**
+ * The command-line span a `/` trigger opens: from the trigger to the end of
+ * its line (typed arguments included), parsed when the span is one
+ * `/name args` line. Picker activation consumes exactly this span — the same
+ * text Enter on the line would dispatch — never just the token up to the
+ * caret, so typed arguments ride along and no orphan text is left behind.
+ */
+export function commandLineSpan(
+  text: unknown,
+  triggerStart: unknown,
+): { start: number; end: number; typed: SubmittedCommand | null } {
+  const source = typeof text === 'string' ? text : ''
+  const start =
+    typeof triggerStart === 'number' && Number.isFinite(triggerStart)
+      ? Math.min(Math.max(Math.trunc(triggerStart), 0), source.length)
+      : 0
+  const newline = source.indexOf('\n', start)
+  const end = newline === -1 ? source.length : newline
+  return { start, end, typed: parseSubmittedCommand(source.slice(start, end)) }
+}
+
 /** Usage line for a base command, e.g. `/plan <objective>`. */
 export function commandUsageLine(command: BaseCommand): string {
   const hint = text(command.argumentHint)
