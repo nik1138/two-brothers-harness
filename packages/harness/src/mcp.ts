@@ -62,6 +62,21 @@
  * `MCP tool error: timed out after …` tool result, never a crash. A caller
  * abort still rejects the call (the harness turns that into a tool error).
  *
+ * Initialization and tool discovery are bounded per server: pi-mcp arms a
+ * timeout on `initialize`/`tools/list` requests, but `client.connect` ends
+ * with an awaited `notifications/initialized` notification whose
+ * streamable-HTTP transport POST carries no request timeout — a server that
+ * answers `initialize` then hangs that POST would stall `loadMcpTools`
+ * forever. `connect` + `listTools` therefore run under one per-server
+ * deadline (the entry's `timeoutMs`, default {@link MCP_DEFAULT_TIMEOUT_MS},
+ * overridable through `McpLoadOptions.connectTimeoutMs`): on timeout the
+ * server lands in `errors` like any other failure, its client is closed
+ * through the same bounded discipline as {@link closeMcpClientBounded} (the
+ * cleanup grace is the smaller of {@link MCP_CLOSE_TIMEOUT_MS} and the
+ * deadline), and the remaining servers still load. The raced connect keeps
+ * unwinding in-process when it settles late — it can neither reject
+ * unhandled nor add the failed server's tools.
+ *
  * `loadMcpTools` returns `(tools, client, errors)` as an object —
  * keep `client` referenced for as long as the tools may be used, because it
  * holds the open stdio/HTTP connections; `client.close()` is idempotent.
@@ -334,11 +349,57 @@ export async function closeMcpClientBounded(
   }
 }
 
-/** Optional hooks for `loadMcpTools` (tests inject in-memory transports). */
+/**
+ * Run `client.connect(transport)` + `listTools()` under one deadline.
+ * pi-mcp times out `initialize`/`tools/list` requests, but `connect` ends
+ * with an awaited `notifications/initialized` notification whose transport
+ * send has no timeout — a server that answers `initialize` then hangs that
+ * send would otherwise stall `loadMcpTools` without bound. On expiry the
+ * raced promise rejects with a timeout error; the connect keeps unwinding
+ * in-process, and because `Promise.race` subscribed to it its late
+ * settlement can neither reject unhandled nor touch the caller's state.
+ *
+ * Timer discipline matches {@link closeMcpClientBounded}: the race timer
+ * stays REF'd and is cleared in `finally` as soon as the race settles.
+ */
+async function connectAndListToolsBounded(
+  client: McpClient,
+  transport: McpTransport,
+  timeoutMs: number,
+): Promise<McpTool[]> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      (async () => {
+        await client.connect(transport);
+        return client.listTools();
+      })(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(
+            new Error(
+              `initialization timed out after ${timeoutMs} ms ` +
+                "(connect + tools/list did not settle)",
+            ),
+          );
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 export interface McpLoadOptions {
   /** Build the transport for a server (defaults to stdio / streamable-HTTP
    *  from the spec). Hermetic tests return pi-mcp's `InMemoryTransport`. */
   transportFor?(serverName: string, spec: McpServerSpec): McpTransport;
+  /**
+   * Override the per-server `connect` + `listTools` deadline for every
+   * server (the per-entry `timeoutMs` wins when this is unset; tests set a
+   * short value so the production default is never waited out). Invalid
+   * values (non-positive / non-finite) are ignored.
+   */
+  connectTimeoutMs?: number;
   /**
    * Keep sanitized MCP text unbounded (no 20 KiB clip) so the calling
    * harness's spill layer can save the full output and show a bounded
@@ -585,6 +646,12 @@ export async function loadMcpTools(
       );
       continue;
     }
+    const connectTimeoutMs =
+      options.connectTimeoutMs !== undefined &&
+      Number.isFinite(options.connectTimeoutMs) &&
+      options.connectTimeoutMs > 0
+        ? options.connectTimeoutMs
+        : timeoutMs;
     const client = new McpClient({ name: MCP_CLIENT_NAME, version: MCP_CLIENT_VERSION });
     try {
       // effective spec: ${VAR} references in env/headers expand from
@@ -597,8 +664,7 @@ export async function loadMcpTools(
       const transport = options.transportFor
         ? options.transportFor(name, effective)
         : defaultTransport(name, effective);
-      await client.connect(transport);
-      const listed = await client.listTools();
+      const listed = await connectAndListToolsBounded(client, transport, connectTimeoutMs);
       const converted = listed.map((tool) => {
         const entry = mcpToolToTool(
           name,
@@ -617,9 +683,17 @@ export async function loadMcpTools(
       byRole[role].push(...converted);
     } catch (exc) {
       // a bad server must not kill the run: record, close the partial
-      // connection, and continue with the remaining servers
+      // connection, and continue with the remaining servers. The cleanup
+      // close is bounded (the smaller of the close grace and the server's
+      // own deadline): a server that could not initialize in time must not
+      // pin the load on its way out either. Close failures stay swallowed,
+      // exactly like the historical unbounded close; the one `errors`
+      // entry above is the single report.
       errors.push(`MCP server '${name}': ${exc instanceof Error ? exc.message : String(exc)}`);
-      await client.close().catch(() => undefined);
+      await closeMcpClientBounded(
+        { servers: [name], close: () => client.close() },
+        { timeoutMs: Math.min(MCP_CLOSE_TIMEOUT_MS, connectTimeoutMs) },
+      ).catch(() => undefined);
     }
   }
 
