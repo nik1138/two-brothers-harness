@@ -33,13 +33,17 @@ import type { MarkdownBlock, MarkdownInline } from '../markdown'
 import { quoteBlock, quoteTextForSelection } from '../messageQuote'
 import {
   FALLBACK_LINE_HEIGHT_PX,
-  clampScrollTop,
-  isNearBottom,
+  applyGestureFollow,
+  applyProgrammaticFollow,
+  applyScrolledFollow,
+  initialFollowState,
   predictedScrollTopAfterTouch,
   predictedScrollTopAfterWheel,
   predictedScrollTopForKey,
+  trackableTouch,
+  wheelAffectsFollow,
 } from '../followScroll'
-import type { ScrollGeometry } from '../followScroll'
+import type { FollowState, ScrollGeometry } from '../followScroll'
 import type { StreamingBlocks } from '../streaming'
 import ToolActivity from './ToolActivity.vue'
 import ApprovalCard from './ApprovalCard.vue'
@@ -119,14 +123,17 @@ const props = defineProps<{
 const scrollEl = ref<HTMLElement | null>(null)
 /** The chord that opens find; the shell owns the reactive, rebindable value. */
 const findBinding = computed(() => props.findBinding ?? DEFAULT_KEYBINDINGS.find)
-/** Pin-to-bottom only while the reader is already near the bottom; reading
- * history must not be interrupted by incoming messages. Besides the scroll
- * handler, gesture handlers (wheel/touch/keyboard) update this flag
- * synchronously from the predicted landing position (see followScroll.ts):
- * the scroll event for a gesture is dispatched asynchronously, after the
- * browser scrolls, so a streaming token's pin would otherwise land in
- * between and undo the reader's scroll. */
-const nearBottom = ref(true)
+/** Bottom-follow state (see followScroll.ts): the pin guard reads
+ * `nearBottom`; `hold` records a deliberate upward reader gesture so the
+ * asynchronously dispatched scroll event cannot re-enable the pin while the
+ * reader is parked inside the near-bottom band. Gesture handlers (wheel/
+ * touch/keyboard) update the state synchronously from the predicted landing
+ * position: the scroll event for a gesture is dispatched asynchronously,
+ * after the browser scrolls, so a streaming token's pin would otherwise land
+ * in between and undo the reader's scroll. */
+const followState = ref<FollowState>(initialFollowState())
+/** Pin-to-bottom guard read by the watchers; a computed over the state. */
+const nearBottom = computed(() => followState.value.nearBottom)
 
 function scrollGeometry(el: HTMLElement): ScrollGeometry {
   return { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop, clientHeight: el.clientHeight }
@@ -135,34 +142,52 @@ function scrollGeometry(el: HTMLElement): ScrollGeometry {
 function onScroll() {
   const el = scrollEl.value
   if (!el) return
-  nearBottom.value = isNearBottom(scrollGeometry(el))
+  followState.value = applyScrolledFollow(followState.value, scrollGeometry(el))
   updateActiveHistoryTarget()
 }
 
 /**
- * Set the follow flag from a landing position the browser has not applied
- * yet (wheel notch, touch drag, scroll key). The synchronous update is the
- * whole point: by the time the gesture's own scroll event dispatches, the
- * next token frame's pin has already consulted this flag and stood down.
+ * Apply a deliberate reader gesture (wheel notch, touch drag, scroll key)
+ * whose landing position is known synchronously, before the browser applies
+ * the scroll. The synchronous update is the whole point: by the time the
+ * gesture's own scroll event dispatches, the next token frame's pin has
+ * already consulted this state and stood down.
  */
 function applyPredictedFollow(predictedTop: number) {
   const el = scrollEl.value
   if (!el) return
-  const g = scrollGeometry(el)
-  nearBottom.value = isNearBottom({ ...g, scrollTop: clampScrollTop(predictedTop, g) })
+  followState.value = applyGestureFollow(followState.value, predictedTop, scrollGeometry(el))
 }
 
-/** Refresh the follow flag at the moment a programmatic scroll moves the
+/** Refresh the follow state at the moment a programmatic scroll moves the
  * transcript: an in-flight token pin between the scroll and its asynchronous
  * scroll event must not drag the reader back to the bottom. */
 function applyCurrentFollow(el: HTMLElement) {
-  nearBottom.value = isNearBottom(scrollGeometry(el))
+  followState.value = applyProgrammaticFollow(followState.value, scrollGeometry(el))
+}
+
+/** True when the event originates inside a nested scrollable region (a tool
+ * card's own output scroller): that region absorbs the gesture, so it must
+ * not move the transcript's follow state. The nearest scrollable ancestor of
+ * the event target has to be the transcript itself. */
+function fromNestedScroller(e: Event): boolean {
+  const el = scrollEl.value
+  const target = e.target
+  if (!el || !(target instanceof Element) || !el.contains(target)) return false
+  for (let node: Element | null = target; node && node !== el; node = node.parentElement) {
+    if (!(node instanceof HTMLElement)) continue
+    if (node.scrollHeight <= node.clientHeight) continue
+    const overflowY = window.getComputedStyle(node).overflowY
+    if (overflowY === 'auto' || overflowY === 'scroll') return true
+  }
+  return false
 }
 
 function onWheel(e: WheelEvent) {
   const el = scrollEl.value
-  // a horizontal-only gesture never moves the vertical follow state
-  if (!el || e.deltaY === 0) return
+  // Ctrl+wheel is zoom, and a horizontal-only gesture never moves the
+  // vertical follow state; nested tool/output scrollers keep their own
+  if (!el || !wheelAffectsFollow(e) || fromNestedScroller(e)) return
   applyPredictedFollow(predictedScrollTopAfterWheel(e.deltaY, e.deltaMode, scrollGeometry(el), lineHeightPx(el)))
 }
 
@@ -177,25 +202,41 @@ let touchStartClientY = 0
 
 function onTouchStart(e: TouchEvent) {
   const el = scrollEl.value
-  const touch = e.touches[0]
-  if (!el || !touch) return
+  if (!el || fromNestedScroller(e)) return
+  // only a single-finger pan is tracked; a second finger joining mid-gesture
+  // is ambiguous, so the baseline stays reset until a fresh touchstart
+  const touch = trackableTouch(e.touches)
+  if (!touch) return
   touchStartScrollTop = el.scrollTop
   touchStartClientY = touch.clientY
 }
 
 function onTouchMove(e: TouchEvent) {
   const el = scrollEl.value
-  const touch = e.touches[0]
-  if (!el || !touch || touchStartScrollTop === null) return
+  if (!el || touchStartScrollTop === null) return
+  const touch = trackableTouch(e.touches)
+  // a finger joined or left mid-gesture: drop the baseline instead of
+  // predicting from a stale one
+  if (!touch) {
+    touchStartScrollTop = null
+    return
+  }
   applyPredictedFollow(
     predictedScrollTopAfterTouch(touchStartScrollTop, touchStartClientY, touch.clientY, scrollGeometry(el)),
   )
 }
 
+/** Gesture over (or aborted by the browser): the touch baseline must not
+ *  leak into the next gesture. */
+function onTouchEnd() {
+  touchStartScrollTop = null
+}
+
 /** Scroll keys bubble up from focused transcript controls; predict their
  * landing position like a wheel notch so a key press away from the bottom
- * cancels follow immediately. Editing surfaces are not scrolling, and Space
- * on a focused control activates it instead of scrolling. */
+ * cancels follow immediately. Editing surfaces are not scrolling, Space on a
+ * focused control activates it instead of scrolling, and keys inside a
+ * nested tool/output scroller scroll that region, not the transcript. */
 function onScrollKeydown(e: KeyboardEvent) {
   const el = scrollEl.value
   if (!el) return
@@ -204,8 +245,9 @@ function onScrollKeydown(e: KeyboardEvent) {
     if (target.closest('input, textarea, select, [contenteditable="true"]')) return
     if (e.key === ' ' && target.closest('button, a[href], summary')) return
   }
-  const predicted = predictedScrollTopForKey(e.key, scrollGeometry(el))
+  const predicted = predictedScrollTopForKey(e.key, scrollGeometry(el), { shiftKey: e.shiftKey })
   if (predicted === null) return
+  if (fromNestedScroller(e)) return
   applyPredictedFollow(predicted)
 }
 
@@ -805,7 +847,11 @@ function scrollRectIntoBand(target: DOMRect) {
   // honest follow state before the smooth scroll's first async scroll event,
   // so a token pin landing mid-reveal cannot override the reveal (or, near
   // the bottom, follow re-engages once the reveal rests there)
-  nearBottom.value = isNearBottom({ scrollHeight: el.scrollHeight, scrollTop: top, clientHeight: el.clientHeight })
+  followState.value = applyProgrammaticFollow(followState.value, {
+    scrollHeight: el.scrollHeight,
+    scrollTop: top,
+    clientHeight: el.clientHeight,
+  })
 }
 
 /**
@@ -1479,6 +1525,8 @@ watch(
       @wheel.passive="onWheel"
       @touchstart.passive="onTouchStart"
       @touchmove.passive="onTouchMove"
+      @touchend.passive="onTouchEnd"
+      @touchcancel.passive="onTouchEnd"
       @keydown="onScrollKeydown"
     >
     <p v-if="loading" class="empty-hint">Loading…</p>
