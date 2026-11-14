@@ -71,12 +71,12 @@ condenses every confirmed finding, hypothesis, deferral, and structural
 candidate. Fix lanes `quality-tui-fixes`, `quality-chat-fixes`,
 `quality-settings-fixes`, `quality-backend-fixes` started from `d98ec79`
 — a started lane is **not** a shipped fix; statuses below track evidence,
-not intention. All product fix branches have since **landed and been
-independently accepted/merged** (marked INTEGRATED with SHAs and
-acceptance counts). E2E-G1 is now the only unintegrated fix (test
-infrastructure); final release gates are still pending. Integrated
-prechecks are recorded below — evidence, **not** the final release
-gates on the eventual final commit. The remaining-core audit (CLI / workspace edit-diff /
+not intention. All reviewed code/test-infrastructure findings are now
+**integrated or explicitly deferred** (INTEGRATED rows carry SHAs and
+acceptance counts). Final verification is **IN PROGRESS** on exact
+commit `3fe647f8901dcd99b953c6f9105c498fa31609e3` — final counts are
+recorded only when the parent supplies them. The prechecks below remain
+historical evidence only, **not** final gates. The remaining-core audit (CLI / workspace edit-diff /
 settings-write / config / subagent runner / runstream / instructions +
 the MCP timeout verdict) is **complete** — its conclusions are recorded
 below as CORE-F1..F5 plus no-finding notes. The paused OAuth (item 6),
@@ -202,8 +202,9 @@ No-finding conclusions from the same audit (full reads, not grep-level):
   pages × 30 s — a pathological listing could stretch to ~8 h; not
   realistically exploitable, awareness only.
 
-PRECHECK (verification evidence on integrated trees — **not** the final
-release gates on the eventual final commit):
+PRECHECK (historical verification evidence on integrated trees only —
+**not** final gates; final verification is in progress on
+`3fe647f8901dcd99b953c6f9105c498fa31609e3`):
 
 - **At `17867f9`** — backend typecheck PASS; package both modes
   2480/2472/0 fail/8 skip; CLI source + dist 19/19 each; web 640/640,
@@ -221,7 +222,7 @@ Gate finding from the browser precheck:
 
 | ID | Sev | Finding | Evidence | Status |
 |---|---|---|---|---|
-| E2E-G1 | Low-Med | `scripts/e2e-test.ps1` did not check the web build exit code, so an EPERM build failure continued and was masked by a recovery ENOENT — the browser matrix can run against a missing/stale `dist` | `scripts/e2e-test.ps1` build step (found by browser precheck) | FIX LANE IN PROGRESS (`quality-e2e-build-exit`); final gate reliability requires it or an explicit deferral |
+| E2E-G1 | Low-Med | `scripts/e2e-test.ps1` did not check the web build exit code, so an EPERM build failure continued and was masked by a recovery ENOENT — the browser matrix can run against a missing/stale `dist` | `scripts/e2e-test.ps1` build step (found by browser precheck) | INTEGRATED — impl `ca1d8dd`, merge `3fe647f`; acceptance helpers 20/20 (14 freshness incl. 2 wrapper + 6 registry), mocked exit 42 / red-on-base proof, PS parse PASS |
 
 CANDIDATE (structural, behavior-preserving — remaining groups DEFERRED,
 descriptions preserved for future work):
