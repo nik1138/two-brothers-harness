@@ -116,7 +116,12 @@ Shipped on the integrate-goal line (`main..6052ff7`); recorded on
       preserved. What remains: sealed provider keys were permanently lost
       in the incident, so the owner must re-enter them in Settings before
       any live run, then re-create check sessions. (The separate real
-      streaming UI validation is still open — not claimed here.)
+      streaming UI validation is DONE — verified PASS 2026-11-14, recorded
+      on branch `docs-goal-live-acceptance`: real LM Studio `lfm3-1.7b`
+      streaming; wheel-up parked the reader with max anchor drift 0 across
+      9 growth pairs; return to bottom resumed following with max fromBottom
+      0 across 7 growth frames; no console errors; test run stopped and the
+      generated test session deleted; original two sessions preserved.)
 - [ ] **0.0.2 release** — only with explicit owner permission. Push the
       current `main` (whatever its tip is at release time), watch CI, bump
       version, curate the changelog, update release docs, run

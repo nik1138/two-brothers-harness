@@ -70,7 +70,16 @@ below).
 | Hermetic server E2E | **4/4** (also inside the smoke gate and the WSL pass) |
 | Browser E2E | **full 40-block matrix: 41 PASS lines / 0 FAIL / 1 opt-in `real` SKIP** + helpers suite **20/20** — validated at `9f353c4` |
 | Tarball | **7/7 + pack check PASS** — last run at `3fe647f`; **not re-run in the goal-wave final gate** |
-| Live server | **running** — PID 271100 `node dist/cli.js serve --port 8600 --sessions-dir sessions`, **re-verified live 2026-11-14 on main `92af62a`** (docs-only after the gated code merge `9f353c4`): package + web rebuilt, `sync-web` byte-identical; `GET /` 200, `GET /api/sessions` 200 with both preserved user sessions (…4176c1 and …066581); process scan shows exactly one intended backend; sessions/settings preserved; **provider keys still to be re-entered by the owner** (live streaming UI validation is a separate, still-open item) |
+| Live server | **running** — PID 271100 `node dist/cli.js serve --port 8600 --sessions-dir sessions`, **re-verified live 2026-11-14 on main `92af62a`** (docs-only after the gated code merge `9f353c4`): package + web rebuilt, `sync-web` byte-identical; `GET /` 200, `GET /api/sessions` 200 with both preserved user sessions (…4176c1 and …066581); process scan shows exactly one intended backend; sessions/settings preserved; **provider keys still to be re-entered by the owner** (the separate live streaming UI validation is now DONE — see the live-evidence note below) |
+
+**Live streaming UI validation — VERIFIED PASS 2026-11-14** (recorded on branch
+`docs-goal-live-acceptance` from `2e2f8c6`; not merged, not pushed): real LM
+Studio `lfm3-1.7b` streaming on the rebuilt app. Wheel-up during token
+streaming left the reader parked with **max anchor drift 0 across 9 growth
+pairs**; returning to the bottom resumed following with **max fromBottom 0
+across 7 growth frames**; **no console errors**; the test run was stopped and
+the generated test session deleted; the original two preserved sessions
+(…4176c1 and …066581) untouched. |
 | Release | no version bump, tag, or publish in this wave; 0.0.1 is the published version |
 
 Live setup (verified on the running server, 2026-11-14):
