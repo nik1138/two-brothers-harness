@@ -376,163 +376,218 @@ export function foldHelperDetail(detail: SubagentDetail, event: RuntimeEvent): S
   const childId = childIdOf(event);
   if (childId !== null) {
     if (childId !== detail.id) return detail;
-    if (event.type === "approval_requested") {
-      const requested = event as ApprovalRequestedEvent;
-      if (
-        detail.transcript.some((entry) => entry.type === "approval" && entry.status === "pending")
-      ) {
-        return detail;
-      }
-      const action = (requested.action ?? "").slice(0, 40) || "action";
-      const target = (requested.target ?? "").slice(0, 500);
-      const command = (requested.command ?? "").slice(0, 1_000);
-      const row: SubagentApprovalEntry = {
-        type: "approval",
-        status: "pending",
-        action,
-        at: intOf(event.at) * 1_000,
-        ...(target !== "" ? { target } : {}),
-        ...(command !== "" ? { command } : {}),
-      };
-      return {
-        ...detail,
-        last_activity: { kind: "status", status: "awaiting_approval", at: intOf(event.at) * 1_000 },
-        transcript: [...detail.transcript, row],
-      };
-    }
-    if (event.type !== "approval_resolved") return detail;
-    const resolved = event as ApprovalResolvedEvent;
-    const status =
-      resolved.reason === "cancelled"
-        ? "cancelled"
-        : resolved.decision === "allow"
-          ? "allowed"
-          : "denied";
-    const transcript = [...detail.transcript];
-    for (let index = transcript.length - 1; index >= 0; index -= 1) {
-      const entry = transcript[index]!;
-      if (entry.type === "approval" && entry.status === "pending") {
-        transcript[index] = { ...entry, status };
-        break;
-      }
-    }
-    return {
-      ...detail,
-      last_activity: {
-        kind: "status",
-        status: detail.status === "running" ? "running" : detail.status,
-        at: intOf(event.at) * 1_000,
-      },
-      transcript,
-    };
+    return foldHelperApprovalDetail(
+      detail,
+      event as ApprovalRequestedEvent | ApprovalResolvedEvent,
+    );
   }
   if (event.type === "subagent_started") {
-    const started = event as SubagentStartedEvent;
-    if (started.subagent_id !== detail.id) return detail;
-    return {
-      ...detail,
-      label: helperOneLineText(started.label),
-      role: roleOf(started.role),
-      model: started.model,
-      status: "running",
-      started_at: intOf(started.started_at),
-      ...(started.background === true ? { background: true } : {}),
-    };
+    return foldHelperStartedDetail(detail, event as SubagentStartedEvent);
   }
   if (event.type === "subagent_activity") {
-    const activity = event as SubagentActivityEvent;
-    if (activity.subagent_id !== detail.id) return detail;
-    const at = intOf(event.at) * 1_000;
-    const lastActivity = activityOfEvent(activity);
-    if (activity.activity === "message") {
-      const text = (activity.text ?? "").slice(0, 12_000);
-      if (text === "") return detail;
-      const last = detail.transcript[detail.transcript.length - 1];
-      if (last?.type === "message" && last.role === "assistant" && last.text === text) {
-        return { ...detail, last_activity: lastActivity };
-      }
-      return {
-        ...detail,
-        last_activity: lastActivity,
-        transcript: [
-          ...detail.transcript,
-          { type: "message", role: "assistant", text, at },
-        ],
-      };
-    }
-    if (activity.activity === "tool") {
-      const tool = (activity.tool ?? "").slice(0, 200);
-      if (tool === "") return detail;
-      const status =
-        activity.status === "completed" || activity.status === "error"
-          ? activity.status
-          : "started";
-      const openIndex = findOpenTool(detail.transcript, tool);
-      if (status === "started") {
-        if (openIndex >= 0) return detail;
-        return {
-          ...detail,
-          last_activity: lastActivity,
-          transcript: [
-            ...detail.transcript,
-            {
-              type: "tool",
-              tool,
-              status,
-              ...(activity.args !== undefined ? { args: activity.args } : {}),
-              at,
-            },
-          ],
-        };
-      }
-      if (openIndex >= 0) {
-        const openEntry = detail.transcript[openIndex];
-        if (openEntry === undefined || openEntry.type !== "tool") return detail;
-        const transcript = [...detail.transcript];
-        transcript[openIndex] = {
-          ...openEntry,
-          status,
-          ...(typeof activity.result === "string" ? { result: activity.result } : {}),
-        };
-        return { ...detail, last_activity: lastActivity, transcript };
-      }
-      return {
-        ...detail,
-        last_activity: lastActivity,
-        transcript: [
-          ...detail.transcript,
-          {
-            type: "tool",
-            tool,
-            status,
-            ...(activity.args !== undefined ? { args: activity.args } : {}),
-            ...(typeof activity.result === "string" ? { result: activity.result } : {}),
-            at,
-          },
-        ],
-      };
-    }
-    return { ...detail, last_activity: lastActivity };
+    return foldHelperActivityDetail(detail, event as SubagentActivityEvent);
   }
   if (event.type === "subagent_completed") {
-    const completed = event as SubagentCompletedEvent;
-    if (completed.subagent_id !== detail.id) return detail;
-    return {
-      ...detail,
-      status: statusOf(completed.status),
-      ...(completed.result !== undefined ? { result: completed.result } : {}),
-      ...(completed.error !== undefined ? { error: completed.error } : {}),
-      usage: usageOf(completed.usage),
-      duration_ms: intOf(completed.duration_ms),
-      ended_at: intOf(completed.ended_at),
-      last_activity: {
-        kind: "status",
-        status: completed.status,
-        at: intOf(event.at) * 1_000,
-      },
-    };
+    return foldHelperCompletedDetail(detail, event as SubagentCompletedEvent);
   }
   return detail;
+}
+
+/**
+ * Fold one child-tagged approval event into the open transcript (the child id
+ * is already matched by the dispatcher): a request appends one pending row
+ * unless one is already pending, and a resolution flips the newest pending row.
+ */
+function foldHelperApprovalDetail(
+  detail: SubagentDetail,
+  event: ApprovalRequestedEvent | ApprovalResolvedEvent,
+): SubagentDetail {
+  const at = intOf(event.at) * 1_000;
+  if (event.type === "approval_requested") {
+    if (
+      detail.transcript.some((entry) => entry.type === "approval" && entry.status === "pending")
+    ) {
+      return detail;
+    }
+    const action = (event.action ?? "").slice(0, 40) || "action";
+    const target = (event.target ?? "").slice(0, 500);
+    const command = (event.command ?? "").slice(0, 1_000);
+    const row: SubagentApprovalEntry = {
+      type: "approval",
+      status: "pending",
+      action,
+      at,
+      ...(target !== "" ? { target } : {}),
+      ...(command !== "" ? { command } : {}),
+    };
+    return {
+      ...detail,
+      last_activity: { kind: "status", status: "awaiting_approval", at },
+      transcript: [...detail.transcript, row],
+    };
+  }
+  const status =
+    event.reason === "cancelled"
+      ? "cancelled"
+      : event.decision === "allow"
+        ? "allowed"
+        : "denied";
+  const transcript = [...detail.transcript];
+  for (let index = transcript.length - 1; index >= 0; index -= 1) {
+    const entry = transcript[index]!;
+    if (entry.type === "approval" && entry.status === "pending") {
+      transcript[index] = { ...entry, status };
+      break;
+    }
+  }
+  return {
+    ...detail,
+    last_activity: {
+      kind: "status",
+      status: detail.status === "running" ? "running" : detail.status,
+      at,
+    },
+    transcript,
+  };
+}
+
+/** Fold one `subagent_started` event into the open detail (id-matched by the dispatcher). */
+function foldHelperStartedDetail(detail: SubagentDetail, event: SubagentStartedEvent): SubagentDetail {
+  if (event.subagent_id !== detail.id) return detail;
+  return {
+    ...detail,
+    label: helperOneLineText(event.label),
+    role: roleOf(event.role),
+    model: event.model,
+    status: "running",
+    started_at: intOf(event.started_at),
+    ...(event.background === true ? { background: true } : {}),
+  };
+}
+
+/** Fold one `subagent_activity` event into the open transcript (id-matched by the dispatcher). */
+function foldHelperActivityDetail(
+  detail: SubagentDetail,
+  activity: SubagentActivityEvent,
+): SubagentDetail {
+  if (activity.subagent_id !== detail.id) return detail;
+  const at = intOf(activity.at) * 1_000;
+  const lastActivity = activityOfEvent(activity);
+  if (activity.activity === "message") {
+    return foldHelperMessageActivity(detail, activity, at, lastActivity);
+  }
+  if (activity.activity === "tool") {
+    return foldHelperToolActivity(detail, activity, at, lastActivity);
+  }
+  return { ...detail, last_activity: lastActivity };
+}
+
+/** Fold one message activity: skip a duplicate of the store's final assistant text, else append. */
+function foldHelperMessageActivity(
+  detail: SubagentDetail,
+  activity: SubagentActivityEvent,
+  at: number,
+  lastActivity: SubagentActivity,
+): SubagentDetail {
+  const text = (activity.text ?? "").slice(0, 12_000);
+  if (text === "") return detail;
+  const last = detail.transcript[detail.transcript.length - 1];
+  if (last?.type === "message" && last.role === "assistant" && last.text === text) {
+    return { ...detail, last_activity: lastActivity };
+  }
+  return {
+    ...detail,
+    last_activity: lastActivity,
+    transcript: [
+      ...detail.transcript,
+      { type: "message", role: "assistant", text, at },
+    ],
+  };
+}
+
+/**
+ * Fold one tool activity: a start appends an open row unless that tool is
+ * already open; a completion/error pairs with the newest open row for that
+ * tool, else appends a settled row.
+ */
+function foldHelperToolActivity(
+  detail: SubagentDetail,
+  activity: SubagentActivityEvent,
+  at: number,
+  lastActivity: SubagentActivity,
+): SubagentDetail {
+  const tool = (activity.tool ?? "").slice(0, 200);
+  if (tool === "") return detail;
+  const status =
+    activity.status === "completed" || activity.status === "error"
+      ? activity.status
+      : "started";
+  const openIndex = findOpenTool(detail.transcript, tool);
+  if (status === "started") {
+    if (openIndex >= 0) return detail;
+    return {
+      ...detail,
+      last_activity: lastActivity,
+      transcript: [
+        ...detail.transcript,
+        {
+          type: "tool",
+          tool,
+          status,
+          ...(activity.args !== undefined ? { args: activity.args } : {}),
+          at,
+        },
+      ],
+    };
+  }
+  if (openIndex >= 0) {
+    const openEntry = detail.transcript[openIndex];
+    if (openEntry === undefined || openEntry.type !== "tool") return detail;
+    const transcript = [...detail.transcript];
+    transcript[openIndex] = {
+      ...openEntry,
+      status,
+      ...(typeof activity.result === "string" ? { result: activity.result } : {}),
+    };
+    return { ...detail, last_activity: lastActivity, transcript };
+  }
+  return {
+    ...detail,
+    last_activity: lastActivity,
+    transcript: [
+      ...detail.transcript,
+      {
+        type: "tool",
+        tool,
+        status,
+        ...(activity.args !== undefined ? { args: activity.args } : {}),
+        ...(typeof activity.result === "string" ? { result: activity.result } : {}),
+        at,
+      },
+    ],
+  };
+}
+
+/** Fold one `subagent_completed` event into the open detail (id-matched by the dispatcher). */
+function foldHelperCompletedDetail(
+  detail: SubagentDetail,
+  event: SubagentCompletedEvent,
+): SubagentDetail {
+  if (event.subagent_id !== detail.id) return detail;
+  return {
+    ...detail,
+    status: statusOf(event.status),
+    ...(event.result !== undefined ? { result: event.result } : {}),
+    ...(event.error !== undefined ? { error: event.error } : {}),
+    usage: usageOf(event.usage),
+    duration_ms: intOf(event.duration_ms),
+    ended_at: intOf(event.ended_at),
+    last_activity: {
+      kind: "status",
+      status: event.status,
+      at: intOf(event.at) * 1_000,
+    },
+  };
 }
 
 function findOpenTool(transcript: readonly SubagentTranscriptEntry[], tool: string): number {
