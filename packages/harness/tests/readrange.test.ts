@@ -16,6 +16,7 @@ import {
   DEFAULT_MAX_CHARS,
   DEFAULT_READ_LINES,
   MAX_READ_LINES,
+  MAX_SOURCE_TEXT_BYTES,
   Workspace,
 } from "../src/workspace.ts";
 import { boundOutput } from "../src/output.ts";
@@ -710,6 +711,123 @@ test("workspace_read_file tool schema and JSON result carry the range fields", a
     ) as Record<string, any>;
     assert.equal(tail.content, "x".repeat(10));
     assert.equal(tail.eof, true);
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// whole-file mode above the source bound
+//
+// Files larger than `MAX_SOURCE_TEXT_BYTES` must not be materialized: the
+// whole-file path streams the file and keeps only the head+tail window, with
+// output byte-identical to `boundOutput` over the full text. Files at or
+// under the bound keep the historical readFileSync path.
+// ---------------------------------------------------------------------------
+
+function bigAscii(bytes: number): string {
+  const unit = "0123456789\n"; // 11 chars, ASCII so bytes === UTF-16 units
+  return unit.repeat(Math.ceil(bytes / unit.length)).slice(0, bytes);
+}
+
+test("whole-file read one byte under the source bound stays byte-identical", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const text = bigAscii(MAX_SOURCE_TEXT_BYTES - 1);
+    write(root, "under.txt", text);
+    const ws = new Workspace(root);
+    const result = await ws.read_file("under.txt");
+    const expected = boundOutput(text, DEFAULT_MAX_CHARS);
+    assert.equal(result.status, "ok");
+    assert.equal(result.truncated, true);
+    assert.equal(result.content, expected.text);
+  } finally {
+    cleanup();
+  }
+});
+
+test("whole-file read one byte over the source bound returns the same head+tail window", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const text = bigAscii(MAX_SOURCE_TEXT_BYTES + 1);
+    write(root, "over.txt", text);
+    const ws = new Workspace(root);
+    const result = await ws.read_file("over.txt");
+    const expected = boundOutput(text, DEFAULT_MAX_CHARS);
+    assert.equal(result.status, "ok");
+    assert.equal(result.truncated, true);
+    assert.equal(result.content, expected.text);
+    assert.ok(
+      (result.content as string).includes(
+        `...[truncated ${text.length - DEFAULT_MAX_CHARS} chars]...`,
+      ),
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("whole-file read over the bound keeps UTF-8 sequences intact across stream chunks", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    // 1-, 2-, 3- and 4-byte code points, repeated so multi-byte sequences
+    // straddle the 64 KiB stream chunk boundaries.
+    const unit = "aé—🙂\n"; // 1 + 2 + 3 + 4 bytes, 6 UTF-16 units
+    const text = unit.repeat(Math.ceil((MAX_SOURCE_TEXT_BYTES + 7) / unit.length));
+    assert.ok(Buffer.byteLength(text, "utf-8") > MAX_SOURCE_TEXT_BYTES);
+    write(root, "utf8.txt", text);
+    const ws = new Workspace(root);
+    for (const maxChars of [DEFAULT_MAX_CHARS, 999]) {
+      const expected = boundOutput(text, maxChars);
+      const result = await ws.read_file("utf8.txt", maxChars);
+      assert.equal(result.truncated, true, `maxChars ${maxChars}`);
+      assert.equal(result.content, expected.text, `maxChars ${maxChars}`);
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test("whole-file read over the bound never materializes the file (sparse file)", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    // A 256 MiB sparse file: instant to create. The historical path
+    // (readFileSync + boundOutput) would hold the whole file as one string;
+    // the streamed window must stay near the character cap instead.
+    const size = 256 * 1024 * 1024;
+    const file = path.join(root, "sparse.txt");
+    const fd = fs.openSync(file, "w");
+    try {
+      fs.writeSync(fd, Buffer.from("head"), 0, 4, 0);
+      fs.writeSync(fd, Buffer.from("tail"), 0, 4, size - 4);
+    } finally {
+      fs.closeSync(fd);
+    }
+    const ws = new Workspace(root);
+    const before = process.memoryUsage().heapUsed;
+    const result = await ws.read_file("sparse.txt");
+    const delta = process.memoryUsage().heapUsed - before;
+    assert.equal(result.status, "ok");
+    assert.equal(result.truncated, true);
+    // Wide margin: materializing the file would cost ~size bytes of heap.
+    assert.ok(delta < size / 2, `heapUsed grew by ${delta} bytes`);
+  } finally {
+    cleanup();
+  }
+});
+
+test("whole-file read over the bound with maxChars at the file size returns everything", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    // No truncation is possible when the cap covers the whole file: the
+    // caller explicitly asked for it, so the full read is the contract.
+    const text = bigAscii(MAX_SOURCE_TEXT_BYTES + 64);
+    write(root, "wide.txt", text);
+    const ws = new Workspace(root);
+    const result = await ws.read_file("wide.txt", text.length + 1);
+    assert.equal(result.status, "ok");
+    assert.equal(result.truncated, false);
+    assert.equal(result.content, text);
   } finally {
     cleanup();
   }

@@ -20,7 +20,7 @@ import {
   Decision,
   PermissionManager,
 } from "../src/permissions.ts";
-import { Workspace } from "../src/workspace.ts";
+import { MAX_SOURCE_TEXT_BYTES, Workspace } from "../src/workspace.ts";
 
 function tmpdir(): { root: string; cleanup: () => void } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-editq-"));
@@ -287,6 +287,55 @@ test("the mutation queue does not weaken confinement", async () => {
     assert.equal(fs.readFileSync(path.join(root, ".env"), "utf-8"), "TOKEN=x");
   } finally {
     fs.rmSync(outside, { force: true });
+    cleanup();
+  }
+});
+// ---------------------------------------------------------------------------
+// large existing files: edit fails closed above the source bound
+//
+// `edit_file` needs the old content to compute the change, so a file above
+// `MAX_SOURCE_TEXT_BYTES` is refused with a structured error instead of being
+// read whole. At or under the bound the edit applies as before.
+// ---------------------------------------------------------------------------
+
+test("edit_file refuses an existing file above the source bound without modifying it", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    // Sparse: one byte at the start, one past the bound — instant to create.
+    const file = path.join(root, "big.txt");
+    const fd = fs.openSync(file, "w");
+    try {
+      fs.writeSync(fd, Buffer.from("needle\n"), 0, 7, 0);
+      fs.writeSync(fd, Buffer.from("x"), 0, 1, MAX_SOURCE_TEXT_BYTES);
+    } finally {
+      fs.closeSync(fd);
+    }
+    const ws = approved(root);
+    const result = await ws.edit_file("big.txt", "needle", "haystack");
+    assert.equal(result.status, "error");
+    assert.match(String(result.error), /source bound/);
+    assert.equal(fs.statSync(file).size, MAX_SOURCE_TEXT_BYTES + 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test("edit_file one byte under the source bound still applies", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const content = ("needle\n" + "filler line\n".repeat(Math.ceil(MAX_SOURCE_TEXT_BYTES / 12))).slice(
+      0,
+      MAX_SOURCE_TEXT_BYTES - 1,
+    );
+    const file = path.join(root, "edge.txt");
+    fs.writeFileSync(file, content, "utf-8");
+    const ws = approved(root);
+    const result = await ws.edit_file("edge.txt", "needle", "haystack");
+    assert.equal(result.status, "ok");
+    assert.equal(result.replaced, 1);
+    assert.ok(result.diff);
+    assert.ok(fs.readFileSync(file, "utf-8").startsWith("haystack\n"));
+  } finally {
     cleanup();
   }
 });

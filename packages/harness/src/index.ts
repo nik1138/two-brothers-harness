@@ -485,6 +485,7 @@ export {
   type WorkspaceMutationRecord,
   type WorkspaceMutationRecorder,
   MAX_MUTATION_CAPTURE_BYTES,
+  MAX_SOURCE_TEXT_BYTES,
   DEFAULT_MAX_CHARS,
   DEFAULT_READ_LINES,
   MAX_READ_LINES,

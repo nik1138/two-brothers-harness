@@ -28,6 +28,7 @@ import {
 import { ShellRunner } from "../src/shell.ts";
 import {
   DELETE_APPROVAL_REASON,
+  MAX_SOURCE_TEXT_BYTES,
   SHELL_APPROVAL_REASON,
   Workspace,
   WorkspaceError,
@@ -819,6 +820,78 @@ test("work mode end-to-end: junior writes, senior verifies, evidence in payloads
     // the senior's verify slice is exactly the read-only tool names
     assert.ok(SENIOR_VERIFY_TOOL_NAMES.has("workspace_read_file"));
     assert.ok(!SENIOR_VERIFY_TOOL_NAMES.has("workspace_write_file"));
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// large existing files: write skips the old-content read and diff
+//
+// Above `MAX_SOURCE_TEXT_BYTES` the old content is never read for a diff —
+// the approval carries an explicit explanation and the result an honest
+// diff-omitted marker instead. At or under the bound the diff stays.
+// ---------------------------------------------------------------------------
+
+function sparseFile(root: string, relPath: string, size: number): string {
+  const file = path.join(root, ...relPath.split("/"));
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const fd = fs.openSync(file, "w");
+  try {
+    fs.writeSync(fd, Buffer.from("x"), 0, 1, size - 1);
+  } finally {
+    fs.closeSync(fd);
+  }
+  return file;
+}
+
+test("write_file over an existing file above the source bound writes without reading old content", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const file = sparseFile(root, "big.bin", MAX_SOURCE_TEXT_BYTES + 1);
+    const requests: ApprovalRequest[] = [];
+    const ws = new Workspace(
+      root,
+      new PermissionManager(
+        null,
+        new CallbackBroker(async (req) => {
+          requests.push(req);
+          return Decision.ALLOW;
+        }),
+      ),
+    );
+    const result = await ws.write_file("big.bin", "replacement\n");
+    assert.equal(result.status, "ok");
+    assert.equal(result.bytes_written, Buffer.byteLength("replacement\n", "utf-8"));
+    assert.equal(result.diff, undefined);
+    assert.match(String(result.diff_omitted), /source bound/);
+    // The write itself happened and the oversize file was replaced.
+    assert.equal(fs.readFileSync(file, "utf-8"), "replacement\n");
+
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].detail?.kind, "write");
+    assert.equal(requests[0].detail?.diff, undefined);
+    assert.match(requests[0].reason ?? "", /not read/);
+  } finally {
+    cleanup();
+  }
+});
+
+test("write_file over an existing file one byte under the source bound still returns a diff", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const old = "old line\n".repeat(Math.ceil((MAX_SOURCE_TEXT_BYTES - 1) / 9)).slice(
+      0,
+      MAX_SOURCE_TEXT_BYTES - 1,
+    );
+    assert.equal(Buffer.byteLength(old, "utf-8"), MAX_SOURCE_TEXT_BYTES - 1);
+    fs.writeFileSync(path.join(root, "edge.txt"), old, "utf-8");
+    const ws = approved(root);
+    const result = await ws.write_file("edge.txt", "new\n");
+    assert.equal(result.status, "ok");
+    assert.ok(result.diff);
+    assert.equal(result.diff_omitted, undefined);
+    assert.equal(fs.readFileSync(path.join(root, "edge.txt"), "utf-8"), "new\n");
   } finally {
     cleanup();
   }
