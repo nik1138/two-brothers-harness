@@ -72,7 +72,11 @@ try {
     Push-Location (Join-Path $root 'web')
     try {
       npm install
+      $installCode = $LASTEXITCODE
+      if ($installCode -ne 0) { exit $installCode }
       npm run build
+      $buildCode = $LASTEXITCODE
+      if ($buildCode -ne 0) { exit $buildCode }
     } finally {
       Pop-Location
     }
@@ -84,6 +88,8 @@ try {
     Push-Location (Join-Path $root 'e2e')
     try {
       npm install
+      $depsCode = $LASTEXITCODE
+      if ($depsCode -ne 0) { exit $depsCode }
     } finally {
       Pop-Location
     }
