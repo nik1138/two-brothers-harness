@@ -4,14 +4,14 @@ Local working handoff. Gitignored; not project documentation. The frozen
 historical snapshot is `docs/history/handoff.md`; this file is the current
 state for the next session.
 
-Last updated: **2026-11-14**. **Validated checkpoint: `3fe647f`** — every
-gate count in this file was recorded there (`test(e2e): integrate web build
-fail fast handling`, the last code commit of the quality wave). Validation
-happened at that commit; local `main` has since moved on with **docs-only
-follow-ups** — `30056eb`, `c52554a` (only `todo.md` checkpoint records) —
-plus this handoff once merged. **Nothing is pushed, tagged, or published**;
+Last updated: **2026-11-14**. **Validated checkpoint: `9f353c4`** — every
+gate count in this file was recorded there (`fix: preserve transcript
+scrolling and default helpers to junior`, the code merge of the goal wave).
+The only commit after it on local `main` is **`92af62a`**, a **docs-only
+cleanup** (stale helper role-model fallback claims) at record time — it does
+not change tested code. **Nothing is pushed, tagged, or published**;
 `origin/main` is still `7f0d2c4` (O1, CI #98 green) and local `main` is
-**111 commits ahead**. Since the 2026-11-13 O1 handoff, the O2/M/C
+**132 commits ahead** (count at record time, tip `92af62a`). Since the 2026-11-13 O1 handoff, the O2/M/C
 observation-parity slices, the whole improvement-lane wave (cooperation
 correctness, LLM hardening, web fixes, bounded MCP/run history, plugin
 bundles + strict parity, E2E cleanup and skip-registry), and the full
@@ -26,17 +26,17 @@ were restored and deps/dist rebuilt, but untracked `packages/harness/sessions`
 content — sessions, settings incl. sealed keys, runtime sidecars/subagent
 logs — was **permanently lost**. See **Incident (2026-11-14)** below. The
 live server was **rebuilt and restarted on 2026-11-14** (verified by the
-server lane on `c52554a`): PID 247580 runs
-`node dist/cli.js serve --port 8600 --sessions-dir sessions`, serving the
-current `web/dist` byte-identically; `GET /` and `GET /api/sessions` (empty
+server lane on `c52554a`, before the goal-integration wave): PID 247580 runs
+`node dist/cli.js serve --port 8600 --sessions-dir sessions`; `GET /` and
+`GET /api/sessions` (empty
 `[]`) return 200, and a full process scan shows no stray/test backends.
 A goal-integration wave landed after the quality wave (transcript
 scroll-follow hold + survivor compensation; absolute Junior helper-model
 fallback) and is recorded as items 10–11 under **Recently shipped** below;
-its gate counts were verified at `6052ff7`. The full 40-block browser matrix
-and the goal wave's final HEAD/checkpoint fields are **pending the final
-gate** (placeholders below — nothing invented). Provider keys are still
-missing (owner task, below).
+its final gate was run on the integrated tree and **validated at `9f353c4`**
+(full 40-block browser matrix, `--dist` CLI leg, offline smoke — counts in
+the Current-state table). Provider keys are still missing (owner task,
+below).
 
 ## Repository at a glance
 
@@ -57,20 +57,20 @@ missing (owner task, below).
 | Item | Value |
 |---|---|
 | Branch | `main` — **local-only / unpushed** |
-| HEAD | local **`c52554a`** (docs-only `todo.md` checkpoint records + this handoff); origin/main **`7f0d2c4`** (O1, CI #98 green); local-only, **111 commits ahead** |
-| Validated checkpoint | **`3fe647f`** — all gate counts below were recorded there; the follow-ups touched `todo.md` only |
-| Docs follow-ups | `30056eb` → `c52554a` (only `todo.md`); earlier wave docs: `668536a` → `987f316` → `ba1e0e4` (`docs/release.md` / `docs/testing.md`) |
+| HEAD | local **`92af62a`** at record time (docs-only cleanup after the validated code merge `9f353c4`); origin/main **`7f0d2c4`** (O1, CI #98 green); local-only, **132 commits ahead** (count at record time) |
+| Validated checkpoint | **`9f353c4`** — all gate counts below were recorded there; the follow-up `92af62a` is docs-only and does not change tested code |
+| Docs follow-ups | `92af62a` (docs-only cleanup, at record time); goal-wave records `2a73f7a` (docs evidence at `6052ff7`); earlier wave docs: `30056eb` → `c52554a` → `b912a0e` → `ad18c2b` → `3b3151f` → `5736eb7` → `4c2dfa3` (`todo.md` / `HANDOFF.md`) |
 | Previous | `3f07d316` — strict plugin parity; `f946238` — O2 merge; `1cc25d4` — slice M; `02c0ad9` — slice C; `7f0d2c4` — O1 |
 | CI | runs #90–#98 success (latest pushed `7f0d2c4`); everything past it unpushed — no CI yet |
-| Package suite (Windows) | **2 483 / 2 475 pass / 0 fail / 8 platform skips** — `npm test` AND `test:spawn` |
-| Package suite (WSL) | Node 22.22.2 + Node 24.16.0: **2 483 / 2 482 pass / 0 fail / 1 env skip**, both modes on each, + typecheck PASS + hermetic server E2E 4/4 (see caveats below) |
-| Web suite | **642/642** + `npm run build` PASS |
-| CLI E2E | **19/19 source + 19/19 `--dist`** |
-| Smoke gate | **PASS** — incl. fault-injection 7/7 and hermetic server E2E 4/4 |
+| Package suite (Windows) | **2 488 / 2 480 pass / 0 fail / 8 platform skips** — `npm test` AND `test:spawn`, validated at `9f353c4` |
+| Package suite (WSL) | Node 22.22.2 + Node 24.16.0: **2 483 / 2 482 pass / 0 fail / 1 env skip**, both modes on each, + typecheck PASS + hermetic server E2E 4/4 — last run at `3fe647f`; **not re-run in the goal-wave final gate** (see caveats below) |
+| Web suite | **668/668** + `npm run build` PASS — validated at `9f353c4` |
+| CLI E2E | **19/19 source + 19/19 `--dist`** — validated at `9f353c4` |
+| Smoke gate | **PASS** — incl. fault-injection 7/7 and hermetic server E2E 4/4, validated at `9f353c4` |
 | Hermetic server E2E | **4/4** (also inside the smoke gate and the WSL pass) |
-| Browser E2E | **39 hermetic PASS / 0 FAIL / 1 opt-in `real` SKIP** + helpers suite **20/20** |
-| Tarball | **7/7 + pack check PASS** |
-| Live server | **running** — PID 247580 `node dist/cli.js serve --port 8600 --sessions-dir sessions` (graceful restart of PID 226508); `GET /` 200, `GET /api/sessions` 200 `[]`; served HTML/JS/CSS byte-identical to fresh `web/dist`; process scan clean (only zen-proxy + this server); sessions/settings untouched; **provider keys still to be re-entered by the owner** |
+| Browser E2E | **full 40-block matrix: 41 PASS lines / 0 FAIL / 1 opt-in `real` SKIP** + helpers suite **20/20** — validated at `9f353c4` |
+| Tarball | **7/7 + pack check PASS** — last run at `3fe647f`; **not re-run in the goal-wave final gate** |
+| Live server | **running** — PID 247580 `node dist/cli.js serve --port 8600 --sessions-dir sessions` (graceful restart of PID 226508), verified **before the goal-integration wave** (server lane on `c52554a`): `GET /` 200, `GET /api/sessions` 200 `[]`; served HTML/JS/CSS byte-identical to fresh `web/dist` at that time; process scan clean (only zen-proxy + this server); sessions/settings untouched; **provider keys still to be re-entered by the owner**; not re-verified in the goal-wave final gate (this lane makes no server claims) |
 | Release | no version bump, tag, or publish in this wave; 0.0.1 is the published version |
 
 Live setup (verified on the running server, 2026-11-14):
@@ -92,10 +92,10 @@ Live setup (verified on the running server, 2026-11-14):
 The lanes below were integrated and **validated at `3f07d316`** (the
 strict-plugin-parity checkpoint that preceded the quality wave). A second
 wave — the code-quality audits and their fixes — was integrated afterwards
-and is validated at the current checkpoint **`3fe647f`** (see the next
-subsection). Local `main` has since added only `todo.md` docs records
-(`30056eb`, `c52554a`) and this handoff — no code or test changes past the
-validated checkpoint. Themes with landmark commits (implementation → integration):
+and is validated at **`3fe647f`**, and a goal-integration wave after that is
+validated at the current checkpoint **`9f353c4`** (see Current state). Local
+`main` has since added only the docs-only cleanup `92af62a` — no code or
+test changes past the validated checkpoint. Themes with landmark commits (implementation → integration):
 
 - **Observation parity COMPLETE:** O2 TUI helper controls (`f963707`),
   M per-call model/effort overrides (`1cc25d4`), C helper usage/cache/cost
@@ -481,16 +481,23 @@ user-profile Temp (documented in docs/testing.md).
   CLI E2E (sources) **19/19**; runtime independent-behavior selection
   **17/17**.
 
-**Goal-wave evidence status (2026-11-14, records lane at `6052ff7`):**
+**Goal-wave evidence status (2026-11-14):**
 
-- Package gates: **2 488 total / 2 480 pass / 0 fail / 8 skips** — both
-  modes, Windows. Web suite: **668/668** + build green. Hermetic CLI E2E:
-  **19/19** sources. Runtime independent behavior: **17/17**.
-- **PENDING (final gate, do not record until run):** the full 40-block
-  browser matrix (expected 41 PASS lines), the `--dist` CLI leg, tarball
-  smoke, WSL pass, and the goal wave's final HEAD / validated-checkpoint
-  fields. The Current-state table above remains the frozen `3fe647f`
-  record.
+- Records lane at `6052ff7`: package gates **2 488 total / 2 480 pass / 0
+  fail / 8 skips** — both modes, Windows. Web suite: **668/668** + build
+  green. Hermetic CLI E2E: **19/19** sources. Runtime independent behavior:
+  **17/17**.
+- **Final gate at `9f353c4` (integrated main), run 2026-11-14:** package
+  gates **2 488 total / 2 480 pass / 0 fail / 8 skips** in BOTH `npm test`
+  and `npm run test:spawn` (Windows); hermetic CLI E2E **19/19 sources +
+  19/19 `--dist`**; web suite **668/668** + `npm run build` green; full
+  40-block browser matrix **41 PASS lines / 0 FAIL / 1 opt-in `real` SKIP**;
+  browser-E2E helper suites **20/20**; offline smoke gate **PASS** —
+  fault-injection 7/7, hermetic server 4/4.
+- Tarball smoke and the WSL pass were **not re-run** in this final gate;
+  their last records stay at `3fe647f` (see Current state). The docs-only
+  cleanup `92af62a` after `9f353c4` does not change tested code; the final
+  docs-record commits are noted here by name, not by a future SHA.
 
 ### Earlier context (still current)
 
@@ -597,12 +604,14 @@ gate. Do not run the live server and the smoke gate at the same time.
    sealed provider keys and any check sessions. Re-enter keys in Settings,
    then re-create check sessions.
 2. **0.0.2 release engineering** — only with explicit permission: push the
-   current `main` (whatever its tip is at release time; local-only, 111
-   commits ahead of `origin/main`), watch CI, bump version, curated
+   current `main` (whatever its tip is at release time; still local-only /
+   unpushed — 132 commits ahead of `origin/main` at record time), watch CI,
+   bump version, curated
    changelog, release docs, rehearsal + independent E2E lanes (browser
    matrix, CLI source + `--dist`, packed-tarball clean install, WSL). The
    final gate evidence for the current tree is already recorded above
-   (validated at `3fe647f`).
+   (validated at `9f353c4`; tarball smoke and the WSL pass still to be
+   re-run before release — last records at `3fe647f`).
 3. **OAuth-only subscription sign-in** — large; API-key plans only today.
 4. **Per-turn cache statistics / Senior+Junior split** — small additive
    prompt-audit/usage field; the combined footer percentage already works.

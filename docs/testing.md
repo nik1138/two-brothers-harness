@@ -41,8 +41,8 @@ The script runs:
 
 Expected final line: `SMOKE TEST: PASS`. It is an offline pre-flight, not the
 whole product gate — run the package gates below for that. On the final
-validation run (commit `3fe647f`) the smoke gate passed with the package
-suite at 2 483 tests (2 475 pass, 0 fail, 8 skips), fault injection 7/7 and
+validation run (commit `9f353c4`) the smoke gate passed with the package
+suite at 2 488 tests (2 480 pass, 0 fail, 8 skips), fault injection 7/7 and
 the hermetic server suites 4/4.
 
 Stop a local `serve`/web backend that uses `packages/harness/sessions` before
@@ -68,7 +68,7 @@ PASS from each:
    package suite so POSIX-only mode/ownership tests actually execute (on
    Windows they skip). The worktree is on `/mnt/c`, so chmod semantics differ
    from ext4; CI's ubuntu legs remain the final POSIX evidence. Final result
-   at `3fe647f`: both Node 22.22.2 and 24.16.0 passed typecheck, `npm test`
+   at `3fe647f` (not yet re-run for the goal-integration wave): both Node 22.22.2 and 24.16.0 passed typecheck, `npm test`
    and `npm run test:spawn` each ran 2 483 tests (2 482 pass, 0 fail, 1
    intentional Windows-only skip), and the hermetic server E2E passed 4/4 —
    the live suites skipped because the local endpoint lacked the required
@@ -111,7 +111,7 @@ Both legs run the same hermetic gates, in this order:
    (`node --test e2e/web-freshness.test.mjs e2e/skip-registry.test.mjs` — plain
    `node:test`, no deps and no browser): the packaged-web freshness guard and
    the missing-backend SKIP-registry parity guard (20/20 — 14 freshness +
-   6 registry — on the final validation run at `3fe647f`);
+   6 registry — re-validated on the goal-integration merge `9f353c4`);
 8. ubuntu Node 22 only, after the web build: `node scripts/tarball-smoke.mjs` at
    the repo root and `npm run pack:check` in `packages/harness`. Both trigger
    the package `prepack` (build + `sync-web`), which is why they need
@@ -164,13 +164,14 @@ npm run test:spawn      # node --test tests/ (child processes allowed)
 ```
 
 On the canonical integrated run for this round — validated at commit
-`3fe647f` — the package suite is
-**2 483 tests: 2 475 pass, 0 fail, 8 skipped** (exit 0) in both `npm test`
+`9f353c4` (the goal-integration code merge; the docs-only cleanup `92af62a`
+after it does not change tested code) — the package suite is
+**2 488 tests: 2 480 pass, 0 fail, 8 skipped** (exit 0) in both `npm test`
 and `npm run test:spawn`; the eight skips are environment/platform-gated and
 never failures. `npm run typecheck`
 and `npm run build` pass, the hermetic CLI E2E is 19/19 on sources and 19/19
-against `--dist`, the tarball smoke is 7/7 and `pack:check` passes. The
-tarball smoke pins its own consumer manifest inside the temp dir, so it also
+against `--dist`; the tarball smoke (7/7, `pack:check` passing) was last run
+at `3fe647f` and not re-run for the goal wave. The tarball smoke pins its own consumer manifest inside the temp dir, so it also
 passes when `TEMP`/`TMP` points inside the checkout (the documented Windows
 Vite workaround).
 
@@ -845,20 +846,21 @@ partial usage (`tests/graph.test.ts`, `tests/runtime.test.ts`,
 (`web/tests/permissionsUi.test.ts`). Wave 30 also hardens the prompt block
 (marker collisions, repair tails, verify kind; `tests/promptsections.test.ts`
 pins belt-stable prefixes). Final measured totals for the merged tree,
-validated at commit `3fe647f`:
-package suite **2 483 tests** (2 475 pass, 0 fail, 8 skips on Windows, in both
+validated at commit `9f353c4` (the goal-integration code merge; the
+docs-only cleanup `92af62a` after it does not change tested code):
+package suite **2 488 tests** (2 480 pass, 0 fail, 8 skips on Windows, in both
 `npm test` and `npm run test:spawn`), web
-suite **642/642**, hermetic CLI E2E **19/19** on sources and `--dist`, fault
-injection **7/7**, hermetic server E2E **4/4**, browser E2E **39 PASS, 0 FAIL,
-1 opt-in `real` skip** (raw log — 38 hermetic scenario blocks, the
-`chat/resume` block reporting chat and resume as separate lines),
+suite **668/668**, hermetic CLI E2E **19/19** on sources and `--dist`, fault
+injection **7/7**, hermetic server E2E **4/4**, browser E2E **41 PASS, 0 FAIL,
+1 opt-in `real` skip** in the raw log over the 40 hermetic scenario blocks
+(the `chat/resume` block reports chat and resume as separate lines),
 browser-E2E helper tests **20/20** (14 freshness + 6 registry), offline smoke
 **PASS**, `npm run typecheck`
-green. The final WSL Linux pass at these counts also landed: at `3fe647f` on
-WSL (Ubuntu), both Node 22.22.2 and 24.16.0 passed typecheck, `npm test` and
+green. The last WSL Linux pass remains the `3fe647f` run (on
+WSL/Ubuntu, both Node 22.22.2 and 24.16.0 passed typecheck, `npm test` and
 `npm run test:spawn` each 2 483 tests (2 482 pass, 0 fail, 1 intentional
-Windows-only skip), and the hermetic server E2E 4/4 — the live suites skipped
-because the local endpoint lacked the required model. The WSL Node 22 pass on
+Windows-only skip), hermetic server E2E 4/4 — live suites skipped); it was
+not re-run for the goal wave. The WSL Node 22 pass on
 a `/mnt/c` worktree hit a post-test socket `TypeError` in teardown with zero
 failed assertions; the identical suite passed clean on a native ext4
 worktree, and the WSL Node 24 pass saw one TUI timing flake that passed on
@@ -1183,18 +1185,18 @@ still must never yank the reader back to the bottom, the post-swipe scrollTop
 must reach quiescence, and subsequent token/scrollHeight growth must keep the
 topmost visible user row's viewport offset stable within ±2px while the
 bottom edge recedes — anchor-row offset stability, not a constant scrollTop —
-while the pre-swipe phase proves at-bottom streaming still follows). The offline
-suite now holds **40 hermetic scenario blocks** (the 38 above plus
+while the pre-swipe phase proves at-bottom streaming still follows). The
+offline suite now holds **40 hermetic scenario blocks** (the 38 above plus
 `stream-follow` and `stream-follow-touch`). The last **full-matrix** validated
-run remains commit `3fe647f` — **39 PASS, 0 FAIL, 1 SKIP** in the raw log over
-those 38 blocks (the `chat/resume` block prints one line for chat and one for
-resume, so 38 blocks reported 39 PASS lines); the full 40-block matrix has not
-been re-run yet and no full-matrix total is claimed for the goal-integration
-tree. Verified evidence at the goal-integration tip `6052ff7`: web suite
-**668/668** + `npm run build` green; browser-E2E helper suites **20/20**
-(14 freshness + 6 registry); focused `stream-follow` (wheel) **5/5 PASS**;
-repaired `stream-follow-touch` **10/10 PASS**; and the touch-sensitivity
-control on the unfixed base fails **10/10**, every run on the exact autoscroll
+run is the goal-integration merge `9f353c4` — **41 PASS, 0 FAIL, 1 SKIP** in
+the raw log over those 40 blocks (the `chat/resume` block prints one line for
+chat and one for resume, so 40 blocks reported 41 PASS lines), with
+browser-E2E helper suites **20/20** (14 freshness + 6 registry). Focused
+evidence from the goal-integration tip `6052ff7` (preserved): web suite
+**668/668** + `npm run build` green; focused `stream-follow` (wheel)
+**5/5 PASS**; repaired `stream-follow-touch` **10/10 PASS**; and the
+touch-sensitivity control on the unfixed base fails **10/10**, every run on
+the exact autoscroll
 re-pin signature, so the touch scenario provably discriminates the bug it
 guards. The queue dock and the session-scope approval decisions
 remain covered by the web unit suites, not by separate browser scenarios. The

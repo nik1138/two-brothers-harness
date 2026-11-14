@@ -7,12 +7,12 @@ Last updated: **2026-11-14**.
 
 ## Current state
 
-- **All gates were validated at `3fe647f`** (final code commit of the
-  quality wave — E2E fail-fast). Local `main` now also carries **docs-only
-  follow-ups** `30056eb`, `c52554a` (only `todo.md` checkpoint records)
-  plus this handoff once merged — **local-only, NOT pushed**; local `main`
-  is **111 commits ahead** of `origin/main` = `7f0d2c4` (O1, CI #98
-  green). Integrated and validated: O2 TUI helper controls (`f963707`),
+- **All gates were validated at `9f353c4`** (the code merge of the
+  goal-integration wave). Local `main` now also carries the **docs-only
+  cleanup `92af62a`** (stale helper fallback claims, at record time) plus
+  this record — **local-only, NOT pushed**; local `main` is **132 commits
+  ahead** of `origin/main` = `7f0d2c4` (O1, CI #98 green; count at record
+  time, tip `92af62a`). Integrated and validated: O2 TUI helper controls (`f963707`),
   M per-call overrides (`1cc25d4`), C helper roll-up (`02c0ad9`), the
   improvement-lane wave — cooperation correctness (`3be613c`), TUI
   helper-overlay correctness (`281f6a1`), provider/transport hardening
@@ -44,7 +44,17 @@ Last updated: **2026-11-14**.
   O1 (`7f0d2c4`) + **O2 (`f963707`) + M (`1cc25d4`) + C (`02c0ad9`)**.
   **F forked-context + D depth>1 DEFERRED** to their own designs; no new
   designs started.
-- Verified at `3fe647f`: package **2 483 / 2 475 pass / 0 fail / 8 skips**
+- Verified at `9f353c4` (goal-wave final gate, integrated main): package
+  **2 488 total / 2 480 pass / 0 fail / 8 skips** in BOTH `npm test` and
+  `test:spawn` (Windows); CLI E2E **19/19 source + 19/19 `--dist`**; web
+  **668/668 + build PASS**; browser full 40-block matrix **41 PASS lines /
+  0 FAIL / 1 opt-in `real` SKIP** + helpers **20/20**; smoke **PASS**
+  (faults 7/7, hermetic server 4/4). Tarball smoke and the WSL pass were
+  not re-run in this gate — their last records stay at `3fe647f` (below).
+  The docs-only cleanup `92af62a` after `9f353c4` does not change tested
+  code.
+- Verified at `3fe647f` (quality-wave final gates; WSL + tarball not
+  re-run for the goal wave): package **2 483 / 2 475 pass / 0 fail / 8 skips**
   (`npm test` and `test:spawn`, Windows); WSL Node 22.22.2 + 24.16.0 each
   **2 483 / 2 482 / 0 fail / 1 skip** in both modes + typecheck PASS +
   hermetic server 4/4; web **642/642 + build PASS**; CLI E2E **19/19
@@ -82,10 +92,15 @@ Shipped on the integrate-goal line (`main..6052ff7`); recorded on
   green; browser-E2E helpers **20/20**; focused `stream-follow` **5/5**;
   repaired `stream-follow-touch` **10/10**; unfixed-base touch-sensitivity
   control **10/10 FAIL** on the exact autoscroll re-pin signature.
-- **PENDING (final gate — placeholders in `HANDOFF.md`, nothing invented):**
-  the full 40-block browser matrix (expected 41 PASS lines), the `--dist`
-  CLI leg, tarball smoke, WSL pass, the offline smoke gate, and the goal
-  wave's final HEAD / validated-checkpoint fields.
+- **Final gate at `9f353c4` (integrated main), run 2026-11-14:**
+  package gates **2 488 total / 2 480 pass / 0 fail / 8 skips** in BOTH
+  `npm test` and `test:spawn`; hermetic CLI E2E **19/19 sources + 19/19
+  `--dist`**; web **668/668** + build green; full 40-block browser matrix
+  **41 PASS lines / 0 FAIL / 1 opt-in `real` SKIP**; helpers **20/20**;
+  offline smoke gate **PASS** (faults 7/7, hermetic server 4/4). Tarball
+  smoke and the WSL pass were **not re-run** in this gate — last records at
+  `3fe647f` (Current state above). The docs-only cleanup `92af62a` after
+  `9f353c4` does not change tested code.
 
 ## Owner / release gates
 
