@@ -64,6 +64,123 @@ Last updated: **2026-11-14**.
 
 ## Next engineering work (priority order)
 
+**Active cycle — code-quality/correctness queue (2026-11-14).** Four
+read-only audits ran against `d98ec79`: TUI, web chat/composer, web
+settings/navigation, backend/runtime. The risk-ranked queue below
+condenses every confirmed finding, hypothesis, deferral, and structural
+candidate. Fix lanes `quality-tui-fixes`, `quality-chat-fixes`,
+`quality-settings-fixes`, `quality-backend-fixes` are open from `d98ec79`
+— a started lane is **not** a shipped fix; statuses below track evidence,
+not intention. The remaining-core audit (CLI / workspace edit-diff /
+settings-write / config / subagent runner / runstream / instructions) is
+still running and is marked AUDIT PENDING. The paused OAuth (item 6),
+cache statistics (item 7), and TUI keybinding-editor items are **outside
+this goal**.
+
+Largest production files (corrected line counts, 2026-11-14):
+`packages/harness/src/tui/app.ts` 5264, `packages/harness/src/cli.ts`
+4813, `packages/harness/src/server.ts` 4478,
+`packages/harness/src/harness.ts` 4339, `web/src/components/Composer.vue`
+3574, `packages/harness/src/provider.ts` 3051,
+`web/src/components/ChatView.vue` 2374,
+`packages/harness/src/workspace.ts` 2070,
+`web/src/components/settings/ProvidersSection.vue` 1914,
+`packages/harness/src/tui/view/helpers.ts` 1461. Other large components
+were reviewed for workflow coverage: TUI `keymap.ts` (1041),
+palette/approval views, `terminal.ts`, `steering.ts` — no findings;
+TUI `model.ts` (1000) (finding TUI-B2 listed below); web
+`SettingsDialog.vue` (1235), `WorkspaceFinder.vue` (1085), `Sidebar.vue`
+(973) (findings listed below; `WorkspaceFinder` lifecycle/guards
+specifically clean); backend `runtime.ts` (1263),
+`runevents.ts` (1187), `sessionlayout.ts` (988), `compaction.ts` (637),
+`session.ts` (458), provider retry/registry internals — no findings.
+`settings_store.ts` (1142) and `mcp.ts` (634) are audit-pending (see
+below).
+
+### Risk-ranked findings queue
+
+Confirmed findings, by severity. The rows marked FIX LANE IN
+PROGRESS have a fix lane open from `d98ec79`; none counts as done until
+the lane lands with green gates. The Google-`maxTokens` nit (BE-F6a) was
+only optionally assigned; the `prompt_tokens` nit (BE-F6b) has no lane.
+Unconfirmed hypotheses (CHAT-F4, SET-H1) were explicitly excluded from
+the implementation lanes — they are deferred, not in flight.
+
+| ID | Sev | Finding | Evidence | Status |
+|---|---|---|---|---|
+| CHAT-F1 | Med-High | Welcome-screen submit never consumed: accepted text persists as draft under the newly created session and reappears on revisit (duplicate-run risk) | `web/src/components/Composer.vue:566-586`, `App.vue:2197-2214` | FIX LANE IN PROGRESS |
+| TUI-B1 | Low-Med | Resume is reachable during an active `/compact`; the old session's summary commits into the new session's transcript (display corruption only, no on-disk damage) | `packages/harness/src/tui/app.ts:3961-4024`, `3734-3823` | FIX LANE IN PROGRESS |
+| BE-F1 | Low-Med | Steering past `MAX_STEERING_ENVELOPES_PER_RUN` is silently dropped: steers already accepted with HTTP 200 vanish at `finish()` with no `steering_dropped` event (contradicts "a drop is never silent") | `packages/harness/src/harness.ts:1782` | FIX LANE IN PROGRESS |
+| TUI-B2 | Med (perf) | `nextBlockId` rescans all block ids per new block — O(n²) transcript growth; collision-skip loop is provably dead work | `packages/harness/src/tui/model.ts:196-202` | FIX LANE IN PROGRESS |
+| SET-C1 | Low-Med | Deleted provider row survives a failed refetch (UI shows it cleared, editing it 404s) | `web/src/components/settings/ProvidersSection.vue:559-585` | FIX LANE IN PROGRESS |
+| CHAT-F2 | Med-Low | Find-in-transcript cache not invalidated on `liveRunId`/`dockedApprovalId` change: ghost matches + transcript yanked to top | `web/src/components/ChatView.vue:858-866` | FIX LANE IN PROGRESS |
+| SET-C2 | Low | Wrong empty state under a workspace filter ("No sessions match" + dead "Clear search"; no way back to All workspaces) | `web/src/components/Sidebar.vue:492-497` | FIX LANE IN PROGRESS |
+| SET-C3 | Low | Subagent role invisible in provider usage badges / delete-impact copy ("No role uses this provider") though the backend clears the subagent ref on delete | `ProvidersSection.vue:107-115`, `web/src/providerSettings.ts:211-286`, `packages/harness/src/server.ts:3619-3624` | FIX LANE IN PROGRESS |
+| SET-C4 | Low | Deletion focus-fallback timers (up to ~8 × 800 ms) not cancelled on unmount; a late tick can steal focus | `web/src/components/Sidebar.vue:255-268` | FIX LANE IN PROGRESS |
+| SET-C5 | Low (a11y) | Roving tabindex moves before the dirty-edit guard resolves; "Keep editing" leaves tab order off the open provider | `web/src/components/settings/ProvidersSection.vue:425-441` | FIX LANE IN PROGRESS |
+| SET-C6 | Low | Settings post-load autofocus targets a `v-show`-hidden pane on deep-link open; no element receives focus | `web/src/components/SettingsDialog.vue:471-477` | FIX LANE IN PROGRESS |
+| CHAT-F3 | Low | Picker-click on a base action silently drops text typed after the token (`args: ''` hardcoded); Enter path on identical text consumes it | `web/src/components/Composer.vue:1203-1218` | FIX LANE IN PROGRESS |
+| BE-F2 | Low | SSE replay loop never checks `write()` backpressure; slow consumer lets Node buffer unboundedly | `packages/harness/src/server.ts:4184-4194` | FIX LANE IN PROGRESS |
+| BE-F3 | Low | In-process session mutex map (`fileSessionTails`) never shrinks; long-lived serve/TUI leaks entries across sessions | `packages/harness/src/harness.ts:854-885` | FIX LANE IN PROGRESS |
+| BE-F6a | Negligible | `GoogleProvider` accepts `maxTokens = Infinity` (serializes as `null` on the wire) | `provider.ts:2716-2717` | FIX LANE IN PROGRESS (optionally assigned) |
+| BE-F6b | Negligible | `emitUsageIfChanged` omits `prompt_tokens` from the usage diff | `harness.ts:4230-4245` | NOT ASSIGNED — no lane |
+
+Hypotheses — explicitly excluded from the implementation lanes;
+unconfirmed (not reproduced), deferred rather than in flight:
+
+| ID | Sev | Finding | Evidence | Status |
+|---|---|---|---|---|
+| CHAT-F4 | Low | "Response complete" announced when a run errors or is stopped (live-region misannounce for screen-reader users) | `web/src/components/ChatView.vue:1228-1234` | DEFERRED / NOT REPRODUCED |
+| SET-H1 | Low | Effort clear from an in-flight models.dev fetch can land after `save()` and blank the form's effort for the next save | `web/src/components/SettingsDialog.vue:393-421` | DEFERRED / NOT REPRODUCED |
+
+DEFERRED:
+
+- **BE-F5** (low, confirmed) — fresh-run task envelope skipped when the
+  text matches an existing user message; two distinct submissions become
+  indistinguishable (`harness.ts:4212-4220`). DEFERRED: arguably by
+  design; needs an owner decision pinning the contract, not a fix.
+- **SET-H2** (low, hypothesis) — document-bubble Escape handler overrides
+  naive-ui inline editors' own dismiss (`ProvidersSection.vue:481-510`).
+  DEFERRED: requires manual verification before changing.
+- **TUI-H1–H4** (low, hypotheses) — `addToolResult` orphan duplication
+  (`model.ts:276-323`); extra render per runtime event
+  (`app.ts:2666-2679`); `helpersListView` capacity-0 tail
+  (`view/helpers.ts:1085-1127`); `lastElapsedMs` survives resume
+  (`app.ts:3811-3813`). DEFERRED: unreachable without a wire-shape
+  change / cosmetic — throttle or revisit only if profiling or a real
+  symptom justifies.
+
+AUDIT PENDING (remaining-core audit still running — no conclusions invented):
+
+- **BE-F4** — MCP `connect`/`listTools` have no timeout (`mcp.ts:588-601`);
+  the follow-up audit is checking the locally installed pi-mcp source
+  for a built-in connect timeout before a verdict is recorded.
+- **settings_store** write path; **config.ts** `validateRunConfig`;
+  **workspace.ts** edit-diff internals; **subagent.ts** runner;
+  **runstream.ts**; **instructions.ts**; CLI periphery
+  (`doctor`, `completions`, `configview`, `modelcatalog`) — read at
+  docstring/grep level only.
+
+CANDIDATE (structural, behavior-preserving, not yet accepted):
+
+- **TUI-R1–R7** — idle-gate `dispatchEntry` parity; `usageFields()`
+  dedup; `scrollByPages()`; shared text-projection helpers model/app;
+  `pluginStats()`; split `foldHelperDetail`; uniform render-ownership
+  for overlay openers. **R6 (`foldHelperDetail` split) — REFACTOR LANE
+  IN PROGRESS** (`quality-tui-fold-refactor`); the rest remain
+  unaccepted candidates.
+- **CHAT-R1–R4** — extract `ModelSwitchMenu.vue`; `useTranscriptFind`
+  composable; `MarkdownBody.vue` island; one `routeDescription()`
+  helper.
+- **SET-S1–S5** — extract `ProviderAddCard`/`ProviderDetailCard`;
+  `useEffortOptions` composable + pure `buildSettingsPatch`; `fsPath.ts`
+  + `sidebarGroups.ts` pure modules with tests; shared `errText`.
+  **S3 (`fsPath.ts` extraction + tests) — REFACTOR LANE IN PROGRESS**
+  (`quality-workspace-paths`); the rest remain unaccepted candidates.
+- **BE-R1–R5** — `harness-subagents.ts` slice; `provider/` module split;
+  server route-group functions; `workspace-edit.ts`; CLI per-command
+  modules (existing `doSessions`/`doSpill`/`doConfig` pattern).
+
 1. [x] **Subagent phase 2 — mutating helpers.** **SHIPPED 2026-11-12**
        (`d1518a9` + `c445eee`; design + owner decisions + errata:
        `.tmp/research/subagent-phase2-design.md`). Child gets the workspace
