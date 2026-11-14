@@ -40,7 +40,7 @@ import {
   type ChildApprovalObserver,
 } from "./permissions.ts";
 import { ShellRunner } from "./shell.ts";
-import { boundOutput, resultSize } from "./output.ts";
+import { boundOutput, resultSize, type BoundedText } from "./output.ts";
 import type { Tool } from "./provider.ts";
 
 /** read_file content cap: head+tail window via `boundOutput`. */
@@ -59,13 +59,24 @@ export const DIFF_CONTEXT_LINES = 3;
 export const MAX_SHELL_TIMEOUT_S = 600;
 /** run_shell timeout floor: a non-positive value means "run without a timer". */
 export const MIN_SHELL_TIMEOUT_S = 1;
+/**
+ * Source-size bound for reading existing file content into memory (2 MiB,
+ * matching {@link MAX_MUTATION_CAPTURE_BYTES}). Above it: `write_file` skips
+ * the old-content read/diff (its approval and result carry an explicit
+ * diff-omitted marker), `edit_file` refuses with a structured error (the old
+ * content is required to compute the change), and `read_file`'s whole-file
+ * mode streams a bounded head+tail window instead of materializing the file.
+ */
+export const MAX_SOURCE_TEXT_BYTES = 2 * 1024 * 1024;
 
 /**
  * Operator-facing reasons for the approvals where the operator genuinely lacks
  * a preview. Stable, path- and secret-free English (the request already names
  * its target/path); the web approval card and the TUI approval panel render
  * them as-is. Write/edit approvals stay reason-free: their unified-diff
- * preview is the explanation, so a reason would only add noise.
+ * preview is the explanation, so a reason would only add noise — except one
+ * write case, where the existing file is over {@link MAX_SOURCE_TEXT_BYTES}
+ * and no diff preview exists (see `write_file`).
  */
 export const SHELL_APPROVAL_REASON =
   "runs arbitrary shell code inside the workspace — its effects cannot be previewed and may change any file the process can reach";
@@ -1146,6 +1157,48 @@ async function readFilePage(
   return result;
 }
 
+/**
+ * `boundOutput` computed over a streamed file: one pass that counts the text
+ * length and retains only the head/tail windows, so a multi-MiB file is never
+ * materialized as a single string. Whenever the decoded text exceeds
+ * `maxChars` the result is byte-identical to
+ * `boundOutput(fs.readFileSync(target, "utf-8"), maxChars)` — same windows,
+ * same marker, same count (UTF-16 units counted incrementally). When the
+ * whole text fits the budget (only possible with a model-supplied `maxChars`
+ * at/above the file size) the file is read in full and bounded by
+ * `boundOutput`: the caller explicitly asked for that much content, so
+ * materializing it is the contract, not a regression.
+ */
+async function streamedBoundOutput(target: string, maxChars: number): Promise<BoundedText> {
+  const headLen = Math.ceil(maxChars / 2);
+  const tailLen = Math.floor(maxChars / 2);
+  let head = "";
+  let tail = "";
+  let total = 0;
+  const stream = fs.createReadStream(target, { encoding: "utf8", highWaterMark: 64 * 1024 });
+  try {
+    for await (const chunk of stream) {
+      const text = typeof chunk === "string" ? chunk : String(chunk);
+      total += text.length;
+      if (head.length < headLen) {
+        head +=
+          text.length <= headLen - head.length ? text : text.slice(0, headLen - head.length);
+      }
+      tail = tailLen <= 0 ? "" : (tail + text).slice(-tailLen);
+    }
+  } finally {
+    stream.destroy();
+  }
+  if (total <= maxChars) {
+    return boundOutput(fs.readFileSync(target, "utf-8"), maxChars);
+  }
+  return {
+    text: head + `\n...[truncated ${total - maxChars} chars]...\n` + tail,
+    truncated: true,
+    omittedChars: total - maxChars,
+  };
+}
+
 /** The only door between the models and the local filesystem. */
 export class Workspace {
   readonly root: string;
@@ -1412,6 +1465,14 @@ export class Workspace {
           typeof maxCharsOrOptions === "number"
             ? maxCharsOrOptions
             : options?.maxChars ?? DEFAULT_MAX_CHARS;
+        // Above the source bound the file is streamed: output stays
+        // byte-identical to readFileSync + boundOutput without ever holding
+        // the whole file in memory. At/under the bound (or when the cap
+        // covers the whole file) the historical path is untouched.
+        if (fs.statSync(p).size > MAX_SOURCE_TEXT_BYTES) {
+          const bounded = await streamedBoundOutput(p, maxChars);
+          return this.result(tool, p, "ok", { content: bounded.text, truncated: bounded.truncated });
+        }
         const text = fs.readFileSync(p, "utf-8");
         const bounded = boundOutput(text, maxChars);
         return this.result(tool, p, "ok", { content: bounded.text, truncated: bounded.truncated });
@@ -1588,20 +1649,38 @@ export class Workspace {
         if (fs.existsSync(target) && fs.statSync(target).isDirectory()) {
           throw new WorkspaceError(`is a directory: ${rel}`);
         }
-        const oldText = fs.existsSync(target) ? fs.readFileSync(target, "utf-8") : null;
+        // An existing file above the source bound is never read for a diff:
+        // the approval reason and the result carry an explicit diff-omitted
+        // marker instead. The write itself is unchanged.
+        let oldText: string | null = null;
+        let diffOmitted: string | null = null;
+        if (fs.existsSync(target)) {
+          const size = fs.statSync(target).size;
+          if (size > MAX_SOURCE_TEXT_BYTES) {
+            diffOmitted = `existing file is ${size} bytes, over the ${MAX_SOURCE_TEXT_BYTES}-byte source bound; the old content was not read, so no diff is available`;
+          } else {
+            oldText = fs.readFileSync(target, "utf-8");
+          }
+        }
         await this.authorize(
           Action.WRITE,
           target,
           "",
-          "",
-          diffDetail("write", this.display(target), oldText ?? "", content),
+          diffOmitted ?? "",
+          diffOmitted === null
+            ? diffDetail("write", this.display(target), oldText ?? "", content)
+            : { kind: "write" },
         );
         const pre = this.captureSeam.recorder === null ? null : this.captureImage(target);
         fs.mkdirSync(path.dirname(target), { recursive: true });
         fs.writeFileSync(target, content, "utf-8");
         const result = this.result(tool, target, "ok");
         result.bytes_written = Buffer.byteLength(content, "utf-8");
-        result.diff = makeDiff(this.display(target), oldText ?? "", content);
+        if (diffOmitted !== null) {
+          result.diff_omitted = diffOmitted;
+        } else {
+          result.diff = makeDiff(this.display(target), oldText ?? "", content);
+        }
         if (pre !== null) this.recordMutation("write", target, pre, this.captureImage(target));
         return result;
       });
@@ -1637,6 +1716,14 @@ export class Workspace {
         }
         if (!fs.statSync(target).isFile()) {
           throw new WorkspaceError(`not a file: ${rel}`);
+        }
+        // Fail closed above the source bound: the old content is required to
+        // compute the edit, and it is not read whole.
+        const size = fs.statSync(target).size;
+        if (size > MAX_SOURCE_TEXT_BYTES) {
+          throw new WorkspaceError(
+            `file is ${size} bytes, over the ${MAX_SOURCE_TEXT_BYTES}-byte source bound; edit_file needs the old content and refuses large files (use write_file or range reads)`,
+          );
         }
         const raw = fs.readFileSync(target, "utf-8");
         const { bom, text } = splitBom(raw);
