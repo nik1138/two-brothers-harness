@@ -87,10 +87,11 @@ Largest production files (corrected line counts, 2026-11-14):
 `web/src/components/settings/ProvidersSection.vue` 1914,
 `packages/harness/src/tui/view/helpers.ts` 1461. Other large components
 were reviewed for workflow coverage: TUI `keymap.ts` (1041),
-`model.ts` (1000), palette/approval views, `terminal.ts`, `steering.ts`
-— no findings; web `SettingsDialog.vue` (1235), `WorkspaceFinder.vue`
-(1085), `Sidebar.vue` (973) (findings listed below; `WorkspaceFinder`
-lifecycle/guards specifically clean); backend `runtime.ts` (1263),
+palette/approval views, `terminal.ts`, `steering.ts` — no findings;
+TUI `model.ts` (1000) (finding TUI-B2 listed below); web
+`SettingsDialog.vue` (1235), `WorkspaceFinder.vue` (1085), `Sidebar.vue`
+(973) (findings listed below; `WorkspaceFinder` lifecycle/guards
+specifically clean); backend `runtime.ts` (1263),
 `runevents.ts` (1187), `sessionlayout.ts` (988), `compaction.ts` (637),
 `session.ts` (458), provider retry/registry internals — no findings.
 `settings_store.ts` (1142) and `mcp.ts` (634) are audit-pending (see
