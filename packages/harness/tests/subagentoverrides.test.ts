@@ -224,7 +224,7 @@ test("a connection-only route keeps its connection while the model comes from ju
   assert.equal(fields.model, "ep-junior");
 });
 
-test("the inherited junior model follows the current junior endpoint between spawns", async () => {
+test("the inherited junior model follows the current junior endpoint between spawns", async (t) => {
   const { root, cleanup } = tmpdir();
   try {
     const store = new SubagentStore(path.join(root, "subagents"));
@@ -240,26 +240,42 @@ test("the inherited junior model follows the current junior endpoint between spa
       },
     });
     const tool = internals(harness).subagentTool(fakeState());
-    const first = JSON.parse(await tool.execute({ task: "First.", role: "senior" })) as {
-      status: string;
-      model?: string;
-    };
-    assert.equal(first.status, "completed");
-    assert.equal(first.model, "junior-a");
-    assert.equal(store.list("parent.jsonl")[0]?.model, "junior-a");
-    // The Junior model changed between runs (a settings save): an unset
-    // helper model follows the CURRENT junior endpoint, never a stale copy.
-    endpoints.junior.model = "junior-b";
-    const second = JSON.parse(await tool.execute({ task: "Second.", role: "senior" })) as {
-      status: string;
-      model?: string;
-    };
-    assert.equal(second.status, "completed");
-    assert.equal(second.model, "junior-b");
-    // Rows are newest-first; the earlier child's recorded model is history
-    // and stays exactly what it ran.
-    assert.equal(store.list("parent.jsonl")[0]?.model, "junior-b");
-    assert.equal(store.list("parent.jsonl")[1]?.model, "junior-a");
+    // Freeze the clock so both spawns share ONE Date.now() value — the exact
+    // same-millisecond tie that made the store's newest-first sort depend on
+    // filesystem readdir order on Linux CI. Child ids come from randomBytes,
+    // so the frozen clock cannot collide them.
+    t.mock.method(Date, "now", () => 1_700_000_000_000);
+    try {
+      const first = JSON.parse(await tool.execute({ task: "First.", role: "senior" })) as {
+        status: string;
+        model?: string;
+      };
+      assert.equal(first.status, "completed");
+      assert.equal(first.model, "junior-a");
+      assert.equal(store.list("parent.jsonl")[0]?.model, "junior-a");
+      // The Junior model changed between runs (a settings save): an unset
+      // helper model follows the CURRENT junior endpoint, never a stale copy.
+      endpoints.junior.model = "junior-b";
+      const second = JSON.parse(await tool.execute({ task: "Second.", role: "senior" })) as {
+        status: string;
+        model?: string;
+      };
+      assert.equal(second.status, "completed");
+      assert.equal(second.model, "junior-b");
+      // Both rows recorded the frozen clock: the started_at-desc sort ties,
+      // so the rows' ORDER is filesystem-dependent and must not be asserted.
+      // Their CONTENTS are deterministic: each child keeps exactly the model
+      // it ran — the earlier child is history, never rewritten.
+      const rows = store.list("parent.jsonl");
+      assert.equal(rows.length, 2);
+      assert.ok(rows.every((row) => row.started_at === 1_700_000_000_000));
+      assert.deepEqual(
+        rows.map((row) => row.model).sort(),
+        ["junior-a", "junior-b"],
+      );
+    } finally {
+      t.mock.restoreAll();
+    }
   } finally {
     cleanup();
   }
@@ -768,6 +784,176 @@ test("the override reaches the child's wire request; effort is normalized; the c
     assert.equal(store.list("parent.jsonl")[0]?.status, "completed");
   } finally {
     server.close();
+    cleanup();
+  }
+});
+
+/** A loopback OpenAI-compatible chat server that records auth + parsed body per request. */
+function loopbackServer(
+  requests: { auth: string | undefined; body: Record<string, unknown> }[],
+): Promise<http.Server> {
+  const server = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk: string) => {
+      raw += chunk;
+    });
+    req.on("end", () => {
+      let body: Record<string, unknown> = {};
+      try {
+        body = JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        body = {};
+      }
+      requests.push({ auth: req.headers.authorization, body });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          id: "chatcmpl-1",
+          object: "chat.completion",
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: "loopback reply" },
+              finish_reason: "stop",
+            },
+          ],
+          usage: { prompt_tokens: 2, completion_tokens: 3, total_tokens: 5 },
+        }),
+      );
+    });
+  });
+  return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server)));
+}
+
+test("loopback: sequential unset-model child spawns send the CURRENT junior model on the wire", async () => {
+  const { root, cleanup } = tmpdir();
+  const requests: { auth: string | undefined; body: Record<string, unknown> }[] = [];
+  const server = await loopbackServer(requests);
+  try {
+    const port = (server.address() as { port: number }).port;
+    const store = new SubagentStore(path.join(root, "subagents"));
+    const endpoints = {
+      junior: {
+        provider: "openai",
+        baseUrl: `http://127.0.0.1:${port}/v1`,
+        apiKey: "junior-key",
+        model: "junior-a",
+        kind: "openai-compatible",
+      },
+    };
+    const harness = new TwoBrothersHarness(
+      resolveConfig({ provider: "mock", retries: 0, timeout: 5 }),
+      {
+        endpoints,
+        subagents: { store, parentSession: "parent.jsonl" },
+      },
+    );
+    const tool = internals(harness).subagentTool(fakeState());
+    const first = JSON.parse(await tool.execute({ task: "First." })) as {
+      status: string;
+      model?: string;
+    };
+    assert.equal(first.status, "completed");
+    assert.equal(first.model, "junior-a");
+    // The Junior model changed between runs (a settings save).
+    endpoints.junior.model = "junior-b";
+    const second = JSON.parse(await tool.execute({ task: "Second." })) as {
+      status: string;
+      model?: string;
+    };
+    assert.equal(second.status, "completed");
+    assert.equal(second.model, "junior-b");
+    // The ACTUAL provider request bodies, in call order: an unset child model
+    // is re-resolved per spawn, never copied from the earlier child.
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0]?.body.model, "junior-a");
+    assert.equal(requests[1]?.body.model, "junior-b");
+    assert.ok(requests.every((request) => request.auth === "Bearer junior-key"));
+    // The store rows match the wire contents, order-independently (the two
+    // spawns can share one Date.now() millisecond; row order is then a
+    // filesystem readdir artifact).
+    assert.deepEqual(
+      store
+        .list("parent.jsonl")
+        .map((row) => row.model)
+        .sort(),
+      ["junior-a", "junior-b"],
+    );
+  } finally {
+    server.close();
+    cleanup();
+  }
+});
+
+test("loopback: an explicit route model stays frozen across spawns while the junior model changes", async () => {
+  const { root, cleanup } = tmpdir();
+  const routeRequests: { auth: string | undefined; body: Record<string, unknown> }[] = [];
+  const juniorRequests: { auth: string | undefined; body: Record<string, unknown> }[] = [];
+  const routeServer = await loopbackServer(routeRequests);
+  const juniorServer = await loopbackServer(juniorRequests);
+  try {
+    const routePort = (routeServer.address() as { port: number }).port;
+    const juniorPort = (juniorServer.address() as { port: number }).port;
+    const store = new SubagentStore(path.join(root, "subagents"));
+    const endpoints = {
+      junior: {
+        provider: "openai",
+        baseUrl: `http://127.0.0.1:${juniorPort}/v1`,
+        apiKey: "junior-key",
+        model: "junior-a",
+        kind: "openai-compatible",
+      },
+    };
+    const harness = new TwoBrothersHarness(
+      resolveConfig({ provider: "mock", retries: 0, timeout: 5 }),
+      {
+        endpoints,
+        subagents: {
+          store,
+          parentSession: "parent.jsonl",
+          endpoint: {
+            provider: "openai",
+            baseUrl: `http://127.0.0.1:${routePort}/v1`,
+            apiKey: "route-secret",
+            model: "route-model",
+            kind: "openai-compatible",
+          },
+        },
+      },
+    );
+    const tool = internals(harness).subagentTool(fakeState());
+    const first = JSON.parse(await tool.execute({ task: "First." })) as {
+      status: string;
+      model?: string;
+    };
+    assert.equal(first.status, "completed");
+    assert.equal(first.model, "route-model");
+    // The Junior endpoint model changed between spawns; the explicit route
+    // model must not follow it.
+    endpoints.junior.model = "junior-b";
+    const second = JSON.parse(await tool.execute({ task: "Second." })) as {
+      status: string;
+      model?: string;
+    };
+    assert.equal(second.status, "completed");
+    assert.equal(second.model, "route-model");
+    // Both child requests hit the ROUTE connection with the ROUTE credential
+    // and the frozen route model — the Junior endpoint never saw a request.
+    assert.equal(routeRequests.length, 2);
+    assert.equal(routeRequests[0]?.body.model, "route-model");
+    assert.equal(routeRequests[1]?.body.model, "route-model");
+    assert.ok(routeRequests.every((request) => request.auth === "Bearer route-secret"));
+    assert.equal(juniorRequests.length, 0);
+    assert.deepEqual(
+      store
+        .list("parent.jsonl")
+        .map((row) => row.model)
+        .sort(),
+      ["route-model", "route-model"],
+    );
+  } finally {
+    routeServer.close();
+    juniorServer.close();
     cleanup();
   }
 });
