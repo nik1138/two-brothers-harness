@@ -404,6 +404,124 @@ test('base URLs: provider api for the primary family, model override otherwise',
   assert.equal(resolveImportBaseUrl(noApi, 'openai-compatible', ''), '')
 })
 
+test('base URLs: the primary family falls back to a per-model override when api is null', () => {
+  const detail = normalizeCatalogProviderDetail({
+    source: 'network',
+    provider: {
+      id: 'model-urls-only',
+      name: 'Model URLs Only',
+      api: null,
+      env: ['KEY'],
+      kind: 'openai-compatible',
+      kind_source: 'guessed',
+      rejected: false,
+      reject_reason: null,
+      needs_base_url: true,
+      model_count: 2,
+      families: { 'openai-compatible': 2, anthropic: 0, google: 0, unsupported: 0 },
+      truncated: false,
+      models: [
+        {
+          id: 'first-model',
+          name: 'First Model',
+          kind: 'openai-compatible',
+          mixed_family: false,
+          base_url: null,
+          context_window: 64000,
+          reasoning: false,
+          efforts: [],
+        },
+        {
+          id: 'second-model',
+          name: 'Second Model',
+          kind: 'openai-compatible',
+          mixed_family: false,
+          base_url: 'https://endpoint.example/v1',
+          context_window: 128000,
+          reasoning: true,
+          efforts: [],
+        },
+      ],
+    },
+  })
+  assert.ok(detail)
+  // The provider api is null, but a model carries a usable override: the
+  // primary family resolves to it instead of forcing a typed URL.
+  assert.equal(familyBaseUrl(detail, 'openai-compatible'), 'https://endpoint.example/v1')
+  assert.equal(requiresBaseUrl(detail, 'openai-compatible'), false)
+  assert.equal(
+    resolveImportBaseUrl(detail, 'openai-compatible', ''),
+    'https://endpoint.example/v1',
+  )
+
+  const imported = buildCatalogImport({
+    detail,
+    family: 'openai-compatible',
+    selection: ['first-model', 'second-model'],
+    baseUrl: '',
+  })
+  assert.equal(imported.ok, true)
+  if (imported.ok) {
+    assert.equal(imported.value.base_url, 'https://endpoint.example/v1')
+    assert.deepEqual(imported.value.models, ['first-model', 'second-model'])
+  }
+  // A typed URL still wins over the model override.
+  assert.equal(
+    resolveImportBaseUrl(detail, 'openai-compatible', 'https://typed.example/v1'),
+    'https://typed.example/v1',
+  )
+
+  // Genuinely URL-less (no api, no model override) stays blocked.
+  const bare = normalizeCatalogProviderDetail({
+    source: 'curated',
+    provider: {
+      id: 'bare',
+      name: 'Bare',
+      api: null,
+      env: [],
+      kind: 'openai-compatible',
+      kind_source: 'guessed',
+      rejected: false,
+      reject_reason: null,
+      needs_base_url: true,
+      model_count: 1,
+      families: { 'openai-compatible': 1, anthropic: 0, google: 0, unsupported: 0 },
+      truncated: false,
+      models: [
+        {
+          id: 'bare-model',
+          name: 'Bare Model',
+          kind: 'openai-compatible',
+          mixed_family: false,
+          base_url: null,
+          context_window: 32000,
+          reasoning: false,
+          efforts: [],
+        },
+      ],
+    },
+  })
+  assert.ok(bare)
+  assert.equal(familyBaseUrl(bare, 'openai-compatible'), null)
+  assert.equal(requiresBaseUrl(bare, 'openai-compatible'), true)
+  const refused = buildCatalogImport({
+    detail: bare,
+    family: 'openai-compatible',
+    selection: ['bare-model'],
+    baseUrl: '',
+  })
+  assert.equal(refused.ok, false)
+  if (!refused.ok) assert.match(refused.reason, /base URL/i)
+  const accepted = buildCatalogImport({
+    detail: bare,
+    family: 'openai-compatible',
+    selection: ['bare-model'],
+    baseUrl: 'https://typed.example/v1',
+  })
+  assert.equal(accepted.ok, true)
+  if (accepted.ok) assert.equal(accepted.value.base_url, 'https://typed.example/v1')
+})
+
 // -- selection (§15.6: default NONE + explicit Select all) ------------------------
 
 test('default selection is NONE; Select all chooses the viewed family only', () => {

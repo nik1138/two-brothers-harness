@@ -63,6 +63,25 @@ test('the Add form carries the context window and the invisible catalog_id', () 
   assert.ok(closeAdd.includes('addCatalogId.value = null'))
 })
 
+test('the prominent needs-base-URL notice is wired and accessible', () => {
+  const browser = read('components/settings/ModelsDevBrowser.vue')
+  assert.ok(browser.includes('CATALOG_NEEDS_BASE_URL_COPY'))
+  // Prominent warning notice near the top of the detail, announced as an alert.
+  const notice = browser.slice(browser.indexOf('catalog-state is-warning'))
+  assert.ok(notice.includes('role="alert"'))
+  assert.ok(notice.indexOf('{{ CATALOG_NEEDS_BASE_URL_COPY }}') < notice.indexOf('</p>'))
+  assert.ok(browser.includes('is-warning'))
+  assert.ok(browser.includes('v-if="needsBaseUrl && !detailView.provider.rejected"'))
+  // The small hint under the typed-URL input stays.
+  assert.ok(browser.includes('This provider has no usable base URL in the catalog; type one to import.'))
+  const model = read('modelsDev.ts')
+  assert.ok(model.includes('CATALOG_NEEDS_BASE_URL_COPY'))
+  assert.match(
+    model,
+    /No usable base URL in the catalog — your endpoint is required\. Type it below to import\./,
+  )
+})
+
 test('the dialog is fail-soft, bounded, accessible and never renders HTML', () => {
   const browser = read('components/settings/ModelsDevBrowser.vue')
   assert.ok(browser.includes('CATALOG_LOADING_COPY'))

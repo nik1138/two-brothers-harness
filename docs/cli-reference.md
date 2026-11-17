@@ -1196,9 +1196,14 @@ protocols are rejected, and an unknown npm is guessed OpenAI-compatible with a
 visible `guessed` source. The dialog groups the model list by family and
 imports one family at a time: the suggested name gains a
 `-anthropic`/`-google`/`-openai` suffix for a secondary family, the family's
-base URL (the provider `api` or the first model override) prefills the Add
-form, and a model on a protocol we do not speak is listed as not importable
-and never offered. Nothing is preselected — **Select all** or per-model
+base URL (the provider `api`, or — when the provider publishes no `api` — the
+first model's per-model `base_url` override, for the primary family as well)
+prefills the Add form, and a model on a protocol we do not speak is listed as
+not importable and never offered. When neither the provider nor any of its
+models carries a usable URL, the row and the detail say **Needs base URL**, the
+detail shows a prominent notice that your endpoint is required, and the import
+stays refused with `Enter the base URL for this provider.` until a valid
+http(s) URL is typed — the typed value wins over any catalog URL. Nothing is preselected — **Select all** or per-model
 toggles choose the import, and an empty selection is refused with an inline
 notice. Importing only prefills the existing Add-provider form (name, base
 URL, kind, models, and the smallest positive context window of the selection);
