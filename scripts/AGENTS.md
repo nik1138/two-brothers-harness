@@ -33,7 +33,8 @@ Local map for the repository gates and release tooling. Root rules:
 
 - `smoke-test.ps1` must end with `SMOKE TEST: PASS`; `release-rehearsal.ps1`
   exits 0 only when every planned step passes; `tarball-smoke.mjs` prints
-  `TARBALL SMOKE: PASS (7/7)`.
+  `TARBALL SMOKE: PASS (<passed>/<total>)` — the totals are dynamic, never
+  hardcode them in docs.
 - `smoke-test.ps1` scopes the repo-local TEMP/TMP redirect to the web build
   stage only (esbuild EPERM workaround); do not widen it to a global redirect —
   the package watcher/editor suites depend on the ambient temp. The rehearsal

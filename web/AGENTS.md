@@ -26,15 +26,15 @@ The backend is the TypeScript server in `packages/harness`:
   (`Ctrl+K`/`Cmd+K`); `src/palette.ts` — pure palette item building/scoring/
   filtering; `src/components/CommandPalette.vue` — the combobox dialog
   (grouped results, `aria-activedescendant`, focus restore via `AppDialog`)
-- `src/components/` — `Sidebar`, `SessionGroup`/`SessionRow` (workspace
-  groups), `SidebarFooter` (bottom-left Settings plus a Light/Dark/System
-  segmented theme selector), `ChatView`, `Composer`,
-  `ToolActivity`, `ApprovalCard` (docked approvals), `DiffView`/`DiffReview`
-  (changed-file review), `CommandResult`, `PromptAudit`, `ContextMeter`,
-  `UsageFooter`, `SettingsDialog` (Senior/Junior roles + provider presets,
-  `settings/` sections), `WorkspaceDialog` + `WorkspaceFinder` (the single
-  workspace picker; fs explorer fed by `/api/fs/browse`), `NewSessionDialog`,
-  `AppDialog`/`AppIcon`, `ErrorToast`
+- `src/components/` — Vue components grouped by area: shell/sidebar
+  (`Sidebar`, `SessionGroup`/`SessionRow`, `SidebarFooter`, `WelcomeHero`),
+  chat (`ChatView`, `Composer`, `ToolActivity`, `ApprovalCard`, `PromptAudit`,
+  `ContextMeter`, `UsageFooter`, `QueueDock`, `TodoPanel`, `SubagentView`),
+  diffs/undo (`DiffView`/`DiffReview`, `RunUndoDialog`, `RewindDialog`),
+  dialogs (`SettingsDialog` with its `settings/` sections, workspace
+  picker/rename, new-session, help/status/permission, `AppDialog`/`AppIcon`,
+  `ErrorToast`) and the `CommandPalette`. This is a category map, not an
+  exhaustive list — `src/components/` is authoritative.
 - `src/api.ts` — backend client; `src/types.ts` — API types mirroring the
   protocol envelopes (`PROTOCOL.md`) and runtime events; `src/modal.ts` —
   stacked-modal mask-click guard (naive-ui fires `mask-click` for clicks
@@ -86,12 +86,16 @@ The backend is the TypeScript server in `packages/harness`:
    switch; Appearance uses its own `.appearance-*` names).
 2. **`npm run build` must keep passing** (outputs `dist/`). The backend serves
    that build, so a broken build breaks the product, not just CI. `npm test`
-   runs the projection/store/model suites (chat, timeline, drafts, palette,
-   session status, recents, density, find, search, workspace order, mentions,
-   streaming, base commands, composer keys, keybindings, provider settings,
-   uiPrefs, queue state, approval policy/session, folding, composer status,
-   todo, recall, tokens, follow scroll) as plain `node --test` via
-   `tests/register-ts.mjs`;
+   runs the projection/store/model suites as plain `node --test` via
+   `tests/register-ts.mjs` — by category: chat/timeline projection and
+   markdown/search, persisted device state (drafts, recents, density,
+   keybindings, uiPrefs), composer behavior (mentions, composer keys, recall,
+   folding, status), run surfaces (streaming, queue state, approvals,
+   steering, follow scroll), settings/providers (including the subagent and
+   compaction settings surfaces), session operations (fork, rewind, undo,
+   export), and appearance/usage (tokens, usage footer/cache, tab title).
+   `web/package.json` `scripts.test` is the registered-suite source of
+   truth — add a new suite there rather than trusting an enumeration here;
    keep it green too — the smoke test calls it. Run test files individually
    (`node --import ./tests/register-ts.mjs --test tests/drafts.test.ts`) when
    the sandbox blocks spawned test runners.

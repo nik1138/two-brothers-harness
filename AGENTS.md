@@ -160,6 +160,10 @@ node dist/cli.js run "Plan a migration from Redis to Valkey" --provider mock
 - Package tests: `npm test` (in-process `node:test` runner) and
   `npm run test:spawn` (`node --test`). Hermetic CLI E2E:
   `node e2e/cli.ts` and `node e2e/cli.ts --dist`.
+  The `tests/subagent*.test.ts` suites cover the helper subagent runtime
+  (approvals, background, controls, follow-ups, mutating, overrides —
+  including wire-level helper-model checks); the browser E2E matrix has the
+  `subagents`/`subagent-*` scenarios and `web/` has matching unit suites.
 - Live/opt-in E2E: `packages/harness/e2e/` (`npm run test:e2e`,
   `npm run test:e2e:dist`) against LM Studio; the hermetic server-status and
   prompt-audit suites run even when no endpoint is reachable.

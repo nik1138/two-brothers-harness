@@ -8,15 +8,27 @@ Local map for the Vue app sources. Parent rules: `../AGENTS.md`; root rules:
 - `App.vue`, `main.ts`, `style.css`, `tokens.css` — shell and the design-token
   layer.
 - `api.ts`, `types.ts` — backend client and API/protocol types.
-- Pure projection/model modules: `chat.ts` (envelopes → group chat),
-  `runtime.ts` (runtime events → tool/approval timeline), `markdown.ts`,
-  `find.ts`, `search.ts`, `streaming.ts`, `sessionStatus.ts`, `drafts.ts`,
-  `palette.ts`, `mentions.ts`, `composerKeys.ts`, `keybindings.ts`,
-  `providerSettings.ts`, `themeMode.ts`, `density.ts`, `historyNav.ts`
-  (user-message navigator: operator-message extraction + window-growth
-  planning), `followScroll.ts` (pure bottom-follow model for the transcript:
-  synchronous gesture-landing prediction, near-bottom/hold state) and the
-  other small persisted-state helpers.
+- Projection and run-state models: `chat.ts` (envelopes → group chat; the only
+  place payloads are interpreted), `runtime.ts` (runtime events →
+  tool/approval timeline), `streaming.ts`, `markdown.ts`, `messageQuote.ts`,
+  `transcriptWindow.ts`, `folding.ts`, `search.ts`, `find.ts`,
+  `sessionStatus.ts`, `tabTitle.ts`, `queueState.ts`.
+- Composer, keyboard and command surfaces: `composerKeys.ts`, `mentions.ts`,
+  `recall.ts`, `composerStatus.ts`, `basecommands.ts`, `palette.ts`,
+  `shortcuts.ts`, `keybindings.ts`, `historyNav.ts`, `followScroll.ts` (pure
+  bottom-follow model for the transcript: synchronous gesture-landing
+  prediction, near-bottom/hold state), `fsPath.ts`, `toolPreview.ts`,
+  `approvalPolicy.ts`, `steering.ts`.
+- Session operations and subagent surfaces: `sessionFork.ts`,
+  `sessionRewind.ts`, `runUndo.ts`, `subagents.ts`, `subagentControls.ts`.
+- Settings/provider models: `providerSettings.ts`, `rolePresetSync.ts`,
+  `modelsDev.ts`, `modelEfforts.ts`, `modelSwitch.ts`,
+  `compactionSettings.ts`, `usageCache.ts`, `usageCost.ts`.
+- Persisted device-local state: `drafts.ts`, `recents.ts`, `themeMode.ts`,
+  `density.ts`, `uiPrefs.ts`, `workspaceOrder.ts`, `workspaceContext.ts`;
+  shared helpers `modal.ts`, `download.ts`, `theme.ts`.
+  This is a category map, not a file inventory — `ls src/` is authoritative
+  when in doubt.
 - `components/` — Vue components (dialogs, sidebar, chat, composer, settings);
   follow the component and class-name rules in `../AGENTS.md`.
 
