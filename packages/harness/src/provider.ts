@@ -2703,6 +2703,42 @@ function googleContents(messages: ChatMessage[]): {
   return { system: systemParts.join("\n\n"), contents };
 }
 
+/**
+ * Gemini's `function_declarations` parameters accept only the fields of the
+ * API's `Schema` object. Tool parameter schemas coming from the harness or
+ * plugins are ordinary JSON Schema and may carry keywords the proto rejects
+ * (`additionalProperties` is the observed 400; `minLength`/`pattern`/… and
+ * `$schema`/`$ref` are equally undefined there). Whitelist-keep the schema
+ * shape — only keys are dropped, never restructured — so a plugin or MCP
+ * schema can never break the whole request. OpenAI-compatible and Anthropic
+ * paths send `tool.parameters` untouched.
+ */
+const GEMINI_SCHEMA_KEYS = new Set([
+  "type",
+  "format",
+  "description",
+  "nullable",
+  "enum",
+  "maxItems",
+  "minItems",
+  "properties",
+  "required",
+  "items",
+]);
+
+function geminiSafeSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(geminiSafeSchema);
+  if (!isRecord(schema)) return schema;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(schema)) {
+    if (!GEMINI_SCHEMA_KEYS.has(key)) continue;
+    out[key] = key === "properties" && isRecord(value)
+      ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, geminiSafeSchema(v)]))
+      : geminiSafeSchema(value);
+  }
+  return out;
+}
+
 /** `Tool` definitions as Gemini `functionDeclarations`. */
 function googleToolDefinitions(tools: Tool[]): unknown[] {
   return [
@@ -2710,7 +2746,7 @@ function googleToolDefinitions(tools: Tool[]): unknown[] {
       functionDeclarations: tools.map((tool) => ({
         name: tool.name,
         description: tool.description,
-        parameters: tool.parameters,
+        parameters: geminiSafeSchema(tool.parameters),
       })),
     },
   ];

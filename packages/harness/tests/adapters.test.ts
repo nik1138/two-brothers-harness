@@ -503,6 +503,118 @@ test("google: systemInstruction, model/user contents and function parts", async 
   assert.deepEqual(body.generationConfig, { temperature: 0.2 });
 });
 
+test("google: tool parameter schemas are stripped of proto-unsupported JSON-schema keywords", async () => {
+  // Gemini's function_declarations Schema proto rejects JSON-schema keywords
+  // like `additionalProperties` with a 400; the adapter must whitelist the
+  // schema recursively (top level and nested) while keeping valid structure.
+  const dirtyTools: Tool[] = [
+    {
+      name: "mutate",
+      description: "Mutate something",
+      parameters: {
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          path: { type: "string", minLength: 1, pattern: "^[a-z]+$" },
+          opts: {
+            type: "object",
+            additionalProperties: false,
+            properties: { n: { type: "integer", minimum: 0, maximum: 10 } },
+            required: ["n"],
+          },
+          tags: { type: "array", items: { type: "string", maxLength: 8 }, maxItems: 5 },
+        },
+        required: ["path"],
+      },
+      execute: () => "unused",
+    },
+  ];
+  const stub = stubFetch(() =>
+    jsonResponse({
+      candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+    }),
+  );
+  const provider = googleProvider(stub.fetchImpl);
+  await provider.chatWithTools(MESSAGES, dirtyTools);
+
+  const wire = JSON.stringify(stub.requests[0].body);
+  assert.equal(wire.includes("additionalProperties"), false);
+  assert.equal(wire.includes("$schema"), false);
+  assert.equal(wire.includes("minLength"), false);
+  assert.equal(wire.includes("maxLength"), false);
+  assert.equal(wire.includes("pattern"), false);
+  assert.equal(wire.includes("minimum"), false);
+  assert.equal(wire.includes("maximum"), false);
+  // Valid Schema structure is kept, never reshaped.
+  assert.deepEqual(stub.requests[0].body.tools, [
+    {
+      functionDeclarations: [
+        {
+          name: "mutate",
+          description: "Mutate something",
+          parameters: {
+            type: "object",
+            properties: {
+              path: { type: "string" },
+              opts: {
+                type: "object",
+                properties: { n: { type: "integer" } },
+                required: ["n"],
+              },
+              tags: { type: "array", items: { type: "string" }, maxItems: 5 },
+            },
+            required: ["path"],
+          },
+        },
+      ],
+    },
+  ]);
+});
+
+test("openai-compatible: dirty tool parameter schema is forwarded byte-identically", async () => {
+  // The Gemini normalization must not leak into the OpenAI path: the tool
+  // schema reaches the wire exactly as declared.
+  const dirty: Tool[] = [
+    {
+      name: "mutate",
+      description: "Mutate something",
+      parameters: {
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        type: "object",
+        additionalProperties: false,
+        properties: { path: { type: "string", minLength: 1 } },
+        required: ["path"],
+      },
+      execute: () => "unused",
+    },
+  ];
+  const stub = stubFetch(() =>
+    jsonResponse({
+      choices: [{ message: { content: "ok" } }],
+      usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+    }),
+  );
+  const provider = new OpenAICompatibleProvider({
+    ...BASE,
+    model: "openai-test",
+    fetchImpl: stub.fetchImpl,
+  });
+  await provider.chatWithTools(MESSAGES, dirty);
+
+  assert.deepEqual(stub.requests[0].body.tools, [
+    {
+      type: "function",
+      function: {
+        name: "mutate",
+        description: "Mutate something",
+        parameters: dirty[0].parameters,
+      },
+    },
+  ]);
+});
+
 test("google: an explicit /v1beta base is used as-is; models/ prefix is normalized", async () => {
   const stub = stubFetch(() => jsonResponse({ candidates: [{ content: { parts: [] } }] }));
   const provider = googleProvider(stub.fetchImpl, {
