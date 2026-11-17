@@ -548,21 +548,22 @@ test('providerRowSummary is identity-only information', () => {
 
 // -- model discovery ("Refresh models") ---------------------------------------
 
-test('supportsModelDiscovery: only OpenAI-compatible endpoints can be probed', () => {
+test('supportsModelDiscovery: OpenAI-compatible and Google Gemini can be probed', () => {
   assert.equal(supportsModelDiscovery('openai-compatible'), true)
   assert.equal(supportsModelDiscovery(''), true, 'empty means the default kind')
   assert.equal(supportsModelDiscovery(undefined), true)
   assert.equal(supportsModelDiscovery(null), true)
+  assert.equal(supportsModelDiscovery('google'), true)
   assert.equal(supportsModelDiscovery('anthropic'), false)
-  assert.equal(supportsModelDiscovery('google'), false)
   assert.equal(supportsModelDiscovery('future-kind'), false)
 })
 
 test('unsupportedDiscoveryCopy names the wire kind and stays honest', () => {
   assert.match(unsupportedDiscoveryCopy('anthropic'), /not supported for Anthropic providers/)
-  assert.match(unsupportedDiscoveryCopy('anthropic'), /OpenAI-compatible/)
+  assert.match(unsupportedDiscoveryCopy('anthropic'), /OpenAI-compatible and Google Gemini/)
   assert.match(unsupportedDiscoveryCopy('anthropic'), /two-brothers models/)
-  assert.match(unsupportedDiscoveryCopy('google'), /Google Gemini/)
+  assert.match(unsupportedDiscoveryCopy('anthropic'), /--kind google/)
+  assert.match(unsupportedDiscoveryCopy('google'), /not supported for Google Gemini/)
 })
 
 test('discoveredModels: tolerant ids from objects, strings and wrappers', () => {
@@ -715,7 +716,7 @@ test('addDiscoveryEligible: only a valid Base URL and an OpenAI-compatible kind'
   assert.equal(addDiscoveryEligible({ baseUrl: '', kind: 'openai-compatible' }), false)
   assert.equal(addDiscoveryEligible({ baseUrl: 'ftp://x', kind: 'openai-compatible' }), false)
   assert.equal(addDiscoveryEligible({ baseUrl: 'http://x/v1', kind: 'anthropic' }), false)
-  assert.equal(addDiscoveryEligible({ baseUrl: 'http://x/v1', kind: 'google' }), false)
+  assert.equal(addDiscoveryEligible({ baseUrl: 'http://x/v1', kind: 'google' }), true)
   assert.equal(addDiscoveryEligible(null), false)
   assert.equal(addDiscoveryEligible(undefined), false)
 })

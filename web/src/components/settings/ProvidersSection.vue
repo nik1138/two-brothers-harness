@@ -1174,8 +1174,8 @@ async function submitAdd(): Promise<void> {
               <span class="provider-field-note">
                 Model IDs are suggestions for the role pickers and onboarding; set the model each
                 role actually uses in Models &amp; roles. Refresh probes the current Base URL and
-                Kind (with the API key typed above, or the saved key when blank) without saving; the
-                offline path is <code>two-brothers models --base-url &lt;url&gt;</code>.
+                Kind (with the API key typed above, or the saved key when blank) without saving;
+                the offline path is <code>two-brothers models --base-url &lt;url&gt; [--kind google]</code>.
               </span>
             </div>
 
@@ -1394,8 +1394,8 @@ async function submitAdd(): Promise<void> {
               {{ addDiscoveryText }}
             </span>
             <span v-else-if="!addFetchEligible" class="provider-field-note">
-              Fetch models asks an OpenAI-compatible endpoint for its model list: enter a valid
-              Base URL and keep the OpenAI-compatible kind. Manual ids above always work.
+              Fetch models asks an OpenAI-compatible or Google Gemini endpoint for its model list:
+              enter a valid Base URL and keep a supported kind. Manual ids above always work.
             </span>
           </div>
           <div v-if="addDiscoveryModels.length" class="provider-add-discovery">

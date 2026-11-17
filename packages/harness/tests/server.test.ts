@@ -4039,12 +4039,11 @@ test("provider model discovery: an empty answer is valid and leaves the catalog 
 test("provider model discovery: unsupported wire kinds are an honest 400", async () => {
   const srv = await startServer();
   try {
-    // Built-in seeds with native wire families: no OpenAI-compatible /models
-    // listing exists, so probing is refused BEFORE any request is attempted.
-    for (const [name, kind] of [
-      ["anthropic", "anthropic"],
-      ["gemini", "google"],
-    ] as const) {
+    // Built-in seed with a native wire family: no model listing exists, so
+    // probing is refused BEFORE any request is attempted. (The gemini seed
+    // speaks the Google listing now — covered by the google tests below on a
+    // loopback endpoint, never the real API.)
+    for (const [name, kind] of [["anthropic", "anthropic"]] as const) {
       const res = await post<Record<string, any>>(srv.base, `/api/providers/${name}/discover`);
       assert.equal(res.status, 400);
       assert.match(String(res.body.detail), /not supported/);
@@ -4353,7 +4352,7 @@ test("draft model discovery: invalid input and unsupported kinds are honest 400s
     assert.equal(scheme.status, 400);
     assert.match(String(scheme.body.detail), /must start with http/);
 
-    for (const kind of ["anthropic", "google"]) {
+    for (const kind of ["anthropic"]) {
       const res = await post<Record<string, any>>(srv.base, "/api/providers/discover", {
         base_url: fake.baseUrl,
         kind,
@@ -4421,6 +4420,244 @@ test("draft model discovery: an empty answer is valid and an upstream failure is
     assert.ok(!JSON.stringify(failed.body).includes("typed-secret"));
   } finally {
     await http500.close();
+    await srv.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Google/Gemini model discovery (`kind: google` on both discovery routes)
+// ---------------------------------------------------------------------------
+
+interface FakeGoogleEndpoint {
+  baseUrl: string;
+  requests: Array<{ url: string; googKey: string | undefined; authorization: string | undefined }>;
+  close(): Promise<void>;
+}
+
+/**
+ * Hermetic Gemini `GET /v1beta/models` endpoint on a loopback port. Serves
+ * the queued `{models, nextPageToken}` pages in order (the last one repeats)
+ * and records the URL plus both credential headers per request.
+ */
+async function startFakeGoogleEndpoint(
+  ...pages: unknown[]
+): Promise<FakeGoogleEndpoint> {
+  const queue = pages.flatMap((page) => (Array.isArray(page) ? page : [page]));
+  const requests: FakeGoogleEndpoint["requests"] = [];
+  let seen = 0;
+  const server = http.createServer((req, res) => {
+    requests.push({
+      url: req.url ?? "",
+      googKey: req.headers["x-goog-api-key"] as string | undefined,
+      authorization: req.headers.authorization,
+    });
+    const page = queue[Math.min(seen, queue.length - 1)];
+    seen += 1;
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(page ?? { models: [] }));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+  const port = (server.address() as AddressInfo).port;
+  return {
+    baseUrl: `http://127.0.0.1:${port}`,
+    requests,
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
+  };
+}
+
+test("google model discovery (edit route): v1beta listing, stored key as x-goog-api-key, no Bearer, prefix stripped", async () => {
+  const srv = await startServer();
+  const fake = await startFakeGoogleEndpoint({
+    models: [{ name: "models/gemini-2.5-pro" }, { name: "models/gemini-2.0-flash" }],
+  });
+  try {
+    await post(srv.base, "/api/providers", {
+      name: "Gem",
+      base_url: fake.baseUrl,
+      api_key: "stored-goog",
+      kind: "google",
+      models: ["keep-me"],
+    });
+    const settingsPath = path.join(srv.dir, "settings.json");
+    const settingsBefore = fs.readFileSync(settingsPath, "utf-8");
+
+    const discovered = await post<Record<string, any>>(srv.base, "/api/providers/Gem/discover");
+    assert.equal(discovered.status, 200);
+    assert.deepEqual(discovered.body.models, [{ id: "gemini-2.5-pro" }, { id: "gemini-2.0-flash" }]);
+    assert.equal(discovered.body.base_url, fake.baseUrl);
+    assert.equal(discovered.body.kind, "google");
+    // Gemini auth: x-goog-api-key header, never an Authorization Bearer,
+    // never a key= query parameter.
+    assert.equal(fake.requests.length, 1);
+    assert.match(fake.requests[0]?.url ?? "", /^\/v1beta\/models\?pageSize=\d+/);
+    assert.equal(fake.requests[0]?.googKey, "stored-goog");
+    assert.equal(fake.requests[0]?.authorization, undefined);
+    assert.ok(!fake.requests[0]?.url.includes("stored-goog"), "the key never rides in the URL");
+    // Nothing written, nothing echoed.
+    assert.equal(fs.readFileSync(settingsPath, "utf-8"), settingsBefore);
+    assert.ok(!JSON.stringify(discovered.body).includes("stored-goog"));
+  } finally {
+    await fake.close();
+    await srv.close();
+  }
+});
+
+test("google model discovery (edit route): the stored-key same-URL guard still applies", async () => {
+  const srv = await startServer();
+  const own = await startFakeGoogleEndpoint({ models: [{ name: "models/own" }] });
+  const other = await startFakeGoogleEndpoint({ models: [{ name: "models/other" }] });
+  try {
+    await post(srv.base, "/api/providers", {
+      name: "Gem",
+      base_url: own.baseUrl,
+      api_key: "stored-goog",
+      kind: "google",
+    });
+    // Different URL + no typed key: refused before any request, same as the
+    // OpenAI-compatible guard.
+    const refused = await post<Record<string, any>>(srv.base, "/api/providers/Gem/discover", {
+      base_url: other.baseUrl,
+    });
+    assert.equal(refused.status, 400);
+    assert.match(String(refused.body.detail), /a typed API key is required/);
+    assert.equal(own.requests.length, 0);
+    assert.equal(other.requests.length, 0);
+    // The typed one-shot key probes the draft URL as x-goog-api-key.
+    const typed = await post<Record<string, any>>(srv.base, "/api/providers/Gem/discover", {
+      base_url: other.baseUrl,
+      api_key: "typed-goog",
+    });
+    assert.equal(typed.status, 200);
+    assert.deepEqual(typed.body.models, [{ id: "other" }]);
+    assert.equal(other.requests.length, 1);
+    assert.equal(other.requests[0]?.googKey, "typed-goog");
+    assert.equal(other.requests[0]?.authorization, undefined);
+    assert.equal(own.requests.length, 0);
+    assert.ok(!JSON.stringify(typed.body).includes("typed-goog"));
+  } finally {
+    await own.close();
+    await other.close();
+    await srv.close();
+  }
+});
+
+test("google model discovery (draft route): typed key only to the draft URL, keyless works with keyed presets", async () => {
+  const srv = await startServer();
+  const keyed = await startFakeGoogleEndpoint({ models: [{ name: "models/keyed" }] });
+  const draft = await startFakeGoogleEndpoint({ models: [{ name: "models/draft" }] });
+  try {
+    // A keyed google preset exists; the name-agnostic route must not resolve
+    // or demand its credential.
+    await post(srv.base, "/api/providers", {
+      name: "Gem",
+      base_url: keyed.baseUrl,
+      api_key: "stored-goog",
+      kind: "google",
+    });
+    const settingsPath = path.join(srv.dir, "settings.json");
+    const settingsBefore = fs.readFileSync(settingsPath, "utf-8");
+
+    const withKey = await post<Record<string, any>>(srv.base, "/api/providers/discover", {
+      base_url: draft.baseUrl,
+      kind: "google",
+      api_key: "typed-goog",
+    });
+    assert.equal(withKey.status, 200);
+    assert.deepEqual(withKey.body.models, [{ id: "draft" }]);
+    assert.equal(draft.requests.length, 1);
+    assert.equal(draft.requests[0]?.googKey, "typed-goog");
+    assert.equal(draft.requests[0]?.authorization, undefined);
+    assert.match(draft.requests[0]?.url ?? "", /^\/v1beta\/models\?/);
+
+    const keyless = await post<Record<string, any>>(srv.base, "/api/providers/discover", {
+      base_url: draft.baseUrl,
+      kind: "google",
+    });
+    assert.equal(keyless.status, 200);
+    assert.equal(draft.requests.length, 2);
+    assert.equal(draft.requests[1]?.googKey, undefined, "no credential is invented keyless");
+    assert.equal(draft.requests[1]?.authorization, undefined);
+    // The keyed preset's endpoint is never contacted; nothing is written.
+    assert.equal(keyed.requests.length, 0);
+    assert.equal(fs.readFileSync(settingsPath, "utf-8"), settingsBefore);
+  } finally {
+    await keyed.close();
+    await draft.close();
+    await srv.close();
+  }
+});
+
+test("google model discovery: nextPageToken pages are combined into one list", async () => {
+  const srv = await startServer();
+  const fake = await startFakeGoogleEndpoint(
+    { models: [{ name: "models/a" }], nextPageToken: "tok-2" },
+    { models: [{ name: "models/b" }] },
+  );
+  try {
+    const discovered = await post<Record<string, any>>(srv.base, "/api/providers/discover", {
+      base_url: fake.baseUrl,
+      kind: "google",
+      api_key: "typed-goog",
+    });
+    assert.equal(discovered.status, 200);
+    assert.deepEqual(discovered.body.models, [{ id: "a" }, { id: "b" }]);
+    assert.equal(fake.requests.length, 2);
+    assert.ok(!fake.requests[0]?.url.includes("pageToken"));
+    assert.match(fake.requests[1]?.url ?? "", /pageToken=tok-2/);
+  } finally {
+    await fake.close();
+    await srv.close();
+  }
+});
+
+test("google model discovery: upstream failures are a clean 502 without key material", async () => {
+  const srv = await startServer();
+  const failing = await new Promise<FakeGoogleEndpoint>((resolve, reject) => {
+    const requests: FakeGoogleEndpoint["requests"] = [];
+    const server = http.createServer((req, res) => {
+      requests.push({
+        url: req.url ?? "",
+        googKey: req.headers["x-goog-api-key"] as string | undefined,
+        authorization: req.headers.authorization,
+      });
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("boom");
+    });
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const port = (server.address() as AddressInfo).port;
+      resolve({
+        baseUrl: `http://127.0.0.1:${port}`,
+        requests,
+        close: () =>
+          new Promise<void>((done) => {
+            server.closeAllConnections();
+            server.close(() => done());
+          }),
+      });
+    });
+  });
+  try {
+    const failed = await post<Record<string, any>>(srv.base, "/api/providers/discover", {
+      base_url: failing.baseUrl,
+      kind: "google",
+      api_key: "typed-goog",
+    });
+    assert.equal(failed.status, 502);
+    assert.match(String(failed.body.detail), /model discovery failed/);
+    assert.match(String(failed.body.detail), /HTTP 500/);
+    assert.ok(!JSON.stringify(failed.body).includes("typed-goog"));
+    assert.equal(failing.requests[0]?.googKey, "typed-goog");
+    assert.equal(failing.requests[0]?.authorization, undefined);
+  } finally {
+    await failing.close();
     await srv.close();
   }
 });

@@ -575,16 +575,17 @@ export function failDiscovery(
   )
 }
 
-/** Discovery is only truthful for endpoints that expose an OpenAI `/models`. */
+/** Wire kinds with a live model listing: OpenAI-compatible `/models` and the Gemini listing. */
 export function supportsModelDiscovery(kind: unknown): boolean {
-  return (text(kind) || PROVIDER_KIND_DEFAULT) === PROVIDER_KIND_DEFAULT
+  const value = text(kind) || PROVIDER_KIND_DEFAULT
+  return value === PROVIDER_KIND_DEFAULT || value === 'google'
 }
 
-/** Honest copy for a wire kind that has no OpenAI-compatible model listing. */
+/** Honest copy for a wire kind that has no model listing (Anthropic). */
 export function unsupportedDiscoveryCopy(kind: unknown): string {
   return `Model discovery is not supported for ${providerKindLabel(
     kind,
-  )} providers; only OpenAI-compatible endpoints expose a /models listing. List models by hand or use two-brothers models with an OpenAI-compatible endpoint.`
+  )} providers; only OpenAI-compatible and Google Gemini endpoints expose a model listing. List models by hand, or use two-brothers models with --base-url <url> [--kind google].`
 }
 
 /** Visible status copy for the control ('' when there is nothing to say). */

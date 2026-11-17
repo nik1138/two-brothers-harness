@@ -207,6 +207,62 @@ test("models: missing --base-url and a missing key env var are usage errors (exi
   assert.match(io2.err.join("\n"), /TB_TEST_UNSET_KEY_ENV is not set/);
 });
 
+test("models --kind google: v1beta URL, x-goog-api-key header, no Bearer, prefix-stripped ids, no key echoed", async () => {
+  const server = await startServer(() => ({
+    body: { models: [{ name: "models/gemini-2.5-pro" }, { name: "models/gemini-2.0-flash" }] },
+  }));
+  const io = makeIO();
+  try {
+    const code = await main(
+      ["models", "--base-url", server.url, "--kind", "google", "--api-key", "goog-secret"],
+      io,
+    );
+    assert.equal(code, 0, io.err.join("\n"));
+    assert.equal(server.requests.length, 1);
+    assert.match(server.requests[0].path, /^\/v1beta\/models\?pageSize=\d+/);
+    assert.equal(server.requests[0].headers["x-goog-api-key"], "goog-secret");
+    assert.equal(server.requests[0].headers.authorization, undefined, "Gemini auth is never a Bearer");
+    assert.deepEqual(io.out, ["gemini-2.5-pro", "gemini-2.0-flash"]);
+    const printed = [...io.out, ...io.err].join("\n");
+    assert.ok(!printed.includes("goog-secret"), "the key never appears in output");
+  } finally {
+    await server.close();
+  }
+});
+
+test("models --kind google --json: one array with the prefix stripped", async () => {
+  const server = await startServer(() => ({
+    body: { models: [{ name: "models/gemini-2.5-pro", displayName: "Gemini 2.5 Pro" }] },
+  }));
+  const io = makeIO();
+  try {
+    const code = await main(
+      ["models", "--base-url", server.url, "--kind", "google", "--json"],
+      io,
+    );
+    assert.equal(code, 0, io.err.join("\n"));
+    assert.deepEqual(JSON.parse(io.out[0]), [{ id: "gemini-2.5-pro" }]);
+  } finally {
+    await server.close();
+  }
+});
+
+test("models --kind: anthropic fails honestly (exit 1), an unknown kind is a usage error (exit 2)", async () => {
+  const io = makeIO();
+  assert.equal(
+    await main(["models", "--base-url", "http://127.0.0.1:9", "--kind", "anthropic"], io),
+    1,
+  );
+  assert.match(io.err.join("\n"), /not supported for the anthropic provider kind/);
+
+  const io2 = makeIO();
+  assert.equal(
+    await main(["models", "--base-url", "http://127.0.0.1:9", "--kind", "wat"], io2),
+    2,
+  );
+  assert.match(io2.err.join("\n"), /invalid provider kind: wat/);
+});
+
 // ---------------------------------------------------------------------------
 // `onboard` settings writing
 // ---------------------------------------------------------------------------

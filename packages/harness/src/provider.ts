@@ -1040,12 +1040,25 @@ export interface RemoteModel {
 }
 
 export interface ListModelsOptions {
-  /** Bearer token for endpoints that require one (never logged). */
+  /**
+   * Credential for the probe: a Bearer token on OpenAI-compatible endpoints,
+   * the `x-goog-api-key` header on Google Gemini (never logged, never a URL
+   * parameter).
+   */
   apiKey?: string;
-  /** Request timeout in seconds (default `MODELS_TIMEOUT_SECONDS`). */
+  /** Wire family: `openai-compatible` (default) or `google`; anthropic has no model listing. */
+  kind?: string;
+  /** Request timeout in seconds (default `MODELS_TIMEOUT_SECONDS`); one budget for ALL pages. */
   timeoutSeconds?: number;
+  /** Google listing page bound (default `MODELS_MAX_PAGES`); at most this many pages are fetched. */
+  maxPages?: number;
   fetchImpl?: FetchLike;
 }
+
+/** Page bound for a Google listing: complete lists without unbounded requests. */
+export const MODELS_MAX_PAGES = 10;
+/** Gemini accepts up to 1000 entries per page; one page is usually the whole list. */
+const GOOGLE_MODELS_PAGE_SIZE = 1000;
 
 /** Unwrap the transport error's `cause` (Node reports `fetch failed` + cause). */
 function describeFetchError(exc: unknown): string {
@@ -1082,11 +1095,22 @@ function entryModel(raw: unknown): RemoteModel | null {
 }
 
 /**
- * List the models an OpenAI-compatible endpoint reports (`GET {base}/models`),
- * optionally with a Bearer token. One bounded ~10 s request — no retry loop
- * (discovery is an explicit operator command and should fail fast). Errors
- * carry a clean message the CLI prints verbatim: an unreachable host, a
- * timeout, a non-2xx response or an unrecognized payload.
+ * List the models an endpoint reports. Kind-aware:
+ *
+ * - `openai-compatible` (default, unchanged): one bounded `GET {base}/models`,
+ *   optionally with a Bearer token.
+ * - `google`: the Gemini listing `GET {base}/v1beta/models` (versioned like
+ *   `GoogleProvider`), authenticated with the `x-goog-api-key` header —
+ *   never an Authorization Bearer and never a `key=` query parameter —
+ *   following `nextPageToken` for at most `MODELS_MAX_PAGES` pages of
+ *   `pageSize` entries, so a complete catalog needs no unbounded requests.
+ * - `anthropic`: no model listing exists; an honest error, like the server's
+ *   discovery routes.
+ *
+ * One overall timeout/abort budget covers every page (discovery is an
+ * explicit operator command and should fail fast). Errors carry a clean
+ * message the CLI prints verbatim: an unreachable host, a timeout, a non-2xx
+ * response or an unrecognized payload.
  */
 export async function listModels(
   baseUrl: string,
@@ -1094,38 +1118,32 @@ export async function listModels(
 ): Promise<RemoteModel[]> {
   const base = baseUrl.trim().replace(/\/+$/, "");
   if (!base) throw new Error("base url is required");
-  const url = `${base}/models`;
+  const kind = (options.kind ?? "").trim() || DEFAULT_PROVIDER_KIND;
+  if (!isProviderKind(kind)) {
+    throw new Error(`unknown provider kind: ${kind} (use ${PROVIDER_KIND_HINT})`);
+  }
+  if (kind === "anthropic") {
+    throw new Error(
+      `model discovery is not supported for the anthropic provider kind (use ${PROVIDER_KIND_HINT}); list models by hand`,
+    );
+  }
   const timeout = options.timeoutSeconds ?? MODELS_TIMEOUT_SECONDS;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout * 1000);
   const fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
   try {
+    const probe = (url: string, headers: Record<string, string>) =>
+      fetchModelsPage(url, headers, controller, fetchImpl, timeout);
+    if (kind === "google") {
+      return await listGoogleModels(base, options, probe);
+    }
     const headers: Record<string, string> = { Accept: "application/json" };
     if (options.apiKey) headers.Authorization = `Bearer ${options.apiKey}`;
-    let response: Response;
-    try {
-      response = await fetchImpl(url, { method: "GET", headers, signal: controller.signal });
-    } catch (exc) {
-      if (controller.signal.aborted) {
-        throw new Error(`request to ${url} timed out after ${timeout}s`);
-      }
-      throw new Error(`cannot reach ${url}: ${describeFetchError(exc)}`);
-    }
-    if (!response.ok) {
-      const detail = (await readBodyCapped(response, MAX_ERROR_BODY_BYTES)).trim();
-      const body = detail.slice(0, 300) || response.statusText || "(no body)";
-      throw new Error(`HTTP ${response.status} from ${url}: ${body}`);
-    }
-    let payload: unknown;
-    try {
-      payload = await response.json();
-    } catch {
-      throw new Error(`unexpected response from ${url}: not JSON`);
-    }
+    const payload = await probe(`${base}/models`, headers);
     const entries = modelEntries(payload);
     if (entries === null) {
       throw new Error(
-        `unexpected response from ${url}: expected an array or a {data: [...]} object`,
+        `unexpected response from ${base}/models: expected an array or a {data: [...]} object`,
       );
     }
     const models: RemoteModel[] = [];
@@ -1137,6 +1155,78 @@ export async function listModels(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** Fetch one listing page with the shared timeout/abort budget. */
+async function fetchModelsPage(
+  url: string,
+  headers: Record<string, string>,
+  controller: AbortController,
+  fetchImpl: FetchLike,
+  timeoutSeconds: number,
+): Promise<unknown> {
+  let response: Response;
+  try {
+    response = await fetchImpl(url, { method: "GET", headers, signal: controller.signal });
+  } catch (exc) {
+    if (controller.signal.aborted) {
+      throw new Error(`request to ${url} timed out after ${timeoutSeconds}s`);
+    }
+    throw new Error(`cannot reach ${url}: ${describeFetchError(exc)}`);
+  }
+  if (!response.ok) {
+    const detail = (await readBodyCapped(response, MAX_ERROR_BODY_BYTES)).trim();
+    const body = detail.slice(0, 300) || response.statusText || "(no body)";
+    throw new Error(`HTTP ${response.status} from ${url}: ${body}`);
+  }
+  try {
+    return await response.json();
+  } catch {
+    throw new Error(`unexpected response from ${url}: not JSON`);
+  }
+}
+
+/**
+ * The Gemini model listing (`GET {base}/v1beta/models`, the same versioned
+ * URL convention `GoogleProvider` uses). Entries are `{name: "models/<id>"}`
+ * objects; the tolerant normalization strips the `models/` prefix, so the ids
+ * match what a run uses. Follows `nextPageToken` for at most `maxPages`
+ * pages; if the endpoint still pages after that, the models fetched so far
+ * are returned rather than looping without bound.
+ */
+async function listGoogleModels(
+  base: string,
+  options: ListModelsOptions,
+  probe: (url: string, headers: Record<string, string>) => Promise<unknown>,
+): Promise<RemoteModel[]> {
+  const maxPages = Math.max(1, Math.trunc(options.maxPages ?? MODELS_MAX_PAGES));
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (options.apiKey) headers["x-goog-api-key"] = options.apiKey;
+  const models: RemoteModel[] = [];
+  let pageToken: string | undefined;
+  for (let page = 0; page < maxPages; page++) {
+    const query = new URLSearchParams({ pageSize: String(GOOGLE_MODELS_PAGE_SIZE) });
+    if (pageToken) query.set("pageToken", pageToken);
+    const listingUrl = `${versionedApiUrl(base, "v1beta", "/models")}?${query}`;
+    const payload = await probe(listingUrl, headers);
+    const entries = modelEntries(payload);
+    if (entries === null) {
+      throw new Error(
+        `unexpected response from ${listingUrl}: expected an array or a {models: [...]} object`,
+      );
+    }
+    for (const entry of entries) {
+      const model = entryModel(entry);
+      if (model) models.push(model);
+    }
+    const next =
+      isRecord(payload) && typeof payload.nextPageToken === "string"
+        ? payload.nextPageToken.trim()
+        : "";
+    if (!next) return models;
+    pageToken = next;
+  }
+  return models;
 }
 
 export interface Sleeper {

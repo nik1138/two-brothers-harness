@@ -86,8 +86,10 @@
  *   probed base URL matches the preset's own endpoint (trimmed, trailing
  *   slashes ignored): probing a different endpoint with a saved secret and no
  *   typed key is a 400 ("a typed API key is required when probing a different
- *   base URL") instead of sending that secret elsewhere. Only OpenAI-compatible
- *   endpoints expose a `/models` listing: any other wire kind is an honest
+ *   base URL") instead of sending that secret elsewhere. OpenAI-compatible
+ *   endpoints (`GET {base}/models`, Bearer) and Google Gemini endpoints
+ *   (`GET {base}/v1beta/models`, `x-goog-api-key`, bounded `nextPageToken`
+ *   pagination) expose a listing: the Anthropic wire family is an honest
  *   400, an unknown provider (seeds included) a 404, an upstream failure a
  *   502, and an empty list a valid 200 (a catalog is never erased by
  *   discovery). Discovery is explicitly separate from `PUT` (Apply); the
@@ -99,7 +101,7 @@
  *   stored/env credential can ever be resolved or attached; only the typed
  *   draft key is used (write-only, one request, never echoed). It answers
  *   200/`models` (empty included), the same honest 400s for a missing or
- *   invalid base URL or a non-OpenAI-compatible kind, and a 502 for
+ *   invalid base URL or a wire kind without a model listing, and a 502 for
  *   upstream failures, with zero presets or all-keyed presets alike.
  * - `GET /api/plugins` lists the plugins discovered by the PluginManager
  *   (`src/plugins.ts`, the plugins.py port) plus load errors, and additively
@@ -3665,22 +3667,27 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     if (!isProviderKind(kind)) {
       throw new HttpError(400, `unknown provider kind: ${kind} (use ${PROVIDER_KIND_HINT})`);
     }
-    if (kind !== PROVIDER_KIND_DEFAULT) {
-      // Honest about the wire families: only the OpenAI-compatible adapter
-      // speaks `GET {base}/models`; the native Messages / Generative
-      // Language APIs are not probed through their own listing shapes here.
+    if (kind !== PROVIDER_KIND_DEFAULT && kind !== "google") {
+      // Honest about the wire families: the OpenAI-compatible adapter speaks
+      // `GET {base}/models` and the Google adapter its `GET {base}/v1beta/
+      // models` listing; the native Anthropic Messages API has no equivalent
+      // listing here and is not probed through a foreign shape.
       throw new HttpError(
         400,
-        `model discovery is not supported for the ${kind} provider kind (use ${PROVIDER_KIND_HINT}); list models by hand or use two-brothers models with an OpenAI-compatible endpoint`,
+        `model discovery is not supported for the ${kind} provider kind (use ${PROVIDER_KIND_HINT}); list models by hand or use two-brothers models with --kind openai-compatible or --kind google`,
       );
     }
     return { baseUrl, kind, typedApiKey: optionalString(body, "api_key")?.trim() };
   }
 
-  /** One bounded `GET {base}/models` probe; upstream failures are a clean 502. */
-  async function probeModelList(baseUrl: string, apiKey: string | undefined): Promise<RemoteModel[]> {
+  /** One bounded model-listing probe (kind-aware); upstream failures are a clean 502. */
+  async function probeModelList(
+    baseUrl: string,
+    apiKey: string | undefined,
+    kind: string,
+  ): Promise<RemoteModel[]> {
     try {
-      return await listModels(baseUrl, { apiKey: apiKey || undefined });
+      return await listModels(baseUrl, { apiKey: apiKey || undefined, kind });
     } catch (exc) {
       throw new HttpError(502, `model discovery failed: ${errorDetail(exc)}`);
     }
@@ -3701,7 +3708,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         baseUrl: "",
         kind: PROVIDER_KIND_DEFAULT,
       });
-      const models = await probeModelList(baseUrl, typedApiKey);
+      const models = await probeModelList(baseUrl, typedApiKey, kind);
       // Empty is a valid answer (`models: []`); the client must not erase a
       // catalog on it. `base_url`/`kind` are additive echoes.
       return { models, base_url: baseUrl, kind };
@@ -3746,7 +3753,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         );
       }
       const probeKey = typedApiKey ? typedApiKey : sameEndpoint ? storedApiKey : "";
-      const models = await probeModelList(baseUrl, probeKey || undefined);
+      const models = await probeModelList(baseUrl, probeKey || undefined, kind);
       // Empty is a valid answer (`models: []`); the client must not erase a
       // catalog on it. `base_url`/`kind` are additive echoes so a client can
       // show what was actually probed.
