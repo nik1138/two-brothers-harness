@@ -881,6 +881,7 @@ async function submitAdd(): Promise<void> {
   addFormError.value = null
   if (validation || window.error) return
   addBusy.value = true
+  let created: ProviderPreset | null = null
   try {
     const body: ProviderCreateRequest = {
       name: addName.value.trim(),
@@ -892,14 +893,7 @@ async function submitAdd(): Promise<void> {
     // 0/empty = unknown; the field is only sent when the operator set a window.
     if (window.value > 0) body.context_window = window.value
     if (addCatalogId.value) body.catalog_id = addCatalogId.value
-    const created = await createProvider(body)
-    announce(`Added ${created.name}.`)
-    closeAdd()
-    await refreshProviders(false)
-    // the parent's prop update lands on the next render; select/open after it
-    await nextTick()
-    activeName.value = created.name
-    openDetail(created.name, true)
+    created = await createProvider(body)
   } catch (e) {
     if (e instanceof ApiError && e.status === 409) {
       addNameError.value = 'A provider already uses this ID.'
@@ -912,6 +906,17 @@ async function submitAdd(): Promise<void> {
     }
   } finally {
     addBusy.value = false
+  }
+  // The success tail runs only after addBusy is cleared: closeAdd() (and the
+  // next openAdd) are no-ops while a save is in flight.
+  if (created !== null) {
+    announce(`Added ${created.name}.`)
+    closeAdd()
+    await refreshProviders(false)
+    // the parent's prop update lands on the next render; select/open after it
+    await nextTick()
+    activeName.value = created.name
+    openDetail(created.name, true)
   }
 }
 </script>

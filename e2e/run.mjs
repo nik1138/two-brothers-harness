@@ -174,6 +174,21 @@
 //                  token/scrollHeight growth must leave the reader's anchored
 //                  row in place while the bottom edge recedes; the pre-swipe
 //                  phase proves at-bottom streaming still follows
+//   settings-provider-setup scripted `provider-discovery` fixture: the
+//                  Add-provider card fetches models from an unsaved
+//                  OpenAI-compatible endpoint (Clear/Select all/subset
+//                  checkboxes + one custom id), saves them; a Google-kind
+//                  draft probes the Gemini listing and the ids arrive without
+//                  the models/ prefix (the fixture's request log proves the
+//                  x-goog-api-key header and no Authorization); the
+//                  discovered models appear in the Senior role's preset
+//                  selector while an explicitly set model survives as (custom)
+//   settings-provider-catalog mock provider: the models.dev browser (catalog
+//                  responses injected by route interception) imports an entry
+//                  with a catalog URL, an entry without one (import blocked
+//                  until a valid http(s) URL is typed) and an entry whose
+//                  model-level baseUrl is the fallback; the imported provider
+//                  is then assigned to the Junior role and persists
 //   real           opt-in (TWO_BROTHERS_REAL_E2E=1): real models via LM Studio
 //
 // Backend: every scenario runs against the TypeScript server
@@ -541,11 +556,14 @@ function tsEnv(overrides = {}) {
  *   streamChunkMs optional --stream-chunk-ms forwarded to the fixture (the
  *            `stream-follow` paced opening's chunk cadence; the touch scenario
  *            pins it explicitly)
+ *   recordFile optional --record-file forwarded to the fixture (the
+ *            `provider-discovery` scenario asserts the request headers the
+ *            harness sent, e.g. x-goog-api-key on the Google probe)
  * The returned handle may carry a `modelServer` (fixture runs) that
  * killBackend() tears down with the backend itself, plus its `modelBase`
  * (the OpenAI-compatible `/v1` URL a helper route can point at).
  */
-async function startBackend({ kind, scenario, lingerMs, helperModel, streamChunkMs }) {
+async function startBackend({ kind, scenario, lingerMs, helperModel, streamChunkMs, recordFile }) {
   const port = await freePort()
   const dir = tmpDir('tb-e2e-ts')
   // Every handle spawned below; on failure the scenario never sees a backend
@@ -565,6 +583,8 @@ async function startBackend({ kind, scenario, lingerMs, helperModel, streamChunk
       if (Number.isFinite(streamChunkMs)) modelArgs.push('--stream-chunk-ms', String(streamChunkMs))
       if (typeof helperModel === 'string' && helperModel !== '')
         modelArgs.push('--helper-model', helperModel)
+      if (typeof recordFile === 'string' && recordFile !== '')
+        modelArgs.push('--record-file', recordFile)
       modelServer = spawnServer(modelArgs, 'ts-model')
       spawned.push(modelServer)
       await waitForModelServer(modelPort)
@@ -7389,6 +7409,472 @@ async function scenarioStopSwitchLeak(runner) {
   }
 }
 
+// -- scenarios: Settings -> provider add-card discovery + catalog import -------------
+
+/** Open the Settings dialog (sidebar footer) and wait for it. */
+async function openSettingsDialog(page) {
+  await page.locator('.sidebar-footer .footer-action').click()
+  const dialog = page.locator('[role="dialog"][aria-labelledby="settings-dialog-title"]')
+  await dialog.waitFor({ state: 'visible' })
+  return dialog
+}
+
+/** Switch the Settings dialog to one of its left-nav panes. */
+async function openSettingsPane(page, dialog, name) {
+  await dialog.getByRole('button', { name, exact: true }).click()
+  const pane = dialog.locator(`[role="region"][aria-label="${name}"]`)
+  await pane.waitFor({ state: 'visible' })
+  return pane
+}
+
+// The Add-provider card's pre-save discovery, for both wire families the
+// harness can probe. The scripted fixture (fixtures/scripted-server.mjs,
+// scenario `provider-discovery`) answers GET /v1/models with three
+// OpenAI-style ids and GET /v1beta/models with a Gemini-style `models/`-prefixed
+// payload, and records every request it receives. No model is ever run.
+async function scenarioSettingsProviderSetup(runner) {
+  const recordFile = path.join(tmpDir('tb-e2e-rec'), 'requests.jsonl')
+  const be = await startBackend({ kind: 'fixture', scenario: 'provider-discovery', recordFile })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  const OPENAI_KEY = 'sk-e2e-openai-key'
+  const GOOGLE_KEY = 'sk-e2e-google-key'
+  const modelOrigin = be.modelBase.replace(/\/v1$/, '')
+  try {
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    const dialog = await openSettingsDialog(page)
+    const pane = await openSettingsPane(page, dialog, 'Providers')
+    const addCard = page.locator('.provider-add')
+
+    // -- OpenAI-compatible draft: fetch, subset-select, one custom id, save
+    await pane.locator('.provider-add-row button:has-text("Add provider")').click()
+    await addCard.waitFor({ state: 'visible' })
+    await addCard.locator('input[placeholder="e.g. lm-studio"]').fill('e2e-disc')
+    await addCard.locator('input[placeholder="http://127.0.0.1:1234/v1"]').fill(be.modelBase)
+    await addCard
+      .locator('input[placeholder="stored encrypted, never shown again"]')
+      .fill(OPENAI_KEY)
+    await addCard.getByRole('button', { name: 'Fetch models', exact: true }).click()
+    await addCard.locator('.provider-add-model-list').waitFor({ state: 'visible' })
+    assert.equal(await addCard.locator('.provider-add-model').count(), 3)
+    const countText = () => addCard.locator('.provider-add-discovery-count').innerText()
+    assert.match(await countText(), /3 of 3 selected/)
+    // Clear once, Select all once, then drop one model from the selection.
+    await addCard.getByRole('button', { name: 'Clear', exact: true }).click()
+    assert.match(await countText(), /0 of 3 selected/)
+    await addCard.getByRole('button', { name: 'Select all', exact: true }).click()
+    assert.match(await countText(), /3 of 3 selected/)
+    await addCard
+      .locator('.provider-add-model', { hasText: 'e2e-disc-gamma' })
+      .locator('input[type="checkbox"]')
+      .uncheck()
+    assert.match(await countText(), /2 of 3 selected/)
+    // One custom typed id rides along with the two discovered ones.
+    await addCard.getByRole('button', { name: '+ Add model', exact: true }).click()
+    const tagInput = addCard.locator('.n-dynamic-tags input')
+    await tagInput.fill('e2e-disc-custom')
+    await tagInput.press('Enter')
+    await waitFor(
+      async () =>
+        (await addCard.locator('.n-dynamic-tags .n-tag', { hasText: 'e2e-disc-custom' }).count()) ===
+        1,
+      { desc: 'the custom model tag to land in the Add draft' },
+    )
+    await addCard.locator('.provider-add-actions button.n-button--primary-type').click()
+    await pane
+      .locator('.provider-row', {
+        has: page.locator('.provider-row-name', { hasText: /^e2e-disc$/ }),
+      })
+      .waitFor({ state: 'visible' })
+    const providersAfterDisc = (await (await fetch(`${be.base}/api/providers`)).json()).providers
+    const disc = providersAfterDisc.find((provider) => provider.name === 'e2e-disc')
+    assert.ok(disc, 'e2e-disc missing from /api/providers after save')
+    assert.equal(disc.base_url, be.modelBase)
+    assert.equal(disc.kind, 'openai-compatible')
+    assert.deepEqual(
+      [...disc.models].sort(),
+      ['e2e-disc-alpha', 'e2e-disc-beta', 'e2e-disc-custom'],
+      'saved models = the checked discovered subset + the custom id',
+    )
+
+    // -- Google kind draft: Gemini listing, x-goog-api-key, models/ stripping
+    await pane.locator('.provider-add-row button:has-text("Add provider")').click()
+    await addCard.waitFor({ state: 'visible' })
+    await addCard.locator('input[placeholder="e.g. lm-studio"]').fill('e2e-google')
+    // A versionless origin: the Google adapter appends /v1beta itself.
+    await addCard.locator('input[placeholder="http://127.0.0.1:1234/v1"]').fill(modelOrigin)
+    await addCard
+      .locator('input[placeholder="stored encrypted, never shown again"]')
+      .fill(GOOGLE_KEY)
+    await addCard.locator('details.provider-advanced summary.provider-advanced-summary').click()
+    await addCard.locator('details.provider-advanced .n-select').first().click()
+    await page.locator('.n-base-select-option', { hasText: 'Google Gemini' }).first().click()
+    await addCard.getByRole('button', { name: 'Fetch models', exact: true }).click()
+    await addCard.locator('.provider-add-model-list').waitFor({ state: 'visible' })
+    assert.match(await countText(), /2 of 2 selected/)
+    const googleDiscovery = await addCard.locator('.provider-add-discovery').innerText()
+    assert.match(googleDiscovery, /gemini-e2e-flash/)
+    assert.match(googleDiscovery, /gemini-e2e-pro/)
+    assert.ok(
+      !googleDiscovery.includes('models/'),
+      'the Gemini models/ prefix must be stripped in the discovery list',
+    )
+    await addCard.locator('.provider-add-actions button.n-button--primary-type').click()
+    await pane
+      .locator('.provider-row', {
+        has: page.locator('.provider-row-name', { hasText: /^e2e-google$/ }),
+      })
+      .waitFor({ state: 'visible' })
+    const providersAfterGoogle = (await (await fetch(`${be.base}/api/providers`)).json()).providers
+    const google = providersAfterGoogle.find((provider) => provider.name === 'e2e-google')
+    assert.ok(google, 'e2e-google missing from /api/providers after save')
+    assert.equal(google.kind, 'google')
+    assert.deepEqual(google.models, ['gemini-e2e-flash', 'gemini-e2e-pro'])
+
+    // -- the wire contract, from the fixture's own request log ---------------
+    const requests = fs
+      .readFileSync(recordFile, 'utf-8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line))
+    const openAiProbes = requests.filter((entry) => entry.path.startsWith('/v1/models'))
+    assert.ok(openAiProbes.length > 0, 'no /v1/models probe reached the scripted endpoint')
+    assert.ok(
+      openAiProbes.some((entry) => entry.headers.authorization === `Bearer ${OPENAI_KEY}`),
+      'the OpenAI-compatible probe must carry the typed key as a Bearer token',
+    )
+    const googleProbes = requests.filter((entry) => entry.path.startsWith('/v1beta/models'))
+    assert.ok(
+      googleProbes.length > 0,
+      'no /v1beta/models probe reached the scripted endpoint',
+    )
+    assert.ok(
+      googleProbes.some((entry) => entry.headers['x-goog-api-key'] === GOOGLE_KEY),
+      'the Google probe must carry the typed key in the x-goog-api-key header',
+    )
+    assert.ok(
+      googleProbes.every((entry) => !entry.headers.authorization),
+      'the Google probe must never send an Authorization header',
+    )
+
+    // -- the discovered models reach the role editor's preset selector ------
+    // ...and an explicitly configured model survives as its own (custom) option.
+    // The PUT happens behind the app's back, so close + reload first: the
+    // dialog seeds its role forms and provider list only when it opens.
+    await dialog.getByRole('button', { name: 'Close settings' }).click()
+    await dialog.waitFor({ state: 'hidden' })
+    const configured = await apiCall(be.base, 'PUT', '/api/settings', {
+      senior: { provider_ref: 'e2e-disc', model: 'e2e-explicit-model' },
+    })
+    assert.equal(configured.status, 200, `PUT settings -> HTTP ${configured.status}`)
+    await page.reload()
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    const rolesDialog = await openSettingsDialog(page)
+    await rolesDialog.getByRole('button', { name: 'Models & roles', exact: true }).click()
+    const rolesPane = rolesDialog.locator('[role="region"][aria-label="Models & roles"]')
+    await rolesPane.waitFor({ state: 'visible' })
+    const seniorCard = rolesPane.locator('.role-card--senior')
+    // Pin the Model row by its exact label: a plain hasText('Model') also
+    // matches the Effort item's feedback ("…the selected model"), and before
+    // the providers list lands the Model control is briefly a plain input.
+    const modelItem = seniorCard.locator('.n-form-item', {
+      has: page.locator('.n-form-item-label', { hasText: /^Model$/ }),
+    })
+    await modelItem.locator('.n-base-selection').waitFor({ state: 'visible' })
+    await modelItem.locator('.n-base-selection').click()
+    const optionTexts = await page.locator('.n-base-select-option').allInnerTexts()
+    for (const expected of [
+      'e2e-disc-alpha',
+      'e2e-disc-beta',
+      'e2e-disc-custom',
+      'e2e-explicit-model (custom)',
+    ]) {
+      assert.ok(
+        optionTexts.some((text) => text.includes(expected)),
+        `Senior model selector missing "${expected}" (got: ${optionTexts.join(' | ')})`,
+      )
+    }
+    const selectionText = (await modelItem.locator('.n-base-selection').innerText()).trim()
+    assert.ok(
+      selectionText.includes('e2e-explicit-model'),
+      `the explicitly set Senior model must stay selected (got: ${selectionText})`,
+    )
+    // close the dropdown without touching the dialog
+    await seniorCard.locator('.role-card-head').click()
+
+    consoleGuard.assertClean()
+    runner.pass('settings-provider-setup')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(be.dir)
+  }
+}
+
+// The models.dev catalog browser import. The catalog responses are injected
+// with Playwright route interception (the backend route is read-only and the
+// suite stays offline); three synthetic entries cover the importable-with-URL
+// case, the missing-URL case (import blocked until a valid http(s) URL is
+// typed) and the model-level baseUrl fallback. Nothing is saved by the import
+// itself — the Add card it prefills is saved explicitly.
+async function scenarioSettingsProviderCatalog(runner) {
+  const be = await startBackend({ kind: 'mock' })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  const NOW = Date.now()
+  const FAMILIES = { 'openai-compatible': 0, anthropic: 0, google: 0, unsupported: 0 }
+  const catalogSummary = (id, name, api, modelCount) => ({
+    id,
+    name,
+    api,
+    env: [],
+    kind: 'openai-compatible',
+    kind_source: 'e2e-fixture',
+    rejected: false,
+    reject_reason: null,
+    needs_base_url: api === null,
+    model_count: modelCount,
+    families: { ...FAMILIES, 'openai-compatible': modelCount },
+  })
+  const catalogModel = (id, baseUrl, contextWindow) => ({
+    id,
+    name: id,
+    kind: 'openai-compatible',
+    mixed_family: false,
+    base_url: baseUrl,
+    context_window: contextWindow,
+    reasoning: false,
+    efforts: [],
+  })
+  const DETAILS = {
+    acme: {
+      ...catalogSummary('acme', 'Acme', 'https://acme.example/v1', 2),
+      truncated: false,
+      models: [
+        catalogModel('acme-alpha', null, 128_000),
+        catalogModel('acme-beta', null, 64_000),
+      ],
+    },
+    nourl: {
+      ...catalogSummary('nourl', 'No URL Co', null, 1),
+      truncated: false,
+      models: [catalogModel('nourl-one', null, 32_000)],
+    },
+    fallback: {
+      ...catalogSummary('fallback', 'Fallback AI', null, 1),
+      truncated: false,
+      models: [catalogModel('fallback-one', 'https://models.fallback.example/v1', 8_000)],
+    },
+  }
+  await context.route(/\/api\/models-dev\/providers/, async (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname === '/api/models-dev/providers') {
+      return route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          source: 'network',
+          fetched_at: NOW,
+          truncated: false,
+          providers: [DETAILS.acme, DETAILS.nourl, DETAILS.fallback].map((detail) => {
+            const { truncated: _t, models: _m, ...summary } = detail
+            return summary
+          }),
+        }),
+      })
+    }
+    const detail = DETAILS[url.pathname.split('/').pop()]
+    if (detail) {
+      return route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({ source: 'network', fetched_at: NOW, provider: detail }),
+      })
+    }
+    return route.fulfill({
+      status: 404,
+      contentType: 'application/json',
+      body: JSON.stringify({ detail: 'not found' }),
+    })
+  })
+  try {
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    const dialog = await openSettingsDialog(page)
+    const pane = await openSettingsPane(page, dialog, 'Providers')
+    const browseButton = pane.locator('button.provider-browse-button')
+    const addCard = page.locator('.provider-add')
+    const providersOnBackend = async () =>
+      (await (await fetch(`${be.base}/api/providers`)).json()).providers
+    const importButton = (catalog) =>
+      catalog.locator('.catalog-actions button.n-button--primary-type')
+
+    // -- importable entry with a catalog URL --------------------------------
+    await browseButton.click()
+    const catalog = page.locator('.catalog')
+    await catalog.waitFor({ state: 'visible' })
+    await waitFor(
+      async () => (await catalog.locator('.catalog-provider-row').count()) === 3,
+      { desc: 'the intercepted catalog to list the three providers' },
+    )
+    await catalog.locator('.catalog-provider-row', { hasText: 'Acme' }).click()
+    await waitFor(async () => (await catalog.locator('.catalog-model').count()) === 2, {
+      desc: 'the Acme detail (models) to load',
+    })
+    assert.match(await catalog.locator('.catalog-detail-title').innerText(), /Acme/)
+    // The catalog supplies the URL: no typing field, import unblocked.
+    assert.equal(
+      await catalog.locator('.catalog-field input').count(),
+      0,
+      'a catalog URL means no Base URL typing field',
+    )
+    assert.match(
+      await catalog.locator('.catalog-base').innerText(),
+      /https:\/\/acme\.example\/v1/,
+    )
+    await catalog.locator('.catalog-model', { hasText: 'acme-alpha' }).locator('.n-checkbox').click()
+    assert.match(await catalog.locator('.catalog-count').innerText(), /1 selected/)
+    await importButton(catalog).click()
+    await catalog.waitFor({ state: 'hidden' })
+    await addCard.waitFor({ state: 'visible' })
+    assert.equal(await addCard.locator('input[placeholder="e.g. lm-studio"]').inputValue(), 'acme')
+    assert.equal(
+      await addCard.locator('input[placeholder="http://127.0.0.1:1234/v1"]').inputValue(),
+      'https://acme.example/v1',
+    )
+    await addCard.locator('.provider-add-actions button.n-button--primary-type').click()
+    await pane
+      .locator('.provider-row', { has: page.locator('.provider-row-name', { hasText: /^acme$/ }) })
+      .waitFor({ state: 'visible' })
+    const acme = (await providersOnBackend()).find((provider) => provider.name === 'acme')
+    assert.ok(acme, 'acme missing from /api/providers after save')
+    assert.equal(acme.base_url, 'https://acme.example/v1')
+    assert.equal(acme.kind, 'openai-compatible')
+    assert.deepEqual(acme.models, ['acme-alpha'])
+    assert.equal(acme.catalog_id, 'acme', 'the catalog id must be stored on the preset')
+
+    // -- entry without any URL: blocked until a valid http(s) URL is typed ---
+    await browseButton.click()
+    await catalog.locator('.catalog-provider-row', { hasText: 'No URL Co' }).click()
+    await waitFor(async () => (await catalog.locator('.catalog-field input').count()) === 1, {
+      desc: 'the No URL Co detail (Base URL field) to load',
+    })
+    assert.match(
+      await catalog.locator('.catalog-state.is-warning').innerText(),
+      /No usable base URL/,
+    )
+    const baseInput = catalog.locator('.catalog-field input')
+    assert.equal(await baseInput.count(), 1)
+    assert.equal(await baseInput.inputValue(), '', 'the missing-URL case opens with an empty Base URL')
+    assert.ok(
+      await importButton(catalog).isDisabled(),
+      'import must be blocked while the Base URL is empty',
+    )
+    await baseInput.fill('not-a-url')
+    await waitFor(
+      async () => (await catalog.locator('.catalog-error[role="alert"]').count()) > 0,
+      { desc: 'the inline URL error' },
+    )
+    assert.ok(
+      await importButton(catalog).isDisabled(),
+      'import must stay blocked for a non-http(s) URL',
+    )
+    await baseInput.fill('https://nourl.example/v1')
+    await waitFor(async () => !(await importButton(catalog).isDisabled()), {
+      desc: 'import to unblock once a valid URL is typed',
+    })
+    await catalog
+      .locator('.catalog-model', { hasText: 'nourl-one' })
+      .locator('.n-checkbox')
+      .click()
+    await importButton(catalog).click()
+    await catalog.waitFor({ state: 'hidden' })
+    await addCard.waitFor({ state: 'visible' })
+    assert.equal(await addCard.locator('input[placeholder="e.g. lm-studio"]').inputValue(), 'nourl')
+    assert.equal(
+      await addCard.locator('input[placeholder="http://127.0.0.1:1234/v1"]').inputValue(),
+      'https://nourl.example/v1',
+    )
+    await addCard.locator('.provider-add-actions button.n-button--primary-type').click()
+    await pane
+      .locator('.provider-row', {
+        has: page.locator('.provider-row-name', { hasText: /^nourl$/ }),
+      })
+      .waitFor({ state: 'visible' })
+    const nourl = (await providersOnBackend()).find((provider) => provider.name === 'nourl')
+    assert.ok(nourl, 'nourl missing from /api/providers after save')
+    assert.equal(nourl.base_url, 'https://nourl.example/v1')
+
+    // -- model-level baseUrl fallback: no provider URL, one model carries it --
+    await browseButton.click()
+    await catalog.locator('.catalog-provider-row', { hasText: 'Fallback AI' }).click()
+    await waitFor(async () => (await catalog.locator('.catalog-model').count()) === 1, {
+      desc: 'the Fallback AI detail (models) to load',
+    })
+    assert.equal(
+      await catalog.locator('.catalog-field input').count(),
+      0,
+      'the model-level fallback means no Base URL typing field',
+    )
+    assert.match(
+      await catalog.locator('.catalog-base').innerText(),
+      /https:\/\/models\.fallback\.example\/v1/,
+    )
+    assert.ok(
+      !(await importButton(catalog).isDisabled()),
+      'the model-level URL must unblock import immediately',
+    )
+    await catalog
+      .locator('.catalog-model', { hasText: 'fallback-one' })
+      .locator('.n-checkbox')
+      .click()
+    await importButton(catalog).click()
+    await catalog.waitFor({ state: 'hidden' })
+    await addCard.waitFor({ state: 'visible' })
+    assert.equal(
+      await addCard.locator('input[placeholder="http://127.0.0.1:1234/v1"]').inputValue(),
+      'https://models.fallback.example/v1',
+    )
+    await addCard.locator('.provider-add-actions button.n-button--primary-type').click()
+    await pane
+      .locator('.provider-row', {
+        has: page.locator('.provider-row-name', { hasText: /^fallback$/ }),
+      })
+      .waitFor({ state: 'visible' })
+    const fallback = (await providersOnBackend()).find((provider) => provider.name === 'fallback')
+    assert.ok(fallback, 'fallback missing from /api/providers after save')
+    assert.equal(
+      fallback.base_url,
+      'https://models.fallback.example/v1',
+      'import must persist the model-level URL',
+    )
+
+    // -- use the imported provider for a role --------------------------------
+    await dialog.getByRole('button', { name: 'Models & roles', exact: true }).click()
+    const rolesPane = dialog.locator('[role="region"][aria-label="Models & roles"]')
+    await rolesPane.waitFor({ state: 'visible' })
+    const juniorCard = rolesPane.locator('.role-card--junior')
+    const connectionItem = juniorCard.locator('.n-form-item', { hasText: 'Connection' })
+    await connectionItem.locator('.n-base-selection').click()
+    await page.locator('.n-base-select-option', { hasText: 'acme' }).first().click()
+    const modelItem = juniorCard.locator('.n-form-item', {
+      has: page.locator('.n-form-item-label', { hasText: /^Model$/ }),
+    })
+    await modelItem.locator('.n-base-selection').waitFor({ state: 'visible' })
+    await modelItem.locator('.n-base-selection').click()
+    await page.locator('.n-base-select-option', { hasText: 'acme-alpha' }).first().click()
+    await dialog.locator('.settings-footer-actions button.n-button--primary-type').first().click()
+    await dialog.waitFor({ state: 'hidden', timeout: 15000 })
+    const saved = await (await fetch(`${be.base}/api/settings`)).json()
+    assert.equal(saved.junior.provider_ref, 'acme')
+    assert.equal(saved.junior.model, 'acme-alpha')
+
+    consoleGuard.assertClean()
+    runner.pass('settings-provider-catalog')
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+    rmTree(be.dir)
+  }
+}
+
 // -- runner -----------------------------------------------------------------------------
 
 function makeRunner(blockName) {
@@ -7705,6 +8191,20 @@ async function main() {
         run: () => (
           (currentRunner = makeRunner('stream-follow-touch')),
           scenarioStreamFollowTouch(currentRunner)
+        ),
+      },
+      {
+        label: 'settings-provider-setup',
+        run: () => (
+          (currentRunner = makeRunner('settings-provider-setup')),
+          scenarioSettingsProviderSetup(currentRunner)
+        ),
+      },
+      {
+        label: 'settings-provider-catalog',
+        run: () => (
+          (currentRunner = makeRunner('settings-provider-catalog')),
+          scenarioSettingsProviderCatalog(currentRunner)
         ),
       },
     ]
