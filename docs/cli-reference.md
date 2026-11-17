@@ -1164,12 +1164,20 @@ kind}` returns the reported ids (`[{id, owned_by?}, ...]` with the probed
 endpoint/kind echoed); an empty `models` list is a valid answer and must never
 erase a saved catalog. Errors: unknown provider (seeds included)
 `404 {"detail": "not found"}`; invalid JSON/body, an empty or non-`http(s)`
-Base URL, an unknown kind, or a wire kind without an OpenAI-compatible listing
-(`anthropic`/`google`) `400`; an upstream failure (unreachable host, timeout,
-non-2xx, unparseable payload) `502` with the provider's message. Only the
-openai-compatible adapter exposes `GET {base}/models`. The server route is the
-same one the web Settings → Providers **Refresh models** button calls; the
-offline equivalent is `two-brothers models --base-url <url>`.
+Base URL, an unknown kind, or a wire kind without a model listing (`anthropic`)
+`400`; an upstream failure (unreachable host, timeout,
+non-2xx, unparseable payload) `502` with the provider's message. The
+openai-compatible kind probes `GET {base}/models` (Bearer auth); the `google`
+kind probes the Gemini listing `GET {base}/v1beta/models` with the
+`x-goog-api-key` header and bounded `nextPageToken` pagination. The server route
+is the same one the web Settings → Providers **Refresh models** button calls;
+the offline equivalent is `two-brothers models --base-url <url> [--kind google]`.
+
+**Provider draft discovery.** `POST /api/providers/discover` is the name-agnostic
+variant for an unsaved draft (the web **Add provider** card): same probe, same
+errors, but no preset is looked up — no stored or env-backed credential can be
+resolved or attached; only the typed draft key is used (write-only, one
+request, never echoed). It works with zero presets and with all-keyed presets.
 
 **models.dev catalog browse.** Settings → Providers → **Browse models.dev…**
 reads the public catalog through the two read-only routes above. No snapshot
@@ -1266,16 +1274,21 @@ detail simply renders no preview. See the
 
 ### `models`
 
-List the models an OpenAI-compatible endpoint reports (`GET {base}/models`).
+List the models an endpoint reports. The default kind is OpenAI-compatible
+(`GET {base}/models`); `--kind google` probes the Gemini listing instead
+(`GET {base}/v1beta/models`, `x-goog-api-key` header, bounded pagination).
 
 ```powershell
 node dist/cli.js models --base-url https://api.deepseek.com/v1
 node dist/cli.js models --base-url https://api.deepseek.com/v1 --api-key-env DEEPSEEK_API_KEY
 node dist/cli.js models --base-url https://api.deepseek.com/v1 --json
+node dist/cli.js models --base-url https://generativelanguage.googleapis.com --kind google --api-key-env GEMINI_API_KEY
 ```
 
 `--api-key-env <VAR>` reads the key from an environment variable name
-(alternative to `--api-key <key>`); `--json` prints the raw list.
+(alternative to `--api-key <key>`); `--kind <openai-compatible|google>` selects
+the wire family (`anthropic` has no model listing and fails honestly);
+`--json` prints the raw list.
 
 ### `onboard`
 

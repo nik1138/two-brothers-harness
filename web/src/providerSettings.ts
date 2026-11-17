@@ -575,16 +575,17 @@ export function failDiscovery(
   )
 }
 
-/** Discovery is only truthful for endpoints that expose an OpenAI `/models`. */
+/** Wire kinds with a live model listing: OpenAI-compatible `/models` and the Gemini listing. */
 export function supportsModelDiscovery(kind: unknown): boolean {
-  return (text(kind) || PROVIDER_KIND_DEFAULT) === PROVIDER_KIND_DEFAULT
+  const value = text(kind) || PROVIDER_KIND_DEFAULT
+  return value === PROVIDER_KIND_DEFAULT || value === 'google'
 }
 
-/** Honest copy for a wire kind that has no OpenAI-compatible model listing. */
+/** Honest copy for a wire kind that has no model listing (Anthropic). */
 export function unsupportedDiscoveryCopy(kind: unknown): string {
   return `Model discovery is not supported for ${providerKindLabel(
     kind,
-  )} providers; only OpenAI-compatible endpoints expose a /models listing. List models by hand or use two-brothers models with an OpenAI-compatible endpoint.`
+  )} providers; only OpenAI-compatible and Google Gemini endpoints expose a model listing. List models by hand, or use two-brothers models with --base-url <url> [--kind google].`
 }
 
 /** Visible status copy for the control ('' when there is nothing to say). */
@@ -619,4 +620,72 @@ export function mergeDiscoveredModels(current: unknown, discovered: unknown): st
 export function discoveredAdditions(current: unknown, discovered: unknown): string[] {
   const existing = cleanModelList(current)
   return discoveredModels(discovered).filter((model) => !existing.includes(model))
+}
+
+// -- model discovery in the Add provider card -----------------------------------
+//
+// The Add card probes the typed draft through the name-agnostic
+// `POST /api/providers/discover` route: it writes nothing, accepts the draft
+// base_url/kind/api_key, and never resolves a stored or env-backed preset
+// credential — only the explicitly typed draft key is used, so the flow works
+// keyless (local endpoints), with zero presets, and with all-keyed presets.
+
+/** True when the Add draft is complete enough for an OpenAI-compatible probe. */
+export function addDiscoveryEligible(draft: {
+  baseUrl: unknown
+  kind: unknown
+} | null | undefined): boolean {
+  return validateProviderBaseUrl(draft?.baseUrl) === null && supportsModelDiscovery(draft?.kind)
+}
+
+/** Default Add-card selection: every successfully discovered id. */
+export function defaultAddModelSelection(discovered: unknown): string[] {
+  return discoveredModels(discovered)
+}
+
+/**
+ * The Add draft's model list for a given selection: manually typed ids that
+ * the endpoint did not report stay (custom ids remain available), then the
+ * selected discovered ids in discovery order. Deselected discovered ids drop
+ * out; stale ids from an earlier probe are cleaned like any other input.
+ */
+export function applyAddModelSelection(
+  current: unknown,
+  discovered: unknown,
+  selected: unknown,
+): string[] {
+  const reported = discoveredModels(discovered)
+  const chosen = new Set(cleanModelList(selected))
+  const out = cleanModelList(current).filter((model) => !reported.includes(model))
+  for (const model of reported) {
+    if (chosen.has(model)) out.push(model)
+  }
+  return out
+}
+
+/** One checkbox toggle in the Add-card discovery list. */
+export function toggleAddModelSelection(selected: unknown, id: unknown): string[] {
+  const list = cleanModelList(selected)
+  const model = text(id)
+  if (!model) return list
+  return list.includes(model) ? list.filter((entry) => entry !== model) : [...list, model]
+}
+
+/** Visible status copy for the Add-card probe ('' when there is nothing to say). */
+export function addDiscoveryStatusText(state: ProviderDiscoveryState): string {
+  switch (state.phase) {
+    case 'loading':
+      return 'Asking the endpoint for its model list…'
+    case 'ready': {
+      const count = state.models.length
+      return `${count} model${count === 1 ? '' : 's'} found. All are selected below — uncheck any you do not want to add, then Add provider.`
+    }
+    case 'empty':
+    case 'error':
+    case 'unsupported':
+      return state.message
+    case 'idle':
+    default:
+      return ''
+  }
 }

@@ -219,7 +219,18 @@ local fake endpoint, no real network): the stored/env-backed key used only for
 the preset's own URL, the different-URL-with-saved-key 400, a one-shot typed key
 that is never stored or echoed, an empty answer that leaves the catalog intact,
 the unsupported-wire-kind 400, unknown-provider 404/invalid-body 400 and the
-clean upstream 502 (suite now 70 tests). The models.dev catalog browse/import
+clean upstream 502. The name-agnostic draft variant (`POST
+/api/providers/discover`, the web Add card) adds +5 hermetic loopback tests:
+keyless probing with a keyed preset, the typed key forwarded only to the draft
+URL, no stored/env credential ever resolved, honest invalid-input 400s, and an
+empty answer / clean 502. The `google` kind adds +5 more (loopback Gemini
+`/v1beta/models` fakes): stored and typed keys sent as `x-goog-api-key` (never
+a Bearer, never in the URL), the same-URL stored-key guard, `models/` prefix
+normalization, bounded `nextPageToken` pagination, and a clean 502 without key
+material — plus +8 `listModels` unit tests (fetch-stubbed: URL/versioning,
+keyless, pagination bound, honest kind refusals, error hygiene) in
+`tests/providers.test.ts` and +3 CLI `--kind google` tests in
+`tests/cliergonomics.test.ts` (suite now 111 tests). The models.dev catalog browse/import
 slice is hermetic through an injected fetch and the fixed
 `tests/fixtures/models-dev.json`: `tests/modelcatalog.test.ts` (now 27 tests —
 index building, the provider/model inference matrix, mixed-family overrides and

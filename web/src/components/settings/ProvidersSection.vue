@@ -7,6 +7,7 @@ import {
   ApiError,
   createProvider,
   deleteProvider,
+  discoverDraftProviderModels,
   discoverProviderModels,
   listProviders,
   resetProvider,
@@ -17,12 +18,16 @@ import type { ProviderPreset } from '../../types'
 import {
   PROVIDER_KIND_DEFAULT,
   PROVIDER_KINDS,
+  addDiscoveryEligible,
+  addDiscoveryStatusText,
   apiKeyPlaceholder,
   apiKeyStateLabel,
+  applyAddModelSelection,
   applyProviderDelete,
   applyProviderReset,
   applyProviderUpdate,
   cleanModelList,
+  defaultAddModelSelection,
   discoveredAdditions,
   discoveryStatusText,
   failDiscovery,
@@ -47,6 +52,7 @@ import {
   settleDiscovery,
   startDiscovery,
   supportsModelDiscovery,
+  toggleAddModelSelection,
   unsupportedDiscoveryCopy,
   validateAddProviderForm,
   validateProviderBaseUrl,
@@ -180,6 +186,33 @@ const addFormError = ref<string | null>(null)
  */
 const addCatalogId = ref<string | null>(null)
 const browseOpen = ref(false)
+
+// -- model discovery in the Add card ("Fetch models") ---------------------------
+// A name-agnostic probe of the unsaved Add draft (`POST /api/providers/
+// discover`): it never saves the provider, never resolves a stored or env
+// credential, and the typed key is sent write-only for the one request. A
+// successful result renders as checkboxes whose selection IS the draft's
+// model list (default: everything discovered).
+const ADD_DISCOVERY_NAME = 'add'
+const addDiscovery = ref<ProviderDiscoveryState>(newDiscoveryState())
+/** Newest Add-card probe token; a settling response with an older token is stale. */
+let addDiscoverySequence = 0
+const addDiscovering = computed(() => addDiscovery.value.phase === 'loading')
+const addDiscoveryText = computed(() => addDiscoveryStatusText(addDiscovery.value))
+/** True for finished probes whose copy should be announced assertively. */
+const addDiscoveryAlert = computed(() =>
+  ['empty', 'error', 'unsupported'].includes(addDiscovery.value.phase),
+)
+const addDiscoveryModels = computed(() =>
+  addDiscovery.value.phase === 'ready' ? addDiscovery.value.models : [],
+)
+/** Ids the operator checked in the discovery list (drives the draft's models). */
+const addDiscoverySelection = ref<string[]>([])
+/** The probe needs a valid Base URL and an OpenAI-compatible kind. */
+const addFetchEligible = computed(() =>
+  addDiscoveryEligible({ baseUrl: addBaseUrl.value, kind: addKind.value }),
+)
+const addDiscoveryCountId = `${panelId}-add-discovery-count`
 
 const rowEls = new Map<string, HTMLButtonElement>()
 const sectionRoot = ref<HTMLElement | null>(null)
@@ -375,6 +408,12 @@ watch(
 // then no longer the newest).
 watch([() => draft.baseUrl, () => draft.kind], () => {
   if (discovery.value.phase !== 'idle') resetDiscovery()
+})
+
+// An Add-card probe describes the draft it was started for: editing the Base
+// URL or Kind makes the result (and any in-flight probe) stale.
+watch([addBaseUrl, addKind], () => {
+  if (addDiscovery.value.phase !== 'idle') resetAddDiscovery()
 })
 
 watch(
@@ -668,6 +707,7 @@ function openAdd(prefill?: CatalogImport): void {
   addBaseUrlError.value = null
   addContextWindowError.value = null
   addFormError.value = null
+  resetAddDiscovery()
   if (prefill) {
     // Catalog prefill: every field stays editable; the key is never supplied.
     addName.value = prefill.name
@@ -704,6 +744,99 @@ function closeAdd(): void {
   addBaseUrlError.value = null
   addContextWindowError.value = null
   addFormError.value = null
+  resetAddDiscovery()
+}
+
+/** Drop the Add-card probe result and invalidate an in-flight one. */
+function resetAddDiscovery(): void {
+  addDiscoverySequence += 1
+  addDiscovery.value = newDiscoveryState()
+  addDiscoverySelection.value = []
+}
+
+/** Push the current discovery selection into the Add draft's model list. */
+function applyAddSelection(): void {
+  addModels.value = applyAddModelSelection(
+    addModels.value,
+    addDiscoveryModels.value,
+    addDiscoverySelection.value,
+  )
+}
+
+/**
+ * Probe the Add draft's endpoint for its model list through the name-agnostic
+ * draft route (`POST /api/providers/discover`). Writes nothing: the provider
+ * exists only after Add provider. Only the key typed in this form is sent —
+ * the route never resolves stored or env credentials — so a keyless local
+ * endpoint probes unauthenticated even when other presets have keys. On
+ * success every discovered model is selected (and thereby in the draft);
+ * deselection removes it again.
+ */
+async function fetchAddModels(): Promise<void> {
+  if (addBusy.value || addDiscovering.value) return
+  const token = ++addDiscoverySequence
+  const started = startDiscovery(ADD_DISCOVERY_NAME, token)
+  // Honest early answer for wire kinds without an OpenAI-compatible listing.
+  if (!supportsModelDiscovery(addKind.value)) {
+    const message = unsupportedDiscoveryCopy(addKind.value)
+    addDiscovery.value = failDiscovery(started, token, ADD_DISCOVERY_NAME, 400, message)
+    announce(message)
+    return
+  }
+  const request: ProviderDiscoverRequest = {
+    base_url: addBaseUrl.value.trim(),
+    kind: addKind.value || PROVIDER_KIND_DEFAULT,
+  }
+  // Only the key typed in this form is sent; it is write-only for this one
+  // request and never persisted or echoed.
+  const typedKey = addApiKey.value.trim()
+  if (typedKey) request.api_key = typedKey
+  addDiscovery.value = started
+  announce('Asking the endpoint for its model list…')
+  try {
+    const result = await discoverDraftProviderModels(request)
+    if (!isCurrentDiscovery(addDiscovery.value, token, ADD_DISCOVERY_NAME)) return
+    addDiscovery.value = settleDiscovery(addDiscovery.value, token, ADD_DISCOVERY_NAME, result.models)
+    const phase = addDiscovery.value.phase
+    if (phase === 'ready') {
+      // Low-friction default: everything discovered is selected (and so in the
+      // draft); the operator can uncheck before Add provider.
+      addDiscoverySelection.value = defaultAddModelSelection(addDiscovery.value.models)
+      applyAddSelection()
+      const count = addDiscovery.value.models.length
+      announce(`${count} model${count === 1 ? '' : 's'} found. All are selected.`)
+    } else if (phase === 'empty') {
+      addDiscoverySelection.value = []
+      announce(addDiscovery.value.message)
+    }
+  } catch (e) {
+    if (!isCurrentDiscovery(addDiscovery.value, token, ADD_DISCOVERY_NAME)) return
+    const status = e instanceof ApiError ? e.status : 0
+    addDiscovery.value = failDiscovery(addDiscovery.value, token, ADD_DISCOVERY_NAME, status, errText(e))
+    announce(addDiscovery.value.message)
+  }
+}
+
+function onAddDiscoveryToggle(model: string, event: Event): void {
+  const checked = event.target instanceof HTMLInputElement ? event.target.checked : false
+  // The :checked binding keeps the model and the box in sync, so the toggle
+  // result matches the box; the checkbox state still wins defensively.
+  const next = new Set(toggleAddModelSelection(addDiscoverySelection.value, model))
+  if (checked) next.add(model)
+  else next.delete(model)
+  // Keep discovery order (not click order) so the draft list stays stable.
+  addDiscoverySelection.value = addDiscoveryModels.value.filter((entry) => next.has(entry))
+  applyAddSelection()
+}
+
+function selectAllAddDiscovery(): void {
+  addDiscoverySelection.value = defaultAddModelSelection(addDiscoveryModels.value)
+  applyAddSelection()
+}
+
+function clearAddDiscovery(): void {
+  addDiscoverySelection.value = []
+  applyAddSelection()
 }
 
 function onAddModelsChange(value: string[]): void {
@@ -1041,8 +1174,8 @@ async function submitAdd(): Promise<void> {
               <span class="provider-field-note">
                 Model IDs are suggestions for the role pickers and onboarding; set the model each
                 role actually uses in Models &amp; roles. Refresh probes the current Base URL and
-                Kind (with the API key typed above, or the saved key when blank) without saving; the
-                offline path is <code>two-brothers models --base-url &lt;url&gt;</code>.
+                Kind (with the API key typed above, or the saved key when blank) without saving;
+                the offline path is <code>two-brothers models --base-url &lt;url&gt; [--kind google]</code>.
               </span>
             </div>
 
@@ -1238,6 +1371,74 @@ async function submitAdd(): Promise<void> {
               </n-button>
             </template>
           </n-dynamic-tags>
+          <div class="provider-models-actions">
+            <n-button
+              attr-type="button"
+              size="tiny"
+              :loading="addDiscovering"
+              :disabled="addBusy || addDiscovering || !addFetchEligible"
+              @click="fetchAddModels"
+            >
+              {{ addDiscovering ? 'Fetching models…' : 'Fetch models' }}
+            </n-button>
+            <span
+              v-if="addDiscoveryText"
+              class="provider-field-note provider-discovery-status"
+              :class="{
+                'is-error': addDiscovery.phase === 'error',
+                'is-unsupported': addDiscovery.phase === 'unsupported',
+                'is-empty': addDiscovery.phase === 'empty',
+              }"
+              :role="addDiscoveryAlert ? 'alert' : 'status'"
+            >
+              {{ addDiscoveryText }}
+            </span>
+            <span v-else-if="!addFetchEligible" class="provider-field-note">
+              Fetch models asks an OpenAI-compatible or Google Gemini endpoint for its model list:
+              enter a valid Base URL and keep a supported kind. Manual ids above always work.
+            </span>
+          </div>
+          <div v-if="addDiscoveryModels.length" class="provider-add-discovery">
+            <div class="provider-add-discovery-head">
+              <span class="provider-add-discovery-count" :id="addDiscoveryCountId">
+                {{ addDiscoverySelection.length }} of {{ addDiscoveryModels.length }} selected
+              </span>
+              <button
+                type="button"
+                class="provider-link-button"
+                :disabled="addDiscoverySelection.length >= addDiscoveryModels.length || addBusy"
+                @click="selectAllAddDiscovery"
+              >
+                Select all
+              </button>
+              <button
+                type="button"
+                class="provider-link-button is-quiet"
+                :disabled="!addDiscoverySelection.length || addBusy"
+                @click="clearAddDiscovery"
+              >
+                Clear
+              </button>
+            </div>
+            <ul
+              class="provider-add-model-list"
+              :aria-labelledby="addDiscoveryCountId"
+              aria-label="Models reported by the endpoint"
+            >
+              <li v-for="model in addDiscoveryModels" :key="model">
+                <label class="provider-add-model">
+                  <input
+                    type="checkbox"
+                    class="provider-add-model-check"
+                    :checked="addDiscoverySelection.includes(model)"
+                    :disabled="addBusy"
+                    @change="onAddDiscoveryToggle(model, $event)"
+                  />
+                  <code class="provider-add-model-id">{{ model }}</code>
+                </label>
+              </li>
+            </ul>
+          </div>
         </div>
         <details class="provider-advanced">
           <summary class="provider-advanced-summary">Advanced</summary>
@@ -1728,6 +1929,80 @@ async function submitAdd(): Promise<void> {
 
 .provider-discovered-action {
   align-self: flex-start;
+}
+
+/* Add-card discovery result: checkboxes whose selection is the draft's list. */
+.provider-add-discovery {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  background: var(--ok-soft);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.provider-add-discovery-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.provider-add-discovery-count {
+  flex: 1;
+  min-width: 8rem;
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+}
+
+.provider-link-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.provider-add-model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 180px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.provider-add-model {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 4px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.provider-add-model:hover {
+  background: var(--surface-hover);
+}
+
+.provider-add-model-check {
+  flex: none;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.provider-add-model-check:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.provider-add-model-id {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-primary);
 }
 
 .provider-optional {

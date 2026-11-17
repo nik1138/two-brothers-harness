@@ -4370,6 +4370,7 @@ const MODELS_OPTIONS = {
   "base-url": { type: "string" as const },
   "api-key": { type: "string" as const },
   "api-key-env": { type: "string" as const },
+  kind: { type: "string" as const },
   timeout: { type: "string" as const },
   json: { type: "boolean" as const, default: false },
   ...HELP_OPTIONS,
@@ -4410,11 +4411,17 @@ async function doModels(
     io.error(`[error] invalid timeout: ${values.timeout} (use seconds)`);
     return 2;
   }
+  const kind = values.kind?.trim() ?? "";
+  if (kind && !isProviderKind(kind)) {
+    io.error(`[error] invalid provider kind: ${kind} (use ${PROVIDER_KIND_HINT})`);
+    return 2;
+  }
 
   let models: Awaited<ReturnType<typeof listModels>>;
   try {
     models = await listModels(baseUrl, {
       ...(apiKey ? { apiKey } : {}),
+      ...(kind ? { kind } : {}),
       ...(timeout !== undefined ? { timeoutSeconds: timeout } : {}),
     });
   } catch (exc) {

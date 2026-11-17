@@ -93,6 +93,11 @@ export const FLAGS: Record<string, FlagHelp> = {
     value: "<openai-compatible|anthropic|google>",
     description: "wire family for openai roles (default openai-compatible)",
   },
+  kind: {
+    name: "kind",
+    value: "<openai-compatible|google>",
+    description: "wire family for model discovery (default openai-compatible; anthropic has no listing)",
+  },
   "senior-kind": {
     name: "senior-kind",
     value: "<kind>",
@@ -1005,14 +1010,20 @@ defineCommand({
 
 defineCommand({
   name: "models",
-  summary: "list the models an OpenAI-compatible endpoint reports",
-  commandLine: "two-brothers models --base-url <url> [--api-key <key>] [--json]",
-  usage: ["models --base-url <url> [--api-key <key> | --api-key-env <VAR>] [--json]"],
+  summary: "list the models an endpoint reports",
+  commandLine:
+    "two-brothers models --base-url <url> [--kind <kind>] [--api-key <key>] [--json]",
+  usage: [
+    "models --base-url <url> [--api-key <key> | --api-key-env <VAR>] [--kind <kind>] [--json]",
+  ],
   description:
-    "Ask an OpenAI-compatible endpoint for its model list (GET {base}/models) and " +
-    "print the ids (with owned_by when the endpoint reports it). --json prints " +
-    "the parsed list as one JSON array. The API key never appears in output.",
-  flags: ["base-url", "api-key", "api-key-env", "timeout", "json", "help"],
+    "Ask an endpoint for its model list and print the ids (with owned_by when " +
+    "the endpoint reports it). The default kind is OpenAI-compatible (GET " +
+    "{base}/models, Bearer auth); --kind google probes the Gemini listing " +
+    "(GET {base}/v1beta/models) with the x-goog-api-key header instead. " +
+    "anthropic has no model listing and fails honestly. --json prints the " +
+    "parsed list as one JSON array. The API key never appears in output.",
+  flags: ["base-url", "kind", "api-key", "api-key-env", "timeout", "json", "help"],
   flagNotes: {
     json: "print the model list as one JSON array instead of the human table",
   },
@@ -1020,6 +1031,7 @@ defineCommand({
     "two-brothers models --base-url https://api.deepseek.com/v1",
     "two-brothers models --base-url https://api.deepseek.com/v1 --api-key-env DEEPSEEK_API_KEY",
     "two-brothers models --base-url http://localhost:1234/v1 --json",
+    "two-brothers models --base-url https://generativelanguage.googleapis.com --kind google --api-key-env GEMINI_API_KEY",
   ],
 });
 

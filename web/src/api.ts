@@ -940,6 +940,27 @@ export async function discoverProviderModels(
   }
 }
 
+/**
+ * Probe an UNSAVED provider draft (`POST /api/providers/discover`) — the Add
+ * card flow. Name-agnostic: no preset is consulted server-side, so no stored
+ * or env-backed credential can be attached; only the typed draft key is used
+ * (write-only, one request, never echoed). An empty `models` list is a valid
+ * answer.
+ */
+export async function discoverDraftProviderModels(
+  draft: ProviderDiscoverRequest = {},
+): Promise<ProviderDiscoverResponse> {
+  const body = await request<Partial<ProviderDiscoverResponse> | null>(
+    `/api/providers/discover`,
+    json('POST', draft),
+  )
+  return {
+    models: Array.isArray(body?.models) ? body.models : [],
+    ...(typeof body?.base_url === 'string' ? { base_url: body.base_url } : {}),
+    ...(typeof body?.kind === 'string' ? { kind: body.kind } : {}),
+  }
+}
+
 // -- models.dev catalog browse (read-only) -------------------------------------
 
 /** Listed models per wire family as the backend reports them. */

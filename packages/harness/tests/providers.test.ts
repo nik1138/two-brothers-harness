@@ -19,6 +19,8 @@ import {
   emptyUsage,
   extractUsage,
   isOpenCodeEndpoint,
+  listModels,
+  MODELS_MAX_PAGES,
   mergeUsage,
   MockProvider,
   openCodeClientHeaders,
@@ -521,4 +523,161 @@ test("mock usage snapshots merge into a run-level aggregate", async () => {
     cached_tokens: 0,
     cache_write_tokens: 0,
   });
+});
+
+// ---------------------------------------------------------------------------
+// listModels: kind-aware discovery (openai-compatible default, google listing)
+// ---------------------------------------------------------------------------
+
+interface RecordedRequest {
+  url: string;
+  headers: Record<string, string>;
+}
+
+/** Records requests and serves queued JSON payloads in order (last repeats). */
+function fakeListingEndpoint(
+  ...pages: unknown[]
+): { fetchImpl: FetchLike; requests: RecordedRequest[] } {
+  const payloads = pages.flatMap((page) => (Array.isArray(page) ? page : [page]));
+  const requests: RecordedRequest[] = [];
+  const fetchImpl: FetchLike = (async (input: unknown, init?: RequestInit) => {
+    const raw = (init?.headers ?? {}) as Record<string, string>;
+    const headers: Record<string, string> = {};
+    for (const [key, value] of Object.entries(raw)) headers[key.toLowerCase()] = value;
+    requests.push({ url: String(input), headers });
+    const payload = payloads[Math.min(requests.length - 1, payloads.length - 1)];
+    return jsonResponse(payload);
+  }) as FetchLike;
+  return { fetchImpl, requests };
+}
+
+test("listModels google: v1beta/models URL, x-goog-api-key header, never Bearer, prefix stripped", async () => {
+  const { fetchImpl, requests } = fakeListingEndpoint({
+    models: [{ name: "models/gemini-2.5-pro" }, { name: "models/gemini-2.0-flash", ownedBy: "google" }],
+  });
+  const models = await listModels("https://generativelanguage.googleapis.com", {
+    kind: "google",
+    apiKey: "goog-secret",
+    fetchImpl,
+  });
+  assert.equal(requests.length, 1);
+  assert.match(requests[0].url, /\/v1beta\/models\?pageSize=\d+/);
+  assert.equal(requests[0].headers["x-goog-api-key"], "goog-secret");
+  assert.equal(requests[0].headers.authorization, undefined, "Gemini auth is never a Bearer");
+  assert.equal(requests[0].headers.Authorization, undefined);
+  assert.match(requests[0].url, /^https:\/\/generativelanguage\.googleapis\.com\//);
+  assert.ok(!requests[0].url.includes("goog-secret"), "the key never rides in the URL");
+  assert.deepEqual(models, [
+    { id: "gemini-2.5-pro" },
+    { id: "gemini-2.0-flash", owned_by: "google" },
+  ]);
+});
+
+test("listModels google: a base already carrying a version segment is used as-is", async () => {
+  const { fetchImpl, requests } = fakeListingEndpoint({ models: [] });
+  await listModels("https://proxy.example.com/gemini/v1beta", {
+    kind: "google",
+    fetchImpl,
+  });
+  assert.match(requests[0].url, /^https:\/\/proxy\.example\.com\/gemini\/v1beta\/models\?/);
+});
+
+test("listModels google: keyless probe sends no credential header at all", async () => {
+  const { fetchImpl, requests } = fakeListingEndpoint({ models: [{ name: "models/gemini-pro" }] });
+  const models = await listModels("http://127.0.0.1:9", { kind: "google", fetchImpl });
+  assert.deepEqual(models, [{ id: "gemini-pro" }]);
+  assert.equal(requests[0].headers["x-goog-api-key"], undefined);
+  assert.equal(requests[0].headers.authorization, undefined);
+});
+
+test("listModels google: nextPageToken is followed until the list is complete", async () => {
+  const { fetchImpl, requests } = fakeListingEndpoint(
+    { models: [{ name: "models/a" }], nextPageToken: "tok-2" },
+    { models: [{ name: "models/b" }], nextPageToken: "tok-3" },
+    { models: [{ name: "models/c" }] },
+  );
+  const models = await listModels("https://generativelanguage.googleapis.com", {
+    kind: "google",
+    fetchImpl,
+  });
+  assert.equal(requests.length, 3);
+  assert.ok(!requests[0].url.includes("pageToken"), "the first page starts without a token");
+  assert.match(requests[1].url, /pageToken=tok-2/);
+  assert.match(requests[2].url, /pageToken=tok-3/);
+  assert.deepEqual(models.map((model) => model.id), ["a", "b", "c"]);
+});
+
+test("listModels google: pagination is bounded by maxPages (no unbounded loop)", async () => {
+  const { fetchImpl, requests } = fakeListingEndpoint({
+    models: [{ name: "models/m" }],
+    nextPageToken: "forever",
+  });
+  const models = await listModels("https://generativelanguage.googleapis.com", {
+    kind: "google",
+    maxPages: 2,
+    fetchImpl,
+  });
+  assert.equal(requests.length, 2, "an endlessly-paging endpoint is capped");
+  assert.equal(models.length, 2, "the fetched prefix is returned, not an error");
+  assert.ok(MODELS_MAX_PAGES >= 2);
+});
+
+test("listModels: anthropic and unknown kinds fail honestly before any request", async () => {
+  const { fetchImpl, requests } = fakeListingEndpoint({ data: [] });
+  await assert.rejects(
+    listModels("https://api.anthropic.com", { kind: "anthropic", fetchImpl }),
+    /not supported for the anthropic provider kind/,
+  );
+  await assert.rejects(
+    listModels("https://x.example.com", { kind: "wat", fetchImpl }),
+    /unknown provider kind: wat/,
+  );
+  assert.equal(requests.length, 0, "no request is attempted for unsupported kinds");
+});
+
+test("listModels google: upstream errors are clean and never carry the key", async () => {
+  const calls: string[] = [];
+  const failing: FetchLike = (async (input: unknown) => {
+    calls.push(String(input));
+    return new Response("boom", { status: 500, statusText: "Server Error" });
+  }) as FetchLike;
+  await assert.rejects(
+    listModels("https://generativelanguage.googleapis.com", {
+      kind: "google",
+      apiKey: "goog-secret",
+      fetchImpl: failing,
+    }),
+    (exc: Error) => {
+      assert.match(exc.message, /HTTP 500/);
+      assert.ok(!exc.message.includes("goog-secret"), "the key is never in an error message");
+      return true;
+    },
+  );
+  const notJson: FetchLike = (async () =>
+    new Response("definitely not json", { status: 200 })) as FetchLike;
+  await assert.rejects(
+    listModels("https://generativelanguage.googleapis.com", { kind: "google", fetchImpl: notJson }),
+    /not JSON/,
+  );
+  const badShape: FetchLike = (async () =>
+    jsonResponse({ unexpected: true })) as FetchLike;
+  await assert.rejects(
+    listModels("https://generativelanguage.googleapis.com", { kind: "google", fetchImpl: badShape }),
+    /expected an array or a \{models: \[\.\.\.\]\} object/,
+  );
+});
+
+test("listModels: the default kind stays OpenAI-compatible (Bearer, one request)", async () => {
+  const { fetchImpl, requests } = fakeListingEndpoint({
+    data: [{ id: "gpt-4o", owned_by: "openai" }],
+  });
+  const models = await listModels("https://api.openai.com/v1", {
+    apiKey: "sk-secret",
+    fetchImpl,
+  });
+  assert.equal(requests.length, 1);
+  assert.match(requests[0].url, /\/v1\/models$/);
+  assert.equal(requests[0].headers.authorization, "Bearer sk-secret");
+  assert.equal(requests[0].headers["x-goog-api-key"], undefined);
+  assert.deepEqual(models, [{ id: "gpt-4o", owned_by: "openai" }]);
 });

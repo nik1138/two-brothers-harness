@@ -51,12 +51,16 @@ while bypassing provider configuration entirely.
 Settings → Providers → **Refresh models** probes the current draft's
 OpenAI-compatible endpoint through `POST /api/providers/{name}/discover` and
 lists what it reports. It never saves the provider and never applies the list —
-adding ids is explicit (**Add N to draft**, then **Save changes**).
+adding ids is explicit (**Add N to draft**, then **Save changes**). The Add
+provider card's **Fetch models** uses the name-agnostic
+`POST /api/providers/discover` variant for an unsaved draft: same probe, but no
+preset is consulted, so no stored or env-backed credential can be attached —
+only the key typed in the Add form is used, and only for that one request.
 
 | Symptom | Why | Fix |
 |---|---|---|
 | **Refresh models** fails with `Model discovery failed: …` (HTTP 502) | The probe is one bounded request to the draft's Base URL; an unreachable host, wrong path, timeout or auth failure surfaces as a clean 502 with the provider's message. Nothing was saved. | Check the Base URL and that the endpoint is running; many local servers need the `/v1` path (`http://127.0.0.1:1234/v1`). The probe has a short one-shot timeout — for a slow local server list the ids with `node dist/cli.js models --base-url <url>` (add `--api-key`/`--api-key-env` if needed). |
-| The control says discovery is not supported for this provider kind (HTTP 400) | Only the OpenAI-compatible adapter exposes `GET {base}/models`; the Anthropic Messages and Google Gemini APIs have no equivalent listing in this probe. | Use the provider with `kind: openai-compatible` if it really speaks that API (e.g. a proxy), or enter model ids by hand and set the role models. The answer is deliberately honest instead of probing the wrong shape. |
+| The control says discovery is not supported for this provider kind (HTTP 400) | The Anthropic Messages API has no model listing in this probe. OpenAI-compatible endpoints expose `GET {base}/models` and Google Gemini endpoints the `GET {base}/v1beta/models` listing (bounded `nextPageToken` pagination, `x-goog-api-key` auth). | Use the provider with `kind: openai-compatible` if it really speaks that API (e.g. a proxy), or enter model ids by hand and set the role models. The answer is deliberately honest instead of probing the wrong shape. |
 | HTTP 400 `a typed API key is required when probing a different base URL` | The draft Base URL differs from the preset's saved endpoint while the preset has a saved/env-backed key — sending that secret to a different host is refused before any request. | Type the key for the target endpoint in the API key field; it is used for this one probe and never stored (a blank field still uses the saved key when the URL is the preset's own). |
 | `Model discovery is not supported by this backend. Nothing was changed.` (404) | The browser is talking to an older backend without the discovery route. | Rebuild and restart the backend from this checkout (`npm run build`, then `serve`). The draft and the saved provider are untouched. |
 | `The endpoint reported no models. Your saved model list is unchanged.` | The endpoint answered but served an empty list (no model loaded, or an API that does not list models). | Load a model in the local server, or add model ids by hand. An empty answer is valid and must not erase the saved catalog. |
