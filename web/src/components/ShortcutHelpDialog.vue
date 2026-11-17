@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { NButton } from 'naive-ui'
 import { BASE_COMMAND_GROUP_LABEL, commandUsageLine } from '../basecommands'
+import { displayCommandAliases } from '../helpAliases'
 import type { Keybindings } from '../keybindings'
 import { SHORTCUT_GROUPS, shortcutEntries, shortcutGroupViews } from '../shortcuts'
 import type { BaseCommand, CommandInfo } from '../types'
@@ -60,8 +61,8 @@ const hasCommands = computed(
               :class="{ 'is-action': command.kind === 'action' }"
             >{{ command.kind }}</span>
             <span class="help-desc">{{ command.description }}</span>
-            <span v-if="command.aliases.length" class="help-aliases">
-              also: {{ command.aliases.join(', ') }}
+            <span v-if="displayCommandAliases(command).length" class="help-aliases">
+              also: {{ displayCommandAliases(command).join(', ') }}
             </span>
           </li>
         </ul>
