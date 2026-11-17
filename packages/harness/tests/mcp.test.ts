@@ -2,19 +2,21 @@
  * MCP loading + role-scoped tool registry tests. Mirrors the intent of the
  * original prototype's MCP tests (removed 2026-11-04; see git history), but
  * hermetic: a fake MCP server speaks
- * JSON-RPC over pi-mcp's in-memory transport pair, so no child process or
- * network is needed. One test at the bottom exercises the real stdio
- * transport against tests/fixtures/mcp-demo-server.mjs and skips when
- * spawning is unavailable.
+ * JSON-RPC over pi-mcp's in-memory transport pair (shared fixture in
+ * ./fixtures/fake-mcp-server.ts), so no child process or network is needed.
+ * One test at the bottom exercises the real stdio transport against
+ * tests/fixtures/mcp-demo-server.mjs and skips when spawning is unavailable;
+ * another exercises the real streamable-HTTP transport against a loopback
+ * node:http server.
  */
 import * as fs from "node:fs";
+import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 
-import { createInMemoryTransportPair, type InMemoryTransport } from "@earendil-works/pi-mcp/testing";
 import type { JsonRpcId, McpTransport, McpTransportMessageListener } from "@earendil-works/pi-mcp";
 
 import { resolveConfig } from "../src/config.ts";
@@ -25,90 +27,25 @@ import {
   loadMcpTools,
   loadMcpToolSpecs,
   MCP_CLOSE_TIMEOUT_MS,
-  MCP_DEFAULT_TIMEOUT_MS,
-  MCP_OUTPUT_MAX_CHARS,
   MCP_TOOL_NAME_MAX_LENGTH,
-  type McpServerSpec,
   type McpToolClient,
-  type McpToolEntry,
   type McpToolSet,
 } from "../src/mcp.ts";
 import { MockProvider, type MockScriptStep, type Tool } from "../src/provider.ts";
 import { main, type CliIO } from "../src/cli.ts";
+import {
+  configOf,
+  startFakeServer,
+  toolOf,
+  transportFactory,
+  type FakeServer,
+  type FakeToolDef,
+} from "./fixtures/fake-mcp-server.ts";
 
 // ---------------------------------------------------------------------------
-// fake MCP server over the in-memory transport pair
+// fake MCP servers come from ./fixtures/fake-mcp-server.ts (shared with
+// pluginmcp.test.ts)
 // ---------------------------------------------------------------------------
-
-interface FakeToolDef {
-  name: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-  run?: (args: Record<string, unknown>) => string;
-  /** Never answer `tools/call` — exercises the per-call timeout. */
-  hang?: boolean;
-}
-
-interface FakeServer {
-  /** Client-side transport: hand this to loadMcpTools' transportFor. */
-  client: InMemoryTransport;
-  /** tool calls the server received, in order */
-  calls: Array<{ name: string; args: Record<string, unknown> }>;
-  closed: boolean;
-}
-
-function startFakeServer(defs: FakeToolDef[]): FakeServer {
-  const { client, server } = createInMemoryTransportPair();
-  // the peer transport must be "started" before it can receive sends
-  void server.start().catch(() => undefined);
-  const calls: FakeServer["calls"] = [];
-  const fake: FakeServer = { client, calls, closed: false };
-  client.onClose(() => {
-    fake.closed = true;
-  });
-  server.onMessage((message) => {
-    const msg = message as Record<string, any>;
-    const reply = (result: unknown): void => {
-      void server.send({ jsonrpc: "2.0", id: msg.id, result } as never);
-    };
-    if (msg.method === "initialize") {
-      reply({
-        protocolVersion: msg.params?.protocolVersion ?? "2025-11-25",
-        capabilities: { tools: {} },
-        serverInfo: { name: "fake-mcp", version: "1.0.0" },
-      });
-    } else if (msg.method === "tools/list") {
-      reply({
-        tools: defs.map((def) => ({
-          name: def.name,
-          description: def.description,
-          inputSchema: def.inputSchema,
-        })),
-      });
-    } else if (msg.method === "tools/call") {
-      const callArgs = (msg.params?.arguments ?? {}) as Record<string, unknown>;
-      calls.push({ name: String(msg.params?.name), args: callArgs });
-      const def = defs.find((d) => d.name === msg.params?.name);
-      if (!def) {
-        reply({ content: [{ type: "text", text: `unknown tool: ${msg.params?.name}` }], isError: true });
-        return;
-      }
-      if (def.hang) return;
-      try {
-        reply({ content: [{ type: "text", text: def.run ? def.run(callArgs) : `called ${def.name}` }] });
-      } catch {
-        reply({ content: [{ type: "text", text: "boom" }], isError: true });
-      }
-    } else if (msg.id !== undefined && msg.id !== null) {
-      void server.send({
-        jsonrpc: "2.0",
-        id: msg.id,
-        error: { code: -32601, message: `method not found: ${msg.method}` },
-      } as never);
-    }
-  });
-  return fake;
-}
 
 const THREE_TOOLS: FakeToolDef[] = [
   {
@@ -134,26 +71,6 @@ const THREE_TOOLS: FakeToolDef[] = [
     run: () => "audit: clean",
   },
 ];
-
-/** One fake server per config entry, keyed by server name. */
-function transportFactory(map: Map<string, FakeServer>) {
-  return (serverName: string): InMemoryTransport => {
-    const fake = map.get(serverName);
-    if (!fake) throw new Error(`no fake server for '${serverName}'`);
-    return fake.client;
-  };
-}
-
-function configOf(entries: Record<string, McpServerSpec>) {
-  return { mcpServers: entries };
-}
-
-/** The adapter for a raw server/tool pair (namespaced wire name). */
-function toolOf(mcp: McpToolSet, server: string, tool: string): McpToolEntry {
-  const entry = mcp.tools.find((t) => t.server === server && t.tool === tool);
-  assert.ok(entry, `no tool '${server}/${tool}' in [${mcp.tools.map((t) => t.name).join(", ")}]`);
-  return entry;
-}
 
 // ---------------------------------------------------------------------------
 // loading / conversion
@@ -264,15 +181,30 @@ test("bounded close: the race timer is cleared on both paths (no lingering handl
 });
 
 test("per-request abort cancels an in-flight MCP tool call", async () => {
-  const fake = startFakeServer(THREE_TOOLS);
+  const fake = startFakeServer([
+    ...THREE_TOOLS,
+    { name: "hang", description: "never answers", inputSchema: { type: "object" }, hang: true },
+  ]);
   const mcp = await loadMcpTools(configOf({ fake: { command: "unused" } }), {
     transportFor: transportFactory(new Map([["fake", fake]])),
   });
   try {
     const controller = new AbortController();
+    const pending = Promise.resolve(toolOf(mcp, "fake", "hang").execute({}, controller.signal));
+    // let the request actually reach the server before aborting
+    await fake.waitForCalls(1);
+    assert.deepEqual(fake.calls.map((c) => c.name), ["hang"]);
     controller.abort();
-    const read = toolOf(mcp, "fake", "mem_read");
-    await assert.rejects(() => Promise.resolve(read.execute({}, controller.signal)));
+    // the in-flight call rejects with pi-mcp's abort (no result, no timeout string)
+    await assert.rejects(pending, (exc: unknown) => {
+      assert.ok(exc instanceof Error);
+      assert.match(exc.message, /aborted/i);
+      return true;
+    });
+    // the aborted call never receives a late result, and the client itself is
+    // still healthy: a fresh call on the same connection succeeds
+    assert.equal(await toolOf(mcp, "fake", "mem_read").execute({}), "memory: hello");
+    assert.deepEqual(fake.calls.map((c) => c.name), ["hang", "mem_read"]);
   } finally {
     await mcp.client.close();
   }
@@ -590,6 +522,79 @@ test("stdio transport: demo MCP server end-to-end", async (t) => {
 });
 
 // ---------------------------------------------------------------------------
+// streamable-HTTP transport end-to-end over a real loopback socket
+// (pi-mcp's StreamableHttpTransport against a node:http MCP endpoint)
+// ---------------------------------------------------------------------------
+
+test("streamable-HTTP transport: url: server end-to-end over loopback", async () => {
+  const received: Array<{ method?: string; params?: Record<string, unknown> }> = [];
+  const server = http.createServer((req, res) => {
+    if (req.method === "GET") {
+      // no server-to-client SSE stream: the transport tolerates 405
+      res.writeHead(405).end();
+      return;
+    }
+    if (req.method === "DELETE") {
+      res.writeHead(202).end();
+      return;
+    }
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      const msg = JSON.parse(body) as { id?: unknown; method?: string; params?: Record<string, unknown> };
+      received.push({ method: msg.method, params: msg.params });
+      const replyJson = (result: unknown, extraHeaders: Record<string, string> = {}): void => {
+        res.writeHead(200, { "content-type": "application/json", ...extraHeaders }).end(
+          JSON.stringify({ jsonrpc: "2.0", id: msg.id, result }),
+        );
+      };
+      if (msg.method === "initialize") {
+        replyJson(
+          {
+            protocolVersion: (msg.params as { protocolVersion?: string })?.protocolVersion ?? "2025-11-25",
+            capabilities: { tools: {} },
+            serverInfo: { name: "loopback-http", version: "1.0.0" },
+          },
+          { "mcp-session-id": "test-session" },
+        );
+      } else if (msg.method === "notifications/initialized") {
+        res.writeHead(202).end();
+      } else if (msg.method === "tools/list") {
+        replyJson({ tools: THREE_TOOLS });
+      } else if (msg.method === "tools/call") {
+        const name = String((msg.params as { name?: unknown })?.name);
+        replyJson({ content: [{ type: "text", text: `http: ${name}` }] });
+      } else {
+        res.writeHead(404).end();
+      }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const url = `http://127.0.0.1:${address.port}/mcp`;
+  const mcp = await loadMcpTools(configOf({ web: { url, role: "shared" } }));
+  try {
+    assert.deepEqual(mcp.errors, []);
+    assert.deepEqual(mcp.client.servers, ["web"]);
+    assert.deepEqual(mcp.tools.map((t) => t.name).sort(), [
+      "mcp__web__mem_read",
+      "mcp__web__mem_write",
+      "mcp__web__senior_audit",
+    ]);
+    assert.equal(await toolOf(mcp, "web", "mem_read").execute({}), "http: mem_read");
+    assert.equal(mcp.sharedTools.length, 3, "role: shared routing through the url: transport");
+  } finally {
+    await mcp.client.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+  assert.ok(
+    received.some((m) => m.method === "tools/call"),
+    "the HTTP server really saw the tool call",
+  );
+});
+
+// ---------------------------------------------------------------------------
 // hardening: namespacing, result cap, per-call timeout
 // ---------------------------------------------------------------------------
 
@@ -702,7 +707,6 @@ test("MCP tool results are clipped to 20 KiB with a truncation marker", async ()
     transportFor: () => fake.client,
   });
   try {
-    assert.equal(MCP_OUTPUT_MAX_CHARS, 20 * 1024);
     const result = await toolOf(mcp, "srv", "big").execute({});
     assert.ok(result.length < big.length, "result was clipped");
     assert.match(result, /\.\.\.\[truncated 9720 chars\]\.\.\./);
@@ -733,27 +737,7 @@ test("deferOutputBounds keeps full MCP text for the harness spill layer", async 
   }
 });
 
-test("a hung tool call times out as a tool error result (default 60 s, config override)", async () => {
-  assert.equal(MCP_DEFAULT_TIMEOUT_MS, 60_000);
-  const fake = startFakeServer([
-    { name: "hang", description: "never answers", inputSchema: { type: "object" }, hang: true },
-  ]);
-  const mcp = await loadMcpTools(configOf({ slow: { command: "x", timeoutMs: 50 } }), {
-    transportFor: () => fake.client,
-  });
-  try {
-    const started = Date.now();
-    const result = await toolOf(mcp, "slow", "hang").execute({});
-    const elapsed = Date.now() - started;
-    assert.equal(result, "MCP tool error: timed out after 50 ms calling 'slow/hang'");
-    assert.ok(elapsed >= 40, `timeout waited (${elapsed} ms)`);
-    assert.ok(elapsed < 5_000, `timeout fired promptly (${elapsed} ms)`);
-  } finally {
-    await mcp.client.close();
-  }
-});
-
-test("config-file timeoutMs override reaches the tool adapter", async () => {
+test("config-file timeoutMs reaches the tool adapter; a hung call times out as a tool error", async () => {
   const fake = startFakeServer([
     { name: "hang", description: "never answers", inputSchema: { type: "object" }, hang: true },
   ]);
@@ -769,15 +753,20 @@ test("config-file timeoutMs override reaches the tool adapter", async () => {
       }),
       "utf-8",
     );
+    // config parsing: the per-server timeoutMs survives the file read
     const specs = loadMcpToolSpecs(configPath);
     assert.equal(specs.slow.timeoutMs, 25);
-    assert.equal(loadMcpToolSpecs(configPath).slow.timeoutMs, 25, "config-file override survives");
-    assert.equal(MCP_DEFAULT_TIMEOUT_MS, 60_000, "default applies when absent");
+
+    // adapter behavior through the same --mcp-config path the CLI uses
     const mcp = await loadMcpTools(configPath, { transportFor: () => fake.client });
     try {
       assert.deepEqual(mcp.errors, []);
+      const started = Date.now();
       const result = await toolOf(mcp, "slow", "hang").execute({});
+      const elapsed = Date.now() - started;
       assert.equal(result, "MCP tool error: timed out after 25 ms calling 'slow/hang'");
+      assert.ok(elapsed >= 15, `timeout waited (${elapsed} ms)`);
+      assert.ok(elapsed < 5_000, `timeout fired promptly (${elapsed} ms)`);
     } finally {
       await mcp.client.close();
     }
