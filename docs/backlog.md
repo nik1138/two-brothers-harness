@@ -1999,3 +1999,13 @@ imported or executed on load/activation. Sources: `src/pluginbundle.ts`
   earlier mask-level click design. Re-check after the next naive-ui release
   (> 2.45.3); optionally file an upstream repro (stacked `n-modal`s: a click
   inside the second fires the first's `on-mask-click`).
+- **Gemini tool-schema whitelist widening (provider, non-blocker)** — noted
+  2026-11-18 during the `additionalProperties` 400 hotfix (shipped as the
+  `geminiSafeSchema` whitelist in `packages/harness/src/provider.ts`): the
+  whitelist keeps only the fields of the Gemini `Schema` proto
+  (`type/format/description/nullable/enum/maxItems/minItems/properties/
+  required/items`), so keywords the proto *does* support (`anyOf`, `pattern`,
+  `minLength`/`maxLength`, `minimum`/`maximum`) are currently dropped and tool
+  parameter hints degrade to unconstrained on the Gemini path (requests
+  succeed; validation hints weaken). Widen the set if a tool needs the
+  stricter hints — the strip must stay a key-whitelist with no reshaping.
