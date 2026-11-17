@@ -1186,8 +1186,12 @@ must reach quiescence, and subsequent token/scrollHeight growth must keep the
 topmost visible user row's viewport offset stable within ±2px while the
 bottom edge recedes — anchor-row offset stability, not a constant scrollTop —
 while the pre-swipe phase proves at-bottom streaming still follows). The
-offline suite now holds **40 hermetic scenario blocks** (the 38 above plus
-`stream-follow` and `stream-follow-touch`). The last **full-matrix** validated
+hermetic scenario list is owned by `e2e/scenario-registry.mjs`
+(`HERMETIC_LABELS`) — the single source of truth for `e2e/run.mjs` and its
+missing-backend SKIP report, guarded by `e2e/skip-registry.test.mjs`; it
+currently holds **40 labels**. The prose above narrates the recent waves, not
+every scenario, so it is neither the count nor the enumeration. The last
+**full-matrix** validated
 run is the goal-integration merge `9f353c4` — **41 PASS, 0 FAIL, 1 SKIP** in
 the raw log over those 40 blocks (the `chat/resume` block prints one line for
 chat and one for resume, so 40 blocks reported 41 PASS lines), with

@@ -21,7 +21,18 @@ Local map for the package sources. Project rules live in
 - Tool-facing modules: `workspace*.ts`, `shell.ts`, `mcp.ts`, `plugins.ts`,
   `pluginbundle.ts` (declarative no-code bundles: `plugin.json` manifests
   feeding the commands/skills engines), `skills.ts`, `commands.ts`,
-  `toolschema.ts`, `permissions.ts`, `spill.ts`.
+  `toolschema.ts`, `permissions.ts`, `spill.ts`, `todos.ts` (the shared
+  value model behind the `todo_write` tool and every UI that renders it),
+  `mentions.ts` (composer `@skill:`/`@path` mention tokens plus the bounded
+  injection blocks the run path appends).
+- `subagent.ts` — the helper subagent runtime: a single-role worker with its
+  own isolated conversation and tool belt ("a third tier", not a second
+  Junior). Test mirroring lives in `tests/subagent*.test.ts` (runtime,
+  approvals, background, controls, follow-ups, mutating, overrides — including
+  wire-level helper-model checks); keep new subagent behavior covered there.
+- `turnsignal.ts` — per-turn cooperative cancellation for a CLI `run`/`chat`
+  turn (an `AbortController` owned by the turn, translated by installed
+  handlers).
 - `repeatguard.ts` — advisory repeat-tool-call guard (deepseek-harness port),
   one instance per tool loop: default thresholds `[3, 5, 8]`, model-facing
   reminder only, `TWO_BROTHERS_REPEAT_GUARD=off` / `repeatToolGuard: false`
@@ -35,7 +46,12 @@ Local map for the package sources. Project rules live in
   `projectInstructions: false` disable it.
 - `tui/` — the full-screen TUI modules.
 - `config.ts`, `presets.ts`, `settings_store.ts`, `secretbox.ts` — settings,
-  presets, encrypted secrets; `prompts.ts` loads `../shared/prompts.json`.
+  presets, encrypted secrets; `configview.ts` — the introspection behind
+  `two-brothers config` and `run --dry-run`; `modelcatalog.ts`/`effort.ts` —
+  the models.dev catalog and per-model reasoning-effort values;
+  `prompts.ts` loads `../shared/prompts.json`; `selftest.ts` — the offline
+  self-test (`node dist/selftest.js` after a build, `node src/selftest.ts`
+  in dev).
 
 ## Boundaries
 

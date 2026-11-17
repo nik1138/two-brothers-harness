@@ -7,7 +7,9 @@ Local map for the documentation set. Root rules: `../AGENTS.md`; the index is
 
 - One flat set of topic files: `quickstart.md`, `cli-reference.md`,
   `testing.md`, `plugins.md`, `release.md`, `backlog.md`,
-  `design-review.md`, `troubleshooting.md`, `keyboard.md`, `attribution.md`.
+  `design-review.md`, `troubleshooting.md`, `keyboard.md`,
+  `session-storage.md` (session store layouts and migration),
+  `spill.md` (oversized tool-result spill storage), `attribution.md`.
 - `history/` — frozen records (`ts-rewrite-plan.md`, `cli-audit.md`,
   `web-ui-audit.md`, `handoff.md`); content is not rewritten.
 

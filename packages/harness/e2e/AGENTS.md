@@ -10,7 +10,11 @@ root project rules: `../../../AGENTS.md`; the detailed suite matrix is in
   `faults.ts` (real-socket retry/timeout/overflow), `server-status.ts` and
   `server-prompt-audit.ts` (in-process server contracts).
 - Live suites: `run.ts` / `run-dist.mjs` against LM Studio
-  (`spark-x2.6-4b@q4_k_m` senior, `lfm3-1.7b` junior).
+  (`spark-x2.6-4b@q4_k_m` senior, `lfm3-1.7b` junior). `run.ts` is
+  conditional: its live model scenarios execute only when a compatible
+  endpoint is reachable; otherwise they print `E2E SKIP:` and exit 0 while
+  the hermetic `server-status` / `server-prompt-audit` suites inside it still
+  run.
 - Opt-in manual load runners: `load.ts` (CLI-level) and `serve-load.ts`
   (RunManager/queue-level). Both can send real model calls.
 - `runs/` — gitignored evidence (JSONL sessions, SSE dumps, reports).

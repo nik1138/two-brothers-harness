@@ -242,6 +242,21 @@ the protocol reference and is not modified by work here either.
    `--verbose` prints the trail. Tests: `tests/promptsections.test.ts`,
    the SSE case in `tests/server.test.ts`, and the hermetic
    `e2e/server-prompt-audit.ts`. No new runtime deps.
+   **Prompt grounding rules (current, from `34432de`):** the base role
+   prompts require proposals to anchor to the original task, to support every
+   material claim with a path, command or observation from the current run
+   (inferred claims labeled), and never to derive project goals, timelines or
+   product requirements from harness session metadata (session files,
+   settings, locks — runtime state, not project evidence; the code-owned
+   `## Using tools` section says so explicitly); when evidence is insufficient
+   the junior asks one focused question. The senior accepts only
+   original-task-answering, evidence-supported proposals — successful tool
+   reads alone do not suffice — and `review.notes` must state what was
+   checked. Subagent runs (`src/subagent.ts`) assemble these same sections for
+   the helper role; coverage is the `tests/subagent*.test.ts` suites,
+   including wire-level helper-model checks. Edit prompt text only in
+   `shared/prompts.json` (both copies stay byte-identical) and regenerate the
+   modebytes goldens per the sanctioned capture script.
    **Web-run status contract is shipped (Wave 2):** `RunManager` emits
    `run_status: waiting` when a run parks on an operator approval and
    `run_status: running` when it resolves (the cause event —
@@ -572,8 +587,11 @@ the protocol reference and is not modified by work here either.
    `--senior`/`--junior`/`--operator`; the confidence bar keeps `--junior`;
    avatars/role dots/`.dot-*` paint the fills). Tokens suite 15 → 16; the
    `appearance-roles` browser scenario asserts the rendered dots follow the
-   fills; web suite 356/356. Package suite **1 572 tests (1 570 pass, 2
-   environment skips)**; no new runtime dependencies; no protocol change.
+   fills; no new runtime dependencies; no protocol change. (Wave-era absolute
+   totals — "web suite 356/356", "package suite 1 572 tests / 2 skips" — were
+   recorded at wave 23 and drift with every wave; this log keeps only
+   wave-relative deltas and invariants. Run `npm test` here and in `../../web/`
+   for live numbers.)
    **wave 23 (steering, prompt caching, session lineage and safety nets):**
    mid-run operator steering — `HarnessOptions.steering` is drained at every
    state-machine node boundary (after `maybeCompact`) and every tool-loop
