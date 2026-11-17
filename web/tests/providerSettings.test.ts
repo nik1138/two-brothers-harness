@@ -8,12 +8,17 @@ import { test } from 'node:test'
 import {
   DISCOVERY_UNSUPPORTED_BACKEND,
   PROVIDER_KIND_DEFAULT,
+  addDiscoveryAnchor,
+  addDiscoveryEligible,
+  addDiscoveryStatusText,
   apiKeyPlaceholder,
   apiKeyStateLabel,
+  applyAddModelSelection,
   applyProviderDelete,
   applyProviderReset,
   applyProviderUpdate,
   cleanModelList,
+  defaultAddModelSelection,
   discoveredAdditions,
   discoveredModels,
   discoveryStatusText,
@@ -41,6 +46,7 @@ import {
   settleDiscovery,
   startDiscovery,
   supportsModelDiscovery,
+  toggleAddModelSelection,
   toggleOpenProvider,
   unsupportedDiscoveryCopy,
   validateAddProviderForm,
@@ -699,8 +705,87 @@ test('discovery never applies by itself: only the explicit merge changes a list'
   ])
 })
 
-// -- models.dev catalog prefill (Add form) -------------------------------------
+// -- model discovery in the Add provider card ("Fetch models") -------------------
 
+test('addDiscoveryEligible: only a valid Base URL and an OpenAI-compatible kind', () => {
+  assert.equal(
+    addDiscoveryEligible({ baseUrl: 'http://127.0.0.1:1234/v1', kind: 'openai-compatible' }),
+    true,
+  )
+  assert.equal(addDiscoveryEligible({ baseUrl: ' http://x/v1 ', kind: '' }), true)
+  assert.equal(addDiscoveryEligible({ baseUrl: '', kind: 'openai-compatible' }), false)
+  assert.equal(addDiscoveryEligible({ baseUrl: 'ftp://x', kind: 'openai-compatible' }), false)
+  assert.equal(addDiscoveryEligible({ baseUrl: 'http://x/v1', kind: 'anthropic' }), false)
+  assert.equal(addDiscoveryEligible({ baseUrl: 'http://x/v1', kind: 'google' }), false)
+  assert.equal(addDiscoveryEligible(null), false)
+  assert.equal(addDiscoveryEligible(undefined), false)
+})
+
+test('addDiscoveryAnchor: typed name when it exists, otherwise the first preset', () => {
+  const views = normalizeProviders([
+    { name: 'openai', base_url: 'https://api.openai.com/v1', kind: 'openai-compatible' },
+    { name: 'lm-studio', base_url: 'http://127.0.0.1:1234/v1', kind: 'openai-compatible' },
+  ])
+  assert.equal(addDiscoveryAnchor(views, 'lm-studio'), 'lm-studio')
+  assert.equal(addDiscoveryAnchor(views, ' LM-STUDIO '), 'lm-studio', 'case-insensitive match')
+  assert.equal(addDiscoveryAnchor(views, 'brand-new'), 'openai', 'a new id anchors at the first preset')
+  assert.equal(addDiscoveryAnchor(views, ''), 'openai')
+  assert.equal(addDiscoveryAnchor([], 'anything'), null)
+})
+
+test('defaultAddModelSelection selects every successfully discovered id', () => {
+  assert.deepEqual(defaultAddModelSelection(['a', 'b']), ['a', 'b'])
+  assert.deepEqual(defaultAddModelSelection([{ id: 'm1' }, ' m2 ', 'm1']), ['m1', 'm2'])
+  assert.deepEqual(defaultAddModelSelection([]), [])
+})
+
+test('applyAddModelSelection: manual ids stay, selected discovered ids follow', () => {
+  // Manual (non-reported) ids are kept; selected discovered ids append in
+  // discovery order; deselected discovered ids drop out.
+  assert.deepEqual(applyAddModelSelection(['manual'], ['a', 'b'], ['a', 'b']), ['manual', 'a', 'b'])
+  assert.deepEqual(applyAddModelSelection(['manual'], ['a', 'b'], ['b']), ['manual', 'b'])
+  assert.deepEqual(applyAddModelSelection([], ['a', 'b'], []), [])
+  // A previously applied, now deselected id is removed again.
+  assert.deepEqual(applyAddModelSelection(['manual', 'a'], ['a'], []), ['manual'])
+  // Manual ids matching a discovered id are governed by the selection.
+  assert.deepEqual(applyAddModelSelection(['a'], ['a'], []), [])
+  assert.deepEqual(applyAddModelSelection(['a'], ['a'], ['a']), ['a'])
+  // Stale/probe ids are cleaned like any other input.
+  assert.deepEqual(applyAddModelSelection([' a ', '', 'a'], ['b'], ['b']), ['a', 'b'])
+})
+
+test('toggleAddModelSelection adds/removes one id without disturbing order', () => {
+  assert.deepEqual(toggleAddModelSelection(['a', 'b'], 'c'), ['a', 'b', 'c'])
+  assert.deepEqual(toggleAddModelSelection(['a', 'b'], 'b'), ['a'])
+  assert.deepEqual(toggleAddModelSelection([], ' a '), ['a'])
+  assert.deepEqual(toggleAddModelSelection(['a'], ''), ['a'], 'empty id is a no-op')
+})
+
+test('addDiscoveryStatusText describes the Add-card probe honestly', () => {
+  assert.equal(addDiscoveryStatusText(newDiscoveryState()), '')
+  assert.match(addDiscoveryStatusText(startDiscovery('add', 1)), /Asking the endpoint/)
+  const ready = settleDiscovery(startDiscovery('add', 2), 2, 'add', ['a', 'b'])
+  assert.match(addDiscoveryStatusText(ready), /2 models found/)
+  assert.match(addDiscoveryStatusText(ready), /All are selected/)
+  const one = settleDiscovery(startDiscovery('add', 3), 3, 'add', ['a'])
+  assert.match(addDiscoveryStatusText(one), /1 model found/)
+  const empty = settleDiscovery(startDiscovery('add', 4), 4, 'add', [])
+  assert.match(addDiscoveryStatusText(empty), /no models/)
+  const error = failDiscovery(startDiscovery('add', 5), 5, 'add', 502, 'boom')
+  assert.match(addDiscoveryStatusText(error), /Model discovery failed: boom/)
+})
+
+test('add-card probe staleness uses the same token contract as the edit card', () => {
+  const started = startDiscovery('add', 7)
+  assert.equal(isCurrentDiscovery(started, 7, 'add'), true)
+  assert.equal(isCurrentDiscovery(started, 8, 'add'), false)
+  assert.equal(isCurrentDiscovery(started, 7, 'openai'), false, 'anchor name is not the state key')
+  const settled = settleDiscovery(started, 7, 'add', ['m1'])
+  assert.equal(settled.phase, 'ready')
+  assert.deepEqual(settled.models, ['m1'])
+})
+
+// -- models.dev catalog prefill (Add form) -------------------------------------
 test('a catalog prefill passes the Add-form validation unchanged', () => {
   // The browser suggests a sanitized, family-suffixed, collision-free name;
   // the Add form accepts it as-is and still lets the operator edit it.

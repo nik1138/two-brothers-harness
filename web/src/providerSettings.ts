@@ -620,3 +620,93 @@ export function discoveredAdditions(current: unknown, discovered: unknown): stri
   const existing = cleanModelList(current)
   return discoveredModels(discovered).filter((model) => !existing.includes(model))
 }
+
+// -- model discovery in the Add provider card -----------------------------------
+//
+// The Add card probes the typed draft through the same provider-anchored
+// `POST /api/providers/{name}/discover` route as the edit card (it writes
+// nothing and accepts the draft base_url/kind/api_key). A brand-new provider
+// id does not exist server-side yet, so the probe is anchored at an existing
+// preset: the typed id when it already resolves (a seed the operator is
+// re-adding under the same name is refused by duplicate validation, so this
+// is only a defensive fallback), otherwise the first listed preset. The
+// draft base URL and the one-shot typed key are always sent, so the stored
+// key of the anchor is never used for a different endpoint — the server
+// refuses that combination with an honest 400.
+
+/** True when the Add draft is complete enough for an OpenAI-compatible probe. */
+export function addDiscoveryEligible(draft: {
+  baseUrl: unknown
+  kind: unknown
+} | null | undefined): boolean {
+  return validateProviderBaseUrl(draft?.baseUrl) === null && supportsModelDiscovery(draft?.kind)
+}
+
+/**
+ * Anchor provider name for an Add-card probe, or null when the backend
+ * reported no presets at all (then the discovery route cannot be reached
+ * either — it predates this UI).
+ */
+export function addDiscoveryAnchor(
+  providers: readonly Pick<ProviderView, 'name'>[],
+  addName: unknown,
+): string | null {
+  const typed = text(addName).toLowerCase()
+  if (typed) {
+    const match = providers.find((provider) => text(provider.name).toLowerCase() === typed)
+    if (match) return match.name
+  }
+  return providers[0]?.name ?? null
+}
+
+/** Default Add-card selection: every successfully discovered id. */
+export function defaultAddModelSelection(discovered: unknown): string[] {
+  return discoveredModels(discovered)
+}
+
+/**
+ * The Add draft's model list for a given selection: manually typed ids that
+ * the endpoint did not report stay (custom ids remain available), then the
+ * selected discovered ids in discovery order. Deselected discovered ids drop
+ * out; stale ids from an earlier probe are cleaned like any other input.
+ */
+export function applyAddModelSelection(
+  current: unknown,
+  discovered: unknown,
+  selected: unknown,
+): string[] {
+  const reported = discoveredModels(discovered)
+  const chosen = new Set(cleanModelList(selected))
+  const out = cleanModelList(current).filter((model) => !reported.includes(model))
+  for (const model of reported) {
+    if (chosen.has(model)) out.push(model)
+  }
+  return out
+}
+
+/** One checkbox toggle in the Add-card discovery list. */
+export function toggleAddModelSelection(selected: unknown, id: unknown): string[] {
+  const list = cleanModelList(selected)
+  const model = text(id)
+  if (!model) return list
+  return list.includes(model) ? list.filter((entry) => entry !== model) : [...list, model]
+}
+
+/** Visible status copy for the Add-card probe ('' when there is nothing to say). */
+export function addDiscoveryStatusText(state: ProviderDiscoveryState): string {
+  switch (state.phase) {
+    case 'loading':
+      return 'Asking the endpoint for its model list…'
+    case 'ready': {
+      const count = state.models.length
+      return `${count} model${count === 1 ? '' : 's'} found. All are selected below — uncheck any you do not want to add, then Add provider.`
+    }
+    case 'empty':
+    case 'error':
+    case 'unsupported':
+      return state.message
+    case 'idle':
+    default:
+      return ''
+  }
+}
