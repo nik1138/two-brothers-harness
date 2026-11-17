@@ -630,7 +630,7 @@ export function discoveredAdditions(current: unknown, discovered: unknown): stri
 // credential — only the explicitly typed draft key is used, so the flow works
 // keyless (local endpoints), with zero presets, and with all-keyed presets.
 
-/** True when the Add draft is complete enough for an OpenAI-compatible probe. */
+/** True when the Add draft is complete enough for a live model-listing probe. */
 export function addDiscoveryEligible(draft: {
   baseUrl: unknown
   kind: unknown

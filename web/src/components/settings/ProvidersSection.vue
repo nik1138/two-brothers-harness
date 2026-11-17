@@ -319,7 +319,7 @@ async function refreshModels(): Promise<void> {
   const name = provider.name
   const token = ++discoverySequence
   const started = startDiscovery(name, token)
-  // Honest early answer for wire kinds without an OpenAI-compatible listing:
+  // Honest early answer for wire kinds without a live model listing:
   // the server refuses them too (400), but this avoids a pointless round trip.
   if (!supportsModelDiscovery(draft.kind)) {
     const message = unsupportedDiscoveryCopy(draft.kind)
@@ -776,7 +776,7 @@ async function fetchAddModels(): Promise<void> {
   if (addBusy.value || addDiscovering.value) return
   const token = ++addDiscoverySequence
   const started = startDiscovery(ADD_DISCOVERY_NAME, token)
-  // Honest early answer for wire kinds without an OpenAI-compatible listing.
+  // Honest early answer for wire kinds without a live model listing.
   if (!supportsModelDiscovery(addKind.value)) {
     const message = unsupportedDiscoveryCopy(addKind.value)
     addDiscovery.value = failDiscovery(started, token, ADD_DISCOVERY_NAME, 400, message)
