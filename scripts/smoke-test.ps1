@@ -166,16 +166,22 @@ try {
     # failure and must not mask the build result. Guard every path: a $null
     # or empty path makes Remove-Item throw a parameter-binding error that
     # -ErrorAction SilentlyContinue cannot suppress (PS 5.1), which would
-    # turn a passing gate into exit 1.
-    if (-not [string]::IsNullOrWhiteSpace($webBuildTemp) -and (Test-Path -LiteralPath $webBuildTemp)) {
-        Remove-Item -LiteralPath $webBuildTemp -Recurse -Force -ErrorAction SilentlyContinue
-    }
+    # turn a passing gate into exit 1. Remove-Item -Recurse on PS 5.1 can also
+    # throw an internal NullReferenceException while deleting a non-empty dir
+    # (the deletion itself succeeds); that too must not fail the gate, so the
+    # cleanup runs under a swallowing catch and re-checks with Test-Path.
     $webBuildTempParent = $null
     if (-not [string]::IsNullOrWhiteSpace($webBuildTemp)) {
         $webBuildTempParent = Split-Path -Parent $webBuildTemp
     }
-    if (-not [string]::IsNullOrWhiteSpace($webBuildTempParent) -and (Test-Path -LiteralPath $webBuildTempParent)) {
-        Remove-Item -LiteralPath $webBuildTempParent -ErrorAction SilentlyContinue
+    foreach ($cleanupPath in @($webBuildTemp, $webBuildTempParent)) {
+        if ([string]::IsNullOrWhiteSpace($cleanupPath)) { continue }
+        if (-not (Test-Path -LiteralPath $cleanupPath)) { continue }
+        try {
+            Remove-Item -LiteralPath $cleanupPath -Recurse -Force -ErrorAction SilentlyContinue
+        } catch [System.NullReferenceException] {
+            # PS 5.1 internal re-enumeration bug after a successful delete.
+        }
     }
 }
 
