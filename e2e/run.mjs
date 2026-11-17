@@ -7910,7 +7910,6 @@ function pendingSecs() {
 async function main() {
   const t0 = Date.now()
   await ensureWebBuild()
-  ensureFreshPackagedWeb()
   await launchBrowser()
   log(`browser: ${browserLabel}`)
   log('backend: TypeScript server (packages/harness/dist/cli.js serve)')
@@ -8259,6 +8258,11 @@ async function main() {
   for (const b of blocks) {
     blockStart = Date.now()
     currentRunner = null
+    // Re-verify the packaged web copy before every scenario, not just once at
+    // startup: a concurrent rebuild of web/dist (e.g. a smoke gate running in
+    // parallel) would otherwise leave the suite testing a mid-build snapshot
+    // for its entire run. Fresh trees make this a cheap no-op comparison.
+    ensureFreshPackagedWeb()
     try {
       await b.run()
     } catch (e) {
