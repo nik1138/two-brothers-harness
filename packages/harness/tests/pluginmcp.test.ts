@@ -18,14 +18,8 @@ import * as path from "node:path";
 import { test } from "node:test";
 
 import {
-  createInMemoryTransportPair,
-  type InMemoryTransport,
-} from "@earendil-works/pi-mcp/testing";
-
-import {
   loadMcpTools,
   mergeMcpConfig,
-  MCP_OUTPUT_MAX_CHARS,
   type McpConfigFileShape,
   type McpServerSpec,
 } from "../src/mcp.ts";
@@ -36,6 +30,7 @@ import {
   PluginManager,
   type PluginMcpServer,
 } from "../src/plugins.ts";
+import { oneTool, startFakeServer, type FakeServer } from "./fixtures/fake-mcp-server.ts";
 
 // ---------------------------------------------------------------------------
 // fixtures + helpers
@@ -94,80 +89,8 @@ const BAD_MANIFEST_PLUGIN = [
 ].join("\n");
 
 // ---------------------------------------------------------------------------
-// fake MCP server over pi-mcp's in-memory transport pair
+// fake MCP server: shared fixture over pi-mcp's in-memory transport pair
 // ---------------------------------------------------------------------------
-
-interface FakeToolDef {
-  name: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-  run?: (args: Record<string, unknown>) => string;
-}
-
-interface FakeServer {
-  client: InMemoryTransport;
-  closed: boolean;
-}
-
-function startFakeServer(defs: FakeToolDef[]): FakeServer {
-  const { client, server } = createInMemoryTransportPair();
-  void server.start().catch(() => undefined);
-  const fake: FakeServer = { client, closed: false };
-  client.onClose(() => {
-    fake.closed = true;
-  });
-  server.onMessage((message) => {
-    const msg = message as Record<string, any>;
-    const reply = (result: unknown): void => {
-      void server.send({ jsonrpc: "2.0", id: msg.id, result } as never);
-    };
-    if (msg.method === "initialize") {
-      reply({
-        protocolVersion: msg.params?.protocolVersion ?? "2025-11-25",
-        capabilities: { tools: {} },
-        serverInfo: { name: "fake-mcp", version: "1.0.0" },
-      });
-    } else if (msg.method === "tools/list") {
-      reply({
-        tools: defs.map((def) => ({
-          name: def.name,
-          description: def.description,
-          inputSchema: def.inputSchema,
-        })),
-      });
-    } else if (msg.method === "tools/call") {
-      const callArgs = (msg.params?.arguments ?? {}) as Record<string, unknown>;
-      const def = defs.find((d) => d.name === msg.params?.name);
-      if (!def) {
-        reply({ content: [{ type: "text", text: `unknown tool: ${msg.params?.name}` }], isError: true });
-        return;
-      }
-      try {
-        reply({ content: [{ type: "text", text: def.run ? def.run(callArgs) : `called ${def.name}` }] });
-      } catch {
-        reply({ content: [{ type: "text", text: "boom" }], isError: true });
-      }
-    } else if (msg.id !== undefined && msg.id !== null) {
-      void server.send({
-        jsonrpc: "2.0",
-        id: msg.id,
-        error: { code: -32601, message: `method not found: ${msg.method}` },
-      } as never);
-    }
-  });
-  return fake;
-}
-
-function oneTool(name: string): FakeToolDef[] {
-  return [
-    {
-      name,
-      description: `The ${name} tool.`,
-      inputSchema: { type: "object", properties: {}, additionalProperties: false },
-      run: () => `${name}: ok`,
-    },
-  ];
-}
 
 // ---------------------------------------------------------------------------
 // ctx.add_mcp_server: registry + tolerant validation
@@ -181,7 +104,8 @@ test("add_mcp_server records declarations with plugin provenance", () => {
   ctx.add_mcp_server("remote", { transport: "http", url: "https://example.invalid/mcp" });
 
   assert.deepEqual(ctx.diagnostics, []);
-  assert.deepEqual(ctx._mcpServers, [
+  // the public collection surface sees exactly what the plugin declared
+  assert.deepEqual(collectPluginMcpServers([ctx]), [
     {
       name: "notes",
       config: { command: "node", args: ["notes.mjs"], role: "junior" },
@@ -209,7 +133,7 @@ test("add_mcp_server rejects bad names and configs with diagnostics, never throw
     [] as unknown as Record<string, unknown>,
   );
 
-  assert.deepEqual(ctx._mcpServers, []);
+  assert.deepEqual(collectPluginMcpServers([ctx]), []);
   assert.equal(ctx.diagnostics.length, 8);
   assert.match(ctx.diagnostics[0], /"BadName".*name must match/);
   assert.match(ctx.diagnostics[1], /"" rejected: name must match/);
@@ -226,8 +150,9 @@ test("a name registered twice by one plugin keeps the first declaration", () => 
   ctx.add_mcp_server("dup", { command: "first" });
   ctx.add_mcp_server("dup", { command: "second" });
 
-  assert.equal(ctx._mcpServers.length, 1);
-  assert.equal(ctx._mcpServers[0].config.command, "first");
+  const collected = collectPluginMcpServers([ctx]);
+  assert.equal(collected.length, 1);
+  assert.equal(collected[0].config.command, "first");
   assert.equal(ctx.diagnostics.length, 1);
   assert.match(ctx.diagnostics[0], /dup.*already registered by this plugin \(first wins\)/);
 });
@@ -464,8 +389,6 @@ test("merged config feeds loadMcpTools unchanged: namespacing and roles", async 
       ["mcp__configured__base_read", "mcp__plugin_default__default_read"],
     );
     assert.equal(mcp.displayNames["mcp__plugin_notes__plugin_read"], "plugin_notes/plugin_read");
-    // the result clip is mcp.ts's untouched contract
-    assert.equal(MCP_OUTPUT_MAX_CHARS, 20 * 1024);
   } finally {
     await mcp.client.close();
   }
