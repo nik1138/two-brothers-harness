@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import RoleEditor from './RoleEditor.vue'
+import type { ProviderPreset } from '../../types'
 
 interface RoleForm {
   provider: string
@@ -18,6 +19,8 @@ defineProps<{
   subagentSupported: boolean
   keySet: { senior: boolean; junior: boolean; subagent: boolean }
   connectionOptions: { label: string; value: string }[]
+  /** Provider presets; each editor's model list comes from its selection. */
+  providers: ProviderPreset[]
   effortOptions: { senior: string[]; junior: string[]; subagent: string[] }
   effortLoading: { senior: boolean; junior: boolean; subagent: boolean }
   effortErrors: { senior: string; junior: string; subagent: string }
@@ -56,6 +59,7 @@ function updateSubagent(patch: Partial<RoleForm>) {
         :form="senior"
         :key-set="keySet.senior"
         :connection-options="connectionOptions"
+        :providers="providers"
         :effort-options="effortOptions.senior"
         :effort-loading="effortLoading.senior"
         :effort-error="effortErrors.senior"
@@ -66,6 +70,7 @@ function updateSubagent(patch: Partial<RoleForm>) {
         :form="junior"
         :key-set="keySet.junior"
         :connection-options="connectionOptions"
+        :providers="providers"
         :effort-options="effortOptions.junior"
         :effort-loading="effortLoading.junior"
         :effort-error="effortErrors.junior"
@@ -77,6 +82,7 @@ function updateSubagent(patch: Partial<RoleForm>) {
         :form="subagent"
         :key-set="keySet.subagent"
         :connection-options="connectionOptions"
+        :providers="providers"
         :effort-options="effortOptions.subagent"
         :effort-loading="effortLoading.subagent"
         :effort-error="effortErrors.subagent"
