@@ -52,6 +52,8 @@ export const HERMETIC_LABELS = Object.freeze([
   'transcript-stability',
   'stream-follow',
   'stream-follow-touch',
+  'settings-provider-setup',
+  'settings-provider-catalog',
 ])
 
 /** Result names a label contributes to the missing-backend SKIP report. */

@@ -28,7 +28,7 @@
 //   --port PORT            (required) TCP port to listen on
 //   --scenario NAME        approval | slow | plan | folding | delete | reasoning
 //                          | cooperation | title | list | helper-write | auto-solo
-//                          | stream-follow
+//                          | stream-follow | provider-discovery
 //                          (default: approval)
 //                          approval: one workspace_write_file call, then the
 //                                    deliverable after the tool result; the first
@@ -125,6 +125,18 @@
 //                          chunks (default 50; the touch scenario pins 12 so
 //                          a token lands inside the gesture's
 //                          application/scroll-event race window)
+//   --record-file PATH     append one JSON line per HTTP request
+//                          ({method, path, headers}) — the browser scenarios
+//                          use it to assert which headers the harness sent
+//                          (e.g. x-goog-api-key on a Google discovery probe)
+//   --scenario provider-discovery
+//                          model-listing fixture for the provider UX browser
+//                          scenarios (no chat behavior beyond the default):
+//                          GET /v1/models answers three OpenAI-style
+//                          `e2e-disc-*` entries and GET /v1beta/models answers
+//                          a Gemini-style payload whose ids carry the
+//                          `models/` prefix, so the scenario can assert the
+//                          harness strips it
 //
 // Every run a scenario drives is inferred from the transcript as a whole: a
 // request with no envelope events starts a run, and a run appended after the
@@ -138,6 +150,7 @@
 // deterministic.
 
 import http from 'node:http'
+import fs from 'node:fs'
 
 const HELLO_FILE = 'e2e-hello.txt'
 const HELLO_CONTENT = 'Hello from the Two Brothers E2E harness.\n'
@@ -163,6 +176,7 @@ function parseArgs(argv) {
     lingerMs: 30000,
     streamChunkMs: 50,
     port: null,
+    recordFile: null,
   }
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i]
@@ -174,6 +188,7 @@ function parseArgs(argv) {
     else if (key === '--helper-model') opts.helperModel = value
     else if (key === '--linger-ms') opts.lingerMs = Number.parseInt(value, 10)
     else if (key === '--stream-chunk-ms') opts.streamChunkMs = Number.parseInt(value, 10)
+    else if (key === '--record-file') opts.recordFile = value
     else {
       process.stderr.write(`unknown argument: ${key}\n`)
       process.exit(2)
@@ -892,6 +907,11 @@ function reqCloseEndsPacedStream(res, timer) {
   })
 }
 
+/** OpenAI-style ids the `provider-discovery` scenario lists on /v1/models. */
+const PROVIDER_DISCOVERY_MODELS = ['e2e-disc-alpha', 'e2e-disc-beta', 'e2e-disc-gamma']
+/** Gemini-style `models/`-prefixed ids the same scenario lists on /v1beta/models. */
+const PROVIDER_DISCOVERY_GOOGLE_MODELS = ['gemini-e2e-flash', 'gemini-e2e-pro']
+
 function readJson(req) {
   return new Promise((resolve, reject) => {
     const chunks = []
@@ -909,13 +929,44 @@ function readJson(req) {
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost')
+  // Test-only observation hook: one JSON line per request so the browser
+  // scenarios can assert the headers the harness actually sent (the
+  // x-goog-api-key contract of the Google discovery probe).
+  if (OPTS.recordFile) {
+    fs.appendFileSync(
+      OPTS.recordFile,
+      JSON.stringify({ method: req.method, path: req.url, headers: req.headers }) + '\n',
+    )
+  }
   try {
+    if (req.method === 'GET' && url.pathname === '/v1beta/models') {
+      // Gemini wire shape: `{name: "models/<id>"}` entries (the harness strips
+      // the prefix) plus the optional nextPageToken this fixture never sets.
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(
+        JSON.stringify({
+          models: PROVIDER_DISCOVERY_GOOGLE_MODELS.map((id) => ({
+            name: `models/${id}`,
+            baseModel: 'model',
+            version: 'e2e',
+            displayName: id,
+            description: 'Scripted Gemini-style listing entry.',
+            supportedGenerationMethods: ['generateContent'],
+          })),
+        }),
+      )
+      return
+    }
     if (req.method === 'GET' && url.pathname === '/v1/models') {
+      const ids =
+        OPTS.scenario === 'provider-discovery'
+          ? PROVIDER_DISCOVERY_MODELS
+          : [OPTS.seniorModel, OPTS.juniorModel, OPTS.helperModel]
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(
         JSON.stringify({
           object: 'list',
-          data: [OPTS.seniorModel, OPTS.juniorModel, OPTS.helperModel].map((id) => ({
+          data: ids.map((id) => ({
             id,
             object: 'model',
             created: 0,
