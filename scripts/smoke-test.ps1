@@ -163,9 +163,20 @@ try {
     # Best-effort cleanup of the private stage dir (esbuild removes its own
     # subdir on success; leftover extraction dirs are safe to drop). The dir
     # lives under the gitignored .tmp/, so a failed cleanup is not a gate
-    # failure and must not mask the build result.
-    Remove-Item -Path $webBuildTemp -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item -Path (Split-Path -Parent $webBuildTemp) -ErrorAction SilentlyContinue
+    # failure and must not mask the build result. Guard every path: a $null
+    # or empty path makes Remove-Item throw a parameter-binding error that
+    # -ErrorAction SilentlyContinue cannot suppress (PS 5.1), which would
+    # turn a passing gate into exit 1.
+    if (-not [string]::IsNullOrWhiteSpace($webBuildTemp) -and (Test-Path -LiteralPath $webBuildTemp)) {
+        Remove-Item -LiteralPath $webBuildTemp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    $webBuildTempParent = $null
+    if (-not [string]::IsNullOrWhiteSpace($webBuildTemp)) {
+        $webBuildTempParent = Split-Path -Parent $webBuildTemp
+    }
+    if (-not [string]::IsNullOrWhiteSpace($webBuildTempParent) -and (Test-Path -LiteralPath $webBuildTempParent)) {
+        Remove-Item -LiteralPath $webBuildTempParent -ErrorAction SilentlyContinue
+    }
 }
 
 Write-Output ""
