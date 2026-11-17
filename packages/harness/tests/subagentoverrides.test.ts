@@ -30,9 +30,7 @@ import {
   SUBAGENT_EFFORT_MAX_CHARS,
   SUBAGENT_MODEL_MAX_CHARS,
   SUBAGENT_REPORT_TOOL_NAME,
-  SUBAGENT_TOOL_DESCRIPTION,
   SUBAGENT_TOOL_NAME,
-  SUBAGENT_TOOL_PARAMETERS,
   SubagentStore,
   type SubagentEndpoint,
 } from "../src/subagent.ts";
@@ -102,42 +100,6 @@ function wire(provider: Provider): {
   };
 }
 
-test("the subagent tool schema gains exactly two optional properties", () => {
-  const schema = SUBAGENT_TOOL_PARAMETERS as {
-    properties: Record<string, unknown>;
-    required: string[];
-    additionalProperties: boolean;
-  };
-  assert.deepEqual(Object.keys(schema.properties).sort(), [
-    "background",
-    "effort",
-    "label",
-    "model",
-    "role",
-    "task",
-  ]);
-  assert.deepEqual(schema.required, ["task"]);
-  assert.equal(schema.additionalProperties, false);
-  const model = schema.properties.model as { type: string; description: string };
-  const effort = schema.properties.effort as { type: string; description: string };
-  assert.equal(model.type, "string");
-  assert.equal(effort.type, "string");
-  assert.match(model.description, /provider, base URL and API key/i);
-});
-
-test("the description pins the honest override rule and keeps the policy sentences", () => {
-  assert.match(SUBAGENT_TOOL_DESCRIPTION, /`model` and `effort` arguments refine only/);
-  assert.match(
-    SUBAGENT_TOOL_DESCRIPTION,
-    /provider, base URL and API key always come from the configured route or the role endpoint/,
-  );
-  // Unchanged model-facing contract sentences:
-  assert.match(SUBAGENT_TOOL_DESCRIPTION, /cannot widen the run's policy/);
-  assert.match(SUBAGENT_TOOL_DESCRIPTION, /It cannot spawn more subagents/);
-  assert.match(SUBAGENT_TOOL_DESCRIPTION, /Do not use it as a replacement for the Junior/);
-  assert.doesNotMatch(SUBAGENT_TOOL_DESCRIPTION, /when set, it wins/);
-});
-
 test("model resolution precedence: override, then route, then the junior model unconditionally", () => {
   const cfg = resolveConfig({
     provider: "mock",
@@ -200,17 +162,9 @@ test("no route: role senior still runs the junior model on the senior endpoint c
   assert.equal(fields.baseUrl, "http://senior/v1");
   assert.equal(fields.apiKey, "s-key");
   assert.equal(fields.model, "ep-junior");
-});
 
-test("a connection-only route keeps its connection while the model comes from junior", () => {
-  const cfg = resolveConfig({ provider: "mock" });
-  const harness = new TwoBrothersHarness(cfg, {
-    endpoints: {
-      junior: { provider: "openai", baseUrl: "http://junior/v1", apiKey: "", model: "ep-junior" },
-    },
-  });
-  const inner = internals(harness);
-  // Empty route model = unset: the junior model applies even for role senior.
+  // A connection-only route (empty route model = unset) keeps its connection
+  // while the model still comes from the Junior role, even for role senior.
   const route: SubagentEndpoint = {
     provider: "openai",
     baseUrl: "http://route.example/v1",
@@ -218,10 +172,10 @@ test("a connection-only route keeps its connection while the model comes from ju
     model: "",
   };
   assert.equal(inner.subagentModel("senior", route), "ep-junior");
-  const fields = wire(inner.buildSubagentProvider("senior", route));
-  assert.equal(fields.baseUrl, "http://route.example/v1");
-  assert.equal(fields.apiKey, "route-secret");
-  assert.equal(fields.model, "ep-junior");
+  const routeFields = wire(inner.buildSubagentProvider("senior", route));
+  assert.equal(routeFields.baseUrl, "http://route.example/v1");
+  assert.equal(routeFields.apiKey, "route-secret");
+  assert.equal(routeFields.model, "ep-junior");
 });
 
 test("the inherited junior model follows the current junior endpoint between spawns", async (t) => {
@@ -301,40 +255,6 @@ test("the connection stays frozen: overrides change only model/effort on the rou
   assert.equal(fields.apiKey, "route-secret");
   assert.equal(fields.model, "override");
   assert.equal(fields.effort, "high");
-});
-
-test("no override builds the identical provider from the route or role endpoint", () => {
-  const cfg = resolveConfig({
-    provider: "openai",
-    baseUrl: "http://cfg/v1",
-    apiKey: "cfg-key",
-    juniorModel: "cfg-junior",
-  });
-  const harness = new TwoBrothersHarness(cfg, {});
-  const inner = internals(harness);
-  const route: SubagentEndpoint = {
-    provider: "openai",
-    baseUrl: "http://route.example/v1",
-    apiKey: "route-secret",
-    model: "route-model",
-    effort: "low",
-  };
-  const fromRoute = wire(inner.buildSubagentProvider("junior", route));
-  assert.equal(fromRoute.baseUrl, "http://route.example/v1");
-  assert.equal(fromRoute.apiKey, "route-secret");
-  assert.equal(fromRoute.model, "route-model");
-  assert.equal(fromRoute.effort, "low");
-  const fromCfg = wire(inner.buildSubagentProvider("junior", undefined));
-  assert.equal(fromCfg.baseUrl, "http://cfg/v1");
-  assert.equal(fromCfg.apiKey, "cfg-key");
-  assert.equal(fromCfg.model, "cfg-junior");
-  assert.equal(fromCfg.effort, undefined);
-  // The junior model applies unconditionally: a senior-role child with no
-  // route or override still runs the junior model on the cfg connection.
-  const fromCfgSenior = wire(inner.buildSubagentProvider("senior", undefined));
-  assert.equal(fromCfgSenior.baseUrl, "http://cfg/v1");
-  assert.equal(fromCfgSenior.apiKey, "cfg-key");
-  assert.equal(fromCfgSenior.model, "cfg-junior");
 });
 
 test("with no endpoint, an override synthesizes the connection from the run config", () => {
@@ -631,77 +551,6 @@ test("the resolved model flows to the result, started event, list_agents and sub
   }
 });
 
-test("no override keeps every surface on the route model", async () => {
-  const { root, cleanup } = tmpdir();
-  try {
-    const store = new SubagentStore(path.join(root, "subagents"));
-    const events: RuntimeEvent[] = [];
-    const senior = new ObservabilitySenior({});
-    const harness = new TwoBrothersHarness(resolveConfig({ provider: "mock" }), {
-      senior,
-      junior: new MockProvider(),
-      subagents: {
-        store,
-        parentSession: "parent.jsonl",
-        endpoint: {
-          provider: "mock",
-          baseUrl: "",
-          apiKey: "",
-          model: "route-model",
-          kind: "openai-compatible",
-        },
-        providerFactory: () => new MockProvider([{ text: "route reply" }]),
-      },
-      onEvent: (event) => events.push(event),
-    });
-    const result = await harness.run("Plan a migration", new SharedContext());
-    assert.equal(result.cancelled, false);
-    const started = events.find((event) => event.type === "subagent_started") as
-      | { model?: string }
-      | undefined;
-    assert.equal(started?.model, "route-model");
-    assert.equal(store.list("parent.jsonl")[0]?.model, "route-model");
-    // The subagent tool result (first call's reply) shows the route model too.
-    assert.equal(toolResult(senior.transcripts, 1, "call-1").model, "route-model");
-  } finally {
-    cleanup();
-  }
-});
-
-test("a role endpoint (no dedicated route) honors the override", async () => {
-  const { root, cleanup } = tmpdir();
-  try {
-    const store = new SubagentStore(path.join(root, "subagents"));
-    const events: RuntimeEvent[] = [];
-    const senior = new ObservabilitySenior({ model: "role-override" });
-    const harness = new TwoBrothersHarness(
-      resolveConfig({ provider: "mock", seniorModel: "cfg-senior", juniorModel: "cfg-junior" }),
-      {
-        senior,
-        junior: new MockProvider(),
-        endpoints: {
-          junior: { provider: "openai", baseUrl: "http://x/v1", apiKey: "", model: "ep-junior" },
-        },
-        subagents: {
-          store,
-          parentSession: "parent.jsonl",
-          providerFactory: () => new MockProvider([{ text: "endpoint reply" }]),
-        },
-        onEvent: (event) => events.push(event),
-      },
-    );
-    const result = await harness.run("Plan a migration", new SharedContext());
-    assert.equal(result.cancelled, false);
-    const started = events.find((event) => event.type === "subagent_started") as
-      | { model?: string }
-      | undefined;
-    assert.equal(started?.model, "role-override");
-    assert.equal(store.list("parent.jsonl")[0]?.model, "role-override");
-  } finally {
-    cleanup();
-  }
-});
-
 test("the override reaches the child's wire request; effort is normalized; the connection is the route's", async () => {
   const { root, cleanup } = tmpdir();
   const requests: { auth: string | undefined; body: Record<string, unknown> }[] = [];
@@ -917,6 +766,7 @@ test("loopback: an explicit route model stays frozen across spawns while the jun
             apiKey: "route-secret",
             model: "route-model",
             kind: "openai-compatible",
+            effort: "low",
           },
         },
       },
@@ -942,6 +792,9 @@ test("loopback: an explicit route model stays frozen across spawns while the jun
     assert.equal(routeRequests.length, 2);
     assert.equal(routeRequests[0]?.body.model, "route-model");
     assert.equal(routeRequests[1]?.body.model, "route-model");
+    // The route's own effort passes through untouched when no per-call
+    // override sets one.
+    assert.ok(routeRequests.every((request) => request.body.reasoning_effort === "low"));
     assert.ok(routeRequests.every((request) => request.auth === "Bearer route-secret"));
     assert.equal(juniorRequests.length, 0);
     assert.deepEqual(

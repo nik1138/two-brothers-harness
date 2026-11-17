@@ -61,6 +61,7 @@ function fakeTool(
 /** A MockProvider that records the exact belt each tool-loop call offered. */
 class RecordingMock extends MockProvider {
   seenToolNames: string[][] = [];
+  readonly transcripts: string[] = [];
 
   override async chatWithTools(
     messages: Parameters<MockProvider["chatWithTools"]>[0],
@@ -68,6 +69,7 @@ class RecordingMock extends MockProvider {
     options: ToolChatOptions = {},
   ): Promise<ToolChatResponse> {
     this.seenToolNames.push(tools.map((tool) => tool.name));
+    this.transcripts.push(JSON.stringify(messages));
     return super.chatWithTools(messages, tools, options);
   }
 }
@@ -512,6 +514,17 @@ test("a configured helper route sets the child model independently of the role",
     assert.equal(rows.length, 1);
     assert.equal(rows[0]?.model, "helper-model");
     assert.equal(rows[0]?.status, "completed");
+    // The synchronous subagent tool result (the reply to the first call)
+    // carries the route model too — the no-override path resolves it.
+    const messages = JSON.parse(senior.transcripts[1] ?? "[]") as {
+      toolCallId?: string;
+      content?: unknown;
+    }[];
+    const spawnResult = JSON.parse(
+      String(messages.find((entry) => entry.toolCallId === "call-1")?.content ?? "{}"),
+    ) as { model?: string; status?: string };
+    assert.equal(spawnResult.model, "helper-model");
+    assert.equal(spawnResult.status, "completed");
   } finally {
     cleanup();
   }
@@ -827,9 +840,20 @@ test("the tool schema and description pin the per-call override surface", () => 
   ]);
   assert.deepEqual(schema.required, ["task"]);
   assert.equal(schema.additionalProperties, false);
+  const model = schema.properties.model as { type: string; description: string };
+  const effort = schema.properties.effort as { type: string; description: string };
+  assert.equal(model.type, "string");
+  assert.equal(effort.type, "string");
+  assert.match(model.description, /provider, base URL and API key/i);
   // The description states the honest rule and keeps the policy/nesting
   // sentences byte-for-byte:
   assert.match(SUBAGENT_TOOL_DESCRIPTION, /`model` and `effort` arguments refine only/);
+  assert.match(
+    SUBAGENT_TOOL_DESCRIPTION,
+    /provider, base URL and API key always come from the configured route or the role endpoint/,
+  );
   assert.match(SUBAGENT_TOOL_DESCRIPTION, /cannot widen the run's policy/);
   assert.match(SUBAGENT_TOOL_DESCRIPTION, /It cannot spawn more subagents\./);
+  assert.match(SUBAGENT_TOOL_DESCRIPTION, /Do not use it as a replacement for the Junior/);
+  assert.doesNotMatch(SUBAGENT_TOOL_DESCRIPTION, /when set, it wins/);
 });
