@@ -3424,9 +3424,24 @@ async function scenarioProviderReset(runner) {
     ]) {
       const card = rolesPane.locator(`.role-card--${role}`)
       assert.equal((await card.locator('.role-chip').innerText()).trim(), 'preset')
-      const modelInput = card.locator('.n-form-item').filter({ hasText: 'Model' }).locator('input')
-      assert.equal(await modelInput.inputValue(), model, `${role} model changed after reset`)
-      const connectionText = (await card.locator('.n-base-selection').innerText()).trim()
+      // The Model control is a searchable preset picker now: the saved model
+      // is the select's value (kept as its own "(custom)" option when the
+      // preset does not declare it). Pin the row by its exact label — a plain
+      // hasText('Model') also matches the Effort item's feedback copy.
+      const modelItem = card.locator('.n-form-item', {
+        has: page.locator('.n-form-item-label', { hasText: /^Model$/ }),
+      })
+      const modelSelection = modelItem.locator('.n-base-selection')
+      await modelSelection.waitFor({ state: 'visible' })
+      const modelValue = (await modelSelection.innerText()).trim()
+      assert.ok(
+        modelValue.includes(model),
+        `${role} model changed after reset (got: ${modelValue})`,
+      )
+      const connectionItem = card.locator('.n-form-item', {
+        has: page.locator('.n-form-item-label', { hasText: /^Connection$/ }),
+      })
+      const connectionText = (await connectionItem.locator('.n-base-selection').innerText()).trim()
       assert.ok(
         connectionText.includes(RESET_SEED),
         `${role} role no longer selects ${RESET_SEED} (got: ${connectionText})`,
