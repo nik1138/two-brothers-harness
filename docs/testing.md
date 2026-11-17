@@ -219,7 +219,11 @@ local fake endpoint, no real network): the stored/env-backed key used only for
 the preset's own URL, the different-URL-with-saved-key 400, a one-shot typed key
 that is never stored or echoed, an empty answer that leaves the catalog intact,
 the unsupported-wire-kind 400, unknown-provider 404/invalid-body 400 and the
-clean upstream 502 (suite now 70 tests). The models.dev catalog browse/import
+clean upstream 502. The name-agnostic draft variant (`POST
+/api/providers/discover`, the web Add card) adds +5 hermetic loopback tests:
+keyless probing with a keyed preset, the typed key forwarded only to the draft
+URL, no stored/env credential ever resolved, honest invalid-input 400s, and an
+empty answer / clean 502 (suite now 106 tests). The models.dev catalog browse/import
 slice is hermetic through an injected fetch and the fixed
 `tests/fixtures/models-dev.json`: `tests/modelcatalog.test.ts` (now 27 tests —
 index building, the provider/model inference matrix, mixed-family overrides and

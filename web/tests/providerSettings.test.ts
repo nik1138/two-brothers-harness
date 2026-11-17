@@ -8,7 +8,6 @@ import { test } from 'node:test'
 import {
   DISCOVERY_UNSUPPORTED_BACKEND,
   PROVIDER_KIND_DEFAULT,
-  addDiscoveryAnchor,
   addDiscoveryEligible,
   addDiscoveryStatusText,
   apiKeyPlaceholder,
@@ -719,18 +718,6 @@ test('addDiscoveryEligible: only a valid Base URL and an OpenAI-compatible kind'
   assert.equal(addDiscoveryEligible({ baseUrl: 'http://x/v1', kind: 'google' }), false)
   assert.equal(addDiscoveryEligible(null), false)
   assert.equal(addDiscoveryEligible(undefined), false)
-})
-
-test('addDiscoveryAnchor: typed name when it exists, otherwise the first preset', () => {
-  const views = normalizeProviders([
-    { name: 'openai', base_url: 'https://api.openai.com/v1', kind: 'openai-compatible' },
-    { name: 'lm-studio', base_url: 'http://127.0.0.1:1234/v1', kind: 'openai-compatible' },
-  ])
-  assert.equal(addDiscoveryAnchor(views, 'lm-studio'), 'lm-studio')
-  assert.equal(addDiscoveryAnchor(views, ' LM-STUDIO '), 'lm-studio', 'case-insensitive match')
-  assert.equal(addDiscoveryAnchor(views, 'brand-new'), 'openai', 'a new id anchors at the first preset')
-  assert.equal(addDiscoveryAnchor(views, ''), 'openai')
-  assert.equal(addDiscoveryAnchor([], 'anything'), null)
 })
 
 test('defaultAddModelSelection selects every successfully discovered id', () => {

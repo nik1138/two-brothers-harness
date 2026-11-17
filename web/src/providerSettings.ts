@@ -623,16 +623,11 @@ export function discoveredAdditions(current: unknown, discovered: unknown): stri
 
 // -- model discovery in the Add provider card -----------------------------------
 //
-// The Add card probes the typed draft through the same provider-anchored
-// `POST /api/providers/{name}/discover` route as the edit card (it writes
-// nothing and accepts the draft base_url/kind/api_key). A brand-new provider
-// id does not exist server-side yet, so the probe is anchored at an existing
-// preset: the typed id when it already resolves (a seed the operator is
-// re-adding under the same name is refused by duplicate validation, so this
-// is only a defensive fallback), otherwise the first listed preset. The
-// draft base URL and the one-shot typed key are always sent, so the stored
-// key of the anchor is never used for a different endpoint — the server
-// refuses that combination with an honest 400.
+// The Add card probes the typed draft through the name-agnostic
+// `POST /api/providers/discover` route: it writes nothing, accepts the draft
+// base_url/kind/api_key, and never resolves a stored or env-backed preset
+// credential — only the explicitly typed draft key is used, so the flow works
+// keyless (local endpoints), with zero presets, and with all-keyed presets.
 
 /** True when the Add draft is complete enough for an OpenAI-compatible probe. */
 export function addDiscoveryEligible(draft: {
@@ -640,23 +635,6 @@ export function addDiscoveryEligible(draft: {
   kind: unknown
 } | null | undefined): boolean {
   return validateProviderBaseUrl(draft?.baseUrl) === null && supportsModelDiscovery(draft?.kind)
-}
-
-/**
- * Anchor provider name for an Add-card probe, or null when the backend
- * reported no presets at all (then the discovery route cannot be reached
- * either — it predates this UI).
- */
-export function addDiscoveryAnchor(
-  providers: readonly Pick<ProviderView, 'name'>[],
-  addName: unknown,
-): string | null {
-  const typed = text(addName).toLowerCase()
-  if (typed) {
-    const match = providers.find((provider) => text(provider.name).toLowerCase() === typed)
-    if (match) return match.name
-  }
-  return providers[0]?.name ?? null
 }
 
 /** Default Add-card selection: every successfully discovered id. */

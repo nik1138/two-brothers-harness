@@ -4212,6 +4212,220 @@ test("provider model discovery: a seed's env-backed key is resolved server-side"
 });
 
 // ---------------------------------------------------------------------------
+// Name-agnostic draft discovery (`POST /api/providers/discover`, the Add card)
+// ---------------------------------------------------------------------------
+
+test("draft model discovery: keyless probe works with a keyed preset and persists nothing", async () => {
+  const srv = await startServer();
+  const storedEndpoint = await startFakeModelsEndpoint();
+  const draftEndpoint = await startFakeModelsEndpoint();
+  try {
+    // A keyed preset exists (the old anchor flow would have demanded a typed
+    // key here); the draft route never consults it.
+    await post(srv.base, "/api/providers", {
+      name: "Keyed",
+      base_url: storedEndpoint.baseUrl,
+      api_key: "stored-secret",
+      models: ["keep-me"],
+    });
+    const settingsPath = path.join(srv.dir, "settings.json");
+    const settingsBefore = fs.readFileSync(settingsPath, "utf-8");
+
+    const discovered = await post<Record<string, any>>(srv.base, "/api/providers/discover", {
+      base_url: draftEndpoint.baseUrl,
+      kind: "openai-compatible",
+    });
+    assert.equal(discovered.status, 200);
+    assert.deepEqual(discovered.body.models, [
+      { id: "model-a" },
+      { id: "model-b", owned_by: "org" },
+    ]);
+    assert.equal(discovered.body.base_url, draftEndpoint.baseUrl);
+    assert.equal(discovered.body.kind, "openai-compatible");
+    // The draft endpoint is probed UNAUTHENTICATED; the keyed preset's own
+    // endpoint is never contacted.
+    assert.equal(draftEndpoint.requests.length, 1);
+    assert.equal(draftEndpoint.requests[0]?.url, "/v1/models");
+    assert.equal(draftEndpoint.requests[0]?.authorization, undefined);
+    assert.equal(storedEndpoint.requests.length, 0);
+    // Nothing is written and nothing secret is echoed.
+    assert.equal(fs.readFileSync(settingsPath, "utf-8"), settingsBefore);
+    assert.ok(!JSON.stringify(discovered.body).includes("stored-secret"));
+    const listed = (await get<Record<string, any>>(srv.base, "/api/providers")).body
+      .providers as Array<Record<string, any>>;
+    assert.deepEqual(
+      listed.find((entry) => entry.name === "Keyed")?.models,
+      ["keep-me"],
+      "the stored catalog is never rewritten",
+    );
+  } finally {
+    await storedEndpoint.close();
+    await draftEndpoint.close();
+    await srv.close();
+  }
+});
+
+test("draft model discovery: the typed key goes only to the draft URL, never stored or echoed", async () => {
+  const srv = await startServer();
+  const storedEndpoint = await startFakeModelsEndpoint();
+  const draftEndpoint = await startFakeModelsEndpoint();
+  try {
+    await post(srv.base, "/api/providers", {
+      name: "Keyed",
+      base_url: storedEndpoint.baseUrl,
+      api_key: "stored-secret",
+      models: [],
+    });
+    const discovered = await post<Record<string, any>>(srv.base, "/api/providers/discover", {
+      base_url: draftEndpoint.baseUrl,
+      api_key: "typed-secret",
+    });
+    assert.equal(discovered.status, 200);
+    assert.equal(draftEndpoint.requests.length, 1);
+    assert.equal(draftEndpoint.requests[0]?.authorization, "Bearer typed-secret");
+    assert.equal(storedEndpoint.requests.length, 0, "only the draft URL is contacted");
+    assert.ok(!JSON.stringify(discovered.body).includes("typed-secret"));
+    assert.ok(!JSON.stringify(discovered.body).includes("stored-secret"));
+    const settingsPath = path.join(srv.dir, "settings.json");
+    const onDisk = fs.readFileSync(settingsPath, "utf-8");
+    assert.ok(!onDisk.includes("typed-secret"), "the one-shot key is never persisted");
+    // The keyed preset is untouched: still keyed, still on its own endpoint.
+    const listed = (await get<Record<string, any>>(srv.base, "/api/providers")).body
+      .providers as Array<Record<string, any>>;
+    const keyed = listed.find((entry) => entry.name === "Keyed");
+    assert.equal(keyed?.api_key_set, true);
+    assert.equal(keyed?.base_url, storedEndpoint.baseUrl);
+  } finally {
+    await storedEndpoint.close();
+    await draftEndpoint.close();
+    await srv.close();
+  }
+});
+
+test("draft model discovery: no stored or env-backed credential is ever resolved", async () => {
+  const srv = await startServer();
+  const fake = await startFakeModelsEndpoint();
+  const previous = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "env-openai-secret";
+  try {
+    // The env-backed seed exists but is never customized: the draft route
+    // must not resolve its credential and must not demand one either.
+    const discovered = await post<Record<string, any>>(srv.base, "/api/providers/discover", {
+      base_url: fake.baseUrl,
+    });
+    assert.equal(discovered.status, 200);
+    assert.equal(fake.requests.length, 1);
+    assert.equal(
+      fake.requests[0]?.authorization,
+      undefined,
+      "the env-backed seed key is never attached",
+    );
+    assert.ok(!JSON.stringify(discovered.body).includes("env-openai-secret"));
+    // And the route works with no stored/custom presets at all (fresh server,
+    // nothing persisted): no preset lookup happens, seeded or not.
+    const settingsPath = path.join(srv.dir, "settings.json");
+    assert.ok(!fs.existsSync(settingsPath), "no settings file is created by a probe");
+  } finally {
+    if (previous === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previous;
+    await fake.close();
+    await srv.close();
+  }
+});
+
+test("draft model discovery: invalid input and unsupported kinds are honest 400s", async () => {
+  const srv = await startServer();
+  const fake = await startFakeModelsEndpoint();
+  try {
+    const missing = await post<Record<string, any>>(srv.base, "/api/providers/discover", {});
+    assert.equal(missing.status, 400);
+    assert.match(String(missing.body.detail), /base_url must not be empty/);
+
+    const blank = await post<Record<string, any>>(srv.base, "/api/providers/discover", {
+      base_url: "   ",
+    });
+    assert.equal(blank.status, 400);
+    assert.match(String(blank.body.detail), /base_url must not be empty/);
+
+    const scheme = await post<Record<string, any>>(srv.base, "/api/providers/discover", {
+      base_url: "localhost:1234/v1",
+    });
+    assert.equal(scheme.status, 400);
+    assert.match(String(scheme.body.detail), /must start with http/);
+
+    for (const kind of ["anthropic", "google"]) {
+      const res = await post<Record<string, any>>(srv.base, "/api/providers/discover", {
+        base_url: fake.baseUrl,
+        kind,
+      });
+      assert.equal(res.status, 400);
+      assert.match(String(res.body.detail), new RegExp(`not supported for the ${kind}`));
+      assert.match(String(res.body.detail), /openai-compatible\|anthropic\|google/);
+    }
+
+    const unknown = await post<Record<string, any>>(srv.base, "/api/providers/discover", {
+      base_url: fake.baseUrl,
+      kind: "wat",
+    });
+    assert.equal(unknown.status, 400);
+    assert.match(String(unknown.body.detail), /unknown provider kind: wat/);
+
+    const keyType = await post<Record<string, any>>(srv.base, "/api/providers/discover", {
+      base_url: fake.baseUrl,
+      api_key: 42,
+    });
+    assert.equal(keyType.status, 400);
+    assert.deepEqual(keyType.body, { detail: "invalid request body" });
+
+    const arrayBody = await post<Record<string, any>>(srv.base, "/api/providers/discover", []);
+    assert.equal(arrayBody.status, 400);
+    assert.deepEqual(arrayBody.body, { detail: "invalid request body" });
+
+    // Nothing was probed for any refused request.
+    assert.equal(fake.requests.length, 0);
+  } finally {
+    await fake.close();
+    await srv.close();
+  }
+});
+
+test("draft model discovery: an empty answer is valid and an upstream failure is a clean 502", async () => {
+  const srv = await startServer();
+  const empty = await startFakeModelsEndpoint((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ data: [] }));
+  });
+  try {
+    const discovered = await post<Record<string, any>>(srv.base, "/api/providers/discover", {
+      base_url: empty.baseUrl,
+      api_key: "typed-secret",
+    });
+    assert.equal(discovered.status, 200);
+    assert.deepEqual(discovered.body.models, []);
+  } finally {
+    await empty.close();
+  }
+
+  const http500 = await startFakeModelsEndpoint((_req, res) => {
+    res.writeHead(500, { "Content-Type": "text/plain" });
+    res.end("boom");
+  });
+  try {
+    const failed = await post<Record<string, any>>(srv.base, "/api/providers/discover", {
+      base_url: http500.baseUrl,
+      api_key: "typed-secret",
+    });
+    assert.equal(failed.status, 502);
+    assert.match(String(failed.body.detail), /model discovery failed/);
+    assert.match(String(failed.body.detail), /HTTP 500/);
+    assert.ok(!JSON.stringify(failed.body).includes("typed-secret"));
+  } finally {
+    await http500.close();
+    await srv.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Misc contract endpoints
 // ---------------------------------------------------------------------------
 

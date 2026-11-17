@@ -51,7 +51,11 @@ while bypassing provider configuration entirely.
 Settings → Providers → **Refresh models** probes the current draft's
 OpenAI-compatible endpoint through `POST /api/providers/{name}/discover` and
 lists what it reports. It never saves the provider and never applies the list —
-adding ids is explicit (**Add N to draft**, then **Save changes**).
+adding ids is explicit (**Add N to draft**, then **Save changes**). The Add
+provider card's **Fetch models** uses the name-agnostic
+`POST /api/providers/discover` variant for an unsaved draft: same probe, but no
+preset is consulted, so no stored or env-backed credential can be attached —
+only the key typed in the Add form is used, and only for that one request.
 
 | Symptom | Why | Fix |
 |---|---|---|

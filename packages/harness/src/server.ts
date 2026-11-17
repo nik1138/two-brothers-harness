@@ -92,6 +92,15 @@
  *   502, and an empty list a valid 200 (a catalog is never erased by
  *   discovery). Discovery is explicitly separate from `PUT` (Apply); the
  *   offline CLI equivalent is `two-brothers models --base-url <url>`.
+ * - `POST /api/providers/discover` is the name-agnostic variant for an
+ *   UNSAVED provider draft (the web Add card): the same `base_url`/`kind` /
+ *   one-shot `api_key` draft probe through `provider.listModels`, but no
+ *   preset is looked up — a new id has nothing stored under it — so no
+ *   stored/env credential can ever be resolved or attached; only the typed
+ *   draft key is used (write-only, one request, never echoed). It answers
+ *   200/`models` (empty included), the same honest 400s for a missing or
+ *   invalid base URL or a non-OpenAI-compatible kind, and a 502 for
+ *   upstream failures, with zero presets or all-keyed presets alike.
  * - `GET /api/plugins` lists the plugins discovered by the PluginManager
  *   (`src/plugins.ts`, the plugins.py port) plus load errors, and additively
  *   `diagnostics` (load-time notes plus the last run's binding notes) when
@@ -3634,6 +3643,71 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     }),
   );
 
+  /**
+   * Parse and validate one discovery draft body, shared by the provider-
+   * anchored route (which passes the preset as the fallback for omitted
+   * fields) and the name-agnostic route (which has no preset to fall back
+   * to). Only OpenAI-compatible endpoints expose a `/models` listing, so
+   * every other wire family is an honest 400 before any request is made.
+   */
+  function parseDiscoveryDraft(
+    body: Record<string, unknown>,
+    fallback: { baseUrl: string; kind: string },
+  ): { baseUrl: string; kind: string; typedApiKey: string | undefined } {
+    const draftBaseUrl = optionalString(body, "base_url");
+    const baseUrl = (draftBaseUrl ?? fallback.baseUrl).trim();
+    if (!baseUrl) throw new HttpError(400, "base_url must not be empty");
+    if (!/^https?:\/\//i.test(baseUrl)) {
+      throw new HttpError(400, "base_url must start with http:// or https://");
+    }
+    const draftKind = optionalString(body, "kind");
+    const kind = (draftKind ?? "").trim() || fallback.kind || PROVIDER_KIND_DEFAULT;
+    if (!isProviderKind(kind)) {
+      throw new HttpError(400, `unknown provider kind: ${kind} (use ${PROVIDER_KIND_HINT})`);
+    }
+    if (kind !== PROVIDER_KIND_DEFAULT) {
+      // Honest about the wire families: only the OpenAI-compatible adapter
+      // speaks `GET {base}/models`; the native Messages / Generative
+      // Language APIs are not probed through their own listing shapes here.
+      throw new HttpError(
+        400,
+        `model discovery is not supported for the ${kind} provider kind (use ${PROVIDER_KIND_HINT}); list models by hand or use two-brothers models with an OpenAI-compatible endpoint`,
+      );
+    }
+    return { baseUrl, kind, typedApiKey: optionalString(body, "api_key")?.trim() };
+  }
+
+  /** One bounded `GET {base}/models` probe; upstream failures are a clean 502. */
+  async function probeModelList(baseUrl: string, apiKey: string | undefined): Promise<RemoteModel[]> {
+    try {
+      return await listModels(baseUrl, { apiKey: apiKey || undefined });
+    } catch (exc) {
+      throw new HttpError(502, `model discovery failed: ${errorDetail(exc)}`);
+    }
+  }
+
+  // Name-agnostic probe for an UNSAVED provider draft (the web Add card).
+  // Registered before the provider-anchored route below; the router matches
+  // the first regex, and this exact segment can never satisfy
+  // `/api/providers/{name}/discover` (two segments). No preset is consulted —
+  // a new id has nothing stored under it — so no stored/env credential can be
+  // resolved or attached: only the explicitly typed draft key is used, and it
+  // is write-only (one request header, never echoed or persisted). Works with
+  // zero presets and with all-keyed presets alike.
+  routes.push(
+    compileRoute("POST", "/api/providers/discover", async (ctx) => {
+      const body = await ctx.json();
+      const { baseUrl, kind, typedApiKey } = parseDiscoveryDraft(body, {
+        baseUrl: "",
+        kind: PROVIDER_KIND_DEFAULT,
+      });
+      const models = await probeModelList(baseUrl, typedApiKey);
+      // Empty is a valid answer (`models: []`); the client must not erase a
+      // catalog on it. `base_url`/`kind` are additive echoes.
+      return { models, base_url: baseUrl, kind };
+    }),
+  );
+
   routes.push(
     compileRoute("POST", "/api/providers/{name}/discover", async (ctx) => {
       // Manual, explicit discovery probe — deliberately separate from Apply
@@ -3649,26 +3723,10 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         (entry) => entry.name.trim().toLowerCase() === wanted,
       );
       if (preset === undefined) throw new HttpError(404, "not found");
-      const draftBaseUrl = optionalString(body, "base_url");
-      const baseUrl = (draftBaseUrl ?? preset.base_url).trim();
-      if (!baseUrl) throw new HttpError(400, "base_url must not be empty");
-      if (!/^https?:\/\//i.test(baseUrl)) {
-        throw new HttpError(400, "base_url must start with http:// or https://");
-      }
-      const draftKind = optionalString(body, "kind");
-      const kind = (draftKind ?? "").trim() || preset.kind || PROVIDER_KIND_DEFAULT;
-      if (!isProviderKind(kind)) {
-        throw new HttpError(400, `unknown provider kind: ${kind} (use ${PROVIDER_KIND_HINT})`);
-      }
-      if (kind !== PROVIDER_KIND_DEFAULT) {
-        // Honest about the wire families: only the OpenAI-compatible adapter
-        // speaks `GET {base}/models`; the native Messages / Generative
-        // Language APIs are not probed through their own listing shapes here.
-        throw new HttpError(
-          400,
-          `model discovery is not supported for the ${kind} provider kind (use ${PROVIDER_KIND_HINT}); list models by hand or use two-brothers models with an OpenAI-compatible endpoint`,
-        );
-      }
+      const { baseUrl, kind, typedApiKey } = parseDiscoveryDraft(body, {
+        baseUrl: preset.base_url,
+        kind: preset.kind,
+      });
       // Secret handling: a typed key is an explicit one-shot override that may
       // point anywhere; the preset's stored/env-backed key is only attached when
       // the probed endpoint IS that preset's own endpoint (trimmed, trailing
@@ -3678,7 +3736,6 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       // URL unauthenticated. Either way the key never leaves as a value,
       // `listModels` only puts it in a request header, and neither this response
       // nor an error message echoes it.
-      const typedApiKey = optionalString(body, "api_key")?.trim();
       const storedApiKey = presetApiKey(preset);
       const sameEndpoint =
         baseUrl.replace(/\/+$/, "") === preset.base_url.trim().replace(/\/+$/, "");
@@ -3689,12 +3746,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         );
       }
       const probeKey = typedApiKey ? typedApiKey : sameEndpoint ? storedApiKey : "";
-      let models: RemoteModel[];
-      try {
-        models = await listModels(baseUrl, { apiKey: probeKey || undefined });
-      } catch (exc) {
-        throw new HttpError(502, `model discovery failed: ${errorDetail(exc)}`);
-      }
+      const models = await probeModelList(baseUrl, probeKey || undefined);
       // Empty is a valid answer (`models: []`); the client must not erase a
       // catalog on it. `base_url`/`kind` are additive echoes so a client can
       // show what was actually probed.

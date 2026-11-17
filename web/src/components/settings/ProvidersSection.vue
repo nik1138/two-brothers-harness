@@ -7,6 +7,7 @@ import {
   ApiError,
   createProvider,
   deleteProvider,
+  discoverDraftProviderModels,
   discoverProviderModels,
   listProviders,
   resetProvider,
@@ -17,7 +18,6 @@ import type { ProviderPreset } from '../../types'
 import {
   PROVIDER_KIND_DEFAULT,
   PROVIDER_KINDS,
-  addDiscoveryAnchor,
   addDiscoveryEligible,
   addDiscoveryStatusText,
   apiKeyPlaceholder,
@@ -188,10 +188,11 @@ const addCatalogId = ref<string | null>(null)
 const browseOpen = ref(false)
 
 // -- model discovery in the Add card ("Fetch models") ---------------------------
-// Same provider-anchored probe as the edit card, but on the unsaved Add draft:
-// it never saves the provider, and the typed key is sent write-only for the one
-// request. A successful result renders as checkboxes whose selection IS the
-// draft's model list (default: everything discovered).
+// A name-agnostic probe of the unsaved Add draft (`POST /api/providers/
+// discover`): it never saves the provider, never resolves a stored or env
+// credential, and the typed key is sent write-only for the one request. A
+// successful result renders as checkboxes whose selection IS the draft's
+// model list (default: everything discovered).
 const ADD_DISCOVERY_NAME = 'add'
 const addDiscovery = ref<ProviderDiscoveryState>(newDiscoveryState())
 /** Newest Add-card probe token; a settling response with an older token is stale. */
@@ -763,11 +764,11 @@ function applyAddSelection(): void {
 }
 
 /**
- * Probe the Add draft's endpoint for its model list through the same
- * provider-anchored route the edit card uses (`POST
- * /api/providers/{name}/discover`). Writes nothing: the provider exists only
- * after Add provider, so the probe is anchored at an existing preset while
- * the draft base URL/kind and the one-shot typed key ride in the body. On
+ * Probe the Add draft's endpoint for its model list through the name-agnostic
+ * draft route (`POST /api/providers/discover`). Writes nothing: the provider
+ * exists only after Add provider. Only the key typed in this form is sent —
+ * the route never resolves stored or env credentials — so a keyless local
+ * endpoint probes unauthenticated even when other presets have keys. On
  * success every discovered model is selected (and thereby in the draft);
  * deselection removes it again.
  */
@@ -782,15 +783,6 @@ async function fetchAddModels(): Promise<void> {
     announce(message)
     return
   }
-  const anchor = addDiscoveryAnchor(views.value, addName.value)
-  if (!anchor) {
-    // The discovery route is provider-anchored; with zero presets reported the
-    // backend predates both seeds and discovery.
-    const message = 'this backend reports no providers to probe from'
-    addDiscovery.value = failDiscovery(started, token, ADD_DISCOVERY_NAME, 502, message)
-    announce(addDiscovery.value.message)
-    return
-  }
   const request: ProviderDiscoverRequest = {
     base_url: addBaseUrl.value.trim(),
     kind: addKind.value || PROVIDER_KIND_DEFAULT,
@@ -802,7 +794,7 @@ async function fetchAddModels(): Promise<void> {
   addDiscovery.value = started
   announce('Asking the endpoint for its model list…')
   try {
-    const result = await discoverProviderModels(anchor, request)
+    const result = await discoverDraftProviderModels(request)
     if (!isCurrentDiscovery(addDiscovery.value, token, ADD_DISCOVERY_NAME)) return
     addDiscovery.value = settleDiscovery(addDiscovery.value, token, ADD_DISCOVERY_NAME, result.models)
     const phase = addDiscovery.value.phase
