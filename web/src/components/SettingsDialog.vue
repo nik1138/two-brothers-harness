@@ -793,6 +793,7 @@ async function save() {
                 :subagent-supported="subagentSupported"
                 :key-set="keySet"
                 :connection-options="connectionOptions"
+                :providers="providers"
                 :effort-options="{
                   senior: effortOptions.senior,
                   junior: effortOptions.junior,

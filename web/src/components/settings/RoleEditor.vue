@@ -2,6 +2,8 @@
 import { computed } from 'vue'
 import { NForm, NFormItem, NInput, NSelect } from 'naive-ui'
 import { effortLabel } from '../../modelEfforts'
+import { presetModelsFor, roleModelSelectOptions } from '../../rolePresetSync'
+import type { ProviderPreset } from '../../types'
 
 interface RoleForm {
   provider: string
@@ -17,6 +19,8 @@ const props = defineProps<{
   form: RoleForm
   keySet: boolean
   connectionOptions: { label: string; value: string }[]
+  /** Provider presets; the selected one supplies the searchable model list. */
+  providers: ProviderPreset[]
   /** Model-declared levels (`GET /api/model-efforts`); empty = no control. */
   effortOptions: string[]
   effortLoading?: boolean
@@ -36,6 +40,22 @@ const description = computed(() =>
       : 'Isolated helper spawned by the Senior; it can request approved workspace changes. The role picks its persona, not a model: with no route model here the helper always inherits the current Junior model; a configured route model or a per-call override wins.',
 )
 const presetActive = computed(() => Boolean(props.form.providerRef))
+/** Models declared by the selected preset; null = Manual/unknown ref. */
+const presetModels = computed(() => presetModelsFor(props.providers, props.form.providerRef))
+/**
+ * Searchable selector when the preset declares models; free text for Manual
+ * connections and for presets that have not fetched a list yet. The current
+ * value always survives as an explicit "(custom)" option, never rewritten.
+ */
+const modelSelectOptions = computed(() =>
+  roleModelSelectOptions(presetModels.value ?? [], props.form.model).map((option) => ({
+    label: option.label,
+    value: option.value,
+  })),
+)
+const useModelSelect = computed(
+  () => presetModels.value !== null && presetModels.value.length > 0,
+)
 const showEffort = computed(
   () => props.effortOptions.length > 0 || props.form.effort !== '' || props.effortLoading === true,
 )
@@ -97,11 +117,30 @@ function onEffort(value: string) {
         />
       </n-form-item>
       <n-form-item label="Model">
+        <n-select
+          v-if="useModelSelect"
+          :value="form.model"
+          :options="modelSelectOptions"
+          filterable
+          tag
+          :consistent-menu-width="false"
+          placeholder="Search or type a model id"
+          @update:value="onModel"
+        />
         <n-input
+          v-else
           :value="form.model"
           placeholder="e.g. spark-x2.6-4b@q4_k_m"
           @update:value="onModel"
         />
+        <template #feedback>
+          <span v-if="presetModels !== null && presetModels.length === 0">
+            This preset declares no models yet — fetch its model list in Providers.
+          </span>
+          <span v-else-if="useModelSelect">
+            Models declared by the selected preset; type any id to use a custom model.
+          </span>
+        </template>
       </n-form-item>
       <n-form-item v-if="showEffort" label="Effort">
         <n-select
