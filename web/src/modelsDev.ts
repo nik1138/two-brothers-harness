@@ -325,14 +325,18 @@ export function primaryFamily(detail: CatalogDetailView): CatalogFamily | null {
 /**
  * The base URL one family's import uses: the provider `api` when the family is
  * the provider's own, otherwise the first usable per-model override for that
- * family (e.g. OpenCode Go's `…/go/anthropic/v1`). Null = the operator must
- * type one.
+ * family (e.g. OpenCode Go's `…/go/anthropic/v1`). When the provider `api` is
+ * null, the primary family falls back to the same per-model override scan —
+ * some providers publish no `api` but give every model a base URL. Null = the
+ * operator must type one.
  */
 export function familyBaseUrl(
   detail: CatalogDetailView,
   family: CatalogFamily,
 ): string | null {
-  if (detail.provider.kind === family) return detail.provider.api
+  if (detail.provider.kind === family && detail.provider.api !== null) {
+    return detail.provider.api
+  }
   const override = detail.provider.models.find(
     (model) => model.kind === family && model.baseUrl !== null,
   )
@@ -631,6 +635,12 @@ export const CATALOG_UNSUPPORTED_COPY =
   'This backend does not support the models.dev catalog yet. Nothing was changed. Update and restart the backend from this checkout.'
 export const CATALOG_UNAVAILABLE_COPY =
   'This provider is only in the live catalog, which is unreachable right now. Add it by hand; your providers are unchanged.'
+/**
+ * Prominent detail-pane notice when the catalog has no usable base URL: the
+ * operator's own endpoint is required before an import can be built.
+ */
+export const CATALOG_NEEDS_BASE_URL_COPY =
+  'No usable base URL in the catalog — your endpoint is required. Type it below to import.'
 
 /** Relative wording for a stale snapshot (`an earlier session` when unknown). */
 export function relativeCatalogTime(value: number | null, now = Date.now()): string {

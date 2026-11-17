@@ -11,6 +11,7 @@ import {
   buildCatalogImport,
   catalogBanner,
   catalogProviderChips,
+  CATALOG_NEEDS_BASE_URL_COPY,
   defaultSelection,
   detailErrorCopy,
   familyBaseUrl,
@@ -475,6 +476,13 @@ onMounted(() => {
             {{ rejectReasonLabel(detailView.provider.rejectReason) }}, which Two Brothers does
             not implement.
           </p>
+          <p
+            v-if="needsBaseUrl && !detailView.provider.rejected"
+            class="catalog-state is-warning"
+            role="alert"
+          >
+            {{ CATALOG_NEEDS_BASE_URL_COPY }}
+          </p>
           <p v-if="detailView.provider.env.length" class="catalog-hint">
             Key variables (display only):
             <code
@@ -662,6 +670,14 @@ onMounted(() => {
   color: var(--danger);
   background: var(--danger-soft);
   border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+}
+
+.catalog-state.is-warning {
+  padding: 7px 9px;
+  color: var(--warning);
+  background: var(--warning-soft);
+  border: 1px solid var(--warning);
   border-radius: var(--radius-sm);
 }
 
