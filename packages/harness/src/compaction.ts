@@ -54,6 +54,21 @@
  * Fail-soft is the caller's contract (harness.ts): a summarization failure
  * propagates as an exception BEFORE anything is rewritten, so the caller can
  * log a warning and keep the un-compacted context.
+ *
+ * Pinned guarantees (regression tests: tests/compactionguarantees.test.ts):
+ * - ATOMIC CUTS: because tool-call evidence rides inside payload fields and
+ *   never as separate envelopes, every cut point is an envelope boundary —
+ *   pi's "never split tool calls" rule needs no analogue — and the task head
+ *   (the `[[TASK]]` source) is never inside the compacted prefix. An envelope
+ *   larger than the keep-recent budget is folded WHOLE into the summary with
+ *   head+tail serialization and an explicit middle truncation marker, never
+ *   silently dropped and never kept half.
+ * - MIN-OF-ROLES WINDOW: the effective auto-compaction context window is the
+ *   SMALLER of the two roles' resolved preset windows
+ *   (runtime.ts::presetContextWindow, fed to
+ *   config.ts::serveCompactionSettings as the last-resort context_window):
+ *   senior preset 1M + junior preset 200K ⇒ effective window 200K, so the
+ *   trigger (window − reserveTokens) can never overflow the smaller model.
  */
 import type { SharedContext } from "./context.ts";
 import type { Message } from "./protocol.ts";
