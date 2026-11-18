@@ -757,6 +757,9 @@ interface PluginInfo {
   description: string;
   roles: string[];
   kind?: string;
+  configSchema?: unknown;
+  options?: Record<string, unknown>;
+  toolsByScope?: { shared: string[]; senior: string[]; junior: string[] };
 }
 
 interface PluginsView {
@@ -775,8 +778,26 @@ test("GET /api/plugins lists discovered plugins and load errors", async () => {
       const entry = res.body.plugins.find((p) => p.name === "good");
       assert.equal(entry?.description, "A good test plugin");
       assert.deepEqual(entry?.roles, ["shared"]);
-      assert.deepEqual(Object.keys(entry ?? {}).sort(), ["description", "kind", "name", "roles"]);
+      assert.deepEqual(Object.keys(entry ?? {}).sort(), [
+        "configSchema",
+        "description",
+        "kind",
+        "name",
+        "options",
+        "roles",
+        "toolsByScope",
+      ]);
       assert.equal(entry?.kind, "code");
+      // additive options/scope surface: no schema -> null, no options -> {},
+      // and per-tool scopes come from effectiveToolScope (legacy positional
+      // roles stay shared, so both fixture tools land in the shared bucket)
+      assert.equal(entry?.configSchema, null);
+      assert.deepEqual(entry?.options, {});
+      assert.deepEqual(entry?.toolsByScope, {
+        shared: ["ping", "seniors_only"],
+        senior: [],
+        junior: [],
+      });
     } finally {
       await srv.close();
     }
@@ -966,5 +987,216 @@ test("describe() sorts plugin names and reports the shared scope", async () => {
     assert.deepEqual(goodEntry?.roles, ["shared"]);
   } finally {
     dir.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Per-plugin options + scope reporting API
+// ---------------------------------------------------------------------------
+
+/** Carries a configSchema, one shared and one junior-scoped tool. */
+const OPTIONS_PLUGIN = [
+  "export const configSchema = {",
+  "  type: 'object',",
+  "  properties: { maxChars: { type: 'integer', minimum: 1 } },",
+  "  additionalProperties: false,",
+  "};",
+  "export function register(ctx) {",
+  '  ctx.set_description("Options test plugin");',
+  '  ctx.add_tool("shared_tool", () => "s", { description: "a shared tool", scope: "shared" });',
+  '  ctx.add_tool("junior_tool", () => "j", { description: "a junior tool", scope: "junior" });',
+  "}",
+  "",
+].join("\n");
+
+test("GET /api/plugins reports configSchema, effective options and real per-tool scopes", async () => {
+  const dir = makePluginsDir({ "opts.ts": OPTIONS_PLUGIN });
+  const sessions = tmpdir("tb-sessions-");
+  try {
+    const srv = await startServer({ pluginsDir: dir.root, sessionsDir: sessions.root });
+    try {
+      // seed options through the settings save (the existing carrier)
+      const put = await api(srv.base, "PUT", "/api/settings", {
+        plugins: [{ path: "opts", options: { maxChars: 5 } }],
+      });
+      assert.equal(put.status, 200);
+      const res = await api<PluginsView>(srv.base, "GET", "/api/plugins");
+      assert.equal(res.status, 200);
+      const entry = res.body.plugins.find((p) => p.name === "opts");
+      assert.deepEqual(entry?.configSchema, {
+        type: "object",
+        properties: { maxChars: { type: "integer", minimum: 1 } },
+        additionalProperties: false,
+      });
+      assert.deepEqual(entry?.options, { maxChars: 5 });
+      // real scope assignment from effectiveToolScope, not the roles stub
+      assert.deepEqual(entry?.toolsByScope, {
+        shared: ["shared_tool"],
+        senior: [],
+        junior: ["junior_tool"],
+      });
+      // the legacy roles field stays byte-compatible
+      assert.deepEqual(entry?.roles, ["shared"]);
+    } finally {
+      await srv.close();
+    }
+  } finally {
+    dir.cleanup();
+    sessions.cleanup();
+  }
+});
+
+test("PUT /api/plugins/{name}/options validates, persists and takes effect on reload", async () => {
+  const dir = makePluginsDir({ "opts.ts": OPTIONS_PLUGIN });
+  const sessions = tmpdir("tb-sessions-");
+  try {
+    const srv = await startServer({ pluginsDir: dir.root, sessionsDir: sessions.root });
+    try {
+      const put = await api<{ name: string; options: Record<string, unknown> }>(
+        srv.base,
+        "PUT",
+        "/api/plugins/opts/options",
+        { options: { maxChars: 9 } },
+      );
+      assert.equal(put.status, 200);
+      assert.deepEqual(put.body, { name: "opts", options: { maxChars: 9 } });
+      // the reloaded manager now registers the plugin with the new options
+      const res = await api<PluginsView>(srv.base, "GET", "/api/plugins");
+      const entry = res.body.plugins.find((p) => p.name === "opts");
+      assert.deepEqual(entry?.options, { maxChars: 9 });
+      // persisted as a {path, options} entry in the shared settings store
+      const raw = JSON.parse(
+        fs.readFileSync(path.join(sessions.root, "settings.json"), "utf-8"),
+      ) as { plugins: unknown };
+      assert.deepEqual(raw.plugins, [{ path: "opts", options: { maxChars: 9 } }]);
+      // the selection now includes the plugin (the save upgraded the list)
+      const settings = await api<{ plugins: unknown }>(srv.base, "GET", "/api/settings");
+      assert.deepEqual(settings.body.plugins, [{ path: "opts", options: { maxChars: 9 } }]);
+    } finally {
+      await srv.close();
+    }
+    // hydration: a fresh server loads the persisted options
+    const srv2 = await startServer({ pluginsDir: dir.root, sessionsDir: sessions.root });
+    try {
+      const res2 = await api<PluginsView>(srv2.base, "GET", "/api/plugins");
+      const entry2 = res2.body.plugins.find((p) => p.name === "opts");
+      assert.deepEqual(entry2?.options, { maxChars: 9 });
+    } finally {
+      await srv2.close();
+    }
+  } finally {
+    dir.cleanup();
+    sessions.cleanup();
+  }
+});
+
+test("PUT /api/plugins/{name}/options replaces an existing bare-name entry", async () => {
+  const dir = makePluginsDir({ "opts.ts": OPTIONS_PLUGIN, "good.ts": GOOD_PLUGIN });
+  const sessions = tmpdir("tb-sessions-");
+  try {
+    const srv = await startServer({ pluginsDir: dir.root, sessionsDir: sessions.root });
+    try {
+      const seed = await api(srv.base, "PUT", "/api/settings", {
+        plugins: ["good", "opts"],
+      });
+      assert.equal(seed.status, 200);
+      const put = await api(srv.base, "PUT", "/api/plugins/opts/options", {
+        options: { maxChars: 3 },
+      });
+      assert.equal(put.status, 200);
+      const settings = await api<{ plugins: unknown }>(srv.base, "GET", "/api/settings");
+      assert.deepEqual(settings.body.plugins, [
+        "good",
+        { path: "opts", options: { maxChars: 3 } },
+      ]);
+    } finally {
+      await srv.close();
+    }
+  } finally {
+    dir.cleanup();
+    sessions.cleanup();
+  }
+});
+
+test("PUT /api/plugins/{name}/options rejects options failing the configSchema with a 400", async () => {
+  const dir = makePluginsDir({ "opts.ts": OPTIONS_PLUGIN });
+  const sessions = tmpdir("tb-sessions-");
+  try {
+    const srv = await startServer({ pluginsDir: dir.root, sessionsDir: sessions.root });
+    try {
+      const low = await api<{ detail?: string }>(
+        srv.base,
+        "PUT",
+        "/api/plugins/opts/options",
+        { options: { maxChars: 0 } },
+      );
+      assert.equal(low.status, 400);
+      assert.match(String(low.body?.detail ?? ""), /invalid options/);
+      const extra = await api(srv.base, "PUT", "/api/plugins/opts/options", {
+        options: { maxChars: 5, surprise: true },
+      });
+      assert.equal(extra.status, 400);
+      // a rejected save leaves the persisted selection untouched
+      const settings = await api<{ plugins: unknown }>(srv.base, "GET", "/api/settings");
+      assert.deepEqual(settings.body.plugins, []);
+      // malformed body shape is a 400 too
+      const shape = await api(srv.base, "PUT", "/api/plugins/opts/options", {
+        options: "nope",
+      });
+      assert.equal(shape.status, 400);
+    } finally {
+      await srv.close();
+    }
+  } finally {
+    dir.cleanup();
+    sessions.cleanup();
+  }
+});
+
+test("PUT /api/plugins/{name}/options: 404 unknown, 400 bundle, 409 broken", async () => {
+  const dir = makePluginsDir({ "opts.ts": OPTIONS_PLUGIN, "broken.ts": BROKEN_PLUGIN });
+  // a declarative bundle next to the code plugins
+  fs.mkdirSync(path.join(dir.root, "standup"));
+  fs.writeFileSync(
+    path.join(dir.root, "standup", "plugin.json"),
+    JSON.stringify({ name: "standup", description: "Daily standup helpers" }),
+    "utf-8",
+  );
+  const sessions = tmpdir("tb-sessions-");
+  try {
+    const srv = await startServer({ pluginsDir: dir.root, sessionsDir: sessions.root });
+    try {
+      const ghost = await api(srv.base, "PUT", "/api/plugins/ghost/options", {
+        options: {},
+      });
+      assert.equal(ghost.status, 404);
+      const bundle = await api<{ detail?: string }>(
+        srv.base,
+        "PUT",
+        "/api/plugins/standup/options",
+        { options: {} },
+      );
+      assert.equal(bundle.status, 400);
+      assert.match(String(bundle.body?.detail ?? ""), /declarative bundle/);
+      const broken = await api<{ detail?: string }>(
+        srv.base,
+        "PUT",
+        "/api/plugins/broken/options",
+        { options: {} },
+      );
+      assert.equal(broken.status, 409);
+      assert.match(String(broken.body?.detail ?? ""), /unavailable/);
+      // the broken plugin still reports its error entry
+      const res = await api<PluginsView>(srv.base, "GET", "/api/plugins");
+      assert.deepEqual(
+        res.body.errors.map((e) => e.plugin),
+        ["broken"],
+      );
+    } finally {
+      await srv.close();
+    }
+  } finally {
+    dir.cleanup();
+    sessions.cleanup();
   }
 });

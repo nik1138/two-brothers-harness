@@ -325,9 +325,12 @@ import {
 } from "./permissions.ts";
 import {
   PluginManager,
+  pluginNameOf,
+  validatePluginOptions,
   type HookRegistry,
   type PluginBindings,
   type PluginDiagnosticEntry,
+  type PluginSetting,
 } from "./plugins.ts";
 import {
   isSeedPresetName,
@@ -3379,6 +3382,84 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         ...state.pluginDiagnostics,
       ];
       return diagnostics.length > 0 ? { ...view, diagnostics } : view;
+    }),
+  );
+
+  // Per-plugin options update: validate against the plugin's exported
+  // `configSchema` through the SAME path `loadPlugins` uses, persist the
+  // `{path, options}` settings entry, then reload the manager so the new
+  // options take effect on the next run — the same trigger a settings save
+  // carrying a `plugins` change uses (serialized by the manager's reload
+  // chain, so a concurrent settings save cannot interleave).
+  routes.push(
+    compileRoute("PUT", "/api/plugins/{name}/options", async (ctx) => {
+      requireWritableSettings();
+      await state.pluginsReady;
+      const name = ctx.params.name;
+      const loaded = state.plugins.plugins.get(name);
+      const bundle = state.plugins.bundles.get(name);
+      const failed = state.plugins.errors.find((entry) => entry.plugin === name);
+      if (loaded === undefined && bundle === undefined) {
+        if (failed !== undefined) {
+          throw new HttpError(
+            409,
+            `plugin ${JSON.stringify(name)} is unavailable: ${errorDetail(failed.error)}`,
+          );
+        }
+        throw new HttpError(404, `unknown plugin: ${JSON.stringify(name)}`);
+      }
+      if (loaded === undefined && bundle !== undefined) {
+        throw new HttpError(
+          400,
+          `plugin ${JSON.stringify(name)} is a declarative bundle and takes no options`,
+        );
+      }
+      const plugin = loaded;
+      if (plugin === undefined) {
+        // Unreachable given the guards above (kept for the type checker and
+        // to stay honest if the guard order ever changes).
+        throw new HttpError(404, `unknown plugin: ${JSON.stringify(name)}`);
+      }
+      const body = await ctx.json();
+      const options = isRecord(body) ? body.options : undefined;
+      if (!isRecord(options)) {
+        throw new HttpError(400, "body must be an object: {options: {...}}");
+      }
+      const check = validatePluginOptions(plugin.module, options);
+      if (!check.ok) {
+        throw new HttpError(400, `invalid options for plugin ${JSON.stringify(name)}: ${check.detail}`);
+      }
+      // Replace (or append) the `{path, options}` entry in the persisted
+      // selection; plain-name entries for this plugin upgrade to the object
+      // form. Env overlay names keep riding on top and stay out of the file.
+      const next: PluginSelection = [];
+      let replaced = false;
+      for (const entry of savedPluginSelection) {
+        const entryName = typeof entry === "string" ? entry : pluginNameOf(entry.path);
+        if (entryName === name) {
+          if (!replaced) {
+            next.push({ path: name, options: check.options });
+            replaced = true;
+          }
+          continue;
+        }
+        next.push(entry);
+      }
+      if (!replaced) next.push({ path: name, options: check.options });
+      savedPluginSelection = next;
+      const effective = [...savedPluginSelection];
+      addPluginNames(effective, envPluginSelectionNames());
+      state.pluginSelection = effective;
+      state.plugins.setSettings(effective);
+      await state.plugins.reload();
+      state.settingsStore.write(
+        state.settings.snapshot(),
+        savedPluginSelection,
+        undefined,
+        state.settings.snapshotSubagent(),
+      );
+      const applied = state.plugins.plugins.get(name);
+      return { name, options: applied ? { ...applied.options } : {} };
     }),
   );
 

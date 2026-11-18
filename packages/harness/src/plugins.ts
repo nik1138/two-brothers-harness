@@ -198,6 +198,22 @@ type Role = (typeof ROLES)[number];
 export const TOOL_SCOPES = ["shared", "senior", "junior"] as const;
 export type ToolScope = (typeof TOOL_SCOPES)[number];
 
+/** Cap for the serialized `configSchema` reported by `describe()` (chars). */
+export const DESCRIBE_SCHEMA_MAX_CHARS = 8192;
+
+/** One bounded line of plugin-facing text (diagnostics, error detail). */
+const PLUGIN_TEXT_MAX_CHARS = 500;
+
+function clipPluginText(text: string): string {
+  return text.length <= PLUGIN_TEXT_MAX_CHARS
+    ? text
+    : `${text.slice(0, PLUGIN_TEXT_MAX_CHARS)}…`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /**
  * A plugin tool handler: receives the model's arguments and an `AbortSignal`
  * as an optional second argument. The signal is the run's cancellation
@@ -971,7 +987,7 @@ export function normalizePluginSettings(
 }
 
 /** Settings entries are matched to files by plugin name (extension stripped). */
-function pluginNameOf(entryPath: string): string {
+export function pluginNameOf(entryPath: string): string {
   return path.basename(entryPath).replace(/\.[^.]+$/, "");
 }
 
@@ -1029,6 +1045,47 @@ export function resolvePluginOptions(
     return { options: {}, diagnostics };
   }
   return { options, diagnostics };
+}
+
+/**
+ * The module's exported `configSchema` as a JSON-safe value for
+ * `GET /api/plugins`, or `null` when it is absent, not a JSON-schema object,
+ * or cannot round-trip through `JSON.stringify` within the cap. The schema is
+ * declared config, never executed; the round-trip also drops functions and
+ * other non-serializable exports gracefully instead of failing the route.
+ */
+export function serializeConfigSchema(
+  module: Record<string, unknown>,
+): JsonSchemaSubset | null {
+  const schema = module.configSchema;
+  if (schema === undefined || schema === null) return null;
+  if (typeof schema !== "object" || Array.isArray(schema)) return null;
+  try {
+    const text = JSON.stringify(schema);
+    if (text === undefined || text.length > DESCRIBE_SCHEMA_MAX_CHARS) return null;
+    return JSON.parse(text) as JsonSchemaSubset;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Strict variant of the options check for the options-update API: the SAME
+ * validation path `loadPlugins` uses (`resolvePluginOptions`), but the
+ * diagnostics are the failure detail instead of a silent `{}` fallback.
+ * Returns `{ok: true, options}` with the validated options, or
+ * `{ok: false, detail}` naming why the object was rejected (bounded).
+ */
+export function validatePluginOptions(
+  module: Record<string, unknown>,
+  rawOptions: unknown,
+): { ok: true; options: Record<string, unknown> } | { ok: false; detail: string } {
+  const raw = isRecord(rawOptions) ? rawOptions : {};
+  const resolved = resolvePluginOptions(module, raw);
+  if (resolved.diagnostics.length > 0) {
+    return { ok: false, detail: clipPluginText(resolved.diagnostics.join("; ")) };
+  }
+  return { ok: true, options: resolved.options };
 }
 
 /**
@@ -1364,12 +1421,20 @@ export class PluginManager {
    * `roles` is the historical shared view and stays byte-compatible with the
    * shipped API: a code plugin with at least one tool reports `["shared"]`, a
    * plugin that registered nothing reports `[]` — and a declarative bundle
-   * (which never registers tools) reports `[]` too. Reporting real per-tool
-   * scopes here is an integration-lane change (the scopes themselves live on
-   * `LoadedPlugin.tools[*].scope` and in `bindingsFor`'s buckets).
+   * (which never registers tools) reports `[]` too.
    *
    * Additive `kind` discriminates the two plugin kinds (`"code"` | `"bundle"`)
    * and bundles carry their manifest `version` — old consumers ignore both.
+   *
+   * Additive per-plugin options surface: code plugins also report their
+   * declared `configSchema` (JSON round-trip; `null` when the module exports
+   * none or one that cannot serialize within the cap) and the current
+   * effective `options` (the validated object the last load registered with;
+   * `{}` when none were configured or a configured object was rejected), plus
+   * `toolsByScope` — the per-tool scope assignment straight from
+   * `effectiveToolScope` over `LoadedPlugin.tools`. Bundles take no options
+   * and register no tools, so they report `configSchema: null`,
+   * `options: {}` and empty buckets.
    */
   describe(): {
     plugins: Array<{
@@ -1378,6 +1443,9 @@ export class PluginManager {
       roles: string[];
       kind: "code" | "bundle";
       version?: string;
+      configSchema: JsonSchemaSubset | null;
+      options: Record<string, unknown>;
+      toolsByScope: Record<ToolScope, string[]>;
     }>;
     errors: PluginErrorEntry[];
   } {
@@ -1387,11 +1455,24 @@ export class PluginManager {
       roles: string[];
       kind: "code" | "bundle";
       version?: string;
+      configSchema: JsonSchemaSubset | null;
+      options: Record<string, unknown>;
+      toolsByScope: Record<ToolScope, string[]>;
     }> = [];
     for (const name of [...this.plugins.keys()].sort()) {
       const loaded = this.plugins.get(name) as LoadedPlugin;
       const roles = loaded.tools.length > 0 ? ["shared"] : [];
-      items.push({ name, description: loaded.description, roles, kind: "code" });
+      const toolsByScope: Record<ToolScope, string[]> = { shared: [], senior: [], junior: [] };
+      for (const tool of loaded.tools) toolsByScope[effectiveToolScope(tool)].push(tool.name);
+      items.push({
+        name,
+        description: loaded.description,
+        roles,
+        kind: "code",
+        configSchema: serializeConfigSchema(loaded.module),
+        options: { ...loaded.options },
+        toolsByScope,
+      });
     }
     for (const name of [...this.bundles.keys()].sort()) {
       const bundle = this.bundles.get(name) as LoadedPluginBundle;
@@ -1401,6 +1482,9 @@ export class PluginManager {
         roles: [],
         kind: "bundle",
         version: bundle.version,
+        configSchema: null,
+        options: {},
+        toolsByScope: { shared: [], senior: [], junior: [] },
       });
     }
     items.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));

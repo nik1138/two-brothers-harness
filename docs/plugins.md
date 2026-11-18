@@ -357,15 +357,33 @@ Settings entries may carry per-plugin settings:
   `TWO_BROTHERS_PLUGINS_DIR`, else `<cwd>/plugins` for the CLI; the server
   keeps its module-relative default unless one of those is set.
 - **API.**
-  - `GET /api/plugins` → `{plugins: [{name, description, roles, kind}],
-    errors: [{plugin, error}]}`. `roles` stays `["shared"]` for any
-    tool-carrying code plugin (`[]` when it registered none, and for bundles).
+  - `GET /api/plugins` → `{plugins: [{name, description, roles, kind,
+    configSchema, options, toolsByScope}], errors: [{plugin, error}]}`.
+    `roles` stays `["shared"]` for any tool-carrying code plugin (`[]` when it
+    registered none, and for bundles) — the byte-compatible historical view.
+    The additive per-plugin options surface: code plugins report their
+    declared `configSchema` (serialized JSON; `null` when the module exports
+    none or one that cannot serialize) and the current effective `options`
+    (the validated object of the last load; `{}` when none/rejected), plus
+    `toolsByScope` — the per-tool scope assignment straight from
+    `effectiveToolScope` (`{shared, senior, junior}` tool-name lists).
+    Bundles report `configSchema: null`, `options: {}` and empty buckets.
     The additive `kind` is `"code"` or `"bundle"`; bundle entries also carry
     their manifest `version`. When there are notes, an additive `diagnostics:
     string[]` field carries load-time notes plus the last run's binding notes
     (`plugin: message`) — bundle load notes (runtime-field info, missing path
     targets, code-plugin collisions) ride the same list; it is omitted when
     empty so the shipped fields stay byte-compatible.
+  - `PUT /api/plugins/{name}/options` with body `{options: {...}}` validates
+    the object against the plugin's exported `configSchema` through the same
+    path `loadPlugins` uses, persists it as the `{path, options}` entry in
+    the shared `plugins` settings list, and reloads the manager so the new
+    options apply to the next run (the same trigger as a plugins-carrying
+    settings save). Responses: `200 {name, options}` on success; `400` for
+    options rejected by the schema, a malformed body, or a declarative
+    bundle (bundles take no options); `404` for an unknown plugin; `409`
+    when the plugin is in `errors[]` (unavailable), with the recorded error
+    as the detail.
   - `GET /api/settings` and the `PUT` response carry the effective shared
     selection under the top-level `plugins` key. `PUT /api/settings`
     accepts the shared list (with `{path, options}` entries) and a legacy
