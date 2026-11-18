@@ -396,7 +396,7 @@ export interface RoleSettingsPatch {
  * One list: every enabled plugin is available to both Senior and Junior
  * (owner decision 2026-11-03).
  */
-export type PluginSelection = string[]
+export type PluginSelection = Array<string | { path: string; options: Record<string, unknown> }>
 
 /** Legacy per-role plugin selection; read fail-soft and merged. */
 export interface LegacyPluginSelection {
@@ -411,7 +411,7 @@ export type PluginSelectionPayload = PluginSelection | LegacyPluginSelection
  * Normalize either selection shape into the shared list (dedup, order
  * preserved: list order, or senior then junior for the legacy object).
  */
-export function normalizePluginSelection(value: unknown): PluginSelection {
+export function normalizePluginSelection(value: unknown): string[] {
   const out: string[] = []
   const add = (item: unknown): void => {
     if (typeof item !== 'string') return
@@ -419,7 +419,16 @@ export function normalizePluginSelection(value: unknown): PluginSelection {
     if (name && !out.includes(name)) out.push(name)
   }
   if (Array.isArray(value)) {
-    value.forEach(add)
+    // Entries may be bare names or `{path, options}` objects (per-plugin
+    // settings); only the name feeds the enable-list editor — the options
+    // ride the dedicated `PUT /api/plugins/{name}/options` route.
+    for (const item of value) {
+      if (typeof item === 'string') add(item)
+      else if (item !== null && typeof item === 'object') {
+        const path = (item as Record<string, unknown>).path
+        if (typeof path === 'string') add(path)
+      }
+    }
   } else if (value !== null && typeof value === 'object') {
     const legacy = value as Record<string, unknown>
     for (const role of ['senior', 'junior'] as const) {
@@ -489,11 +498,49 @@ export async function updateSettingsWithPlugins(
 
 // -- plugins ------------------------------------------------------------------
 
-/** One discovered plugin (`GET /api/plugins`); names and descriptions only. */
+/** One discovered plugin (`GET /api/plugins`). */
 export interface PluginDescriptor {
   name: string
   description: string
   roles: string[]
+  /** Additive: "code" (default when an older backend omits it) or "bundle". */
+  kind?: PluginKind
+  /** Additive: bundle manifest version. */
+  version?: string
+  /**
+   * Additive: the plugin's exported options schema (`null` when it declares
+   * none or one that cannot serialize).
+   */
+  configSchema?: PluginConfigSchema | null
+  /** Additive: the current effective options of the last load (`{}` when none). */
+  options?: Record<string, unknown>
+  /** Additive: per-scope tool names; empty buckets for bundles. */
+  toolsByScope?: PluginToolsByScope
+}
+
+export type PluginKind = 'code' | 'bundle'
+
+export interface PluginToolsByScope {
+  shared: string[]
+  senior: string[]
+  junior: string[]
+}
+
+/**
+ * The JSON-Schema subset a plugin may export as its `configSchema` (same
+ * subset as tool parameter schemas). Only the shapes the options editor
+ * understands are typed here; everything else is ignored by the mapping.
+ */
+export interface PluginConfigSchema {
+  type?: string
+  properties?: Record<string, PluginConfigSchema>
+  required?: string[]
+  description?: string
+  default?: unknown
+  enum?: unknown[]
+  oneOf?: PluginConfigSchema[]
+  const?: unknown
+  additionalProperties?: boolean
 }
 
 /** A plugin that failed to load; fail-soft, the rest keep working. */
@@ -507,9 +554,83 @@ export interface PluginsView {
   errors: PluginLoadError[]
 }
 
+/**
+ * Tolerant read of one `GET /api/plugins` entry: additive fields fall back to
+ * empty defaults so an older backend (names/descriptions only) keeps working
+ * and the section renders the "no configurable options" note.
+ */
+export function normalizePluginDescriptor(value: unknown): PluginDescriptor | null {
+  if (value === null || typeof value !== 'object') return null
+  const raw = value as Record<string, unknown>
+  if (typeof raw.name !== 'string' || !raw.name.trim()) return null
+  const scopeList = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((t): t is string => typeof t === 'string') : []
+  const rawScopes =
+    raw.toolsByScope !== null && typeof raw.toolsByScope === 'object'
+      ? (raw.toolsByScope as Record<string, unknown>)
+      : {}
+  return {
+    name: raw.name,
+    description: typeof raw.description === 'string' ? raw.description : '',
+    roles: scopeList(raw.roles),
+    kind: raw.kind === 'bundle' ? 'bundle' : 'code',
+    version: typeof raw.version === 'string' ? raw.version : undefined,
+    configSchema:
+      raw.configSchema !== null && typeof raw.configSchema === 'object'
+        ? (raw.configSchema as PluginConfigSchema)
+        : null,
+    options:
+      raw.options !== null && typeof raw.options === 'object' && !Array.isArray(raw.options)
+        ? { ...(raw.options as Record<string, unknown>) }
+        : {},
+    toolsByScope: {
+      shared: scopeList(rawScopes.shared),
+      senior: scopeList(rawScopes.senior),
+      junior: scopeList(rawScopes.junior),
+    },
+  }
+}
+
 export async function listPlugins(): Promise<PluginsView> {
   const body = await request<Partial<PluginsView>>('/api/plugins')
-  return { plugins: body.plugins ?? [], errors: body.errors ?? [] }
+  const plugins = Array.isArray(body.plugins)
+    ? body.plugins
+        .map(normalizePluginDescriptor)
+        .filter((p): p is PluginDescriptor => p !== null)
+    : []
+  return {
+    plugins,
+    errors: Array.isArray(body.errors)
+      ? body.errors.filter(
+          (e): e is PluginLoadError =>
+            e !== null &&
+            typeof e === 'object' &&
+            typeof (e as PluginLoadError).plugin === 'string' &&
+            typeof (e as PluginLoadError).error === 'string',
+        )
+      : [],
+  }
+}
+
+export interface PluginOptionsUpdate {
+  name: string
+  options: Record<string, unknown>
+}
+
+/**
+ * Validate + persist per-plugin options through the dedicated route. The
+ * server answers 200 `{name, options}` (post-reload effective values);
+ * failures carry `{detail}`: 400 (schema rejection / malformed body /
+ * declarative bundle), 404 (unknown plugin), 409 (plugin in errors[]).
+ */
+export async function updatePluginOptions(
+  name: string,
+  options: Record<string, unknown>,
+): Promise<PluginOptionsUpdate> {
+  return request<PluginOptionsUpdate>(
+    `/api/plugins/${encodeURIComponent(name)}/options`,
+    json('PUT', { options }),
+  )
 }
 
 // -- background runs ----------------------------------------------------------
