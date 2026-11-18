@@ -27,8 +27,11 @@ separate frontend build:
 ```bash
 two-brothers serve --port 8600                                            # web workspace → http://127.0.0.1:8600
 two-brothers run "Plan a migration from Redis to Valkey" --provider mock  # one offline cycle
-two-brothers tui --provider mock                                          # terminal workspace
+two-brothers tui                                                          # terminal workspace
 ```
+
+The `run` line uses the built-in mock provider so it works offline with no
+API key; `two-brothers onboard` points any workspace at a real model.
 
 From a checkout — the same commands via `node dist/cli.js …`, offline with the
 deterministic mock provider:
