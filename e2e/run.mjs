@@ -141,6 +141,13 @@
 //                  card syncs the (previously stale) Base URL field to the
 //                  preset URL; the save persists provider_ref + the preset URL
 //                  (never the stale Manual URL) and survives a reload
+//   settings-mcp   mock provider: Settings → MCP shows the empty state when no
+//                  config names a server; booted again with `--mcp-config`
+//                  pointing at a fast-failing local stub server, the section
+//                  lists the configured row (name/transport/role) and after a
+//                  mock run the /status dialog's MCP block records the failed
+//                  server (✗ + bounded error + "1 failed"); GET /api/mcp
+//                  matches the documented contract in both boots
 //   session-switch-race mock provider: with session A's detail response held,
 //                  a rapid A→B switch keeps B on screen — the stale A load must
 //                  not commit selection/transcript
@@ -559,11 +566,14 @@ function tsEnv(overrides = {}) {
  *   recordFile optional --record-file forwarded to the fixture (the
  *            `provider-discovery` scenario asserts the request headers the
  *            harness sent, e.g. x-goog-api-key on the Google probe)
+ *   mcpConfig optional --mcp-config path forwarded to `serve` (the
+ *            `settings-mcp` scenario points it at a fixture config naming a
+ *            fast-failing local stub server)
  * The returned handle may carry a `modelServer` (fixture runs) that
  * killBackend() tears down with the backend itself, plus its `modelBase`
  * (the OpenAI-compatible `/v1` URL a helper route can point at).
  */
-async function startBackend({ kind, scenario, lingerMs, helperModel, streamChunkMs, recordFile }) {
+async function startBackend({ kind, scenario, lingerMs, helperModel, streamChunkMs, recordFile, mcpConfig }) {
   const port = await freePort()
   const dir = tmpDir('tb-e2e-ts')
   // Every handle spawned below; on failure the scenario never sees a backend
@@ -596,11 +606,19 @@ async function startBackend({ kind, scenario, lingerMs, helperModel, streamChunk
         TWO_BROTHERS_JUNIOR_MODEL: 'e2e-junior',
       })
     }
-    const server = spawnServer(
-      [TS_CLI, 'serve', '--host', '127.0.0.1', '--port', String(port), '--sessions-dir', dir],
-      `ts-${kind}`,
-      { env },
-    )
+    const serveArgs = [
+      TS_CLI,
+      'serve',
+      '--host',
+      '127.0.0.1',
+      '--port',
+      String(port),
+      '--sessions-dir',
+      dir,
+    ]
+    if (typeof mcpConfig === 'string' && mcpConfig !== '')
+      serveArgs.push('--mcp-config', mcpConfig)
+    const server = spawnServer(serveArgs, `ts-${kind}`, { env })
     spawned.push(server)
     await waitForServer(port)
     return { port, dir, server, modelServer, modelBase, base: `http://127.0.0.1:${port}` }
@@ -7017,6 +7035,151 @@ async function scenarioSettingsPresetSync(runner) {
   }
 }
 
+// -- scenario: Settings → MCP + the /status MCP block ---------------------------
+
+async function scenarioSettingsMcp(runner) {
+  // Phase 1 — no MCP config at all: the section renders the honest empty state
+  // and the API reports nothing configured with no lastRun.
+  const be = await startBackend({ kind: 'mock' })
+  const { context, page, consoleGuard } = await newScenarioPage()
+  try {
+    await page.goto(be.base)
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await page.locator('.sidebar-footer .footer-action').click()
+    const dialog = page.locator('[role="dialog"][aria-labelledby="settings-dialog-title"]')
+    await dialog.waitFor({ state: 'visible' })
+    await dialog.locator('.settings-nav-item', { hasText: 'MCP' }).click()
+    const pane = dialog.locator('.settings-pane[aria-label="MCP"]')
+    await pane.waitFor({ state: 'visible' })
+    await waitFor(async () => (await pane.locator('.mcp-note').count()) === 1, {
+      desc: 'the MCP empty-state note',
+    })
+    assert.match(await pane.locator('.mcp-note').innerText(), /No MCP servers configured/)
+
+    const empty = await (await fetch(`${be.base}/api/mcp`)).json()
+    assert.deepEqual(empty.configured, [])
+    assert.equal(empty.lastRun, null)
+
+    consoleGuard.assertClean()
+  } finally {
+    await context.close().catch(() => {})
+    await killBackend(be)
+  }
+
+  // Phase 2 — a config naming a guaranteed-fail fast local stub server. The
+  // configured row shows in Settings; a mock run records the failed load in
+  // lastRun; the /status dialog's MCP block shows the ✗ row.
+  const mcpDir = tmpDir('tb-e2e-mcp')
+  const mcpConfigPath = path.join(mcpDir, 'mcp.json')
+  fs.writeFileSync(
+    mcpConfigPath,
+    JSON.stringify({
+      mcpServers: {
+        'e2e-fail': { command: process.execPath, args: ['-e', 'process.exit(1)'], role: 'shared' },
+      },
+    }),
+  )
+  const be2 = await startBackend({ kind: 'mock', mcpConfig: mcpConfigPath })
+  const wsDir = tmpDir('tb-e2e-ws-mcp')
+  const wsName = path.basename(wsDir)
+  const context2 = await browser.newContext()
+  const page2 = await context2.newPage()
+  const consoleGuard2 = attachConsoleGuard(page2)
+  try {
+    await page2.goto(be2.base)
+    await page2.locator('nav[aria-label="Sessions"]').waitFor()
+    await page2.locator('.sidebar-footer .footer-action').click()
+    const dialog = page2.locator('[role="dialog"][aria-labelledby="settings-dialog-title"]')
+    await dialog.waitFor({ state: 'visible' })
+    await dialog.locator('.settings-nav-item', { hasText: 'MCP' }).click()
+    const pane = dialog.locator('.settings-pane[aria-label="MCP"]')
+    await pane.waitFor({ state: 'visible' })
+    const card = pane.locator('.mcp-card')
+    await card.waitFor({ state: 'visible' })
+    assert.equal((await card.locator('.mcp-card-title').allInnerTexts()).join(''), 'e2e-fail')
+    assert.match(await card.innerText(), /config/)
+    assert.match(await card.innerText(), /stdio/)
+    assert.match(await card.innerText(), /role: shared/)
+    assert.match(await card.innerText(), /process\.exit\(1\)/)
+
+    // The documented contract, straight from the backend: the configured view
+    // and (before any run) the absent lastRun.
+    const before = await (await fetch(`${be2.base}/api/mcp`)).json()
+    assert.equal(before.configured.length, 1)
+    assert.deepEqual(
+      {
+        name: before.configured[0].name,
+        source: before.configured[0].source,
+        plugin: before.configured[0].plugin,
+        role: before.configured[0].role,
+        transport: before.configured[0].transport,
+      },
+      { name: 'e2e-fail', source: 'config', plugin: null, role: 'shared', transport: 'stdio' },
+    )
+    assert.match(before.configured[0].target, /process\.exit\(1\)/)
+    assert.equal(before.lastRun, null)
+    await dialog.locator('button[aria-label="Close settings"]').click()
+    await dialog.waitFor({ state: 'hidden', timeout: 15000 })
+
+    // One mock turn: the MCP load fails per-server (fail-soft) and records.
+    // The run record (not the composer chrome) is the deterministic signal:
+    // wait for a terminal status, then for the recorded MCP outcome.
+    await ensureWorkspace(page2, wsDir, wsName)
+    await selectWorkspaceFilter(page2, wsName)
+    await createSession(page2, 'E2E MCP session')
+    await sendTask(page2, TASK_TEXT)
+    await waitFor(
+      async () => {
+        const runs = await (await fetch(`${be2.base}/api/runs`)).json()
+        return (
+          Array.isArray(runs) &&
+          runs.some((run) => typeof run.status === 'string' && run.status !== 'running' &&
+            run.status !== 'queued' && run.status !== 'waiting')
+        )
+      },
+      { timeout: 90000, desc: 'the mock run to reach a terminal status' },
+    )
+    const after = await waitFor(
+      async () => {
+        const body = await (await fetch(`${be2.base}/api/mcp`)).json()
+        return body?.lastRun ? body : null
+      },
+      { timeout: 15000, desc: 'GET /api/mcp to record the run MCP outcome' },
+    )
+    assert.match(after.lastRun.session, /\.jsonl$/)
+    assert.equal(after.lastRun.servers.length, 1)
+    assert.equal(after.lastRun.servers[0].name, 'e2e-fail')
+    assert.equal(after.lastRun.servers[0].status, 'failed')
+    assert.equal(after.lastRun.servers[0].toolCount, 0)
+    assert.ok(
+      after.lastRun.servers[0].error && after.lastRun.servers[0].error.length > 0,
+      'the failed server carries a bounded error detail',
+    )
+
+    // The /status dialog: the MCP block shows the ✗ row and the failed count.
+    await page2.locator('textarea.composer-input').fill('/')
+    const statusOption = page2.locator('.mention-option', { hasText: '/status' })
+    await statusOption.waitFor({ state: 'visible' })
+    await statusOption.click()
+    const mcpBlock = page2.locator('.status-mcp')
+    await mcpBlock.waitFor({ state: 'visible' })
+    assert.match(await mcpBlock.locator('.status-mcp-title').innerText(), /MCP — last run/i)
+    assert.match(await mcpBlock.locator('.status-mcp-failed').innerText(), /1 failed/)
+    const row = mcpBlock.locator('.status-mcp-row--failed')
+    assert.equal((await row.locator('.status-mcp-mark').innerText()).trim(), '✗')
+    assert.match(await row.locator('.status-mcp-name').innerText(), /e2e-fail/)
+    assert.notEqual((await row.locator('.status-mcp-detail').innerText()).trim(), '')
+
+    consoleGuard2.assertClean()
+    runner.pass('settings-mcp')
+  } finally {
+    await context2.close().catch(() => {})
+    await killBackend(be2)
+    rmTree(mcpDir)
+    rmTree(wsDir)
+  }
+}
+
 // -- scenario: real models (opt-in) ---------------------------------------------------
 
 async function scenarioReal(runner) {
@@ -8142,6 +8305,13 @@ async function main() {
         run: () => (
           (currentRunner = makeRunner('settings-preset-sync')),
           scenarioSettingsPresetSync(currentRunner)
+        ),
+      },
+      {
+        label: 'settings-mcp',
+        run: () => (
+          (currentRunner = makeRunner('settings-mcp')),
+          scenarioSettingsMcp(currentRunner)
         ),
       },
       {
