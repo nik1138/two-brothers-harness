@@ -374,6 +374,19 @@ Settings entries may carry per-plugin settings:
     (`plugin: message`) — bundle load notes (runtime-field info, missing path
     targets, code-plugin collisions) ride the same list; it is omitted when
     empty so the shipped fields stay byte-compatible.
+  - `GET /api/mcp` → `{configured, lastRun}` (the opencode MCP visibility
+    model). `configured` lists every merged server — config file plus plugin
+    contributions, config winning name collisions — as
+    `{name, source, plugin, role, transport, target}`: `source` is `"config"`
+    or `"plugin"` (`plugin` names the contributor, else `null`), `role` is
+    the effective role exactly as the loader computes it, `transport` is
+    `"stdio" | "http" | "invalid"`, and `target` is the bounded (200 chars)
+    command line or URL — env maps and header values never appear. `lastRun`
+    is `null` until a run whose merged server set was non-empty finishes its
+    MCP load, then `{at, session, runId, servers}` with one
+    `{name, status: "connected" | "failed", error?, toolCount}` per merged
+    server (`error` bounded to 300 chars, present only on failure). A run
+    with nothing configured leaves `lastRun` untouched.
   - `PUT /api/plugins/{name}/options` with body `{options: {...}}` validates
     the object against the plugin's exported `configSchema` through the same
     path `loadPlugins` uses, persists it as the `{path, options}` entry in
