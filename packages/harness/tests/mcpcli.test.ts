@@ -109,6 +109,23 @@ test("mcp list: no config set prints a hint and exits 0", async () => {
   });
 });
 
+test("mcp list --json: no config set keeps stdout machine-clean", async () => {
+  await withoutMcpEnv(async () => {
+    const io = makeIO();
+    const code = await main(["mcp", "list", "--json"], io);
+    assert.equal(code, 0);
+    // stdout is exactly one parseable object (the `sessions --json` empty-dir
+    // `[]` convention) so `mcp list --json | jq .` never chokes on prose.
+    assert.deepEqual(io.out, [JSON.stringify({ servers: [] })], io.out.join("\n"));
+    assert.deepEqual(JSON.parse(io.out[0] ?? ""), { servers: [] });
+    // The human hint moves to stderr.
+    const err = io.err.join("\n");
+    assert.ok(err.includes("No MCP servers configured"), err);
+    assert.ok(err.includes("--mcp-config"), err);
+    assert.ok(err.includes("TWO_BROTHERS_MCP_CONFIG"), err);
+  });
+});
+
 test("mcp list: TWO_BROTHERS_MCP_CONFIG env names the config file", async () => {
   await withTempDir(async (dir) => {
     const filePath = writeConfig(dir, FULL_CONFIG);

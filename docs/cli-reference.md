@@ -1312,10 +1312,13 @@ node dist/cli.js mcp list --mcp-config ./mcp.json
 node dist/cli.js mcp list --json
 ```
 
-When no config is set it prints `No MCP servers configured` plus a hint
-naming `--mcp-config` / `TWO_BROTHERS_MCP_CONFIG` (exit `0`); a missing,
-unparseable or wrong-shaped file is one bounded error line (exit `2`,
-matching `doctor`'s posture). The human output is one line per server,
+When no config is set the human output prints `No MCP servers configured`
+plus a hint naming `--mcp-config` / `TWO_BROTHERS_MCP_CONFIG` (exit `0`);
+with `--json` an unset config instead prints `{"servers":[]}` as the only
+stdout line — the hint moves to stderr, matching the `sessions --json`
+empty-dir `[]` convention, so `mcp list --json | jq .` never chokes on
+prose. A missing, unparseable or wrong-shaped file is one bounded error
+line (exit `2`, matching `doctor`'s posture). The human output is one line per server,
 sorted by name, with aligned columns — `name`, `transport`
 (`stdio`|`http`|`invalid` when the entry has neither `command` nor `url`),
 the effective `role` (an unset server role defaults to `junior`, like the

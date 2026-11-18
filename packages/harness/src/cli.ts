@@ -4049,6 +4049,16 @@ function mcpListCommand(
 ): number {
   const configPath = mcpConfigFromValues(values);
   if (configPath === undefined) {
+    if (values.json === true) {
+      // Machine-clean stdout (the `sessions --json` on an empty dir prints
+      // `[]` convention): unset config still yields a parseable object, and
+      // the human hint moves to stderr so `mcp list --json | jq .` never
+      // chokes on prose.
+      io.log(JSON.stringify({ servers: [] }));
+      io.error("No MCP servers configured.");
+      io.error("Set --mcp-config <file> or TWO_BROTHERS_MCP_CONFIG to list MCP servers.");
+      return 0;
+    }
     io.log("No MCP servers configured.");
     io.log("Set --mcp-config <file> or TWO_BROTHERS_MCP_CONFIG to list MCP servers.");
     return 0;
