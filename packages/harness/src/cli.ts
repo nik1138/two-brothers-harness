@@ -98,6 +98,8 @@ import {
   mergeMcpConfig,
   closeMcpClientBounded,
   type McpConfigFileShape,
+  type McpServerRole,
+  type McpServerSpec,
   type McpToolSet,
 } from "./mcp.ts";
 import { SessionMetadataStore } from "./metadata.ts";
@@ -3943,6 +3945,175 @@ function doSpill(
 }
 
 // --------------------------------------------------------------------------- //
+// mcp: offline listing of the configured MCP servers
+// --------------------------------------------------------------------------- //
+
+/** Bound for one rendered `mcp list` diagnostic/target line. */
+const MCP_LIST_LINE_MAX_CHARS = 240;
+/** Hard bound for the rendered `target` column (terminal-width safety). */
+const MCP_LIST_TARGET_MAX_CHARS = 80;
+
+/** The `mcp` command's flags: config resolution plus `--json`. */
+const MCP_OPTIONS = {
+  "mcp-config": { type: "string" as const },
+  json: { type: "boolean" as const, default: false },
+  ...HELP_OPTIONS,
+} satisfies ParseArgsOptionsConfig;
+
+/** One row of the `mcp list` report. */
+interface McpListEntry {
+  name: string;
+  transport: "stdio" | "http" | "invalid";
+  /** The effective role (an unset spec defaults to "junior", like the loader). */
+  role: McpServerRole;
+  /** stdio: command + args; http: the URL; invalid: "". */
+  target: string;
+  /** Sorted env var NAMES only — values never leave the config file. */
+  envKeys: string[];
+  /** Sorted header NAMES only — values never leave the config file. */
+  headerKeys: string[];
+}
+
+/** Sorted key names of a string mapping, or [] for a non-object value. */
+function mcpKeyNames(mapping: Record<string, string> | undefined): string[] {
+  if (mapping === undefined || typeof mapping !== "object" || Array.isArray(mapping)) return [];
+  return Object.keys(mapping).sort();
+}
+
+/** One `mcpServers` entry as a list row (offline — nothing is started). */
+function mcpListEntry(name: string, spec: McpServerSpec): McpListEntry {
+  const isHttp = typeof spec.url === "string" && spec.url !== "";
+  const isStdio = !isHttp && typeof spec.command === "string" && spec.command !== "";
+  const target = isHttp
+    ? String(spec.url)
+    : isStdio
+      ? [spec.command, ...(Array.isArray(spec.args) ? spec.args : [])].join(" ")
+      : "";
+  return {
+    name,
+    transport: isHttp ? "http" : isStdio ? "stdio" : "invalid",
+    role: spec.role ?? "junior",
+    target,
+    envKeys: mcpKeyNames(spec.env),
+    headerKeys: mcpKeyNames(spec.headers),
+  };
+}
+
+/** Clip the target column to its hard bound, marking the cut. */
+function boundMcpTarget(target: string): string {
+  return target.length > MCP_LIST_TARGET_MAX_CHARS
+    ? `${target.slice(0, MCP_LIST_TARGET_MAX_CHARS - 1)}…`
+    : target;
+}
+
+/** Human table: aligned `name transport role target` columns, sorted by name. */
+function renderMcpList(entries: McpListEntry[], style: CliStyle): string[] {
+  const header = { name: "name", transport: "transport", role: "role", target: "target" };
+  const width = (key: "name" | "transport" | "role") =>
+    Math.max(header[key].length, ...entries.map((entry) => entry[key].length));
+  const nameW = width("name");
+  const transportW = width("transport");
+  const roleW = width("role");
+  const line = (name: string, transport: string, role: string, target: string) =>
+    `${name.padEnd(nameW)}  ${transport.padEnd(transportW)}  ${role.padEnd(roleW)}  ${target}`;
+  const rows = [
+    style.bold(line(header.name, header.transport, header.role, header.target)),
+  ];
+  for (const entry of entries) {
+    rows.push(line(entry.name, entry.transport, entry.role, boundMcpTarget(entry.target)));
+  }
+  return rows;
+}
+
+/** Shared `mcp` subcommand usage diagnostic: exit 2. */
+function mcpUsageError(message: string, io: CliIO): number {
+  io.error(`[error] ${message}`);
+  io.error(`Usage: ${commandUsage("mcp")}`);
+  io.error("Run 'two-brothers mcp --help'.");
+  return 2;
+}
+
+/**
+ * `two-brothers mcp list [--mcp-config <file>] [--json]`: the offline
+ * listing of the MCP servers named by the config file (read only — nothing
+ * is started or contacted, so the command is always local and exits 0 for a
+ * valid file). The config path resolves like `run`: `--mcp-config` >
+ * `TWO_BROTHERS_MCP_CONFIG`. Unset prints a hint (exit 0); a missing,
+ * unparseable or wrong-shaped file is a bounded error (exit 2), matching
+ * `doctor`'s posture. Env/header VALUES are never printed — key names only.
+ */
+function mcpListCommand(
+  values: Record<string, any>,
+  io: CliIO,
+  style: CliStyle,
+): number {
+  const configPath = mcpConfigFromValues(values);
+  if (configPath === undefined) {
+    io.log("No MCP servers configured.");
+    io.log("Set --mcp-config <file> or TWO_BROTHERS_MCP_CONFIG to list MCP servers.");
+    return 0;
+  }
+  let specs: Record<string, McpServerSpec>;
+  try {
+    specs = loadMcpToolSpecs(configPath);
+  } catch (exc) {
+    // A JSON.parse SyntaxError quotes the file's bytes — never surface it;
+    // report the path and the shape problem like doctor's mcp-config check.
+    const message =
+      exc instanceof SyntaxError
+        ? `${configPath} is not valid JSON`
+        : exc instanceof Error
+          ? exc.message
+          : String(exc);
+    const bounded =
+      message.length > MCP_LIST_LINE_MAX_CHARS
+        ? `${message.slice(0, MCP_LIST_LINE_MAX_CHARS - 1)}…`
+        : message;
+    io.error(`[error] ${bounded}`);
+    io.error(`Usage: ${commandUsage("mcp")}`);
+    io.error("Run 'two-brothers mcp --help'.");
+    return 2;
+  }
+  const entries = Object.keys(specs)
+    .sort()
+    .map((name) => mcpListEntry(name, specs[name] ?? {}));
+  if (values.json === true) {
+    io.log(JSON.stringify({ servers: entries }));
+    return 0;
+  }
+  if (entries.length === 0) {
+    io.log(`No MCP servers configured in ${configPath}.`);
+    return 0;
+  }
+  for (const line of renderMcpList(entries, style)) io.log(line);
+  return 0;
+}
+
+/**
+ * `two-brothers mcp [list]`: the MCP server listing subcommand. A bare `mcp`
+ * behaves as `mcp list` (the house default-action convention, like a bare
+ * `sessions`); only `list` exists today. Exit 0 for a valid config, 2 on a
+ * usage/config error.
+ */
+function doMcp(argv: string[], io: CliIO, style: CliStyle = plainCliStyle): number {
+  const parsed = parseCommandArgs(argv, MCP_OPTIONS, "mcp", io, true);
+  if (parsed === null) return 2;
+  const { values, positionals } = parsed;
+  if (isHelpRequested(values)) {
+    io.log(renderCommandHelp("mcp", style));
+    return 0;
+  }
+  const subcommand = positionals[0];
+  if (subcommand !== undefined && subcommand !== "list") {
+    return mcpUsageError(`unexpected argument '${subcommand}' (mcp takes 'list')`, io);
+  }
+  if (positionals.length > 1) {
+    return mcpUsageError(`unexpected argument: ${positionals.slice(1).join(" ")}`, io);
+  }
+  return mcpListCommand(values, io, style);
+}
+
+// --------------------------------------------------------------------------- //
 // doctor: local environment + provider diagnostics
 // --------------------------------------------------------------------------- //
 
@@ -4783,6 +4954,7 @@ export async function main(
   if (command === "selftest") return doSelftest(argv.slice(1), io, cliStyle);
   if (command === "sessions") return doSessions(argv.slice(1), io, cliStyle);
   if (command === "spill") return doSpill(argv.slice(1), io, cliStyle);
+  if (command === "mcp") return doMcp(argv.slice(1), io, cliStyle);
   if (command === "run") return doRun(argv.slice(1), io, cliStyle);
   if (command === "chat") return doChat(argv.slice(1), io, cliStyle);
   if (command === "tui") return doTui(argv.slice(1), io, cliStyle);

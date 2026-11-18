@@ -49,6 +49,7 @@ import "./server.test.ts";
 import "./cli.test.ts";
 import "./printmode.test.ts";
 import "./mcp.test.ts";
+import "./mcpcli.test.ts";
 import "./plugins.test.ts";
 import "./compaction.test.ts";
 import "./compactionv2.test.ts";

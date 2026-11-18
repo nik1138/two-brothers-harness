@@ -1295,6 +1295,46 @@ node dist/cli.js models --base-url https://generativelanguage.googleapis.com --k
 the wire family (`anthropic` has no model listing and fails honestly);
 `--json` prints the raw list.
 
+### `mcp`
+
+Offline listing of the MCP servers named by the config file `--mcp-config`
+(or the `TWO_BROTHERS_MCP_CONFIG` env var) resolves — the same resolution
+`run`/`chat`/`tui`/`serve` use, with the flag winning when both are set
+(see [MCP tools](#mcp-tools)). The file is read only: nothing is started or
+contacted, so the command is always local and exits `0` for a valid file —
+there is no live connected/failed status column (`doctor` performs the
+config-shape diagnostic). A bare `mcp` behaves as `mcp list` (the only
+subcommand).
+
+```powershell
+node dist/cli.js mcp list
+node dist/cli.js mcp list --mcp-config ./mcp.json
+node dist/cli.js mcp list --json
+```
+
+When no config is set it prints `No MCP servers configured` plus a hint
+naming `--mcp-config` / `TWO_BROTHERS_MCP_CONFIG` (exit `0`); a missing,
+unparseable or wrong-shaped file is one bounded error line (exit `2`,
+matching `doctor`'s posture). The human output is one line per server,
+sorted by name, with aligned columns — `name`, `transport`
+(`stdio`|`http`|`invalid` when the entry has neither `command` nor `url`),
+the effective `role` (an unset server role defaults to `junior`, like the
+loader) and the `target` (the command plus args joined, or the URL; hard
+bound of 80 characters). Env and header VALUES are never printed — key
+names only. `--json` prints one machine-readable object instead:
+
+```json
+{"servers":[{"name":"filesystem","transport":"stdio","role":"junior","target":"npx -y @modelcontextprotocol/server-filesystem","envKeys":[],"headerKeys":[]}]}
+```
+
+`envKeys` / `headerKeys` are the sorted variable/header NAMES; the values
+stay in the config file.
+
+| Flag | Values | Default | Description |
+|---|---|---|---|
+| `--mcp-config` | path | `TWO_BROTHERS_MCP_CONFIG` | MCP config JSON file; the flag wins when both are set |
+| `--json` | off | off | print `{servers: [...]}` instead of the aligned table (values never included) |
+
 ### `onboard`
 
 Write per-role provider settings to `sessions/settings.json`

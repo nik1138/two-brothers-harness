@@ -1036,6 +1036,46 @@ defineCommand({
 });
 
 defineCommand({
+  name: "mcp",
+  summary: "list the MCP servers named by the MCP config file",
+  commandLine: "two-brothers mcp [list] [--mcp-config <file>] [--json]",
+  usage: ["mcp [list] [--mcp-config <file>] [--json]"],
+  description:
+    "Offline listing of the MCP servers named by the config file --mcp-config " +
+    "or TWO_BROTHERS_MCP_CONFIG resolves (the same resolution run/chat/tui/" +
+    "serve use; the flag wins). The file is read only — nothing is started or " +
+    "contacted, so the command is always local and exits 0 for a valid file " +
+    "(there is no live connected/failed status column; see doctor for a " +
+    "config-shape check). A bare `mcp` behaves as `mcp list`. When no config " +
+    "is set it prints a hint naming --mcp-config / TWO_BROTHERS_MCP_CONFIG " +
+    "(exit 0); a missing, unparseable or wrong-shaped file is a bounded " +
+    "error (exit 2), matching doctor's posture. One line per server, sorted " +
+    "by name: name, transport (stdio|http|invalid), the effective role " +
+    "(an unset server role defaults to junior, like the loader) and the " +
+    "target (the command plus args, or the URL). Env and header VALUES are " +
+    "never printed — key names only. --json prints one machine-readable " +
+    "object {servers: [{name, transport, role, target, envKeys, headerKeys}]} " +
+    "with sorted key-name arrays.",
+  flags: ["mcp-config", "json", "help"],
+  acceptedFlags: ["mcp-config", "json"],
+  flagNotes: {
+    "mcp-config":
+      "MCP config JSON file (default: the TWO_BROTHERS_MCP_CONFIG env var); " +
+      "the flag wins when both are set",
+    json: "print {servers: [...]} instead of the aligned table (values never included)",
+  },
+  details: [
+    "Subcommands:",
+    "  list   list the configured MCP servers (the default action; the only subcommand)",
+  ],
+  examples: [
+    "two-brothers mcp list",
+    "two-brothers mcp list --mcp-config ./mcp.json",
+    "two-brothers mcp list --json",
+  ],
+});
+
+defineCommand({
   name: "onboard",
   summary: "write per-role provider settings to sessions/settings.json",
   commandLine: "two-brothers onboard [flags]",
@@ -1262,6 +1302,7 @@ export const COMMAND_ORDER: readonly string[] = [
   "sessions",
   "spill",
   "models",
+  "mcp",
   "onboard",
   "doctor",
   "config",
