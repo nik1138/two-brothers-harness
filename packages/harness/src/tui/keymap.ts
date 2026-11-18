@@ -198,6 +198,20 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
     keys: [{ name: "r", ctrl: true }],
     when: "composer",
   },
+  // Registry order is matching priority within a scope: mode-cycle sits before
+  // complete so an empty composer resolves Tab to the mode switch. With text
+  // typed the app declines the dispatch and Tab falls through to the editor's
+  // slash completion (`complete` below keeps its chord for that path).
+  {
+    id: "mode-cycle",
+    title: "Cycle cooperation mode",
+    description:
+      "Switch the next turn's mode (consult → work → auto; Shift+Tab backwards); with a non-empty composer, Tab keeps completing the slash name.",
+    group: "Cooperation",
+    keys: [{ name: "tab" }, { name: "tab", shift: true }],
+    when: "composer",
+    palette: false,
+  },
   {
     id: "complete",
     title: "Complete slash command",

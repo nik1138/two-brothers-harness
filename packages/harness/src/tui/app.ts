@@ -158,6 +158,7 @@ import {
 } from "./providers.ts";
 import {
   BASE_COMMAND_ENTRY_PREFIX,
+  cycleCooperationMode,
   nonAsciiBaseAliasNotice,
   planBaseCommandSubmission,
   tuiBaseCommands,
@@ -5118,8 +5119,18 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
    * was consumed here; false lets the editor handle it (typing, history,
    * submission, scrolling).
    */
-  const dispatchCommand = (command: TuiCommand): boolean => {
+  const dispatchCommand = (command: TuiCommand, key: Key): boolean => {
     switch (command.id) {
+      case "mode-cycle": {
+        // An empty composer makes Tab/Shift+Tab the mode switch for the next
+        // turn; with text typed, Tab keeps its slash-completion meaning and
+        // falls through to the editor (the same rule `?` uses for help).
+        if (editor.text !== "") return false;
+        mode = cycleCooperationMode(mode, key.shift === true);
+        pushToast("info", `mode: ${mode} — the next turn uses it`);
+        render();
+        return true;
+      }
       case "palette":
         openPalette();
         return true;
@@ -5200,7 +5211,7 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
       match.command.id === "help" &&
       isSinglePrintableKeyChord(match.chord) &&
       editor.text !== "";
-    if (match !== null && !helpChordBlocksTyping && dispatchCommand(match.command)) {
+    if (match !== null && !helpChordBlocksTyping && dispatchCommand(match.command, key)) {
       return;
     }
     const result = handleEditorKey(editor, key);

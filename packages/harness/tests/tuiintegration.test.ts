@@ -340,6 +340,32 @@ test("slash commands: /mode auto applies; the picker offers auto; bad modes warn
   assert.equal(code, 0);
 });
 
+test("Tab cycles the cooperation mode on an empty composer; a typed draft keeps slash completion", async () => {
+  const { app, input, output } = startApp();
+  assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+  // consult → work → auto forward, Shift+Tab backwards, each applied to the
+  // next turn only and reported through the same toast as /mode.
+  input.key("tab");
+  await waitFor(() => textOf(output).includes("mode: work"));
+  input.key("tab");
+  await waitFor(() => textOf(output).includes("mode: auto"));
+  input.key("tab", { shift: true });
+  await waitFor(() => textOf(output).includes("mode: work"));
+  input.key("tab", { shift: true });
+  await waitFor(() => textOf(output).includes("mode: consult"));
+  // With text typed, Tab keeps completing the slash name and never cycles.
+  input.type("/them");
+  input.key("tab");
+  await waitFor(() => textOf(output).includes("/theme "));
+  const lastFrame = stripAnsi(output.data.split(ANSI.cursorHome).at(-1) ?? "");
+  assert.ok(
+    lastFrame.includes("/theme "),
+    "a non-empty composer keeps Tab on slash completion (/them → /theme)",
+  );
+  const code = await quit(input, app);
+  assert.equal(code, 0);
+});
+
 test("safe key precedence: Esc arms quit, typing disarms, Esc Esc quits; Esc clears a draft", async () => {
   const { app, input, output } = startApp();
   assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));

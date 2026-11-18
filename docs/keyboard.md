@@ -361,7 +361,8 @@ at startup, so changing `--keys-file`/the env needs a restart.
 |---|---|
 | `Enter` | Send the composer text as the next task. |
 | `Shift+Enter` or `Ctrl+J` | Insert a newline instead of sending. |
-| `Tab` | Complete a partially typed slash name when exactly one built-in or discovered template matches; inside an open picker it accepts the highlighted row. |
+| `Tab` | With an **empty composer**, switch the cooperation mode for the next turn (`consult` → `work` → `auto`, wrapping); the new mode shows in the status bar and applies from the next submitted turn. With text typed, complete a partially typed slash name when exactly one built-in or discovered template matches; inside an open picker it accepts the highlighted row. |
+| `Shift+Tab` | With an empty composer, switch the mode backwards (`auto` → `work` → `consult`); inside an open `/` or `@skill:` picker it dismisses the picker and keeps the draft. |
 | `Up` / `Down` | Recall earlier submitted tasks: a single-line draft recalls immediately; on a multi-line draft the arrows only leave the composer at its very start (Up) or very end (Down) and otherwise move the caret inside the draft. The live draft is preserved and restored exactly when you come back to it, and recall never adds to the persisted history. |
 | `Ctrl+R` | Incremental prompt-history search, newest first; accepting puts the entry back in the composer. |
 | `Ctrl+O` | Stash the draft, or restore the stashed draft. |

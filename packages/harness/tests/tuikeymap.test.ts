@@ -192,6 +192,53 @@ test("external-edit is Ctrl+G in the composer scope, documented once and idle-on
   assert.equal(helpText.match(/Ctrl\+G/g)?.length, 1, "the CLI key guide spells it once");
 });
 
+test("mode-cycle owns Tab/Shift+Tab in the composer scope and leaves other scopes untouched", () => {
+  const command = findCommand(TUI_COMMANDS, "mode-cycle");
+  assert.ok(command, "the registry has a mode-cycle command");
+  assert.equal(command.group, "Cooperation");
+  assert.equal(command.when, "composer");
+  assert.equal(formatKeys(command), "Tab / Shift+Tab");
+
+  // Registry priority: mode-cycle sits before complete, so an empty composer
+  // resolves Tab to the mode switch; the app falls through to slash
+  // completion when the composer has text.
+  assert.equal(resolveKey(TUI_COMMANDS, key("tab", "\t"))?.command.id, "mode-cycle");
+  assert.equal(
+    resolveKey(TUI_COMMANDS, key("tab", "\t", { shift: true }))?.command.id,
+    "mode-cycle",
+  );
+  assert.equal(
+    resolveKey(TUI_COMMANDS, key("tab", "\t", { shift: true }))?.chord.shift,
+    true,
+    "Shift+Tab matches the shifted chord, not plain Tab",
+  );
+  // Slash completion stays registered for the editor fall-through path.
+  assert.ok(findCommand(TUI_COMMANDS, "complete"), "the complete command stays registered");
+  // Picker surfaces keep their own Tab meanings and are never shadowed.
+  assert.equal(
+    resolveKey(TUI_COMMANDS, key("tab", "\t"), "mention")?.command.id,
+    "mention-accept",
+  );
+  assert.equal(
+    resolveKey(TUI_COMMANDS, key("tab", "\t", { shift: true }), "mention")?.command.id,
+    "mention-dismiss",
+  );
+  for (const context of ["overlay", "find", "approval"] as const) {
+    assert.equal(
+      resolveKey(TUI_COMMANDS, key("tab", "\t"), context),
+      null,
+      `mode-cycle is not offered in the ${context} scope`,
+    );
+  }
+
+  // Documented once in help, hidden from the palette (the mode picker row is
+  // the palette surface for switching modes).
+  assert.equal(documentEntries(TUI_COMMANDS).filter((entry) => entry.id === "mode-cycle").length, 1);
+  assert.ok(!paletteEntries(TUI_COMMANDS).some((entry) => entry.id === "mode-cycle"));
+  const helpText = tuiHelpLines(TUI_COMMANDS, { commands: templates }).join("\n");
+  assert.equal(helpText.match(/\bTab\b/g)!.length >= 2, true, "the CLI key guide lists both Tab rows");
+});
+
 test("command lookup, slash aliases and running guards use registry metadata", () => {
   assert.equal(findCommand(TUI_COMMANDS, "help")?.title, "Keyboard help");
   assert.equal(findCommand(TUI_COMMANDS, "missing"), undefined);

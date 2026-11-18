@@ -34,6 +34,8 @@ import type { StreamEvent } from "../src/runstream.ts";
 import { runTuiApp, type TuiAppOptions } from "../src/tui/app.ts";
 import {
   BASE_COMMAND_ENTRY_PREFIX,
+  COOPERATION_MODE_ORDER,
+  cycleCooperationMode,
   nonAsciiBaseAliasNotice,
   planBaseCommandSubmission,
   tuiBaseCommands,
@@ -153,6 +155,19 @@ test("prompt commands expand to the exact template bytes with the mode override"
   assert.ok(compact);
   assert.equal(planBaseCommandSubmission(compact, "", "work").kind, "usage");
   assert.equal(BASE_COMMANDS.length, 10);
+});
+
+test("cycleCooperationMode walks consult → work → auto and wraps in both directions", () => {
+  assert.deepEqual(COOPERATION_MODE_ORDER, ["consult", "work", "auto"]);
+  assert.equal(cycleCooperationMode("consult"), "work");
+  assert.equal(cycleCooperationMode("work"), "auto");
+  assert.equal(cycleCooperationMode("auto"), "consult", "forward cycle wraps to consult");
+  assert.equal(cycleCooperationMode("consult", true), "auto", "backward cycle wraps to auto");
+  assert.equal(cycleCooperationMode("auto", true), "work");
+  assert.equal(cycleCooperationMode("work", true), "consult");
+  // A defensive fallback for a value outside the order (never produced by the
+  // app, but the helper must not return garbage).
+  assert.equal(cycleCooperationMode("solo" as "consult"), "work");
 });
 
 test("help entries carry base commands in prompt/action groups with usage metadata", () => {

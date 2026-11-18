@@ -153,6 +153,26 @@ export type BaseCommandSubmission =
   | { kind: "run"; task: string; mode: Config["mode"] }
   | { kind: "usage"; message: string };
 
+/** Operator-selectable cooperation modes in cycle order. */
+export const COOPERATION_MODE_ORDER: readonly Config["mode"][] = ["consult", "work", "auto"];
+
+/**
+ * The mode after `current` in {@link COOPERATION_MODE_ORDER}, wrapping at both
+ * ends; `backwards` (Shift+Tab) walks the order in reverse. The Tab keybinding
+ * and the tests share this one order, so the chord can never cycle a mode the
+ * rest of the TUI does not know.
+ */
+export function cycleCooperationMode(
+  current: Config["mode"],
+  backwards = false,
+): Config["mode"] {
+  const index = COOPERATION_MODE_ORDER.indexOf(current);
+  const safe = index === -1 ? 0 : index;
+  const delta = backwards ? -1 : 1;
+  const length = COOPERATION_MODE_ORDER.length;
+  return COOPERATION_MODE_ORDER[(((safe + delta) % length) + length) % length] ?? "consult";
+}
+
 /**
  * Plan one `/name args` invocation for a base command.
  *
