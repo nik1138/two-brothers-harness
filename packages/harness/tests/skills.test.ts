@@ -419,3 +419,24 @@ test("diagnostics are deterministic across repeated discoveries", (t) => {
     ["a"],
   );
 });
+// ---------------------------------------------------------------------------
+// CLI root resolution: the instance-local <sessionsDir>/skills default root
+// ---------------------------------------------------------------------------
+
+test("cli skills roots: <sessionsDir>/skills sits between <cwd>/skills and the home root", async () => {
+  const { skillsRootsForCli } = await import("../src/cli.ts");
+  const env = { ...process.env };
+  delete env.TWO_BROTHERS_SKILLS_DIR;
+  const cwd = process.cwd();
+
+  const roots = skillsRootsForCli({}, env);
+  assert.deepEqual(roots.slice(-3), [
+    path.join(cwd, "skills"),
+    path.join(cwd, "sessions", "skills"),
+    path.join(os.homedir(), ".two-brothers", "skills"),
+  ]);
+
+  // `--sessions-dir` redirects the instance root (default `<cwd>/sessions`).
+  const custom = skillsRootsForCli({ "sessions-dir": "other-store" }, env);
+  assert.equal(custom[custom.length - 2], path.join(cwd, "other-store", "skills"));
+});

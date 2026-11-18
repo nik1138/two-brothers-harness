@@ -299,7 +299,7 @@ Design anchors that already exist:
   `## Available skills`) and `renderSkillBody`. `HarnessOptions.skills`
   adds the section + one invocation line to the assembled prompt only for
   roles that have skills; `--skills-dir` / `TWO_BROTHERS_SKILLS_DIR` /
-  `<cwd>/skills` / `~/.two-brothers/skills` are the roots; the server
+  `<cwd>/skills` / `<sessionsDir>/skills` / `~/.two-brothers/skills` are the roots; the server
   serves metadata at `GET /api/skills`. A `<skill name="…">` request in a
   structured reply injects the body once as a `<skill-loaded>` message
   (`deliverSkillRequest`; at most three per run, each skill once, only

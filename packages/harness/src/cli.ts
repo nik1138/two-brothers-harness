@@ -786,9 +786,10 @@ export function pluginSelectionForCli(values: Record<string, any>): PluginSelect
 /**
  * Skill roots for a run: every `--skills-dir` (repeatable), then
  * `TWO_BROTHERS_SKILLS_DIR` (roots separated by the OS path-list separator —
- * `;` on Windows, `:` elsewhere), then `<cwd>/skills` and
- * `~/.two-brothers/skills`. `discoverSkills` ignores missing roots and
- * dedupes by resolved path.
+ * `;` on Windows, `:` elsewhere), then `<cwd>/skills`,
+ * `<sessionsDir>/skills` (the store `--sessions-dir` names, default
+ * `<cwd>/sessions`) and `~/.two-brothers/skills`. `discoverSkills` ignores
+ * missing roots and dedupes by resolved path.
  */
 export function skillsRootsForCli(
   values: Record<string, any>,
@@ -809,6 +810,7 @@ export function skillsRootsForCli(
   }
   roots.push(
     path.join(process.cwd(), "skills"),
+    path.join(sessionsDirForCli(values), "skills"),
     path.join(os.homedir(), ".two-brothers", "skills"),
   );
   return roots;

@@ -1404,7 +1404,7 @@ per-role connection without leaving the terminal.
 | `--compact-keep-recent` | int | `40000` | (TS package) chars of recent envelopes kept verbatim when compacting |
 | `--mcp-config` | path | — | JSON file with MCP server definitions; a server may take a `"role": "shared" \| "senior" \| "junior"` field (default `"junior"`) |
 | `--plugins-dir` | dir | `<cwd>/plugins` | (TS package) plugin directory for `run`/`chat`/`tui`/`serve` (env `TWO_BROTHERS_PLUGINS_DIR`). Plugins are **strict opt-in**: only the plugins named by the persisted plugin selection load — `<sessionsDir>/settings.json` (`--sessions-dir`, default `<cwd>/sessions`) plus the `TWO_BROTHERS_PLUGINS_SENIOR`/`_JUNIOR` env overlay; code files merely discovered in the directory are never imported or executed, and there are no per-plugin selection flags. Plugins load fail-soft, diagnostics under `--verbose`; plugin tools need a workspace, so `serve` runs over a workspace (and `tui --workspace` turns) get them |
-| `--skills-dir` | path | — (repeatable) | (TS package) extra skills root; defaults are `TWO_BROTHERS_SKILLS_DIR` (OS path list), then `<cwd>/skills` and `~/.two-brothers/skills` |
+| `--skills-dir` | path | — (repeatable) | (TS package) extra skills root; defaults are `TWO_BROTHERS_SKILLS_DIR` (OS path list), then `<cwd>/skills`, `<sessionsDir>/skills` (the `--sessions-dir` store, default `<cwd>/sessions`) and `~/.two-brothers/skills` |
 | `--stream-tokens` | flag | off | (TS package, `run --stream` and `tui`) with `--stream`: ask providers to stream their replies and add one `"token"` NDJSON record (`{type, role, delta, at}`) per text delta, in arrival order, interleaved with the other run records. In the TUI the deltas render in place (no `--stream` needed). Without `--stream` in a run it is a usage error (exit 2); env `TWO_BROTHERS_STREAM_TOKENS=1` pins it on |
 | `--dry-run` | flag | off | (TS package, `run`/`chat`) resolve the run (config with sources, tools, session, compaction, limits) and print the plan; exits 0 with no model calls and no session write. `run --dry-run --json` prints one JSON object. Invalid with `--stream` (usage error, exit 2) |
 | `--task-file` | path | — | (TS package, `run` only) read the task from a file — missing/unreadable/blank exits 2; mutually exclusive with a positional task. `run -` reads the task from stdin instead (bounded to 1 MiB, blank exits 2) |
@@ -1592,8 +1592,9 @@ has a timeout (default 60 s, per-server `timeoutMs` override).
 frontmatter (`name`, `description`, optional `scope: shared|senior|junior`,
 optional `tools`) become an `## Available skills` section in the system
 prompt of each role that has visible skills. Roots: repeatable `--skills-dir`,
-then `TWO_BROTHERS_SKILLS_DIR` (OS path list), then `<cwd>/skills` and
-`~/.two-brothers/skills`. A `<skill name="…">` request in a structured reply
+then `TWO_BROTHERS_SKILLS_DIR` (OS path list), then `<cwd>/skills`,
+`<sessionsDir>/skills` (the `--sessions-dir` store, default `<cwd>/sessions`)
+and `~/.two-brothers/skills`. A `<skill name="…">` request in a structured reply
 injects the body once as a `<skill-loaded>` message (at most three per run,
 each skill once, only skills visible to the acting role). The server serves
 metadata only at `GET /api/skills`.

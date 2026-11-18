@@ -790,10 +790,11 @@ function publicPreset(preset: Preset): ReturnType<typeof publicProvider> {
  * Default skill roots, shared by run assembly and `GET /api/skills`:
  * `TWO_BROTHERS_SKILLS_DIR` (one or more roots separated by the OS path-list
  * separator — `;` on Windows, `:` elsewhere), then `<cwd>/skills`, then
- * `~/.two-brothers/skills`. A missing root is not an error (`discoverSkills`
- * reports only real problems).
+ * `<sessionsDir>/skills` (the instance-local tree beside `settings.json`),
+ * then `~/.two-brothers/skills`. A missing root is not an error
+ * (`discoverSkills` reports only real problems).
  */
-function defaultSkillsRoots(): string[] {
+function defaultSkillsRoots(sessionsDir: string): string[] {
   const roots: string[] = [];
   const raw = process.env.TWO_BROTHERS_SKILLS_DIR;
   if (raw) {
@@ -804,6 +805,7 @@ function defaultSkillsRoots(): string[] {
   }
   roots.push(
     path.join(process.cwd(), "skills"),
+    path.join(sessionsDir, "skills"),
     path.join(os.homedir(), ".two-brothers", "skills"),
   );
   return roots;
@@ -1274,7 +1276,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   // `discoverSkills`; the catalog is fail-soft either way. Active declarative
   // bundles contribute their skills roots after the operator roots, so an
   // operator skill shadows a same-named bundle skill.
-  const skillsDirs = options.skillsDirs ?? defaultSkillsRoots();
+  const skillsDirs = options.skillsDirs ?? defaultSkillsRoots(sessionsDir);
   const skillCatalog = (): SkillCatalog =>
     mergeBundleSkills(discoverSkills(skillsDirs), plugins.bundles.values());
 

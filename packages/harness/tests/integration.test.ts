@@ -496,6 +496,43 @@ test("server: GET /api/skills lists metadata without bodies", async () => {
   }
 });
 
+test("server: <sessionsDir>/skills is a default skill root", async () => {
+  const sessions = tmpdir("tb-integration-sessions-");
+  try {
+    // No `skillsDirs` option — the server must fall back to its default
+    // roots, which include the instance-local <sessionsDir>/skills tree.
+    writeFile(
+      sessions.root,
+      "skills/sessions-root-probe/SKILL.md",
+      skillDoc(
+        "name: sessions-root-probe\ndescription: Probe skill in the sessions tree.",
+        "# Probe",
+      ),
+    );
+    const handle = createServer({
+      configFactory: () => resolveConfig({ provider: "mock", mode: "consult" }),
+      sessionsDir: sessions.root,
+      webDist: null,
+      pluginsDir: path.join(sessions.root, "missing-plugins"),
+    });
+    const server = await handle.listen("127.0.0.1", 0);
+    const { port } = server.address() as AddressInfo;
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/api/skills`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { skills: Array<{ name: string }> };
+      assert.ok(
+        body.skills.some((skill) => skill.name === "sessions-root-probe"),
+        `probe skill missing from ${JSON.stringify(body.skills)}`,
+      );
+    } finally {
+      await handle.close();
+    }
+  } finally {
+    sessions.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // (vi) maxTokens rides the per-role endpoint provider onto the wire
 // ---------------------------------------------------------------------------

@@ -493,7 +493,8 @@ function envPathList(env: NodeJS.ProcessEnv, name: string): string[] {
 /**
  * The skills/commands root list, mirroring `cli.ts::skillsRootsForCli` /
  * `commandsRootsForCli`: repeatable flags, then the env path list, then
- * `<cwd>/<kind>` and `~/.two-brothers/<kind>`.
+ * `<cwd>/<kind>`, the instance-local `<sessionsDir>/<kind>` (skills only),
+ * and `~/.two-brothers/<kind>`.
  */
 function buildRoots(
   flags: Record<string, unknown>,
@@ -503,6 +504,7 @@ function buildRoots(
   kind: "skills" | "commands",
   cwd: string,
   homeDir: string,
+  instanceDir?: string,
 ): RootsView {
   const flagDirs = pathListFlags(flags, flagName);
   const envDirs = envPathList(env, envName);
@@ -513,6 +515,7 @@ function buildRoots(
   for (const dir of flagDirs) add(dir);
   for (const dir of envDirs) add(dir);
   add(kind);
+  if (instanceDir) roots.push(instanceDir);
   roots.push(path.join(homeDir, ".two-brothers", kind));
   return {
     paths: roots,
@@ -728,6 +731,7 @@ export function buildConfigView(input: ConfigViewInput): ConfigView {
         "skills",
         cwd,
         homeDir,
+        resolveAgainst(cwd, path.join(sessionsDir, "skills")),
       ),
       commands: buildRoots(
         flags,
