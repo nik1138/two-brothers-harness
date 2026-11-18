@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { NButton } from 'naive-ui'
-import type { RunMode, RunStatus, RunUsage, SettingsView } from '../types'
+import type { McpStatus, RunMode, RunStatus, RunUsage, SettingsView } from '../types'
 import { cacheHitPercent, promptTokensOf } from '../usageCache'
+import { mcpBlockVisible, mcpStatusBlock } from '../mcpStatus'
 import AppDialog from './AppDialog.vue'
 
 /**
@@ -24,6 +25,8 @@ const props = defineProps<{
    *  the run did not route or the backend predates the feature). */
   route?: 'solo' | 'consult' | 'work' | null
   routeReason?: string | null
+  /** `GET /api/mcp` result (null when unavailable or the fetch failed). */
+  mcp?: McpStatus | null
 }>()
 
 const emit = defineEmits<{ close: [] }>()
@@ -66,6 +69,11 @@ function roleLine(role: 'senior' | 'junior'): string | null {
   if (view.provider_ref?.trim()) parts.push(`${view.provider_ref.trim()} preset`)
   return parts.join(' · ')
 }
+
+/** Render-ready MCP block; null hides it entirely (no configured servers / older backend). */
+const mcpBlock = computed(() =>
+  mcpBlockVisible(props.mcp ?? null) ? mcpStatusBlock(props.mcp!.lastRun!) : null,
+)
 </script>
 
 <template>
@@ -141,6 +149,36 @@ function roleLine(role: 'senior' | 'junior'): string | null {
       </div>
     </dl>
 
+    <section v-if="mcpBlock" class="status-mcp">
+      <h3 class="status-mcp-title">
+        {{ mcpBlock.title }}
+        <span
+          v-if="mcpBlock.timeText"
+          class="status-mcp-time"
+          :title="mcpBlock.timeTitle || undefined"
+          >{{ mcpBlock.timeText }}</span
+        >
+        <span
+          v-if="mcpBlock.failedCount > 0"
+          class="status-mcp-failed"
+          :title="`${mcpBlock.failedCount} server${mcpBlock.failedCount === 1 ? '' : 's'} failed`"
+          >{{ mcpBlock.failedCount }} failed</span
+        >
+      </h3>
+      <ul class="status-mcp-list">
+        <li
+          v-for="row in mcpBlock.rows"
+          :key="row.name"
+          class="status-mcp-row"
+          :class="{ 'status-mcp-row--failed': !row.ok }"
+        >
+          <span class="status-mcp-mark" aria-hidden="true">{{ row.ok ? '✓' : '✗' }}</span>
+          <span class="status-mcp-name">{{ row.name }}</span>
+          <span class="status-mcp-detail">{{ row.detail }}</span>
+        </li>
+      </ul>
+    </section>
+
     <template #footer>
       <n-button attr-type="button" type="primary" @click="emit('close')">Close</n-button>
     </template>
@@ -193,5 +231,87 @@ function roleLine(role: 'senior' | 'junior'): string | null {
 
 .status-muted {
   color: var(--text-secondary);
+}
+
+.status-mcp {
+  margin-top: 0.9rem;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.status-mcp-title {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+  font-size: 0.78rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.status-mcp-time {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--text-secondary);
+}
+
+.status-mcp-failed {
+  font-weight: 650;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--danger);
+}
+
+.status-mcp-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.status-mcp-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  padding: 0.3rem 0.5rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.84rem;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.status-mcp-row:nth-child(odd) {
+  background: var(--surface-canvas);
+}
+
+.status-mcp-mark {
+  flex: none;
+  color: var(--ok);
+}
+
+.status-mcp-row--failed .status-mcp-mark {
+  color: var(--danger);
+}
+
+.status-mcp-name {
+  font-weight: 600;
+}
+
+.status-mcp-detail {
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+}
+
+.status-mcp-row--failed .status-mcp-detail {
+  color: var(--danger);
 }
 </style>

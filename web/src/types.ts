@@ -926,3 +926,48 @@ export interface ProviderPreset {
    */
   customized?: boolean
 }
+
+// -- MCP ---------------------------------------------------------------------
+// Response of GET /api/mcp (mirrors the frozen backend contract; the client
+// normalizes tolerantly in api.ts, older backends get no route at all).
+
+export type McpServerSource = 'config' | 'plugin'
+export type McpServerRole = 'shared' | 'senior' | 'junior'
+export type McpTransport = 'stdio' | 'http' | 'invalid'
+
+/** One configured MCP server (from the config file or a plugin declaration). */
+export interface McpConfiguredServer {
+  name: string
+  source: McpServerSource
+  /** Plugin name when source === 'plugin', else null. */
+  plugin: string | null
+  role: McpServerRole
+  transport: McpTransport
+  /** Command+args or URL, pre-truncated server-side. */
+  target: string
+}
+
+export type McpRunServerStatus = 'connected' | 'failed'
+
+/** One server's outcome inside a recorded MCP run. */
+export interface McpRunServer {
+  name: string
+  status: McpRunServerStatus
+  /** Bounded failure detail (failed servers only). */
+  error?: string
+  toolCount: number
+}
+
+/** The most recent run that initialized MCP servers, if any. */
+export interface McpLastRun {
+  at: string
+  session: string
+  runId: string
+  servers: McpRunServer[]
+}
+
+/** Response of GET /api/mcp. */
+export interface McpStatus {
+  configured: McpConfiguredServer[]
+  lastRun: McpLastRun | null
+}

@@ -25,6 +25,7 @@ import type { AccentTheme, RoleTheme } from '../uiPrefs'
 import ModelsRolesSection from './settings/ModelsRolesSection.vue'
 import ProvidersSection from './settings/ProvidersSection.vue'
 import PluginsSection from './settings/PluginsSection.vue'
+import McpSection from './settings/McpSection.vue'
 import PermissionsSection from './settings/PermissionsSection.vue'
 import AppearanceSection from './settings/AppearanceSection.vue'
 import KeyboardSection from './settings/KeyboardSection.vue'
@@ -232,6 +233,7 @@ type SectionId =
   | 'models'
   | 'providers'
   | 'plugins'
+  | 'mcp'
   | 'permissions'
   | 'appearance'
   | 'keyboard'
@@ -256,6 +258,11 @@ const sections: {
     id: 'plugins',
     label: 'Plugins',
     description: 'Tools both brothers can use; the enabled list is shared.',
+  },
+  {
+    id: 'mcp',
+    label: 'MCP',
+    description: 'External tool servers from the MCP config file or plugins.',
   },
   {
     id: 'permissions',
@@ -720,6 +727,24 @@ async function save() {
               <rect x="9" y="9" width="4.5" height="4.5" rx="1" />
             </svg>
             <svg
+              v-else-if="section.id === 'mcp'"
+              class="settings-nav-icon"
+              viewBox="0 0 16 16"
+              width="16"
+              height="16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.3"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path d="M6.2 2.5v3.2M9.8 2.5v3.2" />
+              <path d="M4.2 5.7h7.6v2.6a3.8 3.8 0 0 1-7.6 0V5.7Z" />
+              <path d="M8 12.1v1.4" />
+            </svg>
+            <svg
               v-else-if="section.id === 'permissions'"
               class="settings-nav-icon"
               viewBox="0 0 16 16"
@@ -892,6 +917,15 @@ async function save() {
                 @update:plugins="plugins = $event"
                 @options-updated="onPluginOptionsUpdated"
               />
+            </div>
+
+            <div
+              v-show="activeId === 'mcp'"
+              class="settings-pane"
+              role="region"
+              aria-label="MCP"
+            >
+              <McpSection />
             </div>
 
             <div

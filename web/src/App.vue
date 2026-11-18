@@ -26,6 +26,7 @@ import {
   getSessionRuntimeEvents,
   getSubagent,
   getSettings,
+  getMcpStatus,
   listCommands,
   listRuns,
   listSessionSubagents,
@@ -57,6 +58,7 @@ import type {
   SubagentInfo,
   TokenEvent,
   Workspace,
+  McpStatus,
 } from './types'
 import {
   EMPTY_QUEUE_VIEW,
@@ -397,6 +399,7 @@ type SettingsSection =
   | 'models'
   | 'providers'
   | 'plugins'
+  | 'mcp'
   | 'permissions'
   | 'appearance'
   | 'keyboard'
@@ -410,6 +413,18 @@ function openSettings(section: SettingsSection = 'models') {
 const helpOpen = ref(false)
 /** `/status` overlay. */
 const statusOpen = ref(false)
+/** MCP status for the `/status` overlay; null = unavailable (older backend) or fetch failed. */
+const mcpStatus = ref<McpStatus | null>(null)
+
+async function loadMcpStatus(): Promise<void> {
+  try {
+    mcpStatus.value = await getMcpStatus()
+  } catch {
+    // Older backend without GET /api/mcp (or a transient failure): the status
+    // dialog simply omits the MCP block.
+    mcpStatus.value = null
+  }
+}
 /** `/permission` informational overlay. */
 const permissionOpen = ref(false)
 /** Neutral, auto-dismissing command notice (never an error toast). */
@@ -2590,6 +2605,7 @@ function onComposerCommand(request: ComposerCommandRequest): void {
       }
       lastCommandMode.value = request.mode
       statusOpen.value = true
+      void loadMcpStatus()
       break
     case 'permission':
       permissionOpen.value = true
@@ -3362,6 +3378,7 @@ onUnmounted(() => {
       :events="events.length"
       :route="selectedLastRun?.route ?? null"
       :route-reason="selectedLastRun?.route_reason ?? null"
+      :mcp="mcpStatus"
       @close="statusOpen = false"
     />
     <PermissionInfoDialog

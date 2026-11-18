@@ -8,6 +8,10 @@ import type {
   CompactionSettingsView,
   Envelope,
   FsBrowseResult,
+  McpConfiguredServer,
+  McpLastRun,
+  McpRunServer,
+  McpStatus,
   ModelEffortInfo,
   ProviderPreset,
   RunApprovalsView,
@@ -631,6 +635,78 @@ export async function updatePluginOptions(
     `/api/plugins/${encodeURIComponent(name)}/options`,
     json('PUT', { options }),
   )
+}
+
+// -- MCP ----------------------------------------------------------------------
+
+/**
+ * Tolerant boundary for GET /api/mcp: coerces field types, drops malformed
+ * entries and fills defaults so an older or partial backend payload never
+ * breaks the settings/status surfaces.
+ */
+export function normalizeMcpStatus(value: unknown): McpStatus {
+  const str = (v: unknown): string => (typeof v === 'string' ? v : '')
+  const configured: McpConfiguredServer[] = []
+  if (value === null || typeof value !== 'object') {
+    return { configured, lastRun: null }
+  }
+  const raw = value as Record<string, unknown>
+  if (Array.isArray(raw.configured)) {
+    for (const item of raw.configured) {
+      if (item === null || typeof item !== 'object') continue
+      const entry = item as Record<string, unknown>
+      if (typeof entry.name !== 'string' || !entry.name.trim()) continue
+      configured.push({
+        name: entry.name,
+        source: entry.source === 'plugin' ? 'plugin' : 'config',
+        plugin: typeof entry.plugin === 'string' ? entry.plugin : null,
+        role:
+          entry.role === 'senior' || entry.role === 'junior' ? entry.role : 'shared',
+        transport:
+          entry.transport === 'stdio' || entry.transport === 'http' || entry.transport === 'invalid'
+            ? entry.transport
+            : 'invalid',
+        target: str(entry.target),
+      })
+    }
+  }
+  let run: McpLastRun | null = null
+  if (raw.lastRun !== null && typeof raw.lastRun === 'object') {
+    const rawRun = raw.lastRun as Record<string, unknown>
+    const servers: McpRunServer[] = []
+    if (Array.isArray(rawRun.servers)) {
+      for (const item of rawRun.servers) {
+        if (item === null || typeof item !== 'object') continue
+        const entry = item as Record<string, unknown>
+        if (typeof entry.name !== 'string' || !entry.name.trim()) continue
+        const failed = entry.status !== 'connected'
+        servers.push({
+          name: entry.name,
+          status: failed ? 'failed' : 'connected',
+          ...(failed && typeof entry.error === 'string' && entry.error
+            ? { error: entry.error }
+            : {}),
+          toolCount:
+            typeof entry.toolCount === 'number' && Number.isFinite(entry.toolCount)
+              ? entry.toolCount
+              : 0,
+        })
+      }
+    }
+    run = {
+      at: str(rawRun.at),
+      session: str(rawRun.session),
+      runId: str(rawRun.runId),
+      servers,
+    }
+  }
+  return { configured, lastRun: run }
+}
+
+/** Configured MCP servers plus the last run's per-server outcomes. */
+export async function getMcpStatus(): Promise<McpStatus> {
+  const body = await request<unknown>('/api/mcp')
+  return normalizeMcpStatus(body)
 }
 
 // -- background runs ----------------------------------------------------------
