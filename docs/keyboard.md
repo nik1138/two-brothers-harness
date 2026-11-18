@@ -430,7 +430,10 @@ a turn/compaction runs or an overlay, find bar or approval owns the keyboard.
 | (streaming) | A live `THINKING` block (dim, bounded to the last six content rows with a `… +N lines` marker) appears above the streaming response while the provider emits reasoning; it clears when the reply/envelope arrives. Reasoning is live-only and never persisted. |
 | `Ctrl+F` | Find in the transcript: an inline bar above the status rows. Typing filters live (case-insensitive literal text), `Enter`/`Down` jumps to the next match and `Shift+Enter`/`Up` to the previous one (both wrap); the bar shows `current/total`, marks the active match and scrolls its block into view. `Esc` closes it and restores the composer draft and scroll position exactly. `/find [query]` opens it with a query already typed. |
 | `Ctrl+T` | Expand or collapse the most recent tool result: collapsed shows the first six result rows after width-aware wrapping plus a `… +N more lines` marker (N counts hidden visual rows), expanded shows the whole result. The model always keeps the full text. |
-| `Ctrl+B` | Toggle the status side panel on wide terminals (it needs at least 100 columns and 20 rows; below that the transcript simply uses the full width). `/panel` does the same. |
+| `Ctrl+B` | Toggle the status side panel on wide terminals (it needs at least 100 columns and 20 rows; below that the transcript simply uses the full width). `/panel` does the same.
+The panel also lists each configured MCP server (`name connected (n tools)` /
+`name failed — error`) beneath its `MCP` row, and the footer chip `N MCP`
+turns `N MCP failed` (error tone) while any server is failed. |
 | (plan dock) | A model-written plan shows above the composer (`✓` completed / `▸` in progress / `○` pending, at most four rows plus a `+N more` tail). Display-only: no key answers it and the composer keeps its normal keys. |
 | (status bar) | The second status row rotates one registry-derived discoverability tip per accepted turn (`Ctrl+T fold tool output`, `Ctrl+F find in transcript`, `Ctrl+P commands`, …) and can briefly show a transient hint instead. Tips and hints only describe existing bindings — they add none. |
 
@@ -564,6 +567,10 @@ template shadows a same-named built-in):
   configured senior endpoint and rewrites the session file; the visible
   transcript is unchanged), `/export [path]` (Markdown export; in-memory
   sessions need an explicit path), `/status` (session/context/panel details),
+  `/mcp` (MCP server status: the footer chip `N MCP` turns `N MCP failed`
+  when a server fails; the status panel lists each configured server
+  connected/failed with its tool count and error — the command shows a
+  summary toast and opens the panel),
   `/permission` (the effective preset, its stored mode and honest description,
   the full-access warning, the bound workspace root, the decision keys and
   this process's in-memory session allows; without a `--approval-mode` pin
