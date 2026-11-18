@@ -101,6 +101,16 @@ export {
   type McpToolSet,
   type McpLoadOptions,
 } from "./mcp.ts";
+export {
+  deriveRunStatus,
+  describeConfigured,
+  summarizeLoadFailure,
+  MCP_STATUS_ERROR_MAX_CHARS,
+  MCP_TARGET_MAX_CHARS,
+  type McpConfiguredServer,
+  type McpLastRunStatus,
+  type McpRunServer,
+} from "./mcpstatus.ts";
 export * from "./commands.ts";
 export {
   SpillStore,

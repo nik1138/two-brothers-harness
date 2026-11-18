@@ -300,8 +300,15 @@ import {
   closeMcpClientBounded,
   type McpConfigFileShape,
   type McpLoadOptions,
+  type McpServerSpec,
   type McpToolSet,
 } from "./mcp.ts";
+import {
+  deriveRunStatus,
+  describeConfigured,
+  summarizeLoadFailure,
+  type McpLastRunStatus,
+} from "./mcpstatus.ts";
 import { deriveTitle, SessionMetadataStore } from "./metadata.ts";
 import { SessionLayout } from "./sessionlayout.ts";
 import {
@@ -330,6 +337,7 @@ import {
   type HookRegistry,
   type PluginBindings,
   type PluginDiagnosticEntry,
+  type PluginMcpServer,
   type PluginSetting,
 } from "./plugins.ts";
 import {
@@ -1004,6 +1012,14 @@ export interface ServerState {
   /** Test hook pass-through (see `ServerOptions.mcpLoadOptions`). */
   mcpLoadOptions?: McpLoadOptions;
   /**
+   * MCP outcome of the most recent run whose merged server set was non-empty:
+   * per-server connected/failed statuses plus the bounded failure detail.
+   * In-memory only, never persisted — per-run MCP is connect-at-start /
+   * close-at-end, so this is the honest "last run" view, not a live probe.
+   * A run with nothing configured leaves it untouched.
+   */
+  lastMcpStatus: McpLastRunStatus | null;
+  /**
    * Exact session file names with a manual compaction in flight: the
    * serialization guard shared by the compact route (which reserves/releases)
    * and run admission (which refuses while reserved). Ephemeral, in-memory
@@ -1294,6 +1310,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     pluginDiagnostics: [],
     mcpConfig: options.mcpConfig,
     mcpLoadOptions: options.mcpLoadOptions,
+    lastMcpStatus: null,
     compactions: new Set<string>(),
     syncRuns: new Set<string>(),
     deleting: new Set<string>(),
@@ -1949,6 +1966,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       }
       const merged = mergeMcpConfig(base, pluginServers);
       for (const line of merged.diagnostics) console.warn(`[two-brothers] ${line}`);
+      const mergedServerNames = Object.keys(merged.config.mcpServers);
       try {
         // The harness always has a spill store on the server, so MCP hands it
         // the full sanitized text; the harness saves/spills above its budget.
@@ -1963,8 +1981,42 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
           senior: mcp.seniorTools,
           junior: mcp.juniorTools,
         });
+        // MCP status (GET /api/mcp): record the outcome of THIS run's load —
+        // one entry per merged-config server, connected or failed with the
+        // bounded per-server detail. Fail-soft: recording must never break a
+        // run. A merged list that came out empty means nothing was configured,
+        // so lastRun stays untouched.
+        if (mergedServerNames.length > 0) {
+          try {
+            state.lastMcpStatus = {
+              at: new Date().toISOString(),
+              session: name,
+              runId: runIdOf?.() ?? "",
+              servers: deriveRunStatus(mergedServerNames, mcp),
+            };
+          } catch (exc) {
+            console.warn(`[two-brothers] MCP status recording failed: ${errorDetail(exc)}`);
+          }
+        }
       } catch (exc) {
         console.warn(`[two-brothers] MCP: ${errorDetail(exc)}`);
+        // The load itself threw (a shape the per-server fail-soft could not
+        // contain): every configured server is one failed entry with the
+        // bounded error detail, so the run still leaves an honest lastRun —
+        // but only when the merged list was non-empty (nothing configured
+        // leaves lastRun untouched).
+        if (mergedServerNames.length > 0) {
+          try {
+            state.lastMcpStatus = {
+              at: new Date().toISOString(),
+              session: name,
+              runId: runIdOf?.() ?? "",
+              servers: summarizeLoadFailure(mergedServerNames, exc),
+            };
+          } catch (recordExc) {
+            console.warn(`[two-brothers] MCP status recording failed: ${errorDetail(recordExc)}`);
+          }
+        }
       }
     }
     // Run-scoped workspace edit undo (wave 23): a workspace-bound run captures
@@ -3382,6 +3434,37 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         ...state.pluginDiagnostics,
       ];
       return diagnostics.length > 0 ? { ...view, diagnostics } : view;
+    }),
+  );
+
+  // MCP status (the opencode visibility model): WHAT is configured — the
+  // config-file servers plus the plugin contributions, with each server's
+  // effective role, transport and a secrets-free target — and HOW the last
+  // run's MCP load went. `configured` is recomputed per request through the
+  // same merge the run uses (a missing config file warns-and-continues like
+  // the run path; a failed binding pass falls back to the config-file view);
+  // `lastRun` is the in-memory record written by the most recent run whose
+  // merged server set was non-empty, or null before any such run.
+  routes.push(
+    compileRoute("GET", "/api/mcp", async () => {
+      await state.pluginsReady;
+      let base: Record<string, McpServerSpec> | null = null;
+      if (state.mcpConfig !== undefined) {
+        try {
+          base = loadMcpToolSpecs(state.mcpConfig);
+        } catch (exc) {
+          console.warn(`[two-brothers] MCP config: ${errorDetail(exc)}`);
+        }
+      }
+      let pluginServers: PluginMcpServer[] = [];
+      try {
+        pluginServers = (
+          await state.plugins.bindingsFor(state.pluginSelection, null)
+        ).mcpServers;
+      } catch (exc) {
+        console.warn(`[two-brothers] plugin binding failed: ${errorDetail(exc)}`);
+      }
+      return { configured: describeConfigured(base, pluginServers), lastRun: state.lastMcpStatus };
     }),
   );
 
