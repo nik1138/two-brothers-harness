@@ -11,7 +11,7 @@ import {
   normalizePluginSelection,
   updateSettingsWithPlugins,
 } from '../api'
-import type { PluginLoadError, RoleSettingsPatch, SettingsPatch } from '../api'
+import type { PluginDescriptor, PluginLoadError, PluginSelection, RoleSettingsPatch, SettingsPatch } from '../api'
 import { effortSupported } from '../modelEfforts'
 import { applyRolePatch } from '../rolePresetSync'
 import type { ProviderPreset, RoleSettingsView } from '../types'
@@ -132,6 +132,48 @@ const keySet = reactive({ senior: false, junior: false, subagent: false })
 const pluginOptions = ref<{ label: string; value: string }[]>([])
 const pluginErrors = ref<PluginLoadError[]>([])
 const plugins = ref<string[]>([])
+/**
+ * Full `GET /api/plugins` descriptors (additive fields tolerated as absent on
+ * an older backend); feeds the per-plugin options editors and tool-scope
+ * display in the plugins section.
+ */
+const pluginDescriptors = ref<PluginDescriptor[]>([])
+/**
+ * Effective options per plugin, learned from the settings payload and from
+ * successful options applies. A plain settings save re-attaches them as
+ * `{path, options}` entries so it never wipes persisted plugin options.
+ */
+const pluginOptionEntries = ref<Record<string, Record<string, unknown>>>({})
+
+function absorbPluginOptionEntries(payload: unknown): void {
+  if (!Array.isArray(payload)) return
+  const next: Record<string, Record<string, unknown>> = {}
+  for (const item of payload) {
+    if (item === null || typeof item !== 'object') continue
+    const entry = item as { path?: unknown; options?: unknown }
+    if (
+      typeof entry.path === 'string' &&
+      entry.options !== null &&
+      typeof entry.options === 'object' &&
+      !Array.isArray(entry.options)
+    ) {
+      next[entry.path] = { ...(entry.options as Record<string, unknown>) }
+    }
+  }
+  pluginOptionEntries.value = next
+}
+
+function onPluginOptionsUpdated(name: string, options: Record<string, unknown>): void {
+  pluginOptionEntries.value = { ...pluginOptionEntries.value, [name]: options }
+}
+
+/** Shared list for the settings save: names plus `{path, options}` entries. */
+function pluginSelectionPayload(): PluginSelection {
+  return plugins.value.map((name) => {
+    const options = pluginOptionEntries.value[name]
+    return options && Object.keys(options).length > 0 ? { path: name, options } : name
+  })
+}
 
 // Connection presets (Stage 17): the per-role "connection" select picks a
 // provider preset (which supplies base URL + API key) or "Manual".
@@ -491,8 +533,10 @@ onMounted(async () => {
     subagentSupported.value = view.subagent !== undefined && view.subagent !== null
     if (view.subagent) fill('subagent', view.subagent)
     plugins.value = normalizePluginSelection(view.plugins)
+    absorbPluginOptionEntries(view.plugins)
     approvalPolicy.value = approvalPolicyOf(view)
     applyCompaction(view)
+    pluginDescriptors.value = discovered.plugins
     pluginOptions.value = discovered.plugins.map((p) => ({
       label: p.description ? `${p.name} — ${p.description}` : p.name,
       value: p.name,
@@ -566,7 +610,7 @@ async function save() {
     // section either.
     const view = await updateSettingsWithPlugins({
       ...patch,
-      plugins: plugins.value,
+      plugins: pluginSelectionPayload(),
       ...approvalPolicyPatch(approvalPolicy.value),
       ...(compaction.value !== null && compactionForm !== null
         ? compactionPatch(compaction.value, compactionForm.values)
@@ -576,6 +620,7 @@ async function save() {
     fill('junior', view.junior)
     if (view.subagent) fill('subagent', view.subagent)
     plugins.value = normalizePluginSelection(view.plugins)
+    absorbPluginOptionEntries(view.plugins)
     approvalPolicy.value = approvalPolicyOf(view)
     applyCompaction(view)
     senior.api_key = ''
@@ -843,7 +888,9 @@ async function save() {
                 :plugins="plugins"
                 :options="pluginOptions"
                 :errors="pluginErrors"
+                :descriptors="pluginDescriptors"
                 @update:plugins="plugins = $event"
+                @options-updated="onPluginOptionsUpdated"
               />
             </div>
 
