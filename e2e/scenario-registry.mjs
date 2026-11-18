@@ -43,6 +43,7 @@ export const HERMETIC_LABELS = Object.freeze([
   'settings-advanced',
   'settings-subagent',
   'settings-preset-sync',
+  'settings-mcp',
   'settings-quality',
   'session-switch-race',
   'subagent-switch-race',
