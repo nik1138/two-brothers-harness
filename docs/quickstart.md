@@ -21,12 +21,18 @@ npm install
 npm run build                          # tsc → dist/
 ```
 
-Or install the published package (v0.0.1 is the latest release):
+Or install the published package (v0.0.2 is the latest release):
 
 ```powershell
 npm install -g @two-brothers/harness
 two-brothers --version
 ```
+
+With the global install the web workspace is one command —
+`two-brothers serve --port 8600` serves the built UI from the tarball at
+http://127.0.0.1:8600 — and every `node dist/cli.js …` below also works as
+`two-brothers …` (for example `two-brothers run "…" --provider mock` or
+`two-brothers tui`).
 
 ## 2. First run (offline, no API key)
 

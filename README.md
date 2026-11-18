@@ -21,7 +21,17 @@ npm install -g @two-brothers/harness
 two-brothers --help
 ```
 
-From a checkout — offline, no API key, deterministic mock provider:
+Pick a workspace — the npm tarball ships the built web app, so there is no
+separate frontend build:
+
+```bash
+two-brothers serve --port 8600                                            # web workspace → http://127.0.0.1:8600
+two-brothers run "Plan a migration from Redis to Valkey" --provider mock  # one offline cycle
+two-brothers tui --provider mock                                          # terminal workspace
+```
+
+From a checkout — the same commands via `node dist/cli.js …`, offline with the
+deterministic mock provider:
 
 ```bash
 cd packages/harness
