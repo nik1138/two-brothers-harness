@@ -68,6 +68,7 @@ import {
   normalizePermissionPreset,
   permissionPresetOf,
   permissionPresetWarning,
+  type ApprovalBroker,
   type ApprovalMode,
   type PermissionPreset,
 } from "../permissions.ts";
@@ -382,40 +383,21 @@ export interface TuiIO {
  * multi-select. The core lane implements the broker side; the TUI only
  * builds and posts the body.
  */
-export interface ApprovalAnswerBody {
-  decision: "answer";
-  labels: string[];
-}
-
-/** Build the additive answer decision body for one operator selection. */
-export function approvalAnswerBody(labels: readonly string[]): ApprovalAnswerBody {
-  return { decision: "answer", labels: [...labels] };
-}
-
 /**
- * The approval broker's operator `respond`, widened with the additive answer
- * body. Method-parameter bivariance keeps `RunApprovalBroker` assignable
- * today (it only accepts the Decision enum); once the core lane lands the
- * answer decision, the same call path carries the body unchanged.
- */
-export interface ApprovalAnswerSink {
-  respond(requestId: string, decision: Decision | ApprovalAnswerBody): unknown;
-}
-
-/**
- * Post one ask_user answer through the same `respond` transport the approval
- * path uses, with the additive answer body. Fail-soft by contract: a throw or
- * a not-parked (`null`) answer reports `false` so the caller keeps the
- * question parked and surfaces a toast — the panel is cleared only by the
- * broker's `approval_resolved` event, never optimistically here.
+ * Post one ask_user answer through the broker's operator `respond` transport
+ * (the additive `answer` decision with the selected labels). Fail-soft by
+ * contract: a throw or a not-parked (`null`) answer reports `false` so the
+ * caller keeps the question parked and surfaces a toast — the panel is
+ * cleared only by the broker's `approval_resolved` event, never optimistically
+ * here.
  */
 export function postApprovalAnswer(
-  broker: ApprovalAnswerSink,
+  broker: RunApprovalBroker,
   approvalId: string,
   labels: readonly string[],
 ): boolean {
   try {
-    return broker.respond(approvalId, approvalAnswerBody(labels)) != null;
+    return broker.respond(approvalId, "answer", [...labels]) != null;
   } catch {
     return false;
   }
@@ -1313,6 +1295,13 @@ interface TurnSetup {
   subagentProviderFactory?: (role: SubagentRole) => Provider;
   /** Run id the child handles report (`null` when unknown). */
   runId?: string | null;
+  /**
+   * The turn's approval broker (`HarnessOptions.approvals`): the same broker
+   * the workspace `PermissionManager` parks requests on. Wiring it offers the
+   * `ask_user` tool on both belts this turn (questions park the approval
+   * panel in question mode); absent callers keep today's belt.
+   */
+  approvals?: ApprovalBroker;
 }
 
 interface TurnHarness {
@@ -1381,6 +1370,7 @@ async function buildTurnHarness(setup: TurnSetup): Promise<TurnHarness> {
   const projectInstructions = projectInstructionsFromEnv();
   const harness = new TwoBrothersHarness(cfg, {
     ...(setup.workspace !== undefined ? { workspace: setup.workspace } : {}),
+    ...(setup.approvals !== undefined ? { approvals: setup.approvals } : {}),
     ...(hasScopes ? { toolScopes } : {}),
     endpoints,
     ...(compaction ? { compaction } : {}),
@@ -3342,6 +3332,7 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
           endpoints: turnProviders.endpoints,
           subagentStore,
           parentSession: turnParentSession,
+          ...(activeBroker !== null ? { approvals: activeBroker } : {}),
           ...(turnProviders.subagentEndpoint !== null
             ? { subagentEndpoint: turnProviders.subagentEndpoint }
             : {}),

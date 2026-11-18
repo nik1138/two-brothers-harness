@@ -15,12 +15,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { Decision } from "../src/permissions.ts";
-import {
-  approvalAnswerBody,
-  postApprovalAnswer,
-  type ApprovalAnswerSink,
-} from "../src/tui/app.ts";
+import { Action, Decision } from "../src/permissions.ts";
+import { postApprovalAnswer } from "../src/tui/app.ts";
+import { RunApprovalBroker } from "../src/runevents.ts";
 import { TUI_COMMANDS } from "../src/tui/keymap.ts";
 import { stripAnsi } from "../src/tui/render.ts";
 import { displayWidth } from "../src/tui/text.ts";
@@ -144,32 +141,44 @@ test("single-select: Up/Down move the highlight, Enter answers the highlighted o
   assert.equal(press(wrapped, { name: "up" }).state.selected, 1);
 });
 
-test("answer dispatch: posts { decision: \"answer\", labels } through the respond transport", () => {
-  const bodies: unknown[] = [];
-  const fakeBroker: ApprovalAnswerSink = {
-    respond: (_id, decision) => {
-      bodies.push(decision);
-      return "allow" as const;
+test("answer dispatch: posts the answer decision with labels through the broker respond transport", async () => {
+  const broker = new RunApprovalBroker();
+  const outcome = broker.ask({
+    kind: "question",
+    action: Action.READ,
+    question: {
+      text: "Pick a store",
+      options: [
+        { label: "Redis" },
+        { label: "Valkey" },
+        { label: "Dragonfly" },
+      ],
     },
-  };
-  const state = createApprovalPanelState(questionItem());
-  const result = press(state, { name: "3" });
-  assert.deepEqual(result.labels, ["Dragonfly"]);
-  assert.equal(postApprovalAnswer(fakeBroker, "q-1", result.labels ?? []), true);
-  assert.deepEqual(bodies, [{ decision: "answer", labels: ["Dragonfly"] }]);
-  // The pure body builder is the exact contract shape.
-  assert.deepEqual(approvalAnswerBody(["a", "b"]), { decision: "answer", labels: ["a", "b"] });
+  });
+  const id = broker.pending()[0]?.approval_id;
+  assert.ok(typeof id === "string", "question parked");
+  assert.equal(postApprovalAnswer(broker, id, ["Dragonfly"]), true);
+  assert.deepEqual(await outcome, { status: "answered", labels: ["Dragonfly"] });
 });
 
 test("answer dispatch: a failed post reports failure so the app keeps the question parked", () => {
-  const nullBroker: ApprovalAnswerSink = { respond: () => null };
-  const throwingBroker: ApprovalAnswerSink = {
-    respond: () => {
-      throw new Error("broker gone");
+  const fresh = new RunApprovalBroker();
+  // Unknown id (nothing parked) — respond resolves null ⇒ false.
+  assert.equal(postApprovalAnswer(fresh, "q-1", ["Valkey"]), false);
+  // A validation throw (bad labels) ⇒ false and the wait stays parked.
+  const broker = new RunApprovalBroker();
+  const outcome = broker.ask({
+    kind: "question",
+    action: Action.READ,
+    question: {
+      text: "Pick a store",
+      options: [{ label: "Redis" }, { label: "Valkey" }],
     },
-  };
-  assert.equal(postApprovalAnswer(nullBroker, "q-1", ["Valkey"]), false);
-  assert.equal(postApprovalAnswer(throwingBroker, "q-1", ["Valkey"]), false);
+  });
+  const id = broker.pending()[0]?.approval_id;
+  assert.ok(typeof id === "string", "question parked");
+  assert.equal(postApprovalAnswer(broker, id, ["Nope"]), false);
+  void outcome; // still parked; settled by the stop unwind paths in askuser.test.ts
 });
 
 // --------------------------------------------------------------------------- //
