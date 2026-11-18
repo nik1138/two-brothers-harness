@@ -1,10 +1,9 @@
 # Release runbook — `@two-brothers/harness`
 
-How the package ships to npm. **Status: 0.0.2 in preparation (release
-candidate); 0.0.1 is published on `latest` (and
-`next`), with the `v0.0.1` GitHub release at `b871b5a`.** The publish
-workflow ran on `main` with the full gate and signed provenance; promotion
-and the GitHub release followed on 2026-11-09.
+How the package ships to npm. **Status: 0.0.2 is published on `next`
+(tag `v0.0.2` at `354df89`, publish run 2026-11-18); `latest` still points
+at 0.0.1 until promotion.** The publish workflow ran the full gate with
+trusted-publishing provenance before `npm publish --tag next`.
 
 Mechanics live in `.github/workflows/publish.yml` — read its header comment
 first; it documents the same one-time setup inline. Pushing a `v*` tag (or
