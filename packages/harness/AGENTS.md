@@ -624,6 +624,31 @@ the protocol reference and is not modified by work here either.
    `RunUndoDialog.vue` (12 tests). The rewind route clears the session
    runtime-event sidecar; the transcript is kept. No
    PROTOCOL/schema/session-format change; no new runtime dependencies.
+   **`ask_user` structured operator questions are shipped:** the built-in
+   `ask_user` tool (both belts, every mode, whenever
+   `HarnessOptions.approvals` — a `RunApprovalBroker` — is wired; no broker,
+   no tool and byte-identical prompts) parks an `ApprovalRequest` with
+   `kind: "question"` through the existing approval machinery — deliberately
+   NOT a new protocol envelope. `ApprovalRequest` gains the additive
+   `kind`/`question` fields (`QuestionOption`/`OperatorQuestion` in
+   `permissions.ts`, tolerant `sanitizeQuestion` + strict `questionIssues` /
+   `answerLabelsIssue`, fail-closed); `RunApprovalBroker` gains `ask()`
+   (`QuestionOutcome`: answered/declined/cancelled — no session-allow,
+   denial-cap or shell-caution pre-checks) and `respond()` accepts the
+   additive `"answer"` decision with `labels` (throws on an answer to an
+   approval or an allow to a question; a question deny is a decline and
+   never counts toward the denial cap). The approvals route accepts
+   `{decision: "answer", labels}` (400 on every validation rejection, the
+   wait stays parked) and `approval_requested` / `pending()` carry the
+   additive `kind`/`question` fields (omitted for approvals). Model-facing
+   results: `operator answer: <labels joined with ", ">` (option intents
+   parenthetically), `operator declined to answer`, `question cancelled by
+   operator stop`. Like `spill_read`, `ask_user` never opens a tool loop by
+   itself — belt-less consult runs keep their exact plain request path. Both
+   `shared/prompts.json` copies gained one `ask_user` bullet per role (the
+   modebytes goldens were regenerated with the sanctioned capture script).
+   Tests: `tests/askuser.test.ts` (17). No new runtime deps; no protocol
+   change.
 
 ## Subagent lanes
 

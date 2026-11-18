@@ -328,6 +328,7 @@ import {
   PermissionPolicy,
   resolveApprovalMode,
   Decision,
+  type ApprovalBroker,
   type ApprovalMode,
 } from "./permissions.ts";
 import {
@@ -1918,6 +1919,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     runIdOf?: () => string | null,
     projectPath?: string | null,
     subagentEndpoint?: RoleEndpoint | null,
+    approvals?: ApprovalBroker,
   ): Promise<HarnessResult> {
     const store = materializeStore(name, projectPath ?? workspace?.root ?? null);
     // OpenCode routes each conversation by this stable id (x-opencode-session);
@@ -2083,6 +2085,10 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       ...(repeatToolGuard !== undefined ? { repeatToolGuard } : {}),
       ...(projectInstructions !== undefined ? { projectInstructions } : {}),
       spill: { root: spillRoot },
+      // The run's approval broker doubles as the `ask_user` question broker:
+      // the built-in tool parks structured operator questions on it, so a
+      // question works with or without a bound workspace.
+      ...(approvals ? { approvals } : {}),
       subagents: {
         store: state.subagents,
         parentSession: name,
@@ -2199,6 +2205,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         runIdOf,
         undefined,
         subagentEndpoint,
+        broker,
       );
       // Workspace-instruction skips (oversize/binary/unreadable) are fail-soft
       // but must not be silent on the serve path; the TUI already prints them.
@@ -4325,6 +4332,28 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       const record = state.runs.get(ctx.params.run_id);
       if (record === null || record.approvals === null) throw new HttpError(404, "not found");
       const broker = record.approvals as RunApprovalBroker;
+      // Additive structured-question answer: `{ decision: "answer", labels }`
+      // settles a parked `ask_user` question. Validation is fail-closed in the
+      // broker (unknown labels, wrong count, answer on an approval, allow on a
+      // question) and surfaces here as a 400 with the wait left parked.
+      if (body.decision !== undefined && body.decision !== null) {
+        if (body.decision !== "answer") throw invalidBody();
+        const labels = body.labels;
+        let outcome: Decision | "answer" | null;
+        try {
+          outcome = broker.respond(
+            ctx.params.approval_id,
+            "answer",
+            labels as string[] | undefined,
+          );
+        } catch (exc) {
+          throw new HttpError(400, exc instanceof Error ? exc.message : String(exc));
+        }
+        if (outcome === null) {
+          throw new HttpError(404, "unknown or already resolved approval");
+        }
+        return { approval_id: ctx.params.approval_id, decision: "answer", labels, scope: "once" };
+      }
       if (scope === "session") {
         requireWritableSettings();
         if (
@@ -4354,16 +4383,27 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
           if (exc instanceof SettingsWriteRefusedError) throw exc;
           throw new HttpError(500, `could not persist the session approval: ${errorDetail(exc)}`);
         }
-        const decision = broker.allowForSession(ctx.params.approval_id);
+        let decision: Decision | null;
+        try {
+          decision = broker.allowForSession(ctx.params.approval_id);
+        } catch (exc) {
+          throw new HttpError(400, exc instanceof Error ? exc.message : String(exc));
+        }
         if (decision === null) {
           throw new HttpError(404, "unknown or already resolved approval");
         }
         return { approval_id: ctx.params.approval_id, decision, scope: "session" };
       }
-      const decision = broker.respond(
-        ctx.params.approval_id,
-        allow ? Decision.ALLOW : Decision.DENY,
-      );
+      let decision: Decision | "answer" | null;
+      try {
+        decision = broker.respond(
+          ctx.params.approval_id,
+          allow ? Decision.ALLOW : Decision.DENY,
+        );
+      } catch (exc) {
+        // e.g. an allow against a parked question: fail-closed, 400, still parked.
+        throw new HttpError(400, exc instanceof Error ? exc.message : String(exc));
+      }
       if (decision === null) {
         throw new HttpError(404, "unknown or already resolved approval");
       }

@@ -186,7 +186,17 @@ import {
   type HookRegistry,
   type HookRole,
 } from "./plugins.ts";
-import { Decision, type ApprovalRequest } from "./permissions.ts";
+import {
+  Action,
+  Decision,
+  questionIssues,
+  sanitizeQuestion,
+  type ApprovalBroker,
+  type ApprovalRequest,
+  type OperatorQuestion,
+  type QuestionOutcome,
+} from "./permissions.ts";
+import { validateArgs, type JsonSchemaSubset } from "./toolschema.ts";
 import { nowIso, parseModelOutput, type Message } from "./protocol.ts";
 import type { RoleEndpoint } from "./runtime.ts";
 import type { HarnessResultSummary, StreamEvent, StreamToolStatus } from "./runstream.ts";
@@ -229,6 +239,7 @@ import {
   MAX_EVIDENCE_ENTRIES,
   CLIP_EVIDENCE_CHARS,
   REASONING_EVENT_MAX_CHARS,
+  type RunApprovalBroker,
   type RuntimeEvent,
   type SubagentCompletedEvent,
 } from "./runevents.ts";
@@ -447,6 +458,73 @@ export const WORKSPACE_MUTATION_TOOL_NAMES: ReadonlySet<string> = new Set([
   "workspace_delete_file",
   "workspace_run_shell",
 ]);
+
+/**
+ * The built-in `ask_user` tool: a structured, mid-run question for the
+ * operator, parked on the run's approval broker (a `RunApprovalBroker`) as an
+ * `ApprovalRequest` with `kind: "question"` — the same park machinery as a
+ * workspace mutation, deliberately not a new protocol envelope. Offered on
+ * both belts in every mode whenever `HarnessOptions.approvals` is wired
+ * (`serve`/TUI); without a broker the tool is not advertised. Like
+ * `spill_read`, it never opens a tool loop by itself: it rides every loop a
+ * real tool opens (and the junior deliverable loop, opened by any non-empty
+ * belt), so belt-less consult runs keep their exact plain request path.
+ */
+export const ASK_USER_TOOL_NAME = "ask_user";
+
+export const ASK_USER_TOOL_DESCRIPTION =
+  "Ask the operator a structured question and wait for their answer. Use only when operator input is genuinely required and changes what you do next. Keep the question concise; give 2-4 realistic options (2..6), each with an optional short description; add an intent tag per option when a machine-readable answer helps; set multi_select only when several options can apply at once. The run waits until the operator answers or declines.";
+
+/** Wire schema for the tool call args (validated at dispatch like plugin tools). */
+export const ASK_USER_TOOL_PARAMETERS: JsonSchemaSubset = {
+  type: "object",
+  properties: {
+    question: {
+      type: "string",
+      description: "the question for the operator (required, at most 1000 chars)",
+    },
+    header: {
+      type: "string",
+      description: "optional short heading (at most 120 chars)",
+    },
+    options: {
+      type: "array",
+      description: "2..6 answerable options",
+      items: {
+        type: "object",
+        properties: {
+          label: { type: "string", description: "the answer value (1..80 chars, unique)" },
+          description: { type: "string", description: "optional help text (at most 200 chars)" },
+          intent: {
+            type: "string",
+            description: "optional machine-readable tag (at most 40 chars, [a-z0-9_-])",
+          },
+        },
+        required: ["label"],
+      },
+    },
+    multi_select: {
+      type: "boolean",
+      description: "true when several options may be selected (default false)",
+    },
+  },
+  required: ["question", "options"],
+};
+
+/** Model-facing result strings for one settled question (the contract). */
+export function formatAskUserResult(
+  outcome: QuestionOutcome,
+  question: OperatorQuestion,
+): string {
+  if (outcome.status === "cancelled") return "question cancelled by operator stop";
+  if (outcome.status === "declined") return "operator declined to answer";
+  const byLabel = new Map(question.options.map((option) => [option.label, option]));
+  const parts = outcome.labels.map((label) => {
+    const intent = byLabel.get(label)?.intent;
+    return intent !== undefined && intent !== "" ? `${label} (${intent})` : label;
+  });
+  return `operator answer: ${parts.join(", ")}`;
+}
 
 /**
  * Prefix carried by an operator steering envelope's payload text (wave 23,
@@ -972,6 +1050,14 @@ export interface HarnessOptions {
    * gets the read-only verify slice via SENIOR_VERIFY_TOOL_NAMES.
    */
   workspace?: Workspace;
+  /**
+   * Additive: the run's approval broker (a `RunApprovalBroker` on `serve`/TUI).
+   * When set, the built-in `ask_user` tool joins both roles' belts in every
+   * mode and parks structured operator questions on this broker — no workspace
+   * is required. Without it the tool is not advertised and prompts stay
+   * byte-identical.
+   */
+  approvals?: ApprovalBroker;
   /**
    * Root-level workspace instructions (`AGENTS.md`, then `CLAUDE.md`) appended
    * last to both roles' system prompts. Enabled by default for a
@@ -2238,13 +2324,20 @@ export class TwoBrothersHarness {
 
   /**
    * Whether a belt carries a tool that can do real work (not the display-only
-   * plan tool or the output-retrieval helper). Consult nodes use this to keep
-   * their exact pre-tools request path when spill_read/todo_write are the only
-   * entries; a real tool still opens the bounded loop.
+   * plan tool, the output-retrieval helper or the operator-question tool).
+   * Consult nodes use this to keep their exact pre-tools request path when
+   * spill_read/todo_write/ask_user are the only entries; a real tool still
+   * opens the bounded loop. `ask_user` deliberately does not open a loop on
+   * its own — it rides every loop a real tool opens (and the junior
+   * deliverable loop, which any non-empty belt opens), so existing run shapes
+   * keep their exact request path while both belts still carry the tool.
    */
   private hasTaskTools(tools: readonly Tool[]): boolean {
     return tools.some(
-      (tool) => tool.name !== TODO_TOOL_NAME && tool.name !== SPILL_READ_TOOL_NAME,
+      (tool) =>
+        tool.name !== TODO_TOOL_NAME &&
+        tool.name !== SPILL_READ_TOOL_NAME &&
+        tool.name !== ASK_USER_TOOL_NAME,
     );
   }
 
@@ -2283,6 +2376,53 @@ export class TwoBrothersHarness {
   }
 
   /**
+   * The built-in structured-question tool. The run must have an approval
+   * broker wired (`HarnessOptions.approvals`, a `RunApprovalBroker`); args are
+   * validated at dispatch, the question is sanitized + strictly checked, and
+   * the wait parks on the broker — an operator answer, decline, or a run stop
+   * all settle it into the contract's result string. Fail-soft: every bad
+   * input and a missing broker come back as a normal tool-error string.
+   */
+  private askUserTool(): Tool {
+    return {
+      name: ASK_USER_TOOL_NAME,
+      description: ASK_USER_TOOL_DESCRIPTION,
+      parameters: ASK_USER_TOOL_PARAMETERS,
+      execute: async (args) => {
+        const broker = this.options.approvals;
+        if (broker === undefined || typeof (broker as RunApprovalBroker).ask !== "function") {
+          return "ask_user error: operator questions are not available in this run";
+        }
+        const check = validateArgs(ASK_USER_TOOL_PARAMETERS, args);
+        if (!check.ok) {
+          return `ask_user error: invalid arguments: ${check.errors.join("; ")}`;
+        }
+        const value = check.value as Record<string, unknown>;
+        const sanitized = sanitizeQuestion({
+          text: value.question,
+          header: value.header,
+          options: value.options,
+          multi_select: value.multi_select,
+        });
+        if (sanitized.question === undefined) {
+          return `ask_user error: ${sanitized.error ?? "invalid question"}`;
+        }
+        const issue = questionIssues(sanitized.question);
+        if (issue !== null) return `ask_user error: ${issue}`;
+        const question = sanitized.question;
+        const outcome = await (broker as RunApprovalBroker).ask({
+          kind: "question",
+          question,
+          // A question is not a workspace action; READ marks the request
+          // non-mutating (the pair key is never consulted for questions).
+          action: Action.READ,
+        });
+        return formatAskUserResult(outcome, question);
+      },
+    };
+  }
+
+  /**
    * The junior's belt: the workspace's tool belt (when configured), plus the
    * `shared` and `junior` scopes of the role-scoped registry. The legacy
    * `options.tools` maps into the junior scope, so existing callers keep
@@ -2297,6 +2437,7 @@ export class TwoBrothersHarness {
       ...(scopes?.junior ?? []),
       ...(this.options.tools ?? []),
       ...(this.spillReadOffered() ? [this.spillReadTool()] : []),
+      ...(this.options.approvals !== undefined ? [this.askUserTool()] : []),
       this.todoWriteTool(state),
     ];
   }
@@ -2319,6 +2460,7 @@ export class TwoBrothersHarness {
       ...(this.options.tools ?? []).filter(verifyName),
       ...(this.options.seniorTools ?? []),
       ...(this.spillReadOffered() ? [this.spillReadTool()] : []),
+      ...(this.options.approvals !== undefined ? [this.askUserTool()] : []),
       // Helper surface, gated exactly like the `subagent` tool itself: a
       // surface without `HarnessOptions.subagents` (`run`/`chat`) keeps a
       // byte-identical Senior prompt, and a child's filtered belt never carries

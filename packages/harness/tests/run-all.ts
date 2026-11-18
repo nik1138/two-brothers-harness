@@ -70,6 +70,7 @@ import "./basecommands.test.ts";
 import "./pluginmcp.test.ts";
 import "./skillinvoke.test.ts";
 import "./approvaldeny.test.ts";
+import "./askuser.test.ts";
 import "./security.test.ts";
 import "./providerwarnings.test.ts";
 import "./cliwiring.test.ts";
