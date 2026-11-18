@@ -1,6 +1,7 @@
 # Release runbook — `@two-brothers/harness`
 
-How the package ships to npm. **Status: 0.0.1 published on `latest` (and
+How the package ships to npm. **Status: 0.0.2 in preparation (release
+candidate); 0.0.1 is published on `latest` (and
 `next`), with the `v0.0.1` GitHub release at `b871b5a`.** The publish
 workflow ran on `main` with the full gate and signed provenance; promotion
 and the GitHub release followed on 2026-11-09.

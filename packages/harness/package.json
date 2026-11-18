@@ -1,6 +1,6 @@
 {
   "name": "@two-brothers/harness",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Two-brothers cooperation harness: senior arbiter + junior collaborator sharing one context.",
   "type": "module",
   "license": "MIT",
