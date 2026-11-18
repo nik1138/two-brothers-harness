@@ -349,8 +349,190 @@ export interface ApprovalDetail {
   truncated?: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// Structured operator questions (the built-in `ask_user` tool)
+// ---------------------------------------------------------------------------
+
+/**
+ * Additive request kinds: a plain workspace approval (the historical shape,
+ * also the meaning when `kind` is absent) or a structured operator question
+ * parked through the same broker machinery.
+ */
+export type ApprovalRequestKind = "approval" | "question";
+
+export const QUESTION_HEADER_MAX_CHARS = 120;
+export const QUESTION_TEXT_MAX_CHARS = 1000;
+export const QUESTION_OPTION_LABEL_MAX_CHARS = 80;
+export const QUESTION_OPTION_DESCRIPTION_MAX_CHARS = 200;
+export const QUESTION_OPTION_INTENT_MAX_CHARS = 40;
+export const QUESTION_OPTION_INTENT_PATTERN = "^[a-z0-9_-]+$";
+export const QUESTION_MIN_OPTIONS = 2;
+export const QUESTION_MAX_OPTIONS = 6;
+
+/** One answerable option of a structured operator question. */
+export interface QuestionOption {
+  /** 1..80 chars, unique within the question; the value an answer carries. */
+  label: string;
+  /** Optional 1..200 char help text shown beside the option. */
+  description?: string;
+  /** Optional machine-readable tag (≤40 chars, `^[a-z0-9_-]+$`). */
+  intent?: string;
+}
+
+/**
+ * A structured mid-run question for the operator. Present on an
+ * `ApprovalRequest` exactly when `kind === "question"`.
+ */
+export interface OperatorQuestion {
+  /** Optional 1..120 char heading. */
+  header?: string;
+  /** The question itself (1..1000 chars, required). */
+  text: string;
+  /** 2..6 answerable options (required). */
+  options: QuestionOption[];
+  /** True when several options may be selected; default false. */
+  multi_select?: boolean;
+}
+
+/**
+ * The settle outcome of one parked question, mapped by the `ask_user` tool
+ * onto its model-facing result string. `answered` carries the operator's
+ * chosen option labels; `declined` is an operator deny; `cancelled` is a run
+ * stop (or a withdrawn child wait) while parked.
+ */
+export type QuestionOutcome =
+  | { status: "answered"; labels: string[] }
+  | { status: "declined" }
+  | { status: "cancelled" };
+
+/**
+ * Operator decisions a broker's `respond()` accepts: the historical
+ * allow/deny plus the additive `answer` variant for structured questions,
+ * which carries the selected option labels.
+ */
+export type ApprovalResponse = Decision | "answer";
+
+/**
+ * Tolerant boundary normalization of one model-supplied question (the
+ * `ask_user` tool args): unknown fields are dropped, types are coerced, and
+ * the result is then checked against the strict bounds. `error` names the
+ * first violation; `question` is set only when the shape is usable.
+ */
+export function sanitizeQuestion(raw: unknown): { question?: OperatorQuestion; error?: string } {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { error: "question must be an object" };
+  }
+  const record = raw as Record<string, unknown>;
+  const text = typeof record.text === "string" ? record.text : String(record.text ?? "").trim();
+  const header =
+    record.header === undefined || record.header === null ? undefined : String(record.header);
+  const multi =
+    typeof record.multi_select === "boolean" ? record.multi_select : undefined;
+  const rawOptions = Array.isArray(record.options) ? record.options : [];
+  const options: QuestionOption[] = [];
+  for (const entry of rawOptions) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const option = entry as Record<string, unknown>;
+    const label = String(option.label ?? "");
+    if (label.trim() === "") continue;
+    const out: QuestionOption = { label };
+    if (option.description !== undefined && option.description !== null) {
+      const description = String(option.description);
+      if (description !== "") out.description = description;
+    }
+    if (option.intent !== undefined && option.intent !== null) {
+      const intent = String(option.intent);
+      if (intent !== "") out.intent = intent;
+    }
+    options.push(out);
+  }
+  const question: OperatorQuestion = { text, options };
+  if (header !== undefined && header !== "") question.header = header;
+  if (multi !== undefined) question.multi_select = multi;
+  return { question };
+}
+
+/**
+ * Strict validation of one question. Returns the first issue, or null when
+ * the question satisfies every contract bound. Used fail-closed before a
+ * question is parked and before an operator answer is accepted.
+ */
+export function questionIssues(question: OperatorQuestion): string | null {
+  if (typeof question.text !== "string" || question.text.trim() === "") {
+    return "question.text is required";
+  }
+  if (question.text.length > QUESTION_TEXT_MAX_CHARS) {
+    return `question.text exceeds ${QUESTION_TEXT_MAX_CHARS} chars`;
+  }
+  if (question.header !== undefined) {
+    if (typeof question.header !== "string" || question.header.length > QUESTION_HEADER_MAX_CHARS) {
+      return `question.header exceeds ${QUESTION_HEADER_MAX_CHARS} chars`;
+    }
+  }
+  if (!Array.isArray(question.options) ||
+      question.options.length < QUESTION_MIN_OPTIONS ||
+      question.options.length > QUESTION_MAX_OPTIONS) {
+    return `question.options must have ${QUESTION_MIN_OPTIONS}..${QUESTION_MAX_OPTIONS} entries`;
+  }
+  const seen = new Set<string>();
+  for (const option of question.options) {
+    if (typeof option !== "object" || option === null) return "question.options entries must be objects";
+    if (typeof option.label !== "string" || option.label.trim() === "") {
+      return "every option needs a non-empty label";
+    }
+    if (option.label.length > QUESTION_OPTION_LABEL_MAX_CHARS) {
+      return `option label exceeds ${QUESTION_OPTION_LABEL_MAX_CHARS} chars`;
+    }
+    if (seen.has(option.label)) return `duplicate option label: ${option.label}`;
+    seen.add(option.label);
+    if (option.description !== undefined &&
+        (typeof option.description !== "string" ||
+          option.description.length > QUESTION_OPTION_DESCRIPTION_MAX_CHARS)) {
+      return `option description exceeds ${QUESTION_OPTION_DESCRIPTION_MAX_CHARS} chars`;
+    }
+    if (option.intent !== undefined) {
+      if (typeof option.intent !== "string" || option.intent.length > QUESTION_OPTION_INTENT_MAX_CHARS ||
+          !new RegExp(QUESTION_OPTION_INTENT_PATTERN).test(option.intent)) {
+        return `option intent must match ${QUESTION_OPTION_INTENT_PATTERN}`;
+      }
+    }
+  }
+  if (question.multi_select !== undefined && typeof question.multi_select !== "boolean") {
+    return "question.multi_select must be a boolean";
+  }
+  return null;
+}
+
+/**
+ * Strict, fail-closed validation of one operator answer against the parked
+ * question: 1..options.length entries, every entry an exact option label, and
+ * exactly one label when `multi_select` is false. Returns the issue, or null
+ * when the answer may settle the wait.
+ */
+export function answerLabelsIssue(question: OperatorQuestion, labels: unknown): string | null {
+  if (!Array.isArray(labels)) return "labels must be an array";
+  const chosen = labels.map((label) => (typeof label === "string" ? label : ""));
+  if (chosen.some((label) => label === "" || !question.options.some((option) => option.label === label))) {
+    return "every label must equal one of the question's option labels";
+  }
+  if (question.multi_select !== true && chosen.length !== 1) {
+    return "exactly one label is allowed (multi_select is false)";
+  }
+  if (chosen.length < 1 || chosen.length > question.options.length) {
+    return `1..${question.options.length} labels are allowed`;
+  }
+  return null;
+}
+
 /** Everything an operator needs to approve or deny one action. */
 export interface ApprovalRequest {
+  /**
+   * Additive: "question" marks a structured operator question (the built-in
+   * `ask_user` tool); absent means a workspace approval — today's shape.
+   */
+  kind?: ApprovalRequestKind;
+  /** Additive: present exactly when `kind === "question"`. */
+  question?: OperatorQuestion;
   /** Workspace action being requested. */
   action: Action;
   /** Workspace-relative path (or absolute command). */

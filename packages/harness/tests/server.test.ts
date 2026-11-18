@@ -44,6 +44,7 @@ import {
   type ServerOptions,
 } from "../src/server.ts";
 import type { RunCost } from "../src/runtime.ts";
+import { ASK_USER_TOOL_NAME } from "../src/harness.ts";
 import {
   INTERRUPT_AGENT_TOOL_NAME,
   LIST_AGENTS_TOOL_NAME,
@@ -1380,14 +1381,17 @@ test("prompt_audit event rides the run SSE stream, one frame per provider call",
       assert.equal(audit.run_id, started.body.run_id);
       assert.equal(typeof audit.at, "number");
       assert.ok(Array.isArray(audit.sections) && audit.sections.includes("base"));
-      // A serve/web run enables the read-only helper tool, so the Senior's
-      // consult/review calls now justify a tool loop; the Junior proposal and
-      // the final decision stay plain. The audit reports the exact belt offered.
+      // A serve/web run enables the read-only helper tool, the structured
+      // operator-question tool (ask_user) and the helper subagent surface, so
+      // the Senior's consult/review calls now justify a tool loop; the Junior
+      // proposal and the final decision stay plain. The audit reports the
+      // exact belt offered.
       assert.deepEqual(
         audit.tools,
         index === 0 || index === 2
           ? [
               "spill_read",
+              ASK_USER_TOOL_NAME,
               SUBAGENT_TOOL_NAME,
               LIST_AGENTS_TOOL_NAME,
               SEND_MESSAGE_TOOL_NAME,

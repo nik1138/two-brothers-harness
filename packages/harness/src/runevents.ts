@@ -31,9 +31,13 @@ import { sanitizeOutput } from "./output.ts";
 import {
   Action,
   Decision,
+  answerLabelsIssue,
   type ApprovalBroker,
   type ApprovalDetail,
   type ApprovalRequest,
+  type ApprovalResponse,
+  type OperatorQuestion,
+  type QuestionOutcome,
 } from "./permissions.ts";
 import type { PromptAuditEntry } from "./harness.ts";
 import type { TodoItem } from "./todos.ts";
@@ -170,6 +174,14 @@ export interface ApprovalRequestedEvent extends RuntimeEventMeta {
    */
   subagent_id?: string;
   subagent_label?: string;
+  /**
+   * Additive structured-question identity: `"question"` marks a request
+   * parked by the built-in `ask_user` tool; omitted for workspace approvals
+   * (byte-compatible). Present exactly together with `question`.
+   */
+  kind?: "question";
+  /** Additive: the structured question the operator answers; iff `kind === "question"`. */
+  question?: OperatorQuestion;
 }
 
 /** An approval wait was resolved exactly once (allow/deny, or deny/cancelled). */
@@ -761,6 +773,8 @@ interface PendingApproval {
   request: ApprovalRequest;
   decision: Decision | null;
   answered: boolean;
+  /** Additive: the option labels of an operator `answer` to a question. */
+  answer?: string[];
   resolve: (decision: Decision) => void;
 }
 
@@ -790,6 +804,20 @@ function childApprovalFields(request: ApprovalRequest): {
 function childIdField(request: ApprovalRequest): { subagent_id?: string } {
   return typeof request.subagent_id === "string" && request.subagent_id !== ""
     ? { subagent_id: request.subagent_id }
+    : {};
+}
+
+/**
+ * The additive fields of one `approval_requested` event: the structured
+ * question identity (`kind`/`question`) for `ask_user` requests, omitted for
+ * workspace approvals so their event bytes stay unchanged.
+ */
+function questionFields(request: ApprovalRequest): {
+  kind?: "question";
+  question?: OperatorQuestion;
+} {
+  return request.kind === "question" && request.question !== undefined
+    ? { kind: "question" as const, question: request.question }
     : {};
 }
 
@@ -983,6 +1011,7 @@ export class RunApprovalBroker implements ApprovalBroker {
         : {}),
       ...(effectiveRequest.detail !== undefined ? { detail: effectiveRequest.detail } : {}),
       ...childApprovalFields(effectiveRequest),
+      ...questionFields(effectiveRequest),
     });
 
     let onAbort: (() => void) | null = null;
@@ -1077,6 +1106,138 @@ export class RunApprovalBroker implements ApprovalBroker {
     return decision;
   }
 
+  /**
+   * Park a structured operator question (the built-in `ask_user` tool) until
+   * the operator answers (`respondAnswer` / `respond` with `answer`), declines
+   * (`respond` with deny), or the run stops (the same deny/abort machinery as
+   * `approve()` — a stopped run must never leave a question parked).
+   *
+   * Deliberately NONE of the approval pre-checks apply: a question never
+   * session-auto-allows, never trips the operator-denial cap, and never arms
+   * the shell caution — it always parks and emits `approval_requested` (with
+   * the additive `kind`/`question` fields). The settle maps onto
+   * `QuestionOutcome`: an operator answer, an operator decline, or a
+   * cancellation (stop/denyAll/withdrawn child), exactly once each.
+   */
+  async ask(request: ApprovalRequest): Promise<QuestionOutcome> {
+    const approvalId = shortId();
+    const entry: PendingApproval = {
+      request,
+      decision: null,
+      answered: false,
+      resolve: () => undefined,
+    };
+    const settled = new Promise<Decision>((resolve) => {
+      entry.resolve = resolve;
+    });
+    this._pending.set(approvalId, entry);
+    this._event({
+      type: "approval_requested",
+      approval_id: approvalId,
+      action: request.action,
+      target: request.target,
+      command: request.command,
+      ...(request.reason !== undefined && request.reason !== "" ? { reason: request.reason } : {}),
+      ...childApprovalFields(request),
+      ...questionFields(request),
+    });
+
+    let onAbort: (() => void) | null = null;
+    const signal = this._signal;
+    if (signal !== null) {
+      if (signal.aborted) {
+        // stop landed before the wait even started
+        this._pending.delete(approvalId);
+        this._event({
+          type: "approval_resolved",
+          approval_id: approvalId,
+          decision: Decision.DENY,
+          reason: "cancelled",
+          ...childIdField(request),
+        });
+        return { status: "cancelled" };
+      }
+      onAbort = () => {
+        if (this._pending.delete(approvalId)) {
+          this._event({
+            type: "approval_resolved",
+            approval_id: approvalId,
+            decision: Decision.DENY,
+            reason: "cancelled",
+            ...childIdField(request),
+          });
+        }
+        entry.resolve(Decision.DENY);
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    // A helper's own control withdraws its parked question exactly like a
+    // parked approval (silent while the run signal owns the cancellation).
+    let onChildAbort: (() => void) | null = null;
+    const childSignal = request.signal;
+    if (childSignal !== undefined) {
+      if (childSignal.aborted) {
+        if (onAbort !== null && signal !== null) signal.removeEventListener("abort", onAbort);
+        if (this._pending.delete(approvalId)) {
+          this._event({
+            type: "approval_resolved",
+            approval_id: approvalId,
+            decision: Decision.DENY,
+            reason: "interrupted",
+            ...childIdField(request),
+          });
+        }
+        return { status: "cancelled" };
+      }
+      onChildAbort = () => {
+        if (this._signal?.aborted === true) return; // the run-signal path owns it
+        if (this._pending.delete(approvalId)) {
+          this._event({
+            type: "approval_resolved",
+            approval_id: approvalId,
+            decision: Decision.DENY,
+            reason: "interrupted",
+            ...childIdField(request),
+          });
+        }
+        entry.resolve(Decision.DENY);
+      };
+      childSignal.addEventListener("abort", onChildAbort, { once: true });
+    }
+
+    await settled;
+
+    if (onAbort !== null && this._signal !== null) {
+      this._signal.removeEventListener("abort", onAbort);
+    }
+    if (onChildAbort !== null && childSignal !== undefined) {
+      childSignal.removeEventListener("abort", onChildAbort);
+    }
+    if (!this._pending.delete(approvalId)) {
+      // denyAll()/abort already resolved and emitted for this question
+      return { status: "cancelled" };
+    }
+    if (entry.answer !== undefined) {
+      this._event({
+        type: "approval_resolved",
+        approval_id: approvalId,
+        decision: "answer",
+        ...childIdField(entry.request),
+      });
+      return { status: "answered", labels: entry.answer };
+    }
+    this._event({
+      type: "approval_resolved",
+      approval_id: approvalId,
+      decision: entry.decision ?? Decision.DENY,
+      ...childIdField(entry.request),
+    });
+    // An operator deny settles a question as a decline; nothing else reaches
+    // here (an operator allow on a question is rejected by `respond`).
+    return { status: "declined" };
+  }
+
   // -- operator API ----------------------------------------------------------
 
   /** Operator-facing view of unanswered approval requests. */
@@ -1091,6 +1252,7 @@ export class RunApprovalBroker implements ApprovalBroker {
         reason: entry.request.reason ?? null,
         ...(entry.request.detail !== undefined ? { detail: entry.request.detail } : {}),
         ...childApprovalFields(entry.request),
+        ...questionFields(entry.request),
       });
     }
     return out;
@@ -1099,16 +1261,39 @@ export class RunApprovalBroker implements ApprovalBroker {
   /**
    * Answer one pending request; `null` if unknown or already answered.
    *
-   * Only an operator *deny* counts toward the repeat cap (per identical
-   * `(action, target)` pair). Allows neither count nor reset a pair; an
-   * already-answered/unknown id is a no-op and never changes any count. An
+   * `decision` is the historical {@link Decision} allow/deny or the additive
+   * `"answer"` variant for a structured question (the selected option labels
+   * ride in `labels`). Validation is fail-closed: an `answer` to a workspace
+   * approval, an allow to a question, or labels that do not match the parked
+   * question's options throw — the wait stays parked and nothing settles.
+   *
+   * Only an operator *deny* of a workspace approval counts toward the repeat
+   * cap (per identical `(action, target)` pair); a declined question is not a
+   * workspace denial and never counts. Allows neither count nor reset a pair;
+   * an already-answered/unknown id is a no-op and never changes any count. An
    * operator deny of a file mutation additionally arms the display-only shell
    * caution for later parked shell approvals in this run.
    */
-  respond(requestId: string, decision: Decision): Decision | null {
+  respond(requestId: string, decision: ApprovalResponse, labels?: string[]): Decision | "answer" | null {
     const entry = this._pending.get(requestId);
     if (entry === undefined || entry.answered) return null;
-    if (decision === Decision.DENY) {
+    const question = entry.request.kind === "question" ? entry.request.question : undefined;
+    if (decision === "answer") {
+      if (question === undefined) {
+        throw new Error("this request is a workspace approval: answer with allow or deny");
+      }
+      const issue = answerLabelsIssue(question, labels);
+      if (issue !== null) throw new Error(issue);
+      entry.answer = (labels as string[]).slice();
+      entry.decision = Decision.ALLOW;
+      entry.answered = true;
+      entry.resolve(Decision.ALLOW);
+      return "answer";
+    }
+    if (question !== undefined && decision === Decision.ALLOW) {
+      throw new Error("this request is a question: answer with decision answer or decline with deny");
+    }
+    if (decision === Decision.DENY && question === undefined) {
       const key = approvalPairKey(entry.request);
       this._denials.set(key, (this._denials.get(key) ?? 0) + 1);
       // An operator denial of a file mutation arms the display-only shell
@@ -1146,6 +1331,9 @@ export class RunApprovalBroker implements ApprovalBroker {
   allowForSession(requestId: string): Decision | null {
     const entry = this._pending.get(requestId);
     if (entry === undefined || entry.answered) return null;
+    if (entry.request.kind === "question") {
+      throw new Error("session scope does not apply to operator questions");
+    }
     this._sessionAllows.add(approvalPairKey(entry.request));
     entry.decision = Decision.ALLOW;
     entry.answered = true;
