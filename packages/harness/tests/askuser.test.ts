@@ -530,6 +530,58 @@ test("server: ask_user round trip over the approvals route with SSE kind/questio
   }
 });
 
+test("server: the web client's superset answer body {allow, decision, labels} is accepted", async () => {
+  const srv = await startServer({
+    providerOverrides: {
+      junior: new MockProvider([
+        { tool: ASK_USER_TOOL_NAME, args: askArgs() },
+        {
+          text: JSON.stringify({ result: "migration targets Valkey", artifacts: [], confidence: 0.8 }),
+        },
+      ]),
+    },
+  });
+  try {
+    const started = await post<Record<string, any>>(srv.base, "/api/runs", {
+      task: "Plan a migration from Redis to Valkey",
+      mode: "work",
+      provider: "mock",
+      session: "ask-user-web-body",
+    });
+    assert.equal(started.status, 202);
+    const runId = started.body.run_id;
+
+    await sseUntil(srv.base, `/api/runs/${runId}/events?after=0`, (all) =>
+      all.some((e) => e.type === "approval_requested"),
+    );
+    const pending = await get<Record<string, any>>(srv.base, `/api/runs/${runId}/approvals`);
+    const row = (pending.body.pending as Array<Record<string, any>>)[0];
+    assert.equal(row.kind, "question");
+
+    // The web client sends its historical `allow` field alongside the
+    // additive answer decision; `decision === "answer"` takes precedence
+    // and `allow` must not 400 the request.
+    const answered = await post<Record<string, any>>(
+      srv.base,
+      `/api/runs/${runId}/approvals/${row.approval_id}`,
+      { allow: true, decision: "answer", labels: ["Valkey"] },
+    );
+    assert.equal(answered.status, 200);
+    assert.deepEqual(answered.body.labels, ["Valkey"]);
+
+    const rest = await sseUntil(srv.base, `/api/runs/${runId}/events?after=0`, (all) =>
+      all.some((e) => e.type === "run_end"),
+    );
+    assert.equal(rest.at(-1)?.status, "completed");
+    const completed = rest.find(
+      (e) => e.type === "tool_completed" && e.tool === ASK_USER_TOOL_NAME,
+    ) as Record<string, any>;
+    assert.equal(completed.result, "operator answer: Valkey (valkey)");
+  } finally {
+    await srv.close();
+  }
+});
+
 test("server: answering an approval with decision answer is a 400", async () => {
   const srv = await startServer({
     providerOverrides: {
