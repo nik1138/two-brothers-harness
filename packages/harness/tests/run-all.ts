@@ -126,6 +126,7 @@ import "./cliproviderprovenance.test.ts";
 import "./toolcalling.test.ts";
 import "./tuirecall.test.ts";
 import "./tuiapprovalmodes.test.ts";
+import "./tuiaskuser.test.ts";
 import "./load.test.ts";
 import "./approvalshellcaution.test.ts";
 import "./thinkingpersist.test.ts";

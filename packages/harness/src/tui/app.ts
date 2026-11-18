@@ -274,11 +274,13 @@ import {
   type MentionPickerState,
 } from "./view/mentionpicker.ts";
 import {
+  approvalItemQuestion,
   approvalPanelKey,
   approvalPanelView,
   approvalPreview,
   createApprovalPanelState,
   type ApprovalPanelState,
+  type ApprovalQuestion,
 } from "./view/approval.ts";
 import { sessionSidecarKey, todosFromRuntimeEvents, todoPanelView } from "./view/todo.ts";
 import {
@@ -371,6 +373,77 @@ import {
 export interface TuiIO {
   log(line: string): void;
   error(line: string): void;
+}
+
+/**
+ * Additive ask_user answer body (the frozen contract): answering a structured
+ * question rides the existing approval-answer path with this decision instead
+ * of the allow/deny enum. Exactly one label unless the question is
+ * multi-select. The core lane implements the broker side; the TUI only
+ * builds and posts the body.
+ */
+export interface ApprovalAnswerBody {
+  decision: "answer";
+  labels: string[];
+}
+
+/** Build the additive answer decision body for one operator selection. */
+export function approvalAnswerBody(labels: readonly string[]): ApprovalAnswerBody {
+  return { decision: "answer", labels: [...labels] };
+}
+
+/**
+ * The approval broker's operator `respond`, widened with the additive answer
+ * body. Method-parameter bivariance keeps `RunApprovalBroker` assignable
+ * today (it only accepts the Decision enum); once the core lane lands the
+ * answer decision, the same call path carries the body unchanged.
+ */
+export interface ApprovalAnswerSink {
+  respond(requestId: string, decision: Decision | ApprovalAnswerBody): unknown;
+}
+
+/**
+ * Post one ask_user answer through the same `respond` transport the approval
+ * path uses, with the additive answer body. Fail-soft by contract: a throw or
+ * a not-parked (`null`) answer reports `false` so the caller keeps the
+ * question parked and surfaces a toast — the panel is cleared only by the
+ * broker's `approval_resolved` event, never optimistically here.
+ */
+export function postApprovalAnswer(
+  broker: ApprovalAnswerSink,
+  approvalId: string,
+  labels: readonly string[],
+): boolean {
+  try {
+    return broker.respond(approvalId, approvalAnswerBody(labels)) != null;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Pull the additive ask_user fields off a broker `approval_requested` event.
+ * The event type gains them in the core lane; reading them tolerantly here
+ * keeps this lane buildable against the current tree and byte-identical when
+ * they are absent (a regular approval).
+ */
+function approvalQuestionFields(event: unknown): {
+  kind?: "approval" | "question";
+  question?: ApprovalQuestion;
+} {
+  const extra = event as { kind?: unknown; question?: unknown };
+  const kind = extra.kind === "question" ? ("question" as const) : undefined;
+  const raw = extra.question;
+  const question =
+    raw !== undefined && raw !== null && typeof raw === "object" &&
+    typeof (raw as { text?: unknown }).text === "string" &&
+    Array.isArray((raw as { options?: unknown }).options)
+      ? (raw as ApprovalQuestion)
+      : undefined;
+  return {
+    ...(kind !== undefined ? { kind } : {}),
+    ...(question !== undefined ? { question } : {}),
+  };
 }
 
 /** Resolved resources a TUI session discovers once. */
@@ -2857,8 +2930,13 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
    * Answer the pending approval through the turn's broker. The app is the only
    * caller of the broker's operator API; a decision resolves the parked tool
    * exactly once, and the broker's `approval_resolved` event clears the panel.
+   * An ask_user answer posts the additive `{ decision: "answer", labels }`
+   * body through the same `respond` transport; a failed post keeps the
+   * question parked and surfaces a toast (the panel is never cleared here).
    */
-  const answerApproval = (decision: "allow" | "session" | "deny"): void => {
+  const answerApproval = (
+    decision: "allow" | "session" | "deny" | { kind: "answer"; labels: string[] },
+  ): void => {
     const current = approval;
     const broker = activeBroker;
     if (current === null) return;
@@ -2869,6 +2947,15 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
       return;
     }
     const approvalId = current.item.approvalId;
+    if (typeof decision !== "string") {
+      if (approvalItemQuestion(current.item) === null) return;
+      const posted = postApprovalAnswer(broker, approvalId, decision.labels);
+      if (!posted) {
+        pushToast("warn", "could not post the answer — the question is still parked");
+      }
+      render();
+      return;
+    }
     if (decision === "session") {
       // Remember the pair for this TUI process BEFORE resolving, so the next
       // identical request is auto-allowed; the broker itself stays in-memory.
@@ -2919,6 +3006,12 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
     switch (result.action) {
       case "move":
         render();
+        return;
+      case "toggle":
+        render();
+        return;
+      case "answer":
+        if (result.labels !== undefined) answerApproval({ kind: "answer", labels: result.labels });
         return;
       case "preview":
         openApprovalPreview();
@@ -3125,9 +3218,16 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
           broker.seedSessionAllows([...sessionAllows.keys()]);
           broker.attach((event) => {
             if (event.type === "approval_requested") {
+              // Additive ask_user fields (absent = regular approval): the
+              // core lane emits them; a question parks the same panel in
+              // question mode. Read tolerantly so a pre-core backend renders
+              // exactly the historical approval.
+              const askUser = approvalQuestionFields(event);
               const panel = createApprovalPanelState({
                 approvalId: event.approval_id,
                 action: String(event.action ?? ""),
+                ...(askUser.kind !== undefined ? { kind: askUser.kind } : {}),
+                ...(askUser.question !== undefined ? { question: askUser.question } : {}),
                 ...(event.target !== undefined && event.target !== ""
                   ? { target: event.target }
                   : {}),
@@ -3166,7 +3266,9 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
               updateAttentionTitle("approval");
               notifyApproval(
                 event.approval_id,
-                String(event.action ?? "approval"),
+                askUser.question !== undefined
+                  ? `question: ${askUser.question.header ?? askUser.question.text}`.slice(0, 120)
+                  : String(event.action ?? "approval"),
                 event.target,
               );
               // Child-tagged approvals are broker events in-process (they are
