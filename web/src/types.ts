@@ -389,6 +389,29 @@ export interface ApprovalDetail {
   truncated?: boolean
 }
 
+/**
+ * One answerable option of a structured operator question (the additive
+ * `question` payload of an `approval_requested` event with `kind: "question"`).
+ */
+export interface ApprovalQuestionOption {
+  label: string
+  description?: string
+  /** Machine-readable tag for the answer; rendered as a badge only. */
+  intent?: string
+}
+
+/**
+ * Structured mid-run operator question. Old backends never send it; the web
+ * app normalizes it tolerantly at the boundary (`question.ts::normalizeQuestion`).
+ */
+export interface ApprovalQuestion {
+  header?: string
+  text: string
+  options: ApprovalQuestionOption[]
+  /** Additive: several labels may be answered at once (default single-select). */
+  multi_select?: boolean
+}
+
 export interface ApprovalRequestedEvent {
   type: 'approval_requested'
   approval_id: string
@@ -401,6 +424,15 @@ export interface ApprovalRequestedEvent {
   /** Additive helper identity; absent for a brother's request and old backends. */
   subagent_id?: string
   subagent_label?: string
+  /**
+   * Additive request kind: absent ⇒ a regular approval (old backends). A
+   * `"question"` request parks the run like an approval but asks the operator
+   * to pick from `question.options` instead of allowing an action. The raw
+   * payload is normalized by `normalizeQuestion` before it reaches the UI.
+   */
+  kind?: 'approval' | 'question'
+  /** Additive structured question (only with `kind: "question"`). */
+  question?: unknown
   run_id: string
   at: number
 }
@@ -750,6 +782,10 @@ export interface PendingApproval {
   target: string
   command?: string | null
   reason?: string | null
+  /** Additive request kind; absent ⇒ regular approval (older backends). */
+  kind?: 'approval' | 'question'
+  /** Additive structured question payload (raw; normalized before use). */
+  question?: unknown
 }
 
 export interface RunApprovalsView {
@@ -759,6 +795,10 @@ export interface RunApprovalsView {
 
 export interface ApprovalAnswerRequest {
   allow: boolean
+  /** Additive question decision: answer with the picked option labels. */
+  decision?: 'answer'
+  /** Picked option labels (1 unless the question was multi-select). */
+  labels?: string[]
 }
 
 export interface ApprovalDecisionView {

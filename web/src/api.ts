@@ -890,6 +890,24 @@ export async function answerRunApproval(
   )
 }
 
+/**
+ * Answer a structured operator question (additive `decision: "answer"` on the
+ * same approvals route the allow/deny pair uses). `labels` are the picked
+ * option labels — exactly one unless the question was multi-select. Old
+ * backends reject the body (their approval contract knows only allow/deny);
+ * callers surface that as the card's error line, matching a declined answer.
+ */
+export async function answerRunQuestion(
+  runId: string,
+  approvalId: string,
+  labels: string[],
+): Promise<ApprovalDecisionResponse> {
+  return request<ApprovalDecisionResponse>(
+    `/api/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(approvalId)}`,
+    json('POST', { allow: true, decision: 'answer', labels }),
+  )
+}
+
 // -- run event stream (SSE) -----------------------------------------------------
 
 /** SSE URL for a run; `after` is the last SSE event id already seen. */

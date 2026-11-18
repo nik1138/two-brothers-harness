@@ -47,6 +47,7 @@ import type { FollowState, ScrollGeometry } from '../followScroll'
 import type { StreamingBlocks } from '../streaming'
 import ToolActivity from './ToolActivity.vue'
 import ApprovalCard from './ApprovalCard.vue'
+import QuestionCard from './QuestionCard.vue'
 import PromptAudit from './PromptAudit.vue'
 import ContextMeter from './ContextMeter.vue'
 import AppIcon from './AppIcon.vue'
@@ -64,6 +65,8 @@ const props = defineProps<{
   activity: string | null
   /** Answer a pending approval; returns true when the backend accepted it. */
   resolveApproval: (runId: string, approvalId: string, allow: boolean) => Promise<boolean>
+  /** Answer a structured operator question with the picked option labels. */
+  answerQuestion: (runId: string, approvalId: string, labels: string[]) => Promise<boolean>
   /** Approval currently docked above the composer; its pending timeline card is
    * suppressed (the dock is its live surface), resolved cards stay in history. */
   dockedApprovalId?: string | null
@@ -1615,6 +1618,13 @@ watch(
         <PromptAudit
           v-else-if="row.entry.type === 'prompt_audit' && auditVisible"
           :item="row.entry"
+        />
+
+        <QuestionCard
+          v-else-if="row.entry.type === 'approval' && row.entry.kind === 'question' && !isDockedApproval(row.entry)"
+          :item="row.entry"
+          :resolve="resolveApproval"
+          :answer="answerQuestion"
         />
 
         <ApprovalCard

@@ -16,6 +16,7 @@ import type { AccentTheme, RoleTheme, UiPrefs } from './uiPrefs'
 import {
   ApiError,
   answerRunApproval,
+  answerRunQuestion,
   appliedApprovalScope,
   approvalOutcomeNotice,
   compactSession,
@@ -159,6 +160,7 @@ import WorkspaceRenameDialog from './components/WorkspaceRenameDialog.vue'
 import NewSessionDialog from './components/NewSessionDialog.vue'
 import DiffReview from './components/DiffReview.vue'
 import ApprovalCard from './components/ApprovalCard.vue'
+import QuestionCard from './components/QuestionCard.vue'
 import QueueDock from './components/QueueDock.vue'
 import RewindDialog from './components/RewindDialog.vue'
 import AppDialog from './components/AppDialog.vue'
@@ -2318,6 +2320,45 @@ async function resolveApproval(
   return true
 }
 
+/**
+ * Answer a structured operator question (the additive `decision: "answer"`
+ * body on the approvals route). Mirrors `resolveApproval`: the card flips when
+ * the `approval_resolved` event arrives on the run stream, or is recorded
+ * locally when this app is not following that run.
+ */
+async function answerQuestion(
+  runId: string,
+  approvalId: string,
+  labels: string[],
+): Promise<boolean> {
+  try {
+    await answerRunQuestion(runId, approvalId, labels)
+  } catch (e) {
+    reportError(errText(e))
+    return false
+  }
+  const followed = activeRun.value
+  if (!followed || followed.run_id !== runId) {
+    // not following that run: record the resolution locally so the card flips
+    const helperId = runtimeItems.value.find(
+      (item): item is ApprovalItem =>
+        item.type === 'approval' && item.approvalId === approvalId,
+    )?.subagentId
+    ingestRuntimeEvent({
+      type: 'approval_resolved',
+      approval_id: approvalId,
+      decision: 'answer',
+      run_id: runId,
+      at: Math.floor(Date.now() / 1000),
+      ...(helperId !== undefined ? { subagent_id: helperId } : {}),
+    })
+  } else if (followed.status === 'waiting') {
+    // optimistic: the run resumes as soon as the backend accepts the answer
+    patchLiveRun(runId, { status: 'running' })
+  }
+  return true
+}
+
 async function requestStop() {
   const run = activeRun.value
   if (!run || stopping.value) return
@@ -3098,6 +3139,7 @@ onUnmounted(() => {
         :on-quote="appendQuoteToComposer"
         :live-run-id="activeRun?.run_id ?? null"
         :resolve-approval="resolveApproval"
+        :answer-question="answerQuestion"
         :docked-approval-id="pendingApproval?.approvalId ?? null"
         :run-error="runError"
         :on-retry="retryLastRun"
@@ -3178,9 +3220,20 @@ onUnmounted(() => {
       <div v-if="pendingApproval" class="approval-dock">
         <p class="approval-dock-label" role="status">
           <span class="approval-dock-dot" aria-hidden="true"></span>
-          Waiting for your approval — the run stays paused until you allow or deny.
+          <template v-if="pendingApproval.kind === 'question'">
+            Waiting for your answer — the run stays paused until you answer or decline.
+          </template>
+          <template v-else>
+            Waiting for your approval — the run stays paused until you allow or deny.
+          </template>
         </p>
-        <ApprovalCard :item="pendingApproval" :resolve="resolveApproval" />
+        <QuestionCard
+          v-if="pendingApproval.kind === 'question'"
+          :item="pendingApproval"
+          :resolve="resolveApproval"
+          :answer="answerQuestion"
+        />
+        <ApprovalCard v-else :item="pendingApproval" :resolve="resolveApproval" />
       </div>
 
       <!-- Submissions accepted while a run works wait in the backend FIFO; the

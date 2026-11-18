@@ -1,6 +1,7 @@
 import { chatProjectionGeneration } from './chat'
 import type { ChatItem } from './chat'
-import type { ApprovalDetail, RunEvent, TodoItem, TodoStatus, ToolResultCompact } from './types'
+import type { ApprovalDetail, ApprovalQuestion, RunEvent, TodoItem, TodoStatus, ToolResultCompact } from './types'
+import { normalizeQuestion } from './question'
 
 // Projection of typed runtime events (tool calls, approvals, prompt audits,
 // replayed reasoning) into group-chat items. Components consume RuntimeItem /
@@ -48,6 +49,21 @@ export interface ApprovalItem {
    */
   subagentId?: string
   subagentLabel?: string
+  /**
+   * Additive request kind; absent ⇒ a regular approval (old backends send
+   * neither field, so the approval card renders byte-for-byte as before).
+   */
+  kind?: 'approval' | 'question'
+  /**
+   * Normalized structured question (only with `kind: "question"` and a payload
+   * that survived `normalizeQuestion`).
+   */
+  question?: ApprovalQuestion
+  /**
+   * True when `kind: "question"` arrived but the payload failed tolerant
+   * normalization: the card renders the generic surface with an error note.
+   */
+  questionError?: boolean
 }
 
 /**
@@ -281,6 +297,8 @@ function appendToRuntimeProjection(state: RuntimeProjectionState, ev: RunEvent) 
       const detail = approvalDetailOf(ev.detail)
       const subagentId = childFieldOf(ev.subagent_id)
       const subagentLabel = childFieldOf(ev.subagent_label)
+      const isQuestion = ev.kind === 'question'
+      const question = isQuestion ? normalizeQuestion(ev.question) : null
       const item: ApprovalItem = {
         type: 'approval',
         approvalId: ev.approval_id,
@@ -293,6 +311,11 @@ function appendToRuntimeProjection(state: RuntimeProjectionState, ev: RunEvent) 
         ...(detail !== undefined ? { detail } : {}),
         ...(subagentId !== undefined ? { subagentId } : {}),
         ...(subagentLabel !== undefined ? { subagentLabel } : {}),
+        ...(isQuestion
+          ? question !== null
+            ? { kind: 'question' as const, question }
+            : { kind: 'question' as const, questionError: true }
+          : {}),
       }
       state.approvals.set(ev.approval_id, state.items.length)
       state.items.push(item)
