@@ -547,6 +547,15 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
     when: "app",
   },
   {
+    id: "mcp",
+    title: "MCP server status",
+    description: "Show MCP server status in the side panel and a summary toast.",
+    group: "Settings",
+    slash: "mcp",
+    keys: [],
+    when: "always",
+  },
+  {
     id: "settings",
     title: "Settings and onboarding",
     description: "Open provider setup and application settings.",
