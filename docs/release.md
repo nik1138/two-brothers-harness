@@ -1,9 +1,10 @@
 # Release runbook — `@two-brothers/harness`
 
-How the package ships to npm. **Status: 0.0.2 is published on `next`
-(tag `v0.0.2` at `354df89`, publish run 2026-11-18); `latest` still points
-at 0.0.1 until promotion.** The publish workflow ran the full gate with
-trusted-publishing provenance before `npm publish --tag next`.
+How the package ships to npm. **Status: 0.0.2 is published on `latest`
+(and `next`) — tag `v0.0.2` at `354df89`, published to `next` and promoted
+to `latest` on 2026-11-18.** The publish workflow ran the full gate with
+trusted-publishing provenance before `npm publish --tag next`; promotion
+followed after the soak check (`two-brothers --version` → `0.0.2`).
 
 Mechanics live in `.github/workflows/publish.yml` — read its header comment
 first; it documents the same one-time setup inline. Pushing a `v*` tag (or
@@ -180,13 +181,13 @@ the next release repeats.
 
 ## Promote to `latest` and drop the `@next` suffix
 
-**Done on 2026-11-09:** `latest` points at `0.0.1`, and the docs use the
-untagged install command. The steps remain for future pre-releases.
+**Done on 2026-11-18:** 0.0.2 was promoted the same way — `latest` now
+points at `0.0.2`. The steps remain for future pre-releases.
 
 When `@next` has soaked and you are ready to make it the default install:
 
 ```bash
-npm dist-tag add @two-brothers/harness@0.0.1 latest
+npm dist-tag add @two-brothers/harness@0.0.2 latest
 npm install -g @two-brothers/harness   # no tag = latest
 ```
 
