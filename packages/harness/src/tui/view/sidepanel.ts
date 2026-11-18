@@ -20,6 +20,7 @@
  * the app does not know renders as `unknown` (or the existing honest
  * `cost unknown` marker) instead of a plausible-looking zero.
  */
+import { mcpServerLine, type McpServerStatus } from "../mcpstatus.ts";
 import { findCommand, formatChord, TUI_COMMANDS, type TuiCommand } from "../keymap.ts";
 import { blankRow, boxContentWidth, fitStyled, renderBox, sanitizeDisplayText } from "../screen.ts";
 import { truncateToWidth } from "../text.ts";
@@ -173,6 +174,9 @@ export interface SidePanelMcp {
   pluginServers?: number;
 }
 
+/** Per-server MCP status after the last load (see `src/tui/mcpstatus.ts`). */
+export type { McpServerStatus };
+
 /** Helper-subagent presence for this session (the separate helper surface). */
 export interface SidePanelHelpers {
   total: number;
@@ -230,6 +234,11 @@ export interface SidePanelState {
   helpers?: SidePanelHelpers;
   compaction?: SidePanelCompaction;
   discovery?: SidePanelDiscovery;
+  /**
+   * Per-server MCP status after the last load. Absent renders the historical
+   * single MCP row only; present adds one row per server beneath it.
+   */
+  mcpServers?: McpServerStatus[];
 }
 
 /** One labelled panel row before width fitting (`label` "" = plain row). */
@@ -419,6 +428,16 @@ export function sidePanelEntries(
       tone: "muted",
     },
     { label: "MCP", value: mcpValue(state.discovery?.mcp), tone: "muted" },
+    // Per-server status rows after the MCP summary row: `name connected
+    // (n tools)` / `name failed — <error>`. Absent (no MCP configured, or a
+    // caller that never loaded MCP) renders exactly the historical document.
+    ...(state.mcpServers ?? []).map(
+      (server): SidePanelEntry => ({
+        label: "",
+        value: mcpServerLine(server),
+        tone: server.status === "failed" ? "error" : "dim",
+      }),
+    ),
   ];
   // The helper surface is a separate tier: shown only once this session has a
   // helper, and never folded into the brothers' CONTEXT/TOKENS/COST rows.

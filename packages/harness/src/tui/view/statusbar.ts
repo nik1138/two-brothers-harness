@@ -63,6 +63,12 @@ export interface StatusBarState {
    * when any settled token-bearing child is unpriced.
    */
   helpersUsage?: string;
+  /**
+   * MCP server status for the footer chip: `total` configured servers and how
+   * many `failed` the last load. Both zero / absent renders no chip, so
+   * MCP-free frames stay byte-identical.
+   */
+  mcp?: { total: number; failed: number };
   elapsedMs?: number;
   /** The rotating projection hint (or the app's composed tool-fold hint). */
   hints?: string;
@@ -135,6 +141,17 @@ export function statusBarSegments(
     { text: state.mode.trim() || "consult", tone: "accent" },
   ];
   if (state.running === true) first.push({ text: "RUNNING", tone: "warning" });
+  // The MCP chip leads like a presence indicator: `{n} MCP` when every
+  // server connected, `{n} MCP failed` in the error tone otherwise. Zero
+  // configured servers renders no chip at all.
+  if (state.mcp !== undefined && state.mcp.total > 0) {
+    const failed = Math.max(0, Math.min(state.mcp.total, state.mcp.failed));
+    first.push(
+      failed === 0
+        ? { text: `${state.mcp.total} MCP`, tone: "dim" }
+        : { text: `${failed} MCP failed`, tone: "error" },
+    );
+  }
   first.push(modelSegment("SENIOR", state.seniorModel));
   first.push(modelSegment("JUNIOR", state.juniorModel));
   if (state.sessionName?.trim()) first.push({ text: `session ${state.sessionName.trim()}`, tone: "muted" });

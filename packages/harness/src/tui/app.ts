@@ -350,6 +350,7 @@ import {
 } from "./view/sidepanel.ts";
 import type { StatusBarState } from "./view/statusbar.ts";
 import { transientHintFor } from "./view/statusbar.ts";
+import { mcpStatusFromToolSet, type McpStatusSnapshot } from "./mcpstatus.ts";
 import type { Toast, ToastLevel } from "./view/toast.ts";
 import {
   latestTranscriptScroll,
@@ -1962,6 +1963,13 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
   // (the panel follows the terminal size), false = hidden, true = shown.
   let sidePanelChoice: boolean | null = null;
   /**
+   * Per-server MCP status captured right after each turn's `loadMcpTools`
+   * call (fail-soft: a failed load leaves the previous status untouched).
+   * Feeds the footer chip and the side panel's MCP rows; `null` = no MCP
+   * configured for this session.
+   */
+  let mcpStatus: McpStatusSnapshot | null = null;
+  /**
    * A pending operator approval: set from the turn broker's
    * `approval_requested`, cleared by `approval_resolved`. While set, the
    * approval panel replaces the composer and owns the decision keys; closing
@@ -2307,6 +2315,14 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
       cwd,
       running,
       activity,
+      ...(mcpStatus !== null && mcpStatus.servers.length > 0
+        ? {
+            mcp: {
+              total: mcpStatus.servers.length,
+              failed: mcpStatus.servers.filter((server) => server.status === "failed").length,
+            },
+          }
+        : {}),
       ...(contextTokens !== null ? { contextTokens } : {}),
       ...(sessionCfg.contextWindow > 0 ? { contextWindow: sessionCfg.contextWindow } : {}),
       ...(usage !== null
@@ -2439,7 +2455,28 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
           : {}),
       compaction: sidePanelCompaction(),
       discovery: sidePanelDiscovery(),
+      ...(mcpStatus !== null ? { mcpServers: mcpStatus.servers } : {}),
     };
+  };
+
+  /**
+   * The `/mcp` command: a one-glance summary toast plus the per-server rows
+   * in the side panel (the panel choice is forced on; on a narrow terminal
+   * the panel itself explains the minimum size, same as `panel`).
+   */
+  const showMcpStatus = (): void => {
+    if (mcpStatus === null || mcpStatus.servers.length === 0) {
+      pushToast("info", "no MCP servers configured");
+    } else {
+      const failed = mcpStatus.servers.filter((server) => server.status === "failed").length;
+      const tools = mcpStatus.servers.reduce((total, server) => total + server.toolCount, 0);
+      pushToast(
+        failed > 0 ? "warn" : "info",
+        `${mcpStatus.servers.length} MCP · ${failed} failed · ${tools} tools`,
+      );
+    }
+    sidePanelChoice = true;
+    render();
   };
 
   /**
@@ -3251,6 +3288,9 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
           },
           onWarning,
         });
+        // Footer chip + side-panel rows follow the turn's own MCP load; a
+        // load that never ran (no config, total failure) clears the status.
+        mcpStatus = mcpStatusFromToolSet(mcp);
         try {
           const result = await harness.run(task, context);
           usage = usageOf(result.usage);
@@ -4484,6 +4524,9 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
         break;
       case "panel":
         toggleSidePanel();
+        break;
+      case "mcp":
+        showMcpStatus();
         break;
       case "settings":
         openSettingsDialog();
