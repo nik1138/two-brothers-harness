@@ -1458,6 +1458,32 @@ function messageOf(exc: unknown): string {
   return exc instanceof Error ? exc.message : String(exc);
 }
 
+/**
+ * Longest toast text (chars) before the middle is elided.
+ *
+ * A toast is drawn in a box at most 64 columns wide (`view/screen.ts`), with
+ * one column of padding on each side, so its text wraps at 60 columns: 320
+ * chars is at most six 60-column text rows plus the two borders — eight rows
+ * per toast. Up to three toasts stack (oldest first), so even a full stack is
+ * 24 rows: an ordinary 24-row terminal shows every box whole instead of
+ * cropping the newest tail. Same ceiling as the `/fork` and `/rewind` notice
+ * helpers.
+ */
+export const TOAST_TEXT_MAX_CHARS = 320;
+
+/**
+ * Bound one toast text for display: keep the head AND the tail, elide only the
+ * middle. The overlay is top-cropped at the screen height (`screen.ts`
+ * `overlayRows`), so an unbounded notice would lose exactly its tail — a
+ * `— usage: …` clause or the diagnostic end of an error. The transcript notice
+ * keeps the full text; only this toast copy is bounded.
+ */
+export function boundToastText(text: string): string {
+  if (text.length <= TOAST_TEXT_MAX_CHARS) return text;
+  const tail = Math.floor((TOAST_TEXT_MAX_CHARS - 1) / 2);
+  return `${text.slice(0, TOAST_TEXT_MAX_CHARS - 1 - tail)}…${text.slice(text.length - tail)}`;
+}
+
 // --------------------------------------------------------------------------- //
 // interactive app
 // --------------------------------------------------------------------------- //
@@ -2159,7 +2185,7 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
 
   const pushToast = (level: ToastLevel, text: string): void => {
     toastSeq += 1;
-    const toast: Toast = { id: `t${toastSeq}`, level, text };
+    const toast: Toast = { id: `t${toastSeq}`, level, text: boundToastText(text) };
     toasts = [...toasts, toast].slice(-3);
     const id = toast.id;
     const timer = setTimeout(() => {

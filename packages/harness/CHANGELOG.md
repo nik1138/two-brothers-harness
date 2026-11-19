@@ -221,6 +221,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `web/tests/tokens.test.ts` and the `mobile` browser scenario, now a
   `hasTouch` context that asserts the bar is visible and that a tap on copy
   reaches the clipboard. No protocol/API change; no new dependencies.
+- **TUI notices are bounded where they are displayed:** every toast is now
+  bounded to 320 chars keeping the head and the tail (only the middle is
+  elided), so a long notice can no longer be top-cropped by the toast overlay
+  and lose its actionable `— usage: …` clause or diagnostic tail — the
+  transcript notice keeps the full text. The `/fork` and `/rewind` usage
+  refusals are bounded at composition with the same head-and-tail rule (a
+  long operator token echo now keeps `— usage: /fork …` on screen), and the
+  `/rewind` help row names the `--turns <n>` depth it advertises. No protocol
+  change; display only. Tests: `tests/tuifork.test.ts`,
+  `tests/tuirewind.test.ts`, `tests/tuikeymap.test.ts`,
+  `tests/tuibasecommands.test.ts`.
 - **`HEAD` on the served web app:** the static handler answered `GET` only, so
   `HEAD /assets/*` fell through to the router's 404 while `GET` returned 200
   with the exact bytes. `HEAD` now takes the same `/`, `/assets/*` and SPA

@@ -380,10 +380,13 @@ test("/rewind outcome notice: a no-op states the service reason and that the fil
 });
 
 test("/rewind notices are bounded to one row's worth of text", () => {
-  const long = `rewind failed: ${"x".repeat(REWIND_NOTICE_MAX_CHARS * 2)}`;
+  const usage = ` — usage: ${REWIND_USAGE}`;
+  const long = `rewind failed: ${"x".repeat(REWIND_NOTICE_MAX_CHARS * 2)}${usage}`;
   const bounded = boundRewindNotice(long);
   assert.equal(bounded.length, REWIND_NOTICE_MAX_CHARS);
-  assert.ok(bounded.endsWith("…"));
+  assert.ok(bounded.startsWith("rewind failed: "), "the head is kept");
+  assert.ok(bounded.endsWith(usage), "the actionable tail is kept, not dropped");
+  assert.ok(bounded.includes("…"), "the middle is elided honestly");
   assert.equal(boundRewindNotice("short"), "short");
 });
 
@@ -435,6 +438,23 @@ test("/rewind copy never invents a seq, a name, an empty quote or a sidecar erro
     turns: 1,
     error: null,
   });
+});
+
+test("/rewind parser echoes are bounded and never drop the usage clause", () => {
+  const longOption = parseRewindCommandArgs(`--${"y".repeat(5_000)}`);
+  assert.equal(longOption.turns, 1);
+  assert.ok(longOption.error !== null);
+  assert.ok(longOption.error.length <= REWIND_NOTICE_MAX_CHARS);
+  assert.ok(longOption.error.startsWith("unknown option --y"), "the head names the problem");
+  assert.ok(longOption.error.endsWith(` — usage: ${REWIND_USAGE}`), "the usage clause survives");
+  assert.ok(longOption.error.includes("…"), "the token echo itself is elided");
+
+  const longArgument = parseRewindCommandArgs(`--turns 2 ${"z".repeat(5_000)}`);
+  assert.equal(longArgument.turns, 1);
+  assert.ok(longArgument.error !== null);
+  assert.equal(longArgument.error.length, REWIND_NOTICE_MAX_CHARS);
+  assert.ok(longArgument.error.startsWith("unexpected argument z"));
+  assert.ok(longArgument.error.endsWith(` — usage: ${REWIND_USAGE}`));
 });
 
 // --------------------------------------------------------------------------- //

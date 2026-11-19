@@ -32,7 +32,10 @@ export interface ForkCommandParse {
 }
 
 function usageError(problem: string): ForkCommandParse {
-  return { request: {}, error: `${problem} — usage: ${FORK_USAGE}` };
+  // The problem can echo an operator token verbatim, so the composed sentence
+  // is bounded too: on a long token only the middle of the echo is elided and
+  // the `— usage:` clause (the part the operator has to act on) survives.
+  return { request: {}, error: boundForkNotice(`${problem} — usage: ${FORK_USAGE}`) };
 }
 
 /**
@@ -67,11 +70,15 @@ export function parseForkCommandArgs(raw: string): ForkCommandParse {
   return { request, error: null };
 }
 
-/** Bound one composed `/fork` notice so a long path/error stays one row. */
+/**
+ * Bound one composed `/fork` notice so it stays one toast's worth of rows:
+ * keep the head AND the tail (a `— usage: …` clause or a diagnostic tail is
+ * the actionable part) and elide only the middle.
+ */
 export function boundForkNotice(text: string): string {
-  return text.length > FORK_NOTICE_MAX_CHARS
-    ? `${text.slice(0, FORK_NOTICE_MAX_CHARS - 1)}…`
-    : text;
+  if (text.length <= FORK_NOTICE_MAX_CHARS) return text;
+  const tail = Math.floor((FORK_NOTICE_MAX_CHARS - 1) / 2);
+  return `${text.slice(0, FORK_NOTICE_MAX_CHARS - 1 - tail)}…${text.slice(text.length - tail)}`;
 }
 
 /**

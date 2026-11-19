@@ -47,7 +47,10 @@ export interface RewindCommandParse {
 }
 
 function usageError(problem: string): RewindCommandParse {
-  return { turns: 1, error: `${problem} — usage: ${REWIND_USAGE}` };
+  // The problem can echo an operator token verbatim, so the composed sentence
+  // is bounded too: on a long token only the middle of the echo is elided and
+  // the `— usage:` clause (the part the operator has to act on) survives.
+  return { turns: 1, error: boundRewindNotice(`${problem} — usage: ${REWIND_USAGE}`) };
 }
 
 /**
@@ -73,11 +76,15 @@ export function parseRewindCommandArgs(raw: string): RewindCommandParse {
   return { turns: parsed.turns, error: null };
 }
 
-/** Bound one composed `/rewind` notice so a long error stays one row. */
+/**
+ * Bound one composed `/rewind` notice so it stays one toast's worth of rows:
+ * keep the head AND the tail (a `— usage: …` clause or a diagnostic tail is
+ * the actionable part) and elide only the middle.
+ */
 export function boundRewindNotice(text: string): string {
-  return text.length > REWIND_NOTICE_MAX_CHARS
-    ? `${text.slice(0, REWIND_NOTICE_MAX_CHARS - 1)}…`
-    : text;
+  if (text.length <= REWIND_NOTICE_MAX_CHARS) return text;
+  const tail = Math.floor((REWIND_NOTICE_MAX_CHARS - 1) / 2);
+  return `${text.slice(0, REWIND_NOTICE_MAX_CHARS - 1 - tail)}…${text.slice(text.length - tail)}`;
 }
 
 /** One-line bounded task snippet for the confirmation. */

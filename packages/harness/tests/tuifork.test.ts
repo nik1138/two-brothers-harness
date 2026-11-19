@@ -257,10 +257,13 @@ test("/fork notices: success states the copy count, untouched source and switch;
     /1 envelope copied/,
   );
 
-  const long = `fork failed: ${"x".repeat(FORK_NOTICE_MAX_CHARS * 2)}`;
+  const usage = ` — usage: ${FORK_USAGE}`;
+  const long = `fork failed: ${"x".repeat(FORK_NOTICE_MAX_CHARS * 2)}${usage}`;
   const bounded = boundForkNotice(long);
   assert.equal(bounded.length, FORK_NOTICE_MAX_CHARS);
-  assert.ok(bounded.endsWith("…"));
+  assert.ok(bounded.startsWith("fork failed: "), "the head is kept");
+  assert.ok(bounded.endsWith(usage), "the actionable tail is kept, not dropped");
+  assert.ok(bounded.includes("…"), "the middle is elided honestly");
   assert.equal(boundForkNotice("short"), "short");
 });
 
@@ -282,6 +285,22 @@ test("/fork notices never invent a copy count or an empty label", () => {
     /\(2 envelopes copied;/,
     "a fractional count is floored, never rendered as a fraction",
   );
+});
+
+test("/fork parser echoes are bounded and never drop the usage clause", () => {
+  const longOption = parseForkCommandArgs(`--${"y".repeat(5_000)}`);
+  assert.deepEqual(longOption.request, {});
+  assert.ok(longOption.error !== null);
+  assert.ok(longOption.error.length <= FORK_NOTICE_MAX_CHARS);
+  assert.ok(longOption.error.startsWith("unknown option --y"), "the head names the problem");
+  assert.ok(longOption.error.endsWith(` — usage: ${FORK_USAGE}`), "the usage clause survives");
+  assert.ok(longOption.error.includes("…"), "the token echo itself is elided");
+
+  const longArgument = parseForkCommandArgs(`branch-a ${"z".repeat(5_000)}`);
+  assert.ok(longArgument.error !== null);
+  assert.equal(longArgument.error.length, FORK_NOTICE_MAX_CHARS);
+  assert.ok(longArgument.error.startsWith("unexpected argument z"));
+  assert.ok(longArgument.error.endsWith(` — usage: ${FORK_USAGE}`));
 });
 
 // --------------------------------------------------------------------------- //

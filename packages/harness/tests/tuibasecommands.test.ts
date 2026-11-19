@@ -31,7 +31,12 @@ import {
 import { resolveConfig } from "../src/config.ts";
 import type { Message } from "../src/protocol.ts";
 import type { StreamEvent } from "../src/runstream.ts";
-import { runTuiApp, type TuiAppOptions } from "../src/tui/app.ts";
+import {
+  boundToastText,
+  runTuiApp,
+  TOAST_TEXT_MAX_CHARS,
+  type TuiAppOptions,
+} from "../src/tui/app.ts";
 import {
   BASE_COMMAND_ENTRY_PREFIX,
   COOPERATION_MODE_ORDER,
@@ -428,6 +433,11 @@ class FakeOutput extends EventEmitter {
     this.data += chunk;
     return true;
   }
+  resize(columns: number, rows: number): void {
+    this.columns = columns;
+    this.rows = rows;
+    this.emit("resize");
+  }
 }
 
 interface AppHarness {
@@ -645,6 +655,62 @@ test("/export refuses in-memory sessions honestly and writes Markdown for file s
     assert.ok(body.includes("## 1. user → senior · message"));
   } finally {
     await stop(harness, sessionRoot);
+  }
+});
+
+test("toast text is bounded head-and-tail; a short notice is untouched", () => {
+  const tail = " — usage: /copy";
+  const long = `copy failed: ${"x".repeat(TOAST_TEXT_MAX_CHARS * 3)}${tail}`;
+  const bounded = boundToastText(long);
+  assert.equal(bounded.length, TOAST_TEXT_MAX_CHARS);
+  assert.ok(bounded.startsWith("copy failed: "), "the head is kept");
+  assert.ok(bounded.endsWith(tail), "the actionable tail is kept");
+  assert.ok(bounded.includes("…"), "the middle is elided honestly");
+  assert.equal(boundToastText("saved"), "saved");
+});
+
+test("a long notice is bounded in the toast but kept whole in the transcript", async () => {
+  const { root } = tmpdir();
+  const sessionFile = path.join(root, "session.jsonl");
+  const harness = startApp(root, {
+    cfg: resolveConfig({ provider: "mock", sessionFile }),
+  });
+  const { input, output } = harness;
+  try {
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+    input.type("say hello");
+    input.enter();
+    assert.ok(await waitFor(() => textOf(output).includes("decision:"), 30_000));
+    assert.ok(await waitIdle(output));
+
+    // A short terminal makes the toast geometry (not the producer) the limit:
+    // an unbounded toast is top-cropped there.
+    output.resize(80, 12);
+
+    // `/export` with an over-long name fails with a ~900-char message that
+    // echoes the whole path — an unbounded notice producer behind the toast.
+    const middle = "TRANSCRIPT-MARK";
+    const tail = "ZZ-END-MARK";
+    const longName = `${"a".repeat(600)}${middle}${"a".repeat(160)}${tail}`;
+    input.type(`/export ${longName}`);
+    input.enter();
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("export failed")),
+      "the base command reports the failure",
+    );
+    const toastFrame = lastFrameText(output);
+    assert.ok(toastFrame.includes(tail), "the actionable tail survives the top crop");
+    assert.ok(toastFrame.includes("…"), "the bounded toast marks the elided middle");
+    assert.ok(!toastFrame.includes(middle), "the middle of the echo is not painted");
+
+    // The transcript notice is never bounded: after the 4 s toast expires it
+    // shows the text the toast elided.
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes(middle), 8_000),
+      "the transcript keeps the whole notice after the toast expires",
+    );
+  } finally {
+    await stop(harness, root);
   }
 });
 

@@ -152,6 +152,27 @@ test("steer is one composer chord, documented once and unavailable in exclusive 
   }
 });
 
+test("/rewind help copy names the --turns depth the command advertises", () => {
+  const rewind = findCommand(TUI_COMMANDS, "rewind");
+  assert.ok(rewind, "the registry has a rewind command");
+  assert.equal(rewind.argumentHint, "[--turns <n>]");
+  assert.match(rewind.description, /operator turns/, "the copy no longer claims a single turn");
+  assert.match(rewind.description, /--turns <n>/, "the copy names the depth flag");
+  assert.match(rewind.description, /default one/);
+
+  // The rendered in-app help row carries the same depth at width >= 64.
+  const view = helpView(
+    TUI_COMMANDS,
+    setHelpQuery(createHelpState(), "rewind"),
+    documented(),
+    { width: 120, height: 10 },
+  );
+  const row = view.lines.find((line) => line.includes("Rewind session"));
+  assert.ok(row !== undefined, "the help lists the rewind row");
+  assert.ok(row.includes("--turns"), "the in-app help names the depth");
+  assert.ok(row.includes("operator turns"), "the in-app help does not understate it");
+});
+
 test("external-edit is Ctrl+G in the composer scope, documented once and idle-only", () => {
   const command = findCommand(TUI_COMMANDS, "external-edit");
   assert.ok(command, "the registry has an external-edit command");

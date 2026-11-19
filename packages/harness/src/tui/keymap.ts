@@ -555,7 +555,7 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
     id: "rewind",
     title: "Rewind session",
     description:
-      "Remove the last operator turn from this session after an explicit confirm, then reload it.",
+      "Remove the last operator turns (--turns <n>, default one) from this session after an explicit confirm, then reload it.",
     group: "Session",
     slash: "rewind",
     argumentHint: "[--turns <n>]",
