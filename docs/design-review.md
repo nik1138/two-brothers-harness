@@ -57,10 +57,19 @@ not implemented.
 The cycle always starts with `consult`/`delegation`. There is no branch where
 "the senior decides without consulting". `auto` in v0.1 effectively = `consult`.
 
+**Closed 2026-11-12:** `auto` is model-declared routing and has a structural
+solo branch (`senior_route`/`senior_solo`; `tests/autoroute.test.ts`,
+`tests/solo.test.ts`; see `docs/backlog.md` "real `auto` + Senior solo
+decision").
+
 ### 3. No real mode selection
 
 `auto` does not choose between advice and delegation based on the task's
 content — it deterministically reduces to `consult`.
+
+**Closed 2026-11-12:** `auto` now chooses between advice, delegation and solo
+from the model-declared `route` decision, under the G1–G4 guardrails (see
+limitation #2).
 
 ### 4. One junior round by default
 
@@ -75,8 +84,8 @@ No token or cost accounting.
 **Addressed later:** bounded retries with exponential backoff owned by
 `LangChainResponder` (see "Run failures" below) and per-run token usage on
 `run_end` events / run records (`usage`: `model_calls`, `input_tokens`,
-`output_tokens`, `cached_tokens`). Still missing: streaming and model
-fallback.
+`output_tokens`, `cached_tokens`). Still missing: fallback to another model on
+429/5xx (retry/backoff, streaming, cost and per-role usage are shipped).
 
 **TS-first now:** in the TypeScript package the retry loop is driven by an
 ordered `PROVIDER_ERROR_REGISTRY` (retryable 408/409/429/5xx and transport
@@ -211,7 +220,8 @@ run hung entirely and Stop could not unwind it. Fixes now in place:
    `usage` object — `model_calls`, `input_tokens`, `output_tokens`,
    `cached_tokens` — captured from `AIMessage.usage_metadata` /
    `response_metadata.token_usage`).
-4. **A "decide solo" branch** and a real `auto`.
+4. ~~**A "decide solo" branch** and a real `auto`~~ — done 2026-11-12 (see
+   limitation #2).
 5. **More roles** (a third brother/sister) without changing the protocol.
 6. **GUI/API** on top of the harness — done in v1: the web workspace (Vue 3 +
    Vite frontend; TypeScript package backend via `node dist/cli.js serve`)

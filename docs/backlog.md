@@ -80,8 +80,8 @@ Design anchors that already exist:
   checks, `.husky/pre-commit` lockfile guard, `packages/harness/CHANGELOG.md`,
   and `.github/workflows/publish.yml` (OIDC Trusted Publisher, `--tag next`)
   all landed (see `docs/history/handoff.md`, TypeScript npm-package port section). The
-  one-time npm org / Trusted Publisher linkage described in the workflow
-  still has to happen before the first `v*` tag push.
+  one-time npm org / Trusted Publisher linkage described in the workflow is in
+  place — 0.0.2 was published and promoted on 2026-11-18 (see `docs/release.md`).
 - **Plugins port** — the original prototype's `plugins/` loader (`register(ctx)`
   contract, `PluginContext` with confined workspace helpers, fail-soft loader)
   as an npm-shareable format. Borrow chord's discovery manifest-checklist
@@ -1174,8 +1174,8 @@ Design anchors that already exist:
   `src/tui/app.ts`, `src/tui/keymap.ts`, `src/cli.ts` (origin/state capture);
   tests `tests/tuikeys.test.ts` (+3) and `tests/tuiintegration.test.ts` (+1);
   all 21 `tui*.test.ts` suites stay green with no changed listing/frame
-  assertions. Remaining: in-TUI editor, file watcher/auto-reload, rebinding
-  beyond the three global chords.
+  assertions. Remaining: rebinding beyond the three global chords (a per-surface
+  conflict model is required) — see the Remaining key-binding surfaces item.
 
 ## Shipped 2026-11-08 (wave 23: web role fill tokens, TUI keys auto-reload)
 
@@ -1213,8 +1213,8 @@ Design anchors that already exist:
   watch state, defaults, valid/invalid/absent/stop/debounce/uninstallable) and
   `tests/tuiintegration.test.ts` (25: assembled-app last-good auto-reload,
   embedded `unavailable`). Package suite 1 572 tests (1 570 pass, 2
-  environment skips); typecheck green. Remaining: an in-TUI key-binding
-  editor.
+  environment skips); typecheck green. The in-TUI key-binding editor landed
+  later in `7834514` (see the Remaining key-binding surfaces item).
 
 ## Shipped 2026-11-08 (wave 23: steering, session lineage/rewind, file undo, prompt caching)
 
@@ -1239,8 +1239,9 @@ Design anchors that already exist:
   `web/src/App.vue`, `web/src/components/Composer.vue`,
   `web/src/shortcuts.ts`; tests `tests/steering.test.ts` (20) and
   `web/tests/steering.test.ts` (6). TUI steering shipped in wave 25
-  (`Ctrl+N`); remaining: a browser E2E scenario for steering and real-provider
-  validation (wave 26 added the tab-title and auto-compaction scenarios only).
+  (`Ctrl+N`); remaining: real-provider validation — the hermetic
+  `cooperation-surfaces` browser scenario (`db070f4`) already covers the steer
+  acceptance/rejection paths.
 - **Session fork + self-contained HTML export** — `POST
   /api/sessions/{name}/fork` and `sessions fork <name> [--at <seq>] [--name
   <new>]` copy a session prefix byte-for-byte into a NEW session file (dense
@@ -1316,8 +1317,8 @@ Design anchors that already exist:
   not hits; absent reports stay 0). Files: `src/provider.ts`; tests
   `tests/anthropiccache.test.ts` (9) with the intentional wire change pinned
   in `tests/adapters.test.ts`/`tests/thinkingpassback.test.ts`. Remaining:
-  real-model cache-hit evidence, `ttl`/opt-out, cost-table cached-input
-  discount.
+  real-model cache-hit evidence and `ttl`/opt-out (cached-input pricing shipped
+  in wave 24, `3c37a31`).
 
 ## Shipped 2026-11-08 (wave 25: crash-torn resume, TUI steering, persisted compaction, signals, tab title)
 
@@ -1838,8 +1839,8 @@ imported or executed on load/activation. Sources: `src/pluginbundle.ts`
   exercises the real RunManager/worker pool/queue over HTTP in mock or real
   modes; recorded 2026-11-08 against the owner's LM Studio (workers 1,
   runs 2): 2/2 completed in 230.8 s, run 2 queued 117.7 s behind run 1.
-- **`serve` config-derived auto-compaction is silently inert (medium,
-  verified 2026-11-08)** — `two-brothers serve` accepts `--compact`,
+- **Shipped in wave 24 — `serve` config-derived auto-compaction (medium
+  finding, verified 2026-11-08)** — `two-brothers serve` accepts `--compact`,
   `--compact-threshold <chars>`, `--compact-threshold-tokens <n>`,
   `--compact-keep-recent <chars>` and `--context-window` (plus the
   `TWO_BROTHERS_COMPACT*` env vars) but its runs never receive the resulting
@@ -1856,8 +1857,8 @@ imported or executed on load/activation. Sources: `src/pluginbundle.ts`
   while the identical CLI `run` produced 1. Not fixed here. Shipped in wave 24:
   `serve` now derives the same settings, see `src/server.ts` and
   `docs/cli-reference.md`.
-- **CLI `run --mode work` without a workspace binds no tools** (medium,
-  verified 2026-11-08; **shipped in wave 24**) — the CLI has no workspace
+- **Shipped in wave 24 — CLI `run --mode work` without a workspace binds no
+  tools** (medium finding, verified 2026-11-08) — the CLI has no workspace
   surface (`--workspace` is TUI-only; `serve` is the workspace-bound path), so
   a `run --mode work` gives the junior an empty tool belt while the senior's
   review/decision can still accept a fabricated deliverable as verified. Live
@@ -1955,7 +1956,8 @@ imported or executed on load/activation. Sources: `src/pluginbundle.ts`
   `tests/tuihelpers.test.ts` plus `tuiintegration`/`tuikeymap` cases.
   Remaining phases: async completion/wake (delivery stays poll-only),
   forked-context children and deeper nesting (each deferred to its own
-  design). The protocol stays
+  design). The protocol stays unchanged; children are internal executions, not
+  second protocol peers.
   **Slice O2 (TUI helper controls) shipped 2026-11-13:** inside the open
   child transcript, `i` interrupts the helper through the same in-process
   `SubagentControlHandle` the web routes use (`interrupt("operator")` — the
@@ -1981,7 +1983,6 @@ imported or executed on load/activation. Sources: `src/pluginbundle.ts`
   `tests/tuikeymap.test.ts`, `tests/tuiintegration.test.ts` (interrupt a
   hanging child with the parent completing; queue → deliver at the child's
   next step).
-  unchanged; children are internal executions, not second protocol peers.
   **Slice M (per-call `model`/`effort` overrides) shipped 2026-11-13:** the
   `subagent` tool gains optional `model` (non-empty, ≤200 chars,
   `^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$`) and `effort` (≤32 chars, a
@@ -2041,21 +2042,20 @@ imported or executed on load/activation. Sources: `src/pluginbundle.ts`
   earlier mask-level click design. Re-check after the next naive-ui release
   (> 2.45.3); optionally file an upstream repro (stacked `n-modal`s: a click
   inside the second fires the first's `on-mask-click`).
-- **Gemini tool-schema whitelist widening (provider, non-blocker)** — **shipped
-  2026-11-19 in `52f7359`**; noted
-  2026-11-18 during the `additionalProperties` 400 hotfix (shipped as the
-  `geminiSafeSchema` whitelist in `packages/harness/src/provider.ts`): the
-  whitelist keeps only the fields of the Gemini `Schema` proto
+- **Shipped 2026-11-19 — Gemini tool-schema whitelist widening (provider,
+  non-blocker; `eb7ec74`)** — noted 2026-11-18 during the
+  `additionalProperties` 400 hotfix (shipped as the `geminiSafeSchema`
+  whitelist in `packages/harness/src/provider.ts`; the earlier citation
+  `52f7359` was a pre-rebase lane SHA, not on `main`): the whitelist had kept
+  only the fields of the Gemini `Schema` proto
   (`type/format/description/nullable/enum/maxItems/minItems/properties/
   required/items`), so keywords the proto *does* support (`anyOf`, `pattern`,
-  `minLength`/`maxLength`, `minimum`/`maximum`) are currently dropped and tool
-  parameter hints degrade to unconstrained on the Gemini path (requests
-  succeed; validation hints weaken). Widen the set if a tool needs the
-  stricter hints — the strip must stay a key-whitelist with no reshaping.
-  The widening keeps exactly those six keywords (`anyOf`, `pattern`,
-  `minLength`, `maxLength`, `minimum`, `maximum`) while everything else stays
-  byte-stable; values still pass through unchanged (no reshaping, coercion or
-  reordering), unsupported keys (`additionalProperties`, `$schema`, `$ref`)
-  are still dropped, and the same whitelist recurses into
-  `properties`/`items`/`anyOf`. Tests:
+  `minLength`/`maxLength`, `minimum`/`maximum`) were dropped and tool
+  parameter hints degraded to unconstrained on the Gemini path (requests
+  succeeded; validation hints weakened). The widening keeps exactly those six
+  keywords (`anyOf`, `pattern`, `minLength`, `maxLength`, `minimum`,
+  `maximum`) while everything else stays byte-stable; values still pass through
+  unchanged (no reshaping, coercion or reordering), unsupported keys
+  (`additionalProperties`, `$schema`, `$ref`) are still dropped, and the same
+  whitelist recurses into `properties`/`items`/`anyOf`. Tests:
   `packages/harness/tests/adapters.test.ts`.
