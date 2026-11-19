@@ -219,7 +219,17 @@ the protocol reference and is not modified by work here either.
    `TWO_BROTHERS_COMPACT_THRESHOLD_TOKENS`), `--context-window <n>` (+
    `TWO_BROTHERS_CONTEXT_WINDOW`); `--verbose` failure warnings name the
    unit and the measured size. Tests: `tests/compactiontokens.test.ts`.
-   Preset-level context windows are a follow-up (`docs/backlog.md`).
+   Preset-level context windows are shipped (wave 26, `bd9cef6`): a preset's
+   additive `context_window` rides `RoleEndpoint.contextWindow` out of
+   `resolveRoleEndpoints`, and `presetContextWindow` feeds the smaller of the
+   roles' preset windows into the serve compaction merge as the
+   lowest-priority fallback (explicit `ServerOptions.compaction` > CLI
+   flag/env > persisted `compaction.context_window` > preset > absent;
+   `config.ts::mergeCompactionFields` reports the honest `source: "preset"`).
+   The provider routes and the web provider form carry it; seeded presets
+   deliberately omit windows (absence = unknown, pinned by
+   `tests/presets.test.ts`), and `tests/compactionguarantees.test.ts` pins the
+   min-of-roles guarantee.
    Compaction has no counterpart in the original prototype — a
    documented TS-first divergence (BACKLOG "Context compaction"). No new
    runtime deps.
