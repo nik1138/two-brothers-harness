@@ -1956,10 +1956,13 @@ export class TwoBrothersHarness {
    * model id (per-role endpoint first, then the run config) plus the wire
    * family `roleProviderKind` resolves.
    *
-   * Deliberately absent rather than guessed: a `mock` provider has no
-   * purchasable model, an embedder-supplied provider override can use a model
-   * the config does not name, and a blank configured model is unknown. The
-   * caller attaches this only to a half that actually measured a call.
+   * Deliberately absent rather than guessed: a `mock` provider — configured
+   * as `mock` or supplied as a `MockProvider` instance — has no purchasable
+   * model, and a blank endpoint/config model is unknown. An embedder-supplied
+   * provider override otherwise keeps the config/endpoint model (the override
+   * picks the transport, not the identity); the family comes from
+   * `roleProviderKind` and is omitted when it resolves `null`. The caller
+   * attaches this only to a half that actually measured a call.
    */
   private roleIdentity(role: "senior" | "junior"): Pick<RoleUsage, "model" | "family"> {
     const endpoint = this.options.endpoints?.[role];

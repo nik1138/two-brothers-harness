@@ -243,7 +243,9 @@ session file (`--session-file`) the list is live-only and says so; a
 file-backed session lists the children of previous runs. Slash input: `/mode consult|work|auto`, `/models`,
 `/sessions`, `/fork [--at <seq>] [new-name]` (branch the current session
 through the same fork service `sessions fork` uses and switch to the copy; the
-source file and sidecar stay untouched), `/theme dark|light|system`,
+source file and sidecar stay untouched), `/rewind [--turns <n>]` (remove the
+last operator turn(s) after an explicit confirmation, then reload the
+session), `/theme dark|light|system`,
 `/settings` (provider summary,
 effective permission preset and the **Connect provider…** / **Permissions…**
 actions), `/provider` (the provider connect surface — see
