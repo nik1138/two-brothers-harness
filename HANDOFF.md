@@ -8,8 +8,10 @@ detail stays in git history; release mechanics and evidence live in
 `docs/release.md`.
 
 Last updated: **2026-11-19**. **Checkpoint: the code tree `29861c7`** —
-every count below was taken on it. The trailing `docs:` commits on top are
-this record's own refreshes; `main` = `origin/main`, clean, in sync
+every count below was taken on it. Suite counts are **recorded merged-tree
+lane evidence, not re-run for this refresh**; the git/publish/server facts
+were re-verified read-only this refresh. The trailing `docs:` commits on top
+are this record's own refreshes; `main` = `origin/main`, clean, in sync
 (0 ahead, 0 behind).
 
 ## Current state
