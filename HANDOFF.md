@@ -2,124 +2,155 @@
 
 Local working handoff, tracked as the checkpoint record (owner decision
 2026-11-14). The frozen historical snapshot is `docs/history/handoff.md`;
-this file is the current state for the next session. The 2026-11-14 record
-is superseded by this refresh — its full detail stays in git history;
-release mechanics and evidence live in `docs/release.md`.
+this file is the current state for the next session. The previous refresh
+(the 0.0.2 checkpoint, `3063d01`) is superseded by this one — its full
+detail stays in git history; release mechanics and evidence live in
+`docs/release.md`.
 
-Last updated: **2026-11-19**. **Checkpoint: `main` = `9c354f3`** — clean,
-pushed, in sync with `origin/main` (0 ahead).
+Last updated: **2026-11-19**. **Checkpoint: `main` = `7834514`** — clean,
+pushed, in sync with `origin/main` (0 ahead, 0 behind).
 
 ## Current state
 
 | Item | Value |
 |---|---|
-| Branch / HEAD | `main` = `9c354f3` = `origin/main` (docs(readme): bare tui in quick start) |
-| Published | **0.0.2 on `latest` AND `next`**; tag `v0.0.2` at `354df89` (pushed). Published 2026-11-18 via the trusted-publishing workflow (`publish.yml`, gate + publish to `next`), promoted to `latest` after the soak check. Global install verified: `two-brothers --version` → `0.0.2`, mock run exit 0, `serve` 200s |
-| CI | the publish workflow ran the full release gate at `v0.0.2` (typecheck, build, `npm test` + `test:spawn`, hermetic CLI E2E, real-socket fault injection, web tests + build, selftest, `pack:check`, tag↔version check) — PASS; exact per-suite counts are in the GitHub Actions run log. Only docs commits landed after the tag |
-| Package suite baseline (current main) | **2 611 total / 2 603 pass / 0 fail / 8 POSIX-only skips**, Windows, both `npm test` and `test:spawn` (reported by the TUI mode lane; owner acceptance re-verifying on the feature branch, expected 2 614 / 2 606 / 0 / 8 = baseline + exactly 3 new tests) |
-| Historical full matrix | last locally recorded independent matrix at `9f353c4` (pre-release waves): package 2 488/2 480/0/8, web 668/668, browser 41 PASS / 1 opt-in real SKIP, CLI 19+19, smoke PASS — superseded by the release gate above |
-| Live server | **running** — rebuilt (`npm run build` + `sync-web` byte-identical) and restarted 2026-11-19: `node dist/cli.js serve --port 8600 --sessions-dir sessions` (PID 18028). Verified: `GET /` 200, `GET /api/sessions` 200 with the owner's live sessions, `GET /api/mcp` 200 |
-| Provider keys | **re-entered by the owner** (the 2026-11-14 incident loss is closed): live Google/Gemini and LM Studio runs happened 2026-11-17/18; the Gemini `additionalProperties` 400 they surfaced was fixed (`3a48129`) |
-| In flight | `feat/tui-tab-mode` @ `dbfac78` — Tab/Shift+Tab mode cycling; owner-run acceptance in progress (below) |
+| Branch / HEAD | `main` = `7834514` = `origin/main` (feat(tui): in-app editor for the three global key chords) |
+| Published | **0.0.2 on `latest` AND `next`**; tag `v0.0.2` at `354df89` (pushed). No tag, publish, or version bump this session — the next release repeats `docs/release.md` and needs fresh explicit owner permission |
+| Session window | started at `c80c855` (TUI Tab mode was already accepted, merged, and pushed pre-session — merged-tree evidence 2 614 / 2 606 / 0 / 8 plus CLI 19+19 in `.tmp/merged-gates-tui`; the old handoff was stale on that) → `7834514`: **8 commits in two waves**, every feature independently accepted in a separate lane before merge |
+| CI | the publish workflow ran the full release gate at `v0.0.2` — PASS (per-suite counts are in the GitHub Actions run log). No new release this session, so no new Gate run to cite |
+| Package suite baseline | **2 671 total / 2 663 pass / 0 fail / 8 POSIX-only skips**, Windows, merged tree, in BOTH `npm test` and `npm run test:spawn` |
+| Web / browser / CLI / faults | web **747 / 747 / 0 / 0**; browser E2E **44 PASS / 0 FAIL / 1 SKIP** (opt-in real); hermetic CLI E2E **19 + 19** (sources + `--dist`); loopback real-socket fault injection **7/7**; reference selftest PASS + **33/33**; `SMOKE TEST: PASS` |
+| Live server | **running**, refreshed 2026-11-19 ~15:53 to `7834514`: `node dist/cli.js serve --port 8600 --sessions-dir sessions` (PID **69528**, cwd `packages/harness`, logs `.tmp/live-serve/`). Verified: `GET /` 200 serving the new bundle `index-BAtTsj25.js`, `/api/sessions` 200 with BOTH preserved sessions (`2026-11-14T16-33-32-134-4176c1`, `2026-11-14T16-39-48-429-066581`), `/api/mcp` 200. Store: `packages/harness/sessions` |
+| Packaged web copy | `npm run sync-web` SHA256-identical, 3/3 files (`index.html`, `index-BAtTsj25.js`, `index-BdQuArRh.css`) against `web/dist` |
+| Provider keys | re-entered by the owner after the 2026-11-14 incident; that owner task is closed and live Gemini/LM Studio runs used through the usage waves |
+| Known environment quirk | `HEAD /assets/*` returns 404 (GET-only static handler; no UI impact) — recorded, not a regression |
 
-## Shipped since the 2026-11-14 handoff (`92af62a` → `9c354f3`)
+## Shipped since the last checkpoint (`c80c855` → `7834514`, 8 commits)
 
-Landmark commits by theme (implementation → merge where separate):
+Two waves. Every feature was independently accepted in its own lane before
+merge; a single merged-tree FAIL blocks the push, as designed.
 
-- **Test reliability + consolidation:** `400767f` subagent model-freshness
-  tests order-independent and wire-level (fixed the CI `junior-a`/`junior-b`
-  failure); `1746f6f` override-helper consolidation; `6d6c553` MCP test
-  consolidation + real coverage gaps; `971f921` folder `AGENTS.md` guidance
-  refresh after three drift audits.
-- **Cooperation prompts:** `34432de` senior/junior system prompts grounded in
-  the original task and run evidence.
-- **Provider workflow UX:** searchable role-model pickers with custom models
-  (`db0c9b9`, `31e2d3a`); Add-card live discovery via a name-agnostic draft
-  route (`eea05de`, `54cf01d`, `2933998`); **live Google/Gemini model
-  discovery** `GET {base}/v1beta/models` with `x-goog-api-key` header and
-  bounded pagination (`305e96e`); models.dev model-level base-URL fallback +
-  prominent needs-URL notice for custom-endpoint entries (`e95f4d8`,
-  `14a594b`); Latin-only help aliases (`1b86897`); Add card closes after save
-  (`ad3b04c`); provider add-card/catalog browser scenarios (`235d780`) +
-  provider-reset adaptation (`ca1c121`); smoke cleanup null-path and PS 5.1
-  NRE guards (`fc60cfb`, `971fc8e`); packaged-web freshness re-verified
-  before every browser scenario (`236b220`).
-- **Gemini hotfix:** `3a48129` `geminiSafeSchema` key-whitelist strips
-  unsupported JSON-schema keywords from tool declarations (fixed the live
-  `additionalProperties` 400). Whitelist-widening follow-up recorded in
-  `docs/backlog.md` (lane queued, below).
-- **Plugins:** per-plugin options + scope reporting API and web editors
-  (`524a2e6`, `1a3406e`); deja-vu memory MCP example plugin (`f957bc4`).
-- **MCP visibility:** `GET /api/mcp` configured + last-run status (`26c357b`);
-  web settings/status surfaces (`6972fca`); TUI footer chip + sidepanel
-  (`8274659`); CLI `mcp list` incl. machine-clean `--json` (`f3a67a1`,
-  `dc9d1ed`); `/mcp` docs (`d450de4`); MCP browser scenario (`00c2a9a`).
-- **Skills:** instance-local `<sessionsDir>/skills` scan (`c21297f`).
-- **Structured operator questions (`ask_user`):** harness tool via the
-  approval broker (`927dcb4`); web question card (`80cf9b9`); TUI approval
-  panel question mode (`7ac16bf`) + turn-broker wiring fix (`0530440`);
-  server answer-body superset test (`e3c25e9`).
-- **Compaction guarantees:** `36e827a` pins atomic cuts (never split a tool
-  call) and min-of-roles context-window guarantees on the token-mode
-  (`contextWindow`) compaction path.
-- **Release 0.0.2 + README:** bump `354df89`; release records `2cd487b`,
-  `eb2a840`; README simplified to install → serve/run/tui (`a42d20e`,
-  `8494462`, `9c354f3`).
+- `dbe5908` **test: prune subsumed and constant-only tests** per the
+  meaningfulness audit — −4 (one subsumed server workspaces CRUD test plus
+  three internal constant pins). The owner **kept the 6 published-cap pins**
+  as contract pins (decision 2026-11-19).
+- `eb7ec74` **fix(provider): widen the Gemini tool-schema key whitelist**
+  with `anyOf` / `pattern` / `minLength` / `maxLength` / `minimum` /
+  `maximum` — pure key filter, function body byte-identical, +3 tests; plus
+  `415ca17` docs(backlog) shipped marker.
+- `3c3a03b` **feat(usage): per-turn Senior/Junior usage and cache split** —
+  `PromptAuditEntry.usage?`, `HarnessResult.usageByRole?`, a display-only
+  `call_usage` runtime event after each call, the CLI split block before the
+  byte-stable footer, `--json usage_by_role`, print/verbose surfaces;
+  +11 tests; additive, protocol untouched.
+- `25ad359` **test(e2e): accept the additive `call_usage` frame before
+  `tool_started`** — a strict contract-shaped alignment of an over-pinned
+  adjacency assertion; unblocked the merged-tree smoke. Whole-repo over-pin
+  survey done.
+- `7f4f062` **fix(tui): report OSC 52 copy failure** when the terminal
+  suppresses it — `TERM=dumb` false-success toast fixed via a throwing
+  `writeClipboardSequence` sink; +5 tests; the OSC 52 100 000-character cap
+  documented; the copy description wording made honest.
+- `44e28be` **feat(usage): per-role usage on run records, web footer/status
+  and TUI panel** — `run_end`/`RunRecord usage_by_role` additive plus
+  sidecar `call_usage` recovery, old sessions merged-only; web
+  `UsageFooter` + `SessionStatusDialog` split with old-backend fail-soft;
+  TUI Ctrl+B sidepanel rows; tool-preview browser scenario extended;
+  +13 package / +8 web tests. **Documented limitation:** the footer split is
+  hidden at the drawer breakpoint ≤768px to protect parked readers;
+  `/status` shows it at every width.
+- `7834514` **feat(tui): in-app editor for the three global key chords** —
+  `/keys edit` dialog: capture through the existing keys-file grammar,
+  `resolveTuiCommands` validation, atomic 0600 save, fixed-key /
+  other-global / reserved refusals, repeat/IME/paste-safe, honest
+  no-file/invalid-file behavior, reset-all row; +27 tests; fixed keys
+  unchanged.
+
+### Test-meaningfulness audit (owner asked twice; answered)
+
+Report: `.tmp/test-audit-report.md`. Verdict: the suite is meaningful
+overall — no duplicate suites, no mock-verifies-itself clusters; apparent
+duplication is deliberate layering. The safe slice was executed (−4). The
+owner decision is to **keep** the 6 published-cap constant pins. A
+**NEEDS-DESIGN** bucket is queued (~24–29 tests): web source-string wiring
+consolidation is the largest (−15…−20 — only CI wiring coverage exists
+since browser E2E is opt-in, so consolidate/replace, never blind-delete);
+approval/deny overlap −2 with one unique artifact case to relocate; plugins
+endpoint −1; four mirror pairs −4 table-driven; storage-failure pairs −2.
+Estimated total removable 28–39 (~1.1–1.5%) if the web wiring is accepted.
+**Execute only with the owner's shortlist approval.**
+
+### Verifications closed
+
+Ctrl+G external editor + Ctrl+X copy are **shipped and verified** on the
+current tree (149 focused tests green; dispatch/modality/security traced;
+no material docs drift) — the `todo.md` smaller item is closed.
+Micro-follow-ups recorded: (a) the `/keys edit` invalid-existing-file
+refusal is inspection-verified but lacks a dedicated app-level test (the
+writer side and the state source are tested); (b) the `HEAD /assets/*` 404
+quirk above.
+
+### Hygiene done this session
+
+Early: 2 verified-merged stale worktrees removed
+(`C:/code/tb-fix-subagent-model-copy`, `C:/code/tb-lane-stream-scroll-review`)
+plus their branches (cherry-evidence, `-D` after a `-d` refusal); 134
+disposable `.tmp` probe directories pruned (~23.8 MiB). Post-merge: 11 lane
+worktrees + 2 standalone clones removed, 7 merged branches deleted (`-d`),
+~2.10 GiB freed; junction guard used — each tree's self-referential
+npm-workspace junction `node_modules\@two-brothers\harness` unlinked before
+the recursive delete. `.tmp/lane-usage-by-role` redundant artifacts are
+removed (verified absent). Unmerged worktrees were **kept** awaiting the
+owner's decision (never remove those): `.tmp/worktrees/release-doc-count`,
+`.tmp/worktrees/stream-follow-touch`, `.tmp/worktrees/stream-scroll-test`,
+`.tmp/worktrees/user-message-nav-acceptance`, `C:/code/tb-lane-touch`.
+opencode-owned worktrees and `Temp/tb-review-tip` were never touched.
 
 ## In flight
 
-### `feat/tui-tab-mode` @ `dbfac78` (from `9c354f3`, 7 files, +137/−3)
+Nothing is in flight on `main` — the tree is clean and fully pushed.
 
-Tab on an **empty** TUI composer cycles the next turn's cooperation mode
-`consult → work → auto` (Shift+Tab backwards); with text typed, Tab keeps
-its slash-completion meaning (handler returns `false`, falls through to the
-editor). Pure `cycleCooperationMode` + `COOPERATION_MODE_ORDER` in
-`basecommands.ts`; registry entry `mode-cycle` sits before `complete`;
-mode applies next turn, nothing persisted (same semantics as `/mode`).
-Files: `src/tui/{keymap,basecommands,app}.ts`, `docs/keyboard.md`, tests in
-`tuikeymap`/`tuibasecommands`/`tuiintegration` (+3 tests).
+### Unmerged worktrees awaiting the owner's decision (do not remove)
 
-**Acceptance status (2026-11-19):** the independent subagent lane
-(agent-319) was lost to machine sleep; its worktree
-`.tmp/wt-accept-tui-mode` existed but was empty (no deps, no logs). All
-subagent lanes are currently blocked by a subscription access error on the
-subagent model route (below), so acceptance is **owner-run** by the
-orchestrator — independent of the implementer (agent-318), which AGENTS.md
-permits ("or by the owner"). Diff review: **DONE, no concerns** (dispatch
-order, fall-through, scope isolation for mention/overlay/find/approval,
-docs accuracy all traced). Gate matrix running in the acceptance worktree
-(logs: `.tmp/wt-accept-tui-mode/packages/harness/.gate-logs/`): deps,
-typecheck, focused TUI suites, full `npm test` + `test:spawn`, build +
-selftest, CLI E2E source + `--dist`. On GO: `--ff-only` merge into main,
-merged-tree gates, push, remove lane worktrees/branch.
+| Worktree | Branch / commit |
+|---|---|
+| `.tmp/worktrees/release-doc-count` | `docs-release-e2e-count` @ `8dfcab5` |
+| `.tmp/worktrees/stream-follow-touch` | `fix-stream-follow-touch-test` @ `638f8a4` |
+| `.tmp/worktrees/stream-scroll-test` | `test-stream-scroll` @ `ec6c998` |
+| `.tmp/worktrees/user-message-nav-acceptance` | detached @ `9a96b9d` |
+| `C:/code/tb-lane-touch` | `test-stream-scroll-touch` @ `dbf0c2f` |
 
-### Queued lanes (blocked on subagent route access)
+Each needs a merge / abandon / keep call from the owner before it can be
+cleaned up. `git worktree list` confirms all five are present.
 
-Spawned 2026-11-19, all failed in ~2 s with: *"Your current subscription
-does not have access to Kimi Code right now"* — an account/quota condition
-on the subagent model route, not a code failure. Resume when access
-recovers (conversation context is preserved):
+## Incident / prevention notes (kept)
 
-- **agent-319** — TUI mode acceptance (superseded by the owner-run gates if
-  they finish first).
-- **agent-320** — `feat/usage-by-role`: per-turn Senior/Junior usage + cache
-  split (backlog item; additive fields only; stop-and-report if already
-  exposed end-to-end).
-- **agent-321** — `fix/gemini-schema-whitelist`: widen `geminiSafeSchema`
-  with `anyOf`/`pattern`/`minLength`/`maxLength`/`minimum`/`maximum`
-  (pure key-whitelist, no reshaping; backlog non-blocker).
-- **agent-322** — read-only test-suite meaningfulness audit (remaining
-  duplication/low-value tests after the MCP + override consolidations).
-
-## Incident (2026-11-14) — prevention note (kept)
+### Incident (2026-11-14)
 
 An NTFS-junction-traversing cleanup emptied main-checkout
-`packages/harness`; tracked files were restored, but untracked
-`sessions/` content (sessions, settings incl. sealed keys, sidecars, child
-logs) was permanently lost. Keys have since been re-entered and live runs
-resumed. **Never point recursive cleanup/delete tools at the repo root,
-worktree parents, or any path that can contain NTFS junctions; keep
-destructive commands inside one known directory.**
+`packages/harness`; tracked files were restored, but untracked `sessions/`
+content (sessions, settings incl. sealed keys, sidecars, child logs) was
+permanently lost. Keys have since been re-entered and live runs resumed.
+**Never point recursive cleanup/delete tools at the repo root, worktree
+parents, or any path that can contain NTFS junctions; keep destructive
+commands inside one known directory.**
+
+### Session lessons (2026-11-19)
+
+1. **Subagent sandbox policy is fixed at spawn.** Lanes spawned under
+   `workspace-write` stayed confined (git/`.git` writes, spawn `EPERM`) even
+   after the owner switched the session to `danger-full-access`; only fresh
+   spawns inherit the new policy. The confined lanes used local-clone
+   fallbacks (accepted; their branches were fetched into the main repo for
+   acceptance/merge). An ACL diagnostic ran `NOT_THIS_CLASS` at the repo
+   root (report `.tmp/acl-repair/`).
+2. **Acceptance briefs must include the hermetic SERVER E2E layer plus the
+   smoke gate, not just CLI E2E.** The `call_usage` adjacency over-pin
+   slipped through the per-lane gates and was caught by merged-tree smoke —
+   one FAIL blocks the push, as designed.
+3. **The `TEMP`/`TMP` → `.tmp/build-temp` override is only for standalone
+   web builds and `e2e-test.ps1`.** Widening it to package tests or the
+   smoke gate flakes `tuiintegration` (see `scripts/AGENTS.md`).
 
 ## Commands / verification
 
@@ -166,7 +197,7 @@ dir at the same time (writer lock); lane worktrees have their own.
   stay additive.
 - **Pushing `main` is approved** (settled pattern: merge verified work,
   then push). **No tag, publish, or version bump without fresh explicit
-  owner words.** 0.0.2 is fully shipped; the next release repeats
+  owner words.** 0.0.2 is fully shipped on npm; the next release repeats
   `docs/release.md`.
 - No new runtime dependencies without a ledger entry in
   `docs/history/ts-rewrite-plan.md`; `web/` keeps building; `typescript/`
@@ -177,27 +208,36 @@ dir at the same time (writer lock); lane worktrees have their own.
 
 ## Next moves
 
-1. **Finish the TUI tab-mode acceptance** (gates running) → ff-merge →
-   merged-tree package gates → push → remove `.tmp/wt-tui-mode` +
-   `.tmp/wt-accept-tui-mode` and `feat/tui-tab-mode`.
-2. **Resume the queued lanes** (agent-320/321/322) when subagent route
-   access recovers; otherwise run them owner-inline in the same worktree
-   pattern.
-3. **GitHub Release page for `v0.0.2`** — owner manual step (no `gh` CLI on
-   this machine; the notes body was prepared in session). The npm side is
-   complete.
-4. Backlog after that: OAuth subscription sign-in, TUI keybinding editor,
-   per-role cache split (if the lane hasn't shipped it), deferred F/D
-   designs — see `todo.md` and `docs/backlog.md`.
+Per `todo.md`'s priority order:
+
+1. **Owner decisions:** the NEEDS-DESIGN audit shortlist; the five unmerged
+   worktrees (merge/abandon/keep); the GitHub Release page for `v0.0.2`
+   (manual — no `gh` CLI on this machine).
+2. **OAuth-only subscription sign-in** — large: device flow,
+   refresh-locked token store, provider headers; the subscription seeds
+   cover API-key plans only.
+3. **TUI keybinding surface expansion** beyond the three globals — needs a
+   per-surface conflict model (backlog).
+4. **Usage follow-ups:** per-role cost, cache-miss deltas, failed-run split
+   nuances (backlog item narrowed).
+5. **Micro:** an app-level `/keys edit` invalid-file test; `HEAD /assets/*`
+   support.
+
+The deferred register is unchanged (F/D designs, structural candidates
+TUI-R/CHAT-R/SET-S/BE-R, hypotheses, WAN/soaks manual, POSIX hardware
+validation, the true-virtualization epic, third sibling not on the backlog).
 
 ## Handoff checklist
 
 - [ ] Read `AGENTS.md`, `docs/backlog.md`, this file, and `todo.md`.
-- [ ] Confirm `git status` clean and `git log -1` is the expected commit.
+- [ ] Confirm `git status` clean and `git log -1` is the expected commit
+      (`7834514` on `main`).
 - [ ] Check the background-task panel for running gates/lanes before
       starting new ones (stale-serve writer-lock gotcha above).
 - [ ] Run package + web tests and the smoke gate on the merged tree.
-- [ ] Rebuild + `sync-web` + restart `serve` before handing back.
+- [ ] Rebuild + `sync-web` + restart `serve` before handing back
+      (**done this session**: PID 69528, endpoints 200, bundle
+      `index-BAtTsj25.js`, sync-web 3/3 SHA256-identical).
 - [ ] Keep `research/`, sessions, credentials, logs out of git (this file
       and `todo.md` are the tracked checkpoint exception).
 - [ ] No publish/tag/version bump without explicit owner permission.
