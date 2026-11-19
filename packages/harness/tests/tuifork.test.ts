@@ -4,8 +4,9 @@
  * bounded notices (pure), a whole-session fork that switches the app and keeps
  * the source byte-identical, a prefix fork under an explicit name, the
  * mid-turn and compaction refusals, the no-current-session/absent-file/
- * outside-store refusals, and the fork service's real name-collision and
- * corrupt-source errors surfaced as bounded notices. Everything is hermetic:
+ * outside-store refusals, and the fork service's real name-collision,
+ * out-of-range-`--at` and corrupt-source errors surfaced as bounded notices.
+ * Everything is hermetic:
  * the mock provider drives turns, and the compaction gate uses an ephemeral
  * loopback endpoint (the same pattern `tuiintegration.test.ts` uses).
  *
@@ -261,6 +262,26 @@ test("/fork notices: success states the copy count, untouched source and switch;
   assert.equal(bounded.length, FORK_NOTICE_MAX_CHARS);
   assert.ok(bounded.endsWith("…"));
   assert.equal(boundForkNotice("short"), "short");
+});
+
+test("/fork notices never invent a copy count or an empty label", () => {
+  const blank = forkSwitchNotice({ source: "  ", name: "", events: 0 });
+  assert.match(
+    blank,
+    /^forked the current session → the new session \(0 envelopes copied;/,
+    "blank labels fall back instead of rendering an empty arrow side",
+  );
+  for (const events of [Number.NaN, Number.POSITIVE_INFINITY, -3]) {
+    const notice = forkSwitchNotice({ source: "alpha.jsonl", name: "alpha-fork-1.jsonl", events });
+    assert.match(notice, /\(0 envelopes copied;/, `events ${String(events)} is a zero copy`);
+    assert.equal(notice.includes("NaN"), false, "no NaN is ever rendered as an envelope count");
+    assert.equal(notice.includes("Infinity"), false);
+  }
+  assert.match(
+    forkSwitchNotice({ source: "alpha.jsonl", name: "alpha-fork-1.jsonl", events: 2.7 }),
+    /\(2 envelopes copied;/,
+    "a fractional count is floored, never rendered as a fraction",
+  );
 });
 
 // --------------------------------------------------------------------------- //
@@ -637,6 +658,37 @@ test("/fork surfaces a name collision as a bounded notice and keeps the source s
     );
     assert.deepEqual(forkFiles(sessionsDir), []);
     assert.deepEqual(fs.readFileSync(sourceFile), sourceBytes);
+    assert.equal(await quit(input, app), 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("/fork --at beyond the log refuses honestly and keeps the source selected", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-tui-fork-at-range-"));
+  const sessionsDir = path.join(root, "sessions");
+  const { file: sourceFile, bytes: sourceBytes } = writeSource(sessionsDir, "alpha.jsonl");
+  const { app, input, output } = startApp(sessionsDir, {
+    cfg: resolveConfig({ provider: "mock", sessionFile: sourceFile, resume: true }),
+  });
+  try {
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+    // The parser accepts any positive integer; the range belongs to the
+    // session, so the service's refusal is what has to surface.
+    input.type("/fork --at 9");
+    input.enter();
+    assert.ok(
+      await waitFor(() =>
+        flatText(output).includes("fork failed: at seq must be an integer between 1 and 4"),
+      ),
+      "the service's real range message is shown",
+    );
+    assert.ok(
+      lastFrameText(output).includes("session alpha.jsonl"),
+      "an out-of-range fork leaves the source session selected",
+    );
+    assert.deepEqual(forkFiles(sessionsDir), [], "no fork file was created");
+    assert.deepEqual(fs.readFileSync(sourceFile), sourceBytes, "the source session is untouched");
     assert.equal(await quit(input, app), 0);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

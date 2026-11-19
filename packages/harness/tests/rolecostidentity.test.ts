@@ -337,6 +337,50 @@ test("estimateRoleCostsFromSplit prices each half from its own identity", () => 
   );
 });
 
+test("estimateRoleCostsFromSplit tolerates an absent split and a half that measured nothing", () => {
+  // Old records and jobs without a split carry no `usage_by_role` at all: the
+  // shared rule answers `null` (the caller omits `cost_by_role`) instead of
+  // throwing or inventing a pair of nulls.
+  assert.equal(estimateRoleCostsFromSplit(null), null);
+  assert.equal(estimateRoleCostsFromSplit(undefined), null);
+
+  // An explicitly absent half is skipped, the measured half is still priced.
+  const oneHalf = estimateRoleCostsFromSplit({
+    senior: null,
+    junior: {
+      model_calls: 1,
+      input_tokens: 1_000_000,
+      output_tokens: 0,
+      model: "gpt-4o",
+      family: "openai-compatible",
+    },
+  });
+  assert.ok(oneHalf);
+  assert.equal(oneHalf.senior, null, "an absent half is never priced");
+  assert.equal(oneHalf.junior?.totalCost, 2.5);
+
+  // `model_calls` decides whether a half measured anything: absent, zero, a
+  // negative or a sub-one count is "no call", so a configured model with no
+  // call never becomes a fabricated $0.
+  for (const model_calls of [undefined, 0, -2, 0.4]) {
+    assert.equal(
+      estimateRoleCostsFromSplit({
+        senior: { model_calls, input_tokens: 1_000_000, model: "gpt-4o" },
+      }),
+      null,
+      `model_calls ${String(model_calls)} measured no call`,
+    );
+  }
+  // A real (even fractional) count is a measured call and prices normally.
+  assert.equal(
+    estimateRoleCostsFromSplit({
+      senior: { model_calls: 1.9, input_tokens: 1_000_000, model: "gpt-4o" },
+    })?.senior?.totalCost,
+    2.5,
+    "the count is truncated only for the zero test, never for the price",
+  );
+});
+
 // ---------------------------------------------------------------------------
 // RunManager: run_end + public record
 // ---------------------------------------------------------------------------

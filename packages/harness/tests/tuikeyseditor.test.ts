@@ -9,7 +9,17 @@
  * this suite stays pure and hermetic (temp files only).
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
@@ -345,6 +355,51 @@ test("save: an IO failure is returned, never thrown, and keeps the previous file
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("save: a blank configured path is refused with the honest reason", () => {
+  // The app refuses to open the editor without a captured source, so this is
+  // the writer's own guard for any other caller: a blank path is a refusal,
+  // never a file written next to the process' cwd.
+  const saved = saveTuiKeysBindings("   ", { palette: [chord("l", { ctrl: true })] });
+  assert.deepEqual(saved, { ok: false, error: "no keys-file path is configured" });
+});
+
+test(
+  "save: replacing an existing file applies the owner-only mode",
+  { skip: process.platform === "win32" ? "POSIX mode bits only" : false },
+  () => {
+    const root = mkdtempSync(path.join(tmpdir(), "tui-keys-editor-mode-"));
+    try {
+      const file = path.join(root, "keys.json");
+      // A pre-existing world-readable file must end up owner-only: the atomic
+      // temp-file + rename gives the replaced inode the temp file's mode.
+      writeFileSync(file, `${JSON.stringify({ version: 1, bindings: {} }, null, 2)}\n`, {
+        encoding: "utf8",
+        mode: 0o644,
+      });
+      chmodSync(file, 0o644);
+      assert.equal(statSync(file).mode & 0o777, 0o644);
+
+      const applied = bindTuiCommandChord({}, "help", chord("f2"));
+      assert.equal(applied.ok, true);
+      if (!applied.ok) return;
+      assert.deepEqual(saveTuiKeysBindings(file, applied.bindings), { ok: true });
+
+      assert.equal(statSync(file).mode & 0o777, 0o600, "the replaced keys file is owner-only");
+      assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), {
+        version: 1,
+        bindings: { help: ["f2"] },
+      });
+      assert.deepEqual(
+        readdirSync(root).filter((name) => name.endsWith(".tmp")),
+        [],
+        "the temp file never survives the replace",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test("watch: an editor save is picked up through the same validated reload path", async () => {
   const root = mkdtempSync(path.join(tmpdir(), "tui-keys-editor-watch-"));

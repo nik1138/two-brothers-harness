@@ -387,6 +387,56 @@ test("/rewind notices are bounded to one row's worth of text", () => {
   assert.equal(boundRewindNotice("short"), "short");
 });
 
+test("/rewind copy never invents a seq, a name, an empty quote or a sidecar error", () => {
+  // A hand-written/legacy log can carry envelopes with no `seq` (the preview is
+  // deliberately tolerant there). The counts stay honest and no `seq` range or
+  // kept `seq` is claimed when the envelopes do not carry one.
+  const legacy = [
+    { v: 1, id: "a", from: "user", to: "senior", kind: "message", payload: { text: "legacy task" } },
+    { v: 1, id: "b", from: "senior", to: "user", kind: "message", payload: { text: "legacy reply" } },
+  ] as unknown as Message[];
+  const preview = previewRewind(legacy, 1);
+  assert.equal(preview.cut.removedCount, 2);
+  assert.equal(preview.cut.keptCount, 0);
+  assert.equal(preview.removedSeq, "", "no removed seq range is claimed");
+  assert.equal(preview.keptSeq, null, "no kept seq is claimed");
+  assert.equal(preview.taskText, "legacy task");
+
+  const body = rewindConfirmation({ name: "   ", preview });
+  assert.match(
+    body,
+    /^Remove the last 1 operator turn and everything after: 2 envelopes will be deleted from this session/,
+    "a blank session name falls back instead of rendering empty",
+  );
+  assert.equal(body.includes("(seq "), false, "a seq-less log gets no seq range");
+  assert.equal(body.includes("dense seq through"), false, "a seq-less prefix gets no kept seq");
+  assert.match(body, /Selected task: .legacy task./);
+
+  const withoutTask = rewindConfirmation({ name: "alpha.jsonl", preview: { ...preview, taskText: "" } });
+  assert.equal(
+    withoutTask.includes("Selected task"),
+    false,
+    "an empty quote is omitted rather than rendered as a pair of empty quotes",
+  );
+
+  // A whitespace-only sidecar error is not an error, and a blank name falls back.
+  const notice = rewindOutcomeNotice({
+    name: "  ",
+    cut: preview.cut,
+    sidecarCleared: false,
+    sidecarError: "   ",
+  });
+  assert.match(notice, /^rewound the session: /, "a blank name falls back to 'the session'");
+  assert.match(notice, /the tool\/approval history sidecar was already empty/);
+  assert.equal(notice.includes("could not clear"), false, "whitespace is not a sidecar error");
+
+  // The argument boundary is untrusted: a non-string body is the default depth.
+  assert.deepEqual(parseRewindCommandArgs(undefined as unknown as string), {
+    turns: 1,
+    error: null,
+  });
+});
+
 // --------------------------------------------------------------------------- //
 // assembled app: confirm, cancel and reload
 // --------------------------------------------------------------------------- //
@@ -968,6 +1018,98 @@ test("/rewind surfaces a corrupt current session honestly and rewrites nothing",
     );
     assert.equal(fs.readFileSync(sourceFile, "utf8"), corrupt, "the failed rewind wrote no byte");
     assert.ok(!flatText(output).includes("Rewind session"), "no confirmation for a corrupt file");
+    assert.equal(await quit(input, app), 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("/rewind refuses a log damaged between the preview and the confirmation", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-tui-rewind-reread-"));
+  const sessionsDir = path.join(root, "sessions");
+  const five = FOUR_ENVELOPES();
+  const { file: sourceFile } = writeSession(sessionsDir, "alpha.jsonl", five);
+  const { app, input, output } = startApp(sessionsDir, {
+    cfg: resolveConfig({ provider: "mock", sessionFile: sourceFile, resume: true }),
+  });
+  try {
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+    input.type("/rewind");
+    input.enter();
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("Rewind session")),
+      "the preview runs on the log as it was",
+    );
+
+    // Damage the log while the confirmation is open. The destructive write must
+    // re-read strictly: a torn final fragment is corruption here, not a
+    // recoverable tail, so the rewind refuses instead of rewriting a prefix.
+    const damaged = `${five.join("\n")}\nnot json`;
+    fs.writeFileSync(sourceFile, damaged, "utf8");
+
+    input.key("right");
+    input.enter();
+    assert.ok(
+      await waitFor(() => flatText(output).includes("rewind failed: corrupt session file")),
+      "the strict re-read's real failure is surfaced",
+    );
+    assert.equal(
+      fs.readFileSync(sourceFile, "utf8"),
+      damaged,
+      "the refused rewind rewrote no byte of the damaged log",
+    );
+    assert.ok(
+      !flatText(output).includes("rewound alpha.jsonl"),
+      "no success is claimed for a session that was not rewritten",
+    );
+    assert.equal(await quit(input, app), 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("/rewind discloses a sidecar clear failure and still rewrites the transcript", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-tui-rewind-sidecar-fail-"));
+  const sessionsDir = path.join(root, "sessions");
+  const { file: sourceFile } = writeSession(sessionsDir, "alpha.jsonl", FOUR_ENVELOPES());
+  const keptBytes = Buffer.from(
+    `${sessionLines(sourceFile).slice(0, 2).join("\n")}\n`,
+    "utf8",
+  );
+  // A directory where the runtime sidecar should be cannot be unlinked, so the
+  // clear fails after the transcript was already rewritten.
+  const sidecarPath = path.join(sessionsDir, "runtime", "alpha.jsonl.events.jsonl");
+  fs.mkdirSync(sidecarPath, { recursive: true });
+  fs.writeFileSync(path.join(sidecarPath, "blocker"), "x", "utf8");
+  const { app, input, output } = startApp(sessionsDir, {
+    cfg: resolveConfig({ provider: "mock", sessionFile: sourceFile, resume: true }),
+  });
+  try {
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+    input.type("/rewind");
+    input.enter();
+    assert.ok(await waitFor(() => lastFrameText(output).includes("Rewind session")));
+    input.key("right");
+    input.enter();
+
+    assert.ok(
+      await waitFor(() => flatText(output).includes("rewound alpha.jsonl")),
+      "the transcript rewrite itself succeeded",
+    );
+    const frame = flatText(output);
+    assert.match(
+      frame,
+      /could not clear the tool\/approval history sidecar: /,
+      "a failed sidecar clear is disclosed, not hidden",
+    );
+    assert.equal(
+      frame.includes("sidecar was already empty"),
+      false,
+      "a failed clear is never reported as an empty sidecar",
+    );
+    assert.deepEqual(fs.readFileSync(sourceFile), keptBytes, "the transcript was still rewritten");
+    assert.deepEqual(seqsOf(sourceFile), [1, 2], "the kept prefix keeps its dense seq");
+    assert.ok(fs.existsSync(sidecarPath), "the unremovable sidecar path is untouched");
     assert.equal(await quit(input, app), 0);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
