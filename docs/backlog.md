@@ -1258,7 +1258,12 @@ Design anchors that already exist:
   export cases in `tests/sessionsearch.test.ts` (35); the web session row menu
   ships `Fork session…` and `Export as HTML`
   (forking is unavailable while a run is active). Wave 26 added the transcript's
-  **Fork from here…** (`{seq}`) action; remaining: TUI fork surfaces.
+  **Fork from here…** (`{seq}`) action; the TUI fork surface shipped in
+  `3f8367f` — `/fork [--at <seq>] [new-name]` runs this same service on the
+  current session and switches the app to the copy through the `/sessions`
+  switch machinery, with the source file and sidecar untouched
+  (`src/tui/forkcommand.ts`, `src/tui/app.ts`; `tests/tuifork.test.ts`).
+  Remaining for this item: none.
 - **Session rewind** — `POST /api/sessions/{name}/rewind` (`{turns}` 1–100)
   and `sessions rewind <name> --turns <n>` drop the last N operator turns, so
   a better task can be retyped without a growing context or a new session.
