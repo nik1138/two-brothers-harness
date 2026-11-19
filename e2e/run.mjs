@@ -5461,6 +5461,24 @@ async function scenarioToolPreview(runner) {
     )
     assert.ok(!juniorText.includes('miss '), `Junior has no miss segment: ${juniorText}`)
 
+    // -- additive per-role model identity (`feat/role-cost-surfaces`) --------
+    // The scripted provider is a real OpenAI-compatible endpoint with the
+    // fixture model ids, so the record carries each role's identity. Those
+    // fixture models are deliberately unpriced, so the derived `cost_by_role`
+    // must be absent and the rows must show no cost segment — the honest
+    // absence path (priced display is unit-tested instead).
+    assert.equal(split.senior.model, 'e2e-senior', 'the Senior identity is the fixture model')
+    assert.equal(split.junior.model, 'e2e-junior', 'the Junior identity is the fixture model')
+    assert.equal(split.senior.family, 'openai-compatible', 'the Senior wire family is carried')
+    assert.equal(split.junior.family, 'openai-compatible', 'the Junior wire family is carried')
+    assert.equal(
+      'cost_by_role' in newest,
+      false,
+      'unpriced fixture models must not fabricate a per-role cost',
+    )
+    assert.ok(!seniorText.includes('cost '), `Senior row has no cost segment: ${seniorText}`)
+    assert.ok(!juniorText.includes('cost '), `Junior row has no cost segment: ${juniorText}`)
+
     // The /status dialog shows the same split, one row per measured role.
     await page.locator('textarea.composer-input').fill('/')
     const statusOption = page.locator('.mention-option', { hasText: '/status' })
@@ -5480,6 +5498,8 @@ async function scenarioToolPreview(runner) {
         text.includes(expected),
         `${role} status row does not carry the split (${text} vs ${expected})`,
       )
+      // Unpriced fixture models: no cost segment on the status row either.
+      assert.ok(!text.includes('cost '), `${role} status row has no cost segment: ${text}`)
       if (role === 'Senior') {
         assert.ok(
           text.includes(`miss ${fmt(missOf(usage))} tok`),

@@ -148,4 +148,5 @@ import "./solo.test.ts";
 import "./mcpstatus.test.ts";
 import "./usagebyrole.test.ts";
 import "./usagebyrolesurfaces.test.ts";
+import "./rolecostidentity.test.ts";
 import "./tuisidepanelusage.test.ts";

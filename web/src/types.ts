@@ -179,13 +179,28 @@ export interface RunUsage {
 }
 
 /**
+ * One role's split counters plus its additive model identity
+ * (`feat/role-cost-surfaces`). `model`/`family` are present only on a newer
+ * backend and only for a role that measured a call against a real model; an
+ * old record or a mock/untracked provider omits them. The web never prices a
+ * role itself — the backend projects `cost_by_role` — so the identity is
+ * carried for display/typing and the cost segment comes from that field.
+ */
+export interface RoleRunUsage extends RunUsage {
+  /** That role's effective model id; absent = unknown. */
+  model?: string
+  /** That role's wire family; absent = unresolved. */
+  family?: 'openai-compatible' | 'anthropic' | 'google'
+}
+
+/**
  * Additive Senior/Junior split of a run's usage (feat/usage-surfaces). Present
  * on newer backends only; both halves always exist when the field does (a role
  * that made no call reports zero counters). Absent = merged-only display.
  */
 export interface RunUsageByRole {
-  senior: RunUsage
-  junior: RunUsage
+  senior: RoleRunUsage
+  junior: RoleRunUsage
 }
 
 /**
@@ -197,6 +212,18 @@ export interface RunCost {
   currency: 'USD'
   total: number
   model: string
+}
+
+/**
+ * Additive per-role cost projection on the run record (`feat/role-cost-surfaces`).
+ * Priced by the backend from each split half's own model identity; a `null`
+ * half means that role's cost is unknown (no call, no identity, or an unpriced
+ * model) and the UI renders no cost segment for it. The field itself is absent
+ * when no half is priced, so an old/unpriced record keeps its shape.
+ */
+export interface RunCostByRole {
+  senior: RunCost | null
+  junior: RunCost | null
 }
 
 export interface RunStart {
@@ -244,6 +271,11 @@ export interface RunRecord {
   usage_by_role?: RunUsageByRole | null
   /** Additive run cost estimate; `null`/absent = unknown (omit the segment). */
   cost?: RunCost | null
+  /**
+   * Additive per-role cost estimate (`feat/role-cost-surfaces`); absent when no
+   * half is priced, a null half = that role's cost is unknown.
+   */
+  cost_by_role?: RunCostByRole | null
   /**
    * Additive auto-mode routing fields, derived from the persisted `auto_route`
    * event (present only on auto runs; absent on pre-feature sidecars). `mode`

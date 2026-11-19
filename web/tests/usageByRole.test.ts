@@ -26,7 +26,7 @@ import {
   roleUsageViews,
   usageByRoleFromEvents,
 } from '../src/usageByRole.ts'
-import type { RunEvent, RunUsage, RunUsageByRole } from '../src/types.ts'
+import type { RunCostByRole, RunEvent, RunUsage, RunUsageByRole } from '../src/types.ts'
 
 const SENIOR: RunUsage = {
   model_calls: 2,
@@ -243,4 +243,104 @@ test('App folds live call_usage frames and replaces them with the terminal split
     'both the footer and the status dialog receive the split',
   )
   assert.match(app, /delete splits\[name\]/, 'session deletion prunes the split')
+})
+
+// ---------------------------------------------------------------------------
+// additive per-role cost (`feat/role-cost-surfaces`)
+// ---------------------------------------------------------------------------
+
+test('normalizeUsageByRole carries the additive identity and drops junk', () => {
+  const split = normalizeUsageByRole({
+    senior: { ...SENIOR, model: '  gpt-4o  ', family: 'anthropic' },
+    junior: { ...JUNIOR, model: '   ', family: 'bogus' },
+  })
+  assert.ok(split)
+  assert.equal(split.senior.model, 'gpt-4o', 'the identity is trimmed, never re-derived')
+  assert.equal(split.senior.family, 'anthropic')
+  assert.equal('model' in split.junior, false, 'a blank model stays absent')
+  assert.equal('family' in split.junior, false, 'an unknown family stays absent')
+  // Old data without identity still normalizes to plain counters.
+  const old = normalizeUsageByRole({ senior: SENIOR, junior: JUNIOR })
+  assert.ok(old)
+  assert.equal('model' in old.senior, false)
+})
+
+test('roleUsageViews appends each priced half cost and omits unknown ones', () => {
+  const split: RunUsageByRole = { senior: SENIOR, junior: JUNIOR }
+  const costs: RunCostByRole = {
+    senior: { currency: 'USD', total: 0.000225, model: 'gpt-4o' },
+    junior: null,
+  }
+  const rows = roleUsageViews(split, costs)
+  assert.equal(rows.length, 2)
+  assert.equal(rows[0].cost, '~$0.0002 est.')
+  assert.equal(rows[0].costTitle, 'gpt-4o — estimated from token usage; not a bill')
+  // An unpriced half adds no segment (never "$0.0000").
+  assert.equal(rows[1].cost, null)
+  assert.equal(rows[1].costTitle, null)
+  // The cost is additive: the existing segments are unchanged.
+  assert.equal(rows[0].tokens, 'in 1,200 / out 340 tok')
+  assert.equal(rows[1].tokens, 'in 800 / out 120 tok')
+
+  // Absent / null costs keep today's rows byte-for-byte.
+  assert.deepEqual(
+    roleUsageViews(split).map((row) => row.cost),
+    [null, null],
+  )
+  assert.deepEqual(
+    roleUsageViews(split, null).map((row) => row.cost),
+    [null, null],
+  )
+  // Malformed cost objects fail soft (no made-up number).
+  const junk = roleUsageViews(split, {
+    senior: { currency: 'USD', total: Number.NaN, model: 'gpt-4o' },
+    junior: { currency: 'EUR' as 'USD', total: 1, model: 'deepseek-chat' },
+  })
+  assert.deepEqual(
+    junk.map((row) => row.cost),
+    [null, null],
+  )
+  // A role that measured no call gets no row even when a cost object exists.
+  const solo = roleUsageViews(
+    { senior: { ...SENIOR, model_calls: 0 }, junior: JUNIOR },
+    { senior: { currency: 'USD', total: 1, model: 'gpt-4o' }, junior: null },
+  )
+  assert.deepEqual(
+    solo.map((row) => row.role),
+    ['junior'],
+  )
+})
+
+test('the footer and /status rows render the additive per-role cost conditionally', () => {
+  const footer = readFileSync(
+    fileURLToPath(new URL('../src/components/UsageFooter.vue', import.meta.url)),
+    'utf8',
+  )
+  assert.match(footer, /v-if="row\.cost !== null"/, 'the cost segment is conditional')
+  assert.match(footer, /\{\{ row\.cost \}\}/, 'the row renders the priced estimate')
+  assert.match(footer, /:title="row\.costTitle/, 'the segment carries the priced-model tooltip')
+
+  const dialog = readFileSync(
+    fileURLToPath(new URL('../src/components/SessionStatusDialog.vue', import.meta.url)),
+    'utf8',
+  )
+  assert.match(dialog, /v-if="row\.cost !== null"/, 'the /status row cost is conditional')
+  assert.match(dialog, /\{\{ row\.cost \}\}/, 'the /status row renders the estimate')
+})
+
+test('App carries cost_by_role from the run record into the role rows', () => {
+  const app = readFileSync(fileURLToPath(new URL('../src/App.vue', import.meta.url)), 'utf8')
+  assert.match(app, /runCostByRoleBySession/, 'the per-role estimate has its own session map')
+  assert.match(
+    app,
+    /latest\.cost_by_role \?\? null/,
+    'the newest completed record supplies the per-role estimate',
+  )
+  assert.match(app, /rec\.cost_by_role \?\? null/, 'the terminal record refreshes it')
+  assert.match(
+    app,
+    /runCostByRoleBySession\.value\[selected\.value\] \?\? null/,
+    'the selected session rows receive its per-role costs',
+  )
+  assert.match(app, /delete roleCosts\[name\]/, 'session deletion prunes the per-role estimate')
 })

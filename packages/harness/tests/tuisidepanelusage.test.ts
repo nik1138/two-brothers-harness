@@ -125,3 +125,53 @@ test("a wide panel keeps the whole role value", () => {
   assert.ok(junior.includes("in 800 · out 120 · cache 0%"));
   assert.ok(!junior.endsWith("…"));
 });
+
+// ---------------------------------------------------------------------------
+// additive per-role cost (`feat/role-cost-surfaces`)
+// ---------------------------------------------------------------------------
+
+test("a priced role appends its own cost segment to the usage row", () => {
+  const entries = sidePanelEntries(
+    state({
+      usageByRole: { senior: SENIOR, junior: JUNIOR },
+      usageCostByRole: { senior: 0.000225, junior: null },
+    }),
+  );
+  const senior = entries.find((entry) => entry.label === "SENIOR USE");
+  assert.equal(
+    senior?.value,
+    "in 1.2k · out 340 · cache 42% · miss 700 · write 60 · cost $0.0002",
+  );
+  // An unpriced half renders NO cost segment (never `$0` / `cost unknown`).
+  const junior = entries.find((entry) => entry.label === "JUNIOR USE");
+  assert.equal(junior?.value, "in 800 · out 120 · cache 0%");
+});
+
+test("absent or all-unknown per-role cost keeps the pre-cost rows exactly", () => {
+  const base = sidePanelEntries(state({ usageByRole: { senior: SENIOR, junior: JUNIOR } }));
+  const allNull = sidePanelEntries(
+    state({
+      usageByRole: { senior: SENIOR, junior: JUNIOR },
+      usageCostByRole: { senior: null, junior: null },
+    }),
+  );
+  assert.deepEqual(
+    allNull.map((entry) => entry.value),
+    base.map((entry) => entry.value),
+  );
+  assert.ok(!base.some((entry) => entry.value.includes("cost ")));
+});
+
+test("a narrow panel still clips a priced role row with the shared marker", () => {
+  const rows = sidePanelRows(
+    state({
+      usageByRole: { senior: SENIOR, junior: JUNIOR },
+      usageCostByRole: { senior: 0.000225, junior: null },
+    }),
+    20,
+  ).map(stripAnsi);
+  const senior = rows.find((row) => row.startsWith("SENIOR USE"));
+  assert.ok(senior, "the SENIOR USE row must still be present");
+  assert.ok(senior.length <= 20, `row over the width: ${JSON.stringify(senior)}`);
+  assert.ok(senior.endsWith("…"), `clipped value keeps the marker: ${JSON.stringify(senior)}`);
+});

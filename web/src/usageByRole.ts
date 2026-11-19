@@ -9,10 +9,14 @@
 //
 // Fail-soft by design: a missing split (older backend, a provider that tracks
 // no usage, a pre-feature session) projects to null — callers then render
-// today's merged counters and never a fabricated `0/0` role row. No DOM/Vue
+// today's merged counters and never a fabricated `0/0` role row. The additive
+// per-role cost (`feat/role-cost-surfaces`) is likewise only carried: the
+// backend prices it from each half's own model identity and the web renders
+// `cost_by_role` when present, adding no segment otherwise. No DOM/Vue
 // imports, so the pure tests cover it directly.
 
-import type { RunEvent, RunUsage, RunUsageByRole } from './types'
+import type { RoleRunUsage, RunCost, RunCostByRole, RunEvent, RunUsage, RunUsageByRole } from './types'
+import { costLabel, costTitle } from './usageCost'
 import { cacheHitPercent, promptTokensOf } from './usageCache'
 
 export type RoleName = 'senior' | 'junior'
@@ -68,10 +72,29 @@ export function normalizeRunUsage(value: unknown): RunUsage {
 }
 
 /**
+ * One half of a wire split: the tolerant counters plus the additive model
+ * identity when the backend carried one. The identity is copied, never
+ * derived — an old record or a mock/untracked run stays identity-free.
+ */
+function roleRunUsage(value: Record<string, unknown>): RoleRunUsage {
+  const usage: RoleRunUsage = normalizeRunUsage(value)
+  if (typeof value.model === 'string' && value.model.trim() !== '') usage.model = value.model.trim()
+  if (
+    value.family === 'openai-compatible' ||
+    value.family === 'anthropic' ||
+    value.family === 'google'
+  ) {
+    usage.family = value.family
+  }
+  return usage
+}
+
+/**
  * Tolerant read of a `{senior, junior}` split. Returns null unless at least
  * one half is an object, so an absent (old backend) or malformed value is
  * omitted rather than rendered as a fabricated zero split. A present-but-
- * partial split fills the missing half with zero counters.
+ * partial split fills the missing half with zero counters. Each half's additive
+ * model identity is carried through when present.
  */
 export function normalizeUsageByRole(value: unknown): RunUsageByRole | null {
   if (!isRecord(value)) return null
@@ -79,8 +102,8 @@ export function normalizeUsageByRole(value: unknown): RunUsageByRole | null {
   const junior = isRecord(value.junior) ? value.junior : null
   if (senior === null && junior === null) return null
   return {
-    senior: senior === null ? emptyUsage() : normalizeRunUsage(senior),
-    junior: junior === null ? emptyUsage() : normalizeRunUsage(junior),
+    senior: senior === null ? emptyUsage() : roleRunUsage(senior),
+    junior: junior === null ? emptyUsage() : roleRunUsage(junior),
   }
 }
 
@@ -150,6 +173,13 @@ export interface RoleUsageView {
   miss: string | null
   /** `write 60 tok`, or null when the role billed no cache writes. */
   write: string | null
+  /**
+   * `~$0.0012 est.`, or null when the backend reported no priced cost for
+   * this role (old/unpriced run). The segment is omitted then, never `$0`.
+   */
+  cost: string | null
+  /** Hover text naming the priced model; null together with `cost`. */
+  costTitle: string | null
 }
 
 function formatCount(value: number): string {
@@ -159,9 +189,15 @@ function formatCount(value: number): string {
 /**
  * One role's display rows, or null when that role measured no provider call
  * (the honest "no fabricated zero half" rule). Reuses the merged display's
- * family normalization: `cacheHitPercent`/`promptTokensOf`.
+ * family normalization: `cacheHitPercent`/`promptTokensOf`. `cost` is the
+ * backend's additive per-role estimate for this half (`cost_by_role`); absent
+ * or null adds no segment.
  */
-export function roleUsageView(role: RoleName, usage: RunUsage | null | undefined): RoleUsageView | null {
+export function roleUsageView(
+  role: RoleName,
+  usage: RunUsage | null | undefined,
+  cost?: RunCost | null,
+): RoleUsageView | null {
   if (!usage || count(usage.model_calls) <= 0) return null
   const prompt = promptTokensOf(usage)
   const percent = cacheHitPercent(usage)
@@ -179,13 +215,23 @@ export function roleUsageView(role: RoleName, usage: RunUsage | null | undefined
         : `cached ${formatCount(usage.cached_tokens)} of ${formatCount(prompt)} prompt tokens`,
     miss: cached > 0 ? `miss ${formatCount(Math.max(0, prompt - cached))} tok` : null,
     write: written > 0 ? `write ${formatCount(written)} tok` : null,
+    cost: costLabel(cost),
+    costTitle: costTitle(cost),
   }
 }
 
-/** Both roles' render-ready rows, Senior first; absent split = no rows. */
-export function roleUsageViews(split: RunUsageByRole | null | undefined): RoleUsageView[] {
+/**
+ * Both roles' render-ready rows, Senior first; absent split = no rows.
+ * `costs` is the run record's additive `cost_by_role`: when present, each
+ * priced half's row gains its own cost segment; absent (old/unpriced run)
+ * keeps today's rows exactly.
+ */
+export function roleUsageViews(
+  split: RunUsageByRole | null | undefined,
+  costs?: RunCostByRole | null,
+): RoleUsageView[] {
   if (!split) return []
-  return ROLES.map((role) => roleUsageView(role, split[role])).filter(
+  return ROLES.map((role) => roleUsageView(role, split[role], costs?.[role] ?? null)).filter(
     (view): view is RoleUsageView => view !== null,
   )
 }

@@ -240,6 +240,7 @@ import {
   MAX_EVIDENCE_ENTRIES,
   CLIP_EVIDENCE_CHARS,
   REASONING_EVENT_MAX_CHARS,
+  type RoleUsage,
   type RunApprovalBroker,
   type RuntimeEvent,
   type SubagentCompletedEvent,
@@ -1291,9 +1292,12 @@ export interface HarnessResult {
    * mapping and a mixed-family run stays honest per role. Compaction
    * summarizer calls are attributed to the role whose provider ran them, so the
    * two halves sum to {@link usage} for tracked providers (a provider without
-   * usage tracking contributes nothing to either half).
+   * usage tracking contributes nothing to either half). Each measured half also
+   * carries the additive model identity it was measured against (`model`,
+   * `family`) when it is known — a mock/untracked provider or a blank model
+   * omits it rather than guessing, so a surface can price the half honestly.
    */
-  usageByRole?: { senior: UsageTotals; junior: UsageTotals };
+  usageByRole?: { senior: RoleUsage; junior: RoleUsage };
   /**
    * Per-provider-call prompt/tool-belt audit trail, in call order: assembled
    * section names, the belt offered, and both prompt lengths. Summarizer
@@ -1335,7 +1339,7 @@ interface CooperationState {
    * Tokens consumed this run, split by acting role and accumulated from the
    * per-call provider deltas (see {@link PromptAuditEntry.usage}).
    */
-  usageByRole: { senior: UsageTotals; junior: UsageTotals };
+  usageByRole: { senior: RoleUsage; junior: RoleUsage };
   /**
    * Denied `(action, target)` approval pairs and their denial counts. When a
    * pair reaches `APPROVAL_DENY_LIMIT` operator denials, further identical
@@ -1925,14 +1929,50 @@ export class TwoBrothersHarness {
    * The additive `usageByRole` result field. Omitted entirely when no provider
    * call was measured (a custom provider without usage tracking), so a
    * zero-usage run's result shape stays byte-identical to before the field
-   * existed.
+   * existed. Each MEASURED half also carries the model identity it was
+   * measured against (see {@link roleIdentity}); a mock/untracked provider or
+   * a blank model identity is omitted rather than guessed.
    */
   private usageByRoleField(state: CooperationState): {
-    usageByRole?: { senior: UsageTotals; junior: UsageTotals };
+    usageByRole?: { senior: RoleUsage; junior: RoleUsage };
   } {
     const { senior, junior } = state.usageByRole;
     if (!hasCalls(senior) && !hasCalls(junior)) return {};
-    return { usageByRole: { senior: { ...senior }, junior: { ...junior } } };
+    const identity = {
+      senior: hasCalls(senior) ? this.roleIdentity("senior") : {},
+      junior: hasCalls(junior) ? this.roleIdentity("junior") : {},
+    };
+    return {
+      usageByRole: {
+        senior: { ...senior, ...identity.senior },
+        junior: { ...junior, ...identity.junior },
+      },
+    };
+  }
+
+  /**
+   * The model identity one role's split counters were measured against
+   * (additive wire identity, `feat/role-cost-surfaces`): the role's effective
+   * model id (per-role endpoint first, then the run config) plus the wire
+   * family `roleProviderKind` resolves.
+   *
+   * Deliberately absent rather than guessed: a `mock` provider has no
+   * purchasable model, an embedder-supplied provider override can use a model
+   * the config does not name, and a blank configured model is unknown. The
+   * caller attaches this only to a half that actually measured a call.
+   */
+  private roleIdentity(role: "senior" | "junior"): Pick<RoleUsage, "model" | "family"> {
+    const endpoint = this.options.endpoints?.[role];
+    const provider = endpoint?.provider || this.cfg.provider;
+    if (provider === "mock" || this.providers[role] instanceof MockProvider) return {};
+    const model = (
+      endpoint?.model ||
+      (role === "senior" ? this.cfg.seniorModel : this.cfg.juniorModel) ||
+      ""
+    ).trim();
+    if (model === "") return {};
+    const family = roleProviderKind(this.cfg, endpoint, role);
+    return family === null ? { model } : { model, family };
   }
 
   // -- context helpers ---------------------------------------------------------

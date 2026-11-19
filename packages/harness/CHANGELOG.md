@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-role model identity + per-role cost on run records (additive):** each
+  measured `usage_by_role` half on the terminal `run_end` event and on
+  `RunRecord` (`GET /api/runs[/{id}]`) now carries its own `model` (the role's
+  effective model id) and `family` (`openai-compatible`/`anthropic`/`google`)
+  when known, attached at the harness attribution seam from the per-role
+  endpoint/config identity. The server derives the additive record-only
+  `cost_by_role` = `{senior, junior}` with the new shared
+  `cost.ts::estimateRoleCostsFromSplit` (one `estimateRoleCost` per half; a
+  `null` half for an unmeasured or unpriced role and the whole key omitted when
+  nothing is priced), so the web usage footer and `/status` rows and the TUI
+  Ctrl+B `SENIOR USE`/`JUNIOR USE` rows show each role's own cost when priced
+  and keep today's bytes otherwise. Identity is never fabricated: mock/untracked
+  providers, blank models and old records/sidecars omit it (so old data gains
+  no cost), and a sidecar-rebuilt record recovers the persisted identity and
+  re-derives the cost. The pinned `call_usage` event, the merged
+  `usage`/`cost`/`cost_by_role` CLI outputs, the status bar, keymap and footer
+  tips are untouched; no protocol/schema change and no new runtime
+  dependencies. Tests: `tests/rolecostidentity.test.ts`,
+  `tests/tuisidepanelusage.test.ts`, `web/tests/usageByRole.test.ts`, and the
+  `tool-preview` browser scenario (identity present / cost absent for the
+  unpriced fixture models).
+
 - **Per-role cost API on the public entry:** `estimateRoleCost` and its
   `RoleCostInput` input type are now re-exported from `src/index.ts` beside
   `estimateCost` / `estimateRunCostFromUsage`, so a consumer can price one

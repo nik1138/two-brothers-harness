@@ -45,6 +45,7 @@ import { runFailureUsage } from "./harness.ts";
 import { emptyUsage, ProviderAbortError, type UsageTotals } from "./provider.ts";
 import type { ApprovalBroker } from "./permissions.ts";
 import type { RunApprovalBroker, RunEndEvent, RuntimeEvent, UsageByRole } from "./runevents.ts";
+import { isCostPromptFamily } from "./cost.ts";
 import type { SettingsStore } from "./settings_store.ts";
 import type { TokenStreamEvent } from "./runstream.ts";
 
@@ -116,6 +117,20 @@ export interface RunCost {
   model: string;
 }
 
+/**
+ * One run's estimated USD cost per role (additive, `feat/role-cost-surfaces`).
+ * Each half is priced from that role's OWN model identity + split counters via
+ * `cost.ts::estimateRoleCostsFromSplit`, so a mixed-model run reports both
+ * halves while the merged `cost` keeps its single-model rule and stays `null`.
+ * A half is `null` when that role measured no call or its model is unpriced —
+ * never `$0` for an unknown model. The whole field is omitted when neither
+ * half is priced.
+ */
+export interface RunCostByRole {
+  senior: RunCost | null;
+  junior: RunCost | null;
+}
+
 /** What a run job returns: decision + errors + optional usage totals + cost. */
 export interface RunJobResult {
   cancelled?: boolean;
@@ -125,7 +140,8 @@ export interface RunJobResult {
   /**
    * Additive per-role split of `usage` (`HarnessResult.usageByRole`). Absent
    * when no provider call was measured, so the record and `run_end` stay
-   * merged-only for untracked providers.
+   * merged-only for untracked providers. Each measured half may carry the
+   * additive model identity it was measured against.
    */
   usageByRole?: UsageByRole;
   /**
@@ -134,6 +150,12 @@ export interface RunJobResult {
    * cache counters). Absent behaves like `null`.
    */
   cost?: RunCost | null;
+  /**
+   * Additive per-role cost estimate for the split above, or absent/`null` when
+   * no half can be priced honestly. Derived from the split's own identity by
+   * the job (the only place the resolved config is in scope).
+   */
+  costByRole?: RunCostByRole | null;
 }
 
 export type EnvelopeHook = (message: unknown) => void;
@@ -235,12 +257,24 @@ function addUsageCounts(target: UsageTotals, raw: unknown): void {
 }
 
 /**
+ * Copy one half's additive model identity (`model`, `family`) when the wire
+ * value carries a usable one; absent/blank/malformed fields stay omitted. The
+ * identity is never derived here — it is only carried, so an old record or a
+ * mock/untracked run stays identity-free instead of gaining a guess.
+ */
+function copyRoleIdentity(target: UsageByRole["senior"], raw: Record<string, unknown>): void {
+  if (typeof raw.model === "string" && raw.model.trim() !== "") target.model = raw.model.trim();
+  if (isCostPromptFamily(raw.family)) target.family = raw.family;
+}
+
+/**
  * Tolerant read of a `{senior, junior}` usage split (the `run_end`
  * `usage_by_role` / the run record field / `HarnessResult.usageByRole`).
  * Returns null unless at least one half is an object, so a malformed or
  * missing value is omitted rather than rendered as fabricated zeros. A
  * present-but-partial split fills the missing half with zero counters, the
- * same convention the harness uses for a role that made no calls.
+ * same convention the harness uses for a role that made no calls. Each half's
+ * additive model identity is carried through when present (`feat/role-cost-surfaces`).
  */
 export function normalizeUsageByRole(value: unknown): UsageByRole | null {
   if (!isRecord(value)) return null;
@@ -248,8 +282,14 @@ export function normalizeUsageByRole(value: unknown): UsageByRole | null {
   const junior = isRecord(value.junior) ? value.junior : null;
   if (senior === null && junior === null) return null;
   const split: UsageByRole = { senior: emptyUsage(), junior: emptyUsage() };
-  if (senior !== null) addUsageCounts(split.senior, senior);
-  if (junior !== null) addUsageCounts(split.junior, junior);
+  if (senior !== null) {
+    addUsageCounts(split.senior, senior);
+    copyRoleIdentity(split.senior, senior);
+  }
+  if (junior !== null) {
+    addUsageCounts(split.junior, junior);
+    copyRoleIdentity(split.junior, junior);
+  }
   return split;
 }
 
@@ -743,6 +783,12 @@ export class RunRecord {
    * so the web footer can render it or omit the segment honestly.
    */
   cost: RunCost | null = null;
+  /**
+   * Additive per-role cost estimate (`feat/role-cost-surfaces`); `null` until
+   * the job reports one. `public()` omits `cost_by_role` entirely when null so
+   * an unpriced/old run keeps its historical record shape.
+   */
+  costByRole: RunCostByRole | null = null;
   readonly events: RuntimeEvent[] = [];
   readonly controller = new AbortController();
   readonly done: Promise<boolean>;
@@ -906,6 +952,15 @@ export class RunRecord {
     // Additive run cost (wave 24): always present, honestly null when the run
     // is not attributable to one priced model (mirrors the CLI/TUI rule).
     out.cost = this.cost === null ? null : { ...this.cost };
+    // Additive per-role cost (`feat/role-cost-surfaces`): derived from the
+    // split's own model identity, so it is a RECORD projection like `cost` and
+    // deliberately absent from the event stream. Omitted when no half prices.
+    if (this.costByRole !== null) {
+      out.cost_by_role = {
+        senior: this.costByRole.senior === null ? null : { ...this.costByRole.senior },
+        junior: this.costByRole.junior === null ? null : { ...this.costByRole.junior },
+      };
+    }
     // Mid-run steering honesty (wave 23): a client polling the record learns
     // that texts were dropped at the per-run harness cap and how many are still
     // waiting — no extra route and no faked event. Both fields are additive and
@@ -1356,6 +1411,10 @@ export class RunManager {
     // config/endpoints are in scope. A job that reports none leaves the record
     // honestly null; a terminal failed/cancelled unwind already stayed null.
     record.cost = result.cost ?? null;
+    // Additive per-role cost: the job prices each half from the split's own
+    // identity (the same rule the CLI uses per role). Absent stays null, so an
+    // unpriced run keeps the record's pre-feature shape.
+    record.costByRole = result.costByRole ?? null;
     const end: RunEndEvent = this._runEnd(record);
     if (record.decision !== null) {
       end.decision = record.decision;

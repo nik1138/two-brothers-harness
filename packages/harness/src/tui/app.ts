@@ -41,7 +41,7 @@ import {
   estimateTokens,
 } from "../compaction.ts";
 import { compactionSettingsFromConfig, maxTokensForRole, validateRunConfig, type Config } from "../config.ts";
-import { estimateRunCostFromUsage } from "../cost.ts";
+import { estimateRoleCostsFromSplit, estimateRunCostFromUsage } from "../cost.ts";
 import { SharedContext } from "../context.ts";
 import { TwoBrothersHarness, type ToolScopes } from "../harness.ts";
 import { deriveTitle, SessionMetadataStore } from "../metadata.ts";
@@ -369,6 +369,7 @@ import {
   toggleSidePanelEnabled,
   type SidePanelCompaction,
   type SidePanelDiscovery,
+  type SidePanelRoleCosts,
   type SidePanelState,
 } from "./view/sidepanel.ts";
 import type { StatusBarState } from "./view/statusbar.ts";
@@ -2022,6 +2023,13 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
    * counters. Null until a run reports a split (old/mock providers).
    */
   let usageByRole: UsageByRole | null = null;
+  /**
+   * Additive per-role cost of the measured turn, priced from each half's own
+   * model identity by the shared `cost.ts` rule (the same one the server uses
+   * for the run record). Null until a priced half exists; a null half is the
+   * honest unknown and renders no cost segment on that role's row.
+   */
+  let roleCostsByRole: SidePanelRoleCosts | null = null;
   let cost: number | null = null;
   let contextTokens: number | null = null;
   let turnStartedAt = 0;
@@ -2523,6 +2531,7 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
           }
         : {}),
       ...(usageByRole !== null && usage !== null ? { usageByRole } : {}),
+      ...(roleCostsByRole !== null ? { usageCostByRole: roleCostsByRole } : {}),
       cost,
       ...(helpers.total > 0
         ? {
@@ -3155,6 +3164,7 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
     // The first live `usage` event (node boundary) fills the real counters.
     usage = null;
     usageByRole = null;
+    roleCostsByRole = null;
     cost = null;
     running = true;
     updateAttentionTitle("working");
@@ -3428,6 +3438,17 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
           // provider that tracks no usage reports none and the panel keeps
           // its merged-only rows.
           usageByRole = result.usageByRole ?? null;
+          // Additive per-role cost: priced from each half's own identity with
+          // the same rule the run record uses. A null half (unpriced model /
+          // no call) renders no cost segment, never `$0`.
+          const roleCosts = estimateRoleCostsFromSplit(usageByRole);
+          roleCostsByRole =
+            roleCosts === null
+              ? null
+              : {
+                  senior: roleCosts.senior === null ? null : roleCosts.senior.totalCost,
+                  junior: roleCosts.junior === null ? null : roleCosts.junior.totalCost,
+                };
           lastElapsedMs = Date.now() - turnStartedAt;
           measureContext();
           const estimate = estimateRunCostFromUsage({
@@ -4494,6 +4515,7 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
     scroll = latestTranscriptScroll();
     usage = null;
     usageByRole = null;
+    roleCostsByRole = null;
     cost = null;
     lastElapsedMs = undefined;
     contextTokens = null;

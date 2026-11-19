@@ -294,7 +294,7 @@ import { mergeBundleCommands, mergeBundleSkills } from "./pluginbundle.ts";
 import { SharedContext } from "./context.ts";
 import { normalizeEffortValue } from "./effort.ts";
 import { CATALOG_PROVIDER_ID_RE, ModelsDevCatalog, type ModelEffortCatalog } from "./modelcatalog.ts";
-import { estimateRunCostFromUsage } from "./cost.ts";
+import { estimateRoleCostsFromSplit, estimateRunCostFromUsage } from "./cost.ts";
 import { TwoBrothersHarness, type HarnessResult, type ToolScopes } from "./harness.ts";
 import {
   loadMcpToolSpecs,
@@ -391,7 +391,7 @@ import {
 } from "./settings_store.ts";
 import { discoverSkills, type SkillCatalog } from "./skills.ts";
 import { SpillStore } from "./spill.ts";
-import { RunApprovalBroker, RuntimeEventStore } from "./runevents.ts";
+import { RunApprovalBroker, RuntimeEventStore, type UsageByRole } from "./runevents.ts";
 import {
   isSubagentId,
   SUBAGENT_FOLLOWUP_QUEUE_MAX,
@@ -417,6 +417,7 @@ import {
   usageByRoleFromEvents,
   type RoleEndpoints,
   type RunCost,
+  type RunCostByRole,
   type RunJob,
   type RunRecord,
 } from "./runtime.ts";
@@ -500,6 +501,29 @@ function estimateRecordCost(
   });
   if (estimate === null) return null;
   return { currency: "USD", total: estimate.totalCost, model: estimate.model };
+}
+
+/**
+ * Project the shared per-role estimate (`cost.ts::estimateRoleCostsFromSplit`)
+ * onto the run record's additive `cost_by_role` shape, or null when no half is
+ * priced. The rule lives in `cost.ts` so the TUI's status panel and this
+ * record can never disagree; the web reads this projection because it has no
+ * price table. A half stays null (unknown) for a role that measured no call,
+ * carries no model identity, or resolves to no price row.
+ */
+function estimateRecordCostByRole(split: UsageByRole | null | undefined): RunCostByRole | null {
+  const costs = estimateRoleCostsFromSplit(split);
+  if (costs === null) return null;
+  return {
+    senior:
+      costs.senior === null
+        ? null
+        : { currency: "USD", total: costs.senior.totalCost, model: costs.senior.model },
+    junior:
+      costs.junior === null
+        ? null
+        : { currency: "USD", total: costs.junior.totalCost, model: costs.junior.model },
+  };
 }
 
 /**
@@ -1904,6 +1928,12 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     // field stays omitted and the record is merged-only, as before.
     const split = normalizeUsageByRole(end.usage_by_role) ?? usageByRoleFromEvents(found.events);
     if (split !== null) record.usage_by_role = split;
+    // Additive per-role cost (`feat/role-cost-surfaces`): derived from the
+    // persisted split's own model identity, exactly like the live record's job
+    // projection — never persisted, and absent (not null) when no half prices.
+    // An old sidecar has no identity, so it stays merged-only and cost-free.
+    const costByRole = estimateRecordCostByRole(split);
+    if (costByRole !== null) record.cost_by_role = costByRole;
     // Recompute (never persist) the cost: the event stream stays free of a
     // derived field, and the current config is the only model source after a
     // restart. A failing config factory keeps the record usable with a null
@@ -2235,6 +2265,10 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         // Additive run cost (wave 24): computed here, where the resolved
         // config + per-role endpoints are in scope. `null` is honest.
         cost: estimateRecordCost(cfg, endpoints, result.usage),
+        // Additive per-role cost: priced from each half's own identity (the
+        // split the record will carry), so it survives a restart rebuild and
+        // never disagrees with the TUI's identical rule.
+        costByRole: estimateRecordCostByRole(result.usageByRole),
       };
     };
   }

@@ -213,6 +213,7 @@ export {
   type RunApprovalBrokerOptions,
   type RunErrorEvent,
   type RunEndEvent,
+  type RoleUsage,
   type UsageByRole,
 } from "./runevents.ts";
 export {
@@ -396,6 +397,7 @@ export {
   costUsageForFamily,
   estimateCost,
   estimateRoleCost,
+  estimateRoleCostsFromSplit,
   estimateRunCostFromUsage,
   priceForModel,
   MODEL_PRICES,
@@ -405,6 +407,8 @@ export {
   type ModelPrice,
   type PromptTokenUsage,
   type RoleCostInput,
+  type RoleCosts,
+  type RoleSplitUsage,
   type RunCostInput,
 } from "./cost.ts";
 export { validateArgs, type JsonSchemaSubset, type JsonSchemaType, type ValidationResult } from "./toolschema.ts";

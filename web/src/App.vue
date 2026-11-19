@@ -47,6 +47,7 @@ import type {
   RoleSettingsView,
   RunEvent,
   RunCost,
+  RunCostByRole,
   RunMode,
   RunProvider,
   RunRecord,
@@ -345,6 +346,14 @@ const runUsageByRoleBySession = ref<Record<string, RunUsageByRole | null>>({})
  * record after a terminal event.
  */
 const runCostBySession = ref<Record<string, RunCost | null>>({})
+/**
+ * Additive per-role cost, keyed by session (`feat/role-cost-surfaces`). The
+ * backend prices each split half from its own model identity and returns
+ * `cost_by_role` on the run record; it is not in `run_end`, so it is refreshed
+ * from the record exactly like the merged `cost`. Absent = no priced half
+ * (older backend / unpriced models) and the role rows keep today's bytes.
+ */
+const runCostByRoleBySession = ref<Record<string, RunCostByRole | null>>({})
 
 /**
  * A new followed run must not inherit the previous run's counters: the live
@@ -368,6 +377,12 @@ function forgetSessionUsage(session: string) {
     const next = { ...runCostBySession.value }
     delete next[session]
     runCostBySession.value = next
+  }
+  if (session in runCostByRoleBySession.value) {
+    // the per-role estimate belongs to the same turn
+    const next = { ...runCostByRoleBySession.value }
+    delete next[session]
+    runCostByRoleBySession.value = next
   }
 }
 
@@ -550,7 +565,10 @@ const usageForSelected = computed(() =>
 /** Render-ready Senior/Junior rows; empty = merged-only (no split known). */
 const roleUsagesForSelected = computed(() =>
   selected.value
-    ? roleUsageViews(runUsageByRoleBySession.value[selected.value] ?? null)
+    ? roleUsageViews(
+        runUsageByRoleBySession.value[selected.value] ?? null,
+        runCostByRoleBySession.value[selected.value] ?? null,
+      )
     : [],
 )
 /** Latest known run cost estimate for the selected session (null = unknown). */
@@ -1443,6 +1461,12 @@ async function refreshUsageForSession(session: string) {
       [session]: normalizeUsageByRole(latest.usage_by_role),
     }
     runCostBySession.value = { ...runCostBySession.value, [session]: latest.cost ?? null }
+    // Additive per-role cost: same record, priced per half by the backend. An
+    // old/unpriced record omits it (null → no role cost segment).
+    runCostByRoleBySession.value = {
+      ...runCostByRoleBySession.value,
+      [session]: latest.cost_by_role ?? null,
+    }
   } catch {
     // usage stats are best-effort; never block session loading on them
   }
@@ -1712,6 +1736,9 @@ function finalizeRun(runId: string, status: RunStatus, error: string | null) {
   // installed the new run's usage, so a slow or failed getRun must never pair
   // that usage with the old cost. The record's cost (or null) overwrites it.
   runCostBySession.value = { ...runCostBySession.value, [entry.session]: null }
+  // The per-role estimate is refreshed from the same terminal record, so it is
+  // cleared together with the merged cost to avoid pairing new usage with it.
+  runCostByRoleBySession.value = { ...runCostByRoleBySession.value, [entry.session]: null }
   getRun(runId)
     .then((rec) => {
       // the record carries the authoritative finished timestamp for unread
@@ -1728,6 +1755,11 @@ function finalizeRun(runId: string, status: RunStatus, error: string | null) {
       // Cost is computed by the backend at run completion (not in run_end), so
       // the terminal record is its only source.
       runCostBySession.value = { ...runCostBySession.value, [entry.session]: rec.cost ?? null }
+      // Per-role cost rides the same terminal record (absent = unpriced/old).
+      runCostByRoleBySession.value = {
+        ...runCostByRoleBySession.value,
+        [entry.session]: rec.cost_by_role ?? null,
+      }
       if (rec.status === 'failed' && rec.error && !runErrorBySession.value[entry.session]) {
         setRunError(entry.session, rec.error)
       }
@@ -2802,6 +2834,10 @@ function onSessionDeleted(name: string) {
   const costs = { ...runCostBySession.value }
   delete costs[name]
   runCostBySession.value = costs
+  // the per-role estimate belongs to the deleted session too
+  const roleCosts = { ...runCostByRoleBySession.value }
+  delete roleCosts[name]
+  runCostByRoleBySession.value = roleCosts
   if (lastSeen.value[name] !== undefined) {
     const seen = { ...lastSeen.value }
     delete seen[name]

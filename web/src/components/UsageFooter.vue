@@ -153,6 +153,12 @@ const roleRows = computed(() => props.roleUsages ?? [])
           <span class="usage-sep" aria-hidden="true">·</span>
           <span>{{ row.write }}</span>
         </template>
+        <!-- Additive per-role cost (`feat/role-cost-surfaces`): rendered only
+             when the backend priced this role; absent keeps today's bytes. -->
+        <template v-if="row.cost !== null">
+          <span class="usage-sep" aria-hidden="true">·</span>
+          <span class="usage-cost" :title="row.costTitle ?? undefined">{{ row.cost }}</span>
+        </template>
       </span>
     </div>
   </footer>

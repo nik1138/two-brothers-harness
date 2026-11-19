@@ -239,6 +239,11 @@ export function estimateCost(model: string, usage: CostUsage): CostEstimate | nu
  */
 export type CostPromptFamily = "openai-compatible" | "anthropic" | "google";
 
+/** Tolerant guard for a wire-carried family value (unknown = not a family). */
+export function isCostPromptFamily(value: unknown): value is CostPromptFamily {
+  return value === "openai-compatible" || value === "anthropic" || value === "google";
+}
+
 /**
  * Token counters exactly as the adapters report them (a merged `UsageTotals`
  * satisfies this shape). Values may be missing or hostile; they are coerced.
@@ -363,4 +368,56 @@ export function estimateRoleCost(input: RoleCostInput): CostEstimate | null {
     return null;
   }
   return estimateCost(model, costUsageForFamily(family ?? "openai-compatible", input.usage));
+}
+
+/**
+ * One role's split counters as the wire carries them: the counters plus the
+ * additive model identity (`RoleUsage` satisfies this shape). `model_calls`
+ * decides whether the role measured anything.
+ */
+export interface RoleSplitUsage extends PromptTokenUsage {
+  model?: string | null;
+  family?: CostPromptFamily | null;
+  model_calls?: unknown;
+}
+
+/** Per-role estimates of one run's split (a null half = not priced). */
+export interface RoleCosts {
+  senior: CostEstimate | null;
+  junior: CostEstimate | null;
+}
+
+/**
+ * Price each half of a `usage_by_role` split from its OWN additive identity,
+ * the identity-driven counterpart of the CLI's config-driven
+ * `estimateRunCostByRole`.
+ *
+ * This is the one per-role cost rule shared by the server (which projects it
+ * onto the run record as `cost_by_role`) and the TUI (which renders the same
+ * numbers in its status panel); the web reads the server's projection because
+ * it has no price table. A role that measured no provider call, a half without
+ * an identity (old record / mock / untracked provider) and an unpriced or
+ * cache-ambiguous model all stay `null` — never a fabricated `$0`. The whole
+ * value is `null` when neither half is priced, so a caller can omit the field
+ * instead of carrying a pair of nulls (the CLI's `cost_by_role` rule).
+ */
+export function estimateRoleCostsFromSplit(
+  split:
+    | { senior?: RoleSplitUsage | null; junior?: RoleSplitUsage | null }
+    | null
+    | undefined,
+): RoleCosts | null {
+  if (split === null || split === undefined) return null;
+  const costs: RoleCosts = { senior: null, junior: null };
+  for (const role of ["senior", "junior"] as const) {
+    const usage = split[role];
+    if (usage === null || usage === undefined) continue;
+    if (Math.trunc(Number(usage.model_calls ?? 0)) <= 0) continue;
+    costs[role] = estimateRoleCost({
+      model: usage.model ?? "",
+      family: usage.family ?? null,
+      usage,
+    });
+  }
+  return costs.senior === null && costs.junior === null ? null : costs;
 }

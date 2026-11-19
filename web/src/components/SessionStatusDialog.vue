@@ -164,6 +164,11 @@ const mcpBlock = computed(() =>
             </template>
             <template v-if="row.miss !== null"> · {{ row.miss }}</template>
             <template v-if="row.write !== null"> · {{ row.write }}</template>
+            <!-- Additive per-role cost (`feat/role-cost-surfaces`): only when
+                 the backend priced this role; absent keeps today's row. -->
+            <template v-if="row.cost !== null">
+              · <span class="status-cost" :title="row.costTitle ?? undefined">{{ row.cost }}</span>
+            </template>
             · {{ row.modelCalls }} model call{{ row.modelCalls === 1 ? '' : 's' }}
           </dd>
         </div>
@@ -256,6 +261,11 @@ const mcpBlock = computed(() =>
 
 .status-muted {
   color: var(--text-secondary);
+}
+
+/* The per-role estimate's tooltip carries the model/disclaimer; hint hover. */
+.status-cost {
+  cursor: help;
 }
 
 .status-mcp {

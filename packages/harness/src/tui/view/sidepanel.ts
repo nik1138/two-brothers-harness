@@ -194,6 +194,19 @@ export interface SidePanelHelpers {
   cost?: number | null;
 }
 
+/**
+ * Additive per-role cost totals for the SENIOR USE / JUNIOR USE rows
+ * (`feat/role-cost-surfaces`), priced from each split half's own model
+ * identity by `cost.ts::estimateRoleCostsFromSplit` (the same rule the server
+ * uses for the run record). `null` is the honest unknown for that role and
+ * renders no cost segment — never `$0`; the whole field is absent when no half
+ * is priced, so the rows keep their pre-cost bytes.
+ */
+export interface SidePanelRoleCosts {
+  senior: number | null;
+  junior: number | null;
+}
+
 /** Discovery counts the app already knows at session start. */
 export interface SidePanelDiscovery {
   plugins?: SidePanelPlugins;
@@ -232,6 +245,11 @@ export interface SidePanelState {
    * no measured provider call renders no row either.
    */
   usageByRole?: { senior: UsageTotals; junior: UsageTotals };
+  /**
+   * Additive per-role cost for those rows; absent = no priced half (the rows
+   * keep their pre-cost bytes), a null half = that role's cost is unknown.
+   */
+  usageCostByRole?: SidePanelRoleCosts;
   /** Null is the honest unknown price; undefined means "not measured yet". */
   cost?: number | null;
   elapsedMs?: number;
@@ -305,10 +323,12 @@ function roleMeasured(usage: UsageTotals | undefined): boolean {
  * role's own cache reads (as a percentage of its prompt total, the same
  * honest denominator the merged row uses), the derived cache-miss token count
  * when that role recorded a cache read (prompt minus cache reads — the tokens
- * that were not served from the provider cache), and cache writes when billed.
+ * that were not served from the provider cache), cache writes when billed, and
+ * — additively — the role's own cost when it is priced. An unknown cost
+ * (`null`/absent) adds no segment, so an unpriced row keeps its old bytes.
  * The value is width-clipped by {@link sidePanelRows} like every other row.
  */
-function roleUsageValue(usage: UsageTotals): string {
+function roleUsageValue(usage: UsageTotals, cost?: number | null): string {
   const prompt = usage.prompt_tokens ?? usage.input_tokens ?? 0;
   const cached = usage.cached_tokens ?? 0;
   const parts = [
@@ -319,23 +339,35 @@ function roleUsageValue(usage: UsageTotals): string {
   if (cached > 0) parts.push(`miss ${formatCount(Math.max(0, prompt - cached))}`);
   const written = usage.cache_write_tokens ?? 0;
   if (written > 0) parts.push(`write ${formatCount(written)}`);
+  const priced = formatCost(cost ?? null);
+  if (priced !== null) parts.push(`cost ${priced}`);
   return parts.join(" · ");
 }
 
 /**
  * The per-role usage rows (SENIOR USE / JUNIOR USE) for a measured split:
  * only roles that actually answered a provider call get a row, so a solo run
- * never shows a fabricated zero half. Absent `usageByRole` = no rows.
+ * never shows a fabricated zero half. Absent `usageByRole` = no rows. Each row
+ * gains its own `cost` segment only when that half is priced.
  */
 function roleUsageRows(state: SidePanelState): SidePanelEntry[] {
   const split = state.usageByRole;
   if (split === undefined) return [];
+  const costs = state.usageCostByRole;
   const rows: SidePanelEntry[] = [];
   if (roleMeasured(split.senior)) {
-    rows.push({ label: "SENIOR USE", value: roleUsageValue(split.senior), tone: "senior" });
+    rows.push({
+      label: "SENIOR USE",
+      value: roleUsageValue(split.senior, costs?.senior),
+      tone: "senior",
+    });
   }
   if (roleMeasured(split.junior)) {
-    rows.push({ label: "JUNIOR USE", value: roleUsageValue(split.junior), tone: "junior" });
+    rows.push({
+      label: "JUNIOR USE",
+      value: roleUsageValue(split.junior, costs?.junior),
+      tone: "junior",
+    });
   }
   return rows;
 }

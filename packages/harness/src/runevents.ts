@@ -40,6 +40,7 @@ import {
   type OperatorQuestion,
   type QuestionOutcome,
 } from "./permissions.ts";
+import type { CostPromptFamily } from "./cost.ts";
 import type { PromptAuditEntry } from "./harness.ts";
 import type { UsageTotals } from "./provider.ts";
 import type { TodoItem } from "./todos.ts";
@@ -252,6 +253,23 @@ export interface PromptAuditEvent extends RuntimeEventMeta, PromptAuditEntry {
 }
 
 /**
+ * One role's split counters plus the additive model identity they were
+ * measured against (`feat/role-cost-surfaces`). `model` is the role's
+ * effective model id (per-role endpoint first, then the run config) and
+ * `family` the wire family that produced the counters; both are optional and
+ * omitted when unknown — an old record, a mock/untracked provider or a blank
+ * model never gains a guessed identity. Consumers that only know the counters
+ * keep working unchanged (the fields are additive), and the identity is what
+ * lets a surface price the half with `cost.ts::estimateRoleCost`.
+ */
+export interface RoleUsage extends UsageTotals {
+  /** That role's effective model id; absent = unknown (never guessed). */
+  model?: string;
+  /** That role's wire family; absent = unresolved. */
+  family?: CostPromptFamily;
+}
+
+/**
  * Per-role usage attribution (additive). Carried on the terminal `run_end`
  * event and the `RunRecord` when at least one provider call was measured;
  * omitted entirely otherwise, so old sessions and untracked providers keep
@@ -262,8 +280,8 @@ export interface PromptAuditEvent extends RuntimeEventMeta, PromptAuditEntry {
  * to the role whose provider ran them).
  */
 export interface UsageByRole {
-  senior: UsageTotals;
-  junior: UsageTotals;
+  senior: RoleUsage;
+  junior: RoleUsage;
 }
 
 /**
