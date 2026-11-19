@@ -1126,7 +1126,15 @@ session-switch machinery `/sessions` uses; `/fork --at <seq>` branches at an
 envelope and `[new-name]` names the new session. It needs the current session
 file to live in the TUI's sessions directory, refuses while a turn or
 compaction runs, and reports the service's own name-collision/corrupt-source/IO
-message as a bounded notice (the source is never modified). A rewind rewrites
+message as a bounded notice (the source is never modified). The TUI rewind
+counterpart is `/rewind [--turns <n>]` (default one operator turn): it runs the
+same rewind service on the current session, but first computes the service's
+own cut as a dry run and shows an explicit confirmation naming the removed
+operator turns/envelopes, their removed `seq` range and the kept envelopes —
+with Cancel preselected, so `Esc` (or `Enter` on Cancel) changes nothing. After
+a confirmed cut it clears the removed runs' runtime-event sidecar (disclosed
+honestly when the clear fails) and reloads the session through the same
+switch machinery `/sessions` uses. A rewind rewrites
 the kept prefix atomically and clears the session's runtime-event sidecar, so
 tool/approval history for the removed runs is gone while the kept transcript
 remains (the response states whether the clear succeeded). `format=html`

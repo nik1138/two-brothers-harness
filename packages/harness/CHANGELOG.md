@@ -47,6 +47,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   byte checks, the mid-turn and compaction refusals, the no-current/absent/
   outside-store refusals, name collision and corrupt source). No protocol
   change, no new runtime dependencies.
+- **TUI session rewind (`/rewind`):** the TUI gains a chordless `/rewind
+  [--turns <n>]` command (Session group, discoverable in `Ctrl+P` and `?`, and
+  listed by `tui --help`) that drops the last operator turn (default one) from
+  the current session through the existing `src/sessionrewind.ts` service — the
+  same cut/floor/dense-`seq` semantics as the HTTP route and `sessions rewind`.
+  Destructive, so it is explicitly two-step: the service's pure
+  `computeRewindCut` produces the preview, and a confirmation dialog names the
+  removed operator turns/envelopes and their removed `seq` range, the kept
+  envelopes and the selected task with **Cancel preselected**; `Esc` (or
+  `Enter` on Cancel) closes it with the session file byte-identical, and only
+  "Rewind and delete" calls the service. On success the removed runs'
+  runtime-event sidecar is cleared (a failed clear is disclosed), the session
+  is reloaded through the same `adoptSession` path `/sessions` and `/fork`
+  use, and one bounded notice names the removed turn, the kept dense `seq`,
+  the sidecar and the kept transcript. It refuses while a turn or compaction
+  runs (idleOnly registry plus guards), with no current session file, and
+  outside the TUI's sessions directory (the `/fork` guards); a no-op cut, a
+  compaction-floor/session-start clamp, a corrupt session and a malformed
+  depth all surface honestly and leave the file untouched. Tests:
+  `tests/tuirewind.test.ts` (20: argument grammar and bounded notices,
+  preview/confirmation/clamp honesty, confirm accept with sidecar clear, dense
+  seq, kept transcript and reload, Escape and preselected-Cancel cancels with
+  zero bytes changed, the compaction floor, malformed args, the mid-turn and
+  compaction refusals, the no-current/absent/outside-store refusals, corrupt
+  source, and 60-column width safety). No protocol change, no new runtime
+  dependencies.
 
 - **Per-role cost API on the public entry:** `estimateRoleCost` and its
   `RoleCostInput` input type are now re-exported from `src/index.ts` beside

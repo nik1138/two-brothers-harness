@@ -552,6 +552,18 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
     idleOnly: true,
   },
   {
+    id: "rewind",
+    title: "Rewind session",
+    description:
+      "Remove the last operator turn from this session after an explicit confirm, then reload it.",
+    group: "Session",
+    slash: "rewind",
+    argumentHint: "[--turns <n>]",
+    keys: [],
+    when: "always",
+    idleOnly: true,
+  },
+  {
     id: "theme",
     title: "Theme",
     description: "Switch the terminal theme between dark, light and system.",

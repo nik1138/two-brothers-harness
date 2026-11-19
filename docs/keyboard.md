@@ -598,18 +598,33 @@ chord — and all are searchable in `Ctrl+P`: `/palette`, `/help` (`/h`),
 `/commands`, `/find [query]`, `/agents`, `/retry`, `/stash`, `/exit` (`/quit`,
 `/q`),
 `/mode consult|work`, `/models`, `/sessions`,
-`/fork [--at <seq>] [new-name]`, `/theme dark|light|system`,
+`/fork [--at <seq>] [new-name]`, `/rewind [--turns <n>]`,
+`/theme dark|light|system`,
 `/settings` (provider summary, effective permission preset, and **Connect
 provider…** / **Permissions…** actions), `/provider` (the provider connect
 surface), plus discovered `<name>.md`
-templates. `/models`, `/sessions` and `/fork`
+templates. `/models`, `/sessions`, `/fork` and `/rewind`
 refuse while a turn runs. `/fork` copies the current session into a new one
 through the same fork service the CLI and web use (a byte-exact prefix with
 dense `seq` and a `parent` lineage link, the source untouched) and switches to
 the copy; `/fork --at <seq>` branches at an envelope and `[new-name]` names the
 copy. It needs the current session file to live in the TUI's sessions
 directory, and it also refuses while compaction runs and reports the service's
-own name-collision/corrupt-source/IO message honestly. The find bar is an
+own name-collision/corrupt-source/IO message honestly. `/rewind` removes the
+last operator turn (`--turns <n>`, default one) from the current session
+through the same rewind service the CLI and web use, and it is destructive: it
+opens a confirmation first whose body names the operator turns and envelopes
+(and their removed `seq` range) that will be deleted and quotes the selected
+task. **Cancel is preselected**, so `Enter` there (or `Esc`) closes the dialog
+with the session file byte-identical; `←`/`→`/`Tab`/`↑`/`↓` move between
+Cancel and **Rewind and delete**, and only `Enter` on that action applies the
+cut. A successful rewind then reloads the session through the same machinery
+`/sessions` uses, clears the removed runs' runtime-event sidecar, keeps the
+transcript (the kept envelopes) and reports one bounded notice naming the
+removed turn, the kept dense `seq` and the sidecar outcome. A compaction
+summary is a hard floor, a no-op/clamp states the service's own reason, and
+the same no-saved-file/outside-store/compaction refusals as `/fork` apply (a
+malformed depth is a usage line). The find bar is an
 inline input, not a modal: while it is open it owns printable keys and the app
 chords (`Ctrl+P`, `?`, slash commands) are inert, exactly like the palette and
 help overlays; `Esc` closes it first. The mention picker behaves the same way

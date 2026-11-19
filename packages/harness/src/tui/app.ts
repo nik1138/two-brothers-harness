@@ -109,6 +109,10 @@ import {
   type ForkSessionResult,
 } from "../sessionfork.ts";
 import {
+  rewindSession,
+  type RewindSessionResult,
+} from "../sessionrewind.ts";
+import {
   envPinnedPairs,
   resolvePluginSelection,
   SettingsStore,
@@ -211,6 +215,14 @@ import {
   forkSwitchNotice,
   parseForkCommandArgs,
 } from "./forkcommand.ts";
+import {
+  boundRewindNotice,
+  parseRewindCommandArgs,
+  previewRewind,
+  rewindConfirmation,
+  rewindOutcomeNotice,
+  type RewindPreview,
+} from "./rewindcommand.ts";
 import {
   composeStatusHints,
   findSlashCommand,
@@ -4702,6 +4714,9 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
       case "fork":
         dispatchFork("");
         break;
+      case "rewind":
+        dispatchRewind("");
+        break;
       case "theme":
         cycleTheme();
         break;
@@ -5077,6 +5092,162 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
     );
   };
 
+  /**
+   * `/rewind [--turns <n>]`: remove the last `n` operator turns (default one)
+   * from the CURRENT session through the existing `rewindSession` service,
+   * then reload that same session through the `adoptSession` path `/sessions`
+   * and `/fork` use. Destructive, so it is a two-step action:
+   *
+   * 1. A dry run through the service's pure `computeRewindCut` produces the
+   *    exact preview (removed turns/envelopes, removed `seq` range, kept
+   *    envelopes, clamp boundary) and the first removed task is quoted.
+   * 2. An explicit confirmation dialog shows that preview with **Cancel
+   *    preselected**; Escape or Enter on Cancel closes it and nothing is
+   *    written. Only the "Rewind and delete" action calls the service.
+   *
+   * Refused while a turn or compaction runs (idleOnly registry plus these
+   * guards), with no current session file, and when the current file is not a
+   * session of this TUI's store (the same guards as `/fork`). A no-op cut, a
+   * clamp and a corrupt file are reported as bounded notices and leave the
+   * file untouched; on success the runtime-event sidecar of the removed runs
+   * is cleared (disclosed honestly when it cannot be) and the notice names the
+   * removed turn, the kept dense `seq`, the sidecar and the kept transcript.
+   */
+  const dispatchRewind = (args: string): void => {
+    if (running) {
+      baseNotice("warn", "cannot rewind a session while a turn is running — wait for it to finish");
+      return;
+    }
+    if (compacting) {
+      baseNotice(
+        "warn",
+        "cannot rewind a session while compaction is running — wait for it to finish",
+      );
+      return;
+    }
+    if (sessionCfg.sessionFile === "") {
+      baseNotice(
+        "warn",
+        "rewind: no session file to rewind — start the TUI with --session-file <path> " +
+          "or resume a saved session (/sessions) first",
+      );
+      return;
+    }
+    const parsed = parseRewindCommandArgs(args);
+    if (parsed.error !== null) {
+      baseNotice("warn", parsed.error);
+      return;
+    }
+    const current = path.resolve(sessionCfg.sessionFile);
+    const sourceName = sessionSidecarKey(sessionCfg.sessionFile, sessionsDir);
+    const sourceLocation = layout.resolve(sourceName);
+    const storePath =
+      sourceLocation === null ? null : path.resolve(sourceLocation.sessionPath);
+    const sameFile =
+      storePath !== null &&
+      (process.platform === "win32"
+        ? storePath.toLowerCase() === current.toLowerCase()
+        : storePath === current);
+    if (storePath === null || !sameFile) {
+      baseNotice(
+        "warn",
+        !fs.existsSync(current)
+          ? "rewind: the current session has no saved file yet — send a task first"
+          : `rewind: the current session is not a session in ${sessionsDir} — ` +
+              "resume it from /sessions to rewind it",
+      );
+      return;
+    }
+    const store = new SessionStore(storePath);
+    let preview: RewindPreview;
+    try {
+      preview = previewRewind(store.loadStrict(), parsed.turns);
+    } catch (exc) {
+      baseNotice("warn", boundRewindNotice(`rewind failed: ${messageOf(exc)}`));
+      return;
+    }
+    if (preview.cut.removedCount === 0) {
+      baseNotice(
+        "info",
+        boundRewindNotice(`nothing to rewind in ${sourceName}: ${preview.cut.reason}`),
+      );
+      return;
+    }
+    overlay = {
+      kind: "dialog",
+      state: createDialog({
+        title: "Rewind session",
+        message: rewindConfirmation({ name: sourceName, preview }),
+        tone: "warning",
+        actions: [
+          { id: "cancel", label: "Cancel" },
+          { id: "rewind", label: "Rewind and delete", tone: "error" },
+        ],
+      }),
+      onAction: (id) => {
+        if (id !== "rewind") return;
+        // The dialog owns the keys while open, so a turn cannot be started from
+        // here; re-check anyway so a rewrite never races a live run/compaction.
+        if (running || compacting) {
+          baseNotice(
+            "warn",
+            "rewind: the session is no longer idle — nothing was changed; try again when it finishes",
+          );
+          return;
+        }
+        let result: RewindSessionResult;
+        try {
+          result = rewindSession(store, parsed.turns);
+        } catch (exc) {
+          baseNotice("warn", boundRewindNotice(`rewind failed: ${messageOf(exc)}`));
+          return;
+        }
+        // One operator action: the transcript rewrite and the sidecar clear.
+        // A clear failure is disclosed in the notice instead of hidden.
+        let sidecarCleared = false;
+        let sidecarError: string | null = null;
+        if (result.rewritten) {
+          try {
+            sidecarCleared = runtimeStore.delete(sourceName);
+          } catch (exc) {
+            sidecarError = messageOf(exc);
+          }
+        }
+        if (!result.rewritten) {
+          baseNotice(
+            "info",
+            boundRewindNotice(`nothing to rewind in ${sourceName}: ${result.cut.reason}`),
+          );
+          return;
+        }
+        try {
+          adoptSession(storePath);
+        } catch (exc) {
+          baseNotice(
+            "warn",
+            boundRewindNotice(
+              `rewound ${sourceName} but could not reload it: ${messageOf(exc)}`,
+            ),
+          );
+          return;
+        }
+        updateAttentionTitle(running ? "working" : undefined);
+        baseNotice(
+          "success",
+          boundRewindNotice(
+            rewindOutcomeNotice({
+              name: sourceName,
+              cut: result.cut,
+              sidecarCleared,
+              sidecarError,
+            }),
+          ),
+        );
+      },
+    };
+    render();
+  };
+
   /** Slash forms for registry commands that `resolveTuiInput` does not own
    *  (`/models`, `/sessions`, `/theme`, …). Returns false when the caller
    *  should fall back to the template/builtin resolver. */
@@ -5138,6 +5309,9 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
         return true;
       case "fork":
         dispatchFork(args);
+        return true;
+      case "rewind":
+        dispatchRewind(args);
         return true;
       case "theme":
         cycleTheme(args);
