@@ -7,14 +7,15 @@ this file is the current state for the next session. The previous refresh
 detail stays in git history; release mechanics and evidence live in
 `docs/release.md`.
 
-Last updated: **2026-11-19**. **Checkpoint: `main` = `7834514`** — clean,
-pushed, in sync with `origin/main` (0 ahead, 0 behind).
+Last updated: **2026-11-19**. **Checkpoint: `main` = `7834514` (the code
+tree every count below was taken on) plus this refresh commit `ee0d624`**
+— clean, pushed, in sync with `origin/main` (0 ahead, 0 behind).
 
 ## Current state
 
 | Item | Value |
 |---|---|
-| Branch / HEAD | `main` = `7834514` = `origin/main` (feat(tui): in-app editor for the three global key chords) |
+| Branch / HEAD | `main` = `ee0d624` (this docs refresh) on top of the code checkpoint `7834514` = `origin/main` |
 | Published | **0.0.2 on `latest` AND `next`**; tag `v0.0.2` at `354df89` (pushed). No tag, publish, or version bump this session — the next release repeats `docs/release.md` and needs fresh explicit owner permission |
 | Session window | started at `c80c855` (TUI Tab mode was already accepted, merged, and pushed pre-session — merged-tree evidence 2 614 / 2 606 / 0 / 8 plus CLI 19+19 in `.tmp/merged-gates-tui`; the old handoff was stale on that) → `7834514`: **8 commits in two waves**, every feature independently accepted in a separate lane before merge |
 | CI | the publish workflow ran the full release gate at `v0.0.2` — PASS (per-suite counts are in the GitHub Actions run log). No new release this session, so no new Gate run to cite |
@@ -231,7 +232,8 @@ validation, the true-virtualization epic, third sibling not on the backlog).
 
 - [ ] Read `AGENTS.md`, `docs/backlog.md`, this file, and `todo.md`.
 - [ ] Confirm `git status` clean and `git log -1` is the expected commit
-      (`7834514` on `main`).
+      (this checkpoint: docs refresh `ee0d624` whose parent is the code
+      tree `7834514`).
 - [ ] Check the background-task panel for running gates/lanes before
       starting new ones (stale-serve writer-lock gotcha above).
 - [ ] Run package + web tests and the smoke gate on the merged tree.

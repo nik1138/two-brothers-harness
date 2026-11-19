@@ -11,8 +11,8 @@ Last updated: **2026-11-19**.
 
 ## Current state
 
-- `main` = `origin/main` = `7834514` (feat(tui): in-app editor for the three
-  global key chords), clean, **pushed and in sync**.
+- `main` = `origin/main`: code checkpoint `7834514` plus the docs refresh
+  commit `ee0d624`, clean, **pushed and in sync**.
 - **0.0.2 shipped**: tag `v0.0.2` at `354df89`, published to `next` via the
   trusted-publishing workflow (full release gate PASS), promoted to
   `latest` 2026-11-18; global install verified. **No tag, publish, or
