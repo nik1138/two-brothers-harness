@@ -88,6 +88,7 @@ import "./tuicopyhonesty.test.ts";
 import "./tuiattention.test.ts";
 import "./tuiexternaleditor.test.ts";
 import "./tuikeys.test.ts";
+import "./tuikeyseditor.test.ts";
 import "./tuiterminal.test.ts";
 import "./tuiwidth.test.ts";
 import "./tuivisualmodel.test.ts";

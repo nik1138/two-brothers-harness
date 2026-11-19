@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **In-TUI key-binding editor (`/keys edit`):** the three rebindable global
+  chords (command palette, shortcut reference, draft stash) can now be changed
+  from a small **KEY BINDINGS** dialog instead of hand-editing JSON: pick a
+  slot, press the new combination, and the chord is validated by the same
+  keys-file schema and written atomically through the same document the loader
+  reads, so the active table swaps immediately and `/keys reload` /
+  `--keys-watch` observe the same bytes. Conflict rules are the file's own —
+  fixed native keys and the other two global chords are refused inline with the
+  reason and nothing on disk changes, while capture stays active for another
+  try; `Esc` (or `Ctrl+C`) cancels a capture without closing the dialog. Each
+  slot takes one chord; a trailing row resets all three to their defaults.
+  Typing keys, Escape/quit layering, pickers/overlays, the approval panel and
+  the find bar stay fixed by design. The dialog states the captured
+  path/origin, creates a missing file (and its directory) on save, and refuses
+  honestly when no keys-file source was captured (guidance to
+  `--keys-file`/`TWO_BROTHERS_TUI_KEYS_FILE`) or when the existing file is
+  invalid (fix or remove it, then `/keys reload`) — it never overwrites content
+  it could not validate. Auto-repeat, bare modifier presses and pastes never
+  become bindings, and the terminal's own report is what gets stored. Tests:
+  `tests/tuikeyseditor.test.ts` (26) plus extended `tuiintegration` (existing
+  `/keys show`/`/keys reload` behavior unchanged). No new runtime dependencies.
+
 - **Per-turn Senior/Junior usage + cache split (additive):** every provider
   request's family-mapped counters (input/output, cache reads, cache writes,
   normalized prompt) are attributed to the acting role and node kind by

@@ -1172,10 +1172,161 @@ test("/keys show reports an unwatchable embedded session honestly", async () => 
   input.type("/keys watch on");
   input.enter();
   assert.ok(
-    await waitFor(() => textOf(output).includes("usage: /keys [show|reload]")),
+    await waitFor(() => textOf(output).includes("usage: /keys [show|reload|edit]")),
     "/keys watch is not a command; the flag/env are captured at startup",
   );
+  // `/keys edit` refuses honestly when no keys file was captured: no dialog
+  // opens and nothing is written (the embedding injected the table directly).
+  input.type("/keys edit");
+  input.enter();
+  assert.ok(
+    await waitFor(() =>
+      textOf(output).includes("no keys-file source was captured for this TUI session"),
+    ),
+    "the editor names the missing source and the guidance",
+  );
+  assert.match(textOf(output), /--keys-file <path>|TWO_BROTHERS_TUI_KEYS_FILE/);
+  assert.equal(
+    lastFrameText(output).includes("KEY BINDINGS"),
+    false,
+    "the editor stays closed when no source is configured",
+  );
   assert.equal(await quit(input, app), 0);
+});
+
+test("/keys edit captures a chord, refuses fixed/other-global conflicts, and saves the file", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tui-keys-editor-app-"));
+  const keysFile = path.join(root, "keys.json");
+  const source: TuiKeysSource = { path: keysFile, origin: "env" };
+  // Start absent: the editor creates the captured path (the default-location
+  // behavior) and the app boots on the registry defaults.
+  const initial = loadTuiKeyCommands(source);
+  assert.equal(initial.state, "missing");
+  const { app, input, output } = startApp({
+    commands: initial.commands,
+    keysSource: source,
+    keysState: initial.state,
+    keysDiagnostics: initial.diagnostics,
+  });
+  try {
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+
+    // Open the editor, pick the palette slot, capture Ctrl+L.
+    input.type("/keys edit");
+    input.enter();
+    assert.ok(await waitFor(() => lastFrameText(output).includes("KEY BINDINGS")));
+    const opened = lastFrameText(output);
+    assert.match(opened, /file: \S+/);
+    assert.match(opened, /state: missing — saving creates it/);
+    assert.match(opened, /Command palette\s+Ctrl\+P/);
+    input.enter(); // palette row -> capture
+    assert.ok(await waitFor(() => lastFrameText(output).includes("press keys…")));
+    assert.match(lastFrameText(output), /Esc cancels the capture/);
+    input.key("l", { ctrl: true });
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("palette is now Ctrl+L — saved to")),
+    );
+    assert.ok(fs.existsSync(keysFile), "the editor wrote the captured path");
+    const saved = JSON.parse(fs.readFileSync(keysFile, "utf8")) as {
+      version: number;
+      bindings: Record<string, string[]>;
+    };
+    assert.deepEqual(saved, { version: 1, bindings: { palette: ["ctrl+l"] } });
+
+    // The active table swapped in place: the new chord opens the palette and
+    // the default one is dead without a reload.
+    input.key("escape"); // close the editor
+    assert.ok(await waitFor(() => !lastFrameText(output).includes("KEY BINDINGS")));
+    input.key("l", { ctrl: true });
+    assert.ok(await waitFor(() => lastFrameText(output).includes("COMMANDS")));
+    input.key("escape");
+    assert.ok(await waitFor(() => !lastFrameText(output).includes("COMMANDS")));
+    input.key("p", { ctrl: true });
+    assert.equal(
+      await waitFor(() => lastFrameText(output).includes("COMMANDS"), 300),
+      false,
+      "the previous palette chord is dead right after the save",
+    );
+
+    // A fixed native key is refused and the file is unchanged (readable).
+    const before = fs.readFileSync(keysFile, "utf8");
+    input.type("/keys edit");
+    input.enter();
+    assert.ok(await waitFor(() => lastFrameText(output).includes("KEY BINDINGS")));
+    input.enter(); // palette row -> capture
+    input.key("f", { ctrl: true });
+    assert.ok(
+      await waitFor(
+        () =>
+          lastFrameText(output).includes("already bound") &&
+          lastFrameText(output).includes('"find"'),
+      ),
+      "the conflict is named with the fixed command",
+    );
+    assert.ok(lastFrameText(output).includes("press keys…"), "capture stays active for another try");
+    assert.equal(fs.readFileSync(keysFile, "utf8"), before, "nothing on disk changed");
+    // A chord another global chord still holds is refused the same way.
+    input.key("o", { ctrl: true });
+    assert.ok(
+      await waitFor(
+        () => lastFrameText(output).includes("another global chord") && lastFrameText(output).includes('"stash"'),
+      ),
+      "the other global chord is named as rebindable",
+    );
+    // Escape cancels only the capture, then closes the dialog.
+    input.key("escape");
+    assert.ok(await waitFor(() => !lastFrameText(output).includes("press keys…")));
+    assert.ok(lastFrameText(output).includes("KEY BINDINGS"), "capture cancel keeps the editor open");
+    assert.match(lastFrameText(output), /capture cancelled/);
+    input.key("escape");
+    assert.ok(await waitFor(() => !lastFrameText(output).includes("KEY BINDINGS")));
+
+    // The trailing reset row returns all three chords to their defaults and
+    // writes the documented empty binding set.
+    input.type("/keys edit");
+    input.enter();
+    assert.ok(await waitFor(() => lastFrameText(output).includes("KEY BINDINGS")));
+    for (let step = 0; step < 3; step += 1) input.key("down");
+    input.enter();
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("reset to their defaults")),
+      "the reset is confirmed in the dialog",
+    );
+    const reset = JSON.parse(fs.readFileSync(keysFile, "utf8")) as {
+      version: number;
+      bindings: Record<string, string[]>;
+    };
+    assert.deepEqual(reset, { version: 1, bindings: {} });
+    input.key("escape");
+    assert.ok(await waitFor(() => !lastFrameText(output).includes("KEY BINDINGS")));
+    input.key("p", { ctrl: true });
+    assert.ok(await waitFor(() => lastFrameText(output).includes("COMMANDS")));
+    input.key("escape");
+    assert.ok(await waitFor(() => !lastFrameText(output).includes("COMMANDS")));
+    input.key("l", { ctrl: true });
+    assert.equal(
+      await waitFor(() => lastFrameText(output).includes("COMMANDS"), 300),
+      false,
+      "the reset chord is dead again",
+    );
+
+    // `/keys show` confirms the defaults are active again after the reset.
+    input.type("/keys show");
+    input.enter();
+    assert.ok(await waitFor(() => textOf(output).includes("keys: palette Ctrl+P")));
+    assert.match(textOf(output), /defaults active \(no overrides\)/);
+    assert.equal(await quit(input, app), 0);
+  } finally {
+    // A failed assertion must never leave the app running: every assembled app
+    // shares the default session-store writer lock, and the next start would
+    // fail before its first frame.
+    try {
+      await quit(input, app);
+    } catch {
+      // the app already exited (or its fake streams are gone)
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("/sessions picker: sidecar and derived titles with human ages, resume unchanged", async () => {

@@ -172,7 +172,16 @@ the same startup-captured file and applies valid changes immediately to
 matching, the palette/help listings and the status hints (the success notice
 names the new chords); an invalid/unreadable file keeps the previous chords
 and prints one bounded diagnostic, and an absent file keeps them with an
-informational notice. `tui --keys-watch` (or `TWO_BROTHERS_TUI_KEYS_WATCH=1`,
+informational notice. `/keys edit` opens the in-TUI chord editor: pick one of
+the three slots, press the new combination, and the same validated schema and
+atomic writer store it (the active table swaps immediately, so `/keys reload`
+and `--keys-watch` observe the same bytes); `Esc` cancels a capture or closes
+the dialog, fixed-key and other-global conflicts are refused inline with the
+reason and change nothing on disk, a missing captured file is created on save,
+and a session with no captured source — or an invalid existing file — is
+refused with guidance instead of writing (see
+[Keyboard and shortcuts](keyboard.md#in-app-editing-keys-edit)).
+`tui --keys-watch` (or `TWO_BROTHERS_TUI_KEYS_WATCH=1`,
 off by default and never persisted) keeps watching that captured path and
 live-applies valid edits through the same validated reload path: a detected
 change posts one bounded notice naming the new chords, an invalid file keeps
@@ -1437,7 +1446,7 @@ per-role connection without leaving the terminal.
 | `--commands-dir` | path | — (repeatable) | (TS package) extra slash-command root for the chat REPL and `tui`; defaults are `TWO_BROTHERS_COMMANDS_DIR` (OS path list), then `<cwd>/commands` and `~/.two-brothers/commands` |
 | `--workspace` | dir | — | (TS package, `tui` only) bind every turn to one confined workspace root: `workspace_*` tools for the junior, the read-only verify slice for the senior, the operator approval panel for mutations/shell, and `@path` file mentions. An invalid root exits 2 before the screen opens |
 | `--sessions-dir` | dir | `sessions` | (TS package, `run`/`chat`/`tui` among run/chat/tui/serve) sessions directory read for the persisted settings store. `run`/`chat`/`tui` resolve the strict opt-in plugin selection from `<dir>/settings.json` (see `--plugins-dir`); the flag does not redirect `--session-file`. For the TUI it also points the session store — session JSONL files, settings and runtime sidecars — and the TUI holds the store's single-writer lock there, so a TUI pointed at its own directory is never blocked by a live `serve` on the default one. The store commands (`serve`, `sessions`, `spill`, `doctor`, `config`, `onboard`) take their own `--sessions-dir` |
-| `--keys-file` | path | `~/.two-brothers/tui-keys.json` | (TS package, `tui` only) user-authored JSON with TUI chord overrides for the rebindable global commands (command palette, shortcut reference, draft stash); a missing file means the defaults, an invalid file prints one diagnostic and falls back to the defaults without touching the screen; env `TWO_BROTHERS_TUI_KEYS_FILE`; never persisted; read at startup and re-read by `/keys reload` (or by `--keys-watch`) |
+| `--keys-file` | path | `~/.two-brothers/tui-keys.json` | (TS package, `tui` only) user-authored JSON with TUI chord overrides for the rebindable global commands (command palette, shortcut reference, draft stash); a missing file means the defaults, an invalid file prints one diagnostic and falls back to the defaults without touching the screen; env `TWO_BROTHERS_TUI_KEYS_FILE`; never persisted; read at startup and re-read by `/keys reload` (or by `--keys-watch`); the same file is written atomically by the in-TUI editor (`/keys edit`) through the same schema |
 | `--keys-watch` | flag | off | (TS package, `tui` only) keep polling the captured keys file and live-apply valid chord edits through the same validated reload path as `/keys reload`; a valid change swaps the active table and posts one bounded notice naming the new chords, an invalid file keeps the last good chords with one bounded warning per detected change, an absent/unreadable file keeps them with an informational notice. `fs.watchFile` polling (~twice a second, debounced/coalesced); captured at startup, never persisted; `/keys show` reports the watch state (`on`/`off`/`unavailable`); env `TWO_BROTHERS_TUI_KEYS_WATCH=1` |
 | `--approval-mode` | `ask`, `readonly`, `edits`, `allow-all` | `ask` | (TS package) operator [approval mode](#approval-modes) for workspace actions (env `TWO_BROTHERS_APPROVAL_MODE`). `serve` pins it for its web runs and `tui` for the TUI process (in-memory only, never persisted; the saved `approval_policy` setting applies without a pin); `run`/`chat` accept it but bind no workspace. An unknown value is a usage error (exit 2); `allow-all` prints one visible warning |
 

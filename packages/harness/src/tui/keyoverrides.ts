@@ -2,7 +2,9 @@
  * File-configured rebinding for a small, safe allowlist of global TUI commands.
  *
  * The configuration surface is a plain, versioned JSON document written by the
- * operator (there is no in-TUI editor in this slice):
+ * operator or by the in-TUI editor (`/keys edit`, which captures a chord and
+ * saves through {@link saveTuiKeysBindings} — the same schema, validation and
+ * atomic writer the loader reads):
  *
  * ```json
  * { "version": 1, "bindings": { "palette": ["ctrl+g"], "help": ["f2"], "stash": ["ctrl+u"] } }
@@ -24,6 +26,14 @@
  * surfaces share one last-good-table rule and one bounded notice. Watching is
  * off unless asked for: a session without the flag/env behaves exactly like
  * the on-demand-only one.
+ *
+ * `/keys edit` captures one chord per press and writes the whole validated set
+ * back with {@link saveTuiKeysBindings}; the app then re-reads the file through
+ * the loader, so the editor, `/keys reload` and the watcher all observe the same
+ * bytes. A session with no captured source (an embedding injected the command
+ * table) refuses the edit rather than writing a file nobody configured; an
+ * invalid existing file is refused too, so the editor never overwrites content
+ * it could not validate.
  *
  * ## Why an allowlist?
  *
@@ -73,15 +83,25 @@
  * an action the operator has no way to discover.
  */
 
-import { readFileSync, statSync, unwatchFile, watchFile } from "node:fs";
+import {
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  unwatchFile,
+  watchFile,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import {
   formatChord,
   formatKeys,
   TUI_COMMANDS,
   type KeyChord,
+  type KeyLike,
   type TuiCommand,
 } from "./keymap.ts";
 
@@ -541,7 +561,9 @@ export function resolveTuiCommands(bindings: TuiKeysBindings = {}): TuiCommandsR
   }
 
   // A rebinding must never shadow a fixed registry chord (the operator has no
-  // way to discover that the fixed action lost its key).
+  // way to discover that the fixed action lost its key), and it must not take a
+  // chord another rebindable command still holds in this configuration (they
+  // must move that chord first, or the two edits would contradict).
   if (diagnostics.length === 0) {
     for (const command of TUI_COMMANDS) {
       if (overridden.has(command.id)) continue;
@@ -549,8 +571,11 @@ export function resolveTuiCommands(bindings: TuiKeysBindings = {}): TuiCommandsR
         const identity = chordIdentity(chord);
         const requested = seen.get(identity);
         if (requested !== undefined) {
+          const target = REBINDABLE_SET.has(command.id)
+            ? `another global chord ("${command.id}") — change or reset that one first`
+            : `the fixed command "${command.id}"`;
           diagnostics.push(
-            `"${requested.commandId}": ${formatChord(requested.chord)} is already bound to the fixed command "${command.id}"`,
+            `"${requested.commandId}": ${formatChord(requested.chord)} is already bound to ${target}`,
           );
         }
       }
@@ -593,6 +618,210 @@ export function resolveTuiCommandsFromFile(
     };
   }
   return resolved;
+}
+
+// --------------------------------------------------------------------------- //
+// in-TUI editor support: capture, validate-and-apply, atomic save
+// --------------------------------------------------------------------------- //
+
+/**
+ * Why one keypress while the editor waits for a chord produced no candidate:
+ * an auto-repeat, a bare modifier (the real key is still coming), a bracketed
+ * paste, or a key the file grammar cannot represent. The first three keep the
+ * capture waiting silently; `unrepresentable` carries the parser's honest
+ * reason.
+ */
+export type TuiChordCaptureResult =
+  | { ok: true; chord: KeyChord }
+  | {
+      ok: false;
+      reason: "repeat" | "modifier-only" | "paste" | "unrepresentable";
+      detail?: string;
+    };
+
+/** True when the terminal reports a plain modifier press (no real key yet). */
+const MODIFIER_KEY_NAMES: ReadonlySet<string> = new Set([
+  "shift",
+  "ctrl",
+  "control",
+  "alt",
+  "meta",
+]);
+
+/**
+ * Turn one keypress into a storable chord for the editor.
+ *
+ * The candidate is built as a chord SPEC and parsed by {@link parseTuiChord}, so
+ * whatever the editor accepts is exactly what the keys file can express — the
+ * editor can never persist a binding the loader would reject. A literal symbol
+ * drops the terminal's Shift flag: `keymap.matchChord` treats symbols as
+ * shift-agnostic (pressing `?` arrives as Shift+/ on most layouts), so storing
+ * Shift on one would only make the label claim a modifier the matcher ignores.
+ */
+export function captureTuiChord(key: KeyLike): TuiChordCaptureResult {
+  if (key.repeat === true) return { ok: false, reason: "repeat" };
+  const name = (key.name ?? "").trim();
+  if (name === "") return { ok: false, reason: "modifier-only" };
+  if (name === "paste" || name === "paste-start" || name === "paste-end") {
+    return { ok: false, reason: "paste" };
+  }
+  if (MODIFIER_KEY_NAMES.has(name.toLowerCase())) return { ok: false, reason: "modifier-only" };
+  const units = [...name];
+  const literalSymbol = units.length === 1 && !/[A-Za-z0-9]/u.test(name);
+  const shift = literalSymbol ? false : key.shift === true;
+  const parts: string[] = [];
+  if (key.ctrl === true) parts.push("ctrl");
+  if (shift) parts.push("shift");
+  if (key.alt === true) parts.push("alt");
+  parts.push(name);
+  const parsed = parseTuiChord(parts.join("+"));
+  if (!parsed.ok) {
+    return { ok: false, reason: "unrepresentable", detail: parsed.error };
+  }
+  return { ok: true, chord: parsed.chord };
+}
+
+/** The keys-file chord spec for one chord (`ctrl+shift+p`, `f1`, `?`). */
+export function formatTuiChordSpec(chord: KeyChord): string {
+  const parts: string[] = [];
+  if (chord.ctrl === true) parts.push("ctrl");
+  if (chord.shift === true) parts.push("shift");
+  if (chord.alt === true) parts.push("alt");
+  parts.push(chord.name);
+  return parts.join("+");
+}
+
+function sameChordList(left: readonly KeyChord[], right: readonly KeyChord[]): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((chord, index) => {
+    const other = right[index];
+    return other !== undefined && chordIdentity(chord) === chordIdentity(other);
+  });
+}
+
+/**
+ * The explicit overrides the effective table currently carries: one entry per
+ * rebindable command whose chords differ from the registry default. A command
+ * still on its default is omitted, so a save never freezes a default into the
+ * file, and a file that explicitly re-specifies a default reads as no override
+ * (semantically identical).
+ */
+export function tuiKeyBindingsFromCommands(
+  commands: readonly TuiCommand[],
+): TuiKeysBindings {
+  const bindings: Record<string, readonly KeyChord[]> = {};
+  for (const id of REBINDABLE_TUI_COMMAND_IDS) {
+    const current = commands.find((command) => command.id === id);
+    if (current === undefined) continue;
+    const fallback = TUI_COMMANDS.find((command) => command.id === id);
+    const currentKeys = current.keys ?? [];
+    if (sameChordList(currentKeys, fallback?.keys ?? [])) continue;
+    if (currentKeys.length === 0) continue;
+    bindings[id] = currentKeys.map((chord) => ({ ...chord }));
+  }
+  return bindings;
+}
+
+/** Result of one editor change: the validated set, or honest diagnostics. */
+export type TuiKeysChangeResult =
+  | { ok: true; bindings: TuiKeysBindings; commands: readonly TuiCommand[] }
+  | { ok: false; diagnostics: readonly string[] };
+
+function validateTuiKeysChange(next: TuiKeysBindings): TuiKeysChangeResult {
+  const resolved = resolveTuiCommands(next);
+  if (resolved.diagnostics.length > 0) {
+    return { ok: false, diagnostics: resolved.diagnostics };
+  }
+  return { ok: true, bindings: next, commands: resolved.commands };
+}
+
+/**
+ * Point one rebindable command at exactly one chord. The whole resulting set is
+ * validated by {@link resolveTuiCommands} — the same duplicate, reserved and
+ * fixed-chord rules the file loader applies — so the editor refuses a chord a
+ * fixed key or another global chord already owns instead of silently shadowing
+ * it. A rejected change returns the diagnostics and leaves the caller's
+ * bindings untouched.
+ */
+export function bindTuiCommandChord(
+  bindings: TuiKeysBindings,
+  commandId: RebindableTuiCommandId,
+  chord: KeyChord,
+): TuiKeysChangeResult {
+  return validateTuiKeysChange({ ...bindings, [commandId]: [{ ...chord }] });
+}
+
+/** Drop every override (all three commands back to their defaults); validated. */
+export function resetAllTuiCommandChords(): TuiKeysChangeResult {
+  return validateTuiKeysChange({});
+}
+
+/**
+ * The versioned document for a validated binding set. Chords are written in
+ * the parser's canonical spec form (`[ctrl+][shift+][alt+]key`) and commands in
+ * the allowlist's fixed order, so the same bindings always produce the same
+ * bytes.
+ */
+export function serializeTuiKeysDocument(bindings: TuiKeysBindings): string {
+  const written: Record<string, string[]> = {};
+  for (const id of REBINDABLE_TUI_COMMAND_IDS) {
+    const chords = bindings[id];
+    if (chords === undefined || chords.length === 0) continue;
+    written[id] = chords.map(formatTuiChordSpec);
+  }
+  return `${JSON.stringify({ version: TUI_KEYS_VERSION, bindings: written }, null, 2)}\n`;
+}
+
+/** Outcome of one keys-file write: `ok` or one honest, actionable error. */
+export type TuiKeysSaveResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * Write one validated binding set to the captured keys file, atomically.
+ *
+ * The caller's in-TUI edit goes through the same schema the loader reads: the
+ * set is re-validated here (never write a document the next start would
+ * reject), the size cap is enforced, and the target is replaced with a
+ * same-directory temp file + rename, so a crash mid-write leaves the previous
+ * file intact. Every failure is returned, never thrown: the editor keeps the
+ * dialog open with the real message and nothing on disk changes.
+ */
+export function saveTuiKeysBindings(
+  filePath: string,
+  bindings: TuiKeysBindings,
+): TuiKeysSaveResult {
+  if (filePath.trim() === "") {
+    return { ok: false, error: "no keys-file path is configured" };
+  }
+  const resolved = resolveTuiCommands(bindings);
+  if (resolved.diagnostics.length > 0) {
+    return {
+      ok: false,
+      error: `refusing to write an invalid keys file: ${resolved.diagnostics.join("; ")}`,
+    };
+  }
+  const payload = serializeTuiKeysDocument(bindings);
+  if (Buffer.byteLength(payload, "utf8") > TUI_KEYS_MAX_BYTES) {
+    return { ok: false, error: `the keys document exceeds ${TUI_KEYS_MAX_BYTES} bytes` };
+  }
+  const directory = dirname(filePath);
+  const tempPath = join(
+    directory,
+    `.${basename(filePath)}.${process.pid}.${Date.now().toString(36)}` +
+      `.${Math.random().toString(36).slice(2, 8)}.tmp`,
+  );
+  try {
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(tempPath, payload, { encoding: "utf8", mode: 0o600 });
+    renameSync(tempPath, filePath);
+    return { ok: true };
+  } catch (exc) {
+    try {
+      unlinkSync(tempPath);
+    } catch {
+      // the temp file may never have been created, or the rename consumed it
+    }
+    return { ok: false, error: `cannot write ${filePath} (${errorMessage(exc)})` };
+  }
 }
 
 // --------------------------------------------------------------------------- //

@@ -583,10 +583,10 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
   {
     id: "keys",
     title: "Key bindings",
-    description: "Show the effective global chords and reload the TUI keys file.",
+    description: "Show or edit the effective global chords, or reload the TUI keys file.",
     group: "Settings",
     slash: "keys",
-    argumentHint: "[show|reload]",
+    argumentHint: "[show|reload|edit]",
     keys: [],
     when: "always",
   },

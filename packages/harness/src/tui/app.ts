@@ -204,6 +204,7 @@ import {
 import {
   composeStatusHints,
   findSlashCommand,
+  formatChord,
   hintSegments,
   isCommandEnabled,
   paletteEntries,
@@ -216,16 +217,23 @@ import {
   type TuiCommand,
 } from "./keymap.ts";
 import {
+  bindTuiCommandChord,
   boundTuiKeysNotice,
   describeTuiKeys,
   globalKeySummary,
+  loadTuiKeyCommands,
   reloadTuiCommands,
+  resetAllTuiCommandChords,
+  saveTuiKeysBindings,
+  tuiKeyBindingsFromCommands,
   watchTuiKeysFile,
+  type TuiKeysBindings,
   type TuiKeysLoadResult,
   type TuiKeysLoadState,
   type TuiKeysSource,
   type TuiKeysWatchHandle,
   type TuiKeysWatchState,
+  type RebindableTuiCommandId,
 } from "./keyoverrides.ts";
 import {
   addNotice,
@@ -250,6 +258,16 @@ import {
 import { renderBox } from "./screen.ts";
 import { resolveTheme, type Theme, type ThemeMode } from "./theme.ts";
 import { createDialog, dialogView, handleDialogKey, type DialogState } from "./view/dialog.ts";
+import {
+  createKeysEditorState,
+  keysEditorView,
+  keysEditorKey,
+  setKeysEditorError,
+  setKeysEditorSaveError,
+  setKeysEditorSaved,
+  type KeysEditorData,
+  type KeysEditorState,
+} from "./view/keyseditor.ts";
 import {
   activeFindMatch,
   appendFindText,
@@ -1440,6 +1458,7 @@ type Overlay =
       onAccept: (item: PickerItem) => void;
     }
   | { kind: "provider"; state: ProviderConnectState; data: ProviderConnectData }
+  | { kind: "keyseditor"; state: KeysEditorState; data: KeysEditorData }
   | { kind: "subagents"; state: HelperOverlayState }
   | { kind: "dialog"; state: DialogState; onAction: (id: string) => void };
 
@@ -2647,6 +2666,15 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
         height: boxH,
         theme,
         commands,
+      }).lines;
+    }
+    if (overlay.kind === "keyseditor") {
+      const boxW = Math.max(30, Math.min(Math.max(columns - 8, 30), 76));
+      const boxH = Math.max(8, Math.min(Math.max(rows - 6, 8), 20));
+      return keysEditorView(overlay.state, overlay.data, {
+        width: boxW,
+        height: boxH,
+        theme,
       }).lines;
     }
     if (overlay.kind === "subagents") {
@@ -4770,10 +4798,97 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
   };
 
   /**
-   * `/keys` (show) and `/keys reload`: report the three effective global chords
-   * plus the captured keys-file source and watch state, or re-read that source
-   * and swap the active table in place. Reload failure/absence keeps the last
-   * good table.
+   * Open the in-TUI chord editor (`/keys edit`). It refuses honestly when the
+   * session captured no keys-file source (an embedding injected the table) or
+   * when the existing file is invalid: overwriting content the loader could not
+   * validate would silently destroy the operator's file, so they are told to
+   * fix or remove it and `/keys reload` first.
+   */
+  const openKeysEditor = (): void => {
+    if (keysSource === null) {
+      model = addNotice(
+        model,
+        "warn",
+        "keys: no keys-file source was captured for this TUI session — " +
+          "start with --keys-file <path> or set TWO_BROTHERS_TUI_KEYS_FILE to edit chords in-app",
+      );
+      render();
+      return;
+    }
+    if (keysState === "invalid") {
+      const detail =
+        keysDiagnostics.length > 0 ? keysDiagnostics.join("; ") : "the file is not a valid keys document";
+      model = addNotice(
+        model,
+        "warn",
+        boundTuiKeysNotice(
+          `keys: cannot edit — ${keysSource.path} is invalid (${detail}); ` +
+            "fix or remove it, then /keys reload",
+        ),
+      );
+      render();
+      return;
+    }
+    overlay = {
+      kind: "keyseditor",
+      data: { source: keysSource, commands, state: keysState === "none" ? "missing" : keysState },
+      state: createKeysEditorState(),
+    };
+    render();
+  };
+
+  /**
+   * Persist one editor change and re-read the file through the loader. The
+   * writer validates and replaces atomically, so a failure keeps the previous
+   * file intact and the dialog open with the real message; a success swaps the
+   * active table immediately (matching, palette/help listings and hints), which
+   * is exactly what `/keys reload` and `--keys-watch` would then observe.
+   */
+  const commitKeysEditorBindings = (
+    editor: Extract<Overlay, { kind: "keyseditor" }>,
+    bindings: TuiKeysBindings,
+    notice: string,
+    captureCommand: RebindableTuiCommandId | null,
+  ): void => {
+    const saved = saveTuiKeysBindings(editor.data.source.path, bindings);
+    if (!saved.ok) {
+      overlay = {
+        ...editor,
+        state:
+          captureCommand === null
+            ? setKeysEditorSaveError(editor.state, saved.error)
+            : setKeysEditorError(editor.state, captureCommand, saved.error),
+      };
+      render();
+      return;
+    }
+    const loaded = loadTuiKeyCommands(editor.data.source);
+    if (loaded.state !== "loaded") {
+      const detail =
+        loaded.diagnostics.length > 0 ? loaded.diagnostics.join("; ") : "the written file did not load";
+      overlay = { ...editor, state: setKeysEditorSaveError(editor.state, detail) };
+      render();
+      return;
+    }
+    commands = loaded.commands;
+    keysState = loaded.state;
+    keysDiagnostics = [];
+    overlay = {
+      kind: "keyseditor",
+      data: { source: editor.data.source, commands, state: loaded.state },
+      state: setKeysEditorSaved(
+        editor.state,
+        `${notice} — saved to ${editor.data.source.path} (${editor.data.source.origin})`,
+      ),
+    };
+    render();
+  };
+
+  /**
+   * `/keys` (show), `/keys reload` and `/keys edit`: report the three effective
+   * global chords plus the captured keys-file source and watch state; re-read
+   * that source and swap the active table in place; or open the chord editor.
+   * Reload failure/absence keeps the last good table.
    */
   const dispatchKeys = (args: string): void => {
     const sub = args.trim().toLowerCase();
@@ -4788,8 +4903,12 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
       render();
       return;
     }
+    if (sub === "edit") {
+      openKeysEditor();
+      return;
+    }
     if (sub !== "reload") {
-      model = addNotice(model, "warn", "usage: /keys [show|reload]");
+      model = addNotice(model, "warn", "usage: /keys [show|reload|edit]");
       render();
       return;
     }
@@ -5052,6 +5171,66 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
       overlay = { ...overlay, state: result.state };
       if (result.action.type === "close") overlay = null;
       else if (result.action.type === "save") commitProviderConnect(result.action.request);
+      render();
+      return;
+    }
+    if (overlay.kind === "keyseditor") {
+      // The editor is an exclusive keyboard scope while capturing: every key
+      // (including app chords) is folded as a candidate, Escape cancels only
+      // the capture, and a rejected chord keeps capture active with the real
+      // reason while nothing on disk changes.
+      const editor = overlay;
+      const result = keysEditorKey(editor.state, key);
+      if (result.action.type === "close") {
+        overlay = null;
+        render();
+        return;
+      }
+      overlay = { ...editor, state: result.state };
+      if (result.action.type === "accept") {
+        const applied = bindTuiCommandChord(
+          tuiKeyBindingsFromCommands(commands),
+          result.action.command,
+          result.action.chord,
+        );
+        if (!applied.ok) {
+          overlay = {
+            ...editor,
+            state: setKeysEditorError(
+              result.state,
+              result.action.command,
+              applied.diagnostics.join("; "),
+            ),
+          };
+          render();
+          return;
+        }
+        commitKeysEditorBindings(
+          editor,
+          applied.bindings,
+          `${result.action.command} is now ${formatChord(result.action.chord)}`,
+          result.action.command,
+        );
+        return;
+      }
+      if (result.action.type === "reset-all") {
+        const applied = resetAllTuiCommandChords();
+        if (!applied.ok) {
+          overlay = {
+            ...editor,
+            state: setKeysEditorSaveError(result.state, applied.diagnostics.join("; ")),
+          };
+          render();
+          return;
+        }
+        commitKeysEditorBindings(
+          editor,
+          applied.bindings,
+          "all three global chords reset to their defaults",
+          null,
+        );
+        return;
+      }
       render();
       return;
     }

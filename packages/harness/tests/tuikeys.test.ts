@@ -587,7 +587,7 @@ test("registry: /keys is a chordless, non-rebindable, discoverable Settings comm
   const helpRows = documentEntries(TUI_COMMANDS).filter((entry) => entry.id === "keys");
   assert.equal(helpRows.length, 1, "the ? overlay lists /keys once");
   const helpText = tuiHelpLines(TUI_COMMANDS).join("\n");
-  assert.match(helpText, /\/keys \[show\|reload\]/, "tui --help lists the slash form");
+  assert.match(helpText, /\/keys \[show\|reload\|edit\]/, "tui --help lists the slash form");
   assert.equal(
     TUI_COMMANDS.filter((candidate) => candidate.slash === "keys").length,
     1,

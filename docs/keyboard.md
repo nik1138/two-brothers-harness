@@ -355,6 +355,52 @@ or `unavailable` when the session has no captured keys-file source to watch);
 it never claims overrides that are not active. The path/origin are captured
 at startup, so changing `--keys-file`/the env needs a restart.
 
+#### In-app editing (/keys edit)
+
+`/keys edit` opens a small **KEY BINDINGS** dialog listing the three chords with
+their effective keys. `Up`/`Down` move, `Enter` starts capturing the selected
+slot, `Esc` closes the dialog, and the trailing **Reset all three to defaults**
+row clears every override when chosen.
+
+While capturing, press the desired combination. The next complete chord is
+validated by the same schema the file loader uses and saved through the same
+atomic writer, so `/keys reload`, `--keys-watch` and the next start read exactly
+the bytes the dialog wrote; the active table (matching, palette/help listings
+and status hints) swaps immediately and the dialog confirms the new chord and
+the file path. Rules, all shared with the file format:
+
+- `Esc` (or `Ctrl+C`) cancels only the capture and keeps the dialog open; it
+  never closes it or quits.
+- A held key (terminal auto-repeat), a bare modifier press and a bracketed
+  paste never become a binding; the capture keeps waiting.
+- A chord needs a modifier combination or a named key (see the grammar above).
+  Chords reserved for typing, the Escape/quit/picker layering or terminal
+  control are refused with the reason, and capture stays active for another
+  try.
+- A chord a fixed native key owns is refused and named (for example
+  `Ctrl+F is already bound to the fixed command "find"`). A chord one of the
+  other two global chords still holds is refused too and named as a rebindable
+  chord — rebind or reset that one first. Nothing on disk changes on a refusal.
+- Each slot takes exactly one chord; saving replaces that slot's previous list.
+  Every other slot's override is preserved.
+
+The dialog states where it writes: `file: <path> (<origin>)` and
+`state: missing — saving creates it` when the captured path does not exist yet
+(saving creates the file, and its directory). A session that captured no
+keys-file source at all (an embedding injected the command table) refuses
+`/keys edit` with guidance instead of writing a file nobody configured:
+start with `--keys-file <path>` or set `TWO_BROTHERS_TUI_KEYS_FILE`. When the
+existing file is invalid, `/keys edit` refuses too — fix or remove it and run
+`/keys reload` — so the editor can never overwrite content it could not
+validate. Typing keys, the Escape/quit layering, the composer, pickers and
+overlays, the approval panel and the find bar remain fixed by design and are
+not editable from the dialog.
+
+Terminal honesty: the dialog captures what the terminal actually delivers, so
+on terminals that send the same byte for `Ctrl+P` and `Ctrl+Shift+P` the saved
+chord is the reportable one, and the confirmation names exactly what was
+stored.
+
 ### Compose and send
 
 | Keys | Action |
