@@ -1795,10 +1795,20 @@ imported or executed on load/activation. Sources: `src/pluginbundle.ts`
   the derived cache-miss count (prompt minus cache reads, shown only when the
   role recorded a cache read) is displayed in the CLI split lines, the web
   usage footer and `/status` rows, and the TUI Ctrl+B per-role rows without a
-  new wire field. Per-role cost shipped on the CLI/`--json` slice only (commit
-  `3e1e6d9`); web/TUI stay merged-only because run records/`run_end` carry no
-  per-role model identity — per-role cost there is a future additive wire
-  decision.
+  new wire field. **Follow-up shipped (feat/role-cost-surfaces, additive,
+  commit `5593274`):** each measured `usage_by_role` half on the terminal
+  `run_end` and on `RunRecord` now carries its own model identity (`model` and
+  `family`, attached at the harness attribution seam; omitted for a
+  mock/untracked provider, a blank model or old data), and the record derives
+  the additive `cost_by_role` = `{senior, junior}` with the shared
+  `cost.ts::estimateRoleCostsFromSplit` (a null half for an unmeasured or
+  unpriced role; the key is omitted entirely when no half is priced). The web
+  usage footer and `/status` rows and the TUI Ctrl+B `SENIOR USE`/`JUNIOR USE`
+  rows therefore show each role's own cost when priced and keep today's
+  merged/split bytes otherwise; a sidecar-rebuilt record recovers the persisted
+  identity and re-derives the cost. The pinned `call_usage` event, the merged
+  `usage`/`cost`, the CLI surfaces (its `--json` `cost_by_role` is unchanged)
+  and the status bar, keymap and footer tips are untouched.
   **Remaining:** a failed run's per-role split
   is not attached to the thrown error (the live/rebuilt record still carries
   the calls it measured), and pi's cache-miss/eviction *deltas* between turns
