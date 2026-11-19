@@ -1794,7 +1794,10 @@ imported or executed on load/activation. Sources: `src/pluginbundle.ts`
   the derived cache-miss count (prompt minus cache reads, shown only when the
   role recorded a cache read) is displayed in the CLI split lines, the web
   usage footer and `/status` rows, and the TUI Ctrl+B per-role rows without a
-  new wire field.
+  new wire field. Per-role cost shipped on the CLI/`--json` slice only (commit
+  `3e1e6d9`); web/TUI stay merged-only because run records/`run_end` carry no
+  per-role model identity — per-role cost there is a future additive wire
+  decision.
   **Remaining:** a failed run's per-role split
   is not attached to the thrown error (the live/rebuilt record still carries
   the calls it measured), and pi's cache-miss/eviction *deltas* between turns

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-role cost API on the public entry:** `estimateRoleCost` and its
+  `RoleCostInput` input type are now re-exported from `src/index.ts` beside
+  `estimateCost` / `estimateRunCostFromUsage`, so a consumer can price one
+  role's split counters without deep-importing `cost.ts`. No behavior change,
+  no wire change and no new runtime dependencies. Tests: `tests/cost.test.ts`.
+
 - **In-TUI key-binding editor (`/keys edit`):** the three rebindable global
   chords (command palette, shortcut reference, draft stash) can now be changed
   from a small **KEY BINDINGS** dialog instead of hand-editing JSON: pick a

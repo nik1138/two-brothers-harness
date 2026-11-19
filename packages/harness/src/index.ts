@@ -395,6 +395,7 @@ export {
 export {
   costUsageForFamily,
   estimateCost,
+  estimateRoleCost,
   estimateRunCostFromUsage,
   priceForModel,
   MODEL_PRICES,
@@ -403,6 +404,7 @@ export {
   type CostUsage,
   type ModelPrice,
   type PromptTokenUsage,
+  type RoleCostInput,
   type RunCostInput,
 } from "./cost.ts";
 export { validateArgs, type JsonSchemaSubset, type JsonSchemaType, type ValidationResult } from "./toolschema.ts";

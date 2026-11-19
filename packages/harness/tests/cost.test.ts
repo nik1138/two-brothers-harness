@@ -13,7 +13,9 @@ import {
   estimateRunCostFromUsage,
   MODEL_PRICES,
   priceForModel,
+  type RoleCostInput,
 } from "../src/cost.ts";
+import type { RoleCostInput as PublicRoleCostInput } from "../src/index.ts";
 
 function close(actual: number, expected: number, label: string): void {
   assert.ok(Math.abs(actual - expected) < 1e-12, `${label}: expected ${expected}, got ${actual}`);
@@ -441,4 +443,19 @@ test("role estimate: zero counters on a priced model are an honest $0.0000", () 
   });
   assert.ok(estimate);
   assert.equal(estimate.totalCost, 0);
+});
+
+test("public entry: estimateRoleCost and RoleCostInput are re-exported and match cost.ts", async () => {
+  const publicApi = await import("../src/index.ts");
+  assert.equal(typeof publicApi.estimateRoleCost, "function");
+  assert.equal(publicApi.estimateRoleCost, estimateRoleCost, "the entry re-exports the same function");
+  const input: PublicRoleCostInput = {
+    model: "claude-sonnet-4",
+    family: "anthropic",
+    usage: { input_tokens: 1_000_000, output_tokens: 0, cached_tokens: 1_000_000 },
+  };
+  // Both type names must remain assignable to one another.
+  const local: RoleCostInput = input;
+  assert.deepEqual(publicApi.estimateRoleCost(input), estimateRoleCost(local));
+  assert.equal(publicApi.estimateRoleCost({ ...input, model: "  " }), null);
 });
