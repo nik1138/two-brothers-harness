@@ -1999,7 +1999,8 @@ imported or executed on load/activation. Sources: `src/pluginbundle.ts`
   earlier mask-level click design. Re-check after the next naive-ui release
   (> 2.45.3); optionally file an upstream repro (stacked `n-modal`s: a click
   inside the second fires the first's `on-mask-click`).
-- **Gemini tool-schema whitelist widening (provider, non-blocker)** — noted
+- **Gemini tool-schema whitelist widening (provider, non-blocker)** — **shipped
+  2026-11-19 in `52f7359`**; noted
   2026-11-18 during the `additionalProperties` 400 hotfix (shipped as the
   `geminiSafeSchema` whitelist in `packages/harness/src/provider.ts`): the
   whitelist keeps only the fields of the Gemini `Schema` proto
@@ -2009,3 +2010,10 @@ imported or executed on load/activation. Sources: `src/pluginbundle.ts`
   parameter hints degrade to unconstrained on the Gemini path (requests
   succeed; validation hints weaken). Widen the set if a tool needs the
   stricter hints — the strip must stay a key-whitelist with no reshaping.
+  The widening keeps exactly those six keywords (`anyOf`, `pattern`,
+  `minLength`, `maxLength`, `minimum`, `maximum`) while everything else stays
+  byte-stable; values still pass through unchanged (no reshaping, coercion or
+  reordering), unsupported keys (`additionalProperties`, `$schema`, `$ref`)
+  are still dropped, and the same whitelist recurses into
+  `properties`/`items`/`anyOf`. Tests:
+  `packages/harness/tests/adapters.test.ts`.
