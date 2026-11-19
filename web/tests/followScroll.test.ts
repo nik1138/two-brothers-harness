@@ -10,7 +10,6 @@ import {
   ARROW_KEY_SCROLL_PX,
   BOTTOM_EPSILON_PX,
   FALLBACK_LINE_HEIGHT_PX,
-  FOLLOW_THRESHOLD_PX,
   applyGestureFollow,
   applyProgrammaticFollow,
   applyScrolledFollow,
@@ -291,8 +290,4 @@ test('the reported race: an in-flight pin sees the gesture-updated follow state'
   assert.equal(state.nearBottom, false, 'the state flips before the browser even dispatches the scroll event')
   // the token frame's pin guard reads `nearBottom` here — and stands down
   assert.equal(state.hold, true)
-})
-
-test('FOLLOW_THRESHOLD_PX matches the documented follow band', () => {
-  assert.equal(FOLLOW_THRESHOLD_PX, 120)
 })

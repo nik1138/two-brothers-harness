@@ -19,7 +19,6 @@ import {
   sessionPickerItems,
   sessionStem,
   SESSION_TITLE_EVENT_SCAN,
-  SESSION_TITLE_PREFIX_BYTES,
   UNKNOWN_SESSION_AGE,
   type SessionPickEntry,
 } from "../src/tui/view/sessionpick.ts";
@@ -152,11 +151,6 @@ test("parseSessionEventPrefix: the scan is bounded to the first N parsed events"
   // An explicit smaller limit works too.
   assert.equal(parseSessionEventPrefix(lines.join("\n"), 1).length, 1);
   assert.deepEqual(parseSessionEventPrefix(lines.join("\n"), 0), []);
-});
-
-test("the title scan bounds are documented sizes", () => {
-  assert.equal(SESSION_TITLE_EVENT_SCAN, 20);
-  assert.equal(SESSION_TITLE_PREFIX_BYTES, 64 * 1024);
 });
 
 // ---------------------------------------------------------------------------

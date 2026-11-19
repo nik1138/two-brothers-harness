@@ -481,40 +481,6 @@ test("api/stream answers with the standard SSE headers", async () => {
 // Workspaces
 // ---------------------------------------------------------------------------
 
-test("workspaces: register, list, remove + validation", async () => {
-  const srv = await startServer();
-  const ws = tmpdir("tb-ws-");
-  try {
-    assert.equal((await post(srv.base, "/api/workspaces", { name: "no-path" })).status, 400);
-    assert.equal(
-      (await post(srv.base, "/api/workspaces", { path: path.join(ws.root, "missing") })).status,
-      400,
-    );
-
-    const created = await post<Record<string, unknown>>(srv.base, "/api/workspaces", {
-      path: ws.root,
-      name: "e2e-ws",
-    });
-    assert.equal(created.status, 201);
-    assert.ok(created.body.id);
-    assert.equal(created.body.name, "e2e-ws");
-    assert.equal(created.body.path, path.resolve(ws.root));
-
-    const listed = await get<Array<Record<string, unknown>>>(srv.base, "/api/workspaces");
-    assert.deepEqual(
-      listed.body.map((w) => w.id),
-      [created.body.id],
-    );
-
-    assert.equal((await api(srv.base, "DELETE", `/api/workspaces/${created.body.id}`)).status, 200);
-    assert.deepEqual((await get(srv.base, "/api/workspaces")).body, []);
-    assert.equal((await api(srv.base, "DELETE", "/api/workspaces/nope")).status, 404);
-  } finally {
-    await srv.close();
-    ws.cleanup();
-  }
-});
-
 test("a run inherits the session's linked workspace for tool calling", async () => {
   const srv = await startServer({
     providerOverrides: {

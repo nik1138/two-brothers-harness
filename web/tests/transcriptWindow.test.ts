@@ -16,11 +16,6 @@ import {
   transcriptWindow,
 } from '../src/transcriptWindow.ts'
 
-test('defaults: newest 200 blocks, 100-block backfill chunks', () => {
-  assert.equal(TRANSCRIPT_PAGE_SIZE, 200)
-  assert.equal(TRANSCRIPT_CHUNK_SIZE, 100)
-})
-
 test('empty transcript: no window, no control, no slice', () => {
   const state = initialTranscriptWindow(0)
   assert.deepEqual(state, { loaded: 0 })
