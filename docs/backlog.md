@@ -1280,8 +1280,15 @@ Design anchors that already exist:
   `src/server.ts`, `src/cli.ts`, `src/clihelp.ts`; tests
   `tests/sessionrewind.test.ts` (19). The web transcript offers **Rewind** on
   operator messages (destructive confirmation; blocked while a run is
-  active/compacting, and at a compaction floor). Remaining: a TUI rewind
-  surface.
+  active/compacting, and at a compaction floor). The TUI surface shipped in
+  `185ece2` — `/rewind [--turns <n>]` (Session group, also in `Ctrl+P`/`?` and
+  `tui --help`) runs this same service on the current session after an explicit
+  confirmation whose preview names the removed operator turns/envelopes and
+  their `seq` range (Cancel preselected, `Esc` cancels with the file
+  byte-identical), then clears the removed runs' runtime-event sidecar, reloads
+  the session through the `/sessions` switch machinery and reports one bounded
+  notice (`src/tui/rewindcommand.ts`, `src/tui/app.ts`;
+  `tests/tuirewind.test.ts`, 20). Remaining for this item: none.
 - **Run-scoped workspace edit undo** — after a workspace-bound `serve` run,
   the operator can revert exactly the files that run mutated through
   `workspace_write_file`/`workspace_edit_file`/`workspace_delete_file` (shell
