@@ -66,6 +66,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Gemini tool-schema whitelist widened:** `geminiSafeSchema`
+  (`src/provider.ts`) now keeps the remaining Gemini `Schema` proto
+  constraint keywords — `anyOf`, `pattern`, `minLength`, `maxLength`,
+  `minimum`, `maximum` — so tool parameter hints reach the Gemini wire
+  instead of being dropped. Keywords the proto does not define
+  (`additionalProperties`, `$schema`, `$ref`) are still stripped. The strip
+  stays a pure key whitelist: values pass through unchanged (no reshaping, no
+  coercion, no reordering), and the same whitelist recurses into
+  `properties`/`items`/`anyOf`. OpenAI-compatible and Anthropic paths are
+  byte-identical. Tests: `tests/adapters.test.ts`.
 - **Browser-E2E session-switch race:** `createSession()` returned as soon as
   the New-session dialog closed, while the app still had to refresh the session
   list and load the new session before the composer's target moved, so a send

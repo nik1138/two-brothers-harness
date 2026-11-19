@@ -503,11 +503,12 @@ test("google: systemInstruction, model/user contents and function parts", async 
   assert.deepEqual(body.generationConfig, { temperature: 0.2 });
 });
 
-test("google: tool parameter schemas are stripped of proto-unsupported JSON-schema keywords", async () => {
+test("google: tool parameter schemas drop proto-unsupported keywords and keep proto-supported ones", async () => {
   // Gemini's function_declarations Schema proto rejects JSON-schema keywords
   // like `additionalProperties` with a 400; the adapter must whitelist the
   // schema recursively (top level and nested) while keeping valid structure.
-  const dirtyTools: Tool[] = [
+  // Keywords the proto does support (pattern, minLength/minimum, …) survive.
+  const mixedTools: Tool[] = [
     {
       name: "mutate",
       description: "Mutate something",
@@ -537,16 +538,18 @@ test("google: tool parameter schemas are stripped of proto-unsupported JSON-sche
     }),
   );
   const provider = googleProvider(stub.fetchImpl);
-  await provider.chatWithTools(MESSAGES, dirtyTools);
+  await provider.chatWithTools(MESSAGES, mixedTools);
 
   const wire = JSON.stringify(stub.requests[0].body);
+  // Proto-unsupported keywords are still stripped, nested included.
   assert.equal(wire.includes("additionalProperties"), false);
   assert.equal(wire.includes("$schema"), false);
-  assert.equal(wire.includes("minLength"), false);
-  assert.equal(wire.includes("maxLength"), false);
-  assert.equal(wire.includes("pattern"), false);
-  assert.equal(wire.includes("minimum"), false);
-  assert.equal(wire.includes("maximum"), false);
+  // Proto-supported constraint keywords are kept.
+  assert.equal(wire.includes("minLength"), true);
+  assert.equal(wire.includes("maxLength"), true);
+  assert.equal(wire.includes("pattern"), true);
+  assert.equal(wire.includes("minimum"), true);
+  assert.equal(wire.includes("maximum"), true);
   // Valid Schema structure is kept, never reshaped.
   assert.deepEqual(stub.requests[0].body.tools, [
     {
@@ -557,13 +560,13 @@ test("google: tool parameter schemas are stripped of proto-unsupported JSON-sche
           parameters: {
             type: "object",
             properties: {
-              path: { type: "string" },
+              path: { type: "string", minLength: 1, pattern: "^[a-z]+$" },
               opts: {
                 type: "object",
-                properties: { n: { type: "integer" } },
+                properties: { n: { type: "integer", minimum: 0, maximum: 10 } },
                 required: ["n"],
               },
-              tags: { type: "array", items: { type: "string" }, maxItems: 5 },
+              tags: { type: "array", items: { type: "string", maxLength: 8 }, maxItems: 5 },
             },
             required: ["path"],
           },
@@ -571,6 +574,134 @@ test("google: tool parameter schemas are stripped of proto-unsupported JSON-sche
       ],
     },
   ]);
+});
+
+test("google: proto-supported constraint keywords survive at the top level verbatim", async () => {
+  // `anyOf`, `pattern`, `minLength`/`maxLength` and `minimum`/`maximum` are
+  // Schema proto fields: the whitelist keeps their values and their order
+  // exactly as declared (pure key filtering, no reshaping/coercion).
+  const parameters = {
+    type: "object",
+    anyOf: [{ type: "string" }, { type: "integer" }],
+    pattern: "^[a-z]+$",
+    minLength: 1,
+    maxLength: 64,
+    minimum: 2,
+    maximum: 99,
+    properties: { q: { type: "string" } },
+    required: ["q"],
+  };
+  const tools: Tool[] = [
+    { name: "constrained", description: "Constrained", parameters, execute: () => "unused" },
+  ];
+  const stub = stubFetch(() =>
+    jsonResponse({
+      candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+    }),
+  );
+  await googleProvider(stub.fetchImpl).chatWithTools(MESSAGES, tools);
+
+  const declaration = stub.requests[0].body.tools[0].functionDeclarations[0];
+  assert.equal(JSON.stringify(declaration.parameters), JSON.stringify(parameters));
+});
+
+test("google: the whitelist recurses into properties, items and anyOf branches", async () => {
+  const parameters = {
+    type: "object",
+    properties: {
+      slug: { type: "string", pattern: "^[a-z0-9-]+$", minLength: 2, maxLength: 32 },
+      score: { type: "integer", minimum: 0, maximum: 5, additionalProperties: false },
+      choice: {
+        anyOf: [
+          { type: "string", pattern: "^(on|off)$" },
+          { type: "integer", minimum: 1, maximum: 3 },
+        ],
+      },
+      tags: { type: "array", items: { type: "string", minLength: 1 }, maxItems: 4 },
+    },
+    required: ["slug"],
+  };
+  const tools: Tool[] = [
+    { name: "nested", description: "Nested", parameters, execute: () => "unused" },
+  ];
+  const stub = stubFetch(() =>
+    jsonResponse({
+      candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+    }),
+  );
+  await googleProvider(stub.fetchImpl).chatWithTools(MESSAGES, tools);
+
+  assert.deepEqual(stub.requests[0].body.tools[0].functionDeclarations[0].parameters, {
+    type: "object",
+    properties: {
+      slug: { type: "string", pattern: "^[a-z0-9-]+$", minLength: 2, maxLength: 32 },
+      score: { type: "integer", minimum: 0, maximum: 5 },
+      choice: {
+        anyOf: [
+          { type: "string", pattern: "^(on|off)$" },
+          { type: "integer", minimum: 1, maximum: 3 },
+        ],
+      },
+      tags: { type: "array", items: { type: "string", minLength: 1 }, maxItems: 4 },
+    },
+    required: ["slug"],
+  });
+});
+
+test("google: mixed schemas keep supported keywords and drop unsupported ones at every depth", async () => {
+  // Same whitelist per level: inside an `anyOf` branch and inside `items`,
+  // `$schema`/`$ref`/`title`/`default`/`additionalProperties` are dropped
+  // while every proto-supported key survives in place.
+  const parameters = {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      mode: {
+        anyOf: [
+          { type: "string", pattern: "^a$", $ref: "#/x" },
+          { type: "integer", minimum: 1, title: "n" },
+        ],
+      },
+      list: {
+        type: "array",
+        items: { type: "string", maxLength: 3, default: "x" },
+        maxItems: 2,
+      },
+    },
+    required: ["mode"],
+  };
+  const tools: Tool[] = [
+    { name: "mixed", description: "Mixed", parameters, execute: () => "unused" },
+  ];
+  const stub = stubFetch(() =>
+    jsonResponse({
+      candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+    }),
+  );
+  await googleProvider(stub.fetchImpl).chatWithTools(MESSAGES, tools);
+
+  const body = stub.requests[0].body;
+  assert.deepEqual(body.tools[0].functionDeclarations[0].parameters, {
+    type: "object",
+    properties: {
+      mode: {
+        anyOf: [{ type: "string", pattern: "^a$" }, { type: "integer", minimum: 1 }],
+      },
+      list: { type: "array", items: { type: "string", maxLength: 3 }, maxItems: 2 },
+    },
+    required: ["mode"],
+  });
+  for (const unsupported of ["$schema", "$ref", "title", "default", "additionalProperties"]) {
+    assert.equal(
+      JSON.stringify(body).includes(unsupported),
+      false,
+      `${unsupported} must not reach the Gemini wire`,
+    );
+  }
 });
 
 test("openai-compatible: dirty tool parameter schema is forwarded byte-identically", async () => {
