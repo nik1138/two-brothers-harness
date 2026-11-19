@@ -2126,6 +2126,20 @@ watch(
   opacity: 0.55;
 }
 
+/* Touch has no hover: keep the message actions permanently reachable. */
+@media (hover: none) {
+  .bubble-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  /* 28px matches the sidebar trigger targets, the smallest reliable tap size. */
+  .bubble-copy {
+    min-width: 28px;
+    min-height: 28px;
+  }
+}
+
 .show-earlier {
   display: block;
   margin: 0.2rem auto 0.7rem;

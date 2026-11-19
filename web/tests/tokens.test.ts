@@ -25,7 +25,9 @@
 //      white on every accessible-palette fill keeps AA contrast, in both
 //      schemes;
 //   8. the default palette keeps each fill companion equal to its role token,
-//      so the default look is unchanged.
+//      so the default look is unchanged;
+//   9. the transcript message actions stay reachable under `(hover: none)`
+//      (touch has no hover, so the hover/focus reveal needs a touch twin).
 
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -1121,4 +1123,58 @@ test('token layer: diff chrome tokens freeze the intent colours they replaced', 
   assertDiff('light', LIGHT)
   assertDiff('dark (media)', DARK_MEDIA)
   assertDiff('dark (pinned)', DARK_PINNED)
+})
+
+// --- touch reachability -------------------------------------------------------
+
+/** Plain declarations of the first top-level rule listing `selector`. */
+function plainDeclarations(css: string, selector: string): Map<string, string> | null {
+  for (const block of blocks(css)) {
+    const selectors = block.prelude.split(',').map((part) => part.trim())
+    if (!selectors.includes(selector)) continue
+    const out = new Map<string, string>()
+    for (const match of block.body.matchAll(/([a-zA-Z-]+)\s*:\s*([^;]+);/g)) {
+      out.set(match[1]!, match[2]!.replace(/\s+/g, ' ').trim())
+    }
+    return out
+  }
+  return null
+}
+
+test('touch: the transcript message actions stay reachable without hover', () => {
+  const chat = MIGRATED_SHEETS.find((sheet) => sheet.name === 'ChatView.vue')
+  assert.ok(chat, 'ChatView.vue must stay in the migrated set')
+  const css = stripComments(styleSheet(chat.source, chat.name))
+
+  // Pointer devices keep the hover/focus reveal: hidden until the bubble is
+  // hovered or focuses something inside it.
+  const hidden = plainDeclarations(css, '.bubble-actions')
+  assert.ok(hidden, '.bubble-actions must keep its base rule')
+  assert.equal(hidden.get('opacity'), '0', 'the action bar must stay hidden by default')
+  assert.equal(
+    hidden.get('pointer-events'),
+    'none',
+    'the hidden action bar must not catch pointer events',
+  )
+  const hovered = plainDeclarations(css, '.bubble-wrap:hover .bubble-actions')
+  assert.ok(hovered, 'hover/focus must keep revealing the action bar on pointer devices')
+  assert.equal(hovered.get('opacity'), '1')
+  assert.equal(hovered.get('pointer-events'), 'auto')
+
+  // Touch has no hover: the same controls must be permanently visible, tappable
+  // and large enough to hit (the 28px sidebar-trigger target).
+  const touch = blocks(css).find((block) => block.prelude === '@media (hover: none)')
+  assert.ok(touch, 'ChatView.vue must handle (hover: none) like the sidebar controls')
+  const reachable = plainDeclarations(touch.body, '.bubble-actions')
+  assert.ok(reachable, 'the (hover: none) block must target .bubble-actions')
+  assert.equal(reachable.get('opacity'), '1', 'touch must keep the action bar visible')
+  assert.equal(
+    reachable.get('pointer-events'),
+    'auto',
+    'touch must let the action bar receive taps',
+  )
+  const target = plainDeclarations(touch.body, '.bubble-copy')
+  assert.ok(target, 'the (hover: none) block must keep a usable tap target')
+  assert.equal(target.get('min-width'), '28px')
+  assert.equal(target.get('min-height'), '28px')
 })

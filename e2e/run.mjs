@@ -19,7 +19,9 @@
 //                  never 'smooth'), the fresh highlight still applies, and the
 //                  allow path still writes the file
 //   stop           scripted fixture: stop a slow run -> cancelled state
-//   mobile         390px drawer: open/close/Escape/focus and session select
+//   mobile         390px hasTouch drawer: open/close/Escape/focus and session
+//                  select, plus the transcript actions staying visible and
+//                  accepting a copy tap without hover
 //   appearance-density mock provider: Settings -> Appearance cards stay readable
 //                  under compact density; the footer theme switch shrinks and the
 //                  preference survives a reload
@@ -2318,15 +2320,44 @@ async function scenarioStop(runner) {
 // -- scenario: mobile drawer (390px) -----------------------------------------------------
 // Below 768px the sidebar starts closed, opens as an accessible drawer
 // (Escape / backdrop / inert chat / focus), and closes on session select.
+// The hasTouch context also pins the `(hover: none)` transcript rule: message
+// actions stay visible and accept a tap without a preceding hover.
+
+const TOUCH_MESSAGE_TEXT = 'Touch action probe'
 
 async function scenarioMobile(runner) {
   const wsDir = tmpDir('tb-e2e-ws-mobile')
   const wsName = path.basename(wsDir)
   const be = await startBackend({ kind: 'mock' })
-  const context = await browser.newContext({ viewport: { width: 390, height: 844 } })
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+  })
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'])
   const page = await context.newPage()
   const consoleGuard = attachConsoleGuard(page)
   try {
+    // Seed one operator turn so the transcript has per-message actions to
+    // reach; the touch rules must show them before any hover or focus.
+    const seeded = await apiCall(be.base, 'POST', '/api/sessions', {
+      title: 'E2E mobile touch actions',
+    })
+    assert.ok(seeded.json?.name, `seed session -> HTTP ${seeded.status}`)
+    fs.writeFileSync(
+      path.join(be.dir, seeded.json.name),
+      JSON.stringify({
+        v: 1,
+        id: 'msg-1',
+        seq: 1,
+        ts: new Date(Date.UTC(2026, 10, 10, 12, 0, 0)).toISOString(),
+        from: 'user',
+        to: 'senior',
+        kind: 'message',
+        payload: { text: TOUCH_MESSAGE_TEXT },
+      }) + '\n',
+      'utf-8',
+    )
+
     await page.goto(be.base)
     const nav = page.locator('nav[aria-label="Sessions"]')
     const expand = page.locator('button[aria-label="Show sessions"]')
@@ -2383,6 +2414,49 @@ async function scenarioMobile(runner) {
     await page.locator('.session-item', { hasText: 'E2E mobile session' }).first().click()
     await nav.waitFor({ state: 'hidden' })
     await page.locator('.chat-scroll').waitFor({ state: 'visible' })
+
+    // -- touch: message actions stay reachable without hover -----------------
+    // The app hides the per-message toolbar until `:hover`/`:focus-within` on
+    // pointer devices; this context reports `(hover: none)`, so the touch block
+    // must keep it visible and the tap must land on the copied message.
+    assert.ok(
+      await page.evaluate(() => matchMedia('(hover: none)').matches),
+      'the mobile context must report (hover: none)',
+    )
+    await expand.click()
+    await nav.waitFor({ state: 'visible' })
+    await page.locator('.session-item', { hasText: 'E2E mobile touch actions' }).first().click()
+    await nav.waitFor({ state: 'hidden' })
+    const touchTurn = page.locator('.chat-group.side-operator').first()
+    await touchTurn.locator('.bubble').first().waitFor({ state: 'visible' })
+    const touchActions = touchTurn.locator('.bubble-actions')
+    await touchActions.waitFor({ state: 'visible' })
+    const reach = await touchActions.evaluate((el) => {
+      const style = getComputedStyle(el)
+      return { opacity: style.opacity, pointerEvents: style.pointerEvents }
+    })
+    assert.equal(
+      reach.opacity,
+      '1',
+      `the message actions must stay visible on touch (opacity ${reach.opacity})`,
+    )
+    assert.equal(
+      reach.pointerEvents,
+      'auto',
+      `the message actions must accept taps on touch (pointer-events ${reach.pointerEvents})`,
+    )
+    const copyButton = touchActions.locator('button[aria-label="Copy message"]')
+    // A tap (touch input only — no mouse move) must be accepted by the button.
+    await copyButton.tap()
+    await waitFor(
+      async () => (await copyButton.innerText()).trim() === 'copied',
+      { desc: 'the tap on the touch copy action to be accepted' },
+    )
+    assert.equal(
+      (await page.evaluate(() => navigator.clipboard.readText())).trim(),
+      TOUCH_MESSAGE_TEXT,
+      'the tapped copy action must put its message on the clipboard',
+    )
 
     consoleGuard.assertClean()
     runner.pass('mobile')

@@ -210,6 +210,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Web transcript actions on touch devices:** the per-message action bar
+  (`.bubble-actions` in `web/src/components/ChatView.vue`: copy, quote, fork,
+  rewind) was revealed only by `:hover`/`:focus-within`, so a `(hover: none)`
+  device could neither see nor tap those controls. A new `@media (hover: none)`
+  block mirrors the sidebar's established rule (`SessionRow.vue`,
+  `SessionGroup.vue`): the bar stays `opacity: 1; pointer-events: auto` and
+  each action keeps a 28px tap target, while pointer devices keep the
+  hover/focus reveal unchanged. Tests: the touch-reachability contract in
+  `web/tests/tokens.test.ts` and the `mobile` browser scenario, now a
+  `hasTouch` context that asserts the bar is visible and that a tap on copy
+  reaches the clipboard. No protocol/API change; no new dependencies.
 - **`HEAD` on the served web app:** the static handler answered `GET` only, so
   `HEAD /assets/*` fell through to the router's 404 while `GET` returned 200
   with the exact bytes. `HEAD` now takes the same `/`, `/assets/*` and SPA
