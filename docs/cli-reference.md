@@ -288,7 +288,13 @@ is no OS clipboard to reach (remote/SSH, a container, WSL without WSLg) or
 every native writer fails, the TUI falls back to one terminal OSC 52 sequence.
 OSC 52 is a request the terminal may ignore, so the toast names the route
 (`via OSC 52`) instead of claiming a clipboard write, and an empty transcript
-answers `nothing to copy yet` without copying. `Ctrl+X` is a fixed binding (not
+answers `nothing to copy yet` without copying. One sequence is capped at
+100 000 base64-encoded characters (75 000 bytes of text, fewer characters for
+multi-byte UTF-8) and is never truncated: an over-cap reply fails honestly and
+the toast names the cap. On a terminal that suppresses attention output
+(`TERM=dumb`), or while the driver is restoring or suspended, no sequence is
+emitted and the copy fails honestly (`copy failed: OSC 52: …`) instead of
+claiming a route it could not use. `Ctrl+X` is a fixed binding (not
 one of the three rebindable global chords) and appears in the `Ctrl+P` palette,
 the `?`/`F1` overlay and `tui --help`.
 

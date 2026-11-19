@@ -292,7 +292,8 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
   {
     id: "copy",
     title: "Copy last reply",
-    description: "Copy the newest committed reply to the system clipboard.",
+    description:
+      "Copy the newest committed reply to the clipboard, falling back to OSC 52 when no OS clipboard is reachable.",
     group: "Transcript",
     // Ctrl+X: unbound here, one control byte, outside the XON/XOFF pair, and
     // the conventional cut/copy partner. App scope keeps every modal surface

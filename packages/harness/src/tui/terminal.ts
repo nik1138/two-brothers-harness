@@ -204,6 +204,30 @@ export class Terminal {
   }
 
   /**
+   * Write the clipboard's OSC 52 sequence, or THROW when the driver suppresses
+   * attention output. Unlike {@link writeAttention}, a suppressed clipboard
+   * write is an error rather than a silent no-op: `copyToClipboard` turns the
+   * throw into an honest `{ok:false}`, so Ctrl+X never reports `via OSC 52`
+   * when no escape byte left the process (a plain `TERM=dumb` session, a
+   * non-TTY output, or a driver that was restored or handed to a child).
+   * The suppression policy itself is unchanged — this method only refuses to
+   * call a suppressed write a success.
+   */
+  writeClipboardSequence(sequence: string): void {
+    if (this.restored || this.suspended) {
+      throw new Error(
+        "the terminal is not available (restored or handed to a child process)",
+      );
+    }
+    if (!this.attentionEnabled()) {
+      throw new Error("attention output is suppressed on this terminal (TERM=dumb or non-TTY)");
+    }
+    // Direct write, not `writeSafely`: an output that refuses the sequence must
+    // surface as a copy failure, never as a copy that did not happen.
+    this.output.write(sequence);
+  }
+
+  /**
    * Emit one attention notification (OSC 9, a tmux DCS passthrough, or one
    * BEL — see `attention.ts`). Same guards as {@link setTitle}: attention is
    * an interactive-terminal affordance only.

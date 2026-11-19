@@ -402,8 +402,14 @@ clipboard to reach (a remote/SSH session, a container, WSL without WSLg) or
 every native writer fails, the TUI writes one terminal OSC 52 sequence. OSC 52
 is a request the terminal may ignore (and `tmux` only forwards it with
 clipboard passthrough configured), so when that is the only route the notice
-names it (`via OSC 52`) instead of claiming a clipboard write. With nothing to
-copy yet it prints one honest notice and copies nothing.
+names it (`via OSC 52`) instead of claiming a clipboard write. One sequence
+carries at most 100 000 base64-encoded characters (75 000 bytes of text, so
+fewer characters for multi-byte UTF-8); a longer reply is never truncated — the
+copy fails honestly with a notice naming the cap. A terminal that suppresses
+attention output (`TERM=dumb`) or a driver that is quitting or handing the
+screen to a child process emits no sequence at all, and the copy then fails
+honestly (`copy failed: OSC 52: …`) instead of claiming a route it could not
+use. With nothing to copy yet it prints one honest notice and copies nothing.
 
 The terminal title (OSC 0) follows the session and run status:
 `Two Brothers — <session> · working|approval|done|failed`, the plain

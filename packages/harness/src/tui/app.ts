@@ -192,6 +192,7 @@ import {
   copyToClipboard,
   type ClipboardResult,
   type ClipboardWriter,
+  type CopyOptions,
 } from "./clipboard.ts";
 import { lastReplyText } from "./copytext.ts";
 import {
@@ -1701,8 +1702,7 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
   };
   /** The clipboard writer behind Ctrl+X (injectable so tests stay real-clean). */
   const clipboardWriter: ClipboardWriter =
-    options.clipboard ??
-    ((text) => copyToClipboard(text, { write: (sequence) => terminal.writeAttention(sequence) }));
+    options.clipboard ?? createTerminalClipboardWriter(terminal);
 
   const layout = new SessionLayout(sessionsDir);
 
@@ -5392,6 +5392,25 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
     clearInterval(spinnerTimer);
     terminal.restore();
   }
+}
+
+/**
+ * The default Ctrl+X writer: the platform clipboard writers with the driver's
+ * strict OSC 52 sink as the fallback. The sink throws whenever the terminal
+ * suppresses attention output (`Terminal.writeClipboardSequence`), and
+ * `copyToClipboard` turns that into an honest `{ok:false}` — the toast then
+ * says `copy failed`, never `via OSC 52` after zero escape bytes. Injected
+ * `copyOptions` keep the seam testable without touching a real clipboard.
+ */
+export function createTerminalClipboardWriter(
+  terminal: Pick<Terminal, "writeClipboardSequence">,
+  copyOptions: Omit<CopyOptions, "write"> = {},
+): ClipboardWriter {
+  return (text) =>
+    copyToClipboard(text, {
+      ...copyOptions,
+      write: (sequence) => terminal.writeClipboardSequence(sequence),
+    });
 }
 
 /**

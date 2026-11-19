@@ -84,6 +84,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **TUI OSC 52 copy honesty:** the `Ctrl+X` fallback sink now throws when the
+  terminal driver suppresses attention output — a plain (`TERM=dumb`)
+  terminal, a non-TTY output, or a driver that is restoring/suspended — instead
+  of silently writing nothing, so the copy reports an honest
+  `copy failed: OSC 52: attention output is suppressed …` toast rather than
+  claiming `via OSC 52` after zero escape bytes. New seam:
+  `app.ts::createTerminalClipboardWriter` (also keeps the writer testable
+  without a real clipboard) over `Terminal.writeClipboardSequence`; the
+  suppression policy (`attentionEnabled`/`writeAttention`) and the
+  `clipboard.ts` contract are unchanged, and a normal terminal still writes
+  exactly one sequence. The documented 100 000-encoded-character OSC 52 cap is
+  now stated in `docs/keyboard.md` and `docs/cli-reference.md`, and the
+  `copy` key description no longer says "system clipboard" when OSC 52 may be
+  the only route. Tests: `tests/tuicopyhonesty.test.ts`.
 - **Gemini tool-schema whitelist widened:** `geminiSafeSchema`
   (`src/provider.ts`) now keeps the remaining Gemini `Schema` proto
   constraint keywords — `anyOf`, `pattern`, `minLength`, `maxLength`,
