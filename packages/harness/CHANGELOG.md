@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **TUI transcript render memoization:** the transcript window no longer
+  re-wraps every block on every frame. `view/transcript.ts` memoizes the
+  positioned rows in a module-level `WeakMap` keyed by the model's `blocks`
+  array, comparing width, theme, the tool-expansion flags, the active find
+  block, the replayed-reasoning section/hidden bound and the live reasoning
+  buffer, so a frame with unchanged inputs reuses the previous wrap while any
+  input change re-renders. `scrollTranscript` also drops its second
+  `positionedRows` pass (the frame hands back the rows it windowed). Measured on
+  Node 24 with the repo's block builders (width 100, height 32; 100/250/500
+  turns): a repeated frame drops from ~38/117/224 ms to ~0.2 ms and a repeated
+  PgUp from ~79/242/467 ms to ~0.2/0.2/0.3 ms. Frames with a changed document
+  (streaming deltas, new blocks) keep their old cost and stay byte-identical;
+  no app.ts change and no new dependencies. Tests:
+  `tests/tuitranscriptview.test.ts`.
 - **TUI parked transcript indicator:** a transcript window parked above the
   newest content now marks its bottom gutter row with a dim `⋯ n more` (the
   exact count of visual rows below it) instead of leaving the operator to guess

@@ -67,10 +67,12 @@ interface PositionedRow {
  * come from the view option, never from the model, so an omitted/empty option
  * produces the exact pre-replay rows.
  */
-function positionedRows(model: TuiModel, options: TranscriptViewOptions): PositionedRow[] {
+function computePositionedRows(
+  blocks: TuiModel["blocks"],
+  thinking: TuiModel["liveThinking"],
+  options: TranscriptViewOptions,
+): PositionedRow[] {
   const rows: PositionedRow[] = [];
-  const blocks = model.blocks;
-  const thinking = model.liveThinking;
   const replayed = options.replayedReasoning ?? [];
   if (replayed.length > 0) {
     const rendered = renderReplayedReasoning(replayed, {
@@ -113,6 +115,109 @@ function positionedRows(model: TuiModel, options: TranscriptViewOptions): Positi
     for (const text of rendered) rows.push({ blockId: block.id, text });
   });
   if (!thinkingInserted) insertThinking();
+  return rows;
+}
+
+/**
+ * One memoized render of the positioned rows. `width` is the floored display
+ * width (every row renderer floors `options.width` themselves, so halves of a
+ * cell cannot change the rows), and every other field is an input the rows
+ * actually read.
+ */
+interface PositionedRowsCacheEntry {
+  width: number;
+  theme: Theme | undefined;
+  expandedTools: boolean;
+  maxToolRows: number | undefined;
+  maxSummaryRows: number | undefined;
+  activeBlockId: string | undefined;
+  replayedReasoning: readonly ReplayedReasoningBlock[] | undefined;
+  hiddenReplayedReasoning: number | undefined;
+  liveThinking: TuiModel["liveThinking"];
+  rows: readonly PositionedRow[];
+}
+
+/** Per-`blocks` entry budget: a resize or a theme flip adds at most one. */
+const POSITIONED_ROWS_CACHE_ENTRIES = 8;
+
+/**
+ * Positioned-rows memo, keyed by the model's `blocks` array.
+ *
+ * The model is immutable-by-replacement (`appendBlock`,
+ * `appendEnvelopeDelta` and `commitEnvelope` return a model with a new `blocks`
+ * array), so the array reference is a sound identity for its content. Every
+ * other input the rows read is compared explicitly in
+ * {@link positionedRowsMatches}: the live reasoning buffer (same `blocks`, a new
+ * `liveThinking` on each reasoning delta), the per-row tool-expansion clones
+ * (`withToolExpansion` derives a new `blocks` array), and the view options that
+ * change row text or count — width, theme, `expandedTools`, the two row bounds,
+ * the active find block, the replayed-reasoning section and its hidden bound.
+ * Height and scroll are deliberately absent: they only window the rows.
+ *
+ * Rows are read-only after creation (the view slices, maps and searches them),
+ * and the map is weak, so a replaced document is collected with its entries.
+ * Replay-record arrays are expected to be replaced, not mutated in place, which
+ * is how the session loader hands them over.
+ */
+const positionedRowsCache = new WeakMap<
+  TuiModel["blocks"],
+  PositionedRowsCacheEntry[]
+>();
+
+function positionedRowsMatches(
+  entry: PositionedRowsCacheEntry,
+  thinking: TuiModel["liveThinking"],
+  options: TranscriptViewOptions,
+  width: number,
+): boolean {
+  return (
+    entry.width === width &&
+    entry.theme === options.theme &&
+    entry.expandedTools === (options.expandedTools === true) &&
+    entry.maxToolRows === options.maxToolRows &&
+    entry.maxSummaryRows === options.maxSummaryRows &&
+    entry.activeBlockId === options.activeBlockId &&
+    entry.replayedReasoning === options.replayedReasoning &&
+    entry.hiddenReplayedReasoning === options.hiddenReplayedReasoning &&
+    entry.liveThinking === thinking
+  );
+}
+
+/** Positioned rows for this model/options, reusing the last matching render. */
+function positionedRows(
+  model: TuiModel,
+  options: TranscriptViewOptions,
+): readonly PositionedRow[] {
+  // Read the model's two row inputs once per pass: the blocks array is also the
+  // cache key, and the live-reasoning identity is part of the key.
+  const blocks = model.blocks;
+  const thinking = model.liveThinking;
+  const width = Math.max(0, Math.floor(options.width));
+  const entries = positionedRowsCache.get(blocks);
+  if (entries !== undefined) {
+    for (const entry of entries) {
+      if (positionedRowsMatches(entry, thinking, options, width)) return entry.rows;
+    }
+  }
+  const rows = computePositionedRows(blocks, thinking, options);
+  const entry: PositionedRowsCacheEntry = {
+    width,
+    theme: options.theme,
+    expandedTools: options.expandedTools === true,
+    maxToolRows: options.maxToolRows,
+    maxSummaryRows: options.maxSummaryRows,
+    activeBlockId: options.activeBlockId,
+    replayedReasoning: options.replayedReasoning,
+    hiddenReplayedReasoning: options.hiddenReplayedReasoning,
+    liveThinking: thinking,
+    rows,
+  };
+  if (entries === undefined) {
+    positionedRowsCache.set(blocks, [entry]);
+  } else {
+    entries.push(entry);
+    if (entries.length > POSITIONED_ROWS_CACHE_ENTRIES) entries.shift();
+  }
   return rows;
 }
 
@@ -228,8 +333,20 @@ function markMoreBelowRow(row: string, width: number, more: number, theme: Theme
   return marker + clipStyled(body, columns - TRANSCRIPT_LABEL_WIDTH);
 }
 
-/** Render a fixed-height window anchored by block identity across resize. */
-export function transcriptView(model: TuiModel, options: TranscriptViewOptions): TranscriptView {
+/** One rendered frame plus the positioned rows it was windowed from. */
+interface RenderedTranscript {
+  view: TranscriptView;
+  rows: readonly PositionedRow[];
+}
+
+/**
+ * Render a fixed-height window anchored by block identity across resize, and
+ * hand back the rows so scroll math reuses them instead of re-rendering.
+ */
+function renderTranscript(
+  model: TuiModel,
+  options: TranscriptViewOptions,
+): RenderedTranscript {
   const width = Math.max(0, Math.floor(options.width));
   const height = Math.max(0, Math.floor(options.height));
   const rows = width === 0 ? [] : positionedRows(model, options);
@@ -282,26 +399,42 @@ export function transcriptView(model: TuiModel, options: TranscriptViewOptions):
   while (lines.length < height) lines.push(" ".repeat(width));
   const scroll = scrollFor(rows, start, height);
   return {
-    lines,
-    scroll,
-    startRow: start,
-    totalRows: rows.length,
-    atLatest: scroll.followLatest,
-    visibleBlockIds: [...new Set(visible.map((row) => row.blockId))],
+    view: {
+      lines,
+      scroll,
+      startRow: start,
+      totalRows: rows.length,
+      atLatest: scroll.followLatest,
+      visibleBlockIds: [...new Set(visible.map((row) => row.blockId))],
+    },
+    rows,
   };
 }
 
-/** Move by visual rows and return a stable anchor for the next render. */
+/** Render a fixed-height window anchored by block identity across resize. */
+export function transcriptView(model: TuiModel, options: TranscriptViewOptions): TranscriptView {
+  return renderTranscript(model, options).view;
+}
+
+/**
+ * Move by visual rows and return a stable anchor for the next render. One
+ * render pass: the positioned rows are taken from the same frame that produced
+ * `startRow`/`totalRows` (and are memoized for the next frame too).
+ */
 export function scrollTranscript(
   model: TuiModel,
   scroll: TranscriptScroll,
   delta: number,
   options: TranscriptViewOptions,
 ): TranscriptScroll {
-  const current = transcriptView(model, { ...options, scroll });
-  const target = clamp(current.startRow + (Number.isFinite(delta) ? delta : 0), 0, Math.max(0, current.totalRows - Math.max(0, Math.floor(options.height))));
-  const rows = positionedRows(model, options);
-  return scrollFor(rows, target, Math.max(0, Math.floor(options.height)));
+  const height = Math.max(0, Math.floor(options.height));
+  const { view, rows } = renderTranscript(model, { ...options, scroll });
+  const target = clamp(
+    view.startRow + (Number.isFinite(delta) ? delta : 0),
+    0,
+    Math.max(0, view.totalRows - height),
+  );
+  return scrollFor(rows, target, height);
 }
 
 export function renderTranscriptWindow(model: TuiModel, options: TranscriptViewOptions): string[] {
