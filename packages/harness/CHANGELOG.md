@@ -30,6 +30,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/tuisidepanelusage.test.ts`, `web/tests/usageByRole.test.ts`, and the
   `tool-preview` browser scenario (identity present / cost absent for the
   unpriced fixture models).
+- **TUI session fork (`/fork`):** the TUI gains a chordless `/fork
+  [--at <seq>] [new-name]` command (Session group, discoverable in `Ctrl+P`
+  and `?`) that copies the current session through the existing `forkSession`
+  service — byte-exact prefix, dense `seq`, the `parent: {name, seq}` sidecar
+  link and the `<source title> (fork)` title — and then switches the app to
+  the copy through the same machinery `/sessions` uses. The source file and
+  its sidecar are never modified. It refuses while a turn or compaction runs
+  (the existing refusal patterns), when no session file is open ("no session
+  file to fork"), when the current file has no saved session yet, and when the
+  current file is not a session of the TUI's sessions directory (so a
+  same-named stranger is never forked); the service's real name-collision,
+  corrupt-source and store IO errors surface as one bounded notice and leave
+  the current session selected. Tests: `tests/tuifork.test.ts` (11: argument
+  grammar and notices, whole and prefix forks with switch and source-untouched
+  byte checks, the mid-turn and compaction refusals, the no-current/absent/
+  outside-store refusals, name collision and corrupt source). No protocol
+  change, no new runtime dependencies.
 
 - **Per-role cost API on the public entry:** `estimateRoleCost` and its
   `RoleCostInput` input type are now re-exported from `src/index.ts` beside

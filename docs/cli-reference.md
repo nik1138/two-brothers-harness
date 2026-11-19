@@ -241,7 +241,10 @@ tokens/context/cost numbers never include a helper. A helper mutation parks on
 the ordinary approval panel with one dim `helper: <label>` row. Without a
 session file (`--session-file`) the list is live-only and says so; a
 file-backed session lists the children of previous runs. Slash input: `/mode consult|work|auto`, `/models`,
-`/sessions`, `/theme dark|light|system`, `/settings` (provider summary,
+`/sessions`, `/fork [--at <seq>] [new-name]` (branch the current session
+through the same fork service `sessions fork` uses and switch to the copy; the
+source file and sidecar stay untouched), `/theme dark|light|system`,
+`/settings` (provider summary,
 effective permission preset and the **Connect provider…** / **Permissions…**
 actions), `/provider` (the provider connect surface — see
 [Provider connection](#provider-connection-provider)),
@@ -260,8 +263,10 @@ and `/new` (in-memory session; on-disk sessions are refused
 honestly) are
 performed locally and never submitted as tasks — see
 [Built-in commands](#built-in-commands). A native command always wins its own
-name and a discovered template shadows a same-named built-in. `/models` and
-`/sessions` refuse to change things while a turn runs, and model changes are
+name and a discovered template shadows a same-named built-in. `/models`,
+`/sessions` and `/fork` refuse to change things while a turn runs (and `/fork`
+also refuses while compaction runs, when no session file is open, and when the
+current file is not a session of the TUI's store), and model changes are
 session-local. Provider connections resolve from the same persisted settings
 store as `serve` (see [Provider connection](#provider-connection-provider)).
 `--stream-tokens` renders token deltas in place while a turn
@@ -1114,7 +1119,14 @@ runtime-event sidecar or inherit the source's workspace link. In the web
 transcript, an operator message bubble offers **Fork from here…**, which sends
 the same route with that bubble's `{seq}` and opens the new fork, so the copy
 ends exactly at that message; the original file and sidecar stay byte-identical,
-and the action is unavailable while a run is active for the session. A rewind rewrites
+and the action is unavailable while a run is active for the session. The TUI
+counterpart is `/fork [--at <seq>] [new-name]`: it runs the same fork service on
+the current TUI session and switches the app to the copy through the same
+session-switch machinery `/sessions` uses; `/fork --at <seq>` branches at an
+envelope and `[new-name]` names the new session. It needs the current session
+file to live in the TUI's sessions directory, refuses while a turn or
+compaction runs, and reports the service's own name-collision/corrupt-source/IO
+message as a bounded notice (the source is never modified). A rewind rewrites
 the kept prefix atomically and clears the session's runtime-event sidecar, so
 tool/approval history for the removed runs is gone while the kept transcript
 remains (the response states whether the clear succeeded). `format=html`

@@ -540,6 +540,18 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
     idleOnly: true,
   },
   {
+    id: "fork",
+    title: "Fork session",
+    description:
+      "Copy this session into a new one and switch to the copy; the source stays untouched.",
+    group: "Session",
+    slash: "fork",
+    argumentHint: "[--at <seq>] [new-name]",
+    keys: [],
+    when: "always",
+    idleOnly: true,
+  },
+  {
     id: "theme",
     title: "Theme",
     description: "Switch the terminal theme between dark, light and system.",

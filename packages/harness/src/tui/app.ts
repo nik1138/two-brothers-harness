@@ -104,6 +104,11 @@ import {
   type SessionSearchDoc,
 } from "../sessionsearch.ts";
 import {
+  forkSession,
+  SessionForkError,
+  type ForkSessionResult,
+} from "../sessionfork.ts";
+import {
   envPinnedPairs,
   resolvePluginSelection,
   SettingsStore,
@@ -201,6 +206,11 @@ import {
   type ExternalEditResult,
   type ExternalEditorOptions,
 } from "./externaleditor.ts";
+import {
+  boundForkNotice,
+  forkSwitchNotice,
+  parseForkCommandArgs,
+} from "./forkcommand.ts";
 import {
   composeStatusHints,
   findSlashCommand,
@@ -3926,6 +3936,44 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
     }
   };
 
+  /**
+   * Switch the app to `sessionFile`: open the saved session through the same
+   * resume path every TUI start uses, then reset every per-session surface
+   * (compaction markers, plan, replayed reasoning, helper rows, tool
+   * expansion, draft, scroll, usage). The single session-switch path shared by
+   * the `/sessions` picker and `/fork`. Throws when the session cannot be
+   * opened; the current session is only replaced after the new context opens.
+   */
+  const adoptSession = (sessionFile: string): void => {
+    const next = openTuiContext(
+      { ...sessionCfg, sessionFile, resume: true },
+      options.io,
+      (message) => pushToast("warn", message),
+    );
+    context = next;
+    sessionCfg = { ...sessionCfg, sessionFile, resume: true };
+    // Seed the neutral compaction markers of the restored context; the rest of
+    // the TUI transcript history is not replayed.
+    model = createCompactionSummaryModel(context.events);
+    // The plan belongs to the session: show this process's live snapshot when
+    // there is one, else replay the session sidecar (serve-written or
+    // TUI-written plan snapshots).
+    todos = planForSession(sessionFile);
+    // Read-only replay of the session's persisted reasoning records.
+    loadSessionReasoningFor(sessionFile);
+    // Helpers belong to one session: reload this session's rows (and close a
+    // stale HELPERS overlay) rather than showing the old ones.
+    resetHelperRows();
+    toolExpansion = new Set<string>();
+    // A session switch resets the draft but not durable prompt history or the
+    // in-memory stash slot.
+    editor = seedEditorHistory(createEditor(), editor.history);
+    scroll = latestTranscriptScroll();
+    usage = null;
+    cost = null;
+    measureContext();
+  };
+
   const openSessionPicker = (): void => {
     // The palette dispatch reaches this directly (idleOnly gates on `running`
     // only), so the compacting guard lives here: a pending /compact must
@@ -3991,32 +4039,7 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
               const sessionFile =
                 layout.resolve(item.id)?.sessionPath ??
                 path.join(sessionsDir, item.id);
-              context = openTuiContext(
-                { ...sessionCfg, sessionFile, resume: true },
-                options.io,
-                (message) => pushToast("warn", message),
-              );
-              sessionCfg = { ...sessionCfg, sessionFile, resume: true };
-              // Seed the neutral compaction markers of the restored context;
-              // the rest of the TUI transcript history is not replayed.
-              model = createCompactionSummaryModel(context.events);
-              // The plan belongs to the session: show this process's live
-              // snapshot when there is one, else replay the session sidecar
-              // (serve-written or TUI-written plan snapshots).
-              todos = planForSession(sessionFile);
-              // Read-only replay of the session's persisted reasoning records.
-              loadSessionReasoningFor(sessionFile);
-              // Helpers belong to one session: reload this session's rows (and
-              // close a stale HELPERS overlay) rather than showing the old ones.
-              resetHelperRows();
-              toolExpansion = new Set<string>();
-              // A session switch resets the draft but not durable prompt
-              // history or the in-memory stash slot.
-              editor = seedEditorHistory(createEditor(), editor.history);
-              scroll = latestTranscriptScroll();
-              usage = null;
-              cost = null;
-              measureContext();
+              adoptSession(sessionFile);
               pushToast("success", `resumed ${item.label}`);
               updateAttentionTitle(running ? "working" : undefined);
             } catch (exc) {
@@ -4676,6 +4699,9 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
       case "sessions":
         openSessionPicker();
         break;
+      case "fork":
+        dispatchFork("");
+        break;
       case "theme":
         cycleTheme();
         break;
@@ -4948,6 +4974,109 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
     render();
   };
 
+  /**
+   * `/fork [--at <seq>] [new-name]`: copy the CURRENT session (or its first
+   * `--at` envelopes) through the existing `forkSession` service, then switch
+   * to the copy through the same machinery `/sessions` uses. Only the source's
+   * file is read; a failure leaves the current session selected and reports the
+   * service's real message (name collision, corrupt/unreadable source, store
+   * IO) as one bounded notice. Refused while a turn or compaction runs, with
+   * no current session file, or when the current file is not a session of this
+   * TUI's store (forking the same-named stranger would be dishonest).
+   */
+  const dispatchFork = (args: string): void => {
+    if (running) {
+      baseNotice("warn", "cannot fork a session while a turn is running — wait for it to finish");
+      return;
+    }
+    if (compacting) {
+      baseNotice(
+        "warn",
+        "cannot fork a session while compaction is running — wait for it to finish",
+      );
+      return;
+    }
+    if (sessionCfg.sessionFile === "") {
+      baseNotice(
+        "warn",
+        "fork: no session file to fork — start the TUI with --session-file <path> " +
+          "or resume a saved session (/sessions) first",
+      );
+      return;
+    }
+    const parsed = parseForkCommandArgs(args);
+    if (parsed.error !== null) {
+      baseNotice("warn", parsed.error);
+      return;
+    }
+    const current = path.resolve(sessionCfg.sessionFile);
+    const sourceName = sessionSidecarKey(sessionCfg.sessionFile, sessionsDir);
+    const sourceLocation = layout.resolve(sourceName);
+    const storePath =
+      sourceLocation === null ? null : path.resolve(sourceLocation.sessionPath);
+    const sameFile =
+      storePath !== null &&
+      (process.platform === "win32"
+        ? storePath.toLowerCase() === current.toLowerCase()
+        : storePath === current);
+    if (!sameFile) {
+      baseNotice(
+        "warn",
+        !fs.existsSync(current)
+          ? "fork: the current session has no saved file yet — send a task first"
+          : `fork: the current session is not a session in ${sessionsDir} — ` +
+              "resume it from /sessions to fork it",
+      );
+      return;
+    }
+    const options = parsed.request;
+    let result: ForkSessionResult;
+    try {
+      result = forkSession(sessionsDir, sourceName, {
+        ...(options.atSeq !== undefined ? { atSeq: options.atSeq } : {}),
+        ...(options.name !== undefined ? { name: options.name } : {}),
+      });
+    } catch (exc) {
+      const detail = exc instanceof SessionForkError ? exc.message : messageOf(exc);
+      baseNotice("warn", boundForkNotice(`fork failed: ${detail}`));
+      return;
+    }
+    const targetFile = layout.resolve(result.name)?.sessionPath ?? null;
+    if (targetFile === null) {
+      baseNotice(
+        "warn",
+        boundForkNotice(
+          `fork: copied ${sourceName} to ${result.name} but could not open the copy — ` +
+            "resume it from /sessions",
+        ),
+      );
+      return;
+    }
+    try {
+      adoptSession(targetFile);
+    } catch (exc) {
+      baseNotice(
+        "warn",
+        boundForkNotice(
+          `fork: copied ${sourceName} to ${result.name} but could not switch to it: ` +
+            messageOf(exc),
+        ),
+      );
+      return;
+    }
+    updateAttentionTitle(running ? "working" : undefined);
+    baseNotice(
+      "success",
+      boundForkNotice(
+        forkSwitchNotice({
+          source: sourceName,
+          name: result.name,
+          events: result.events,
+        }),
+      ),
+    );
+  };
+
   /** Slash forms for registry commands that `resolveTuiInput` does not own
    *  (`/models`, `/sessions`, `/theme`, …). Returns false when the caller
    *  should fall back to the template/builtin resolver. */
@@ -5006,6 +5135,9 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
       case "sessions":
         if (!gateIdleCommand(command)) return true;
         openSessionPicker();
+        return true;
+      case "fork":
+        dispatchFork(args);
         return true;
       case "theme":
         cycleTheme(args);

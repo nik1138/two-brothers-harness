@@ -597,16 +597,23 @@ Every registry command also has a typed slash form — even when it has no
 chord — and all are searchable in `Ctrl+P`: `/palette`, `/help` (`/h`),
 `/commands`, `/find [query]`, `/agents`, `/retry`, `/stash`, `/exit` (`/quit`,
 `/q`),
-`/mode consult|work`, `/models`, `/sessions`, `/theme dark|light|system`,
+`/mode consult|work`, `/models`, `/sessions`,
+`/fork [--at <seq>] [new-name]`, `/theme dark|light|system`,
 `/settings` (provider summary, effective permission preset, and **Connect
 provider…** / **Permissions…** actions), `/provider` (the provider connect
 surface), plus discovered `<name>.md`
-templates. `/models` and `/sessions`
-refuse while a turn runs. The find bar is an inline input, not a modal: while
-it is open it owns printable keys and the app chords (`Ctrl+P`, `?`, slash
-commands) are inert, exactly like the palette and help overlays; `Esc` closes
-it first. The mention picker behaves the same way while open (printable keys
-filter, `Esc` closes).
+templates. `/models`, `/sessions` and `/fork`
+refuse while a turn runs. `/fork` copies the current session into a new one
+through the same fork service the CLI and web use (a byte-exact prefix with
+dense `seq` and a `parent` lineage link, the source untouched) and switches to
+the copy; `/fork --at <seq>` branches at an envelope and `[new-name]` names the
+copy. It needs the current session file to live in the TUI's sessions
+directory, and it also refuses while compaction runs and reports the service's
+own name-collision/corrupt-source/IO message honestly. The find bar is an
+inline input, not a modal: while it is open it owns printable keys and the app
+chords (`Ctrl+P`, `?`, slash commands) are inert, exactly like the palette and
+help overlays; `Esc` closes it first. The mention picker behaves the same way
+while open (printable keys filter, `Esc` closes).
 
 The first-party built-in commands from the shared catalogue are available next
 to the native set (a native command always wins its own name, and a discovered
