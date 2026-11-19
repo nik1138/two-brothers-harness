@@ -1131,10 +1131,11 @@ Design anchors that already exist:
   hint builders gained optional `commands` parameters (defaults keep the
   previous frames byte-identical). CLI/`clihelp.ts` catalogue the flag/env so
   the docs↔CLI drift guard stays green. Tests: `tests/tuikeys.test.ts` (25) +
-  2 injected-override `tests/tuiintegration.test.ts` cases. Remaining
-  surfaces stay fixed by design: typing/composer keys, Escape/quit layering,
-  picker/overlay navigation, approval keys, the find bar, an in-TUI editor
-  and hot reload.
+  2 injected-override `tests/tuiintegration.test.ts` cases. The in-TUI
+  key-binding editor landed later in `7834514`, and keys-file hot reload in
+  wave 23 (`tui --keys-watch`) — see the Remaining key-binding surfaces item.
+  Remaining surfaces stay fixed by design: typing/composer keys, Escape/quit
+  layering, picker/overlay navigation, approval keys, the find bar.
 
 ## Shipped 2026-11-08 (wave 21: role-colour palettes, web theming gap closed)
 
@@ -1331,6 +1332,43 @@ Design anchors that already exist:
   in `tests/adapters.test.ts`/`tests/thinkingpassback.test.ts`. Remaining:
   real-model cache-hit evidence and `ttl`/opt-out (cached-input pricing shipped
   in wave 24, `3c37a31`).
+
+## Shipped 2026-11-08 (wave 24: serve config-derived auto-compaction, work-mode warning)
+
+- **Shipped in wave 24 — `serve` config-derived auto-compaction (medium
+  finding, verified 2026-11-08)** — `two-brothers serve` accepts `--compact`,
+  `--compact-threshold <chars>`, `--compact-threshold-tokens <n>`,
+  `--compact-keep-recent <chars>` and `--context-window` (plus the
+  `TWO_BROTHERS_COMPACT*` env vars) but its runs never receive the resulting
+  compaction settings: only the manual `POST /api/sessions/{name}/compact`
+  route falls back to the resolved config, so the documented proactive
+  auto-compaction never fires on the primary (serve/web) surface. Evidence and
+  a decision-complete fix sketch (one shared `compactionSettingsFromConfig`
+  helper used by `run`/`chat`/`tui`/`serve`, explicit `ServerOptions`
+  still winning) are in `.tmp/research/wave24-proposals.md` §A1: the A/B probe
+  `.tmp/research/probe-serve-auto-compact.mjs` reports config-only
+  `{envelopes: 5, summaries: 0}` vs an explicit `compaction` option
+  `{envelopes: 4, summaries: 1}`, and a real
+  `serve --compact-threshold 200` run produced a session with 0 summaries
+  while the identical CLI `run` produced 1. Not fixed here. Shipped in wave 24:
+  `serve` now derives the same settings, see `src/server.ts` and
+  `docs/cli-reference.md`.
+- **Shipped in wave 24 — CLI `run --mode work` without a workspace binds no
+  tools** (medium finding, verified 2026-11-08) — the CLI has no workspace
+  surface (`--workspace` is TUI-only; `serve` is the workspace-bound path), so
+  a `run --mode work` gives the junior an empty tool belt while the senior's
+  review/decision can still accept a fabricated deliverable as verified. Live
+  evidence: `.tmp/livecheck/wave23/REPORT.md` §S2 / finding F1 — against LM
+  Studio `lfm3-1.7b`, the run exited 0 with the deliverable "Created
+  /workspace/hello.txt …", the review verdict `accept` and the decision "File
+  creation verified and accepted", yet no file existed and no tool was called.
+  Wave 24 ships the honest notice:
+  `packages/harness/src/cli.ts::workModeWithoutToolsWarning`, called from
+  `runOnce` after MCP/plugin binding, emits one
+  `[warn] work mode has no tools bound: ...` stderr line whenever the junior's
+  belt (`shared` + `junior`) is empty — a senior-only tool does not suppress
+  it — while stdout, exit codes and `--json` output stay unchanged. Tests:
+  `packages/harness/tests/cli.test.ts`; docs: `docs/cli-reference.md` §Modes.
 
 ## Shipped 2026-11-08 (wave 25: crash-torn resume, TUI steering, persisted compaction, signals, tab title)
 
@@ -1776,6 +1814,26 @@ imported or executed on load/activation. Sources: `src/pluginbundle.ts`
   catalogs with `--verbose` bundle counts. No protocol/session-envelope
   change, no web source change, no new runtime dependency.
 
+## Shipped 2026-11-19 (Gemini tool-schema whitelist widening)
+
+- **Shipped 2026-11-19 — Gemini tool-schema whitelist widening (provider,
+  non-blocker; `eb7ec74`)** — noted 2026-11-18 during the
+  `additionalProperties` 400 hotfix (shipped as the `geminiSafeSchema`
+  whitelist in `packages/harness/src/provider.ts`; the earlier citation
+  `52f7359` was a pre-rebase lane SHA, not on `main`): the whitelist had kept
+  only the fields of the Gemini `Schema` proto
+  (`type/format/description/nullable/enum/maxItems/minItems/properties/
+  required/items`), so keywords the proto *does* support (`anyOf`, `pattern`,
+  `minLength`/`maxLength`, `minimum`/`maximum`) were dropped and tool
+  parameter hints degraded to unconstrained on the Gemini path (requests
+  succeeded; validation hints weakened). The widening keeps exactly those six
+  keywords (`anyOf`, `pattern`, `minLength`, `maxLength`, `minimum`,
+  `maximum`) while everything else stays byte-stable; values still pass through
+  unchanged (no reshaping, coercion or reordering), unsupported keys
+  (`additionalProperties`, `$schema`, `$ref`) are still dropped, and the same
+  whitelist recurses into `properties`/`items`/`anyOf`. Tests:
+  `packages/harness/tests/adapters.test.ts`.
+
 ## Open items (deferred)
 
 - **OAuth-only subscription sign-in (large)** — GitHub Copilot, OpenAI Codex
@@ -1861,40 +1919,6 @@ imported or executed on load/activation. Sources: `src/pluginbundle.ts`
   exercises the real RunManager/worker pool/queue over HTTP in mock or real
   modes; recorded 2026-11-08 against the owner's LM Studio (workers 1,
   runs 2): 2/2 completed in 230.8 s, run 2 queued 117.7 s behind run 1.
-- **Shipped in wave 24 — `serve` config-derived auto-compaction (medium
-  finding, verified 2026-11-08)** — `two-brothers serve` accepts `--compact`,
-  `--compact-threshold <chars>`, `--compact-threshold-tokens <n>`,
-  `--compact-keep-recent <chars>` and `--context-window` (plus the
-  `TWO_BROTHERS_COMPACT*` env vars) but its runs never receive the resulting
-  compaction settings: only the manual `POST /api/sessions/{name}/compact`
-  route falls back to the resolved config, so the documented proactive
-  auto-compaction never fires on the primary (serve/web) surface. Evidence and
-  a decision-complete fix sketch (one shared `compactionSettingsFromConfig`
-  helper used by `run`/`chat`/`tui`/`serve`, explicit `ServerOptions`
-  still winning) are in `.tmp/research/wave24-proposals.md` §A1: the A/B probe
-  `.tmp/research/probe-serve-auto-compact.mjs` reports config-only
-  `{envelopes: 5, summaries: 0}` vs an explicit `compaction` option
-  `{envelopes: 4, summaries: 1}`, and a real
-  `serve --compact-threshold 200` run produced a session with 0 summaries
-  while the identical CLI `run` produced 1. Not fixed here. Shipped in wave 24:
-  `serve` now derives the same settings, see `src/server.ts` and
-  `docs/cli-reference.md`.
-- **Shipped in wave 24 — CLI `run --mode work` without a workspace binds no
-  tools** (medium finding, verified 2026-11-08) — the CLI has no workspace
-  surface (`--workspace` is TUI-only; `serve` is the workspace-bound path), so
-  a `run --mode work` gives the junior an empty tool belt while the senior's
-  review/decision can still accept a fabricated deliverable as verified. Live
-  evidence: `.tmp/livecheck/wave23/REPORT.md` §S2 / finding F1 — against LM
-  Studio `lfm3-1.7b`, the run exited 0 with the deliverable "Created
-  /workspace/hello.txt …", the review verdict `accept` and the decision "File
-  creation verified and accepted", yet no file existed and no tool was called.
-  Wave 24 ships the honest notice:
-  `packages/harness/src/cli.ts::workModeWithoutToolsWarning`, called from
-  `runOnce` after MCP/plugin binding, emits one
-  `[warn] work mode has no tools bound: ...` stderr line whenever the junior's
-  belt (`shared` + `junior`) is empty — a senior-only tool does not suppress
-  it — while stdout, exit codes and `--json` output stay unchanged. Tests:
-  `packages/harness/tests/cli.test.ts`; docs: `docs/cli-reference.md` §Modes.
 - **Subagents** — **phase 1 shipped 2026-11-12 for `serve`/web:** the Senior
   can spawn one isolated read-only single-role helper through the `subagent`
   tool. The child has its own context, a fresh provider instance, read-only
@@ -2064,20 +2088,3 @@ imported or executed on load/activation. Sources: `src/pluginbundle.ts`
   earlier mask-level click design. Re-check after the next naive-ui release
   (> 2.45.3); optionally file an upstream repro (stacked `n-modal`s: a click
   inside the second fires the first's `on-mask-click`).
-- **Shipped 2026-11-19 — Gemini tool-schema whitelist widening (provider,
-  non-blocker; `eb7ec74`)** — noted 2026-11-18 during the
-  `additionalProperties` 400 hotfix (shipped as the `geminiSafeSchema`
-  whitelist in `packages/harness/src/provider.ts`; the earlier citation
-  `52f7359` was a pre-rebase lane SHA, not on `main`): the whitelist had kept
-  only the fields of the Gemini `Schema` proto
-  (`type/format/description/nullable/enum/maxItems/minItems/properties/
-  required/items`), so keywords the proto *does* support (`anyOf`, `pattern`,
-  `minLength`/`maxLength`, `minimum`/`maximum`) were dropped and tool
-  parameter hints degraded to unconstrained on the Gemini path (requests
-  succeeded; validation hints weakened). The widening keeps exactly those six
-  keywords (`anyOf`, `pattern`, `minLength`, `maxLength`, `minimum`,
-  `maximum`) while everything else stays byte-stable; values still pass through
-  unchanged (no reshaping, coercion or reordering), unsupported keys
-  (`additionalProperties`, `$schema`, `$ref`) are still dropped, and the same
-  whitelist recurses into `properties`/`items`/`anyOf`. Tests:
-  `packages/harness/tests/adapters.test.ts`.
