@@ -123,6 +123,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`HEAD` on the served web app:** the static handler answered `GET` only, so
+  `HEAD /assets/*` fell through to the router's 404 while `GET` returned 200
+  with the exact bytes. `HEAD` now takes the same `/`, `/assets/*` and SPA
+  fallback path as `GET` and answers the same status, `Content-Type` and
+  `Content-Length` headers with no body (the `/assets/*` 404 keeps its status
+  and `Content-Type` without the JSON body). `GET` responses are unchanged and
+  JSON API routes keep their GET-only method handling. Tests:
+  `tests/server.test.ts` ("static HEAD answers the GET status and headers with
+  no body"). No protocol or API change; no new runtime dependencies.
 - **TUI OSC 52 copy honesty:** the `Ctrl+X` fallback sink now throws when the
   terminal driver suppresses attention output — a plain (`TERM=dumb`)
   terminal, a non-TTY output, or a driver that is restoring/suspended — instead

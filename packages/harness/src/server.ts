@@ -224,7 +224,10 @@
  *   `/assets` mounted like FastAPI's StaticFiles. Lookup order (computed from
  *   this module, never cwd): the packaged `<package>/web` copy that
  *   `scripts/sync-web.mjs` places in the npm tarball, then the repo layout
- *   `<repo>/web/dist`. Overridable via `webDist`.
+ *   `<repo>/web/dist`. Overridable via `webDist`. `HEAD` follows the same
+ *   lookup order and answers the same status/`Content-Type`/`Content-Length`
+ *   headers as `GET` (including the SPA fallback and the `/assets` 404), with
+ *   no body; JSON API routes keep their GET-only method handling.
  * - `GET /api/workspaces` lists operator-registered workspaces in their
  *   operator-set order; `POST /api/workspaces` registers one (201),
  *   `PATCH /api/workspaces/{id}` renames one (200 with the updated object:
@@ -4515,7 +4518,14 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     ".txt": "text/plain; charset=utf-8",
   };
 
-  function serveStaticFile(res: http.ServerResponse, filePath: string): boolean {
+  // GET streams the file; HEAD answers the same status/type/length headers
+  // without opening the stream (Node would suppress a HEAD body anyway, but
+  // reading the file only to discard it is pointless).
+  function serveStaticFile(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    filePath: string,
+  ): boolean {
     let stat: fs.Stats;
     try {
       stat = fs.statSync(filePath);
@@ -4527,28 +4537,38 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       "Content-Type": MIME[path.extname(filePath).toLowerCase()] ?? "application/octet-stream",
       "Content-Length": stat.size,
     });
+    if (req.method === "HEAD") {
+      res.end();
+      return true;
+    }
     fs.createReadStream(filePath).pipe(res);
     return true;
   }
 
   function handleStatic(req: http.IncomingMessage, res: http.ServerResponse, pathname: string): boolean {
-    if (webDist === null || req.method !== "GET") return false;
+    // HEAD is answered like GET with the body omitted: the same lookup order,
+    // SPA fallback and 404 parity apply to both methods.
+    if (webDist === null || (req.method !== "GET" && req.method !== "HEAD")) return false;
     const index = path.join(webDist, "index.html");
     if (!fs.existsSync(index)) return false;
     if (pathname === "/") {
-      serveStaticFile(res, index);
+      serveStaticFile(req, res, index);
       return true;
     }
     const candidate = path.join(webDist, pathname.replace(/^\/+/, ""));
     if (pathname.startsWith("/assets/")) {
-      if (serveStaticFile(res, candidate)) return true;
+      if (serveStaticFile(req, res, candidate)) return true;
       res.writeHead(404, { "Content-Type": "application/json" });
+      if (req.method === "HEAD") {
+        res.end();
+        return true;
+      }
       res.end(JSON.stringify({ detail: "Not Found" }));
       return true;
     }
-    if (serveStaticFile(res, candidate)) return true;
+    if (serveStaticFile(req, res, candidate)) return true;
     // SPA fallback
-    serveStaticFile(res, index);
+    serveStaticFile(req, res, index);
     return true;
   }
 

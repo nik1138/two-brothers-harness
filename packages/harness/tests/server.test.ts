@@ -4707,6 +4707,66 @@ test("static web/dist is served at / with an SPA fallback", async () => {
   }
 });
 
+test("static HEAD answers the GET status and headers with no body", async () => {
+  const dist = tmpdir("tb-dist-head-");
+  const indexBody = '<div id="app">Two Brothers</div>';
+  const assetBody = "console.log(1)";
+  try {
+    fs.mkdirSync(path.join(dist.root, "assets"));
+    fs.writeFileSync(path.join(dist.root, "index.html"), indexBody);
+    fs.writeFileSync(path.join(dist.root, "assets", "app.js"), assetBody);
+
+    const srv = await startServer({ webDist: dist.root });
+    try {
+      // `/` (index.html): same status/type/length, empty body; GET unchanged.
+      const indexGet = await fetch(`${srv.base}/`);
+      const indexHead = await fetch(`${srv.base}/`, { method: "HEAD" });
+      assert.equal(indexGet.status, 200);
+      assert.equal(indexHead.status, 200);
+      assert.equal(await indexGet.text(), indexBody);
+      assert.equal(indexHead.headers.get("content-type"), indexGet.headers.get("content-type"));
+      assert.equal(indexHead.headers.get("content-length"), indexGet.headers.get("content-length"));
+      assert.equal(indexHead.headers.get("content-length"), String(Buffer.byteLength(indexBody)));
+      assert.equal(await indexHead.text(), "");
+
+      // `/assets/*` (real file): same status/type/length, empty body.
+      const assetGet = await fetch(`${srv.base}/assets/app.js`);
+      const assetHead = await fetch(`${srv.base}/assets/app.js`, { method: "HEAD" });
+      assert.equal(assetGet.status, 200);
+      assert.equal(assetHead.status, 200);
+      assert.equal(await assetGet.text(), assetBody);
+      assert.equal(assetHead.headers.get("content-type"), assetGet.headers.get("content-type"));
+      assert.equal(assetHead.headers.get("content-type"), "text/javascript; charset=utf-8");
+      assert.equal(assetHead.headers.get("content-length"), assetGet.headers.get("content-length"));
+      assert.equal(assetHead.headers.get("content-length"), String(Buffer.byteLength(assetBody)));
+      assert.equal(await assetHead.text(), "");
+
+      // Unknown asset: the 404 parity is status/type without the JSON body.
+      const missingGet = await fetch(`${srv.base}/assets/missing.js`);
+      const missingHead = await fetch(`${srv.base}/assets/missing.js`, { method: "HEAD" });
+      assert.equal(missingGet.status, 404);
+      assert.equal(missingHead.status, 404);
+      assert.equal(
+        missingHead.headers.get("content-type"),
+        missingGet.headers.get("content-type"),
+      );
+      assert.equal(missingHead.headers.get("content-type"), "application/json");
+      assert.equal(await missingHead.text(), "");
+
+      // SPA fallback applies to HEAD too (index.html headers, no body).
+      const spaHead = await fetch(`${srv.base}/some/client/route`, { method: "HEAD" });
+      assert.equal(spaHead.status, 200);
+      assert.equal(spaHead.headers.get("content-type"), indexGet.headers.get("content-type"));
+      assert.equal(spaHead.headers.get("content-length"), String(Buffer.byteLength(indexBody)));
+      assert.equal(await spaHead.text(), "");
+    } finally {
+      await srv.close();
+    }
+  } finally {
+    dist.cleanup();
+  }
+});
+
 test("default web dist: packaged <package>/web wins, repo web/dist is the fallback", () => {
   const tmp = tmpdir("tb-webdist-");
   try {
