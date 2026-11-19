@@ -205,6 +205,7 @@ export {
   type ApprovalAutoAllowedEvent,
   type TodoUpdatedEvent,
   type PromptAuditEvent,
+  type CallUsageEvent,
   type ReasoningEvent,
   type AutoRouteEvent,
   type UsageEvent,

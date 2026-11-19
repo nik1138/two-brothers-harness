@@ -738,8 +738,10 @@ test("run: the work-mode warning is stderr-only in machine output modes", async 
   const parsed = JSON.parse(work.out[0]) as Record<string, unknown>;
   assert.deepEqual(
     Object.keys(parsed).sort(),
-    ["cost", "decision", "errors", "events", "rounds", "task", "usage"],
-    "the machine object shape is unchanged",
+    // `usage_by_role` is the additive per-role split (present because the mock
+    // provider tracks usage); every other key keeps its exact name.
+    ["cost", "decision", "errors", "events", "rounds", "task", "usage", "usage_by_role"],
+    "the machine object shape is unchanged apart from the additive split",
   );
   assert.ok(work.err.some((line) => WORK_WARNING_ROW.test(line)), "the warning still reaches stderr");
   assert.doesNotMatch(work.out[0], /work mode has no tools bound/, "stdout carries no warning text");
@@ -771,7 +773,17 @@ test("run: --mode auto --json carries the additive auto_route key (fail-closed m
   assert.deepEqual(parsed.errors, []);
   assert.deepEqual(
     Object.keys(parsed).sort(),
-    ["auto_route", "cost", "decision", "errors", "events", "rounds", "task", "usage"],
+    [
+      "auto_route",
+      "cost",
+      "decision",
+      "errors",
+      "events",
+      "rounds",
+      "task",
+      "usage",
+      "usage_by_role",
+    ],
   );
   assert.ok(
     io.err.some((line) => line.includes("auto routing degraded to consult: unstructured model reply for route")),

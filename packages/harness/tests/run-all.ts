@@ -144,3 +144,4 @@ import "./modebytes.test.ts";
 import "./autoroute.test.ts";
 import "./solo.test.ts";
 import "./mcpstatus.test.ts";
+import "./usagebyrole.test.ts";

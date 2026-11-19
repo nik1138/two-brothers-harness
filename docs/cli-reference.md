@@ -1038,7 +1038,7 @@ but stores `meta.json` and `events.jsonl` inside
 | `GET /api/runs`, `GET /api/runs/{run_id}` | list runs / run status (`queued`/`running`/`waiting`/`completed`/`failed`/`cancelled`); records carry a per-run `usage` object (`model_calls`, `input_tokens`, `output_tokens`, `cached_tokens`, `cache_write_tokens`, and the optional normalized `prompt_tokens` for Anthropic/Gemini; live counters update after each cooperation node, zeros only before the first call) plus an additive `cost` object (`{currency: "USD", total, model}` or `null` — computed at run completion, recomputed from the persisted usage for sidecar-rebuilt terminal records, and `null` when the usage cannot be attributed to one priced model). Records also carry, additively, `steering_pending` (steering texts waiting for the run's next step, present only while live and non-empty) and `steering_dropped` (`dropped` texts discarded at the per-run envelope cap; present only when > 0). An `auto` run additionally carries `route` (`solo`/`consult`/`work` — the effective routing decision) and `route_reason` (the senior's one-sentence justification), derived from the persisted `auto_route` event so they survive a sidecar-rebuilt terminal record; `mode` keeps the REQUESTED mode (`auto`), and non-auto records carry neither field |
 | `POST /api/runs/{run_id}/stop` | cooperative stop (pending approvals are denied); a `queued` run is marked cancelled immediately, without waiting for a worker |
 | `POST /api/runs/{run_id}/steer` | mid-run operator steering: queue `{"text": "..."}` for an ACTIVE run — `running`, or `waiting` on an approval (applied at the next step after it resolves). Accepted `200 {"run_id", "status", "pending"}` (`pending` = steering texts now waiting, 1–8); the text is trimmed, must be non-empty and at most 4 000 characters (`400` otherwise; a non-string `text` is the standard `400 invalid request body`), an unknown run is `404`, and a queued/terminal run or a full pending queue is an honest `409` (the detail names the run's status, or `steering queue is full …`). Acceptance emits **no** event: the steer is appended to the shared context as an ordinary `user`→`senior` `message` envelope (payload text prefixed `[[OPERATOR STEER]] `) when the harness reaches the next node boundary/tool-loop iteration, so SSE consumers see the normal `envelope` frame with its dense `seq` at that moment. Pending steering is in-memory only: a stopped run appends nothing more and drops what was queued, and a backend restart loses the queue (`404` for the run id) |
-| `GET /api/runs/{run_id}/events?after=N` | SSE of typed runtime events (`run_status`, `envelope`, `tool_started`, `tool_completed`, `approval_requested`, `approval_resolved`, `approval_auto_allowed`, `approval_auto_denied`, `todo_updated`, `prompt_audit`, `reasoning`, `usage`, `subagent_started`, `subagent_activity`, `subagent_completed`, `steering_dropped`, `auto_route`, `run_error`, `run_end`); reconnectable via `after`. `approval_requested` additively carries `reason` and a bounded `detail` (`{kind, diff?, addedLines?, removedLines?, command?, truncated?}` preview) when the request has one; `todo_updated` carries the model's complete sanitized plan snapshot; `steering_dropped` carries `{dropped, applied, limit}` when a 200-accepted steer later hit the per-run envelope cap; `auto_route` carries `{route, reason, requested: "auto", downgraded_from?}` once per auto run, before the `[[AUTO ROUTE]]` marker envelope. When the run was started with `stream_tokens`, the same stream additionally carries ephemeral named `token` frames (`event: token`, data `{type, run_id, role, kind: "text"\\|"thinking", delta, at}`) with no SSE id — they are live-only, never persisted and never replayed |
+| `GET /api/runs/{run_id}/events?after=N` | SSE of typed runtime events (`run_status`, `envelope`, `tool_started`, `tool_completed`, `approval_requested`, `approval_resolved`, `approval_auto_allowed`, `approval_auto_denied`, `todo_updated`, `prompt_audit`, `call_usage`, `reasoning`, `usage`, `subagent_started`, `subagent_activity`, `subagent_completed`, `steering_dropped`, `auto_route`, `run_error`, `run_end`); reconnectable via `after`. `approval_requested` additively carries `reason` and a bounded `detail` (`{kind, diff?, addedLines?, removedLines?, command?, truncated?}` preview) when the request has one; `todo_updated` carries the model's complete sanitized plan snapshot; `steering_dropped` carries `{dropped, applied, limit}` when a 200-accepted steer later hit the per-run envelope cap; `auto_route` carries `{route, reason, requested: "auto", downgraded_from?}` once per auto run, before the `[[AUTO ROUTE]]` marker envelope; `call_usage` carries `{role, kind, usage}` once per provider request, immediately after it (the request's own family-mapped counters — the per-call half of `usage`; a compaction summarizer call reports `kind: "compaction"` and has no `prompt_audit` frame). When the run was started with `stream_tokens`, the same stream additionally carries ephemeral named `token` frames (`event: token`, data `{type, run_id, role, kind: "text"\\|"thinking", delta, at}`) with no SSE id — they are live-only, never persisted and never replayed |
 | `GET /api/runs/{run_id}/approvals`, `POST /api/runs/{run_id}/approvals/{id}` | list/answer pending operator approvals (`{"allow": bool, "scope"?: "once" \| "session"}` → `{approval_id, decision, scope}`; `scope` defaults to `once`, an invalid value or `session` with a deny is a 400, an unknown/already-resolved approval id is a 404). Structured `ask_user` questions carry the additive `kind`/`question` fields and answer with `{"decision": "answer", "labels": [...]}` (400 on any validation rejection). See the session-scope paragraph below and [Structured operator questions](#structured-operator-questions-ask_user) |
 | `GET /api/providers`, `POST /api/providers`, `PUT /api/providers/{seed}`, `POST /api/providers/{name}/reset`, `POST /api/providers/{name}/discover`, `DELETE /api/providers/{name}` | provider presets (the curated seed table: hosted providers, subscription plans, LM Studio, custom). `GET` returns `{name, base_url, api_key_set, kind, models}` plus additive `seed` (the name comes from the built-in seed table) and `customized` (a stored override of that name exists), so a client can tell a pristine seed from an edited/custom entry; a positive preset `context_window` (tokens, used only as a compaction fallback) is exposed additively, while `0`/absent stays unknown and omitted so pre-wave presets keep the exact old shape. `POST` creates a custom provider (409 on a duplicate name, including a seed name); `PUT` updates it, and on a seed name materializes a stored override (blank `base_url` is a 400); both accept `context_window` as a positive safe integer; an explicit `0` clears it, an absent/null field on an update leaves the stored value untouched (a create starts without one), and negative/float/string/boolean/unsafe values are a `400` before any write; `DELETE` removes a stored preset/override and clears any role `provider_ref` that pointed at it (a pristine seed is a 404); `POST /api/providers/{name}/reset` restores a customized built-in seed without clearing role references (see below); `POST /api/providers/{name}/discover` probes a draft endpoint for its model list without saving (see the discovery paragraph below). Keys are never returned — responses carry `api_key_set` only. The Settings → Providers tab is the operator UI for these routes |
 | `GET /api/models-dev/providers` | read-only provider summaries from the public models.dev catalog (the same in-memory fetch the effort route uses; no snapshot is shipped). `200 {source, fetched_at, truncated, providers}` where `source` is `network`/`cache`/`stale`/`curated`, `fetched_at` is the last successful fetch (epoch ms, `null` when curated/never) and each provider is `{id, name, api, env, kind, kind_source, rejected, reject_reason, needs_base_url, model_count, families}` — `api` is a usable http(s) base URL or `null`, `env` carries variable NAMES only (≤ 3), `kind_source` is `type`/`npm`/`id`/`guessed`, and `families` counts `openai-compatible`/`anthropic`/`google`/`unsupported` (≤ 400 rows, sorted by display name then id; a cap hit sets `truncated`). The summary is always `200`: with no snapshot (offline, first fetch failed, or `disabled: true` from `TWO_BROTHERS_MODEL_EFFORTS=off`) it answers `source:"curated"` from the built-in seed table with `upstream_error` and/or `disabled:true`. Cache policy: 1 h TTL, 60 s failure back-off, 10 s timeout, single-flight, stale-on-error (`source:"stale"` serves the previous snapshot plus `upstream_error`; a good snapshot is never replaced by a failed/empty one). No keys are read or sent; read-only |
@@ -1759,6 +1759,17 @@ stable, width-safe layout:
   print-mode format and stay on stderr there (see
   [Automation output](#automation-output-ts-package)); the human transcript does
   not print them.
+- **Per-turn role split.** When the run tracks usage per role, a second,
+  blank-line-separated block reports the same counters split by the acting
+  role, one line per role that made a model call:
+  `senior: 100 in / 20 out · cache 40% · write 7 · 2 calls` then
+  `junior: 10 in / 5 out · 1 call`. Each line uses that role's own family
+  normalisation (`in` is its prompt total, `cache` is its `cached / prompt`), so
+  a mixed-family run stays honest per role instead of averaging two
+  denominators; `cache`/`write` appear only when that role recorded them. The
+  block prints before the merged footer (which keeps its bytes and its place as
+  the last line), is absent when the provider tracks no usage or a role made no
+  call, and is width-capped like the footer.
 - **Live on a TTY.** On an interactive stdout `run`/`chat` write each envelope
   block as the harness produces it, with dim `· …` activity rows between blocks
   (`· senior consulting…` before a call, `· junior tool workspace_read_file…`
@@ -1781,8 +1792,10 @@ stable, width-safe layout:
   width wraps onto an indented continuation row instead of overflowing it.
 
 Machine output is unaffected: `--json`, `--json-events`, `--stream`,
-`--mode print` and `--dry-run` are byte-identical to their previous formats
-(zero escape bytes, same field shapes and stderr routing), and live streaming
+`--mode print` and `--dry-run` keep their previous stdout formats (zero escape
+bytes, same field shapes), except that `--json`/`--json-events` add the
+`usage_by_role` key and `--mode print` appends the per-role split lines to
+stderr after the unchanged `tokens:`/`cost:` diagnostics. Live streaming still
 never applies to them (nor to a non-TTY stdout).
 
 ## Plan and todo function (TS package)
@@ -1988,8 +2001,9 @@ separators are suppressed in machine modes so every turn's payload stays
 parseable):
 
 - `--mode print` — stdout carries only the final decision text (with
-  `--json`: the decision object as JSON). Warnings and the usage line go to
-  stderr, so the output is pipe-clean for scripts and `$(...)`.
+  `--json`: the decision object as JSON). Warnings, the `tokens:`/`cost:`
+  diagnostics and — when usage is tracked per role — the per-role split lines go
+  to stderr, so the output is pipe-clean for scripts and `$(...)`.
 - `--mode json` (alias `--json-events`; a bare `--json` with no explicit
   `--mode` selects this mode too) — stdout is exactly one
   machine-readable JSON object
@@ -2001,6 +2015,13 @@ parseable):
   (`route` is `solo`/`consult`/`work`; `downgradedFrom: "work"` appears only
   when the no-workspace guardrail downgraded work→consult). Explicit
   `consult`/`work` objects are byte-identical to before (no `auto_route` key).
+  A run that measured provider calls also adds `usage_by_role` =
+  `{senior: <usage>, junior: <usage>}` with the same counter names as `usage`
+  (`model_calls`, `input_tokens`, `output_tokens`, `cached_tokens`,
+  `cache_write_tokens`, and the family-normalized `prompt_tokens` when the
+  family reports it). It is additive: `usage` and every other key keep their
+  shape, and a run whose provider tracks no usage omits `usage_by_role`
+  entirely.
 
 `TWO_BROTHERS_JSON=1` (also `true`/`yes`/`on`) is the environment spelling of
 a bare `--json`: it selects the same single machine-readable object on stdout

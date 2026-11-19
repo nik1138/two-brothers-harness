@@ -13,8 +13,9 @@
  * envelope log. Events are the typed runtime events (run_status / envelope /
  * tool_started / tool_completed / approval_requested / approval_resolved /
  * approval_auto_denied / approval_auto_allowed / todo_updated / prompt_audit /
- * reasoning / auto_route / subagent_started / subagent_activity /
- * subagent_completed / run_error / run_end) plus `run_id`
+ * call_usage / reasoning / usage / auto_route / subagent_started /
+ * subagent_activity / subagent_completed / steering_dropped / run_error /
+ * run_end) plus `run_id`
  * and `at` (epoch seconds). Event JSON keeps the Python field names
  * (`run_id`, `approval_id`) so sidecar files stay interchangeable with the
  * Python implementation; `prompt_audit` keeps its camelCase payload
@@ -249,6 +250,30 @@ export interface PromptAuditEvent extends RuntimeEventMeta, PromptAuditEntry {
   type: "prompt_audit";
 }
 
+/**
+ * Additive per-call usage attribution: the tokens ONE provider request
+ * consumed, attributed to the acting role and the node kind it answered.
+ * Emitted immediately AFTER the request (the counters only exist once the
+ * provider's response was parsed), so it is deliberately a separate event
+ * rather than an extra field on `prompt_audit`: that event's contract is
+ * "emitted immediately before the call" and consumers count it one-per-call.
+ * `usage` carries the family-mapped counters exactly as the provider adapter
+ * recorded them (`cached_tokens` for Anthropic cache reads, `cache_write_tokens`
+ * for cache writes, `prompt_tokens` when the family reports the total), so the
+ * split reuses the existing mapping instead of re-deriving it. A compaction
+ * summarizer call is attributed here too (kind `compaction`) even though it has
+ * no `prompt_audit` row. Display/telemetry only: the protocol envelopes, the
+ * session JSONL and `run_end.usage` are unchanged, and consumers that do not
+ * know the type can ignore it safely.
+ */
+export interface CallUsageEvent extends RuntimeEventMeta {
+  type: "call_usage";
+  role: "senior" | "junior";
+  /** Node kind the call answered (consult / delegation / deliverable / verify / review / decision / compaction / …). */
+  kind: string;
+  usage: Record<string, unknown>;
+}
+
 /** Hard cap on one persisted reasoning record's text (chars, head+tail kept). */
 export const REASONING_EVENT_MAX_CHARS = 10_000;
 
@@ -356,6 +381,7 @@ export type RuntimeEvent =
   | ApprovalAutoAllowedEvent
   | TodoUpdatedEvent
   | PromptAuditEvent
+  | CallUsageEvent
   | ReasoningEvent
   | SteeringDroppedEvent
   | AutoRouteEvent

@@ -221,12 +221,14 @@ test("TWO_BROTHERS_JSON=1 emits the same machine object as bare --json", async (
   assert.equal(envResult.io.out.length, 1, "stdout must be a single line");
   assert.deepEqual(envResult.io.err, [], "a clean run keeps stderr silent");
   // The env output is the full machine object, key order included — never the
-  // retired human transcript plus a decision JSON last line.
+  // retired human transcript plus a decision JSON last line. `usage_by_role`
+  // is the additive per-role split of the same counters.
   assert.deepEqual(Object.keys(JSON.parse(envResult.io.out[0])), [
     "task",
     "events",
     "decision",
     "usage",
+    "usage_by_role",
     "cost",
     "rounds",
     "errors",

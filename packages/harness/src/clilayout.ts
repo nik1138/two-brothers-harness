@@ -270,6 +270,49 @@ function usageInt(value: unknown): number {
   return Number.isFinite(num) ? num : 0;
 }
 
+/** One aggregate's footer counters, normalized once for the footer and the role split. */
+interface UsageCounters {
+  prompt: number;
+  output: number;
+  cached: number;
+  written: number;
+  calls: number;
+  percent: number;
+}
+
+/**
+ * Normalize one usage aggregate the way the footer always has: `prompt` is the
+ * family's honest prompt total (Anthropic/Gemini report uncached input and send
+ * `prompt_tokens`; OpenAI-compatible input already includes cache reads) and
+ * `percent` is `cached / prompt`. Shared by {@link humanFooter} and
+ * {@link roleUsageLines} so both render the same numbers.
+ */
+function usageCounters(usage: FooterUsage): UsageCounters {
+  const input = usageInt(usage.input_tokens);
+  const prompt = usage.prompt_tokens === undefined ? input : usageInt(usage.prompt_tokens);
+  const cached = usageInt(usage.cached_tokens);
+  return {
+    prompt,
+    output: usageInt(usage.output_tokens),
+    cached,
+    written: usageInt(usage.cache_write_tokens),
+    calls: usageInt(usage.model_calls),
+    percent:
+      prompt > 0 ? Math.min(100, Math.round((cached * 100) / prompt)) : cached > 0 ? 100 : 0,
+  };
+}
+
+/** True when an aggregate recorded anything worth printing. */
+function hasCounters(counters: UsageCounters): boolean {
+  return (
+    counters.prompt !== 0 ||
+    counters.output !== 0 ||
+    counters.cached !== 0 ||
+    counters.written !== 0 ||
+    counters.calls !== 0
+  );
+}
+
 /**
  * The compact human run footer:
  * `tokens 40 in / 20 out · cache 25% · 4 calls · cost $0.0300`.
@@ -287,28 +330,62 @@ export function humanFooter(
   style: CliStyle = plainCliStyle,
   width: number = FALLBACK_TERMINAL_WIDTH,
 ): string | null {
-  const input = usageInt(usage.input_tokens);
-  const output = usageInt(usage.output_tokens);
-  const cached = usageInt(usage.cached_tokens);
-  const written = usageInt(usage.cache_write_tokens);
-  const calls = usageInt(usage.model_calls);
-  if (input === 0 && output === 0 && cached === 0 && written === 0 && calls === 0) return null;
-  // Anthropic/Gemini report uncached input; prompt_tokens is their honest total.
-  // OpenAI-compatible runs omit it, so input_tokens is already the prompt total.
-  const prompt = usage.prompt_tokens === undefined ? input : usageInt(usage.prompt_tokens);
-  const percent =
-    prompt > 0 ? Math.min(100, Math.round((cached * 100) / prompt)) : cached > 0 ? 100 : 0;
+  const counters = usageCounters(usage);
+  if (!hasCounters(counters)) return null;
   const parts: string[] = [
-    `${style.paint("muted", "tokens")} ${prompt} in / ${output} out`,
+    `${style.paint("muted", "tokens")} ${counters.prompt} in / ${counters.output} out`,
   ];
-  if (cached > 0) parts.push(`${style.paint("muted", "cache")} ${percent}%`);
-  if (written > 0) parts.push(`${style.paint("muted", "write")} ${written}`);
-  parts.push(`${calls} ${calls === 1 ? "call" : "calls"}`);
+  if (counters.cached > 0) parts.push(`${style.paint("muted", "cache")} ${counters.percent}%`);
+  if (counters.written > 0) parts.push(`${style.paint("muted", "write")} ${counters.written}`);
+  parts.push(`${counters.calls} ${counters.calls === 1 ? "call" : "calls"}`);
   if (cost !== null) {
     parts.push(`${style.paint("muted", "cost")} ${style.paint("strong", `$${cost.toFixed(4)}`)}`);
   }
   const line = parts.join(style.paint("dim", FOOTER_SEPARATOR));
   return truncateToWidth(line, columns(width));
+}
+
+/**
+ * The per-role split of the turn's usage, one line per role that made a model
+ * call, e.g.
+ *
+ * ```
+ * senior: 30 in / 15 out · cache 50% · write 10 · 2 calls
+ * junior: 10 in / 5 out · 1 call
+ * ```
+ *
+ * Additive to {@link humanFooter}: the merged footer's bytes are unchanged and
+ * the split is printed as its own block before that footer (so the footer stays
+ * the last, compact summary), only when the run exposed per-role counters
+ * (`HarnessResult.usageByRole`). Each role's `in` and `cache` use the same
+ * family-normalized counters as the footer, so a mixed-family run stays honest
+ * per role instead of averaging two denominators. Lines are width-capped like
+ * the footer; a role that made no call is omitted rather than printed as zero.
+ */
+export function roleUsageLines(
+  usageByRole:
+    | { senior?: FooterUsage | null; junior?: FooterUsage | null }
+    | null
+    | undefined,
+  style: CliStyle = plainCliStyle,
+  width: number = FALLBACK_TERMINAL_WIDTH,
+): string[] {
+  if (usageByRole === null || usageByRole === undefined) return [];
+  const lines: string[] = [];
+  for (const role of ["senior", "junior"] as const) {
+    const counters = usageCounters(usageByRole[role] ?? {});
+    if (!hasCounters(counters)) continue;
+    const parts: string[] = [
+      `${paintRole(style, role)}: ${counters.prompt} in / ${counters.output} out`,
+    ];
+    if (counters.cached > 0) parts.push(`${style.paint("muted", "cache")} ${counters.percent}%`);
+    if (counters.written > 0) parts.push(`${style.paint("muted", "write")} ${counters.written}`);
+    parts.push(`${counters.calls} ${counters.calls === 1 ? "call" : "calls"}`);
+    lines.push(
+      truncateToWidth(parts.join(style.paint("dim", FOOTER_SEPARATOR)), columns(width)),
+    );
+  }
+  return lines;
 }
 
 // --------------------------------------------------------------------------- //

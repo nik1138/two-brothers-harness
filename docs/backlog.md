@@ -1771,11 +1771,21 @@ imported or executed on load/activation. Sources: `src/pluginbundle.ts`
   flow, a refresh-locked token store and provider-specific request headers;
   the subscription seeds deliberately cover API-key plans only.
 - **Per-turn prompt-cache statistics** — pi's `cache-stats.ts` exposes
-  per-turn cache-miss/write stats beyond the run total. Our footer now shows
-  the normalized run percentage and write count; a per-call breakdown in the
-  prompt-audit rows would make cache misses attributable to a node/tool belt.
-  Requires an additive `prompt_audit` field or a new display-only event, so it
-  was not folded into the kind-stable prompt change.
+  per-turn cache-miss/write stats beyond the run total. **Shipped slice
+  (feat/usage-by-role, additive):** every provider request's usage is
+  attributed to the acting role and node kind — `PromptAuditEntry.usage`,
+  `HarnessResult.usageByRole`, the display-only `call_usage` runtime event, the
+  `--json` `usage_by_role` key, the human per-role split block(s) and the
+  `--verbose` per-call token segment — so a cache read/write is attributable to
+  a node and tool belt, and the run total is split Senior vs Junior with each
+  role's own family normalization. **Remaining:** the web UsageFooter/TUI
+  status bar still render the merged counters only (consuming `usageByRole`
+  there is a follow-up), `RunRecord`/`run_end` do not carry the split (a
+  sidecar-rebuilt record would need a new event field), per-role cost is not
+  estimated, a failed run's per-role split is not attached to the error, and
+  pi's cache-miss/eviction *deltas* between turns (rather than per-call token
+  accounting) are still absent. Subagent (helper) usage stays a separate tier
+  by design.
 - **Remaining key-binding surfaces** — wave 16 shipped the web's three
   modifier global chords (command palette, find, shortcut reference) with the
   Settings → Keyboard capture UI, and wave 19 shipped the TUI's three global

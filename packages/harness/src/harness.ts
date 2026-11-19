@@ -226,6 +226,7 @@ import {
   roleProviderKind,
   type Tool,
   type ToolChatResponse,
+  USAGE_KEYS,
   type UsageTotals,
 } from "./provider.ts";
 import {
@@ -1236,6 +1237,19 @@ export interface PromptAuditEntry {
   systemChars: number;
   /** Characters in the rendered user message (the shared context). */
   userChars: number;
+  /**
+   * The tokens THIS request consumed, recorded after the reply settled
+   * (additive; present only when the provider tracks usage). A role provider's
+   * counters are cumulative, so the harness snapshots them before and after
+   * each call and stores the difference; the family mapping is the provider's
+   * own (`cached_tokens` for Anthropic cache reads, `cache_write_tokens` for
+   * cache writes, `prompt_tokens` when reported). An overflow retry is a
+   * separate provider request and therefore gets its own audit entry and its
+   * own delta. Compaction summarizer calls are not role prompt calls, so they
+   * stay out of this trail (they appear as a `call_usage` event with kind
+   * `compaction`).
+   */
+  usage?: UsageTotals;
 }
 
 /**
@@ -1270,6 +1284,16 @@ export interface HarnessResult {
   cancelled: boolean;
   /** Merged token usage of both roles' providers (zeros when untracked). */
   usage: UsageTotals;
+  /**
+   * The same run's usage split by acting role (additive; present only when at
+   * least one provider call was measured). Each half is the sum of that role's
+   * provider-call deltas, so its cache counters keep the provider family's own
+   * mapping and a mixed-family run stays honest per role. Compaction
+   * summarizer calls are attributed to the role whose provider ran them, so the
+   * two halves sum to {@link usage} for tracked providers (a provider without
+   * usage tracking contributes nothing to either half).
+   */
+  usageByRole?: { senior: UsageTotals; junior: UsageTotals };
   /**
    * Per-provider-call prompt/tool-belt audit trail, in call order: assembled
    * section names, the belt offered, and both prompt lengths. Summarizer
@@ -1308,6 +1332,11 @@ interface CooperationState {
   /** Per-provider-call prompt/tool-belt audit trail, in call order. */
   promptAudits: PromptAuditEntry[];
   /**
+   * Tokens consumed this run, split by acting role and accumulated from the
+   * per-call provider deltas (see {@link PromptAuditEntry.usage}).
+   */
+  usageByRole: { senior: UsageTotals; junior: UsageTotals };
+  /**
    * Denied `(action, target)` approval pairs and their denial counts. When a
    * pair reaches `APPROVAL_DENY_LIMIT` operator denials, further identical
    * requests are auto-denied without waking the broker (a stubborn model
@@ -1345,6 +1374,52 @@ type NodeResult = NodeName | "END";
 function usageOf(provider: Provider): UsageTotals {
   const tracked = provider as Provider & { usageSnapshot?: () => UsageTotals };
   return typeof tracked.usageSnapshot === "function" ? tracked.usageSnapshot() : emptyUsage();
+}
+
+/** A provider's usage snapshot, fail-soft: a throwing tracker reads as zeros. */
+function safeUsageOf(provider: Provider): UsageTotals {
+  try {
+    return usageOf(provider);
+  } catch {
+    return emptyUsage();
+  }
+}
+
+function usageInt(value: unknown): number {
+  const num = Number(value ?? 0) || 0;
+  return Number.isFinite(num) ? Math.trunc(num) : 0;
+}
+
+/**
+ * Per-counter difference `after - before`, clamped at zero. The role
+ * providers report CUMULATIVE counters, so one request's own tokens are the
+ * delta across the call. `prompt_tokens` is copied only when either side has
+ * it, keeping the OpenAI-compatible omission intact.
+ */
+function usageDelta(before: UsageTotals, after: UsageTotals): UsageTotals {
+  const delta = emptyUsage();
+  for (const key of USAGE_KEYS) {
+    delta[key] = Math.max(0, usageInt(after[key]) - usageInt(before[key]));
+  }
+  if (after.prompt_tokens !== undefined || before.prompt_tokens !== undefined) {
+    delta.prompt_tokens = Math.max(0, usageInt(after.prompt_tokens) - usageInt(before.prompt_tokens));
+  }
+  return delta;
+}
+
+/** Accumulate one call's delta into a role aggregate (in place). */
+function addUsage(target: UsageTotals, delta: UsageTotals): void {
+  for (const key of USAGE_KEYS) {
+    target[key] = usageInt(target[key]) + usageInt(delta[key]);
+  }
+  if (delta.prompt_tokens !== undefined) {
+    target.prompt_tokens = usageInt(target.prompt_tokens) + usageInt(delta.prompt_tokens);
+  }
+}
+
+/** True when an aggregate recorded at least one provider call. */
+function hasCalls(usage: UsageTotals): boolean {
+  return usageInt(usage.model_calls) > 0;
 }
 
 /**
@@ -1846,6 +1921,20 @@ export class TwoBrothersHarness {
     return mergeUsage(usageOf(this.providers.senior), usageOf(this.providers.junior));
   }
 
+  /**
+   * The additive `usageByRole` result field. Omitted entirely when no provider
+   * call was measured (a custom provider without usage tracking), so a
+   * zero-usage run's result shape stays byte-identical to before the field
+   * existed.
+   */
+  private usageByRoleField(state: CooperationState): {
+    usageByRole?: { senior: UsageTotals; junior: UsageTotals };
+  } {
+    const { senior, junior } = state.usageByRole;
+    if (!hasCalls(senior) && !hasCalls(junior)) return {};
+    return { usageByRole: { senior: { ...senior }, junior: { ...junior } } };
+  }
+
   // -- context helpers ---------------------------------------------------------
 
   private append(
@@ -1954,6 +2043,9 @@ export class TwoBrothersHarness {
    * exactly one entry per provider request. Never records prompt bodies.
    * The same entry is emitted as a `prompt_audit` runtime event, so a live
    * consumer sees it before the call's tool/envelope events.
+   *
+   * Returns the entry so {@link measureCall} can complete it with the tokens
+   * the call actually consumed (the counters only exist after the reply).
    */
   private auditPrompt(
     state: CooperationState,
@@ -1961,7 +2053,7 @@ export class TwoBrothersHarness {
     kind: string,
     messages: ChatMessage[],
     tools: Tool[],
-  ): void {
+  ): PromptAuditEntry {
     const system = messages.find((message) => message.role === "system")?.content ?? "";
     const user = messages.find((message) => message.role === "user")?.content ?? "";
     const sections = sectionNames(system);
@@ -1978,6 +2070,44 @@ export class TwoBrothersHarness {
     };
     state.promptAudits.push(entry);
     this.emitRuntime({ type: "prompt_audit", ...entry });
+    return entry;
+  }
+
+  /**
+   * Run ONE provider request and attribute the tokens it consumed to the
+   * acting role and node kind: the role provider's cumulative counters are
+   * snapshotted before and after the call, the difference is added to the
+   * run's per-role aggregate, copied onto the call's audit entry (when the
+   * seam has one) and emitted as an additive `call_usage` runtime event.
+   *
+   * Attribution is telemetry: it is fail-soft (a throwing usage tracker reads
+   * as zeros and a throwing event consumer never reaches the caller), and a
+   * provider that tracks no usage simply contributes nothing. The mapping of
+   * cache reads/writes stays the adapter's own — this seam only subtracts
+   * counters, it never re-derives them.
+   */
+  private async measureCall<T>(
+    state: CooperationState,
+    role: "senior" | "junior",
+    kind: string,
+    entry: PromptAuditEntry | undefined,
+    call: () => Promise<T>,
+  ): Promise<T> {
+    const before = safeUsageOf(this.providers[role]);
+    try {
+      return await call();
+    } finally {
+      try {
+        const delta = usageDelta(before, safeUsageOf(this.providers[role]));
+        if (hasCalls(delta)) {
+          addUsage(state.usageByRole[role], delta);
+          if (entry !== undefined) entry.usage = delta;
+          this.emitRuntime({ type: "call_usage", role, kind, usage: { ...delta } });
+        }
+      } catch {
+        // usage attribution never changes a run's outcome
+      }
+    }
   }
 
   /** Structured ask: tolerant parse → sanitize (the Python text fallback path). */
@@ -2016,17 +2146,21 @@ export class TwoBrothersHarness {
     // token streaming is off or the call produced no thinking deltas).
     const capture = this.reasoningCapture(role, responseKind);
     try {
-      this.auditPrompt(state, role, responseKind, messages, []);
+      const audit = this.auditPrompt(state, role, responseKind, messages, []);
       try {
-        text = await this.providers[role].chat(messages, responseKind, this.options.signal, capture.options);
+        text = await this.measureCall(state, role, responseKind, audit, () =>
+          this.providers[role].chat(messages, responseKind, this.options.signal, capture.options),
+        );
       } catch (err) {
         if (!(err instanceof ProviderContextOverflowError)) throw err;
         // pi's overflow recovery: compact once and retry the same node against
         // the compacted context. A second overflow surfaces to the caller.
         if (!(await this.compactAfterOverflow(state))) throw err;
         const retry = withReplyFormat(rebuild === undefined ? messages : rebuild(), responseKind);
-        this.auditPrompt(state, role, responseKind, retry, []);
-        text = await this.providers[role].chat(retry, responseKind, this.options.signal, capture.options);
+        const retryAudit = this.auditPrompt(state, role, responseKind, retry, []);
+        text = await this.measureCall(state, role, responseKind, retryAudit, () =>
+          this.providers[role].chat(retry, responseKind, this.options.signal, capture.options),
+        );
       }
     } finally {
       capture.finish();
@@ -2188,16 +2322,20 @@ export class TwoBrothersHarness {
     // and to the repair envelope, and its thinking gets its own reasoning record.
     const capture = this.reasoningCapture(role, kind);
     try {
-      this.auditPrompt(state, role, kind, repaired, []);
+      const audit = this.auditPrompt(state, role, kind, repaired, []);
       try {
-        return await this.providers[role].chat(repaired, kind, this.options.signal, capture.options);
+        return await this.measureCall(state, role, kind, audit, () =>
+          this.providers[role].chat(repaired, kind, this.options.signal, capture.options),
+        );
       } catch (err) {
         if (!(err instanceof ProviderContextOverflowError)) throw err;
         if (!(await this.compactAfterOverflow(state))) return null;
         // the repair turn already rides in the shared context; rebuild from it
         const retry = withReplyFormat(rebuild === undefined ? repaired : rebuild(), kind);
-        this.auditPrompt(state, role, kind, retry, []);
-        return await this.providers[role].chat(retry, kind, this.options.signal, capture.options);
+        const retryAudit = this.auditPrompt(state, role, kind, retry, []);
+        return await this.measureCall(state, role, kind, retryAudit, () =>
+          this.providers[role].chat(retry, kind, this.options.signal, capture.options),
+        );
       }
     } finally {
       capture.finish();
@@ -2221,7 +2359,12 @@ export class TwoBrothersHarness {
   ): Promise<boolean> {
     const role = settings.summarizerRole ?? "senior";
     try {
-      const changed = await compactContext(state.ctx, this.providers[role], settings, this.options.signal);
+      // The summarizer is a real provider call on the role's provider, so its
+      // tokens are attributed to that role (kind `compaction`) even though it
+      // has no prompt-audit row.
+      const changed = await this.measureCall(state, role, "compaction", undefined, () =>
+        compactContext(state.ctx, this.providers[role], settings, this.options.signal),
+      );
       if (changed) {
         const summary = state.ctx.events.find(isCompactionSummary);
         if (summary !== undefined) {
@@ -3841,15 +3984,19 @@ export class TwoBrothersHarness {
       const callOptions =
         capture.options === undefined ? baseOptions : { ...baseOptions, ...capture.options };
       try {
-        this.auditPrompt(state, role, auditKind, messages, tools);
+        const audit = this.auditPrompt(state, role, auditKind, messages, tools);
         try {
-          response = await chatWithTools(messages, tools, callOptions);
+          response = await this.measureCall(state, role, auditKind, audit, () =>
+            chatWithTools(messages, tools, callOptions),
+          );
         } catch (err) {
           if (!(err instanceof ProviderContextOverflowError)) throw err;
           if (!(await this.compactAfterOverflow(state))) throw err;
           messages = withReplyFormat(rebuild(), formatKind);
-          this.auditPrompt(state, role, auditKind, messages, tools);
-          response = await chatWithTools(messages, tools, callOptions);
+          const retryAudit = this.auditPrompt(state, role, auditKind, messages, tools);
+          response = await this.measureCall(state, role, auditKind, retryAudit, () =>
+            chatWithTools(messages, tools, callOptions),
+          );
         }
       } finally {
         capture.finish();
@@ -4381,6 +4528,7 @@ export class TwoBrothersHarness {
       verifySummary: "",
       compactNow: this.options.compaction?.force === true,
       promptAudits: [],
+      usageByRole: { senior: emptyUsage(), junior: emptyUsage() },
       approvalDenials: new Map(),
       injectedSkills: new Set(),
       todos: [],
@@ -4454,6 +4602,7 @@ export class TwoBrothersHarness {
         cancelled: false,
         usage: this.usageSnapshot(),
         promptAudits: state.promptAudits,
+        ...this.usageByRoleField(state),
         ...(state.todos.length > 0
           ? { todos: state.todos.map((todo) => ({ ...todo })) }
           : {}),
@@ -4487,6 +4636,7 @@ export class TwoBrothersHarness {
           cancelled: true,
           usage: this.usageSnapshot(),
           promptAudits: state.promptAudits,
+          ...this.usageByRoleField(state),
           ...(state.todos.length > 0
             ? { todos: state.todos.map((todo) => ({ ...todo })) }
             : {}),

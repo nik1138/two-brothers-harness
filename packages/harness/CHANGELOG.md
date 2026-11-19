@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-turn Senior/Junior usage + cache split (additive):** every provider
+  request's family-mapped counters (input/output, cache reads, cache writes,
+  normalized prompt) are attributed to the acting role and node kind by
+  snapshotting the role provider before and after the call, and aggregated per
+  turn and per role. Surfaces, all additive: `HarnessResult.usageByRole`
+  (`{senior, junior}`, omitted when the provider tracks no usage),
+  `PromptAuditEntry.usage` (that call's delta; overflow retries get their own
+  row, the compaction summarizer has none), a display-only `call_usage`
+  runtime event (`{role, kind, usage}`, after each request — `kind:
+  "compaction"` for summarizer passes), the `--json` `usage_by_role` key, a
+  per-role split block in human `run`/`chat` output
+  (`senior: 100 in / 20 out · cache 40% · write 7 · 2 calls`) and the same
+  lines on stderr in `--mode print`, plus a per-call token segment on
+  `--verbose` prompt-audit rows. The merged `usage` counters, the compact
+  footer bytes, `--stream`, the protocol envelopes, both `prompts.json` copies
+  and `provider.ts` are untouched; no new runtime dependencies. Tests:
+  `tests/usagebyrole.test.ts`.
+
 - **Real `auto` mode + Senior solo decision:** `auto` is no longer a consult
   alias. A new `senior_route` entry node (auto runs only) makes ONE plain
   senior call requesting the code-only `route` payload

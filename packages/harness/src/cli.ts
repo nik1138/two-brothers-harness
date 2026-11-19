@@ -87,6 +87,7 @@ import {
   humanFooter,
   paintRole,
   renderMessages,
+  roleUsageLines,
   sanitizeOneLine,
 } from "./clilayout.ts";
 import { formatDoctorReport, runDoctor } from "./doctor.ts";
@@ -550,6 +551,29 @@ function parseCommandArgs(
 }
 
 /**
+ * The per-call token segment appended to a verbose prompt-audit row: additive
+ * and empty when the provider tracks no usage, e.g.
+ * `; tokens 120 in / 30 out, cache 40%, write 10`. Counters are normalized the
+ * same way as the footer (family `prompt_tokens` wins; `cache` is
+ * `cached / prompt`), so a cache read or write is attributable to the node
+ * kind and tool belt of the row it belongs to.
+ */
+function auditUsageSuffix(usage: PromptAuditEntry["usage"]): string {
+  if (usage === undefined) return "";
+  const input = usageInt(usage.input_tokens);
+  const prompt = usage.prompt_tokens === undefined ? input : usageInt(usage.prompt_tokens);
+  const output = usageInt(usage.output_tokens);
+  const cached = usageInt(usage.cached_tokens);
+  const written = usageInt(usage.cache_write_tokens);
+  const percent =
+    prompt > 0 ? Math.min(100, Math.round((cached * 100) / prompt)) : cached > 0 ? 100 : 0;
+  const parts = [`tokens ${prompt} in / ${output} out`];
+  if (cached > 0) parts.push(`cache ${percent}%`);
+  if (written > 0) parts.push(`write ${written}`);
+  return `; ${parts.join(", ")}`;
+}
+
+/**
  * One line per provider call: the assembled section names, the tool belt
  * offered, and both prompt lengths. Names and sizes only — never bodies.
  * The role is painted with its transcript token and the node kind is `dim`.
@@ -565,7 +589,8 @@ function renderPromptAudits(
     lines.push(
       `  ${paintRole(style, audit.role)} ${style.dim(audit.kind)}: ` +
         `${audit.sections.join(" > ")}; tools: ${tools}; ` +
-        `system ${audit.systemChars} chars, user ${audit.userChars} chars`,
+        `system ${audit.systemChars} chars, user ${audit.userChars} chars` +
+        auditUsageSuffix(audit.usage),
     );
   }
   return lines.join("\n");
@@ -1489,6 +1514,10 @@ async function runOnce(
           events: result.messages,
           decision: result.decision,
           usage: result.usage,
+          // Additive per-role split of the same counters, present only when a
+          // provider call was actually measured; zero-usage objects stay
+          // byte-identical to the pre-split shape.
+          ...(result.usageByRole !== undefined ? { usage_by_role: result.usageByRole } : {}),
           cost: estimateRunCost(cfg, result.usage ?? {}),
           rounds: result.rounds,
           errors: result.errors,
@@ -1506,6 +1535,11 @@ async function runOnce(
       io.error(usageLine(result.usage ?? {}, textStyle)); // stdout carries decision only
       const cost = costLine(cfg, result.usage ?? {}, textStyle);
       if (cost) io.error(cost);
+      // Additive per-role split on stderr, after the unchanged machine
+      // `tokens:`/`cost:` diagnostics; stdout keeps the decision only.
+      for (const line of roleUsageLines(result.usageByRole, textStyle, terminalWidth())) {
+        io.error(line);
+      }
       if (options.jsonDecision === true) {
         io.log(JSON.stringify(result.decision));
       } else {
@@ -1545,6 +1579,16 @@ async function runOnce(
       textStyle,
       terminalWidth(),
     );
+    // Additive per-turn Senior/Junior split + cache breakdown: one line per
+    // role that made a model call, in its own blank-line-separated block before
+    // the unchanged merged footer (so the footer stays the last, compact
+    // summary line). Both the live and the piped path emit it the same way, so
+    // `--live` on a pipe still changes no byte.
+    const split = roleUsageLines(result.usageByRole, textStyle, terminalWidth());
+    if (split.length > 0) {
+      io.log("");
+      for (const line of split) io.log(line);
+    }
     if (footer !== null) {
       // Live mode reserves the footer for the end (exactly once); the piped
       // path keeps its historical blank-line + footer layout.
