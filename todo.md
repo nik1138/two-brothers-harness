@@ -40,8 +40,9 @@ Last updated: **2026-11-19**.
 
 ## In flight
 
-- [ ] **Nothing in flight on `main`.** Three items are queued behind owner
-      decisions (below); no code is mid-landing.
+Nothing is in flight on `main` — no code is mid-landing. The open owner
+decisions (below) gate the next work.
+
 - [ ] **Test-meaningfulness audit — NEEDS-DESIGN bucket.** Report
       `.tmp/test-audit-report.md`: the suite is meaningful overall (no
       duplicate suites, no mock-verifies-itself clusters; apparent
@@ -134,8 +135,8 @@ Last updated: **2026-11-19**.
       each tree's self-referential npm-workspace junction
       `node_modules\@two-brothers\harness` was unlinked before the
       recursive delete.
-- [ ] `.tmp/lane-usage-by-role` redundant artifacts — **removed, verified
-      absent** (no pending removal).
+- [x] **DONE — `.tmp/lane-usage-by-role` redundant artifacts removed**
+      (verified absent 2026-11-19; nothing pending).
 - [ ] **KEEP the five unmerged worktrees** listed under Owner items until
       the owner decides (merge/abandon/keep). opencode-owned worktrees and
       `Temp/tb-review-tip` are not touched either way.
