@@ -563,8 +563,8 @@ the protocol reference and is not modified by work here either.
    file absent at startup loads on a later reload). CLI tracks the keys-file
    origin/state (`TuiAppOptions.keysSource/keysState/keysDiagnostics`); tests
    `tuikeys` +3 and `tuiintegration` +1; all 21 `tui*.test.ts` suites stay
-   green. Remaining: in-TUI editor, file watcher/auto-reload, rebinding beyond
-   the three global chords.
+   green. Remaining: rebinding beyond the three global chords (a per-surface
+   conflict model is required).
    **wave 23:** two feature slices. (1) TUI **keys-file auto-reload (opt-in):**
    `tui --keys-watch` / `TWO_BROTHERS_TUI_KEYS_WATCH` (startup-captured, never
    persisted, off by default) polls the captured keys file with

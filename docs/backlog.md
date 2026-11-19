@@ -1804,14 +1804,29 @@ imported or executed on load/activation. Sources: `src/pluginbundle.ts`
   modifier global chords (command palette, find, shortcut reference) with the
   Settings → Keyboard capture UI, and wave 19 shipped the TUI's three global
   chords (command palette, shortcut reference, draft stash) via
-  `tui --keys-file`/`TWO_BROTHERS_TUI_KEYS_FILE`. Still fixed by design:
+  `tui --keys-file`/`TWO_BROTHERS_TUI_KEYS_FILE`. Two more slices shipped:
+  `/keys edit` (commit `7834514`) opens a dialog that captures a chord for
+  each of the three globals, validates it through the existing keys-file
+  grammar and `resolveTuiCommands`, saves atomically (0600 temp-file +
+  rename), refuses fixed-key/other-global conflicts in place and has a
+  trailing reset-all row (`src/tui/view/keyseditor.ts`,
+  `tests/tuikeyseditor.test.ts`; `docs/keyboard.md` "In-app editing
+  (/keys edit)"), plus wave 23's opt-in automatic reload of the captured
+  file (`tui --keys-watch` / `TWO_BROTHERS_TUI_KEYS_WATCH=1`, off by
+  default) beside `/keys show` and `/keys reload`. What remains is rebinding
+  **beyond** the three global chords, which needs a per-surface conflict
+  model; a read-only scouting brief is local-only at
+  `.tmp/keybinding-surfaces-design.md` (not committed): key uniqueness is a
+  property of co-live namespaces rather than the whole app, schema v2 adds a
+  `surfaces` section while v1 files stay compatible, the approval panel is
+  permanently closed, and the recommended first slice is the transcript
+  read-side actions (`tool-expand`, `copy`, `panel`). Still fixed by design:
   composer/typing keys (IME- and picker-sensitive), picker/overlay
-  navigation, dual-Escape stop, `?`/search/scroll keys, approval-panel keys
-  and the find bar. The TUI also gained opt-in automatic reload of the
-  captured keys file in wave 23 (`tui --keys-watch` /
-  `TWO_BROTHERS_TUI_KEYS_WATCH=1`, off by default) alongside `/keys show` and
-  `/keys reload`; an in-TUI key-binding editor is still absent. Extending
-  rebinding there needs a per-surface conflict model.
+  navigation, the **web's** dual-Escape stop (`web/src/composerKeys.ts`,
+  `web/src/App.vue`; the TUI cancels a turn on a single `Esc` and arms quit
+  with Esc-Esc, `src/tui/app.ts` `cancelKey`/`requestQuit`, pinned by
+  `tests/tuiintegration.test.ts` "safe key precedence"), `?`/search/scroll
+  keys, approval-panel keys and the find bar.
 - **WAN fault / long-soak coverage (manual)** — WAN latency/load and
   real-provider fault injection are not covered by the offline gates, and long
   soaks are an operator choice; keep those manual (they need a real endpoint
