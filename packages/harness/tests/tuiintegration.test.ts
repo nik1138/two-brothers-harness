@@ -1329,6 +1329,157 @@ test("/keys edit captures a chord, refuses fixed/other-global conflicts, and sav
   }
 });
 
+test("/keys edit refuses an invalid existing keys file until /keys reload sees it fixed", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-keys-invalid-"));
+  const keysFile = path.join(root, "keys.json");
+  const source: TuiKeysSource = { path: keysFile, origin: "flag" };
+  // Notices wrap at the 80-column test terminal, so compare the words, not the
+  // physical rows.
+  const flat = (text: string): string => text.replace(/\s+/g, " ").trim();
+  const brokenJson = "{oops\n";
+  fs.writeFileSync(keysFile, brokenJson, "utf8");
+  // The loader is the startup seam the CLI passes to the app (`keysState` /
+  // `keysDiagnostics`): it reports the real `invalid` state the guard reads and
+  // the diagnostic the refusal quotes.
+  const initial = loadTuiKeyCommands(source);
+  assert.equal(initial.state, "invalid");
+  assert.match(initial.diagnostics.join("; "), /keys\.json: invalid JSON/);
+  const { app, input, output } = startApp({
+    commands: initial.commands,
+    keysSource: source,
+    keysState: initial.state,
+    keysDiagnostics: initial.diagnostics,
+  });
+  try {
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+
+    // The refusal lands before any dialog: the honest diagnostic, the
+    // fix/remove + `/keys reload` guidance, and the file left byte-identical.
+    input.type("/keys edit");
+    input.enter();
+    assert.ok(await waitFor(() => textOf(output).includes("keys: cannot edit")));
+    assert.ok(
+      flat(lastFrameText(output)).includes(
+        flat(
+          `keys: cannot edit — ${keysFile} is invalid (${keysFile}: invalid JSON); ` +
+            "fix or remove it, then /keys reload",
+        ),
+      ),
+      "the refusal names the file, the real diagnostic and the fix/remove guidance",
+    );
+    const refused = lastFrameText(output);
+    assert.equal(refused.includes("KEY BINDINGS"), false, "no editor dialog opens");
+    assert.equal(
+      refused.includes("The three global chords can be changed here."),
+      false,
+      "no overlay opens at all",
+    );
+    assert.equal(refused.includes("press keys…"), false, "no chord capture starts");
+    assert.equal(fs.readFileSync(keysFile, "utf8"), brokenJson, "the invalid file is untouched");
+
+    // `/keys show` agrees with the refusal instead of claiming a usable file.
+    input.type("/keys show");
+    input.enter();
+    assert.ok(
+      await waitFor(() =>
+        flat(lastFrameText(output)).includes(
+          `keys file: ${keysFile} (flag) — invalid; defaults active`,
+        ),
+      ),
+      "the status reports the invalid file honestly",
+    );
+
+    // A reload of a still-broken file (now failing registry validation, not
+    // JSON parsing) keeps the refusal and the bytes.
+    const unknownId = `${JSON.stringify({ version: 1, bindings: { nope: ["ctrl+l"] } })}\n`;
+    fs.writeFileSync(keysFile, unknownId, "utf8");
+    input.type("/keys reload");
+    input.enter();
+    assert.ok(
+      await waitFor(() =>
+        flat(lastFrameText(output)).includes(
+          `keys reload failed: ${keysFile}: "nope": unknown TUI command id — keeping the current chords`,
+        ),
+      ),
+      "the failed reload names the validation error",
+    );
+    input.type("/keys edit");
+    input.enter();
+    assert.ok(
+      await waitFor(() =>
+        flat(lastFrameText(output)).includes(
+          flat(
+            `keys: cannot edit — ${keysFile} is invalid ` +
+              `(${keysFile}: "nope": unknown TUI command id); ` +
+              "fix or remove it, then /keys reload",
+          ),
+        ),
+      ),
+      "the reloaded invalid state re-arms the refusal",
+    );
+    assert.equal(lastFrameText(output).includes("KEY BINDINGS"), false);
+    assert.equal(fs.readFileSync(keysFile, "utf8"), unknownId, "the rejected file is untouched");
+
+    // Fixing the file and reloading re-enables the editor.
+    const fixed = `${JSON.stringify({ version: 1, bindings: { palette: ["ctrl+l"] } }, null, 2)}\n`;
+    fs.writeFileSync(keysFile, fixed, "utf8");
+    input.type("/keys reload");
+    input.enter();
+    assert.ok(
+      await waitFor(() => flat(lastFrameText(output)).includes("keys reloaded: palette Ctrl+L")),
+      "the fixed file loads and swaps the active table",
+    );
+    input.type("/keys edit");
+    input.enter();
+    assert.ok(await waitFor(() => lastFrameText(output).includes("KEY BINDINGS")));
+    const opened = flat(lastFrameText(output));
+    assert.ok(opened.includes("state: loaded"), "the dialog reports the loaded state");
+    assert.ok(opened.includes("Command palette Ctrl+L"), "the dialog shows the reloaded chord");
+    input.key("escape");
+    assert.ok(await waitFor(() => !lastFrameText(output).includes("KEY BINDINGS")));
+
+    // Breaking the file again and reloading re-arms the guard, so the refusal
+    // tracks the live load state, not just the startup one.
+    const wrongVersion = `${JSON.stringify({ version: 2, bindings: {} })}\n`;
+    fs.writeFileSync(keysFile, wrongVersion, "utf8");
+    input.type("/keys reload");
+    input.enter();
+    assert.ok(
+      await waitFor(() =>
+        flat(lastFrameText(output)).includes(
+          `keys reload failed: ${keysFile}: unsupported version (expected 1) — keeping the current chords`,
+        ),
+      ),
+    );
+    input.type("/keys edit");
+    input.enter();
+    assert.ok(
+      await waitFor(() =>
+        flat(lastFrameText(output)).includes(
+          flat(
+            `keys: cannot edit — ${keysFile} is invalid ` +
+              `(${keysFile}: unsupported version (expected 1)); fix or remove it, then /keys reload`,
+          ),
+        ),
+      ),
+      "the live reload state re-arms the refusal",
+    );
+    assert.equal(lastFrameText(output).includes("KEY BINDINGS"), false);
+    assert.equal(fs.readFileSync(keysFile, "utf8"), wrongVersion, "the rejected file is untouched");
+    assert.equal(await quit(input, app), 0);
+  } finally {
+    // A failed assertion must never leave the app running: every assembled app
+    // shares the default session-store writer lock, and the next start would
+    // fail before its first frame.
+    try {
+      await quit(input, app);
+    } catch {
+      // the app already exited (or its fake streams are gone)
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("/sessions picker: sidecar and derived titles with human ages, resume unchanged", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-tui-sessions-picker-"));
   const sessionsDir = path.join(root, "sessions");
