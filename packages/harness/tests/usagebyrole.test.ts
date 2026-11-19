@@ -367,7 +367,9 @@ test("cli layout: the role split renders cache reads and writes per role", () =>
     FALLBACK_TERMINAL_WIDTH,
   );
   assert.deepEqual(lines, [
-    "senior: 100 in / 20 out · cache 40% · write 7 · 2 calls",
+    // `miss` is derived display: the role's prompt total minus its cache reads
+    // (100 - 40). A role with no cache read keeps its historical bytes.
+    "senior: 100 in / 20 out · cache 40% · miss 60 · write 7 · 2 calls",
     "junior: 10 in / 5 out · 1 call",
   ]);
 
@@ -420,6 +422,38 @@ test("cli layout: the role split omits untracked roles and caps the width", () =
   const width = (line: string): number => [...line].length;
   assert.ok(width(narrow[0] as string) <= 20, narrow[0]);
   assert.ok((narrow[0] as string).endsWith("…"), narrow[0]);
+});
+
+test("cli layout: the role split appends per-role cost only when priced", () => {
+  const usageByRole = {
+    senior: { input_tokens: 30, output_tokens: 15, model_calls: 3 },
+    junior: { input_tokens: 10, output_tokens: 5, model_calls: 1 },
+  };
+  // The merged footer's single-model rule is untouched: the split carries its
+  // own per-role totals (0.000225 and 0.000075 USD for gpt-4o here).
+  assert.deepEqual(
+    roleUsageLines(usageByRole, plainCliStyle, FALLBACK_TERMINAL_WIDTH, {
+      senior: 0.000225,
+      junior: 0.000075,
+    }),
+    [
+      "senior: 30 in / 15 out · 3 calls · cost $0.0002",
+      "junior: 10 in / 5 out · 1 call · cost $0.0001",
+    ],
+  );
+  // An unpriced/mixed half omits its segment; the other half keeps its own.
+  assert.deepEqual(
+    roleUsageLines(usageByRole, plainCliStyle, FALLBACK_TERMINAL_WIDTH, {
+      senior: 0.000225,
+      junior: null,
+    }),
+    ["senior: 30 in / 15 out · 3 calls · cost $0.0002", "junior: 10 in / 5 out · 1 call"],
+  );
+  // No cost view = exactly the pre-cost bytes.
+  assert.deepEqual(roleUsageLines(usageByRole, plainCliStyle, FALLBACK_TERMINAL_WIDTH, null), [
+    "senior: 30 in / 15 out · 3 calls",
+    "junior: 10 in / 5 out · 1 call",
+  ]);
 });
 
 // ---------------------------------------------------------------------------
@@ -475,7 +509,74 @@ test("run: --json carries the additive usage_by_role split", async () => {
       cache_write_tokens: 0,
     },
   });
+  // The unpriced mock model adds no cost_by_role key: the machine object keeps
+  // its pre-cost shape unless a role's own model resolves to a price.
+  assert.ok(!("cost_by_role" in parsed), "no fabricated per-role cost key");
   assert.deepEqual(io.err, [], "a clean machine run keeps stderr silent");
+});
+
+test("run: --json carries cost_by_role when each role's own model is priced", async () => {
+  const io = makeIO();
+  assert.equal(
+    await main(
+      [...MOCK_RUN_ARGS, "--json", "--senior-model", "gpt-4o", "--junior-model", "gpt-4o"],
+      io,
+    ),
+    0,
+    io.err.join("\n"),
+  );
+  const parsed = JSON.parse(io.out[0] as string) as Record<string, any>;
+  // The merged cost keeps its exact shape/rule and is still the one-model sum.
+  assert.equal(parsed.cost.model, "gpt-4o");
+  assert.deepEqual(Object.keys(parsed.cost_by_role).sort(), ["junior", "senior"]);
+  assert.equal(parsed.cost_by_role.senior.model, "gpt-4o");
+  assert.equal(parsed.cost_by_role.junior.model, "gpt-4o");
+  // gpt-4o: 30 in + 15 out = $0.000225; 10 in + 5 out = $0.000075.
+  assert.ok(Math.abs(parsed.cost_by_role.senior.totalCost - 0.000225) < 1e-12);
+  assert.ok(Math.abs(parsed.cost_by_role.junior.totalCost - 0.000075) < 1e-12);
+  assert.ok(
+    Math.abs(
+      parsed.cost_by_role.senior.totalCost +
+        parsed.cost_by_role.junior.totalCost -
+        parsed.cost.totalCost,
+    ) < 1e-12,
+    "the priced halves sum to the merged estimate",
+  );
+});
+
+test("run: --json prices a mixed-model run per role while the merged cost stays null", async () => {
+  const io = makeIO();
+  assert.equal(
+    await main(
+      [...MOCK_RUN_ARGS, "--json", "--senior-model", "gpt-4o", "--junior-model", "deepseek-chat"],
+      io,
+    ),
+    0,
+    io.err.join("\n"),
+  );
+  const parsed = JSON.parse(io.out[0] as string) as Record<string, any>;
+  assert.equal(parsed.cost, null, "the merged single-model rule is unchanged");
+  assert.equal(parsed.cost_by_role.senior.model, "gpt-4o");
+  assert.equal(parsed.cost_by_role.junior.model, "deepseek-chat");
+  assert.ok(Number.isFinite(parsed.cost_by_role.senior.totalCost));
+  assert.ok(Number.isFinite(parsed.cost_by_role.junior.totalCost));
+});
+
+test("run: text mode appends per-role cost to the split lines only", async () => {
+  const io = makeIO();
+  assert.equal(
+    await main(
+      [...MOCK_RUN_ARGS, "--senior-model", "gpt-4o", "--junior-model", "gpt-4o"],
+      io,
+    ),
+    0,
+    io.err.join("\n"),
+  );
+  const rows = io.out;
+  assert.ok(rows.includes("senior: 30 in / 15 out · 3 calls · cost $0.0002"), rows.join("\n"));
+  assert.ok(rows.includes("junior: 10 in / 5 out · 1 call · cost $0.0001"), rows.join("\n"));
+  // The merged footer keeps its own single cost segment and its last-line place.
+  assert.equal(rows[rows.length - 1], "tokens 40 in / 20 out · 4 calls · cost $0.0003");
 });
 
 test("run: --verbose prompt-audit rows carry the per-call token segment", async () => {

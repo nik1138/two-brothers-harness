@@ -145,6 +145,10 @@ const roleRows = computed(() => props.roleUsages ?? [])
           <span class="usage-sep" aria-hidden="true">·</span>
           <span :title="row.cacheTitle ?? undefined">{{ row.cache }}</span>
         </template>
+        <template v-if="row.miss !== null">
+          <span class="usage-sep" aria-hidden="true">·</span>
+          <span>{{ row.miss }}</span>
+        </template>
         <template v-if="row.write !== null">
           <span class="usage-sep" aria-hidden="true">·</span>
           <span>{{ row.write }}</span>

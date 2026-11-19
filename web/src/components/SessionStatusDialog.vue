@@ -162,6 +162,7 @@ const mcpBlock = computed(() =>
             <template v-if="row.cache !== null">
               · <span :title="row.cacheTitle ?? undefined">{{ row.cache }}</span>
             </template>
+            <template v-if="row.miss !== null"> · {{ row.miss }}</template>
             <template v-if="row.write !== null"> · {{ row.write }}</template>
             · {{ row.modelCalls }} model call{{ row.modelCalls === 1 ? '' : 's' }}
           </dd>

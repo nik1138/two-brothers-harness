@@ -1786,7 +1786,16 @@ imported or executed on load/activation. Sources: `src/pluginbundle.ts`
   web UsageFooter + `/status` dialog and the TUI Ctrl+B status panel render the
   Senior/Junior split with each role's tokens in/out and cache reads/writes.
   The status bar, footer tips, keymap and machine CLI outputs are unchanged.
-  **Remaining:** per-role cost is not estimated, a failed run's per-role split
+  **Follow-up shipped (feat/usage-followups, additive):** per-role cost is
+  estimated from each role's own model and split counters — a `cost` segment on
+  the human per-role split lines and the additive `cost_by_role` key in
+  `--json` (absent unless at least one role's model is priced; the merged
+  `cost` keeps its single-model rule and stays `null` on a mixed-model run), and
+  the derived cache-miss count (prompt minus cache reads, shown only when the
+  role recorded a cache read) is displayed in the CLI split lines, the web
+  usage footer and `/status` rows, and the TUI Ctrl+B per-role rows without a
+  new wire field.
+  **Remaining:** a failed run's per-role split
   is not attached to the thrown error (the live/rebuilt record still carries
   the calls it measured), and pi's cache-miss/eviction *deltas* between turns
   (rather than per-call token accounting) are still absent. Subagent (helper)

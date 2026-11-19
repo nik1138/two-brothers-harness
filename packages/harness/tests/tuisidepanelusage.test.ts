@@ -4,7 +4,8 @@
  * The Ctrl+B panel keeps its merged CONTEXT/TOKENS/CACHE rows untouched and
  * gains SENIOR USE / JUNIOR USE rows directly beneath them when the turn
  * reported a `HarnessResult.usageByRole` split: tokens in/out plus the role's
- * own cache read percentage and cache writes. Absent split (old provider /
+ * own cache read percentage, the derived cache-miss count when that role read
+ * the cache, and cache writes. Absent split (old provider /
  * mock) renders exactly the pre-feature document; a role that answered no call
  * gets no row (never a fabricated zero half); narrow panels clip the value
  * with the shared `…` marker instead of dropping the row.
@@ -60,11 +61,25 @@ test("per-role usage rows render beneath the merged CACHE row", () => {
   assert.ok(cache >= 0 && senior === cache + 1 && junior === senior + 1 && cost === junior + 1);
   assert.equal(
     entries[senior].value,
-    "in 1.2k · out 340 · cache 42% · write 60",
+    // `miss` is derived: prompt (1,200) minus the 500 cache reads.
+    "in 1.2k · out 340 · cache 42% · miss 700 · write 60",
   );
-  // junior: no cache writes → the write segment is omitted, and 0 cached is a
-  // real measured 0% (not "unknown")
+  // junior: no cache reads/writes → the miss/write segments are omitted, and
+  // 0 cached is a real measured 0% (not "unknown")
   assert.equal(entries[junior].value, "in 800 · out 120 · cache 0%");
+});
+
+test("a fully cached role reports a zero miss", () => {
+  const entries = sidePanelEntries(
+    state({
+      usageByRole: { senior: { ...SENIOR, cached_tokens: 1200 }, junior: JUNIOR },
+    }),
+  );
+  const senior = entries.find((entry) => entry.label === "SENIOR USE");
+  assert.equal(
+    senior?.value,
+    "in 1.2k · out 340 · cache 100% · miss 0 · write 60",
+  );
 });
 
 test("an absent split leaves the historical merged-only panel", () => {

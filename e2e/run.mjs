@@ -5427,6 +5427,8 @@ async function scenarioToolPreview(runner) {
       if (prompt <= 0) return cached > 0 ? 100 : null
       return Math.min(100, Math.round((cached / prompt) * 100))
     }
+    // Derived cache-miss display: prompt total minus cache reads (no wire field).
+    const missOf = (usage) => Math.max(0, promptOf(usage) - (Number(usage.cached_tokens) || 0))
     const roleRows = page.locator('.usage-roles .usage-role')
     await waitFor(async () => (await roleRows.count()) === 2, {
       desc: 'the footer Senior/Junior usage rows',
@@ -5451,6 +5453,13 @@ async function scenarioToolPreview(runner) {
     assert.equal(cacheOf(split.junior), 0, 'the scripted Junior read no cache')
     assert.ok(seniorText.includes('cache 50%'), `Senior cache segment: ${seniorText}`)
     assert.ok(juniorText.includes('cache 0%'), `Junior cache segment: ${juniorText}`)
+    // Derived cache-miss display: prompt minus cache reads, only for a role
+    // that read the cache (Junior recorded none).
+    assert.ok(
+      seniorText.includes(`miss ${fmt(missOf(split.senior))} tok`),
+      `Senior derived miss segment: ${seniorText}`,
+    )
+    assert.ok(!juniorText.includes('miss '), `Junior has no miss segment: ${juniorText}`)
 
     // The /status dialog shows the same split, one row per measured role.
     await page.locator('textarea.composer-input').fill('/')
@@ -5471,6 +5480,12 @@ async function scenarioToolPreview(runner) {
         text.includes(expected),
         `${role} status row does not carry the split (${text} vs ${expected})`,
       )
+      if (role === 'Senior') {
+        assert.ok(
+          text.includes(`miss ${fmt(missOf(usage))} tok`),
+          `Senior status row carries the derived miss count: ${text}`,
+        )
+      }
     }
     await page.keyboard.press('Escape')
     await statusDialog.waitFor({ state: 'hidden' })

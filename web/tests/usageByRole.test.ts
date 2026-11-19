@@ -137,10 +137,18 @@ test('roleUsageViews renders measured roles only, Senior first', () => {
   assert.equal(rows[0].tokens, 'in 1,200 / out 340 tok')
   assert.equal(rows[0].cache, 'cache 42%')
   assert.equal(rows[0].cacheTitle, 'cached 500 of 1,200 prompt tokens')
+  // Derived display, never a wire field: 1,200 prompt - 500 cache reads.
+  assert.equal(rows[0].miss, 'miss 700 tok')
   assert.equal(rows[0].write, 'write 60 tok')
-  // junior: a measured 0% is shown, and no write segment when nothing billed
+  // junior: a measured 0% is shown, no miss/write segment when nothing read/billed
   assert.equal(rows[1].cache, 'cache 0%')
+  assert.equal(rows[1].miss, null)
   assert.equal(rows[1].write, null)
+
+  // A fully cached role honestly reports a zero miss.
+  const fullyCached = roleUsageView('senior', { ...SENIOR, cached_tokens: 1200 })
+  assert.ok(fullyCached)
+  assert.equal(fullyCached.miss, 'miss 0 tok')
 
   // a role that answered no call gets no row; no split = no rows at all
   const solo = roleUsageViews({
@@ -158,6 +166,29 @@ test('roleUsageViews renders measured roles only, Senior first', () => {
   assert.ok(noPrompt)
   assert.equal(noPrompt.cache, null)
   assert.equal(noPrompt.cacheTitle, null)
+  assert.equal(noPrompt.miss, null)
+})
+
+test('the derived cache-miss segment is prompt minus cache reads', () => {
+  // The family-normalized prompt total is the denominator (Anthropic reports
+  // uncached input only and sends prompt_tokens), so 100 - 40 = 60.
+  const anthropic = roleUsageView('senior', {
+    model_calls: 1,
+    input_tokens: 60,
+    prompt_tokens: 100,
+    output_tokens: 10,
+    cached_tokens: 40,
+    cache_write_tokens: 0,
+  })
+  assert.ok(anthropic)
+  assert.equal(anthropic.cache, 'cache 40%')
+  assert.equal(anthropic.miss, 'miss 60 tok')
+  // A role that recorded no cache read shows no miss segment at all, so a
+  // cache-free row keeps its historical bytes.
+  const noCache = roleUsageView('junior', JUNIOR)
+  assert.ok(noCache)
+  assert.equal(noCache.cache, 'cache 0%')
+  assert.equal(noCache.miss, null)
 })
 
 test('the UsageFooter renders the split on its own line and degrades to merged-only', () => {
@@ -168,6 +199,8 @@ test('the UsageFooter renders the split on its own line and degrades to merged-o
   assert.match(footer, /v-if="roleRows\.length > 0"/, 'the split block is conditional')
   assert.match(footer, /v-for="row in roleRows"/, 'one row per measured role')
   assert.match(footer, /class="usage-roles"/, 'the split rides its own footer line')
+  assert.match(footer, /v-if="row\.miss !== null"/, 'the derived miss segment is conditional')
+  assert.match(footer, /\{\{ row\.miss \}\}/, 'the row renders the derived miss count')
   // Drawer-width viewports keep the merged counters: growing the footer while a
   // run streams/ends shifts the transcript viewport under a parked reader.
   assert.match(
@@ -186,6 +219,7 @@ test('the SessionStatusDialog renders a row per measured role', () => {
   )
   assert.match(dialog, /v-for="row in roleRows"/, 'one row per measured role')
   assert.match(dialog, /\{\{ row\.label \}\} usage/, 'the row names its role')
+  assert.match(dialog, /v-if="row\.miss !== null"/, 'the derived miss segment is conditional')
   assert.match(dialog, /roleUsages\?: RoleUsageView\[\]/, 'the split prop is additive/optional')
 })
 

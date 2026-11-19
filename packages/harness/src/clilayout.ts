@@ -346,11 +346,21 @@ export function humanFooter(
 }
 
 /**
+ * Per-role cost totals (USD) for the split lines. `null`/absent means that
+ * role's model is unpriced or its prompt base is ambiguous, so the line omits
+ * the segment instead of printing a made-up number.
+ */
+export interface RoleCostTotals {
+  senior?: number | null;
+  junior?: number | null;
+}
+
+/**
  * The per-role split of the turn's usage, one line per role that made a model
  * call, e.g.
  *
  * ```
- * senior: 30 in / 15 out · cache 50% · write 10 · 2 calls
+ * senior: 30 in / 15 out · cache 50% · miss 15 · write 10 · 2 calls · cost $0.0030
  * junior: 10 in / 5 out · 1 call
  * ```
  *
@@ -359,8 +369,13 @@ export function humanFooter(
  * the last, compact summary), only when the run exposed per-role counters
  * (`HarnessResult.usageByRole`). Each role's `in` and `cache` use the same
  * family-normalized counters as the footer, so a mixed-family run stays honest
- * per role instead of averaging two denominators. Lines are width-capped like
- * the footer; a role that made no call is omitted rather than printed as zero.
+ * per role instead of averaging two denominators. `miss` is derived, not
+ * stored: it is the role's prompt total minus its cache reads (the tokens that
+ * were not served from the provider cache), shown only when that role recorded
+ * a cache read — a cache-free line keeps its historical bytes. `cost` appears
+ * only when the caller priced that role's own model (the merged footer's
+ * single-model rule stays untouched). Lines are width-capped like the footer; a
+ * role that made no call is omitted rather than printed as zero.
  */
 export function roleUsageLines(
   usageByRole:
@@ -369,6 +384,7 @@ export function roleUsageLines(
     | undefined,
   style: CliStyle = plainCliStyle,
   width: number = FALLBACK_TERMINAL_WIDTH,
+  costByRole?: RoleCostTotals | null,
 ): string[] {
   if (usageByRole === null || usageByRole === undefined) return [];
   const lines: string[] = [];
@@ -379,8 +395,19 @@ export function roleUsageLines(
       `${paintRole(style, role)}: ${counters.prompt} in / ${counters.output} out`,
     ];
     if (counters.cached > 0) parts.push(`${style.paint("muted", "cache")} ${counters.percent}%`);
+    // Derived display: prompt tokens that were NOT cache reads. Only shown
+    // when the role recorded a cache read, so a cache-free line is unchanged.
+    if (counters.cached > 0) {
+      parts.push(`${style.paint("muted", "miss")} ${Math.max(0, counters.prompt - counters.cached)}`);
+    }
     if (counters.written > 0) parts.push(`${style.paint("muted", "write")} ${counters.written}`);
     parts.push(`${counters.calls} ${counters.calls === 1 ? "call" : "calls"}`);
+    const cost = costByRole?.[role];
+    if (typeof cost === "number" && Number.isFinite(cost)) {
+      parts.push(
+        `${style.paint("muted", "cost")} ${style.paint("strong", `$${cost.toFixed(4)}`)}`,
+      );
+    }
     lines.push(
       truncateToWidth(parts.join(style.paint("dim", FOOTER_SEPARATOR)), columns(width)),
     );

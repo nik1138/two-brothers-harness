@@ -326,3 +326,41 @@ export function estimateRunCostFromUsage(input: RunCostInput): CostEstimate | nu
   }
   return estimateCost(senior, costUsageForFamily(family, input.usage));
 }
+
+/** Inputs for ONE role's estimate: its effective model, family and counters. */
+export interface RoleCostInput {
+  /** That role's effective model id; blank means unknown, never $0. */
+  model: string;
+  /**
+   * That role's wire family (the harness/provider resolves it per role);
+   * `null`/absent means unresolved — then only cache-free counters are
+   * priced, because the prompt base would otherwise be ambiguous.
+   */
+  family?: CostPromptFamily | null;
+  /** That role's own split counters (a `usageByRole` half). */
+  usage: PromptTokenUsage;
+}
+
+/**
+ * Estimate ONE role's cost from its own split counters, the per-role
+ * counterpart of {@link estimateRunCostFromUsage}.
+ *
+ * The family mapping is the same one the merged estimate uses, so a mixed-model
+ * run can now report a Senior and a Junior number instead of no number at all
+ * while the merged `cost` stays `null` (its single-model rule is unchanged).
+ * `null` covers a blank/unknown model, an unresolved family WITH cache tokens
+ * (ambiguous prompt base), and nothing else — zero counters on a priced model
+ * are an honest $0.0000.
+ */
+export function estimateRoleCost(input: RoleCostInput): CostEstimate | null {
+  const model = input.model.trim();
+  if (model === "") return null;
+  const family = input.family ?? null;
+  if (
+    family === null &&
+    tokens(Number(input.usage.cached_tokens)) + tokens(Number(input.usage.cache_write_tokens)) > 0
+  ) {
+    return null;
+  }
+  return estimateCost(model, costUsageForFamily(family ?? "openai-compatible", input.usage));
+}

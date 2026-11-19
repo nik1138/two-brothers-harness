@@ -303,16 +303,20 @@ function roleMeasured(usage: UsageTotals | undefined): boolean {
 /**
  * One role's usage in the panel's compact vocabulary: tokens in/out plus the
  * role's own cache reads (as a percentage of its prompt total, the same
- * honest denominator the merged row uses) and cache writes when billed. The
- * value is width-clipped by {@link sidePanelRows} like every other row.
+ * honest denominator the merged row uses), the derived cache-miss token count
+ * when that role recorded a cache read (prompt minus cache reads — the tokens
+ * that were not served from the provider cache), and cache writes when billed.
+ * The value is width-clipped by {@link sidePanelRows} like every other row.
  */
 function roleUsageValue(usage: UsageTotals): string {
   const prompt = usage.prompt_tokens ?? usage.input_tokens ?? 0;
+  const cached = usage.cached_tokens ?? 0;
   const parts = [
     `in ${formatCount(prompt)}`,
     `out ${formatCount(usage.output_tokens ?? 0)}`,
-    `cache ${cachePercent(usage.cached_tokens ?? 0, prompt)}%`,
+    `cache ${cachePercent(cached, prompt)}%`,
   ];
+  if (cached > 0) parts.push(`miss ${formatCount(Math.max(0, prompt - cached))}`);
   const written = usage.cache_write_tokens ?? 0;
   if (written > 0) parts.push(`write ${formatCount(written)}`);
   return parts.join(" · ");

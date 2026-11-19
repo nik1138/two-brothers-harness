@@ -142,6 +142,12 @@ export interface RoleUsageView {
   cache: string | null
   /** Tooltip text for the cache segment: `cached N of M prompt tokens`. */
   cacheTitle: string | null
+  /**
+   * `miss 700 tok`, or null when the role recorded no cache read. Derived
+   * display, never a wire field: it is the role's prompt total minus its cache
+   * reads — the tokens that were not served from the provider cache.
+   */
+  miss: string | null
   /** `write 60 tok`, or null when the role billed no cache writes. */
   write: string | null
 }
@@ -159,6 +165,7 @@ export function roleUsageView(role: RoleName, usage: RunUsage | null | undefined
   if (!usage || count(usage.model_calls) <= 0) return null
   const prompt = promptTokensOf(usage)
   const percent = cacheHitPercent(usage)
+  const cached = count(usage.cached_tokens)
   const written = count(usage.cache_write_tokens ?? 0)
   return {
     role,
@@ -170,6 +177,7 @@ export function roleUsageView(role: RoleName, usage: RunUsage | null | undefined
       percent === null
         ? null
         : `cached ${formatCount(usage.cached_tokens)} of ${formatCount(prompt)} prompt tokens`,
+    miss: cached > 0 ? `miss ${formatCount(Math.max(0, prompt - cached))} tok` : null,
     write: written > 0 ? `write ${formatCount(written)} tok` : null,
   }
 }

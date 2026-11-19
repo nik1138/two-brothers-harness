@@ -9,6 +9,7 @@ import { test } from "node:test";
 import {
   costUsageForFamily,
   estimateCost,
+  estimateRoleCost,
   estimateRunCostFromUsage,
   MODEL_PRICES,
   priceForModel,
@@ -374,4 +375,70 @@ test("run estimate: an unresolved family falls back while no cache counters exis
   });
   assert.ok(estimate);
   close(estimate.totalCost, 2.5, "unknown kind still prices uncached input");
+});
+
+test("role estimate: one role's own counters price at its own model", () => {
+  // Anthropic reports uncached input only; the split half carries prompt_tokens
+  // via its family mapping. 1M uncached * $3 + 1M reads * $0.30 + 1M writes * $3.75.
+  const anthropic = estimateRoleCost({
+    model: "claude-sonnet-4",
+    family: "anthropic",
+    usage: {
+      input_tokens: 1_000_000,
+      output_tokens: 0,
+      cached_tokens: 1_000_000,
+      cache_write_tokens: 1_000_000,
+    },
+  });
+  assert.ok(anthropic);
+  close(anthropic.totalCost, 3 + 0.3 + 3.75, "anthropic role total");
+  assert.equal(anthropic.model, "claude-sonnet-4");
+
+  // OpenAI-compatible input already includes the cached subset: 1M prompt
+  // with 1M cache reads prices entirely at the read rate.
+  const openai = estimateRoleCost({
+    model: "gpt-4o",
+    family: "openai-compatible",
+    usage: { input_tokens: 1_000_000, output_tokens: 0, cached_tokens: 1_000_000 },
+  });
+  assert.ok(openai);
+  close(openai.totalCost, 1.25, "openai role total");
+
+  // Google reports prompt-minus-cached as input: 1M input + 1M reads = 2M prompt.
+  const google = estimateRoleCost({
+    model: "gemini-2.5-pro",
+    family: "google",
+    usage: { input_tokens: 1_000_000, output_tokens: 0, cached_tokens: 1_000_000 },
+  });
+  assert.ok(google);
+  close(google.totalCost, 1.25 + 0.31, "google role total");
+});
+
+test("role estimate: blank/unknown model and an ambiguous family stay unknown", () => {
+  const usage = { input_tokens: 10, output_tokens: 10 };
+  assert.equal(estimateRoleCost({ model: "  ", family: "openai-compatible", usage }), null);
+  assert.equal(estimateRoleCost({ model: "mystery-model", family: "openai-compatible", usage }), null);
+  // Unresolved family is priced only while the prompt base is unambiguous.
+  assert.equal(
+    estimateRoleCost({
+      model: "gpt-4o",
+      family: null,
+      usage: { input_tokens: 10, cached_tokens: 5, output_tokens: 0 },
+    }),
+    null,
+    "an unresolved family with cache tokens cannot be priced honestly",
+  );
+  const noCache = estimateRoleCost({ model: "gpt-4o", family: null, usage });
+  assert.ok(noCache, "cache-free counters map identically across families");
+  close(noCache.totalCost, (10 * 2.5 + 10 * 10) / 1_000_000, "uncached role total");
+});
+
+test("role estimate: zero counters on a priced model are an honest $0.0000", () => {
+  const estimate = estimateRoleCost({
+    model: "gpt-4o",
+    family: "openai-compatible",
+    usage: { input_tokens: 0, output_tokens: 0 },
+  });
+  assert.ok(estimate);
+  assert.equal(estimate.totalCost, 0);
 });

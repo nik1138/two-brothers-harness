@@ -66,6 +66,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/usagebyrolesurfaces.test.ts`, `tests/tuisidepanelusage.test.ts`,
   `web/tests/usageByRole.test.ts`, and the `tool-preview` browser scenario.
 
+- **Per-role cost + derived cache-miss display (additive):** each Senior/Junior
+  split line can now carry its own `cost` segment, priced from that role's own
+  model and split counters (`cost.ts::estimateRoleCost`), and `--json` gains the
+  additive `cost_by_role` key when at least one half is priced — the merged
+  `cost` keeps its single-model rule and stays `null` on a mixed-model run,
+  while an unpriced half is `null` and an all-unpriced run omits the key. The
+  same split lines, the web usage footer and `/status` rows, and the TUI Ctrl+B
+  `SENIOR USE`/`JUNIOR USE` rows also show the derived cache-miss count
+  (`prompt - cached`, the tokens not served from the provider cache), displayed
+  only when that role recorded a cache read so cache-free output keeps its
+  bytes. No wire fields: the `call_usage` event and its usage record,
+  `usage_by_role`, the merged footer/`cost:` bytes, the status bar and
+  `--stream` are untouched. Tests: `tests/cost.test.ts` (+3),
+  `tests/usagebyrole.test.ts`, `tests/tuisidepanelusage.test.ts`,
+  `web/tests/usageByRole.test.ts`, and the `tool-preview` browser scenario.
+
 - **Real `auto` mode + Senior solo decision:** `auto` is no longer a consult
   alias. A new `senior_route` entry node (auto runs only) makes ONE plain
   senior call requesting the code-only `route` payload

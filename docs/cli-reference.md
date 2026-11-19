@@ -1777,14 +1777,20 @@ stable, width-safe layout:
 - **Per-turn role split.** When the run tracks usage per role, a second,
   blank-line-separated block reports the same counters split by the acting
   role, one line per role that made a model call:
-  `senior: 100 in / 20 out · cache 40% · write 7 · 2 calls` then
+  `senior: 100 in / 20 out · cache 40% · miss 60 · write 7 · 2 calls · cost $0.0030` then
   `junior: 10 in / 5 out · 1 call`. Each line uses that role's own family
   normalisation (`in` is its prompt total, `cache` is its `cached / prompt`), so
   a mixed-family run stays honest per role instead of averaging two
-  denominators; `cache`/`write` appear only when that role recorded them. The
-  block prints before the merged footer (which keeps its bytes and its place as
-  the last line), is absent when the provider tracks no usage or a role made no
-  call, and is width-capped like the footer.
+  denominators; `cache`/`write` appear only when that role recorded them. `miss`
+  is derived display — that role's prompt total minus its cache reads, i.e. the
+  tokens that were not served from the provider cache — and appears only when
+  the role recorded a cache read (a cache-free line keeps its historical bytes).
+  `cost` prices that role's **own** model from its own half, so a mixed-model
+  run can show both halves while the merged footer still shows no cost; a role
+  whose model is unknown or whose prompt base is ambiguous omits the segment
+  (never `$0`). The block prints before the merged footer (which keeps its
+  bytes and its place as the last line), is absent when the provider tracks no
+  usage or a role made no call, and is width-capped like the footer.
 - **Live on a TTY.** On an interactive stdout `run`/`chat` write each envelope
   block as the harness produces it, with dim `· …` activity rows between blocks
   (`· senior consulting…` before a call, `· junior tool workspace_read_file…`
@@ -1809,7 +1815,8 @@ stable, width-safe layout:
 Machine output is unaffected: `--json`, `--json-events`, `--stream`,
 `--mode print` and `--dry-run` keep their previous stdout formats (zero escape
 bytes, same field shapes), except that `--json`/`--json-events` add the
-`usage_by_role` key and `--mode print` appends the per-role split lines to
+`usage_by_role` key (and the additive `cost_by_role` when at least one role's
+own model is priced) and `--mode print` appends the per-role split lines to
 stderr after the unchanged `tokens:`/`cost:` diagnostics. Live streaming still
 never applies to them (nor to a non-TTY stdout).
 
@@ -2036,7 +2043,12 @@ parseable):
   `cache_write_tokens`, and the family-normalized `prompt_tokens` when the
   family reports it). It is additive: `usage` and every other key keep their
   shape, and a run whose provider tracks no usage omits `usage_by_role`
-  entirely.
+  entirely. When at least one role's own model resolves to a price, the object
+  also adds `cost_by_role` = `{senior: <estimate>|null, junior: <estimate>|null}`
+  — each half priced from that role's own model and split counters (the merged
+  `cost` keeps its single-model rule and may stay `null` on a mixed-model run),
+  `null` for an unpriced half, and the key is absent entirely when no half can
+  be priced.
 
 `TWO_BROTHERS_JSON=1` (also `true`/`yes`/`on`) is the environment spelling of
 a bare `--json`: it selects the same single machine-readable object on stdout

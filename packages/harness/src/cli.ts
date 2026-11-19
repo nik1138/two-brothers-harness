@@ -80,7 +80,11 @@ import {
   matchCommand,
   type CommandCatalog,
 } from "./commands.ts";
-import { estimateRunCostFromUsage, type CostEstimate } from "./cost.ts";
+import {
+  estimateRoleCost,
+  estimateRunCostFromUsage,
+  type CostEstimate,
+} from "./cost.ts";
 import { plainCliStyle, resolveCliStyle, terminalWidth, type CliStyle } from "./clistyle.ts";
 import {
   createLiveTranscript,
@@ -1152,6 +1156,54 @@ export function estimateRunCost(cfg: Config, usage: UsageView): CostEstimate | n
   });
 }
 
+/**
+ * Per-role cost estimates, additive to the merged {@link estimateRunCost}:
+ * each half is priced from that role's own model and its own split counters,
+ * so a mixed-model or mixed-family run can report both halves while the merged
+ * `cost` stays `null` (its single-model rule is unchanged). A role with no
+ * measured call gets `null`; the whole value is `null` when no half can be
+ * priced, so `--json` omits the key instead of carrying a pair of nulls.
+ */
+export interface RoleCostView {
+  senior: CostEstimate | null;
+  junior: CostEstimate | null;
+}
+
+/** The per-role cost view for a run's split, or null when nothing is priced. */
+export function estimateRunCostByRole(
+  cfg: Config,
+  usageByRole:
+    | { senior?: UsageView | null; junior?: UsageView | null }
+    | null
+    | undefined,
+): RoleCostView | null {
+  if (usageByRole === null || usageByRole === undefined) return null;
+  const view: RoleCostView = { senior: null, junior: null };
+  for (const role of ["senior", "junior"] as const) {
+    const usage = usageByRole[role];
+    if (usage === null || usage === undefined) continue;
+    if (usageInt(usage.model_calls) <= 0) continue;
+    view[role] = estimateRoleCost({
+      model: role === "senior" ? cfg.seniorModel : cfg.juniorModel,
+      family: roleProviderKind(cfg, undefined, role),
+      usage,
+    });
+  }
+  return view.senior === null && view.junior === null ? null : view;
+}
+
+/** The role totals the split lines append (`null` = unpriced, segment omitted). */
+function roleCostTotals(view: RoleCostView | null): {
+  senior: number | null;
+  junior: number | null;
+} | null {
+  if (view === null) return null;
+  return {
+    senior: view.senior === null ? null : view.senior.totalCost,
+    junior: view.junior === null ? null : view.junior.totalCost,
+  };
+}
+
 /** `cost: $0.0300 (in 4000 / out 2000 tokens)`, or null when not estimable. */
 export function costLine(
   cfg: Config,
@@ -1501,6 +1553,9 @@ async function runOnce(
       io.error(paintWarningPrefix(textStyle, `[warn] ${warning}`));
     }
     const failed = result.errors.length > 0;
+    // Additive per-role pricing of the same split, derived from each role's own
+    // model and counters. The merged `cost` above keeps its exact rule/bytes.
+    const costByRole = estimateRunCostByRole(cfg, result.usageByRole);
     if (outputMode === "stream") {
       // every event, the terminal `result` included, already went to stdout
       // as one NDJSON line; diagnostics stayed on stderr
@@ -1519,6 +1574,10 @@ async function runOnce(
           // byte-identical to the pre-split shape.
           ...(result.usageByRole !== undefined ? { usage_by_role: result.usageByRole } : {}),
           cost: estimateRunCost(cfg, result.usage ?? {}),
+          // Additive per-role pricing, present only when at least one role's
+          // own model resolves to a price (an unpriced/mock run keeps the
+          // pre-feature key set byte-identical).
+          ...(costByRole !== null ? { cost_by_role: costByRole } : {}),
           rounds: result.rounds,
           errors: result.errors,
           // Additive auto-mode routing key, present only when the run routed;
@@ -1537,7 +1596,12 @@ async function runOnce(
       if (cost) io.error(cost);
       // Additive per-role split on stderr, after the unchanged machine
       // `tokens:`/`cost:` diagnostics; stdout keeps the decision only.
-      for (const line of roleUsageLines(result.usageByRole, textStyle, terminalWidth())) {
+      for (const line of roleUsageLines(
+        result.usageByRole,
+        textStyle,
+        terminalWidth(),
+        roleCostTotals(costByRole),
+      )) {
         io.error(line);
       }
       if (options.jsonDecision === true) {
@@ -1584,7 +1648,12 @@ async function runOnce(
     // the unchanged merged footer (so the footer stays the last, compact
     // summary line). Both the live and the piped path emit it the same way, so
     // `--live` on a pipe still changes no byte.
-    const split = roleUsageLines(result.usageByRole, textStyle, terminalWidth());
+    const split = roleUsageLines(
+      result.usageByRole,
+      textStyle,
+      terminalWidth(),
+      roleCostTotals(costByRole),
+    );
     if (split.length > 0) {
       io.log("");
       for (const line of split) io.log(line);
