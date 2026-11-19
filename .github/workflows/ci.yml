@@ -54,11 +54,19 @@ jobs:
         working-directory: packages/harness
 
       - name: Test (in-process)
-        run: npm test
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/ci-logs"
+          npm test 2>&1 | tee "$RUNNER_TEMP/ci-logs/ubuntu-node${{ matrix.node }}-in-process.log"
         working-directory: packages/harness
 
       - name: Test (spawned)
-        run: npm run test:spawn
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/ci-logs"
+          npm run test:spawn 2>&1 | tee "$RUNNER_TEMP/ci-logs/ubuntu-node${{ matrix.node }}-spawned.log"
         working-directory: packages/harness
 
       - name: Offline selftest
@@ -137,6 +145,21 @@ jobs:
         run: npm run pack:check
         working-directory: packages/harness
 
+      # Additive diagnostics only: the job log is not readable for every
+      # reviewer, so a red run gives them the captured hermetic test output.
+      # The upload is failure-gated — an unconditional upload would burn
+      # artifact storage on green runs; the captured TAP names the failing
+      # tests (and the tests cancelled by their parent) that the auth-gated
+      # job log hides.
+      - name: Upload captured test output (failure only)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-ubuntu-node-${{ matrix.node }}
+          path: ${{ runner.temp }}/ci-logs/
+          if-no-files-found: ignore
+          retention-days: 7
+
   # Windows leg: the same hermetic correctness gates on the platform this
   # project is actually developed and gated on (Git Bash paths, child-process
   # spawning, shell tests, temp dirs). A single Node version is enough here —
@@ -208,7 +231,13 @@ jobs:
         working-directory: packages/harness
 
       - name: Test (in-process)
-        run: npm test
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'ci-logs'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $log = Join-Path $dir 'windows-node24-in-process.log'
+          npm test 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         working-directory: packages/harness
 
       - name: Offline selftest
@@ -256,3 +285,15 @@ jobs:
       # logic is proven here on a clean checkout too.
       - name: Browser-E2E unit tests (freshness + skip registry)
         run: node --test e2e/web-freshness.test.mjs e2e/skip-registry.test.mjs
+
+      # Additive diagnostics only, same rationale as the ubuntu job: a red run
+      # exposes the captured hermetic test output, and green runs upload
+      # nothing (the upload is failure-gated).
+      - name: Upload captured test output (failure only)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-windows-node24
+          path: ${{ runner.temp }}/ci-logs/
+          if-no-files-found: ignore
+          retention-days: 7
