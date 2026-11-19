@@ -1,13 +1,14 @@
 import { isStreamingBlock, type TuiModel } from "../model.ts";
-import { fitStyled } from "../screen.ts";
+import { clipStyled, fitStyled, styledWidth } from "../screen.ts";
 import {
+  TOP_SLICE_MARKER,
   TRANSCRIPT_LABEL_WIDTH,
   markTopSliceRow,
   renderBlock,
   renderThinkingBlock,
   type TranscriptOptions,
 } from "../transcript.ts";
-import { plainTheme } from "../theme.ts";
+import { plainTheme, type Theme } from "../theme.ts";
 import {
   REPLAYED_REASONING_BLOCK_ID,
   renderReplayedReasoning,
@@ -178,6 +179,55 @@ function startsMidBlock(rows: readonly PositionedRow[], start: number): boolean 
   return row.blockId === previous.blockId;
 }
 
+/** The plain 8-cell gutter every inline continuation row opens with. */
+const CONTINUATION_GUTTER = " ".repeat(TRANSCRIPT_LABEL_WIDTH);
+
+/**
+ * Cells the parked indicator may use: the gutter minus the one separator cell
+ * that keeps the marker from running into the row body (`⋯5 more` + space).
+ */
+const MORE_BELOW_LABEL_CELLS = TRANSCRIPT_LABEL_WIDTH - 1;
+
+/**
+ * Gutter text of the parked indicator: `⋯ n more`, where `n` counts the visual
+ * rows below the marked row. The label is only seven cells wide, so the wording
+ * tightens when the count needs the room: three digits keep the exact count
+ * without the word, and five-digit counts still fit. Every variant stays inside
+ * that budget, so the marker always swaps the same gutter cells and the one
+ * separator cell after it keeps the row body readable.
+ */
+function moreBelowText(more: number): string {
+  const variants = [
+    `${TOP_SLICE_MARKER} ${more} more`,
+    `${TOP_SLICE_MARKER}${more} more`,
+    `${TOP_SLICE_MARKER}${more}more`,
+    `${TOP_SLICE_MARKER} ${more}`,
+  ];
+  for (const variant of variants) {
+    if (styledWidth(variant) <= MORE_BELOW_LABEL_CELLS) return variant;
+  }
+  return clipStyled(variants[variants.length - 1] ?? "", MORE_BELOW_LABEL_CELLS);
+}
+
+/**
+ * Replace the label gutter of an already-rendered row with the dim parked
+ * indicator. Like {@link markTopSliceRow} it is a cell-for-cell gutter swap: the
+ * label is padded to the eight gutter cells (its last cell stays blank) and the
+ * row body is kept, so a row never grows, shrinks or absorbs content. Under
+ * `plainTheme`/`NO_COLOR` the only visible bytes are the marker characters.
+ */
+function markMoreBelowRow(row: string, width: number, more: number, theme: Theme): string {
+  const columns = Math.max(0, Math.floor(width));
+  const marker = theme.paint(
+    "dim",
+    moreBelowText(more).padEnd(TRANSCRIPT_LABEL_WIDTH, " "),
+  );
+  const body = row.startsWith(CONTINUATION_GUTTER)
+    ? row.slice(CONTINUATION_GUTTER.length)
+    : row;
+  return marker + clipStyled(body, columns - TRANSCRIPT_LABEL_WIDTH);
+}
+
 /** Render a fixed-height window anchored by block identity across resize. */
 export function transcriptView(model: TuiModel, options: TranscriptViewOptions): TranscriptView {
   const width = Math.max(0, Math.floor(options.width));
@@ -202,6 +252,32 @@ export function transcriptView(model: TuiModel, options: TranscriptViewOptions):
     startsMidBlock(rows, start)
   ) {
     lines[0] = markTopSliceRow(lines[0] ?? "", width, options.theme ?? plainTheme);
+  }
+  // Parked indicator: when content continues below the window, the bottom-most
+  // gutter row says how many rows are hidden (`⋯ n more`). The window is
+  // followed (`scroll.followLatest`) exactly when nothing is below it, so a
+  // followed frame is byte-identical to the pre-indicator output. A bottom row
+  // that is a block label row is left alone — swapping its label away would
+  // erase the role identity the transcript exists to carry — and the indicator
+  // moves up to the nearest continuation/blank gutter row instead. Replayed
+  // reasoning rows do not use the transcript gutter, so they are skipped just
+  // like the top-slice marker skips them.
+  const hiddenBelow = rows.length - (start + visible.length);
+  if (lines.length > 0 && width > TRANSCRIPT_LABEL_WIDTH + 8 && hiddenBelow > 0) {
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const row = visible[index];
+      const line = lines[index];
+      if (row === undefined || line === undefined) continue;
+      if (row.blockId === REPLAYED_REASONING_BLOCK_ID) continue;
+      if (!line.startsWith(CONTINUATION_GUTTER)) continue;
+      lines[index] = markMoreBelowRow(
+        line,
+        width,
+        rows.length - (start + index + 1),
+        options.theme ?? plainTheme,
+      );
+      break;
+    }
   }
   while (lines.length < height) lines.push(" ".repeat(width));
   const scroll = scrollFor(rows, start, height);

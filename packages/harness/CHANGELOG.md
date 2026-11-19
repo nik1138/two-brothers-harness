@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **TUI parked transcript indicator:** a transcript window parked above the
+  newest content now marks its bottom gutter row with a dim `⋯ n more` (the
+  exact count of visual rows below it) instead of leaving the operator to guess
+  that output is accumulating off-screen. The mark reuses the
+  `markTopSliceRow` cell-for-cell gutter swap: rows keep their exact width, the
+  row body is untouched, `NO_COLOR` output carries only the marker characters,
+  a block label row on the bottom is preserved (the mark moves up to the nearest
+  continuation/blank gutter row), and a followed window renders
+  byte-identically to before. Display-only: no key binding, scroll math or
+  renderer change. Tests: `tests/tuitranscriptview.test.ts`.
 - **Per-role model identity + per-role cost on run records (additive):** each
   measured `usage_by_role` half on the terminal `run_end` event and on
   `RunRecord` (`GET /api/runs[/{id}]`) now carries its own `model` (the role's
