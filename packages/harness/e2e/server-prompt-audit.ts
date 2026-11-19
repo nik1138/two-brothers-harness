@@ -15,7 +15,7 @@
  *                         entry field for field (role, kind, sections, tools,
  *                         character lengths — never prompt bodies); the
  *                         junior audit precedes its call's tool round
- *                         (`prompt_audit` -> `tool_started` ->
+ *                         (`prompt_audit` -> `call_usage` -> `tool_started` ->
  *                         `approval_requested/resolved` -> `tool_completed` ->
  *                         next `prompt_audit` -> `deliverable`), and the
  *                         verify/review/decision audits stay pinned to their
@@ -82,6 +82,23 @@ const AUDIT_KEYS = [
   "tools",
   "type",
   "userChars",
+];
+
+/**
+ * Every `call_usage` frame key (the SSE `id:` is added by the reader). That
+ * event is display-only per-call attribution emitted immediately AFTER its own
+ * provider call, so it is the only additive frame allowed to interleave
+ * between a `prompt_audit` and the frames that call produces.
+ */
+const CALL_USAGE_KEYS = ["at", "kind", "role", "run_id", "type", "usage"];
+
+/** The per-call usage counters the mock provider reports (sorted). */
+const CALL_USAGE_COUNTERS = [
+  "cache_write_tokens",
+  "cached_tokens",
+  "input_tokens",
+  "model_calls",
+  "output_tokens",
 ];
 
 class CheckError extends Error {}
@@ -453,10 +470,67 @@ async function suitePromptAudit(api: Api, runsDir: string): Promise<PromptAuditS
       juniorToolAudit > delegationEnvelope && juniorToolAudit < toolStarted,
       `${where}: junior audit (${juniorToolAudit}) does not precede its tool round (${toolStarted})`,
     );
+    // The audit is emitted immediately BEFORE its provider call and that
+    // call's additive `call_usage` frame immediately AFTER it, so the usage
+    // frame is the ONLY thing allowed between the audit and the tool round the
+    // call requested. Walk back over that one additive frame and pin both it
+    // and the audit it belongs to — never "some event happened before the tool".
+    let nearestAudit = toolStarted - 1;
+    while (nearestAudit >= 0 && events[nearestAudit].type === "call_usage") nearestAudit -= 1;
     check(
-      toolStarted > 0 && events[toolStarted - 1].type === "prompt_audit",
-      `${where}: the frame before tool_started is ${String(events[toolStarted - 1]?.type)}`,
+      nearestAudit >= 0 && isAudit(events[nearestAudit], "junior", "deliverable"),
+      `${where}: the nearest prompt_audit before tool_started (${nearestAudit}) is ` +
+        `${String(events[nearestAudit]?.type)} (expected the junior/deliverable audit at ${juniorToolAudit})`,
     );
+    check(
+      nearestAudit === juniorToolAudit,
+      `${where}: the audit nearest to tool_started (${nearestAudit}) is not the junior tool-round audit ` +
+        `(${juniorToolAudit})`,
+    );
+    const framesBetweenAuditAndTool = events.slice(nearestAudit + 1, toolStarted);
+    check(
+      framesBetweenAuditAndTool.length === 1,
+      `${where}: ${framesBetweenAuditAndTool.length} frame(s) between the junior audit (${nearestAudit}) and ` +
+        `tool_started (${toolStarted}) — ${JSON.stringify(
+          framesBetweenAuditAndTool.map((event) => String(event.type)),
+        )}; expected exactly the call's additive call_usage`,
+    );
+    for (const betweenFrame of framesBetweenAuditAndTool) {
+      check(
+        betweenFrame.type === "call_usage",
+        `${where}: unexpected ${String(betweenFrame.type)} frame between the junior audit and tool_started`,
+      );
+      // the additive frame's shape: one call's attribution, not a free pass
+      check(
+        Object.keys(betweenFrame).filter((key) => key !== "id").sort().join(",") ===
+          CALL_USAGE_KEYS.join(","),
+        `${where}: call_usage keys ${Object.keys(betweenFrame)
+          .filter((key) => key !== "id")
+          .sort()
+          .join(",")} (expected ${CALL_USAGE_KEYS.join(",")})`,
+      );
+      check(
+        betweenFrame.role === "junior" && betweenFrame.kind === "deliverable",
+        `${where}: call_usage ${String(betweenFrame.role)}/${String(betweenFrame.kind)} does not carry the ` +
+          `junior tool-round call`,
+      );
+      check(
+        betweenFrame.run_id === runId,
+        `${where}: call_usage has run_id ${String(betweenFrame.run_id)}`,
+      );
+      check(typeof betweenFrame.at === "number", `${where}: call_usage has no ` + "`at`");
+      const callCounters = isRecord(betweenFrame.usage) ? betweenFrame.usage : null;
+      check(callCounters !== null, `${where}: call_usage carries no usage record`);
+      check(
+        Object.keys(callCounters).sort().join(",") === CALL_USAGE_COUNTERS.join(",") &&
+          CALL_USAGE_COUNTERS.every((key) => typeof callCounters[key] === "number"),
+        `${where}: call_usage counters ${JSON.stringify(betweenFrame.usage)} are not the per-call usage shape`,
+      );
+      check(
+        callCounters.model_calls === 1,
+        `${where}: call_usage reports ${String(callCounters.model_calls)} model calls for one tool round`,
+      );
+    }
     check(
       Array.isArray(juniorToolAuditEvent.tools) && juniorToolAuditEvent.tools.includes(toolName),
       `${where}: junior audit belt ${JSON.stringify(juniorToolAuditEvent.tools)} misses ${toolName}`,
@@ -554,7 +628,7 @@ async function suitePromptAudit(api: Api, runsDir: string): Promise<PromptAuditS
     return {
       detail:
         `${audits.length} prompt_audit frames over SSE (${audits.map(auditLabel).join(" -> ")}), ` +
-        `pinned around the tool round (audit -> tool -> approval -> tool result -> audit -> deliverable), ` +
+        `pinned around the tool round (audit -> call_usage -> tool -> approval -> tool result -> audit -> deliverable), ` +
         `persisted in the sidecar and replayable with ?after=`,
       evidenceFile,
     };
