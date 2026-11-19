@@ -410,6 +410,8 @@ import {
   type LiveTokenHook,
   type PublicRuntimeSettings,
   type RoleEndpoint,
+  normalizeUsageByRole,
+  usageByRoleFromEvents,
   type RoleEndpoints,
   type RunCost,
   type RunJob,
@@ -1892,6 +1894,13 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
     }
     const usage = isRecord(end.usage) ? { ...emptyUsage(), ...end.usage } : { ...emptyUsage() };
     record.usage = usage;
+    // Additive per-role split: prefer the terminal event's own split (the
+    // backend that wrote it knows the exact attribution); a sidecar written by
+    // a backend that emitted `call_usage` but no `run_end` split is rebuilt by
+    // summing those events per role. A pre-feature session has neither, so the
+    // field stays omitted and the record is merged-only, as before.
+    const split = normalizeUsageByRole(end.usage_by_role) ?? usageByRoleFromEvents(found.events);
+    if (split !== null) record.usage_by_role = split;
     // Recompute (never persist) the cost: the event stream stays free of a
     // derived field, and the current config is the only model source after a
     // restart. A failing config factory keeps the record usable with a null
@@ -2219,6 +2228,7 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         decision: result.decision,
         errors: result.errors,
         usage: result.usage,
+        ...(result.usageByRole !== undefined ? { usageByRole: result.usageByRole } : {}),
         // Additive run cost (wave 24): computed here, where the resolved
         // config + per-role endpoints are in scope. `null` is honest.
         cost: estimateRecordCost(cfg, endpoints, result.usage),

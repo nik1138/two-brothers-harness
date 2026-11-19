@@ -26,6 +26,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   footer bytes, `--stream`, the protocol envelopes, both `prompts.json` copies
   and `provider.ts` are untouched; no new runtime dependencies. Tests:
   `tests/usagebyrole.test.ts`.
+- **Per-role usage on run records and in the web/TUI surfaces (additive):**
+  `RunRecord` (`GET /api/runs[/{id}]`) and the terminal `run_end` runtime event
+  carry `usage_by_role` = `{senior, junior}` with the same counters as `usage`;
+  it is omitted for a run that measured no provider call, and a sidecar-rebuilt
+  record prefers the terminal event's split and otherwise sums the persisted
+  `call_usage` events per role (a pre-feature session stays merged-only). The
+  web usage footer and `/status` dialog render a Senior/Junior row each (tokens
+  in/out, cache %, cache writes) and degrade to today's merged display when no
+  split is present; the footer keeps the merged counters at the drawer
+  breakpoint (growing it mid-run would shift the transcript viewport) and the
+  `/status` dialog carries the split at every width. The TUI Ctrl+B status
+  panel gains `SENIOR USE` / `JUNIOR
+  USE` rows under the merged TOKENS/CACHE rows, only for roles that answered a
+  call. Status-bar segments, footer tips, the keymap, the machine CLI outputs
+  and the merged `usage`/`run_end` fields are unchanged. Tests:
+  `tests/usagebyrolesurfaces.test.ts`, `tests/tuisidepanelusage.test.ts`,
+  `web/tests/usageByRole.test.ts`, and the `tool-preview` browser scenario.
 
 - **Real `auto` mode + Senior solo decision:** `auto` is no longer a consult
   alias. A new `senior_route` entry node (auto runs only) makes ONE plain

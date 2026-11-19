@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
 import type { RunCost, RunUsage } from '../types'
+import type { RoleUsageView } from '../usageByRole'
 import { costLabel, costTitle } from '../usageCost'
 import { cacheHitPercent, promptTokensOf } from '../usageCache'
 
@@ -15,6 +16,12 @@ const props = defineProps<{
   turns: number
   /** Latest known usage for the selected session; null when unavailable. */
   usage: RunUsage | null
+  /**
+   * Render-ready Senior/Junior rows (feat/usage-surfaces). Empty/absent means
+   * the backend reported no split: the footer keeps today's merged counters
+   * and never fabricates a per-role row.
+   */
+  roleUsages?: RoleUsageView[]
   /**
    * Latest known run cost estimate for the session; null/absent = unknown.
    * The segment is omitted entirely in that case (never "$0.00").
@@ -68,6 +75,8 @@ const costText = computed(() => costLabel(props.cost))
 const costTitleText = computed(() => costTitle(props.cost))
 
 const visible = computed(() => ticking.value || props.usage !== null || props.turns > 0)
+/** Per-role rows; empty (old backend / no measured split) renders no row. */
+const roleRows = computed(() => props.roleUsages ?? [])
 </script>
 
 <template>
@@ -116,6 +125,32 @@ const visible = computed(() => ticking.value || props.usage !== null || props.tu
         <span class="usage-cost" :title="costTitleText ?? undefined">{{ costText }}</span>
       </template>
     </template>
+    <!-- Additive per-role split (feat/usage-surfaces): one row per role that
+         answered a model call, on its own footer line. Absent/empty = exactly
+         today's merged-only footer. The split is hidden at the drawer
+         breakpoint (see the style block): growing the footer mid-run would
+         shift the transcript viewport under a reader parked away from the
+         bottom, so narrow screens keep the merged counters and /status still
+         carries the per-role rows. -->
+    <div v-if="roleRows.length > 0" class="usage-roles">
+      <span
+        v-for="row in roleRows"
+        :key="row.role"
+        class="usage-role"
+        :class="`usage-role-${row.role}`"
+      >
+        <span class="usage-role-name">{{ row.label }}</span>
+        <span>{{ row.tokens }}</span>
+        <template v-if="row.cache !== null">
+          <span class="usage-sep" aria-hidden="true">·</span>
+          <span :title="row.cacheTitle ?? undefined">{{ row.cache }}</span>
+        </template>
+        <template v-if="row.write !== null">
+          <span class="usage-sep" aria-hidden="true">·</span>
+          <span>{{ row.write }}</span>
+        </template>
+      </span>
+    </div>
   </footer>
 </template>
 
@@ -156,6 +191,46 @@ const visible = computed(() => ticking.value || props.usage !== null || props.tu
 
 .usage-sep {
   opacity: 0.7;
+}
+
+/* The per-role split rides its own centered line under the merged counters. */
+.usage-roles {
+  flex-basis: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.15rem var(--space-4);
+}
+
+.usage-role {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.usage-role-name {
+  font-weight: 600;
+}
+
+.usage-role-senior .usage-role-name {
+  color: var(--senior);
+}
+
+.usage-role-junior .usage-role-name {
+  color: var(--junior);
+}
+
+/*
+ * Mobile keeps the historical fused footer: the transcript viewport must not
+ * change height while a run streams or ends (a reader parked above the bottom
+ * would be shifted), and the drawer-width footer has no room for two role
+ * rows. The /status dialog still lists the split at every width.
+ */
+@media (max-width: 768px) {
+  .usage-roles {
+    display: none;
+  }
 }
 
 /* The estimate's tooltip carries the model/disclaimer; hint that it is hoverable. */

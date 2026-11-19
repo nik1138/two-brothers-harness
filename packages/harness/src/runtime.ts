@@ -44,7 +44,7 @@ import { normalizeEffortValue, type EffortValue } from "./effort.ts";
 import { runFailureUsage } from "./harness.ts";
 import { emptyUsage, ProviderAbortError, type UsageTotals } from "./provider.ts";
 import type { ApprovalBroker } from "./permissions.ts";
-import type { RunApprovalBroker, RuntimeEvent } from "./runevents.ts";
+import type { RunApprovalBroker, RunEndEvent, RuntimeEvent, UsageByRole } from "./runevents.ts";
 import type { SettingsStore } from "./settings_store.ts";
 import type { TokenStreamEvent } from "./runstream.ts";
 
@@ -123,6 +123,12 @@ export interface RunJobResult {
   errors?: string[];
   usage?: UsageTotals;
   /**
+   * Additive per-role split of `usage` (`HarnessResult.usageByRole`). Absent
+   * when no provider call was measured, so the record and `run_end` stay
+   * merged-only for untracked providers.
+   */
+  usageByRole?: UsageByRole;
+  /**
    * Additive per-run cost estimate, or `null` when it cannot be attributed
    * honestly (mixed models, unknown price row, mixed provider families with
    * cache counters). Absent behaves like `null`.
@@ -196,6 +202,93 @@ const ROLE_FIELDS = ["provider", "model", "base_url", "api_key", "provider_ref",
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+// ---------------------------------------------------------------------------
+// Per-role usage attribution (additive; the run record's `usage_by_role`)
+// ---------------------------------------------------------------------------
+
+/**
+ * Add one raw usage object's counters into `target`, tolerantly: only finite
+ * numeric fields are folded, missing fields keep the accumulator's value, and
+ * a malformed value contributes nothing (a broken event must never invent a
+ * number). `prompt_tokens` stays absent unless some delta reported it, so an
+ * OpenAI-compatible aggregate keeps the field's documented omission.
+ */
+function addUsageCounts(target: UsageTotals, raw: unknown): void {
+  if (!isRecord(raw)) return;
+  for (const key of [
+    "model_calls",
+    "input_tokens",
+    "output_tokens",
+    "cached_tokens",
+    "cache_write_tokens",
+  ] as const) {
+    const value = Number(raw[key]);
+    if (Number.isFinite(value)) target[key] = (target[key] ?? 0) + Math.trunc(value);
+  }
+  if (raw.prompt_tokens !== undefined) {
+    const value = Number(raw.prompt_tokens);
+    if (Number.isFinite(value)) {
+      target.prompt_tokens = (target.prompt_tokens ?? 0) + Math.trunc(value);
+    }
+  }
+}
+
+/**
+ * Tolerant read of a `{senior, junior}` usage split (the `run_end`
+ * `usage_by_role` / the run record field / `HarnessResult.usageByRole`).
+ * Returns null unless at least one half is an object, so a malformed or
+ * missing value is omitted rather than rendered as fabricated zeros. A
+ * present-but-partial split fills the missing half with zero counters, the
+ * same convention the harness uses for a role that made no calls.
+ */
+export function normalizeUsageByRole(value: unknown): UsageByRole | null {
+  if (!isRecord(value)) return null;
+  const senior = isRecord(value.senior) ? value.senior : null;
+  const junior = isRecord(value.junior) ? value.junior : null;
+  if (senior === null && junior === null) return null;
+  const split: UsageByRole = { senior: emptyUsage(), junior: emptyUsage() };
+  if (senior !== null) addUsageCounts(split.senior, senior);
+  if (junior !== null) addUsageCounts(split.junior, junior);
+  return split;
+}
+
+/**
+ * Fold one `call_usage` event's usage into a split, pure and incremental (a
+ * fresh object each time). An unknown role or malformed usage leaves the
+ * current value untouched, so a live record never gains a fabricated half.
+ */
+export function addCallUsage(
+  current: UsageByRole | null,
+  role: unknown,
+  usage: unknown,
+): UsageByRole | null {
+  if ((role !== "senior" && role !== "junior") || !isRecord(usage)) return current;
+  const split: UsageByRole =
+    current === null
+      ? { senior: emptyUsage(), junior: emptyUsage() }
+      : { senior: { ...current.senior }, junior: { ...current.junior } };
+  addUsageCounts(split[role], usage);
+  return split;
+}
+
+/**
+ * Honest recovery of a per-role split from a persisted event stream: sum the
+ * sidecar's `call_usage` events per role. Returns null when the stream has
+ * none (a pre-feature session), so a rebuilt record stays merged-only instead
+ * of reporting a fabricated `0/0` split.
+ */
+export function usageByRoleFromEvents(
+  events: readonly Record<string, unknown>[],
+): UsageByRole | null {
+  let split: UsageByRole | null = null;
+  for (const event of events) {
+    if (event.type !== "call_usage") continue;
+    split = addCallUsage(split, event.role, event.usage);
+  }
+  return split;
+}
+
 
 // ---------------------------------------------------------------------------
 // Per-role endpoint resolution (Stage 18: python per-role parity)
@@ -638,6 +731,13 @@ export class RunRecord {
   decision: Record<string, unknown> | null = null;
   usage: UsageTotals = emptyUsage();
   /**
+   * Additive per-role split of `usage`, accumulated from this run's
+   * `call_usage` events and replaced by the job's authoritative split when it
+   * reports one. Null until a measured call exists; `public()` then omits
+   * `usage_by_role` entirely (merged-only record, as before the feature).
+   */
+  usageByRole: UsageByRole | null = null;
+  /**
    * Additive run cost estimate (wave 24); `null` until the job reports one —
    * unknown stays unknown, never `$0`. Returned by `public()` on every record
    * so the web footer can render it or omit the segment honestly.
@@ -794,6 +894,15 @@ export class RunRecord {
     if (this.error) out.error = this.error;
     if (this.decision !== null) out.decision = this.decision;
     out.usage = { ...this.usage };
+    // Additive per-role split (feat/usage-surfaces): present only when a
+    // measured call exists, so a pre-feature or untracked run keeps the
+    // historical merged-only record byte-for-byte.
+    if (this.usageByRole !== null) {
+      out.usage_by_role = {
+        senior: { ...this.usageByRole.senior },
+        junior: { ...this.usageByRole.junior },
+      };
+    }
     // Additive run cost (wave 24): always present, honestly null when the run
     // is not attributable to one priced model (mirrors the CLI/TUI rule).
     out.cost = this.cost === null ? null : { ...this.cost };
@@ -1109,7 +1218,7 @@ export class RunManager {
       try {
         if (record.status === "cancelled") {
           // stop() landed while the record sat on the dispatch queue
-          this._emit(record, { type: "run_end", status: "cancelled", usage: { ...record.usage } });
+          this._emit(record, this._runEnd(record));
         } else {
           await this._runRecord(record);
         }
@@ -1131,7 +1240,7 @@ export class RunManager {
       // a stop landed between dequeue and start — honor it instead of
       // clobbering the cancelled status with "running"
       record.status = "cancelled";
-      this._emit(record, { type: "run_end", status: "cancelled", usage: { ...record.usage } });
+      this._emit(record, this._runEnd(record));
       return;
     }
     record.status = "running";
@@ -1152,6 +1261,16 @@ export class RunManager {
           if (isRecord(usage)) {
             record.usage = { ...emptyUsage(), ...(usage as Partial<UsageTotals>) };
           }
+        }
+        if (type === "call_usage") {
+          // Live per-role attribution: the record folds the events it already
+          // persists, so a polled record shows the split while the run works
+          // and a failed/cancelled run keeps the spend it measured.
+          record.usageByRole = addCallUsage(
+            record.usageByRole,
+            (msg as { role?: unknown }).role,
+            (msg as { usage?: unknown }).usage,
+          );
         }
         this._emit(record, msg as unknown as RuntimeEvent);
         if (type === "approval_requested") {
@@ -1179,7 +1298,7 @@ export class RunManager {
       record.error = "run has no job";
       record.finished = nowSeconds();
       this._emit(record, { type: "run_error", message: record.error });
-      this._emit(record, { type: "run_end", status: record.status, usage: { ...record.usage } });
+      this._emit(record, this._runEnd(record));
       record.finish();
       return;
     }
@@ -1213,7 +1332,7 @@ export class RunManager {
         if (failureUsage !== undefined) record.usage = failureUsage;
         this._emit(record, { type: "run_error", message: String(exc) });
       }
-      this._emit(record, { type: "run_end", status: record.status, usage: { ...record.usage } });
+      this._emit(record, this._runEnd(record));
       record.finish();
       return;
     }
@@ -1228,20 +1347,41 @@ export class RunManager {
     if (result.usage !== undefined && isRecord(result.usage)) {
       record.usage = { ...emptyUsage(), ...(result.usage as Partial<UsageTotals>) };
     }
+    // The job's own split is authoritative when it reports one; a job that
+    // reports none keeps the split already folded from its `call_usage`
+    // events (never a fabricated zero half).
+    const resultSplit = normalizeUsageByRole(result.usageByRole);
+    if (resultSplit !== null) record.usageByRole = resultSplit;
     // Additive run cost (wave 24): the job computes it where the resolved
     // config/endpoints are in scope. A job that reports none leaves the record
     // honestly null; a terminal failed/cancelled unwind already stayed null.
     record.cost = result.cost ?? null;
-    const end: RuntimeEvent = {
+    const end: RunEndEvent = this._runEnd(record);
+    if (record.decision !== null) {
+      end.decision = record.decision;
+    }
+    this._emit(record, end);
+    record.finish();
+  }
+
+  /**
+   * The terminal `run_end` event for one record: the merged `usage` stays
+   * byte-stable and the additive `usage_by_role` is present only when the run
+   * measured a split.
+   */
+  private _runEnd(record: RunRecord): RunEndEvent {
+    const end: RunEndEvent = {
       type: "run_end",
       status: record.status,
       usage: { ...record.usage },
     };
-    if (record.decision !== null) {
-      (end as { decision?: Record<string, unknown> }).decision = record.decision;
+    if (record.usageByRole !== null) {
+      end.usage_by_role = {
+        senior: { ...record.usageByRole.senior },
+        junior: { ...record.usageByRole.junior },
+      };
     }
-    this._emit(record, end);
-    record.finish();
+    return end;
   }
 
   /** Flip the status and emit exactly one matching `run_status` event. */

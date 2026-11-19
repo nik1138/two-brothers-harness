@@ -1778,14 +1778,19 @@ imported or executed on load/activation. Sources: `src/pluginbundle.ts`
   `--json` `usage_by_role` key, the human per-role split block(s) and the
   `--verbose` per-call token segment — so a cache read/write is attributable to
   a node and tool belt, and the run total is split Senior vs Junior with each
-  role's own family normalization. **Remaining:** the web UsageFooter/TUI
-  status bar still render the merged counters only (consuming `usageByRole`
-  there is a follow-up), `RunRecord`/`run_end` do not carry the split (a
-  sidecar-rebuilt record would need a new event field), per-role cost is not
-  estimated, a failed run's per-role split is not attached to the error, and
-  pi's cache-miss/eviction *deltas* between turns (rather than per-call token
-  accounting) are still absent. Subagent (helper) usage stays a separate tier
-  by design.
+  role's own family normalization. **Follow-up shipped (feat/usage-surfaces,
+  additive):** `RunRecord`/`GET /api/runs[/{id}]` and the terminal `run_end`
+  event carry `usage_by_role` (`{senior, junior}`; omitted for a pre-feature or
+  untracked run, and rebuilt by summing the sidecar's `call_usage` events when
+  the terminal event has no split, so old sessions stay merged-only), and the
+  web UsageFooter + `/status` dialog and the TUI Ctrl+B status panel render the
+  Senior/Junior split with each role's tokens in/out and cache reads/writes.
+  The status bar, footer tips, keymap and machine CLI outputs are unchanged.
+  **Remaining:** per-role cost is not estimated, a failed run's per-role split
+  is not attached to the thrown error (the live/rebuilt record still carries
+  the calls it measured), and pi's cache-miss/eviction *deltas* between turns
+  (rather than per-call token accounting) are still absent. Subagent (helper)
+  usage stays a separate tier by design.
 - **Remaining key-binding surfaces** — wave 16 shipped the web's three
   modifier global chords (command palette, find, shortcut reference) with the
   Settings → Keyboard capture UI, and wave 19 shipped the TUI's three global

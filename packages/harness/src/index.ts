@@ -213,6 +213,7 @@ export {
   type RunApprovalBrokerOptions,
   type RunErrorEvent,
   type RunEndEvent,
+  type UsageByRole,
 } from "./runevents.ts";
 export {
   TODO_CONTENT_MAX_CHARS,

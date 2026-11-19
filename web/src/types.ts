@@ -179,6 +179,16 @@ export interface RunUsage {
 }
 
 /**
+ * Additive Senior/Junior split of a run's usage (feat/usage-surfaces). Present
+ * on newer backends only; both halves always exist when the field does (a role
+ * that made no call reports zero counters). Absent = merged-only display.
+ */
+export interface RunUsageByRole {
+  senior: RunUsage
+  junior: RunUsage
+}
+
+/**
  * Estimated USD cost of one run (wave 24). Present on a run record only when
  * both roles resolved to the same priced model; `null` means unknown, never
  * `$0`. `model` is the price-table row the id matched.
@@ -226,6 +236,12 @@ export interface RunRecord {
   error?: string
   decision?: Record<string, unknown>
   usage?: RunUsage | null
+  /**
+   * Additive per-role split of `usage` (newer backends only; omitted for a
+   * pre-feature run or a provider that tracks no usage). The footer/status
+   * dialog render it when present and stay merged-only otherwise.
+   */
+  usage_by_role?: RunUsageByRole | null
   /** Additive run cost estimate; `null`/absent = unknown (omit the segment). */
   cost?: RunCost | null
   /**
@@ -580,6 +596,22 @@ export interface UsageEvent {
 }
 
 /**
+ * Additive per-call usage attribution (display-only): the tokens ONE provider
+ * request consumed, attributed to the acting role and the node kind it
+ * answered. Emitted after the request by newer backends only (kind
+ * `compaction` covers summarizer passes); older backends never send it, so a
+ * consumer that ignores the type keeps working.
+ */
+export interface CallUsageEvent {
+  type: 'call_usage'
+  role: 'senior' | 'junior'
+  kind: string
+  usage: RunUsage
+  run_id: string
+  at: number
+}
+
+/**
  * Additive auto-mode routing pre-decision (`auto_route`): the EFFECTIVE route
  * after the harness guardrails, the Senior's one-sentence reason, and the
  * requested mode (always 'auto'). `downgraded_from` is present only when the
@@ -750,6 +782,8 @@ export type RunEvent =
       status: 'completed' | 'failed' | 'cancelled'
       decision?: Record<string, unknown>
       usage?: RunUsage | null
+      /** Additive per-role split; omitted/absent on older backends. */
+      usage_by_role?: RunUsageByRole | null
       run_id: string
       at: number
     }
@@ -764,6 +798,7 @@ export type RunEvent =
   | PromptAuditEvent
   | ReasoningEvent
   | UsageEvent
+  | CallUsageEvent
   | AutoRouteEvent
   | SubagentStartedEvent
   | SubagentActivityEvent

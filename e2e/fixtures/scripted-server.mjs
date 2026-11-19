@@ -733,7 +733,38 @@ function decide(body) {
 
 // -- OpenAI-compatible HTTP surface --------------------------------------------
 
-function completionJson(model, decision) {
+/**
+ * Per-call usage the provider adapter maps into the acting role's tracker.
+ * The tool-preview scenario (`list`) reports role-distinct counters, so the
+ * backend attributes a real Senior/Junior split (`usage_by_role`, `call_usage`)
+ * that the web footer can be checked against; every other scenario keeps the
+ * historical fixed 10/5 chunk so existing expectations are untouched.
+ */
+function completionUsage(role) {
+  if (OPTS.scenario === 'list') {
+    return role === 'senior'
+      ? {
+          prompt_tokens: 12,
+          completion_tokens: 4,
+          total_tokens: 16,
+          prompt_tokens_details: { cached_tokens: 6 },
+        }
+      : {
+          prompt_tokens: 30,
+          completion_tokens: 6,
+          total_tokens: 36,
+          prompt_tokens_details: { cached_tokens: 0 },
+        }
+  }
+  return {
+    prompt_tokens: 10,
+    completion_tokens: 5,
+    total_tokens: 15,
+    prompt_tokens_details: { cached_tokens: 0 },
+  }
+}
+
+function completionJson(model, decision, role) {
   return {
     id: `chatcmpl-e2e-${(++callCounter).toString(36)}`,
     object: 'chat.completion',
@@ -746,12 +777,7 @@ function completionJson(model, decision) {
         finish_reason: decision.toolCalls.length > 0 ? 'tool_calls' : 'stop',
       },
     ],
-    usage: {
-      prompt_tokens: 10,
-      completion_tokens: 5,
-      total_tokens: 15,
-      prompt_tokens_details: { cached_tokens: 0 },
-    },
+    usage: completionUsage(role),
   }
 }
 
@@ -997,8 +1023,9 @@ const server = http.createServer(async (req, res) => {
       }
       const send = () => {
         if (res.writableEnded) return
+        const role = body.model === OPTS.seniorModel ? 'senior' : 'junior'
         res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify(completionJson(String(body.model ?? ''), decision)))
+        res.end(JSON.stringify(completionJson(String(body.model ?? ''), decision, role)))
       }
       if (decision.linger && decision.linger > 0) {
         // a stopped run aborts the fetch: drop the reply and end quietly so

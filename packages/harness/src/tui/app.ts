@@ -74,7 +74,7 @@ import {
 } from "../permissions.ts";
 import type { Message } from "../protocol.ts";
 import { RunApprovalBroker, RuntimeEventStore } from "../runevents.ts";
-import type { RuntimeEvent } from "../runevents.ts";
+import type { RuntimeEvent, UsageByRole } from "../runevents.ts";
 import type { RoleEndpoint, RoleEndpoints } from "../runtime.ts";
 import {
   SubagentStore,
@@ -1997,6 +1997,12 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
   const steerQueue = createSteerQueue();
   let lastFailedTask: { task: string; turnMode: Config["mode"] } | null = null;
   let usage: UsageSnapshot | null = null;
+  /**
+   * Additive per-role split of the measured turn (`HarnessResult.usageByRole`),
+   * rendered only by the Ctrl+B status panel; the status bar keeps the merged
+   * counters. Null until a run reports a split (old/mock providers).
+   */
+  let usageByRole: UsageByRole | null = null;
   let cost: number | null = null;
   let contextTokens: number | null = null;
   let turnStartedAt = 0;
@@ -2497,6 +2503,7 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
             promptTokens: usage.prompt,
           }
         : {}),
+      ...(usageByRole !== null && usage !== null ? { usageByRole } : {}),
       cost,
       ...(helpers.total > 0
         ? {
@@ -3119,6 +3126,7 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
     // tokens/cache as if they were current would be worse than showing none.
     // The first live `usage` event (node boundary) fills the real counters.
     usage = null;
+    usageByRole = null;
     cost = null;
     running = true;
     updateAttentionTitle("working");
@@ -3388,6 +3396,10 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
         try {
           const result = await harness.run(task, context);
           usage = usageOf(result.usage);
+          // Additive per-role split: the panel shows it when present; a
+          // provider that tracks no usage reports none and the panel keeps
+          // its merged-only rows.
+          usageByRole = result.usageByRole ?? null;
           lastElapsedMs = Date.now() - turnStartedAt;
           measureContext();
           const estimate = estimateRunCostFromUsage({
@@ -4453,6 +4465,7 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
     toolExpansion = new Set<string>();
     scroll = latestTranscriptScroll();
     usage = null;
+    usageByRole = null;
     cost = null;
     lastElapsedMs = undefined;
     contextTokens = null;

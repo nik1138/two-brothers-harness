@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { NButton } from 'naive-ui'
 import type { McpStatus, RunMode, RunStatus, RunUsage, SettingsView } from '../types'
+import type { RoleUsageView } from '../usageByRole'
 import { cacheHitPercent, promptTokensOf } from '../usageCache'
 import { mcpBlockVisible, mcpStatusBlock } from '../mcpStatus'
 import AppDialog from './AppDialog.vue'
@@ -19,6 +20,13 @@ const props = defineProps<{
   runStatus: RunStatus | null
   roles: SettingsView | null
   usage: RunUsage | null
+  /**
+   * Render-ready Senior/Junior rows of the newest measured run split
+   * (feat/usage-surfaces). Empty/absent = the backend reported none: the
+   * dialog keeps its merged-only Tokens row and still tells the truth that no
+   * per-role split is known, rather than fabricating one.
+   */
+  roleUsages?: RoleUsageView[]
   turns: number
   events: number
   /** Additive auto-mode routing decision of the newest known run (null when
@@ -54,6 +62,8 @@ const runLabel = computed(() =>
 const promptTokens = computed(() => promptTokensOf(props.usage))
 /** `cached / prompt`, clamped; null only when there is no counter to show. */
 const cachePct = computed(() => cacheHitPercent(props.usage))
+/** Per-role rows; empty (older backend / no measured split) renders none. */
+const roleRows = computed(() => props.roleUsages ?? [])
 const sessionTitle = computed(
   () => props.session?.title || props.session?.name || 'No session selected',
 )
@@ -140,6 +150,20 @@ const mcpBlock = computed(() =>
             <template v-if="(usage.cache_write_tokens ?? 0) > 0">
               · {{ usage.cache_write_tokens }} written
             </template>
+          </dd>
+        </div>
+        <!-- Additive per-role split (feat/usage-surfaces): shown only for the
+             roles the backend measured; absent = the merged rows above stand
+             alone, as before. -->
+        <div v-for="row in roleRows" :key="row.role" class="status-row">
+          <dt>{{ row.label }} usage</dt>
+          <dd>
+            {{ row.tokens }}
+            <template v-if="row.cache !== null">
+              · <span :title="row.cacheTitle ?? undefined">{{ row.cache }}</span>
+            </template>
+            <template v-if="row.write !== null"> · {{ row.write }}</template>
+            · {{ row.modelCalls }} model call{{ row.modelCalls === 1 ? '' : 's' }}
           </dd>
         </div>
       </template>

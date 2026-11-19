@@ -52,6 +52,7 @@ import type {
   RunRecord,
   RunStatus,
   RunUsage,
+  RunUsageByRole,
   SessionInfo,
   SessionRewindResult,
   SettingsView,
@@ -70,6 +71,11 @@ import {
 import type { QueuedRunRow, SessionQueueView } from './queueState'
 import { isBaseCommandAction } from './basecommands'
 import type { ComposerCommandRequest } from './basecommands'
+import {
+  addCallUsage,
+  normalizeUsageByRole,
+  roleUsageViews,
+} from './usageByRole'
 import { canUseStopGesture, isStopGesture } from './composerKeys'
 import {
   steeredNotice,
@@ -326,6 +332,13 @@ const sidebarCollapsed = ref<boolean>(drawerQuery?.matches ?? false)
 /** Latest known per-run usage, keyed by session (from run_end events / run records). */
 const runUsageBySession = ref<Record<string, RunUsage | null>>({})
 /**
+ * Additive per-role split, keyed by session (feat/usage-surfaces): folded from
+ * the followed run's live `call_usage` frames and replaced by the authoritative
+ * `run_end` / run-record split. Null/absent = merged-only display (older
+ * backend); never a fabricated zero half.
+ */
+const runUsageByRoleBySession = ref<Record<string, RunUsageByRole | null>>({})
+/**
  * Latest known run cost estimate, keyed by session (wave 24). Null/absent is
  * honest unknown (mixed models or an unpriced model); the footer omits the
  * segment then. Cost is not in `run_end`, so it is refreshed from the run
@@ -344,6 +357,12 @@ function forgetSessionUsage(session: string) {
     const next = { ...runUsageBySession.value }
     delete next[session]
     runUsageBySession.value = next
+  }
+  if (session in runUsageByRoleBySession.value) {
+    // the split belongs to the same turn: a new run must not inherit it
+    const next = { ...runUsageByRoleBySession.value }
+    delete next[session]
+    runUsageByRoleBySession.value = next
   }
   if (session in runCostBySession.value) {
     const next = { ...runCostBySession.value }
@@ -527,6 +546,12 @@ const selectedWorkspaceName = computed<string | null>(() => {
 /** Latest known usage for the selected session, if any. */
 const usageForSelected = computed(() =>
   selected.value ? (runUsageBySession.value[selected.value] ?? null) : null,
+)
+/** Render-ready Senior/Junior rows; empty = merged-only (no split known). */
+const roleUsagesForSelected = computed(() =>
+  selected.value
+    ? roleUsageViews(runUsageByRoleBySession.value[selected.value] ?? null)
+    : [],
 )
 /** Latest known run cost estimate for the selected session (null = unknown). */
 const costForSelected = computed(() =>
@@ -1411,6 +1436,12 @@ async function refreshUsageForSession(session: string) {
     // action copy says the link is unknown rather than pretending.
     recordLastRun(latest)
     runUsageBySession.value = { ...runUsageBySession.value, [session]: latest.usage ?? null }
+    // Additive per-role split: a rebuilt pre-feature record omits the field,
+    // so this clears to null instead of keeping another run's split.
+    runUsageByRoleBySession.value = {
+      ...runUsageByRoleBySession.value,
+      [session]: normalizeUsageByRole(latest.usage_by_role),
+    }
     runCostBySession.value = { ...runCostBySession.value, [session]: latest.cost ?? null }
   } catch {
     // usage stats are best-effort; never block session loading on them
@@ -1688,6 +1719,12 @@ function finalizeRun(runId: string, status: RunStatus, error: string | null) {
       if (rec.usage) {
         runUsageBySession.value = { ...runUsageBySession.value, [entry.session]: rec.usage }
       }
+      // The finished record is authoritative for the additive split too: an
+      // old backend omits it (null → merged-only), never a stale mix.
+      runUsageByRoleBySession.value = {
+        ...runUsageByRoleBySession.value,
+        [entry.session]: normalizeUsageByRole(rec.usage_by_role),
+      }
       // Cost is computed by the backend at run completion (not in run_end), so
       // the terminal record is its only source.
       runCostBySession.value = { ...runCostBySession.value, [entry.session]: rec.cost ?? null }
@@ -1771,6 +1808,19 @@ function handleRunEvent(runId: string, raw: string, eventId: string) {
         runUsageBySession.value = { ...runUsageBySession.value, [run.session]: data.usage }
       }
       break
+    case 'call_usage':
+      // Additive per-call attribution (newer backends only): fold it into the
+      // session's split so the footer/status dialog can show Senior vs Junior
+      // while the run works. Older backends never send this frame.
+      runUsageByRoleBySession.value = {
+        ...runUsageByRoleBySession.value,
+        [run.session]: addCallUsage(
+          runUsageByRoleBySession.value[run.session] ?? null,
+          data.role,
+          data.usage,
+        ),
+      }
+      break
     case 'subagent_started':
     case 'subagent_activity':
     case 'subagent_completed':
@@ -1792,6 +1842,12 @@ function handleRunEvent(runId: string, raw: string, eventId: string) {
     case 'run_end':
       if (data.usage) {
         runUsageBySession.value = { ...runUsageBySession.value, [run.session]: data.usage }
+      }
+      // The terminal split is authoritative when present; a pre-feature
+      // backend omits it, so the accumulators are cleared rather than kept.
+      runUsageByRoleBySession.value = {
+        ...runUsageByRoleBySession.value,
+        [run.session]: normalizeUsageByRole(data.usage_by_role),
       }
       finalizeRun(runId, data.status, runErrorBySession.value[run.session] ?? null)
       break
@@ -2738,6 +2794,10 @@ function onSessionDeleted(name: string) {
   const rest = { ...runUsageBySession.value }
   delete rest[name]
   runUsageBySession.value = rest
+  // the split belongs to the deleted session too; never resurrect it
+  const splits = { ...runUsageByRoleBySession.value }
+  delete splits[name]
+  runUsageByRoleBySession.value = splits
   // the estimate belongs to the deleted session too; never resurrect it
   const costs = { ...runCostBySession.value }
   delete costs[name]
@@ -3252,6 +3312,7 @@ onUnmounted(() => {
         :started-at="runStartedAt"
         :turns="turns"
         :usage="usageForSelected"
+        :role-usages="roleUsagesForSelected"
         :cost="costForSelected"
       />
       <div class="composer-inert" :inert="viewedSubagent !== null || subagentLoading">
@@ -3427,6 +3488,7 @@ onUnmounted(() => {
       :run-status="activeRun?.status ?? null"
       :roles="settings"
       :usage="usageForSelected"
+      :role-usages="roleUsagesForSelected"
       :turns="turns"
       :events="events.length"
       :route="selectedLastRun?.route ?? null"

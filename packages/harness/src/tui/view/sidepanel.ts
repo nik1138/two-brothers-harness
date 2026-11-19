@@ -22,6 +22,7 @@
  */
 import { mcpServerLine, type McpServerStatus } from "../mcpstatus.ts";
 import { findCommand, formatChord, TUI_COMMANDS, type TuiCommand } from "../keymap.ts";
+import type { UsageTotals } from "../../provider.ts";
 import { blankRow, boxContentWidth, fitStyled, renderBox, sanitizeDisplayText } from "../screen.ts";
 import { truncateToWidth } from "../text.ts";
 import { plainTheme, type Theme, type ThemeToken } from "../theme.ts";
@@ -224,6 +225,13 @@ export interface SidePanelState {
   outputTokens?: number;
   cachedTokens?: number;
   cacheWriteTokens?: number;
+  /**
+   * Additive per-role split of the merged TOKENS/CACHE rows (from
+   * `HarnessResult.usageByRole`). Absent renders no extra rows, so a turn
+   * without a measured split keeps the historical panel document; a role with
+   * no measured provider call renders no row either.
+   */
+  usageByRole?: { senior: UsageTotals; junior: UsageTotals };
   /** Null is the honest unknown price; undefined means "not measured yet". */
   cost?: number | null;
   elapsedMs?: number;
@@ -270,17 +278,62 @@ function tokenValue(state: SidePanelState): string {
   return `in ${formatCount(prompt)} · out ${formatCount(state.outputTokens ?? 0)}`;
 }
 
+/** Clamped `cached / prompt` percentage (writes are never counted as hits). */
+function cachePercent(cached: number, prompt: number): number {
+  return prompt > 0
+    ? Math.min(100, Math.round((cached * 100) / prompt))
+    : cached > 0
+      ? 100
+      : 0;
+}
+
 function cacheValue(state: SidePanelState): string {
   if (state.cachedTokens === undefined) return "unknown";
   const prompt = state.promptTokens ?? state.inputTokens ?? 0;
-  const percent =
-    prompt > 0
-      ? Math.min(100, Math.round((state.cachedTokens * 100) / prompt))
-      : state.cachedTokens > 0
-        ? 100
-        : 0;
+  const percent = cachePercent(state.cachedTokens, prompt);
   const written = state.cacheWriteTokens ?? 0;
   return written > 0 ? `${percent}% · ${formatCount(written)} written` : `${percent}%`;
+}
+
+/** True when a split half measured at least one provider call. */
+function roleMeasured(usage: UsageTotals | undefined): boolean {
+  return usage !== undefined && Math.trunc(Number(usage.model_calls ?? 0)) > 0;
+}
+
+/**
+ * One role's usage in the panel's compact vocabulary: tokens in/out plus the
+ * role's own cache reads (as a percentage of its prompt total, the same
+ * honest denominator the merged row uses) and cache writes when billed. The
+ * value is width-clipped by {@link sidePanelRows} like every other row.
+ */
+function roleUsageValue(usage: UsageTotals): string {
+  const prompt = usage.prompt_tokens ?? usage.input_tokens ?? 0;
+  const parts = [
+    `in ${formatCount(prompt)}`,
+    `out ${formatCount(usage.output_tokens ?? 0)}`,
+    `cache ${cachePercent(usage.cached_tokens ?? 0, prompt)}%`,
+  ];
+  const written = usage.cache_write_tokens ?? 0;
+  if (written > 0) parts.push(`write ${formatCount(written)}`);
+  return parts.join(" · ");
+}
+
+/**
+ * The per-role usage rows (SENIOR USE / JUNIOR USE) for a measured split:
+ * only roles that actually answered a provider call get a row, so a solo run
+ * never shows a fabricated zero half. Absent `usageByRole` = no rows.
+ */
+function roleUsageRows(state: SidePanelState): SidePanelEntry[] {
+  const split = state.usageByRole;
+  if (split === undefined) return [];
+  const rows: SidePanelEntry[] = [];
+  if (roleMeasured(split.senior)) {
+    rows.push({ label: "SENIOR USE", value: roleUsageValue(split.senior), tone: "senior" });
+  }
+  if (roleMeasured(split.junior)) {
+    rows.push({ label: "JUNIOR USE", value: roleUsageValue(split.junior), tone: "junior" });
+  }
+  return rows;
 }
 
 function costValue(cost: number | null | undefined): string {
@@ -387,6 +440,9 @@ export function sidePanelEntries(
     { label: "CONTEXT", value: contextValue(state), tone: "muted" },
     { label: "TOKENS", value: tokenValue(state), tone: "muted" },
     { label: "CACHE", value: cacheValue(state), tone: "muted" },
+    // Additive per-role rows (feat/usage-surfaces): directly under the merged
+    // TOKENS/CACHE rows they split. Absent split = exactly the old document.
+    ...roleUsageRows(state),
     {
       label: "COST",
       value: costValue(state.cost),

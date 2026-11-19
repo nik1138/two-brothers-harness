@@ -41,6 +41,7 @@ import {
   type QuestionOutcome,
 } from "./permissions.ts";
 import type { PromptAuditEntry } from "./harness.ts";
+import type { UsageTotals } from "./provider.ts";
 import type { TodoItem } from "./todos.ts";
 
 export const CLIP_RESULT_CHARS = 800;
@@ -251,6 +252,21 @@ export interface PromptAuditEvent extends RuntimeEventMeta, PromptAuditEntry {
 }
 
 /**
+ * Per-role usage attribution (additive). Carried on the terminal `run_end`
+ * event and the `RunRecord` when at least one provider call was measured;
+ * omitted entirely otherwise, so old sessions and untracked providers keep
+ * their merged-only record. Both halves are always present when the field
+ * exists: a role that made no calls reports its zero counters, exactly like
+ * `HarnessResult.usageByRole`. The two halves sum to the merged `usage` for
+ * every provider that tracks usage (compaction summarizer calls are attributed
+ * to the role whose provider ran them).
+ */
+export interface UsageByRole {
+  senior: UsageTotals;
+  junior: UsageTotals;
+}
+
+/**
  * Additive per-call usage attribution: the tokens ONE provider request
  * consumed, attributed to the acting role and the node kind it answered.
  * Emitted immediately AFTER the request (the counters only exist once the
@@ -367,6 +383,12 @@ export interface RunEndEvent extends RuntimeEventMeta {
   status: string;
   usage: Record<string, unknown>;
   decision?: Record<string, unknown>;
+  /**
+   * Additive Senior/Junior split of `usage`. Omitted when no provider call ran
+   * (or tracked usage), so a pre-feature sidecar's `run_end` bytes are
+   * unchanged; `usage` itself never changes.
+   */
+  usage_by_role?: UsageByRole;
 }
 
 /** Every typed runtime event the harness/manager/broker can emit. */

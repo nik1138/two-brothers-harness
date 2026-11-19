@@ -146,3 +146,5 @@ import "./autoroute.test.ts";
 import "./solo.test.ts";
 import "./mcpstatus.test.ts";
 import "./usagebyrole.test.ts";
+import "./usagebyrolesurfaces.test.ts";
+import "./tuisidepanelusage.test.ts";

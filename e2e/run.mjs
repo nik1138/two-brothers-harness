@@ -94,7 +94,10 @@
 //                  bounded `preview` makes the completed tool card expandable;
 //                  its toggle is keyboard-operable (aria-expanded), the plain-
 //                  text <pre> lists entry types/names, and collapsing hides it
-//                  again
+//                  again. The fixture reports role-distinct usage counters, so
+//                  the backend attributes a real Senior/Junior split: the usage
+//                  footer and the /status dialog render exactly the run
+//                  record's `usage_by_role` rows (and no rows before a run)
 //   workspace-drag mock provider: three registered workspaces (API) show group
 //                  headers; dragging a group by its dedicated handle reorders
 //                  the sidebar optimistically and persists through
@@ -5334,6 +5337,13 @@ async function scenarioToolPreview(runner) {
     await ensureWorkspace(page, wsDir, wsName)
     await selectWorkspaceFilter(page, wsName)
     await createSession(page, 'E2E tool preview session')
+    // Before any measured run there is no per-role split: the footer keeps the
+    // merged-only shape (the additive rows are absent, never fabricated).
+    assert.equal(
+      await page.locator('.usage-roles').count(),
+      0,
+      'no Senior/Junior footer rows before a measured run',
+    )
     await sendTask(page, 'List the workspace root', { mode: 'work' })
     await waitForRunEnd(page)
 
@@ -5387,6 +5397,83 @@ async function scenarioToolPreview(runner) {
     const transcript = await page.locator('.chat-scroll').innerText()
     assert.ok(!transcript.includes('{"v":1'), 'raw protocol JSON visible in chat')
     assert.ok(!transcript.includes('[[TASK]]'), 'raw [[TASK]] marker visible in chat')
+
+    // -- additive Senior/Junior usage split (feat/usage-surfaces) -------------
+    // The scripted provider reports role-distinct counters per call (Senior
+    // 12/4 with a 6-token cache read, Junior 30/6 uncached), so the backend
+    // attributes a real split. The footer must render exactly what the run
+    // record carries — never the merged counters re-labelled per role.
+    const sessionName = await sessionNameByTitle(be.base, 'E2E tool preview session')
+    const runsBody = await (
+      await fetch(`${be.base}/api/runs?session=${encodeURIComponent(sessionName)}`)
+    ).json()
+    const newest = [...runsBody].sort(
+      (a, b) => (b.finished || b.created || 0) - (a.finished || a.created || 0),
+    )[0]
+    const split = newest?.usage_by_role
+    assert.ok(split, 'the run record must carry the additive usage_by_role split')
+    assert.ok(split.senior.model_calls > 0, 'the Senior made no attributed call')
+    assert.ok(split.junior.model_calls > 0, 'the Junior made no attributed call')
+
+    const fmt = (value) => Number(value).toLocaleString('en-US')
+    const promptOf = (usage) => {
+      const prompt = Number(usage.prompt_tokens)
+      if (Number.isFinite(prompt) && prompt > 0) return Math.floor(prompt)
+      return Math.floor(Number(usage.input_tokens) || 0)
+    }
+    const cacheOf = (usage) => {
+      const prompt = promptOf(usage)
+      const cached = Number(usage.cached_tokens) || 0
+      if (prompt <= 0) return cached > 0 ? 100 : null
+      return Math.min(100, Math.round((cached / prompt) * 100))
+    }
+    const roleRows = page.locator('.usage-roles .usage-role')
+    await waitFor(async () => (await roleRows.count()) === 2, {
+      desc: 'the footer Senior/Junior usage rows',
+    })
+    assert.equal((await roleRows.nth(0).locator('.usage-role-name').innerText()).trim(), 'Senior')
+    assert.equal((await roleRows.nth(1).locator('.usage-role-name').innerText()).trim(), 'Junior')
+    const seniorText = (await roleRows.nth(0).innerText()).replace(/\s+/g, ' ').trim()
+    const juniorText = (await roleRows.nth(1).innerText()).replace(/\s+/g, ' ').trim()
+    const expectedSenior = `in ${fmt(promptOf(split.senior))} / out ${fmt(split.senior.output_tokens)} tok`
+    const expectedJunior = `in ${fmt(promptOf(split.junior))} / out ${fmt(split.junior.output_tokens)} tok`
+    assert.ok(
+      seniorText.includes(expectedSenior),
+      `Senior footer row does not match the record (${seniorText} vs ${expectedSenior})`,
+    )
+    assert.ok(
+      juniorText.includes(expectedJunior),
+      `Junior footer row does not match the record (${juniorText} vs ${expectedJunior})`,
+    )
+    // role-distinct fixture counters: the Senior reads its prompt cache, the
+    // Junior does not — a merged percentage could not produce both values
+    assert.equal(cacheOf(split.senior), 50, 'the scripted Senior cache read is 50%')
+    assert.equal(cacheOf(split.junior), 0, 'the scripted Junior read no cache')
+    assert.ok(seniorText.includes('cache 50%'), `Senior cache segment: ${seniorText}`)
+    assert.ok(juniorText.includes('cache 0%'), `Junior cache segment: ${juniorText}`)
+
+    // The /status dialog shows the same split, one row per measured role.
+    await page.locator('textarea.composer-input').fill('/')
+    const statusOption = page.locator('.mention-option', { hasText: '/status' })
+    await statusOption.waitFor({ state: 'visible' })
+    await statusOption.click()
+    const statusDialog = page.locator('.app-dialog', { hasText: 'Session status' })
+    await statusDialog.waitFor({ state: 'visible' })
+    for (const [role, usage] of [
+      ['Senior', split.senior],
+      ['Junior', split.junior],
+    ]) {
+      const row = statusDialog.locator('.status-row', { hasText: `${role} usage` })
+      await row.waitFor({ state: 'visible' })
+      const text = (await row.innerText()).replace(/\s+/g, ' ').trim()
+      const expected = `in ${fmt(promptOf(usage))} / out ${fmt(usage.output_tokens)} tok`
+      assert.ok(
+        text.includes(expected),
+        `${role} status row does not carry the split (${text} vs ${expected})`,
+      )
+    }
+    await page.keyboard.press('Escape')
+    await statusDialog.waitFor({ state: 'hidden' })
 
     consoleGuard.assertClean()
     runner.pass('tool-preview')
