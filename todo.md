@@ -136,10 +136,11 @@ fully pushed. What sits open is owner-gated:
 5. [ ] **Next release** — repeat `docs/release.md`; bump + tag + publish
        only with fresh explicit permission.
 6. [ ] **Micro follow-ups (non-blocking):** `roleIdentity` doc comment
-       overstates one absence case (`harness.ts`; behavior correct and
+       FIXED in `1d104ef` (`harness.ts`; comment only, behavior correct and
        pinned); the `/fork` parser usage echo can exceed 320 characters on
        very long operator tokens (cosmetic); the cli-reference TUI summary
-       paragraph is non-exhaustive (`/rewind` documented fully elsewhere);
+       paragraph FIXED in `1d104ef` (`/rewind` now listed; fully documented
+       elsewhere);
        `/rewind` preview→apply has no CAS against external writers (same
        property as the CLI route; TUI holds the keyboard + idle re-check +
        strict atomic re-read); sidecar OS-unlink failure is not

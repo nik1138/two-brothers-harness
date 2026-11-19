@@ -146,11 +146,12 @@ shipped (wave 26). `CANCELLED_TURN_HINT` verified **non-bug** (the exit
 chord is fixed; design note: if exit ever becomes rebindable, derive it and
 `QUIT_ARMED_ACTIVITY` from the effective table).
 
-Micro-follow-ups recorded, non-blocking: (a) the `roleIdentity` doc comment
-overstates one absence case (`harness.ts`; behavior correct and pinned);
-(b) the `/fork` parser usage echo can exceed 320 characters on very long
-operator tokens (cosmetic, pure parser); (c) the cli-reference TUI summary
-paragraph is non-exhaustive (`/rewind` documented fully elsewhere);
+Micro-follow-ups recorded, non-blocking: (a) FIXED in `1d104ef` — the
+`roleIdentity` doc comment now matches the verified behavior (`harness.ts`;
+comment only, no code change); (b) the `/fork` parser usage echo can exceed
+320 characters on very long operator tokens (cosmetic, pure parser); (c)
+FIXED in `1d104ef` — the cli-reference TUI summary lists
+`/rewind [--turns <n>]` (`/rewind` documented fully elsewhere);
 (d) the `/rewind` preview→apply has no CAS against external writers (same
 property as the CLI route; the TUI holds the keyboard + idle re-check +
 strict atomic re-read); (e) sidecar OS-unlink failure is not hermetically
