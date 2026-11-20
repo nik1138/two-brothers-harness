@@ -531,11 +531,11 @@ test("streamable-HTTP transport: url: server end-to-end over loopback", async ()
   const server = http.createServer((req, res) => {
     if (req.method === "GET") {
       // no server-to-client SSE stream: the transport tolerates 405
-      res.writeHead(405).end();
+      res.writeHead(405, { Connection: "close" }).end();
       return;
     }
     if (req.method === "DELETE") {
-      res.writeHead(202).end();
+      res.writeHead(202, { Connection: "close" }).end();
       return;
     }
     let body = "";
@@ -544,9 +544,15 @@ test("streamable-HTTP transport: url: server end-to-end over loopback", async ()
       const msg = JSON.parse(body) as { id?: unknown; method?: string; params?: Record<string, unknown> };
       received.push({ method: msg.method, params: msg.params });
       const replyJson = (result: unknown, extraHeaders: Record<string, string> = {}): void => {
-        res.writeHead(200, { "content-type": "application/json", ...extraHeaders }).end(
-          JSON.stringify({ jsonrpc: "2.0", id: msg.id, result }),
-        );
+        res
+          .writeHead(200, {
+            "content-type": "application/json",
+            Connection: "close",
+            ...extraHeaders,
+          })
+          .end(
+            JSON.stringify({ jsonrpc: "2.0", id: msg.id, result }),
+          );
       };
       if (msg.method === "initialize") {
         replyJson(
@@ -558,14 +564,14 @@ test("streamable-HTTP transport: url: server end-to-end over loopback", async ()
           { "mcp-session-id": "test-session" },
         );
       } else if (msg.method === "notifications/initialized") {
-        res.writeHead(202).end();
+        res.writeHead(202, { Connection: "close" }).end();
       } else if (msg.method === "tools/list") {
         replyJson({ tools: THREE_TOOLS });
       } else if (msg.method === "tools/call") {
         const name = String((msg.params as { name?: unknown })?.name);
         replyJson({ content: [{ type: "text", text: `http: ${name}` }] });
       } else {
-        res.writeHead(404).end();
+        res.writeHead(404, { Connection: "close" }).end();
       }
     });
   });
@@ -586,6 +592,7 @@ test("streamable-HTTP transport: url: server end-to-end over loopback", async ()
     assert.equal(mcp.sharedTools.length, 3, "role: shared routing through the url: transport");
   } finally {
     await mcp.client.close();
+    server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
   assert.ok(

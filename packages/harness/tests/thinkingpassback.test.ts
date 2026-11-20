@@ -856,7 +856,7 @@ test("serve/TUI endpoint path: both role endpoints carry the thinking option", a
       req.on("end", () => {
         bodies.push(JSON.parse(Buffer.concat(chunks).toString("utf-8")));
         const text = replies[Math.min(bodies.length - 1, replies.length - 1)]!;
-        res.writeHead(200, { "Content-Type": "application/json" });
+        res.writeHead(200, { "Content-Type": "application/json", Connection: "close" });
         res.end(
           JSON.stringify({
             content: [{ type: "text", text }],
@@ -951,7 +951,7 @@ async function startMixedKindServer(): Promise<MixedKindServer> {
       const role = url.includes("/senior") ? "senior" : "junior";
       captures.push({ role, family, raw, body });
       const reply = mixedReplyText(body);
-      res.writeHead(200, { "Content-Type": "application/json" });
+      res.writeHead(200, { "Content-Type": "application/json", Connection: "close" });
       if (family === "anthropic") {
         res.end(
           JSON.stringify({

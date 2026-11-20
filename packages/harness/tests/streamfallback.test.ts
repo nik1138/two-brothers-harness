@@ -77,12 +77,12 @@ function readBody(req: IncomingMessage): Promise<string> {
 }
 
 function sendJson(res: ServerResponse, body: unknown, status = 200): void {
-  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", Connection: "close" });
   res.end(JSON.stringify(body));
 }
 
 function sendSse(res: ServerResponse, body: string): void {
-  res.writeHead(200, { "Content-Type": "text/event-stream" });
+  res.writeHead(200, { "Content-Type": "text/event-stream", Connection: "close" });
   res.end(body);
 }
 
@@ -368,7 +368,7 @@ test("a 400 JSON error body stays fatal with streaming requested", async () => {
 
 test("a non-JSON body on a JSON response fails loudly instead of an empty reply", async () => {
   const stub = await startStub((_req, res) => {
-    res.writeHead(200, { "Content-Type": "application/json" });
+    res.writeHead(200, { "Content-Type": "application/json", Connection: "close" });
     res.end("definitely not json");
   });
   try {

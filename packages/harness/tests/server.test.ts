@@ -1979,7 +1979,7 @@ async function startRoleEndpoint(script: string[]): Promise<{
         authorization: (req.headers.authorization as string | undefined) ?? null,
       });
       const content = script.length > 1 ? (script.shift() as string) : script[0];
-      res.writeHead(200, { "Content-Type": "application/json" });
+      res.writeHead(200, { "Content-Type": "application/json", Connection: "close" });
       res.end(
         JSON.stringify({
           choices: [{ message: { content } }],
@@ -1995,7 +1995,7 @@ async function startRoleEndpoint(script: string[]): Promise<{
     baseUrl: `http://127.0.0.1:${port}/v1`,
     close: () =>
       new Promise<void>((resolve) => {
-        server.closeAllConnections?.();
+        server.closeAllConnections();
         server.close(() => resolve());
       }),
   };
@@ -3790,7 +3790,7 @@ async function startFakeModelsEndpoint(
       handler(req, res);
       return;
     }
-    res.writeHead(200, { "Content-Type": "application/json" });
+    res.writeHead(200, { "Content-Type": "application/json", Connection: "close" });
     res.end(JSON.stringify({ data: [{ id: "model-a" }, { id: "model-b", owned_by: "org" }] }));
   });
   await new Promise<void>((resolve, reject) => {
@@ -3937,7 +3937,7 @@ test("provider model discovery: draft URL and one-shot key are used, never store
   const srv = await startServer();
   const storedEndpoint = await startFakeModelsEndpoint();
   const draftEndpoint = await startFakeModelsEndpoint((_req, res) => {
-    res.writeHead(200, { "Content-Type": "application/json" });
+    res.writeHead(200, { "Content-Type": "application/json", Connection: "close" });
     res.end(JSON.stringify({ models: ["draft-model"] }));
   });
   try {
@@ -3982,7 +3982,7 @@ test("provider model discovery: draft URL and one-shot key are used, never store
 test("provider model discovery: an empty answer is valid and leaves the catalog untouched", async () => {
   const srv = await startServer();
   const empty = await startFakeModelsEndpoint((_req, res) => {
-    res.writeHead(200, { "Content-Type": "application/json" });
+    res.writeHead(200, { "Content-Type": "application/json", Connection: "close" });
     res.end(JSON.stringify({ data: [] }));
   });
   try {
@@ -4082,7 +4082,7 @@ test("provider model discovery: upstream failures are a clean 502 with no key ma
   const srv = await startServer();
   try {
     const http500 = await startFakeModelsEndpoint((_req, res) => {
-      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.writeHead(500, { "Content-Type": "text/plain", Connection: "close" });
       res.end("boom");
     });
     try {
@@ -4104,7 +4104,7 @@ test("provider model discovery: upstream failures are a clean 502 with no key ma
     }
 
     const notJson = await startFakeModelsEndpoint((_req, res) => {
-      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.writeHead(200, { "Content-Type": "text/plain", Connection: "close" });
       res.end("definitely not json");
     });
     try {
@@ -4120,7 +4120,7 @@ test("provider model discovery: upstream failures are a clean 502 with no key ma
     }
 
     const unexpectedShape = await startFakeModelsEndpoint((_req, res) => {
-      res.writeHead(200, { "Content-Type": "application/json" });
+      res.writeHead(200, { "Content-Type": "application/json", Connection: "close" });
       res.end(JSON.stringify({ unexpected: true }));
     });
     try {
@@ -4361,7 +4361,7 @@ test("draft model discovery: invalid input and unsupported kinds are honest 400s
 test("draft model discovery: an empty answer is valid and an upstream failure is a clean 502", async () => {
   const srv = await startServer();
   const empty = await startFakeModelsEndpoint((_req, res) => {
-    res.writeHead(200, { "Content-Type": "application/json" });
+    res.writeHead(200, { "Content-Type": "application/json", Connection: "close" });
     res.end(JSON.stringify({ data: [] }));
   });
   try {
@@ -4376,7 +4376,7 @@ test("draft model discovery: an empty answer is valid and an upstream failure is
   }
 
   const http500 = await startFakeModelsEndpoint((_req, res) => {
-    res.writeHead(500, { "Content-Type": "text/plain" });
+    res.writeHead(500, { "Content-Type": "text/plain", Connection: "close" });
     res.end("boom");
   });
   try {
@@ -4423,7 +4423,7 @@ async function startFakeGoogleEndpoint(
     });
     const page = queue[Math.min(seen, queue.length - 1)];
     seen += 1;
-    res.writeHead(200, { "Content-Type": "application/json" });
+    res.writeHead(200, { "Content-Type": "application/json", Connection: "close" });
     res.end(JSON.stringify(page ?? { models: [] }));
   });
   await new Promise<void>((resolve, reject) => {
@@ -4597,7 +4597,7 @@ test("google model discovery: upstream failures are a clean 502 without key mate
         googKey: req.headers["x-goog-api-key"] as string | undefined,
         authorization: req.headers.authorization,
       });
-      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.writeHead(500, { "Content-Type": "text/plain", Connection: "close" });
       res.end("boom");
     });
     server.once("error", reject);

@@ -86,7 +86,10 @@ async function startServer(
       const request: RecordedRequest = { path: req.url ?? "", headers: req.headers, body };
       requests.push(request);
       const result = handler(request);
-      res.writeHead(result.status ?? 200, { "Content-Type": "application/json" });
+      res.writeHead(result.status ?? 200, {
+        "Content-Type": "application/json",
+        Connection: "close",
+      });
       res.end(JSON.stringify(result.body));
     });
   });
@@ -96,7 +99,11 @@ async function startServer(
   return {
     url: `http://127.0.0.1:${port}`,
     requests,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
   };
 }
 

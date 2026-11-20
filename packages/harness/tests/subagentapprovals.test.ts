@@ -263,7 +263,7 @@ async function startHelperModel(): Promise<HelperModel> {
       try {
         body = JSON.parse(Buffer.concat(chunks).toString("utf-8")) as Record<string, any>;
       } catch {
-        res.writeHead(400, { "Content-Type": "application/json" });
+        res.writeHead(400, { "Content-Type": "application/json", Connection: "close" });
         res.end(JSON.stringify({ error: { message: "invalid JSON" } }));
         return;
       }
@@ -289,7 +289,7 @@ async function startHelperModel(): Promise<HelperModel> {
       const content = hasToolResult
         ? "Wrote e2e-helper.txt as the operator approved."
         : "";
-      res.writeHead(200, { "Content-Type": "application/json" });
+      res.writeHead(200, { "Content-Type": "application/json", Connection: "close" });
       res.end(
         JSON.stringify({
           id: "chatcmpl-helper",
@@ -312,7 +312,11 @@ async function startHelperModel(): Promise<HelperModel> {
   const port = (server.address() as AddressInfo).port;
   return {
     baseUrl: `http://127.0.0.1:${port}/v1`,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
   };
 }
 

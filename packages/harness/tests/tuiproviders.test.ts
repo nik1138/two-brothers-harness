@@ -142,7 +142,7 @@ async function startFakeCooperationEndpoint(): Promise<{
         model: typeof body.model === "string" ? body.model : "",
       });
       const content = script.length > 1 ? (script.shift() as string) : (script[0] as string);
-      res.writeHead(200, { "Content-Type": "application/json" });
+      res.writeHead(200, { "Content-Type": "application/json", Connection: "close" });
       res.end(
         JSON.stringify({
           choices: [{ message: { content } }],
@@ -158,7 +158,7 @@ async function startFakeCooperationEndpoint(): Promise<{
     requests,
     close: () =>
       new Promise<void>((resolve) => {
-        server.closeAllConnections?.();
+        server.closeAllConnections();
         server.close(() => resolve());
       }),
   };

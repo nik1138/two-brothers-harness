@@ -59,6 +59,7 @@ async function startStub(steps: StubStep[]): Promise<StubEndpoint> {
       const step = steps.length > 1 ? (steps.shift() as StubStep) : (steps[0] as StubStep);
       res.writeHead(step.status, {
         "Content-Type": "application/json",
+        Connection: "close",
         ...(step.headers ?? {}),
       });
       res.end(typeof step.body === "string" ? step.body : JSON.stringify(step.body ?? {}));
@@ -71,7 +72,7 @@ async function startStub(steps: StubStep[]): Promise<StubEndpoint> {
     calls: () => calls,
     close: () =>
       new Promise<void>((resolve) => {
-        server.closeAllConnections?.();
+        server.closeAllConnections();
         server.close(() => resolve());
       }),
   };

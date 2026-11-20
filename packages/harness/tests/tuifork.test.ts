@@ -514,7 +514,7 @@ test("/fork is refused while compaction runs (palette dispatch) and writes nothi
     req.on("data", () => {});
     req.on("end", () => {
       void gate.then(() => {
-        res.writeHead(200, { "Content-Type": "application/json" });
+        res.writeHead(200, { "Content-Type": "application/json", Connection: "close" });
         res.end(JSON.stringify({ choices: [{ message: { content: SUMMARY_TEXT } }] }));
       });
     });
@@ -567,8 +567,8 @@ test("/fork is refused while compaction runs (palette dispatch) and writes nothi
     );
     assert.equal(await quit(input, app), 0);
   } finally {
-    server.closeAllConnections?.();
-    server.close();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

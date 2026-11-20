@@ -551,7 +551,7 @@ async function startCapturingEndpoint(script: string[]): Promise<{
       const body = JSON.parse(Buffer.concat(chunks).toString("utf-8")) as Record<string, unknown>;
       requests.push(body);
       const content = script.length > 1 ? script.shift() : script[0];
-      res.writeHead(200, { "Content-Type": "application/json" });
+      res.writeHead(200, { "Content-Type": "application/json", Connection: "close" });
       res.end(
         JSON.stringify({
           choices: [{ message: { content } }],
@@ -567,7 +567,7 @@ async function startCapturingEndpoint(script: string[]): Promise<{
     requests,
     close: () =>
       new Promise<void>((resolve) => {
-        server.closeAllConnections?.();
+        server.closeAllConnections();
         server.close(() => resolve());
       }),
   };

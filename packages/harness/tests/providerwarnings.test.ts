@@ -130,7 +130,7 @@ test("CLI: a slow endpoint warns on stderr without --verbose, stdout stays empty
   const slow = createHttpServer((_req, res) => {
     // answer well after the configured timeout
     setTimeout(() => {
-      res.writeHead(200, { "Content-Type": "application/json" });
+      res.writeHead(200, { "Content-Type": "application/json", Connection: "close" });
       res.end(JSON.stringify({ choices: [{ message: { content: "late" } }] }));
     }, 300);
   });
@@ -174,6 +174,7 @@ test("CLI: a slow endpoint warns on stderr without --verbose, stdout stays empty
     else process.env.TWO_BROTHERS_RETRIES = previousRetries;
     if (previousTimeout === undefined) delete process.env.TWO_BROTHERS_TIMEOUT;
     else process.env.TWO_BROTHERS_TIMEOUT = previousTimeout;
+    slow.closeAllConnections();
     await new Promise<void>((resolve) => slow.close(() => resolve()));
   }
 });
@@ -199,7 +200,7 @@ async function startRequestRecorder(): Promise<{
   let count = 0;
   const server = createHttpServer((_req, res) => {
     count += 1;
-    res.writeHead(200, { "Content-Type": "application/json" });
+    res.writeHead(200, { "Content-Type": "application/json", Connection: "close" });
     res.end(JSON.stringify({ choices: [{ message: { content: "unreachable" } }] }));
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -230,6 +231,7 @@ test("CLI: --retries over the cap fails before any provider request", async () =
     assert.equal(recorder.requests(), 0, "no provider attempt may occur on invalid config");
     assert.deepEqual(io.out, [], "no diagnostic may leak onto stdout");
   } finally {
+    recorder.server.closeAllConnections();
     await new Promise<void>((resolve) => recorder.server.close(() => resolve()));
   }
 });
@@ -249,6 +251,7 @@ test("CLI: invalid TWO_BROTHERS_TIMEOUT env fails before any provider request", 
   } finally {
     if (previousTimeout === undefined) delete process.env.TWO_BROTHERS_TIMEOUT;
     else process.env.TWO_BROTHERS_TIMEOUT = previousTimeout;
+    recorder.server.closeAllConnections();
     await new Promise<void>((resolve) => recorder.server.close(() => resolve()));
   }
 });

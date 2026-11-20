@@ -316,7 +316,7 @@ test("without onDelta the request is the plain non-streaming one", async () => {
   const bodies: Array<Record<string, unknown>> = [];
   const stub = await startStub(async (req, res) => {
     bodies.push(JSON.parse(await readBody(req)) as Record<string, unknown>);
-    res.writeHead(200, { "Content-Type": "application/json" });
+    res.writeHead(200, { "Content-Type": "application/json", Connection: "close" });
     res.end(JSON.stringify({ choices: [{ message: { content: "plain" } }], usage: OPENAI_USAGE }));
   });
   try {

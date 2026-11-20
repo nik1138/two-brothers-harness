@@ -567,7 +567,7 @@ test("the override reaches the child's wire request; effort is normalized; the c
         body = {};
       }
       requests.push({ auth: req.headers.authorization, body });
-      res.writeHead(200, { "Content-Type": "application/json" });
+      res.writeHead(200, { "Content-Type": "application/json", Connection: "close" });
       res.end(
         JSON.stringify({
           id: "chatcmpl-1",
@@ -632,7 +632,8 @@ test("the override reaches the child's wire request; effort is normalized; the c
     assert.equal(store.list("parent.jsonl")[0]?.model, "override-model");
     assert.equal(store.list("parent.jsonl")[0]?.status, "completed");
   } finally {
-    server.close();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
     cleanup();
   }
 });
@@ -654,7 +655,7 @@ function loopbackServer(
         body = {};
       }
       requests.push({ auth: req.headers.authorization, body });
-      res.writeHead(200, { "Content-Type": "application/json" });
+      res.writeHead(200, { "Content-Type": "application/json", Connection: "close" });
       res.end(
         JSON.stringify({
           id: "chatcmpl-1",
@@ -729,7 +730,8 @@ test("loopback: sequential unset-model child spawns send the CURRENT junior mode
       ["junior-a", "junior-b"],
     );
   } finally {
-    server.close();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
     cleanup();
   }
 });
@@ -805,8 +807,13 @@ test("loopback: an explicit route model stays frozen across spawns while the jun
       ["route-model", "route-model"],
     );
   } finally {
-    routeServer.close();
-    juniorServer.close();
+    routeServer.closeAllConnections();
+    juniorServer.closeAllConnections();
+    await Promise.all(
+      [routeServer, juniorServer].map(
+        (stub) => new Promise<void>((resolve) => stub.close(() => resolve())),
+      ),
+    );
     cleanup();
   }
 });
