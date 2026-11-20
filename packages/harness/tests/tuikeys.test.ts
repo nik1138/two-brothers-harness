@@ -931,17 +931,23 @@ test("watch: rapid writes inside the debounce window coalesce into one reload", 
   const watcher = watchTuiKeysFile(source, {
     current: () => TUI_COMMANDS,
     onChange: (result) => results.push(result),
+    // The poll interval is 30x smaller than the write gap (the intermediate
+    // stat signature is observed, so the burst is two change events) and the
+    // debounce window is far wider than any scheduler stall, so both events
+    // provably land in ONE window even on a loaded spawn-mode runner.
     intervalMs: 10,
-    debounceMs: 200,
+    debounceMs: 2_000,
   });
   assert.notEqual(watcher, null);
   try {
     await waitForWatchBaseline(10);
-    writeFileSync(file, doc({ palette: ["ctrl+u"] }), "utf8");
-    await sleep(60);
+    // Different document sizes: the stat signature differs even where the
+    // filesystem's mtime granularity is coarse.
+    writeFileSync(file, doc({ palette: ["ctrl+u"], help: ["f5"] }), "utf8");
+    await sleep(300);
     writeFileSync(file, doc({ palette: ["ctrl+l"] }), "utf8");
-    assert.ok(await waitUntil(() => results.length > 0), "the burst reloads");
-    await sleep(350);
+    assert.ok(await waitUntil(() => results.length > 0, 8_000), "the burst reloads");
+    await sleep(800);
     assert.equal(results.length, 1, "one coalesced reload, not one per write");
     assert.equal(
       formatKeys({ keys: results[0]?.commands.find((command) => command.id === "palette")?.keys }),
