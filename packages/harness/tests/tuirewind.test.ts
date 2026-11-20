@@ -126,6 +126,12 @@ const flatText = (output: FakeOutput): string =>
     .replace(/[│─╭╮╰╯┌┐└┘]/g, " ")
     .replace(/\s+/g, " ");
 
+/** Collapse ALL whitespace, so a renderer wrap cannot split an absolute path. */
+const squeeze = (text: string): string => text.replace(/\s+/g, "");
+
+/** The whole rendered text squeezed: a mid-path hard wrap still matches the notice. */
+const squeezedText = (output: FakeOutput): string => squeeze(flatText(output));
+
 /** The newest fully rendered frame (rows joined with newlines). */
 const lastFrameText = (output: FakeOutput): string =>
   stripAnsi(output.data.split(ANSI.cursorHome).at(-1) ?? "");
@@ -1003,10 +1009,9 @@ test("/rewind refuses a current session outside the TUI's session store", async 
     assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
     input.type("/rewind");
     input.enter();
+    const expectedNotice = `rewind: the current session is not a session in ${sessionsDir}`;
     assert.ok(
-      await waitFor(() =>
-        flatText(output).includes(`rewind: the current session is not a session in ${sessionsDir}`),
-      ),
+      await waitFor(() => squeezedText(output).includes(squeeze(expectedNotice))),
       "a file outside the store is refused instead of rewriting a same-named stranger",
     );
     assert.deepEqual(fs.readFileSync(outsideFile), before, "the outside file is untouched");
