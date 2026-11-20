@@ -211,12 +211,10 @@ import {
   type ExternalEditorOptions,
 } from "./externaleditor.ts";
 import {
-  boundForkNotice,
   forkSwitchNotice,
   parseForkCommandArgs,
 } from "./forkcommand.ts";
 import {
-  boundRewindNotice,
   parseRewindCommandArgs,
   previewRewind,
   rewindConfirmation,
@@ -4215,6 +4213,12 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
       level === "warn" ? "warn" : level === "error" ? "error" : "info",
       message,
     );
+    // Toasts are drawn over the newest transcript rows. When the toast's
+    // bounded copy elides the middle of a long notice it no longer carries the
+    // whole text, so paint the transcript first: the whole notice reaches a
+    // frame before the toast covers it. Shorter notices are unaffected (their
+    // toast copy is the whole text).
+    if (message.length > TOAST_TEXT_MAX_CHARS) render();
     pushToast(level, message);
     render();
   };
@@ -5079,17 +5083,15 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
       });
     } catch (exc) {
       const detail = exc instanceof SessionForkError ? exc.message : messageOf(exc);
-      baseNotice("warn", boundForkNotice(`fork failed: ${detail}`));
+      baseNotice("warn", `fork failed: ${detail}`);
       return;
     }
     const targetFile = layout.resolve(result.name)?.sessionPath ?? null;
     if (targetFile === null) {
       baseNotice(
         "warn",
-        boundForkNotice(
-          `fork: copied ${sourceName} to ${result.name} but could not open the copy — ` +
-            "resume it from /sessions",
-        ),
+        `fork: copied ${sourceName} to ${result.name} but could not open the copy — ` +
+          "resume it from /sessions",
       );
       return;
     }
@@ -5098,23 +5100,19 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
     } catch (exc) {
       baseNotice(
         "warn",
-        boundForkNotice(
-          `fork: copied ${sourceName} to ${result.name} but could not switch to it: ` +
-            messageOf(exc),
-        ),
+        `fork: copied ${sourceName} to ${result.name} but could not switch to it: ` +
+          messageOf(exc),
       );
       return;
     }
     updateAttentionTitle(running ? "working" : undefined);
     baseNotice(
       "success",
-      boundForkNotice(
-        forkSwitchNotice({
-          source: sourceName,
-          name: result.name,
-          events: result.events,
-        }),
-      ),
+      forkSwitchNotice({
+        source: sourceName,
+        name: result.name,
+        events: result.events,
+      }),
     );
   };
 
@@ -5189,13 +5187,13 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
     try {
       preview = previewRewind(store.loadStrict(), parsed.turns);
     } catch (exc) {
-      baseNotice("warn", boundRewindNotice(`rewind failed: ${messageOf(exc)}`));
+      baseNotice("warn", `rewind failed: ${messageOf(exc)}`);
       return;
     }
     if (preview.cut.removedCount === 0) {
       baseNotice(
         "info",
-        boundRewindNotice(`nothing to rewind in ${sourceName}: ${preview.cut.reason}`),
+        `nothing to rewind in ${sourceName}: ${preview.cut.reason}`,
       );
       return;
     }
@@ -5225,7 +5223,7 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
         try {
           result = rewindSession(store, parsed.turns);
         } catch (exc) {
-          baseNotice("warn", boundRewindNotice(`rewind failed: ${messageOf(exc)}`));
+          baseNotice("warn", `rewind failed: ${messageOf(exc)}`);
           return;
         }
         // One operator action: the transcript rewrite and the sidecar clear.
@@ -5242,7 +5240,7 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
         if (!result.rewritten) {
           baseNotice(
             "info",
-            boundRewindNotice(`nothing to rewind in ${sourceName}: ${result.cut.reason}`),
+            `nothing to rewind in ${sourceName}: ${result.cut.reason}`,
           );
           return;
         }
@@ -5251,23 +5249,19 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
         } catch (exc) {
           baseNotice(
             "warn",
-            boundRewindNotice(
-              `rewound ${sourceName} but could not reload it: ${messageOf(exc)}`,
-            ),
+            `rewound ${sourceName} but could not reload it: ${messageOf(exc)}`,
           );
           return;
         }
         updateAttentionTitle(running ? "working" : undefined);
         baseNotice(
           "success",
-          boundRewindNotice(
-            rewindOutcomeNotice({
-              name: sourceName,
-              cut: result.cut,
-              sidecarCleared,
-              sidecarError,
-            }),
-          ),
+          rewindOutcomeNotice({
+            name: sourceName,
+            cut: result.cut,
+            sidecarCleared,
+            sidecarError,
+          }),
         );
       },
     };

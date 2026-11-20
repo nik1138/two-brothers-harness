@@ -1135,3 +1135,79 @@ test("/rewind discloses a sidecar clear failure and still rewrites the transcrip
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+/** The toast box rows of one rendered frame ("" when no toast box is painted). */
+function toastBoxText(frame: string): string {
+  const rows = frame.split("\n");
+  const anchor = rows.findIndex((row) => row.includes("SUCCESS  rewound"));
+  if (anchor < 0) return "";
+  let start = anchor;
+  while (start >= 0 && !(rows[start] ?? "").includes("╭")) start -= 1;
+  let end = anchor;
+  while (end < rows.length && !(rows[end] ?? "").includes("╰")) end += 1;
+  if (start < 0 || end >= rows.length) return "";
+  return rows.slice(start, end + 1).join("\n");
+}
+
+test("/rewind keeps a long outcome notice whole in the transcript while the toast is bounded", async () => {
+  // A long temp root makes the sidecar clear's error (it echoes the unlink
+  // path) push the outcome notice well past the 320-char toast bound, with the
+  // sidecar-disclosure clause in the middle of the text.
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), `tb-tui-rewind-notice-whole-${"p".repeat(60)}-`),
+  );
+  const sessionsDir = path.join(root, "sessions");
+  const { file: sourceFile } = writeSession(sessionsDir, "alpha.jsonl", FOUR_ENVELOPES());
+  // A directory where the runtime sidecar should be cannot be unlinked, so the
+  // clear fails after the transcript was rewritten and the notice discloses it.
+  const sidecarPath = path.join(sessionsDir, "runtime", "alpha.jsonl.events.jsonl");
+  fs.mkdirSync(sidecarPath, { recursive: true });
+  fs.writeFileSync(path.join(sidecarPath, "blocker"), "x", "utf8");
+  const { app, input, output } = startApp(sessionsDir, {
+    cfg: resolveConfig({ provider: "mock", sessionFile: sourceFile, resume: true }),
+  });
+  try {
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+    input.type("/rewind");
+    input.enter();
+    assert.ok(await waitFor(() => lastFrameText(output).includes("Rewind session")));
+    input.key("right");
+    input.enter();
+
+    assert.ok(
+      await waitFor(() => flatText(output).includes("rewound alpha.jsonl")),
+      "the outcome notice was produced",
+    );
+    // The toast copy is bounded head-and-tail: it marks the elided middle and
+    // does not carry the disclosure clause that sits there.
+    const toast = toastBoxText(lastFrameText(output));
+    assert.ok(toast.includes("SUCCESS  rewound"), "the outcome is toasted");
+    assert.ok(toast.includes("…"), "the toast copy is bounded with an ellipsis");
+    assert.equal(
+      toast.includes("could not clear the tool/approval history sidecar:"),
+      false,
+      "the toast elides the mid-notice disclosure clause",
+    );
+    // The transcript keeps the same notice whole: the clause is painted, whole
+    // and consecutive, even though the bounded toast elided it.
+    assert.ok(
+      flatText(output).includes("could not clear the tool/approval history sidecar:"),
+      "the transcript keeps the whole notice, clause included",
+    );
+    assert.ok(
+      flatText(output).includes("the transcript is kept — reloaded the session"),
+      "the transcript keeps the notice's tail too",
+    );
+    // With the toast gone the transcript frame shows the whole notice.
+    assert.ok(
+      await waitFor(
+        () => lastFrameText(output).includes("could not clear the tool/approval history sidecar:"),
+        8_000,
+      ),
+      "the whole notice is visible in the transcript once the toast expires",
+    );
+    assert.equal(await quit(input, app), 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -234,6 +234,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Long `/fork` and `/rewind` outcome notices stay whole in the transcript:**
+  the TUI no longer applies the `/fork`/`/rewind` notice helpers at the app's
+  composition sites, so every composed failure/outcome notice reaches
+  `baseNotice` whole and the transcript keeps it byte-for-byte; the display
+  bound stays at the toast sink (`boundToastText` in `pushToast`, still
+  head-and-tail at 320 chars). A notice over 320 chars now keeps its
+  actionable middle clause in the transcript instead of losing it to the
+  toast's elided middle, and a long notice is painted in the transcript before
+  its bounded toast covers the newest rows. The parser usage echoes keep their
+  composition-time head-and-tail bound, so `— usage: …` still survives a long
+  echoed operator token. No protocol change; display only. Tests:
+  `tests/tuirewind.test.ts` ("keeps a long outcome notice whole in the
+  transcript while the toast is bounded"; the sidecar-disclosure contract
+  stays green).
 - **Web transcript actions on touch devices:** the per-message action bar
   (`.bubble-actions` in `web/src/components/ChatView.vue`: copy, quote, fork,
   rewind) was revealed only by `:hover`/`:focus-within`, so a `(hover: none)`
