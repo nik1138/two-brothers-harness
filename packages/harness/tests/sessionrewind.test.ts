@@ -35,6 +35,7 @@ import {
   MAX_REWIND_TURNS,
   MIN_REWIND_TURNS,
   rewindSession,
+  sessionFileSignature,
   validateRewindTurns,
 } from "../src/sessionrewind.ts";
 
@@ -579,6 +580,31 @@ test("rewindSession: a persisted solo session rewinds without a dangling marker"
     // Resume over the kept prefix stays dense and valid.
     const restored = restoreContext(new SessionStore(file));
     assert.deepEqual(restored.events.map((event) => event.seq), [1, 2, 3]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sessionFileSignature: size:mtimeMs:ino identity, null for a missing file", () => {
+  const dir = tmpdir();
+  try {
+    const file = path.join(dir, "sig.jsonl");
+    fs.writeFileSync(file, "abc", "utf-8");
+    const first = sessionFileSignature(file);
+    assert.ok(first !== null);
+    const [size, mtime, ino, ...rest] = first.split(":");
+    assert.equal(size, "3", "the size component counts bytes");
+    assert.ok(Number(mtime) > 0, "the mtime component is a real timestamp");
+    assert.match(ino ?? "", /^\d+$/, "an unavailable inode is written as 0, never omitted");
+    assert.equal(rest.length, 0, "exactly three colon-separated components");
+    assert.equal(
+      sessionFileSignature(path.join(dir, "missing.jsonl")),
+      null,
+      "an unstat-able file is null, which the rewind CAS treats as changed",
+    );
+    // Any append changes at least the size component, so the CAS sees drift.
+    fs.appendFileSync(file, "d", "utf-8");
+    assert.notEqual(sessionFileSignature(file), first);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

@@ -1093,6 +1093,120 @@ test("/rewind refuses a log damaged between the preview and the confirmation", a
   }
 });
 
+test("/rewind refuses a session changed while the confirmation is open and writes zero bytes", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-tui-rewind-cas-"));
+  const sessionsDir = path.join(root, "sessions");
+  const { file: sourceFile } = writeSession(sessionsDir, "alpha.jsonl", FOUR_ENVELOPES());
+  const sidecar = writeSidecar(sessionsDir, "alpha.jsonl");
+  const sidecarBytes = fs.readFileSync(sidecar);
+  const { app, input, output } = startApp(sessionsDir, {
+    cfg: resolveConfig({ provider: "mock", sessionFile: sourceFile, resume: true }),
+  });
+  try {
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+    input.type("/rewind");
+    input.enter();
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("Rewind session")),
+      "the preview is shown before any write",
+    );
+    assert.match(flatText(output), /3 envelopes \(seq 3-5\) will be deleted from alpha\.jsonl/);
+
+    // An external writer appends a new operator turn while the human decides.
+    // The previewed cut (seq 3-5) is no longer the cut `rewindSession` would
+    // apply now (with one operator turn requested it would remove only seq 6),
+    // so accepting the stale confirmation must refuse, not apply a different cut.
+    const mutated = Buffer.concat([
+      fs.readFileSync(sourceFile),
+      Buffer.from(`${envelope(6, "user", "senior", "external task")}\n`, "utf8"),
+    ]);
+    fs.writeFileSync(sourceFile, mutated);
+
+    input.key("right");
+    input.enter();
+    assert.ok(
+      await waitFor(() =>
+        flatText(output).includes(
+          "rewind: the session changed since the preview — nothing was deleted; " +
+            "re-run /rewind to preview again",
+        ),
+      ),
+      "the changed-session refusal is surfaced",
+    );
+    assert.deepEqual(
+      fs.readFileSync(sourceFile),
+      mutated,
+      "the refused rewind wrote zero bytes: the pre-accept state is byte-identical",
+    );
+    assert.deepEqual(fs.readFileSync(sidecar), sidecarBytes, "the sidecar was not deleted");
+    assert.equal(
+      flatText(output).includes("rewound alpha.jsonl"),
+      false,
+      "no success is claimed for a cut that was not applied",
+    );
+    assert.equal(await quit(input, app), 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("/rewind re-previews a changed session and then applies the new cut normally", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-tui-rewind-cas-retry-"));
+  const sessionsDir = path.join(root, "sessions");
+  const { file: sourceFile } = writeSession(sessionsDir, "alpha.jsonl", FOUR_ENVELOPES());
+  const sidecar = writeSidecar(sessionsDir, "alpha.jsonl");
+  const { app, input, output } = startApp(sessionsDir, {
+    cfg: resolveConfig({ provider: "mock", sessionFile: sourceFile, resume: true }),
+  });
+  try {
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+    input.type("/rewind");
+    input.enter();
+    assert.ok(await waitFor(() => lastFrameText(output).includes("Rewind session")));
+
+    const mutated = Buffer.concat([
+      fs.readFileSync(sourceFile),
+      Buffer.from(`${envelope(6, "user", "senior", "external task")}\n`, "utf8"),
+    ]);
+    fs.writeFileSync(sourceFile, mutated);
+    input.key("right");
+    input.enter();
+    assert.ok(
+      await waitFor(() => flatText(output).includes("the session changed since the preview")),
+      "the stale confirmation is refused",
+    );
+
+    // A fresh `/rewind` previews the file as it is now; accepting it applies the
+    // new cut exactly as an unchanged preview does.
+    input.type("/rewind");
+    input.enter();
+    assert.ok(
+      await waitFor(() => lastFrameText(output).includes("Rewind session")),
+      "a fresh preview opens on the changed file",
+    );
+    const dialogFrame = flatText(output);
+    assert.match(dialogFrame, /1 envelope \(seq 6\) will be deleted from alpha\.jsonl/);
+    assert.match(dialogFrame, /5 envelopes stay \(dense seq through 5\)/);
+
+    input.key("right");
+    input.enter();
+    assert.ok(
+      await waitFor(() => flatText(output).includes("rewound alpha.jsonl")),
+      "the re-previewed cut applies normally",
+    );
+    assert.deepEqual(seqsOf(sourceFile), [1, 2, 3, 4, 5], "the appended turn was the cut");
+    assert.equal(
+      sessionLines(sourceFile).some((line) => line.includes("external task")),
+      false,
+      "the re-previewed cut removed the appended turn",
+    );
+    assert.equal(fs.existsSync(sidecar), false, "the successful rewind cleared the sidecar");
+    assert.equal(await quit(input, app), 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("/rewind discloses a sidecar clear failure and still rewrites the transcript", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-tui-rewind-sidecar-fail-"));
   const sessionsDir = path.join(root, "sessions");

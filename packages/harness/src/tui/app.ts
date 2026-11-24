@@ -110,6 +110,7 @@ import {
 } from "../sessionfork.ts";
 import {
   rewindSession,
+  sessionFileSignature,
   type RewindSessionResult,
 } from "../sessionrewind.ts";
 import {
@@ -5116,6 +5117,11 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
     );
   };
 
+  /** Refusal shown when the session file is no longer the one previewed. */
+  const REWIND_CHANGED_NOTICE =
+    "rewind: the session changed since the preview — nothing was deleted; " +
+    "re-run /rewind to preview again";
+
   /**
    * `/rewind [--turns <n>]`: remove the last `n` operator turns (default one)
    * from the CURRENT session through the existing `rewindSession` service,
@@ -5136,6 +5142,12 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
    * file untouched; on success the runtime-event sidecar of the removed runs
    * is cleared (disclosed honestly when it cannot be) and the notice names the
    * removed turn, the kept dense `seq`, the sidecar and the kept transcript.
+   *
+   * The preview also captures the file's `size:mtimeMs:ino` signature (the
+   * server rewind route's CAS identity): a file changed by another writer
+   * while the confirmation is open is refused at accept with the file left
+   * byte-identical, because the cut `rewindSession` would apply then is not
+   * the cut the operator was shown.
    */
   const dispatchRewind = (args: string): void => {
     if (running) {
@@ -5183,6 +5195,11 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
       return;
     }
     const store = new SessionStore(storePath);
+    // The confirmation below describes exactly the cut computed from this file
+    // state, so its identity is the CAS anchor the accept path re-checks: an
+    // external writer during the human confirmation must refuse, never apply
+    // a different cut than the one previewed.
+    const previewSignature = sessionFileSignature(storePath);
     let preview: RewindPreview;
     try {
       preview = previewRewind(store.loadStrict(), parsed.turns);
@@ -5217,6 +5234,25 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
             "warn",
             "rewind: the session is no longer idle — nothing was changed; try again when it finishes",
           );
+          return;
+        }
+        // CAS before the destructive re-read/write: the preview named a cut on
+        // the file at preview time, and `rewindSession` re-loads and
+        // re-computes the cut. A changed file (a second first-party CLI writer
+        // shares the directory with no lock) would silently apply a different
+        // cut, so refuse with zero bytes written and the sidecar untouched.
+        const currentSignature = sessionFileSignature(storePath);
+        if (previewSignature === null || currentSignature !== previewSignature) {
+          // A changed file may also now be unreadable: name that specific
+          // problem (the strict reader's own sentence) instead of hiding it
+          // behind the staleness notice. Neither path writes a byte.
+          try {
+            store.loadStrict();
+          } catch (exc) {
+            baseNotice("warn", `rewind failed: ${messageOf(exc)}`);
+            return;
+          }
+          baseNotice("warn", REWIND_CHANGED_NOTICE);
           return;
         }
         let result: RewindSessionResult;

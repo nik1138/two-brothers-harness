@@ -234,6 +234,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **TUI `/rewind` refuses a session changed during the confirmation:** the
+  preview now captures the session file's `size:mtimeMs:ino` signature (the
+  server rewind route's own identity, extracted unchanged to
+  `src/sessionrewind.ts::sessionFileSignature`) and the accept path re-stats and
+  compares it before the destructive re-read/rewrite. A file changed by another
+  writer while the operator decides — the store's `.writer.json` lock is
+  advisory, so `run --session-file`, `chat --resume` and `sessions rewind` can
+  share the file — now refuses with a bounded "the session changed since the
+  preview — nothing was deleted; re-run /rewind to preview again" notice and
+  zero bytes written, instead of silently applying a cut the operator never saw.
+  The strict re-read, the idle re-check and the sidecar clear on success are
+  unchanged; no HTTP body or wire change. Tests: `tests/tuirewind.test.ts`,
+  `tests/sessionrewind.test.ts`.
 - **Long `/fork` and `/rewind` outcome notices stay whole in the transcript:**
   the TUI no longer applies the `/fork`/`/rewind` notice helpers at the app's
   composition sites, so every composed failure/outcome notice reaches

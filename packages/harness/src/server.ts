@@ -375,7 +375,12 @@ import {
   sessionToMarkdown,
   type SessionSearchDoc,
 } from "./sessionsearch.ts";
-import { computeRewindCut, rewindSession, validateRewindTurns } from "./sessionrewind.ts";
+import {
+  computeRewindCut,
+  rewindSession,
+  sessionFileSignature,
+  validateRewindTurns,
+} from "./sessionrewind.ts";
 import {
   PROVIDER_KIND_DEFAULT,
   SettingsReadOnlyError,
@@ -1663,20 +1668,6 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
         // write-failed: the session directory is not writable, not a request
         // problem, and the fork rollback already removed any partial file.
         return 500;
-    }
-  }
-
-  /**
-   * Cheap file identity for the rewind rewrite CAS: size + mtime (ns) + inode
-   * wherever the platform reports one. `null` when the file cannot be stat'ed
-   * (which the rewind route reports as a changed-session 409).
-   */
-  function sessionFileSignature(filePath: string): string | null {
-    try {
-      const stat = fs.statSync(filePath);
-      return `${stat.size}:${stat.mtimeMs}:${String(stat.ino ?? 0)}`;
-    } catch {
-      return null;
     }
   }
 

@@ -68,6 +68,8 @@
  * opencode `packages/core/src/session/revert.ts` (cut at a message boundary).
  * Here the anchors and markers are the Two Brothers protocol envelopes.
  */
+import * as fs from "node:fs";
+
 import { isCompactionSummary } from "./compaction.ts";
 import { AUTO_ROUTE_PREFIX, STEERING_PREFIX } from "./harness.ts";
 import { REPAIR_REQUEST_PREFIX } from "./payloads.ts";
@@ -79,6 +81,23 @@ export const MIN_REWIND_TURNS = 1;
 
 /** Largest accepted rewind depth (a session is not a database). */
 export const MAX_REWIND_TURNS = 100;
+
+/**
+ * Cheap file identity for the rewind rewrite CAS: size + mtime (ms) + inode
+ * wherever the platform reports one. `null` when the file cannot be stat'ed
+ * (a caller treats that as a changed session and refuses).
+ *
+ * Shared by the server's rewind route and the TUI's preview→apply guard so
+ * both agree byte-for-byte on what "the same session file" means.
+ */
+export function sessionFileSignature(filePath: string): string | null {
+  try {
+    const stat = fs.statSync(filePath);
+    return `${stat.size}:${stat.mtimeMs}:${String(stat.ino ?? 0)}`;
+  } catch {
+    return null;
+  }
+}
 
 /** Opening tag of an attached skill block (`mentions.ts` renderer). */
 const ATTACHED_SKILL_TAG = "<skill-loaded";
