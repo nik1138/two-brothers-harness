@@ -9,6 +9,7 @@
  * every notice stays one bounded transcript row. The service itself is reused
  * as-is; nothing here re-implements the copy.
  */
+import { boundNoticeText } from "./noticebound.ts";
 
 /** The exact accepted invocation, shown by every usage refusal. */
 export const FORK_USAGE = "/fork [--at <seq>] [new-name]";
@@ -73,12 +74,11 @@ export function parseForkCommandArgs(raw: string): ForkCommandParse {
 /**
  * Bound one composed `/fork` notice so it stays one toast's worth of rows:
  * keep the head AND the tail (a `— usage: …` clause or a diagnostic tail is
- * the actionable part) and elide only the middle.
+ * the actionable part) and elide only the middle, with the split shared by
+ * every TUI notice (`noticebound.ts`).
  */
 export function boundForkNotice(text: string): string {
-  if (text.length <= FORK_NOTICE_MAX_CHARS) return text;
-  const tail = Math.floor((FORK_NOTICE_MAX_CHARS - 1) / 2);
-  return `${text.slice(0, FORK_NOTICE_MAX_CHARS - 1 - tail)}…${text.slice(text.length - tail)}`;
+  return boundNoticeText(text, FORK_NOTICE_MAX_CHARS);
 }
 
 /**

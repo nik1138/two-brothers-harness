@@ -215,6 +215,7 @@ import {
   forkSwitchNotice,
   parseForkCommandArgs,
 } from "./forkcommand.ts";
+import { boundNoticeText } from "./noticebound.ts";
 import {
   parseRewindCommandArgs,
   previewRewind,
@@ -1461,10 +1462,12 @@ function messageOf(exc: unknown): string {
  * Longest toast text (chars) before the middle is elided.
  *
  * A toast is drawn in a box at most 64 columns wide (`view/screen.ts`), with
- * one column of padding on each side, so its text wraps at 60 columns: 320
- * chars is at most six 60-column text rows plus the two borders — eight rows
- * per toast. Up to three toasts stack (oldest first), so even a full stack is
- * 24 rows: an ordinary 24-row terminal shows every box whole instead of
+ * one column of padding on each side, so its text wraps at 60 columns. The
+ * widest level label — `SUCCESS` plus the two-space gap after it — takes 9 of
+ * the first row's columns, so 9 + 320 = 329 still fits six 60-column text rows
+ * (ceiling division): 320 chars is six text rows plus the two borders — eight
+ * rows per toast. Up to three toasts stack (oldest first), so even a full stack
+ * is 24 rows: an ordinary 24-row terminal shows every box whole instead of
  * cropping the newest tail. Same ceiling as the `/fork` and `/rewind` notice
  * helpers.
  */
@@ -1475,12 +1478,11 @@ export const TOAST_TEXT_MAX_CHARS = 320;
  * middle. The overlay is top-cropped at the screen height (`screen.ts`
  * `overlayRows`), so an unbounded notice would lose exactly its tail — a
  * `— usage: …` clause or the diagnostic end of an error. The transcript notice
- * keeps the full text; only this toast copy is bounded.
+ * keeps the full text; only this toast copy is bounded. The split itself is
+ * the shared `noticebound.ts` helper.
  */
 export function boundToastText(text: string): string {
-  if (text.length <= TOAST_TEXT_MAX_CHARS) return text;
-  const tail = Math.floor((TOAST_TEXT_MAX_CHARS - 1) / 2);
-  return `${text.slice(0, TOAST_TEXT_MAX_CHARS - 1 - tail)}…${text.slice(text.length - tail)}`;
+  return boundNoticeText(text, TOAST_TEXT_MAX_CHARS);
 }
 
 // --------------------------------------------------------------------------- //

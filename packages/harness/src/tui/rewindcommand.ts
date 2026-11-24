@@ -28,6 +28,7 @@ import {
   validateRewindTurns,
   type RewindCut,
 } from "../sessionrewind.ts";
+import { boundNoticeText } from "./noticebound.ts";
 
 /** The exact accepted invocation, shown by every usage refusal. */
 export const REWIND_USAGE = "/rewind [--turns <n>]";
@@ -79,12 +80,11 @@ export function parseRewindCommandArgs(raw: string): RewindCommandParse {
 /**
  * Bound one composed `/rewind` notice so it stays one toast's worth of rows:
  * keep the head AND the tail (a `— usage: …` clause or a diagnostic tail is
- * the actionable part) and elide only the middle.
+ * the actionable part) and elide only the middle, with the split shared by
+ * every TUI notice (`noticebound.ts`).
  */
 export function boundRewindNotice(text: string): string {
-  if (text.length <= REWIND_NOTICE_MAX_CHARS) return text;
-  const tail = Math.floor((REWIND_NOTICE_MAX_CHARS - 1) / 2);
-  return `${text.slice(0, REWIND_NOTICE_MAX_CHARS - 1 - tail)}…${text.slice(text.length - tail)}`;
+  return boundNoticeText(text, REWIND_NOTICE_MAX_CHARS);
 }
 
 /** One-line bounded task snippet for the confirmation. */
