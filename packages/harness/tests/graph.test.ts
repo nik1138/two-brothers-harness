@@ -317,6 +317,23 @@ test("tool_started args are clipped and tool results compacted", async () => {
   assert.equal((completed.result.stdout as string).length, 800);
 });
 
+test("a throwing onEvent consumer never breaks the run (fail-soft typed sink)", async () => {
+  // The typed RuntimeEvent hook is an observability seam, exactly like the
+  // additive stream sink: a broken consumer (pipe, SSE writer, serializer) must
+  // not change the run's outcome or its envelopes.
+  let calls = 0;
+  const harness = new TwoBrothersHarness(cfg({ mode: "consult" }), {
+    onEvent: (event) => {
+      calls += 1;
+      throw new Error(`runtime event consumer blew up on ${event.type}`);
+    },
+  });
+  const result = await harness.run("events are observational");
+  assert.equal(result.cancelled, false);
+  assert.deepEqual(kinds(result), ["message", "consult", "proposal", "review", "decision"]);
+  assert.ok(calls > 0, "the sink really was called (and threw)");
+});
+
 // ---------------------------------------------------------------------------
 // senior verification (ports SeniorVerificationTest)
 // ---------------------------------------------------------------------------

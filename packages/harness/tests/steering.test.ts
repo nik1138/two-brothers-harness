@@ -634,19 +634,60 @@ test("steering accepted past the run cap is drained and accounted, never strande
   assert.ok(result.warnings.some((warning) => warning.includes(`at most ${MAX_STEERING_ENVELOPES_PER_RUN}`)));
 });
 
-test("a terminal record clears its steering queue and refuses late texts", () => {
+test("a terminal record clears its steering queue, reports the drop and refuses late texts", () => {
   const record = new RunRecord("run-terminal", "s.jsonl", "task");
   assert.equal(record.steer("queued but never applied"), true);
   assert.equal(record.pendingSteering, 1);
   assert.equal(record.public().steering_pending, 1);
   record.finish();
   // finish() drops the queue: a terminal run can never apply it, and the
-  // public view must not claim a pending text.
+  // public view must not claim a pending text — but the accepted text is not
+  // silent either: it is reported as dropped steering.
   assert.equal(record.pendingSteering, 0);
   assert.equal(record.public().steering_pending, undefined);
+  assert.equal(record.public().steering_dropped, 1);
   assert.equal(record.steer("too late"), false);
   assert.equal(record.pendingSteering, 0);
   assert.deepEqual(record.drainSteering(), []);
+  // A terminal drain has nothing left to drop: the count is not double-counted.
+  assert.equal(record.public().steering_dropped, 1);
+});
+
+test("a steer accepted during the final model call is reported as dropped, not silent", async () => {
+  // The last state-machine drain happens before the final node; a text accepted
+  // while `senior_decide`'s provider call is in flight has no later boundary to
+  // land at. It must not vanish without accounting: the run record reports it
+  // as dropped steering (public().steering_dropped), and no envelope is faked.
+  const manager = new RunManager({ workers: 1 });
+  const senior = new ScriptedProvider();
+  const original = senior.chat.bind(senior);
+  let runId = "";
+  senior.chat = async (messages: ChatMessage[], responseKind = "message"): Promise<string> => {
+    const reply = await original(messages, responseKind);
+    if (responseKind === "decision") {
+      assert.equal(manager.steer(runId, "arrived after the last drain").accepted, true);
+    }
+    return reply;
+  };
+  const record = manager.submit("final call", "s.jsonl", async (signal) => {
+    const harness = new TwoBrothersHarness(cfg(), {
+      senior,
+      junior: new ScriptedProvider(),
+      signal,
+      steering: () => record.drainSteering(),
+    });
+    const result = await harness.run("final call");
+    return { decision: result.decision, usage: result.usage };
+  });
+  runId = record.runId;
+  await manager.wait(record.runId);
+  assert.equal(record.status, "completed");
+  assert.equal(record.pendingSteering, 0);
+  assert.equal(record.public().steering_pending, undefined);
+  assert.equal(record.public().steering_dropped, 1, "the accepted-but-unused text is accounted");
+  // The accounting is a record projection, not a faked event: the harness never
+  // asked for the text, so a sidecar/replay sees no invented steering_dropped.
+  assert.equal(record.events.filter((event) => event.type === "steering_dropped").length, 0);
 });
 
 test("a stopped run refuses steering and leaves nothing pending", async () => {

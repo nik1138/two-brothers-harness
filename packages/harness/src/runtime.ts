@@ -828,6 +828,14 @@ export class RunRecord {
   approvals: RunApprovalBroker | ApprovalBroker | null = null;
   /** Bounded pending operator steering texts, oldest first (in-memory only). */
   private readonly _steering: string[] = [];
+  /**
+   * Bounded steering texts discarded because the record reached a terminal
+   * state (or was drained while terminal) before the harness could apply them.
+   * Folded into `public().steering_dropped`, so a text accepted during the
+   * final model call is never lost without accounting (it is not appended to
+   * the transcript either: the cycle that could apply it already ended).
+   */
+  private _steeringUnused = 0;
 
   private _resolveDone!: (finished: boolean) => void;
   private _doneFlag = false;
@@ -905,7 +913,11 @@ export class RunRecord {
     this._doneFlag = true;
     // Nothing will ever drain a terminal run's steering queue, so it must not
     // outlive the run: the texts are dropped with the record (a later `steer`
-    // cannot revive them, and `public()` reports no pending text).
+    // cannot revive them, and `public()` reports no pending text). The drop is
+    // accounted, not silent: the leftover count is folded into the record's
+    // `steering_dropped` view, so a text accepted while the final call was in
+    // flight is reported exactly like a text dropped at the per-run cap.
+    this._steeringUnused += this._steering.length;
     this._steering.length = 0;
     this._resolveDone(true);
   }
@@ -951,6 +963,9 @@ export class RunRecord {
    */
   drainSteering(): string[] {
     if (this._doneFlag || this.signal.aborted) {
+      // Nothing may be appended after the cycle ended: the leftovers are
+      // dropped unused and counted on the public view (never silently).
+      this._steeringUnused += this._steering.length;
       this._steering.length = 0;
       return [];
     }
@@ -993,10 +1008,12 @@ export class RunRecord {
       };
     }
     // Mid-run steering honesty (wave 23): a client polling the record learns
-    // that texts were dropped at the per-run harness cap and how many are still
-    // waiting — no extra route and no faked event. Both fields are additive and
-    // only present when they carry information.
-    let steeringDropped = 0;
+    // that texts were dropped at the per-run harness cap (aggregated from the
+    // typed events), that texts are still waiting, or that accepted texts were
+    // discarded unused when the run went terminal before the harness could
+    // drain them — no extra route and no faked event. All fields are additive
+    // and only present when they carry information.
+    let steeringDropped = this._steeringUnused;
     for (const event of this.events) {
       if (event.type === "steering_dropped") steeringDropped += event.dropped;
     }

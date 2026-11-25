@@ -308,6 +308,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   module generations. Tests: `tests/plugins.test.ts`,
   `tests/mcpstatus.test.ts`.
 
+- **Core run robustness (steering accounting + fail-soft event/control sinks):**
+  a steering text accepted while the final model call is in flight is no longer
+  silent: `RunRecord.finish()` (and a drain on a terminal record) counts the
+  queued leftovers into the record's additive `steering_dropped` view instead
+  of clearing them unaccounted, without appending anything to the transcript,
+  emitting a faked event or changing the queue/cap/envelope contract. The typed
+  `HarnessOptions.onEvent` sink is now fail-soft like the additive stream sink
+  (a throwing consumer never fails a run; call order and payloads unchanged),
+  and `runChild`'s `finally` guards the embedder-supplied
+  `SubagentControlSink.release` (the active budget is decremented first, so a
+  throwing sink neither masks the child's result/error nor leaks the per-run
+  helper budget). Tests: `tests/steering.test.ts`, `tests/graph.test.ts`,
+  `tests/subagentcontrols.test.ts`.
 - **TUI `/rewind` refuses a session changed during the confirmation:** the
   preview now captures the session file's `size:mtimeMs:ino` signature (the
   server rewind route's own identity, extracted unchanged to

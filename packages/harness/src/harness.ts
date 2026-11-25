@@ -1821,8 +1821,21 @@ export class TwoBrothersHarness {
     }
   }
 
+  /**
+   * Publish one typed runtime event to the embedder's `onEvent` hook. Fail-soft
+   * like {@link emitStream}: a throwing consumer is swallowed, so an
+   * observability seam (a broken pipe, an SSE writer, a serialization error)
+   * never changes the run's outcome. Call order and the event payload are
+   * unchanged.
+   */
   private emitRuntime(event: RuntimeEvent): void {
-    this.options.onEvent?.(event);
+    const sink = this.options.onEvent;
+    if (sink === undefined) return;
+    try {
+      sink(event);
+    } catch {
+      // a broken runtime-event consumer never breaks a run
+    }
   }
 
   /**
@@ -3695,8 +3708,15 @@ export class TwoBrothersHarness {
       // Release the control on every settle path (including a parent unwind):
       // a route can never poke a dead child, and the server registry is balanced.
       if (control.status === "running") control.status = "cancelled";
-      settings.controls?.release(id);
+      // The active budget is decremented first, and the embedder-supplied sink
+      // is fail-soft: a throwing `release` must never mask the child's real
+      // outcome (or leave `subagentActive` leaked for the rest of the run).
       this.subagentActive -= 1;
+      try {
+        settings.controls?.release(id);
+      } catch {
+        // a broken control sink never masks the child's result/error
+      }
     }
   }
 

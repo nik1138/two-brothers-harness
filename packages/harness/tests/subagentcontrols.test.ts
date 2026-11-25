@@ -517,6 +517,71 @@ test("a completed child ignores a late interrupt and keeps its report", async ()
   }
 });
 
+test("a throwing control sink never masks the child's result nor leaks the active budget", async () => {
+  const tmp = tmpdir("tb-subcontrols-sink-");
+  try {
+    const store = new SubagentStore(path.join(tmp.root, "subagents"));
+    let registered = 0;
+    let releases = 0;
+    // An embedder-supplied sink that always fails on release. The shipped
+    // server sink is a Map.delete, so this guards the seam, not today's server.
+    const sink: SubagentControlSink = {
+      register() {
+        registered += 1;
+      },
+      release() {
+        releases += 1;
+        throw new Error("control sink blew up");
+      },
+    };
+    const senior = new RecordingSenior([
+      { tool: SUBAGENT_TOOL_NAME, args: { task: "First helper." } },
+      { tool: SUBAGENT_TOOL_NAME, args: { task: "Second helper." } },
+    ]);
+    const harness = new TwoBrothersHarness(mockConfig(), {
+      senior,
+      junior: new MockProvider(),
+      subagents: {
+        store,
+        parentSession: "parent.jsonl",
+        providerFactory: () => new MockProvider(),
+        controls: sink,
+        // One active helper at a time: a leaked budget would refuse the second
+        // spawn instead of letting it complete.
+        maxActive: 1,
+      },
+    });
+    const result = await harness.run("Plan a migration", parentContext(tmp.root));
+    // The parent run is unaffected by the sink and both children settled.
+    assert.equal(result.cancelled, false);
+    assert.equal(registered, 2);
+    assert.equal(releases, 2);
+    // Dedupe by child id: every provider call re-sends the prior tool history,
+    // and later (verify) calls carry none.
+    const byId = new Map<string, AnyRecord>();
+    for (const call of senior.seen) {
+      for (const message of call) {
+        if (message.role !== "tool") continue;
+        const payload = JSON.parse(String(message.content)) as AnyRecord;
+        if (typeof payload.subagent_id === "string") byId.set(payload.subagent_id, payload);
+      }
+    }
+    const toolPayloads = [...byId.values()];
+    assert.equal(toolPayloads.length, 2, "both children reported exactly one tool result");
+    assert.deepEqual(
+      toolPayloads.map((payload) => payload.status),
+      ["completed", "completed"],
+      "a throwing release() neither replaces a child result nor blocks the next spawn",
+    );
+    for (const payload of toolPayloads) {
+      assert.equal(payload.tool, SUBAGENT_TOOL_NAME);
+      assert.ok(!String(payload.error ?? "").includes("control sink"));
+    }
+  } finally {
+    tmp.cleanup();
+  }
+});
+
 test("golden: a completed sync child's tool result and event sequence gain no key", async () => {
   const tmp = tmpdir("tb-subcontrols-golden-");
   try {
