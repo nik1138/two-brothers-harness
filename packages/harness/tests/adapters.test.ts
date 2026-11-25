@@ -882,6 +882,127 @@ test("google: 429 RESOURCE_EXHAUSTED is retryable and honors Retry-After", async
   assert.ok(Math.abs(sleep.total() - 0.2) < 1e-9, `slept ${sleep.total()}s, not 0.2s`);
 });
 
+test("google: 429 body RetryInfo.retryDelay is honored when no Retry-After header exists", async () => {
+  const sleep = recordingSleeper();
+  const stub = stubFetch((_request, index) =>
+    index === 0
+      ? jsonResponse(
+          {
+            error: {
+              code: 429,
+              message: "Resource has been exhausted (e.g. check quota).",
+              status: "RESOURCE_EXHAUSTED",
+              details: [
+                {
+                  "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                  reason: "RATE_LIMIT_EXCEEDED",
+                  domain: "googleapis.com",
+                },
+                {
+                  "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                  retryDelay: "5s",
+                },
+              ],
+            },
+          },
+          429,
+        )
+      : jsonResponse({ candidates: [{ content: { parts: [{ text: "ok" }] } }] }),
+  );
+  // The scheduled backoff is 2 s; the body hint is 5 s, so the wait proves the
+  // body delay replaced the schedule instead of coinciding with it.
+  const provider = googleProvider(stub.fetchImpl, {
+    retries: 1,
+    sleeper: sleep.sleeper,
+    rng: () => 0,
+  });
+  assert.equal(await provider.chat([{ role: "user", content: "u" }]), "ok");
+  assert.equal(stub.requests.length, 2);
+  assert.ok(Math.abs(sleep.total() - 5) < 1e-9, `slept ${sleep.total()}s, not the body's 5s`);
+});
+
+test("google: a Retry-After header still wins over a body RetryInfo.retryDelay", async () => {
+  const sleep = recordingSleeper();
+  const stub = stubFetch((_request, index) =>
+    index === 0
+      ? jsonResponse(
+          {
+            error: {
+              code: 429,
+              message: "Resource has been exhausted (e.g. check quota).",
+              status: "RESOURCE_EXHAUSTED",
+              details: [
+                {
+                  "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                  retryDelay: "5s",
+                },
+              ],
+            },
+          },
+          429,
+          { "Retry-After": "0.2" },
+        )
+      : jsonResponse({ candidates: [{ content: { parts: [{ text: "ok" }] } }] }),
+  );
+  const provider = googleProvider(stub.fetchImpl, { retries: 1, sleeper: sleep.sleeper });
+  assert.equal(await provider.chat([{ role: "user", content: "u" }]), "ok");
+  assert.ok(Math.abs(sleep.total() - 0.2) < 1e-9, `slept ${sleep.total()}s, not the header's 0.2s`);
+});
+
+test("google: body retryDelay is capped at the Retry-After cap and malformed hints fall back", async () => {
+  // A body hint beyond the 120 s cap waits the cap, not the hint.
+  const capped = recordingSleeper();
+  const cappedStub = stubFetch((_request, index) =>
+    index === 0
+      ? jsonResponse(
+          {
+            error: {
+              code: 429,
+              message: "Resource has been exhausted (e.g. check quota).",
+              status: "RESOURCE_EXHAUSTED",
+              details: [{ retryDelay: "999s" }],
+            },
+          },
+          429,
+        )
+      : jsonResponse({ candidates: [{ content: { parts: [{ text: "ok" }] } }] }),
+  );
+  const cappedProvider = googleProvider(cappedStub.fetchImpl, {
+    retries: 1,
+    sleeper: capped.sleeper,
+    rng: () => 0,
+  });
+  assert.equal(await cappedProvider.chat([{ role: "user", content: "u" }]), "ok");
+  assert.ok(Math.abs(capped.total() - 120) < 1e-9, `slept ${capped.total()}s, not the 120s cap`);
+
+  // An unparseable hint (and a non-RetryInfo details entry) keeps the backoff.
+  const fallback = recordingSleeper();
+  const fallbackStub = stubFetch((_request, index) =>
+    index === 0
+      ? jsonResponse(
+          {
+            error: {
+              code: 429,
+              message: "Resource has been exhausted (e.g. check quota).",
+              status: "RESOURCE_EXHAUSTED",
+              details: [
+                { "@type": "type.googleapis.com/google.rpc.ErrorInfo", retryDelay: "soon" },
+              ],
+            },
+          },
+          429,
+        )
+      : jsonResponse({ candidates: [{ content: { parts: [{ text: "ok" }] } }] }),
+  );
+  const fallbackProvider = googleProvider(fallbackStub.fetchImpl, {
+    retries: 1,
+    sleeper: fallback.sleeper,
+    rng: () => 0,
+  });
+  assert.equal(await fallbackProvider.chat([{ role: "user", content: "u" }]), "ok");
+  assert.ok(Math.abs(fallback.total() - 2) < 1e-9, `slept ${fallback.total()}s, not the 2s backoff`);
+});
+
 test("google: PERMISSION_DENIED is fatal with the provider message", async () => {
   const stub = stubFetch(() =>
     jsonResponse(

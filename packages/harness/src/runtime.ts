@@ -466,7 +466,9 @@ function resolvePair(
  * the other role's. Role provider/model fields are never borrowed across
  * roles; the provider is the run-level one unless the role sets its own (the
  * `roleProviders` switch mirrors Python's `apply(allow_provider=False)` when
- * a per-request provider override is in force).
+ * a per-request provider override is in force). Borrowing an API key for a
+ * DIFFERENT base URL is reported in `warnings` (a diagnostic only: the fill
+ * precedence itself is unchanged and pinned by the tests).
  */
 export function resolveRoleEndpoints(
   snapshot: RuntimeSettingsSnapshot,
@@ -500,6 +502,10 @@ export function resolveRoleEndpoints(
   };
   const senior = endpointFor("senior");
   const junior = endpointFor("junior");
+  // Which role resolved its OWN (non-empty) key before the cross-role fill
+  // below; only used by the diagnostic after it, never to change the fill.
+  const seniorOwnKey = senior.apiKey !== "";
+  const juniorOwnKey = junior.apiKey !== "";
   // Connection fields only — never provider/model (see docstring above).
   // The wire flavor follows a borrowed URL: a preset URL only speaks its
   // own kind, so kind pairs with the baseUrl it travels with — never
@@ -514,7 +520,32 @@ export function resolveRoleEndpoints(
   }
   if (!senior.apiKey) senior.apiKey = junior.apiKey;
   if (!junior.apiKey) junior.apiKey = senior.apiKey;
+  // Diagnostic only (the fill itself is pinned by the precedence matrix): a
+  // key borrowed across roles travels to whatever base URL the borrowing role
+  // resolved. When those URLs differ, one provider's credential is sent to a
+  // different host — the operator configured both endpoints, so report it in
+  // the endpoint warnings instead of letting it pass silently. The fill
+  // precedence is deliberately unchanged (its tightening is owner-gated).
+  if (seniorOwnKey !== juniorOwnKey && !sameRoleBaseUrl(senior.baseUrl, junior.baseUrl)) {
+    const borrowing = seniorOwnKey ? "junior" : "senior";
+    const source = seniorOwnKey ? "senior" : "junior";
+    warnings.push(
+      `the ${borrowing} role has no API key of its own; using the ${source} role's key for a ` +
+        `different base URL — set --${borrowing}-api-key (or a ${borrowing} preset) to keep ` +
+        "each provider's credential on its own endpoint",
+    );
+  }
   return { senior, junior, warnings };
+}
+
+/**
+ * True when two resolved role base URLs name the same endpoint (surrounding
+ * whitespace and trailing slashes ignored). Diagnostic-only helper for the
+ * cross-role API-key warning.
+ */
+function sameRoleBaseUrl(left: string, right: string): boolean {
+  const normalize = (value: string): string => value.trim().replace(/\/+$/, "");
+  return normalize(left) === normalize(right);
 }
 
 /**

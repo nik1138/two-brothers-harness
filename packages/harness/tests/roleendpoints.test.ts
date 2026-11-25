@@ -148,6 +148,76 @@ test("resolver: connection fields gap-fill across roles, never provider/model", 
   assert.equal(out.junior.model, "");
 });
 
+test("resolver: a key borrowed across DIFFERENT base URLs warns, the fill still happens", () => {
+  // senior: local endpoint, no key. junior: a paid provider with its own key.
+  const snapshot = snap({ base_url: "http://local.example/v1", api_key: "" });
+  snapshot.junior = {
+    provider: "",
+    model: "",
+    base_url: "https://paid.example/v1",
+    api_key: "junior-key",
+    provider_ref: "",
+  };
+  const out = resolveRoleEndpoints(snapshot, [], NO_ENV);
+  // The fill precedence/behavior is unchanged (that change is owner-gated)...
+  assert.equal(out.senior.apiKey, "junior-key");
+  assert.equal(out.junior.apiKey, "junior-key");
+  // ...but the cross-endpoint reuse is reported as an additive warning.
+  assert.equal(out.warnings.length, 1, out.warnings.join("\n"));
+  assert.match(out.warnings[0], /senior role has no API key of its own/);
+  assert.match(out.warnings[0], /junior role's key/);
+  assert.match(out.warnings[0], /--senior-api-key/);
+});
+
+test("resolver: the cross-URL key warning mirrors for a borrowing junior", () => {
+  const snapshot = snap();
+  snapshot.junior = {
+    provider: "",
+    model: "",
+    base_url: "https://paid.example/v1",
+    api_key: "",
+    provider_ref: "",
+  };
+  const out = resolveRoleEndpoints(snapshot, [], NO_ENV);
+  assert.equal(out.junior.apiKey, "manual-key");
+  assert.equal(out.warnings.length, 1, out.warnings.join("\n"));
+  assert.match(out.warnings[0], /junior role has no API key of its own/);
+  assert.match(out.warnings[0], /senior role's key/);
+  assert.match(out.warnings[0], /--junior-api-key/);
+});
+
+test("resolver: a key borrowed for the SAME base URL does not warn", () => {
+  // A role with no URL of its own inherits the other role's URL AND key: one
+  // endpoint, one credential — the intended parity case.
+  const snapshot = snap({ base_url: "https://paid.example/v1", api_key: "" });
+  snapshot.junior = {
+    provider: "",
+    model: "",
+    base_url: "https://paid.example/v1/",
+    api_key: "junior-key",
+    provider_ref: "",
+  };
+  const out = resolveRoleEndpoints(snapshot, [], NO_ENV);
+  assert.equal(out.senior.apiKey, "junior-key");
+  // Trailing-slash spelling is the same endpoint, not a cross-URL reuse.
+  assert.deepEqual(out.warnings, []);
+
+  // A role with no URL at all inherits everything from the other role: same
+  // endpoint too, so the shared-config fallback stays silent as well.
+  const inherited = snap({ base_url: "", api_key: "" });
+  inherited.junior = {
+    provider: "",
+    model: "",
+    base_url: "https://paid.example/v1",
+    api_key: "junior-key",
+    provider_ref: "",
+  };
+  const inheritedOut = resolveRoleEndpoints(inherited, [], NO_ENV);
+  assert.equal(inheritedOut.senior.baseUrl, "https://paid.example/v1");
+  assert.equal(inheritedOut.senior.apiKey, "junior-key");
+  assert.deepEqual(inheritedOut.warnings, []);
+});
+
 // ---------------------------------------------------------------------------
 // harness: per-role providers built from endpoints
 // ---------------------------------------------------------------------------

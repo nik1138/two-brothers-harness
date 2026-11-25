@@ -20,6 +20,7 @@ import { test } from "node:test";
 
 import { main, type CliIO } from "../src/cli.ts";
 import {
+  MAX_PROVIDER_TIMEOUT_SECONDS,
   MAX_TIMEOUT_WARNINGS,
   OpenAICompatibleProvider,
   type FetchLike,
@@ -186,6 +187,82 @@ test("serve --help mentions --timeout", async () => {
   assert.match(help, /two-brothers serve/);
   assert.match(help, /--timeout <s>/);
   assert.match(help, /slow local models/);
+});
+
+/** Largest delay Node's 32-bit timers accept (the value an overflow collapses past). */
+const INT32_TIMER_MAX_MS = 2_147_483_647;
+
+/**
+ * Record every `setTimeout` delay armed while `body` runs (the provider's
+ * per-attempt timer is the only timer it owns). The wrapper still delegates to
+ * the real timer, so abort semantics — including the deliberate `timeout: 0`
+ * immediate abort — keep working.
+ */
+async function recordTimerDelays(body: (delays: number[]) => Promise<void>): Promise<number[]> {
+  const delays: number[] = [];
+  const original = globalThis.setTimeout;
+  globalThis.setTimeout = ((
+    callback: (...args: unknown[]) => void,
+    delay?: number,
+    ...args: unknown[]
+  ) => {
+    delays.push(Number(delay));
+    return original(callback as never, delay, ...(args as never[]));
+  }) as unknown as typeof setTimeout;
+  try {
+    await body(delays);
+  } finally {
+    globalThis.setTimeout = original;
+  }
+  return delays;
+}
+
+test("an over-ceiling --timeout is clamped to the 24 h ceiling, never a 1 ms timer", async () => {
+  const lines: string[] = [];
+  const delays = await recordTimerDelays(async () => {
+    const provider = makeProvider({
+      timeout: 3_000_000_000,
+      retries: 0,
+      fetchImpl: async () => jsonResponse({ choices: [{ message: { content: "ok" } }] }),
+      onWarning: (line: string) => lines.push(line),
+    });
+    assert.equal(await provider.chat([{ role: "user", content: "hi" }], "message"), "ok");
+  });
+  assert.equal(delays[0], MAX_PROVIDER_TIMEOUT_SECONDS * 1000, delays.join(", "));
+  // The clamp is the whole point: no armed delay may overflow Node's timer.
+  assert.ok(delays.every((ms) => ms <= INT32_TIMER_MAX_MS), delays.join(", "));
+  assert.ok(!delays.includes(1), `an overflowing delay armed a 1 ms timer: ${delays.join(", ")}`);
+  assert.equal(lines.length, 1);
+  assert.match(
+    lines[0],
+    /^\[warn\] timeout 3000000000s exceeds the 86400s \(24 h\) ceiling; using 86400s \(--timeout <s> \/ TWO_BROTHERS_TIMEOUT\)$/,
+  );
+});
+
+test("timeout 0 keeps its deliberate immediate-timeout meaning", async () => {
+  const delays = await recordTimerDelays(async () => {
+    const provider = makeProvider({ timeout: 0, retries: 0 });
+    await assert.rejects(
+      provider.chat([{ role: "user", content: "hi" }], "message"),
+      /timed out after 0s/,
+    );
+  });
+  assert.equal(delays[0], 0, delays.join(", "));
+});
+
+test("a normal timeout is left unchanged", async () => {
+  const lines: string[] = [];
+  const delays = await recordTimerDelays(async () => {
+    const provider = makeProvider({
+      timeout: 120,
+      retries: 0,
+      fetchImpl: async () => jsonResponse({ choices: [{ message: { content: "ok" } }] }),
+      onWarning: (line: string) => lines.push(line),
+    });
+    assert.equal(await provider.chat([{ role: "user", content: "hi" }], "message"), "ok");
+  });
+  assert.equal(delays[0], 120_000, delays.join(", "));
+  assert.deepEqual(lines, []);
 });
 
 /**

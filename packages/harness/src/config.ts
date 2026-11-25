@@ -69,6 +69,11 @@ export interface Config {
    * Per-attempt provider timeout in seconds. Must be a finite integer >= 0
    * (0 stays legal: existing test seams and `TWO_BROTHERS_TIMEOUT=0` pin an
    * immediate timeout); `resolveConfig` rejects anything else before a run.
+   * A value above `MAX_PROVIDER_TIMEOUT_SECONDS` (24 h) is accepted here and
+   * clamped by the provider before it arms its per-attempt timer, so an
+   * oversized `--timeout`/`TWO_BROTHERS_TIMEOUT` can never overflow Node's
+   * 32-bit timer delay (which would fire a 1 ms timer and fail every attempt
+   * as if it had timed out).
    */
   timeout: number;
   /**

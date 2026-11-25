@@ -265,6 +265,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of being clamped to 1 s (positive values keep the 1–600 s clamp and
   the 30 s default). Tests: `tests/editqueue.test.ts`, `tests/readrange.test.ts`,
   `tests/security.test.ts`.
+- **Provider hardening (three safe fixes):** `--timeout` /
+  `TWO_BROTHERS_TIMEOUT` is now clamped to `MAX_PROVIDER_TIMEOUT_SECONDS`
+  (86 400 s = 24 h) before the per-attempt timer is armed, with one honest
+  `[warn]` line naming the requested and the effective value — a larger delay
+  used to overflow Node's 32-bit timer (a 1 ms timer, so every attempt "timed
+  out" for the wrong reason); the 120 s default and the deliberate
+  `timeout: 0` immediate timeout are unchanged. A Gemini 429 whose body carries
+  `error.details[]` `RetryInfo.retryDelay` (`"5s"`/`"0.5s"`) now feeds the same
+  exact-wait retry path as `Retry-After`, capped at the existing 120 s ceiling
+  (a `retry-after-ms`/`Retry-After` header still wins; wire requests are
+  untouched). And `resolveRoleEndpoints` adds one diagnostic warning when a
+  role's API key is borrowed across roles whose base URLs differ — the
+  cross-role fill precedence itself is unchanged. Tests:
+  `tests/providerwarnings.test.ts`, `tests/adapters.test.ts`,
+  `tests/roleendpoints.test.ts`. No protocol change; no new dependencies.
 - **TUI `/rewind` refuses a session changed during the confirmation:** the
   preview now captures the session file's `size:mtimeMs:ino` signature (the
   server rewind route's own identity, extracted unchanged to

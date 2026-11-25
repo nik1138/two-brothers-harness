@@ -29,9 +29,18 @@
  * response's `retry-after-ms` header (finite milliseconds) or `Retry-After`
  * header (seconds or HTTP-date) replaces that attempt's backoff, capped at
  * 120 s; `retry-after-ms` wins when both are present, and a malformed value
- * falls through to the next source. Context-overflow payloads raise
+ * falls through to the next source. Google's quota 429 carries its reopening
+ * delay in the response body instead (`error.details[]`
+ * `RetryInfo.retryDelay`), which is honored the same way when no header
+ * supplies one (a header still wins when both are present).
+ * Context-overflow payloads raise
  * `ProviderContextOverflowError` so callers can compact the context rather
  * than retry the same request.
+ *
+ * The per-attempt timer is bounded by `Config.timeout` clamped to
+ * {@link MAX_PROVIDER_TIMEOUT_SECONDS} (24 h), so an oversized `--timeout`
+ * cannot overflow Node's 32-bit timer delay and turn every attempt into a
+ * 1 ms "timeout".
  *
  * Every provider carries a `UsageTracker` recording per-call token usage; the
  * cooperation state machine (`harness.ts`) aggregates the roles' snapshots
@@ -666,6 +675,44 @@ export function retryAfterSecondsFromHeaders(
 }
 
 /**
+ * Parse a Google `RetryInfo.retryDelay` duration string (`"5s"`, `"0.5s"`,
+ * `"35.2s"`) into seconds, clamped to `[0, RETRY_AFTER_CAP_SECONDS]`.
+ * `undefined` for anything that is not a non-negative protobuf Duration in
+ * seconds, so the retry loop keeps its own backoff. Parity with
+ * {@link parseRetryAfterSeconds}: a body delay is capped exactly like a
+ * `Retry-After` header.
+ */
+function parseRetryDelaySeconds(value: unknown): number | undefined {
+  if (typeof value !== "string") return undefined;
+  const match = /^(\d+(?:\.\d+)?)s$/.exec(value.trim());
+  if (match === null) return undefined;
+  const seconds = Number(match[1]);
+  if (!Number.isFinite(seconds)) return undefined;
+  return Math.min(Math.max(seconds, 0), RETRY_AFTER_CAP_SECONDS);
+}
+
+/**
+ * The provider-requested delay carried in a Google error body's
+ * `error.details[]` (a `google.rpc.RetryInfo` entry, `retryDelay: "5s"`),
+ * already capped like a `Retry-After` header. Gemini's quota 429 carries its
+ * reopening delay here rather than in a header; reading it lets the retry
+ * loop wait the hinted interval instead of spending the fixed schedule
+ * against a window that has not reopened. A details entry whose `@type` is
+ * present but names another RPC is skipped; the first parseable delay wins.
+ */
+function googleRetryInfoSeconds(error: unknown): number | undefined {
+  if (!isRecord(error) || !Array.isArray(error.details)) return undefined;
+  for (const entry of error.details) {
+    if (!isRecord(entry)) continue;
+    const type = typeof entry["@type"] === "string" ? entry["@type"] : "";
+    if (type !== "" && !type.endsWith("google.rpc.RetryInfo")) continue;
+    const seconds = parseRetryDelaySeconds(entry.retryDelay);
+    if (seconds !== undefined) return seconds;
+  }
+  return undefined;
+}
+
+/**
  * Error text meaning "the input exceeded the model's context window". Covers
  * the OpenAI-compatible shapes this client targets (`context_length_exceeded`,
  * "maximum context length", "exceeds the context window") plus the common
@@ -856,6 +903,18 @@ export class ProviderTimeoutError extends Error {
 /** Timeout-retry warnings a single provider instance may emit (`--timeout` hint). */
 export const MAX_TIMEOUT_WARNINGS = 3;
 
+/**
+ * Largest per-attempt timeout a provider accepts (`--timeout` /
+ * `TWO_BROTHERS_TIMEOUT`), in seconds: 24 h. Node's timers take a 32-bit
+ * signed millisecond delay (2 147 483 647 ms ≈ 24.8 days); a larger delay
+ * overflows and Node fires the timer immediately instead (one
+ * `TimeoutOverflowWarning` and a 1 ms timer), so every attempt would "time
+ * out" for a reason that has nothing to do with the endpoint. A larger
+ * configured value is clamped to this ceiling with one honest warning;
+ * `timeout: 0` keeps its deliberate immediate-timeout meaning.
+ */
+export const MAX_PROVIDER_TIMEOUT_SECONDS = 86_400;
+
 /** HTTP failure from the endpoint; `retryable`/`reason` pin the classification. */
 export class ProviderHttpError extends Error {
   readonly status: number;
@@ -863,8 +922,10 @@ export class ProviderHttpError extends Error {
   /** Stable label from `PROVIDER_ERROR_REGISTRY` (e.g. "client-error"). */
   readonly reason: string;
   /**
-   * Provider-requested delay from `retry-after-ms`/`Retry-After`, already
-   * capped; else undefined. Never jittered by the retry loop.
+   * Provider-requested delay, already capped: `retry-after-ms`/`Retry-After`
+   * when the response carries one, else the Google 429 body's
+   * `RetryInfo.retryDelay`; undefined otherwise. Never jittered by the retry
+   * loop.
    */
   readonly retryAfterSeconds?: number;
 
@@ -1274,6 +1335,16 @@ export interface ProviderErrorDetail {
   message: string;
   /** Set when the adapter recognizes a context-window overflow. */
   overflow?: boolean;
+  /**
+   * Delay the provider requested in the response BODY, in seconds, already
+   * capped at {@link RETRY_AFTER_CAP_SECONDS} (Google's 429
+   * `error.details[]` `RetryInfo.retryDelay`). A `retry-after-ms`/
+   * `Retry-After` header always wins over this body hint; when neither is
+   * present the retry loop waits exactly this long instead of its scheduled
+   * backoff, just as it does for a header. Absent when the body carries no
+   * parseable delay.
+   */
+  retryAfterSeconds?: number;
 }
 
 /**
@@ -1470,7 +1541,15 @@ export abstract class BaseHttpProvider implements Provider {
       providerSessionId(cfg) ??
       (isOpenCodeEndpoint(this.baseUrl) ? randomUUID() : undefined);
     this.temperature = cfg.temperature;
-    this.timeout = cfg.timeout;
+    // Clamp at the owner of the per-attempt timer: an over-ceiling value is
+    // otherwise legal config, so the clamp is what keeps `setTimeout` inside
+    // Node's 32-bit delay instead of arming a 1 ms timer (see
+    // MAX_PROVIDER_TIMEOUT_SECONDS). 0 and fractional test seams pass through.
+    const requestedTimeout = cfg.timeout;
+    this.timeout =
+      requestedTimeout > MAX_PROVIDER_TIMEOUT_SECONDS
+        ? MAX_PROVIDER_TIMEOUT_SECONDS
+        : requestedTimeout;
     this.retries = Math.max(0, Math.trunc(cfg.retries ?? 6));
     this.backoffBase = cfg.backoffBase ?? BACKOFF_BASE_SECONDS;
     this.backoffCap = cfg.backoffCap ?? BACKOFF_CAP_SECONDS;
@@ -1483,6 +1562,13 @@ export abstract class BaseHttpProvider implements Provider {
     this.sleeper = cfg.sleeper ?? defaultSleeper;
     this.random = cfg.rng ?? Math.random;
     this.onWarning = cfg.onWarning ?? ((line) => console.error(line));
+    if (requestedTimeout > MAX_PROVIDER_TIMEOUT_SECONDS) {
+      this.onWarning(
+        `[warn] timeout ${requestedTimeout}s exceeds the ${MAX_PROVIDER_TIMEOUT_SECONDS}s (24 h) ` +
+          `ceiling; using ${MAX_PROVIDER_TIMEOUT_SECONDS}s ` +
+          "(--timeout <s> / TWO_BROTHERS_TIMEOUT)",
+      );
+    }
   }
 
   /** The run's usage so far; merge with other roles' snapshots for a run total. */
@@ -1824,11 +1910,12 @@ export abstract class BaseHttpProvider implements Provider {
       });
       if (!response.ok) {
         const detail = await readBodyCapped(response, MAX_ERROR_BODY_BYTES);
-        const { message, overflow } = this.describeError(
+        const described = this.describeError(
           response.status,
           detail,
           response.statusText,
         );
+        const { message, overflow } = described;
         const clipped = clipErrorDetail(message);
         if (overflow) throw new ProviderContextOverflowError(response.status, clipped);
         const { retryable, reason } = classifyProviderErrorContext({
@@ -1836,12 +1923,18 @@ export abstract class BaseHttpProvider implements Provider {
           message: clipped,
           headers: response.headers,
         });
+        // A provider-requested delay can arrive in a header or in the body
+        // (Google's 429 `RetryInfo.retryDelay`). The header is the explicit
+        // transport-level hint and wins; the body hint is the fallback when no
+        // header carries one, so both feed the same exact-wait path.
+        const retryAfterSeconds =
+          retryAfterSecondsFromHeaders(response.headers) ?? described.retryAfterSeconds;
         throw new ProviderHttpError(
           response.status,
           clipped,
           retryable,
           reason,
-          retryable ? retryAfterSecondsFromHeaders(response.headers) : undefined,
+          retryable ? retryAfterSeconds : undefined,
         );
       }
       if (!streaming) return (await response.json()) as unknown;
@@ -2990,7 +3083,14 @@ export class GoogleProvider extends BaseHttpProvider {
       isContextOverflowError(status, text) ||
       /exceeds the maximum number of tokens/i.test(text) ||
       /\bMAX_TOKENS\b/.test(detail);
-    return { message, overflow };
+    // Gemini's quota 429 puts its reopening delay in `error.details[]`
+    // (`RetryInfo.retryDelay`) instead of a header; surface it so the retry
+    // loop can honor it like a `Retry-After` header (which still wins when
+    // present — see ProviderErrorDetail.retryAfterSeconds).
+    const retryAfterSeconds = googleRetryInfoSeconds(error);
+    return retryAfterSeconds === undefined
+      ? { message, overflow }
+      : { message, overflow, retryAfterSeconds };
   }
 }
 
