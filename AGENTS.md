@@ -96,6 +96,23 @@ copies:
 - **One lane = one concern.** Branch from current `main` in its own worktree
   (`agents-<concern>`, `fix-<concern>`); never edit `main` directly and never
   work in another lane's tree. Remove the worktree and branch after merge.
+- **Never junction a worktree's `node_modules`.** Twice now (2026-11-14 and
+  2026-11-25) a recursive worktree cleanup emptied the main checkout, and
+  NTFS junction traversal is the recorded cause both times. On 2026-11-25 the
+  cleanup lane ran only `git worktree remove --force` on worktrees inside
+  `.tmp/`, never named `packages/harness` or `node_modules`, and the wipe
+  landed in the same seconds as its first removal batch. The likely
+  mechanism: a removed acceptance worktree carried a `node_modules` junction
+  into the main root `node_modules` (the practice is on record from a review
+  lane, `.tmp/review/wave23.md` says "`node_modules` junctioned"), and the
+  main store's own npm-workspace junction `node_modules/@two-brothers/harness`
+  → `packages/harness` turned that into a double wipe (294 tracked files plus
+  the gitignored `sessions/` store). Install into the worktree instead of
+  linking it. Before removing a worktree, enumerate its reparse points and
+  delete each junction itself with `cmd /c rmdir <path>` (non-recursive,
+  removes only the link); never let a recursive delete traverse one. Tracked
+  files are recoverable from `HEAD`; a gitignored directory inside the
+  checkout is not — the session store has been lost twice this way.
 - **A lane starts with an explicit brief.** The owner/parent states the goal,
   allowed paths, non-goals, acceptance commands and forbidden actions. If the
   brief is missing or ambiguous, stop and ask instead of widening scope.

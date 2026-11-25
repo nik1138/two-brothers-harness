@@ -10,92 +10,104 @@ Last updated: **2026-11-25**.
 
 ## Current state
 
-- `main` = `origin/main` = `b1fc2c5`, clean — a docs checkpoint commit on
-  top; **pushed and in sync** (0 ahead / 0 behind).
+- `origin/main` = `12e3097`; `main` has this docs checkpoint commit on top
+  (1 ahead, unpushed) and is clean.
 - **0.0.2 shipped**: tag `v0.0.2` at `354df89`; `latest` = `next` = **0.0.2**.
   **No tag, publish, or version bump this session** — the next release
   repeats `docs/release.md` and needs fresh explicit owner permission. The
   GitHub Release *page* remains the one owner-manual step.
-- **CI fully green on all 3 legs** at `b1fc2c5` (run 45528544514), including
-  the newly-wired **"Dependency checks"** step in every job. Actions are
-  node24 majors; `npm run check` (pinned + recursive runtime-deps, 105 files)
-  now runs in CI. The three CI failure mechanisms (undici keep-alive, Windows
-  wrap-and-budget, spawned debounce) are root-caused and fixed; the
-  failure-artifact pipeline is proven end-to-end.
-- Baselines at `b1fc2c5` (Windows, merged tree, **recorded lane evidence**):
-  package **2 760 / 2 751 pass / 0 fail / 9 POSIX-only skips** in BOTH
-  `npm test` and `test:spawn`; web **753 / 753**; browser **44 PASS / 0 FAIL /
-  1 SKIP**; CLI **19 + 19**; faults **7/7**; `SMOKE TEST: PASS`. WSL Node-22
-  at `4ddab19`: `npm test` 3/3 exit 0, zero `parser.deref`.
-- Packaging re-verified at `8baae35`: tarball **428 files / 1.66 MB packed /
-  6.77 MB unpacked**, **489 exports**, `estimateRoleCost` reachable; Node-22
-  WSL tarball-smoke 7/7 + pack:check PASS.
-- This continuation shipped **15 code commits** (`3423788` → `b1fc2c5`):
-  CI-actions node24 bump; a 10-commit batch (coverage tests, backlog
-  corrections, web touch actions, TUI notice bounding + transcript-whole fix,
-  parked mark, transcript memoization ~295×, three CI-reliability fixes);
-  `/rewind` CAS; notice-bound dedupe; recursive runtime-deps scan; and wiring
-  the dep-check gate into CI. Details in `HANDOFF.md`.
-- Live serve refreshed to `8baae35` (product-current): **PID 18708**, GET/HEAD
-  parity, bundle `index-Baw0tops.js`, both preserved sessions intact.
+- **CI green on all 3 legs** at `12e3097` (run 45646884074): `harness (22)`,
+  `harness (24)`, `harness-windows`, each with a green **"Dependency
+  checks"** step (verified through the Actions API). Actions are node24
+  majors; `npm run check` (pinned + recursive runtime-deps, 105 files) runs
+  in CI.
+- Baselines at `12e3097` (Windows merged tree, **recorded lane evidence**):
+  package **2 812 / 2 803 pass / 0 fail / 0 cancelled / 9 POSIX-only skips**
+  in BOTH `npm test` and `test:spawn`; web **753 / 753** + build PASS;
+  browser **44 PASS / 0 FAIL / 1 SKIP**; CLI **19 + 19**; faults **7/7**;
+  `npm run check` PASS; `SMOKE TEST: PASS`. WSL Node-22 at `12e3097`:
+  **2 812 / 2 810 pass / 0 fail / 0 cancelled / 2 skipped**, three
+  consecutive runs.
+- This window shipped **16 commits** (`b1fc2c5` → `12e3097`): 11 fixes,
+  3 docs, 1 test, 1 perf — steering accounting + fail-soft sinks, bundle
+  skills parity, compaction size safety, the binary marker on paged/streamed
+  reads, plugin import deadline (+ its ref'd-timer fix), the models timeout
+  clamp, and the earlier hardening/coverage/docs batch. Details in
+  `HANDOFF.md`.
+- Packaging metadata unchanged since `8baae35`: tarball **428 files /
+  1.66 MB packed / 6.77 MB unpacked**. `docs/release.md` figures are current
+  (`2b7acdf`) — the old L157 drift is closed; no refresh item remains.
+- **Known loss (2026-11-25):** a housekeeping lane most likely followed an
+  NTFS `node_modules` junction (see `AGENTS.md`, "Subagent Lanes") and deleted
+  294 tracked files from the main checkout and the gitignored
+  `packages/harness/sessions` store. Tracked files were restored from `HEAD`;
+  the **sessions are gone** (no backup) and the live `:8600` server runs with
+  an empty store.
 
 ## In flight
 
-Nothing is in flight on `main` — the tree is clean and fully pushed. **The
-safe autonomous queue is exhausted**; everything below is owner-gated.
+Nothing is in flight on `main` — the tree is clean at `12e3097`. **The safe
+autonomous queue is exhausted**; everything below is owner-gated.
 
 ## Owner items
 
-1. [ ] **Web source-string wiring consolidation** — design ready
-       (`.tmp/web-wiring-consolidation-design.md`, 789 lines): 43 blocks, 40
-       genuine contracts, 9 slices, net −17 → 735 tests. Decide **D1–D9**
-       (browser E2E as coverage home; E2E fixtures; copy exactness; section
-       order; absence contracts; test type-checking; the `runUsage.ts`
-       extraction; keep `tokens.test.ts` out; stop point 735 vs 740).
-2. [ ] **Broader NEEDS-DESIGN test-audit shortlist**
-       (`.tmp/test-audit-report.md`): approval/deny −2, plugins endpoint −1,
-       mirror pairs −4, storage pairs −2. The owner KEPT the 6 published-cap
-       contract pins. Execute only with approval.
-3. [ ] **OAuth implementation** — design ready (`.tmp/oauth-design.md`):
-       zero-new-dep, sealed `oauth.json`, single-flight refresh, 8 slices,
-       8 owner decisions; Codex needs a 4th wire family; third-party client
-       identities are a policy blocker. First slice: Kimi sign-in.
-4. [ ] **Keybinding-surface expansion** — design ready
-       (`.tmp/keybinding-surfaces-design.md`): co-live-namespace conflict
-       model, schema v2 (v1 compatible), approval panel permanently closed;
-       S1 = transcript read-side chords (tool-expand / copy / panel).
-5. [ ] **Preset seed window values** — reverses the pinned "seeds never
-       invent one" choice; product call.
-6. [ ] **Decide the five unmerged worktrees** — merge/abandon/keep (never
-       remove without the call): `.tmp/worktrees/release-doc-count`
-       (`8dfcab5`), `.tmp/worktrees/stream-follow-touch` (`638f8a4`),
+1. [ ] **R1 — next release version.** `0.1.0` recommended (70 commits since
+       `v0.0.2`, user-facing features); `0.0.3` if treated as incremental.
+2. [ ] **R2 — start release prep.** Not started (owner chose "just assess").
+       Prep = release rehearsal 7/7 + independent E2E gate lanes + bump
+       commit + notes; publishing is owner-run via tag → `publish.yml` →
+       promote to `latest`.
+3. [ ] **R3 — GitHub Release page for `v0.0.2`.** Manual (no `gh` CLI); npm
+       side complete.
+4. [ ] **C1–C8 correctness/semantics decisions**
+       (`.tmp/owner-decisions-2026-11-25.md` has evidence + line refs):
+       C1 failed strict review defaults to `accept` (revise, or emit
+       `review_degraded`); C2 cost prefix matching prices `-lite`/`-mini`
+       siblings (tighten the boundary rule); C3 the senior consult belt can
+       reach MCP servers whose side effects bypass the approval broker
+       (read-only hint or docs); C4 task-envelope dedupe drops a repeated
+       identical prompt (flip call sites or keep, pinned); C5
+       plugin-contributed MCP servers default `role: "junior"` (change or
+       document); C6 duplicate plugin selection double-registers (dedupe by
+       resolved name or keep, pinned); C7 bundle enable/disable is not
+       authoritative (make it authoritative or stop listing bundles); C8
+       the summarizer pays the 1.25× cache-write premium (suppress
+       `cache_control` or accept).
+5. [ ] **U1–U5 UX/keyboard/terminal decisions:** U1 toast geometry loses
+       the newest box's tail in a 3-stack on 24 rows (choose which toast to
+       sacrifice); U2 web `/rewind` CAS needs an `expected_signature` wire
+       field; U3 CLI write paths bypass the advisory writer lock (a check
+       would turn today-succeeding invocations into refusals); U4 no
+       mouse-wheel scrolling (enter/leave mode + restoration proof);
+       U5 no Home/End jump (fixed structural keys are policy — the
+       keybinding design owns it).
+6. [ ] **R4 — decide the five unmerged worktrees** (merge/abandon/keep;
+       never remove without the call):
+       `.tmp/worktrees/release-doc-count` (`8dfcab5`),
+       `.tmp/worktrees/stream-follow-touch` (`638f8a4`),
        `.tmp/worktrees/stream-scroll-test` (`ec6c998`),
        `.tmp/worktrees/user-message-nav-acceptance` (detached `9a96b9d`),
-       `C:/code/tb-lane-touch` (`dbf0c2f`).
-7. [ ] **GitHub Release page for `v0.0.2`** — manual (no `gh` CLI); npm side
-       complete.
-8. [ ] **Next release** — bump + tag + publish need **fresh explicit owner
-       words**; packaging/CI/WSL evidence green. **Refresh `docs/release.md`
-       L157 tarball figures** (still 0.0.1-era 368 / 1.28 MB / 5.17 MB; now
-       428 / 1.66 MB / 6.77 MB).
-9. [ ] **Triage owner-gated items:** TUI-undo capture policy, third sibling,
-       models.dev URL override; discovery A6 (CLI write paths bypass the
-       advisory writer lock — design-first), A7 (mouse-wheel scroll), A8
-       (Home/End key), A9 (`res.json()` guard).
-10. [ ] **A4 failed-run error-object split** — discovery verdict LEAVE
-       (runtime already rebuilds a failed run's split from `call_usage`; no
-       first-party consumer of `harness.run()` catches); revisit only for an
-       embedding consumer.
-- [ ] Optional: pin a deliberate subagent route model in Settings → Models
-      & roles → Subagent.
+       `C:/code/tb-lane-touch` (`dbf0c2f`). These five are not touched by
+       cleanup lanes.
+7. [ ] **R5 — preset seed window values.** Reverses the pinned "seeds never
+       invent a window" choice; product call.
+8. [ ] **Design shelf — unimplemented, owner-gated.**
+       `.tmp/web-wiring-consolidation-design.md` (789 lines: 43 blocks,
+       40 genuine contracts, 9 slices, net −17 → 735 tests; decisions
+       D1–D9), `.tmp/keybinding-surfaces-design.md` (schema v2, S1 =
+       transcript read-side chords), `.tmp/test-audit-report.md`,
+       `.tmp/backlog-triage.md`. Execute only with approval.
+9. [ ] **OAuth — DEFERRED by the owner** ("I think we don't need this
+       now"). `.tmp/oauth-design.md` stays reference only; **do not propose
+       or implement**.
 
 ## Next engineering work
 
-The safe queue is exhausted. All remaining engineering is owner-gated
-(above): owner decisions first, then OAuth / keybinding expansion / preset
-windows / next release as approved. Non-blocking micro noted in `HANDOFF.md`
-(char-vs-display-width bound property; `release.md` figures refresh at the
-next release).
+The safe queue is exhausted. All remaining engineering is owner-gated:
+release decisions (R1–R3) first, then C1–C8 / U1–U5 / R5 as approved, then
+the design shelf. Do not start OAuth. Non-blocking micro from the previous
+checkpoint: the notice bound is char-based, not display-width-based
+(pre-existing; practical content is ASCII).
 
 ## Deferred register (technical reasons; do not start without a payoff)
 
@@ -111,10 +123,9 @@ next release).
 
 - [x] **CLOSED — TUI external editor / copy polish**; **`CANCELLED_TURN_HINT`
       non-bug**.
-- [x] **CLOSED 2026-11-25 — discovery A1–A5, B1 CAS, B2 fork echo, C1/C2
-      backlog nits**; B4 `tools/AGENTS.md` deleted; actions Node-20 bump; the
-      three CI failure mechanisms; notice-bound dedupe; recursive
-      runtime-deps scan; dep-check gate wired into CI.
+- [x] **CLOSED 2026-11-25 — the 2026-11-25 audit SAFE batch** (this window's
+      16 commits); earlier discovery A1–A5, B1 CAS, B2 fork echo and the
+      backlog nits also landed.
 - [ ] Stacked-dialog mask-click guard — blocked on naive-ui > 2.45.3.
 - [ ] WAN fault injection / long soaks — deliberately manual.
 - [ ] POSIX hardware validation — detached `run_shell` group reaping / real
@@ -125,19 +136,23 @@ next release).
 ## Local hygiene
 
 - [x] **DONE 2026-11-25:** `tools/AGENTS.md` deleted (owner-approved);
-      `.tmp/wt-temp` KEPT (owner choice). Merged lane worktrees + branches
-      removed in three junction-guarded passes (`-d`/cherry `-D`), ≈3.0 GiB;
-      keep-set intact (23/23). Only `agents-depth3` (opencode-owned) remains
-      among `agents-*` branches.
+      `.tmp/wt-temp` KEPT (owner choice). The previous batch's merged lane
+      worktrees + branches were removed in junction-guarded passes
+      (`-d`/cherry `-D`), ≈3.0 GiB; keep-set intact (23/23).
 - [ ] **KEEP the five unmerged worktrees** under Owner items until the owner
       decides. opencode-owned worktrees and `Temp/tb-review-tip` untouched.
+- [ ] This window's lane/acceptance worktrees (`.tmp/wt-*`, `.tmp/accept-*`)
+      were pruned by the lead's housekeeping lane; the five above remain.
+      The prune went wrong once (see "Known loss") — only prune inside one
+      known directory, never the main checkout or a worktree parent.
 - [ ] `.tmp/` holds gate logs + design artifacts — prune inside that one
       directory only (NTFS-junction lesson).
-- [ ] Keep `research/`, sessions, credentials, logs out of git.
+- [ ] Keep `research/`, sessions, credentials, logs out of git. The local
+      `sessions/` store is gone (2026-11-25) and is not recoverable.
 - [ ] Do not widen `TEMP`/`TMP` = `.tmp/build-temp` beyond web builds +
       `e2e-test.ps1`; smoke/package tests use ambient TEMP.
-- [ ] npm install at root; **`web/` is NOT a workspace** (fresh worktree needs
-      `npm install` in `web/`). WSL bash needs nvm PATH prepended.
+- [ ] npm install at root; **`web/` is NOT a workspace** (fresh worktree
+      needs `npm install` in `web/`). WSL bash needs nvm PATH prepended.
 
 ## Constraints
 
