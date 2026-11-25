@@ -92,9 +92,12 @@ Both legs run the same hermetic gates, in this order:
 
 1. `typescript/`: `node src/selftest.ts`, then `node tests/run-all.ts`
    (no install step: the reference is zero-dependency);
-2. `packages/harness`: typecheck, build, `npm test`,
-   `npm run test:spawn` (ubuntu only — the same suites run in-process on
-   Windows), `node dist/selftest.js`, and the mock CLI run;
+2. `packages/harness`: typecheck, build, then — from the repo root —
+   `npm run check` (the dependency gates: exact pins on the package's runtime
+   dependencies plus undeclared bare imports in the built `dist/`, which is
+   why it follows the build), `npm test`, `npm run test:spawn` (ubuntu only —
+   the same suites run in-process on Windows), `node dist/selftest.js`, and
+   the mock CLI run;
 3. `packages/harness`: the hermetic CLI E2E — `node e2e/cli.ts` (sources)
    and then `node e2e/cli.ts --dist` (the built CLI);
 4. `packages/harness`: the real-socket fault-injection runner

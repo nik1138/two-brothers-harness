@@ -479,7 +479,7 @@ a turn/compaction runs or an overlay, find bar or approval owns the keyboard.
 
 | Keys | Action |
 |---|---|
-| `PgUp` / `PgDn` | Page the transcript without moving the composer cursor. |
+| `PgUp` / `PgDn` | Page the transcript without moving the composer cursor. A window parked above the newest content marks its lowest blank or continuation gutter row `⋯ n more` (the visual rows below that marked row); scrolling back to the newest row clears the mark. |
 | (streaming) | A live `THINKING` block (dim, bounded to the last six content rows with a `… +N lines` marker) appears above the streaming response while the provider emits reasoning; it clears when the reply/envelope arrives. Reasoning is live-only and never persisted. |
 | `Ctrl+F` | Find in the transcript: an inline bar above the status rows. Typing filters live (case-insensitive literal text), `Enter`/`Down` jumps to the next match and `Shift+Enter`/`Up` to the previous one (both wrap); the bar shows `current/total`, marks the active match and scrolls its block into view. `Esc` closes it and restores the composer draft and scroll position exactly. `/find [query]` opens it with a query already typed. |
 | `Ctrl+T` | Expand or collapse the most recent tool result: collapsed shows the first six result rows after width-aware wrapping plus a `… +N more lines` marker (N counts hidden visual rows), expanded shows the whole result. The model always keeps the full text. |
@@ -618,7 +618,14 @@ opens a confirmation first whose body names the operator turns and envelopes
 task. **Cancel is preselected**, so `Enter` there (or `Esc`) closes the dialog
 with the session file byte-identical; `←`/`→`/`Tab`/`↑`/`↓` move between
 Cancel and **Rewind and delete**, and only `Enter` on that action applies the
-cut. A successful rewind then reloads the session through the same machinery
+cut. The preview captures the session file's identity, so a file changed while
+the dialog is open — the store lock is advisory, so `run --session-file`,
+`chat --resume` and `sessions rewind` can share it — makes the accept path
+refuse the cut with zero bytes written and the sidecar intact: the notice reads
+`rewind: the session changed since the preview — nothing was deleted; re-run /rewind to preview again`
+(a changed file that no longer reads reports the strict reader's own error
+instead), so re-running `/rewind` previews the changed file afresh. A
+successful rewind then reloads the session through the same machinery
 `/sessions` uses, clears the removed runs' runtime-event sidecar, keeps the
 transcript (the kept envelopes) and reports one bounded notice naming the
 removed turn, the kept dense `seq` and the sidecar outcome. A compaction

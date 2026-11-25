@@ -571,9 +571,13 @@ The overlays follow the theme — the palette and help lists paint their heading
 chords, descriptions and selected row — while `NO_COLOR` output keeps the same
 text; the composer no longer repeats the mode/models line because the status bar
 is the single source for both; a transcript window that starts in the middle of
-a block marks the hidden label with a dim `⋯` in the gutter; and the status bar
-uses its hint slot well at ordinary widths: one registry-derived tip per
-accepted turn (`Ctrl+T fold tool output`, `Ctrl+F find in transcript`,
+a block marks the hidden label with a dim `⋯` in the gutter; a window parked
+above the newest content marks its lowest blank or continuation gutter row with
+a dim `⋯ n more` count of the visual rows below that marked row (a bottom
+block-label row is preserved rather than overwritten; the label tightens for
+long counts; a followed window shows no mark); and the status bar uses its hint
+slot well at ordinary widths: one registry-derived tip per accepted turn
+(`Ctrl+T fold tool output`, `Ctrl+F find in transcript`,
 `Ctrl+P commands`, …), with the tool-fold action leading while a tool row is on
 screen, and a brief transient hint after events such as a stopped turn
 (`turn stopped — Ctrl+C ×2 exits`). While a workspace approval is parked the
