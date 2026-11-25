@@ -2674,9 +2674,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Degraded reviews are visible**: a review reply that fails the strict payload
-  check and its one repair re-ask still degrades fail-soft to
-  `verdict: "accept"` (unchanged, never a run error, the existing
-  `unstructured model reply for review` entry still fires once), but the
+  check and its one repair re-ask still degrades fail-soft to the tolerant
+  boundary's default verdict (`accept` when nothing usable survives; a
+  `verdict` the reply did emit can survive sanitize, e.g. `revise`) — unchanged
+  behavior, never a run error, the existing
+  `unstructured model reply for review` entry still fires once — but the
   degradation is no longer silent to machine consumers. The run records it on
   its state and exposes the additive `HarnessResult.reviewDegraded?: boolean`
   — present only when the run's FINAL review was degraded, so a degraded review

@@ -1683,9 +1683,11 @@ fail-closed `consult` path with one honest warning; solo demos use a real or
 scripted provider.
 
 The senior's `review` reply must be a strict verdict payload. A malformed
-review — no usable payload even after the one repair re-ask — degrades to
-`verdict: "accept"` (the tolerant boundary is fail-soft and never fails the
-run), and the degradation is visible instead of silent: the run then carries
+review — no usable payload even after the one repair re-ask — degrades to the
+tolerant boundary's default verdict (`accept` when nothing usable survives;
+a `verdict` the reply did emit can survive sanitize, e.g. `revise`), and the
+tolerant boundary is fail-soft: it never fails the run. The degradation is
+visible instead of silent: the run then carries
 the additive field (`review_degraded: true` in the `--json` / `--mode json`
 object, `reviewDegraded: true` on the `--stream` `result` record), and
 one `review_degraded` runtime event (`{round, verdict}`) makes it visible live
