@@ -1256,11 +1256,18 @@ export async function loadPlugins(
  * Dynamic `import()` of one plugin file with the reload cache-bust, bounded by
  * `PLUGIN_IMPORT_TIMEOUT_MS`.
  *
- * The timer is `unref`'d and cleared on both outcomes. A module that settles
- * after the deadline has its namespace discarded: the race already attached
- * handlers to the import promise, so a late rejection is never an unhandled
- * rejection, and nothing from it can reach the manager because registration
- * never runs.
+ * The deadline timer stays REF'd on purpose: it is the only thing that can
+ * settle a promise that never does, so it must keep the event loop alive for
+ * its own deadline. `unref` is wrong here — once every other ref'd handle is
+ * gone, Node 22 drains the loop before an unref'd timer fires and the load is
+ * cancelled instead of skipped (the repo hit this class twice before:
+ * e51c54f and 1079917, "keep such timers ref'd"). The fast path still clears
+ * the timer in `finally`, so a settled import leaves no live handle behind.
+ *
+ * A module that settles after the deadline has its namespace discarded: the
+ * race already attached handlers to the import promise, so a late rejection is
+ * never an unhandled rejection, and nothing from it can reach the manager
+ * because registration never runs.
  */
 async function importPluginModule(
   filePath: string,
@@ -1273,7 +1280,6 @@ async function importPluginModule(
     timer = setTimeout(() => {
       reject(new PluginError(`import timed out after ${timeoutMs} ms`));
     }, timeoutMs);
-    timer.unref?.();
   });
   let module: unknown;
   try {

@@ -261,8 +261,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for tests through the new `PluginManagerOptions.importTimeoutMs`) with the
   same fail-soft shape as a registration timeout: the load path warns, records
   the plugin in `errors`, and skips it — nothing from it is adopted, and the
-  process never crashes or hangs. The timer is unref'd and cleared on both
-  outcomes, and a module that settles after the deadline is discarded (its
+  process never crashes or hangs. The deadline timer stays ref'd by design (it
+  is the only thing that can settle a never-settling import, so it must keep
+  the loop alive for its own deadline — see e51c54f/1079917) and is cleared on
+  both outcomes, and a module that settles after the deadline is discarded (its
   late rejection stays handled). Tests: `tests/plugins.test.ts`.
 - **`read_file`'s binary marker now covers paged and streamed reads:** the
   additive `binary: true` marker (added with the edit-encoding refusal) was
