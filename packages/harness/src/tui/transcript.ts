@@ -243,6 +243,27 @@ export function toolFoldHint(
 const expandedToolRows = new WeakSet<ToolBlock>();
 
 /**
+ * Derivation memo for {@link withToolExpansion}: source `blocks` array → key
+ * set + derived model.
+ *
+ * Keying on the source array is sound because the model is replaced, never
+ * mutated (`appendBlock`, `appendEnvelopeDelta` and `commitEnvelope` return a
+ * new `blocks` array), and every expansion change builds a new
+ * {@link ToolExpansionKeys} set ({@link toggleNewestToolExpansion}, the app's
+ * resets), so a set is never edited in place. Reusing the derived model keeps
+ * its `blocks` array, which is the identity the transcript view's
+ * positioned-rows memo keys on; a fresh array per frame misses that memo for
+ * as long as a tool row stays expanded.
+ *
+ * One entry per live source array (a changed key set replaces it), so the
+ * cache is bounded by the documents still reachable.
+ */
+const expansionDerivations = new WeakMap<
+  TuiModel["blocks"],
+  { keys: ToolExpansionKeys; expanded: boolean; model: TuiModel }
+>();
+
+/**
  * Derive a model whose expanded tool rows render in full. Only rows whose
  * {@link toolExpansionKey} is in `keys` are cloned; every other block is
  * shared with the input, and an empty/unmatched key set returns the input
@@ -250,6 +271,20 @@ const expandedToolRows = new WeakSet<ToolBlock>();
  */
 export function withToolExpansion(model: TuiModel, keys: ToolExpansionKeys): TuiModel {
   if (keys.size === 0) return model;
+  const cached = expansionDerivations.get(model.blocks);
+  if (cached !== undefined && cached.keys === keys) {
+    // A key set that matches no row derives the input model itself.
+    if (!cached.expanded) return model;
+    // Only `blocks` is derived: a reasoning delta can move the live buffer
+    // while the `blocks` array stays the same, so a hit carries the current
+    // buffer and next id instead of the ones captured at derivation.
+    if (cached.model.liveThinking === model.liveThinking && cached.model.nextId === model.nextId) {
+      return cached.model;
+    }
+    const refreshed: TuiModel = { ...model, blocks: cached.model.blocks };
+    expansionDerivations.set(model.blocks, { keys, expanded: true, model: refreshed });
+    return refreshed;
+  }
   let expanded = false;
   const blocks = model.blocks.map((block) => {
     if (block.kind !== "tool" || !keys.has(toolExpansionKey(block))) return block;
@@ -258,7 +293,9 @@ export function withToolExpansion(model: TuiModel, keys: ToolExpansionKeys): Tui
     expanded = true;
     return clone;
   });
-  return expanded ? { ...model, blocks } : model;
+  const derived = expanded ? { ...model, blocks } : model;
+  expansionDerivations.set(model.blocks, { keys, expanded, model: derived });
+  return derived;
 }
 
 function toolSummary(block: ToolBlock): string {

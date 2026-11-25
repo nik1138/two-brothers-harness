@@ -94,6 +94,7 @@ import "./tuiwidth.test.ts";
 import "./tuivisualmodel.test.ts";
 import "./tuiviewlane.test.ts";
 import "./tuitranscriptview.test.ts";
+import "./tuimemoexpansion.test.ts";
 import "./tuimcpstatus.test.ts";
 import "./tuiintegration.test.ts";
 import "./tuisteering.test.ts";

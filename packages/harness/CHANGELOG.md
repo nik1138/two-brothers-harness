@@ -234,6 +234,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **TUI transcript memoization is no longer defeated while a tool row is
+  expanded:** `withToolExpansion` (`src/tui/transcript.ts`) now memoizes its
+  derivation on the source `blocks` array identity plus the expansion key-set
+  identity, so a frame whose expanded set has not changed reuses the derived
+  model and its `blocks` array. The transcript view's positioned-rows memo is
+  keyed on that array, so deriving a fresh one per frame missed it and paid the
+  full re-wrap for as long as the fold state stayed non-empty; a repeated warm
+  frame with a stable expanded tool row now costs ~0.2 ms instead of
+  23 ms @100 turns / 55 ms @250 turns (measured on the `withToolExpansion` +
+  `transcriptView` frame path: 27.76 → 0.26 ms @100 turns, 67.30 → 0.17 ms
+  @250 turns). The derived blocks are still fresh whenever the expansion set or
+  the source document changes, and a cache hit carries the current live
+  reasoning buffer and next id, so a reasoning delta (same `blocks`, new
+  buffer) never renders stale. Frames are byte-identical to an uncached
+  derivation across expansion states; no `app.ts` change and no row-memo key
+  change. Tests: `tests/tuimemoexpansion.test.ts`.
 - **TUI `/rewind` refuses a session changed during the confirmation:** the
   preview now captures the session file's `size:mtimeMs:ino` signature (the
   server rewind route's own identity, extracted unchanged to
