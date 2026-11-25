@@ -1572,11 +1572,12 @@ flushed immediately, so a crash loses at most the final, partially written line
   fresh session starts with a `[warn]`.
 - A submitted task is a real turn: `run` (and every `chat` REPL task) appends
   its task envelope even when an identical user message already exists in the
-  context, so repeating a prompt is never swallowed. The same-task dedupe is
-  kept only for `--resume` (the loaded session already carries its task
-  envelopes, so re-submitting the identical task continues the cycle instead
-  of appending it twice); `serve` never pre-appends the task, so a repeated
-  prompt over the API always creates a new envelope.
+  context, so repeating a prompt is never swallowed. The same-task dedupe
+  applies only where the caller already appended the task: `--resume` (`run`
+  and the first resumed `chat` turn) and the TUI's `@skill:`/`@file`
+  pre-append path, where the attachment blocks must follow exactly one task
+  envelope; `serve` never pre-appends the task, so a repeated prompt over the
+  API always creates a new envelope.
 - `chat`: one shared context across all REPL tasks, persisted; with `--resume`
   it continues a previous session.
 - (TS package) `--compact` / `--compact-threshold <chars>` (env
