@@ -404,7 +404,14 @@ the same hero appears inside a selected session that has no transcript yet.
    Permissions. The row also shows the latest prompt audit's exact
    system/context character counts plus the offered-tool count; the usage
    footer shows tokens and the live cache-hit percentage after every
-   cooperation node. A seat whose data is unknown is simply absent — no
+   cooperation node. Once the backend reports a per-role split, the footer
+   adds a `Senior`/`Junior` row under the merged counters — each measured
+   role's own in/out tokens, cache-hit percentage, derived cache-miss count,
+   cache writes when billed and its own estimated cost when priced (a role
+   that answered no provider call gets no row); the split is hidden at the
+   mobile drawer breakpoint (≤ 768 px), while the `/status` dialog always
+   lists it as `Senior usage` / `Junior usage`. A seat whose data is unknown
+   is simply absent — no
    token counts or other numbers are invented. The browser tab title follows
    the selected session and its run state: `▶ …` while a run works or is
    queued, `! …` while it waits for an approval, `… (failed)` for a failed run,
@@ -532,6 +539,10 @@ before anything else. While a turn runs, `Ctrl+N` (or the palette's **Steer
 the running turn** row) queues the composer text for that turn at its next
 step — not a new task — bounded to eight pending texts of 4 000 characters;
 the draft clears only on acceptance and leftovers are reported honestly.
+`Tab` on an empty composer cycles the cooperation mode `consult` → `work` →
+`auto` (`Shift+Tab` runs it backwards), the status bar shows the new mode and
+the next submitted turn uses it; `/mode consult|work|auto` sets it explicitly
+(a bare `/mode` opens the mode picker).
 `Ctrl+X` copies the last completed reply (native clipboard first, OSC 52 where
 there is no OS clipboard, with an honest route-specific notice), `Ctrl+G` opens
 the draft in `$VISUAL`/`$EDITOR`, and the terminal title shows

@@ -266,11 +266,12 @@ honestly) are
 performed locally and never submitted as tasks — see
 [Built-in commands](#built-in-commands). A native command always wins its own
 name and a discovered template shadows a same-named built-in. `/models`,
-`/sessions` and `/fork` refuse to change things while a turn runs (and `/fork`
-also refuses while compaction runs, when no session file is open, and when the
-current file is not a session of the TUI's store), and model changes are
-session-local. Provider connections resolve from the same persisted settings
-store as `serve` (see [Provider connection](#provider-connection-provider)).
+`/sessions`, `/fork` and `/rewind` refuse to change things while a turn runs
+(and `/fork` and `/rewind` also refuse while compaction runs, or when no
+session file is open or the current file is not a session of the TUI's
+store), and model changes are session-local. Provider connections resolve
+from the same persisted settings store as `serve` (see
+[Provider connection](#provider-connection-provider)).
 `--stream-tokens` renders token deltas in place while a turn
 runs.
 

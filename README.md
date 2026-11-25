@@ -125,6 +125,7 @@ Installed globally the command is `two-brothers`; from a checkout it is
 | `serve` | web workspace backend (HTTP + SSE) |
 | `doctor` | offline configuration check |
 | `models` | list models an OpenAI-compatible endpoint reports |
+| `mcp` | list the MCP servers named by the MCP config file |
 | `onboard` | write per-role provider settings |
 | `config` | print the resolved configuration |
 | `completions` | shell completion scripts |

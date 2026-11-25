@@ -484,6 +484,7 @@ a turn/compaction runs or an overlay, find bar or approval owns the keyboard.
 | `Ctrl+F` | Find in the transcript: an inline bar above the status rows. Typing filters live (case-insensitive literal text), `Enter`/`Down` jumps to the next match and `Shift+Enter`/`Up` to the previous one (both wrap); the bar shows `current/total`, marks the active match and scrolls its block into view. `Esc` closes it and restores the composer draft and scroll position exactly. `/find [query]` opens it with a query already typed. |
 | `Ctrl+T` | Expand or collapse the most recent tool result: collapsed shows the first six result rows after width-aware wrapping plus a `… +N more lines` marker (N counts hidden visual rows), expanded shows the whole result. The model always keeps the full text. |
 | `Ctrl+B` | Toggle the status side panel on wide terminals (it needs at least 100 columns and 20 rows; below that the transcript simply uses the full width). `/panel` does the same.
+When the turn's usage was measured per role, a `SENIOR USE` and/or `JUNIOR USE` row sits directly under the merged `TOKENS`/`CACHE` rows, carrying that role's own in/out tokens, cache-hit percentage, derived cache-miss count, cache writes when billed, and its own cost when priced; a role that answered no provider call gets no row (no fabricated zero half).
 The panel also lists each configured MCP server (`name connected (n tools)` /
 `name failed — error`) beneath its `MCP` row, and the footer chip `N MCP`
 turns `N MCP failed` (error tone) while any server is failed. |

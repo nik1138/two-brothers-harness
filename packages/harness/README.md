@@ -14,7 +14,7 @@ MCP). MIT.
 
 ## Install
 
-v0.0.1 is the latest published release:
+v0.0.2 is the latest published release:
 
 ```bash
 npm install -g @two-brothers/harness
@@ -190,6 +190,13 @@ the original and its sidecar stay byte-identical.
 - **Cooperation loop**: consult → proposal → review → (revise)* → decision,
   with delegation → deliverable in `work` mode; the junior's objections are
   recorded explicitly (`decision.dissent`).
+- **Helper subagents**: the senior may hand a focused side task to a
+  single-role helper with its own isolated conversation and provider — it never
+  sees the brothers' context, its usage never enters their numbers, and it is
+  not a second junior. A workspace-bound helper gets the seven workspace
+  built-ins, its mutations park as ordinary approvals on the parent run, its
+  bounded transcript persists under `<sessions>/subagents/`, and the web
+  workspace and the TUI (`Ctrl+Y` / `/agents`) show the live helpers.
 - **Tools for both brothers**: in consult mode the senior's opening, the
   junior's proposal/revision and the senior's review may call a read-only
   workspace belt before emitting the structured reply (bounded; the four
@@ -279,7 +286,11 @@ the original and its sidecar stay byte-identical.
   `TWO_BROTHERS_TUI_KEYS_FILE` reads a versioned JSON document that rebinds
   only the global palette/help/stash chords; the effective chords drive
   matching, the palette/help listings, status hints and `tui --help`, while
-  invalid/conflicting files print one diagnostic and keep the defaults.
+  invalid/conflicting files print one diagnostic and keep the defaults. Inside
+  the TUI, `/keys` reports the effective chords and the captured file, `/keys
+  reload` re-reads it, and `/keys edit` captures a replacement chord in place;
+  `tui --keys-watch` / `TWO_BROTHERS_TUI_KEYS_WATCH` live-applies valid edits
+  to that file through the same validated reload path.
 - **Server**: HTTP + SSE on plain `node:http`; worker pool, approval broker
   (one-shot or session-scope allows persisted in the settings store),
   settings/secret stores (DPAPI/`plain1:`).
