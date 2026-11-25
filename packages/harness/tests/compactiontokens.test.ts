@@ -290,12 +290,13 @@ test("token trigger: an over-window transcript compacts at window - reserve", as
 
 test("token trigger: a transcript under the trigger leaves the summarizer alone", async () => {
   const ctx = triggerContext();
-  const measured = estimateTokens(ctx.renderTranscript());
 
-  // reserve 0 and a window twice the measured size: trigger = 2 * measured
+  // A window far above the whole prompt (transcript + the static system
+  // prompt/tool-schema prefix the trigger also measures): the trigger never
+  // fires, so the summarizer stays untouched.
   const provider = new RecordingProvider();
   const result = await consultHarness(provider, {
-    compaction: { contextWindow: measured * 2, reserveTokens: 0 },
+    compaction: { contextWindow: 1_000_000, reserveTokens: 0 },
   }).run("token trigger task", ctx);
   assert.deepEqual(result.warnings, []);
   assert.equal(provider.compactionRequests().length, 0);
@@ -357,8 +358,10 @@ test("overflow recovery: a known window sizes the recovery budgets in tokens", a
   const provider = new OverflowProvider(false);
   // Char defaults (40000 chars) would leave nothing to cut here; token
   // budgets derived from the window make the recovery compaction possible.
+  // The window is far above the token trigger (the gauge now also measures
+  // the static prompt prefix), so only the overflow path compacts.
   const harness = consultHarness(provider, {
-    compaction: { contextWindow: 1200, reserveTokens: 200, keepRecentTokens: 100 },
+    compaction: { contextWindow: 100_000, reserveTokens: 200, keepRecentTokens: 100 },
   });
 
   const result = await harness.run("overflow task", ctx);
@@ -379,7 +382,7 @@ test("overflow recovery: with a window, a second overflow still propagates", asy
   const ctx = overflowContext();
   const provider = new OverflowProvider(true);
   const harness = consultHarness(provider, {
-    compaction: { contextWindow: 1200, reserveTokens: 200, keepRecentTokens: 100 },
+    compaction: { contextWindow: 100_000, reserveTokens: 200, keepRecentTokens: 100 },
   });
 
   await assert.rejects(

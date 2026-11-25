@@ -333,6 +333,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loaded bundle set is reused (no re-discovery); discovery roots and
   `--verbose` diagnostics are otherwise unchanged. Tests:
   `tests/pluginbundle.test.ts` (cross-surface parity).
+- **Compaction size safety: the token-mode trigger counts the static prompt
+  prefix, and the summarizer request is bounded.** Two audit fixes.
+  (1) Token-mode auto-compaction compared `estimateTokens(renderTranscript())`
+  alone, so the assembled system prompt + tool schemas — thousands of tokens
+  that ride every request — were unmeasured and proactive compaction fired
+  late, leaving the run to overflow recovery. The trigger now adds the
+  estimated tokens of the acting role's assembled system prompt (through the
+  same `assemblePrompt`/belt seam the calls use) plus its tool-schema JSON
+  (`{name, description, parameters}`, the fields every adapter sends), taken
+  as the larger of the two roles' full belts, to the transcript measurement.
+  The trigger formula (`window`/`thresholdTokens` − reserve), the reserve and
+  tail/summary derivation, and char mode (still the rendered transcript's char
+  length, the documented back-compatible unit) are unchanged; `--verbose`
+  failure warnings report the combined measured figure.
+  (2) Overflow-recovery compaction could overflow the summarizer itself: char
+  mode sent the whole serialized prefix in one uncapped request, so on a
+  small-window model with no `--context-window`/preset window the summarizer
+  overflowed too, `compactionFailed` surfaced the original overflow and an
+  otherwise recoverable run was unrecoverable. The serialized conversation is
+  now bounded through `summarizerSourceBudget`: by the configured char trigger
+  when the caller declared one, else `DEFAULT_SUMMARIZER_SOURCE_CHARS` =
+  64 000 chars (≈16k estimated tokens, leaving room for the default 20k-char
+  summary inside a ~32k-token window), using the existing head+tail
+  serialization and the existing explicit truncation marker (no new marker).
+  A summarizer `ProviderContextOverflowError` in char mode gets exactly one
+  tighter (halved, never below one entry cap) retry; a second failure stays
+  fail-soft — the full context is kept and one warning is recorded. Token mode
+  (known window) keeps its pre-existing uncapped request bytes and budgets.
+  No protocol/schema/session-format change; no new dependencies. Tests:
+  `tests/compactionsafety.test.ts` (8: the F4 recovery/retry/fail-soft cases
+  and the F2 cross-point probe).
 - **TUI `/rewind` refuses a session changed during the confirmation:** the
   preview now captures the session file's `size:mtimeMs:ino` signature (the
   server rewind route's own identity, extracted unchanged to

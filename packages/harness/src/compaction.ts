@@ -70,10 +70,10 @@
  *   senior preset 1M + junior preset 200K ⇒ effective window 200K, so the
  *   trigger (window − reserveTokens) can never overflow the smaller model.
  */
-import type { SharedContext } from "./context.ts";
+import type { ChatMessage, SharedContext } from "./context.ts";
 import type { Message } from "./protocol.ts";
 import { createMessage, validateMessage } from "./protocol.ts";
-import type { Provider } from "./provider.ts";
+import { ProviderContextOverflowError, type Provider } from "./provider.ts";
 
 /** Longest envelope serialization a summary source keeps (pi's cap). */
 const ENTRY_MAX_CHARS = 2000;
@@ -81,6 +81,18 @@ const ENTRY_MAX_CHARS = 2000;
 export const DEFAULT_KEEP_RECENT_CHARS = 40000;
 /** Summary cap for manual compactions (no threshold given). */
 const MAX_SUMMARY_CHARS = 20000;
+
+/**
+ * Conservative cap on the serialized conversation sent to the summarizer when
+ * the run knows no context window (char mode). From the estimator's 4:1 ASCII
+ * benchmark ~16 000 estimated tokens, which leaves room for the pinned
+ * prompts plus the largest auto summary ({@link MAX_SUMMARY_CHARS} ≈ 5 000
+ * tokens) inside a small (~32K-token) window — the unrecoverable-run case: an
+ * uncapped source made the recovery compaction overflow the summarizer too.
+ * Token mode, which does know its window, keeps the pre-existing uncapped
+ * path (its budgets are already sized to the window).
+ */
+export const DEFAULT_SUMMARIZER_SOURCE_CHARS = 64000;
 
 /**
  * Default reply headroom below `thresholdChars` before an auto compaction
@@ -359,16 +371,40 @@ function truncateEntry(text: string): string {
 }
 
 /**
+ * Head + tail of one serialized block at `maxChars`, with the omitted middle
+ * replaced by `marker`. Shared by {@link splitEntry} (one oversized envelope,
+ * the split-payload cut) and {@link boundSummarizerSource} (the whole
+ * serialized conversation when no window is known), so the two cuts keep the
+ * same shape and reuse the existing marker strings instead of inventing new
+ * ones.
+ */
+function headTail(text: string, maxChars: number, marker: (omitted: number) => string): string {
+  if (text.length <= maxChars) return text;
+  const head = Math.floor(maxChars / 2);
+  const tail = maxChars - head;
+  return `${text.slice(0, head)}\n\n${marker(text.length - maxChars)}\n\n${text.slice(text.length - tail)}`;
+}
+
+/**
  * Split an oversized envelope's serialization for the summarizer: keep its
  * head and tail, mark the omitted middle. The tail matters because payload
  * endings (a result, acceptance notes, a closing decision) are often what the
  * next summary needs; head-only truncation would drop them.
  */
 function splitEntry(text: string): string {
-  if (text.length <= ENTRY_MAX_CHARS) return text;
-  const head = Math.floor(ENTRY_MAX_CHARS / 2);
-  const tail = ENTRY_MAX_CHARS - head;
-  return `${text.slice(0, head)}\n\n${splitMarker(text.length - ENTRY_MAX_CHARS)}\n\n${text.slice(text.length - tail)}`;
+  return headTail(text, ENTRY_MAX_CHARS, splitMarker);
+}
+
+/**
+ * Bound the serialized conversation sent to the summarizer to `maxChars`,
+ * keeping the head (the task framing at the start) and the tail (the evidence
+ * closest to the cut) and marking the omitted middle with the existing
+ * truncation marker. Size safety for the summarizer request itself: the
+ * summarized prefix can be far larger than the summarizer's own window when a
+ * tool loop grew the context past the auto trigger.
+ */
+function boundSummarizerSource(text: string, maxChars: number): string {
+  return headTail(text, maxChars, truncationMarker);
 }
 
 /** Options for {@link serializeConversation}. */
@@ -564,6 +600,24 @@ export function compactionTriggerTokens(settings: CompactionSettings): number {
 }
 
 /**
+ * The char budget for the serialized conversation sent to the summarizer, or
+ * `undefined` when token mode knows its window (the pre-existing uncapped
+ * path stays byte-identical there — those budgets are already sized to the
+ * window). Char mode derives it from the configured char trigger when the
+ * caller declared one (the largest context the run admits is exactly the
+ * amount the summarizer may be asked to read), and falls back to
+ * {@link DEFAULT_SUMMARIZER_SOURCE_CHARS} when no budget is known at all —
+ * the default CLI/TUI/serve run with no `--context-window` and no preset
+ * window, where an uncapped summarizer request could overflow the summarizer
+ * and turn a recoverable overflow into a failed run.
+ */
+export function summarizerSourceBudget(settings: CompactionSettings): number | undefined {
+  if (compactionUnit(settings) === "tokens") return undefined;
+  const trigger = compactionTriggerChars(settings);
+  return trigger > 0 ? trigger : DEFAULT_SUMMARIZER_SOURCE_CHARS;
+}
+
+/**
  * Compact `ctx` in place: summarize `events[head..cut)` through `provider`
  * and replace the context with `[task head, summary event, kept tail]`,
  * renumbered to dense `seq`; when a previous summary is part of the summarized
@@ -609,19 +663,48 @@ export async function compactContext(
   const source = serializeConversation(sourceEvents, { splitIndex });
 
   const basePrompt = previousSummary === undefined ? SUMMARIZATION_PROMPT : UPDATE_SUMMARIZATION_PROMPT;
-  let request = `<conversation>\n${source}\n</conversation>\n\n`;
-  if (previousSummary !== undefined) {
-    request += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
+  // Bound the source the summarizer is asked to read. Token mode knows its
+  // window and keeps the pre-existing uncapped request bytes; char mode
+  // without one is capped so recovery compaction cannot overflow the
+  // summarizer itself (an unrecoverable run otherwise).
+  const sourceBudget = summarizerSourceBudget(settings);
+  const requestFor = (serialized: string): string => {
+    let text = `<conversation>\n${serialized}\n</conversation>\n\n`;
+    if (previousSummary !== undefined) {
+      text += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
+    }
+    return text + basePrompt;
+  };
+  const summarizerMessages = (budget: number | undefined): ChatMessage[] => [
+    { role: "system", content: SUMMARIZATION_SYSTEM_PROMPT },
+    {
+      role: "user",
+      content: requestFor(budget === undefined ? source : boundSummarizerSource(source, budget)),
+    },
+  ];
+  let raw: string;
+  try {
+    raw = await provider.chat(summarizerMessages(sourceBudget), "compaction", signal);
+  } catch (err) {
+    // One tighter retry on a summarizer overflow, char mode only (token mode
+    // keeps its known-window path unchanged): halve the budget the request
+    // used, never below a single entry cap. A budget already at that floor has
+    // no tighter step, so its error propagates directly. A second failure also
+    // propagates to the fail-soft caller, which keeps the full context and
+    // warns once.
+    if (
+      sourceBudget === undefined ||
+      sourceBudget <= ENTRY_MAX_CHARS ||
+      !(err instanceof ProviderContextOverflowError)
+    ) {
+      throw err;
+    }
+    const tighter = Math.max(
+      ENTRY_MAX_CHARS,
+      Math.floor(Math.min(sourceBudget, source.length) / 2),
+    );
+    raw = await provider.chat(summarizerMessages(tighter), "compaction", signal);
   }
-  request += basePrompt;
-  const raw = await provider.chat(
-    [
-      { role: "system", content: SUMMARIZATION_SYSTEM_PROMPT },
-      { role: "user", content: request },
-    ],
-    "compaction",
-    signal,
-  );
   const trimmed = String(raw ?? "").trim();
   const summary = (
     budgets.unit === "tokens"

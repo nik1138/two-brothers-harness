@@ -55,6 +55,7 @@ import "./compaction.test.ts";
 import "./compactionv2.test.ts";
 import "./compactiontokens.test.ts";
 import "./compactionguarantees.test.ts";
+import "./compactionsafety.test.ts";
 import "./skills.test.ts";
 import "./presets.test.ts";
 import "./cost.test.ts";

@@ -2468,14 +2468,47 @@ export class TwoBrothersHarness {
   }
 
   /**
+   * Estimated tokens of the static prompt prefix the wire request carries
+   * beside the transcript: the assembled system prompt plus the JSON tool
+   * schemas, measured for the larger of the two roles' full belts. Token-mode
+   * compaction adds this to the transcript measurement so the trigger sees
+   * what the provider actually receives — system prompt, tool sections,
+   * skills, workspace instructions and the tool schema payload were all
+   * unmeasured before, so proactive compaction fired late and runs fell into
+   * overflow recovery. The assembly goes through the same
+   * `assemblePrompt` + belt seam the role calls use (never a copy), and the
+   * belt schemas are the `{name, description, parameters}` fields every
+   * adapter sends. Char mode deliberately stays transcript-only (documented
+   * back-compatible unit).
+   */
+  private staticPrefixTokens(state: CooperationState): number {
+    const rolePrefix = (role: "senior" | "junior", belt: Tool[]): number => {
+      const prompt = this.assemblePrompt(role, belt).text;
+      const schemas = belt.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+      }));
+      return estimateTokens(prompt) + estimateTokens(JSON.stringify(schemas));
+    };
+    return Math.max(
+      rolePrefix("senior", this.verificationToolSet(state)),
+      rolePrefix("junior", this.toolSet(state)),
+    );
+  }
+
+  /**
    * Auto-compact when the rendered context reaches the active trigger —
    * `thresholdChars - reserveChars` chars in char mode,
    * `contextWindow - reserveTokens` (or `thresholdTokens - reserveTokens`)
    * estimated tokens in token mode — or once when `--compact` asked for it.
    * Runs between state-machine nodes, so the context the next model call sees
-   * is already compacted. Fail-soft: a summarization failure records a
-   * warning, disables further attempts this run, and leaves the context
-   * un-compacted; only an operator stop (`ProviderAbortError`) propagates.
+   * is already compacted. Token mode measures the transcript PLUS the static
+   * prompt prefix (see {@link staticPrefixTokens}); char mode measures the
+   * rendered transcript only, unchanged. Fail-soft: a summarization failure
+   * records a warning, disables further attempts this run, and leaves the
+   * context un-compacted; only an operator stop (`ProviderAbortError`)
+   * propagates.
    */
   private async maybeCompact(state: CooperationState): Promise<void> {
     const settings = this.compactionSettings();
@@ -2484,7 +2517,8 @@ export class TwoBrothersHarness {
     const charTrigger = compactionTriggerChars(settings);
     let notice: { unit: CompactionUnit; measured?: number; limit?: number } | undefined;
     if (tokenTrigger > 0) {
-      const measured = estimateTokens(state.ctx.renderTranscript());
+      const measured =
+        estimateTokens(state.ctx.renderTranscript()) + this.staticPrefixTokens(state);
       notice = { unit: "tokens", measured, limit: tokenTrigger };
       if (!state.compactNow && measured < tokenTrigger) return;
     } else if (charTrigger > 0) {
