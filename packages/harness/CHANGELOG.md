@@ -246,6 +246,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a normal load leaves no live handle behind. This is the class the repo fixed
   twice before (`e51c54f`, `1079917` — keep such timers ref'd). Tests:
   `tests/plugins.test.ts`.
+- **Plugin module `import()` is bounded by a deadline:** a plugin file whose
+  top-level await never settled blocked `loadPlugins`/`PluginManager` forever —
+  the register deadline could not cover an import that never returns. Each
+  module import now runs under `PLUGIN_IMPORT_TIMEOUT_MS` (10 s, overridable
+  for tests through the new `PluginManagerOptions.importTimeoutMs`) with the
+  same fail-soft shape as a registration timeout: the load path warns, records
+  the plugin in `errors`, and skips it — nothing from it is adopted, and the
+  process never crashes or hangs. The timer is unref'd and cleared on both
+  outcomes, and a module that settles after the deadline is discarded (its
+  late rejection stays handled). Tests: `tests/plugins.test.ts`.
 - **`read_file`'s binary marker now covers paged and streamed reads:** the
   additive `binary: true` marker (added with the edit-encoding refusal) was
   attached only by the whole-file at/below-2-MiB path, so a model paging

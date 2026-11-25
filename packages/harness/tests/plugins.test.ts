@@ -670,6 +670,101 @@ test("a plugin whose register never settles is skipped after the deadline", asyn
   }
 });
 
+test("a plugin whose module import never settles is skipped after the deadline", async () => {
+  const dir = makePluginsDir({
+    // A top-level await that never settles: `import()` itself never resolves,
+    // so the register deadline can never cover it.
+    "hungimport.ts": "await new Promise(() => {});\nexport function register() {}\n",
+    "good.ts": GOOD_PLUGIN,
+  });
+  const tmp = tmpdir("tb-ws-");
+  try {
+    // A small import deadline keeps the case fast and hermetic.
+    const manager = await PluginManager.create(dir.root, [], { importTimeoutMs: 80 });
+    assert.deepEqual([...manager.plugins.keys()], ["good"]);
+    assert.equal(manager.errors.length, 1);
+    assert.equal(manager.errors[0].plugin, "hungimport");
+    assert.match(manager.errors[0].error, /import timed out after 80 ms/);
+    // The healthy module alongside still loads and registers its tools.
+    const ws = workspaceWith(tmp.root, new StaticBroker(Decision.ALLOW));
+    assert.deepEqual(
+      (await manager.toolsFor(["good"], ws)).map((tool) => tool.name),
+      ["ping", "seniors_only"],
+    );
+    // The timed-out import contributes nothing at run time either.
+    const bindings = await manager.bindingsFor(["hungimport", "good"], ws);
+    assert.deepEqual(bindings.tools.map((tool) => tool.name), ["ping", "seniors_only"]);
+  } finally {
+    dir.cleanup();
+    tmp.cleanup();
+  }
+});
+
+test("a module that settles after the import deadline is discarded safely", async () => {
+  const dir = makePluginsDir({
+    // Rejects well after the deadline: the discarded race must still own the
+    // rejection (no unhandled rejection, no crash) and adopt nothing.
+    "late.ts": [
+      "await new Promise((resolve) => setTimeout(resolve, 150));",
+      'throw new Error("late import failure");',
+      "",
+    ].join("\n"),
+    "good.ts": GOOD_PLUGIN,
+  });
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => {
+    unhandled.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const manager = await PluginManager.create(dir.root, [], { importTimeoutMs: 40 });
+    assert.deepEqual([...manager.plugins.keys()], ["good"]);
+    assert.match(manager.errors[0].error, /import timed out after 40 ms/);
+    // Give the late rejection time to surface: it must be swallowed.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.deepEqual(unhandled, []);
+    assert.deepEqual([...manager.plugins.keys()], ["good"]);
+    assert.equal(manager.plugins.has("late"), false);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+    dir.cleanup();
+  }
+});
+
+test("the import deadline leaves no live timer behind", async () => {
+  const delay = 57;
+  const created = new Set<ReturnType<typeof setTimeout>>();
+  const cleared = new Set<ReturnType<typeof setTimeout>>();
+  const originalSet = globalThis.setTimeout;
+  const originalClear = globalThis.clearTimeout;
+  globalThis.setTimeout = ((
+    callback: (...args: unknown[]) => void,
+    ms?: number,
+    ...args: unknown[]
+  ) => {
+    const timer = originalSet(callback as never, ms, ...(args as never[]));
+    if (ms === delay) created.add(timer);
+    return timer;
+  }) as unknown as typeof setTimeout;
+  globalThis.clearTimeout = ((timer: ReturnType<typeof setTimeout>) => {
+    if (created.has(timer)) cleared.add(timer);
+    originalClear(timer);
+  }) as unknown as typeof clearTimeout;
+  const dir = makePluginsDir({
+    "hungimport.ts": "await new Promise(() => {});\nexport function register() {}\n",
+  });
+  try {
+    const manager = await PluginManager.create(dir.root, [], { importTimeoutMs: delay });
+    assert.deepEqual([...manager.plugins.keys()], []);
+    assert.equal(created.size, 1);
+    assert.equal(cleared.size, 1);
+  } finally {
+    globalThis.setTimeout = originalSet;
+    globalThis.clearTimeout = originalClear;
+    dir.cleanup();
+  }
+});
+
 test("one binding pass keeps a consistent plugin-map generation across a reload", async () => {
   const dir = makePluginsDir({
     "aaa.ts": reloadTriggerPlugin("gen_a", "one"),

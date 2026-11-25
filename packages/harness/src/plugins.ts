@@ -862,6 +862,29 @@ const DEFAULT_PLUGIN_TOOL_TIMEOUT_MS = 60_000;
  */
 export const PLUGIN_REGISTER_TIMEOUT_MS = 10_000;
 
+/**
+ * Wall-clock deadline for one plugin module `import()`: 10 s.
+ *
+ * A module's top-level await is evaluated by `import()`, so a plugin whose
+ * module body awaits a promise that never settles blocks the load path just
+ * like a hung `register(ctx)` would (the register deadline cannot cover the
+ * import that never returns). The import is bounded by its own race, with the
+ * same fail-soft shape: expiry rejects with a `PluginError`, the load path
+ * warns and records it in `errors`, and the plugin is skipped — no tools,
+ * hooks or MCP servers, never a crash and never partial state. A module that
+ * settles after the deadline is discarded: the race keeps its handlers
+ * attached, so a late rejection is never unhandled. Overridable for tests
+ * through `PluginManagerOptions.importTimeoutMs`.
+ */
+export const PLUGIN_IMPORT_TIMEOUT_MS = 10_000;
+
+/** A positive finite override, else the import default (tolerant boundary). */
+function importDeadlineMs(value: number | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : PLUGIN_IMPORT_TIMEOUT_MS;
+}
+
 /** A positive finite override, else the shared default (tolerant boundary). */
 function registrationDeadlineMs(value: number | undefined): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0
@@ -1167,11 +1190,12 @@ export function validatePluginOptions(
  * view (`GET /api/plugins`) lists every discovered plugin and per-run
  * binding is opt-in through `bindingsFor`.
  *
- * Each plugin's `register(ctx)` is awaited under `PLUGIN_REGISTER_TIMEOUT_MS`
- * (overridable through `registerTimeoutMs`, used by tests): a registration
- * that does not settle in time fails that plugin exactly like a thrown
- * registration — it is skipped, recorded in `errors`, and contributes no
- * tools, hooks or MCP servers.
+ * Each plugin's module is imported under `PLUGIN_IMPORT_TIMEOUT_MS` and its
+ * `register(ctx)` is awaited under `PLUGIN_REGISTER_TIMEOUT_MS` (both
+ * overridable through `registerTimeoutMs`/`importTimeoutMs`, used by tests):
+ * an import or registration that does not settle in time fails that plugin
+ * exactly like a thrown one — it is skipped, recorded in `errors`, and
+ * contributes no tools, hooks or MCP servers.
  */
 export async function loadPlugins(
   pluginsDir: string,
@@ -1179,6 +1203,7 @@ export async function loadPlugins(
   settings: readonly PluginSetting[] = [],
   importOnly: ReadonlySet<string> | null = null,
   registerTimeoutMs: number = PLUGIN_REGISTER_TIMEOUT_MS,
+  importTimeoutMs: number = PLUGIN_IMPORT_TIMEOUT_MS,
 ): Promise<{
   plugins: Map<string, LoadedPlugin>;
   errors: PluginErrorEntry[];
@@ -1189,6 +1214,7 @@ export async function loadPlugins(
   const diagnostics: PluginDiagnosticEntry[] = [];
   const optionsFor = optionsByName(settings);
   const deadlineMs = registrationDeadlineMs(registerTimeoutMs);
+  const importDeadline = importDeadlineMs(importTimeoutMs);
   let stat: fs.Stats;
   try {
     stat = fs.statSync(pluginsDir);
@@ -1213,7 +1239,7 @@ export async function loadPlugins(
     if (importOnly !== null && !importOnly.has(name)) continue;
     const filePath = path.join(pluginsDir, fileName);
     try {
-      const module = await importPluginModule(filePath, loadCount);
+      const module = await importPluginModule(filePath, loadCount, importDeadline);
       const loaded = await registerModule(name, module, filePath, optionsFor.get(name) ?? {}, deadlineMs);
       for (const message of loaded.diagnostics) diagnostics.push({ plugin: name, message });
       plugins.set(name, loaded);
@@ -1226,13 +1252,35 @@ export async function loadPlugins(
   return { plugins, errors, diagnostics };
 }
 
-/** Dynamic `import()` of one plugin file with the reload cache-bust. */
+/**
+ * Dynamic `import()` of one plugin file with the reload cache-bust, bounded by
+ * `PLUGIN_IMPORT_TIMEOUT_MS`.
+ *
+ * The timer is `unref`'d and cleared on both outcomes. A module that settles
+ * after the deadline has its namespace discarded: the race already attached
+ * handlers to the import promise, so a late rejection is never an unhandled
+ * rejection, and nothing from it can reach the manager because registration
+ * never runs.
+ */
 async function importPluginModule(
   filePath: string,
   loadCount: number,
+  timeoutMs: number,
 ): Promise<Record<string, unknown>> {
   const url = `${pathToFileURL(filePath).href}?v=${loadCount}`;
-  const module: unknown = await import(url);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(new PluginError(`import timed out after ${timeoutMs} ms`));
+    }, timeoutMs);
+    timer.unref?.();
+  });
+  let module: unknown;
+  try {
+    module = await Promise.race([import(url), deadline]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
   if (!isModuleNamespace(module)) {
     throw new PluginError(`cannot import ${path.basename(filePath)}`);
   }
@@ -1367,6 +1415,13 @@ export interface PluginManagerOptions {
    * numbers fall back to the default.
    */
   registerTimeoutMs?: number;
+  /**
+   * Wall-clock deadline for one plugin module `import()`, in milliseconds;
+   * omitted = `PLUGIN_IMPORT_TIMEOUT_MS` (10 s). A test knob for keeping the
+   * never-settling top-level await case fast, not an operator-facing setting.
+   * Values that are not positive finite numbers fall back to the default.
+   */
+  importTimeoutMs?: number;
 }
 
 /** One run's plugin contribution: tools (flat + scoped), hooks, MCP servers, diagnostics. */
@@ -1423,6 +1478,7 @@ export class PluginManager {
   bundles = new Map<string, LoadedPluginBundle>();
   private readonly selectedOnly: boolean;
   private readonly registerTimeoutMs: number;
+  private readonly importTimeoutMs: number;
   private loadCount = 0;
   private reloadTail: Promise<void> = Promise.resolve();
 
@@ -1435,6 +1491,7 @@ export class PluginManager {
     this.settings = [...settings];
     this.selectedOnly = options.selectedOnly === true;
     this.registerTimeoutMs = registrationDeadlineMs(options.registerTimeoutMs);
+    this.importTimeoutMs = importDeadlineMs(options.importTimeoutMs);
   }
 
   /** Construct + load — the async equivalent of Python's eager `__init__`. */
@@ -1471,6 +1528,7 @@ export class PluginManager {
       this.settings,
       this.selectedOnly ? pluginSelectionNames(this.settings) : null,
       this.registerTimeoutMs,
+      this.importTimeoutMs,
     );
     const discovered = discoverPluginBundles(this.pluginsDir);
     this.plugins = plugins;
