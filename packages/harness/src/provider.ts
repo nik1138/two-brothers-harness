@@ -915,6 +915,18 @@ export const MAX_TIMEOUT_WARNINGS = 3;
  */
 export const MAX_PROVIDER_TIMEOUT_SECONDS = 86_400;
 
+/**
+ * The one honest warning for a configured timeout above the ceiling. Shared by
+ * the request path and model discovery so both clamp the same way and say the
+ * same thing.
+ */
+function timeoutCeilingWarning(requestedSeconds: number): string {
+  return (
+    `[warn] timeout ${requestedSeconds}s exceeds the ${MAX_PROVIDER_TIMEOUT_SECONDS}s (24 h) ` +
+    `ceiling; using ${MAX_PROVIDER_TIMEOUT_SECONDS}s (--timeout <s> / TWO_BROTHERS_TIMEOUT)`
+  );
+}
+
 /** HTTP failure from the endpoint; `retryable`/`reason` pin the classification. */
 export class ProviderHttpError extends Error {
   readonly status: number;
@@ -1111,6 +1123,12 @@ export interface ListModelsOptions {
   kind?: string;
   /** Request timeout in seconds (default `MODELS_TIMEOUT_SECONDS`); one budget for ALL pages. */
   timeoutSeconds?: number;
+  /**
+   * Sink for the one clamp warning when `timeoutSeconds` exceeds
+   * `MAX_PROVIDER_TIMEOUT_SECONDS`; omitted = stderr, never stdout (machine
+   * modes stay parseable).
+   */
+  onWarning?: (line: string) => void;
   /** Google listing page bound (default `MODELS_MAX_PAGES`); at most this many pages are fetched. */
   maxPages?: number;
   fetchImpl?: FetchLike;
@@ -1188,7 +1206,18 @@ export async function listModels(
       `model discovery is not supported for the anthropic provider kind (use ${PROVIDER_KIND_HINT}); list models by hand`,
     );
   }
-  const timeout = options.timeoutSeconds ?? MODELS_TIMEOUT_SECONDS;
+  // Discovery arms its own timer, so it needs the same clamp as the request
+  // path: an over-ceiling `models --timeout` would otherwise overflow Node's
+  // 32-bit delay and abort the probe after 1 ms (see
+  // MAX_PROVIDER_TIMEOUT_SECONDS), with one warning, not a silent surprise.
+  const requestedTimeout = options.timeoutSeconds ?? MODELS_TIMEOUT_SECONDS;
+  const timeout =
+    requestedTimeout > MAX_PROVIDER_TIMEOUT_SECONDS
+      ? MAX_PROVIDER_TIMEOUT_SECONDS
+      : requestedTimeout;
+  if (requestedTimeout > MAX_PROVIDER_TIMEOUT_SECONDS) {
+    (options.onWarning ?? ((line) => console.error(line)))(timeoutCeilingWarning(requestedTimeout));
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout * 1000);
   const fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
@@ -1563,11 +1592,7 @@ export abstract class BaseHttpProvider implements Provider {
     this.random = cfg.rng ?? Math.random;
     this.onWarning = cfg.onWarning ?? ((line) => console.error(line));
     if (requestedTimeout > MAX_PROVIDER_TIMEOUT_SECONDS) {
-      this.onWarning(
-        `[warn] timeout ${requestedTimeout}s exceeds the ${MAX_PROVIDER_TIMEOUT_SECONDS}s (24 h) ` +
-          `ceiling; using ${MAX_PROVIDER_TIMEOUT_SECONDS}s ` +
-          "(--timeout <s> / TWO_BROTHERS_TIMEOUT)",
-      );
+      this.onWarning(timeoutCeilingWarning(requestedTimeout));
     }
   }
 

@@ -22,7 +22,9 @@ import { main, type CliIO } from "../src/cli.ts";
 import {
   MAX_PROVIDER_TIMEOUT_SECONDS,
   MAX_TIMEOUT_WARNINGS,
+  MODELS_TIMEOUT_SECONDS,
   OpenAICompatibleProvider,
+  listModels,
   type FetchLike,
 } from "../src/provider.ts";
 
@@ -237,6 +239,53 @@ test("an over-ceiling --timeout is clamped to the 24 h ceiling, never a 1 ms tim
     lines[0],
     /^\[warn\] timeout 3000000000s exceeds the 86400s \(24 h\) ceiling; using 86400s \(--timeout <s> \/ TWO_BROTHERS_TIMEOUT\)$/,
   );
+});
+
+test("an over-ceiling models --timeout is clamped to the 24 h ceiling, never a 1 ms timer", async () => {
+  const lines: string[] = [];
+  const delays = await recordTimerDelays(async () => {
+    const models = await listModels("https://api.example.com/v1", {
+      timeoutSeconds: 3_000_000_000,
+      fetchImpl: async () => jsonResponse({ data: [{ id: "m" }] }),
+      onWarning: (line: string) => lines.push(line),
+    });
+    assert.deepEqual(models, [{ id: "m" }]);
+  });
+  // Discovery has its own timer owner, so it needs the same clamp: the armed
+  // delay must be the ceiling, never the overflowing 1 ms fallback.
+  assert.equal(delays[0], MAX_PROVIDER_TIMEOUT_SECONDS * 1000, delays.join(", "));
+  assert.ok(delays.every((ms) => ms <= INT32_TIMER_MAX_MS), delays.join(", "));
+  assert.ok(!delays.includes(1), `an overflowing delay armed a 1 ms timer: ${delays.join(", ")}`);
+  assert.equal(lines.length, 1);
+  assert.match(
+    lines[0],
+    /^\[warn\] timeout 3000000000s exceeds the 86400s \(24 h\) ceiling; using 86400s \(--timeout <s> \/ TWO_BROTHERS_TIMEOUT\)$/,
+  );
+});
+
+test("models discovery keeps its 10 s default and leaves a normal timeout unchanged", async () => {
+  const fetchImpl: FetchLike = async () => jsonResponse({ data: [{ id: "m" }] });
+  // Default: MODELS_TIMEOUT_SECONDS, no warning.
+  let lines: string[] = [];
+  let delays = await recordTimerDelays(async () => {
+    await listModels("https://api.example.com/v1", {
+      fetchImpl,
+      onWarning: (line: string) => lines.push(line),
+    });
+  });
+  assert.equal(delays[0], MODELS_TIMEOUT_SECONDS * 1000, delays.join(", "));
+  assert.deepEqual(lines, []);
+  // A normal operator value is passed through untouched.
+  lines = [];
+  delays = await recordTimerDelays(async () => {
+    await listModels("https://api.example.com/v1", {
+      timeoutSeconds: 30,
+      fetchImpl,
+      onWarning: (line: string) => lines.push(line),
+    });
+  });
+  assert.equal(delays[0], 30_000, delays.join(", "));
+  assert.deepEqual(lines, []);
 });
 
 test("timeout 0 keeps its deliberate immediate-timeout meaning", async () => {

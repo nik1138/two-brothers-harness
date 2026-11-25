@@ -246,6 +246,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a normal load leaves no live handle behind. This is the class the repo fixed
   twice before (`e51c54f`, `1079917` — keep such timers ref'd). Tests:
   `tests/plugins.test.ts`.
+- **`models --timeout` shares the provider's timeout ceiling:** model
+  discovery armed its own timer from `timeoutSeconds ?? MODELS_TIMEOUT_SECONDS`
+  and never passed through the 24 h `MAX_PROVIDER_TIMEOUT_SECONDS` clamp, so an
+  operator-supplied oversized `--timeout` overflowed Node's 32-bit timer and
+  aborted the probe after 1 ms. Discovery now clamps to the same ceiling and
+  emits the same single `[warn]` line (through the new
+  `ListModelsOptions.onWarning` sink, stderr by default); the 10 s default and
+  normal values are unchanged. Tests: `tests/providerwarnings.test.ts`.
 - **Plugin module `import()` is bounded by a deadline:** a plugin file whose
   top-level await never settled blocked `loadPlugins`/`PluginManager` forever —
   the register deadline could not cover an import that never returns. Each
