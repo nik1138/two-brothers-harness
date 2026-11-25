@@ -733,7 +733,12 @@ async function scenarioOverflowRecovery(): Promise<string> {
 
     const state = newRecoveryState();
     return await withFaultServer(recoveryHandler(state), async (server) => {
-      const harness = new TwoBrothersHarness(recoveryConfig(server.baseUrl));
+      // The seeded session already carries this task, so the run continues it
+      // (the resume contract): keep the same-task dedupe instead of appending
+      // a second task envelope.
+      const harness = new TwoBrothersHarness(recoveryConfig(server.baseUrl), {
+        dedupeInitialTask: true,
+      });
       const result = await harness.run(RECOVERY_TASK, restoreContext(new SessionStore(file)));
 
       check(!result.cancelled, "the recovered run must complete");
@@ -805,7 +810,11 @@ async function scenarioSecondOverflowBounded(): Promise<string> {
 
     const state = newRecoveryState(true);
     return await withFaultServer(recoveryHandler(state), async (server) => {
-      const harness = new TwoBrothersHarness(recoveryConfig(server.baseUrl));
+      // Same resume contract as the recovery scenario: the seeded session
+      // already carries the task, so do not append a second envelope.
+      const harness = new TwoBrothersHarness(recoveryConfig(server.baseUrl), {
+        dedupeInitialTask: true,
+      });
       let thrown: unknown;
       try {
         await harness.run(RECOVERY_TASK, restoreContext(new SessionStore(file)));
