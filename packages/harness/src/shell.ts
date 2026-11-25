@@ -4,9 +4,11 @@
  *
  * Commands run with `bash -c` when a bash executable is on PATH (the
  * project's documented shell on Windows is Git Bash); otherwise they fall
- * back to the platform default shell. Every run is constrained by a timeout
- * and an output cap, and can be cancelled cooperatively through an
- * `AbortSignal`.
+ * back to the platform default shell. Every run is constrained by an output
+ * cap and can be cancelled cooperatively through an `AbortSignal`; the
+ * per-call timeout defaults to `DEFAULT_TIMEOUT_S`, and a non-positive value
+ * is the documented "no timer" request (the command runs until it exits or
+ * the caller aborts).
  *
  * Output is bounded while it streams: each `data` chunk is decoded
  * incrementally (a `StringDecoder` keeps split UTF-8 sequences whole) and
@@ -468,7 +470,12 @@ export class ShellRunner {
 
   /** Run one command, bounded by timeout and output size. */
   async run(command: string, options: { timeout?: number; signal?: AbortSignal } = {}): Promise<ShellResult> {
-    const timeout = options.timeout ?? this.defaultTimeout;
+    // The documented contract: an absent timeout uses the runner default, a
+    // positive one is used as given, and a non-positive one means "no timer"
+    // (the command runs until it exits or the caller aborts). A non-finite
+    // value falls back to the default instead of silently disarming the timer.
+    const requested = options.timeout ?? this.defaultTimeout;
+    const timeout = Number.isFinite(requested) ? Math.max(requested, 0) : this.defaultTimeout;
     const signal = options.signal;
     const started = performance.now();
 
@@ -525,6 +532,9 @@ export class ShellRunner {
     });
     let timeoutHandle: NodeJS.Timeout | undefined;
     const timedOut = new Promise<"timeout">((resolve) => {
+      // A non-positive timeout is "no timer": only the process exiting or the
+      // caller's abort can settle the race below.
+      if (timeout <= 0) return;
       timeoutHandle = setTimeout(() => resolve("timeout"), timeout * 1000);
     });
     const exited = new Promise<"exit" | { error: Error }>((resolve) => {

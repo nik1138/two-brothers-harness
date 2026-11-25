@@ -55,9 +55,9 @@ export const MAX_SEARCH_RESULT_CHARS = 20_000;
 export const MAX_LIST_ENTRIES = 400;
 export const DEFAULT_MAX_MATCHES = 50;
 export const DIFF_CONTEXT_LINES = 3;
-/** run_shell timeout ceiling for model-supplied values (the default stays 30 s). */
+/** run_shell timeout ceiling for model-supplied positive values (the default stays 30 s). */
 export const MAX_SHELL_TIMEOUT_S = 600;
-/** run_shell timeout floor: a non-positive value means "run without a timer". */
+/** run_shell timeout floor for positive values; zero/negative means "run without a timer". */
 export const MIN_SHELL_TIMEOUT_S = 1;
 /**
  * Source-size bound for reading existing file content into memory (2 MiB,
@@ -761,6 +761,21 @@ function planEdit(text: string, oldText: string, newText: string, replaceAll: bo
 /** A BOM is stripped for matching and written back untouched. */
 function splitBom(text: string): { bom: string; text: string } {
   return text.startsWith("\uFEFF") ? { bom: "\uFEFF", text: text.slice(1) } : { bom: "", text };
+}
+
+/**
+ * Decode bytes as UTF-8 text only when re-encoding reproduces them exactly and
+ * the content carries no NUL byte. A non-UTF-8 encoding (Latin-1/cp1251, a
+ * UTF-16 BOM) or binary content fails the round trip; a BOM-less ASCII UTF-16
+ * file decodes to NUL-interleaved text that *would* round-trip, so the NUL
+ * sniff is required too. Returns null when `text` is not safe to rewrite —
+ * `edit_file` refuses those files instead of replacing every unmappable byte
+ * with U+FFFD.
+ */
+function decodeUtf8Text(buf: Buffer): string | null {
+  const text = buf.toString("utf-8");
+  if (text.includes("\u0000")) return null;
+  return Buffer.from(text, "utf-8").equals(buf) ? text : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1473,9 +1488,18 @@ export class Workspace {
           const bounded = await streamedBoundOutput(p, maxChars);
           return this.result(tool, p, "ok", { content: bounded.text, truncated: bounded.truncated });
         }
-        const text = fs.readFileSync(p, "utf-8");
+        const rawBuf = fs.readFileSync(p);
+        const exact = decodeUtf8Text(rawBuf);
+        const text = exact ?? rawBuf.toString("utf-8");
         const bounded = boundOutput(text, maxChars);
-        return this.result(tool, p, "ok", { content: bounded.text, truncated: bounded.truncated });
+        return this.result(tool, p, "ok", {
+          content: bounded.text,
+          truncated: bounded.truncated,
+          // Additive marker: the bytes are not valid UTF-8 text (binary,
+          // UTF-16 or a legacy single-byte encoding), so edit_file refuses
+          // the file even though this read still shows the decoded view.
+          ...(exact === null ? { binary: true } : {}),
+        });
       }
       const page = await readFilePage(
         p,
@@ -1725,7 +1749,16 @@ export class Workspace {
             `file is ${size} bytes, over the ${MAX_SOURCE_TEXT_BYTES}-byte source bound; edit_file needs the old content and refuses large files (use write_file or range reads)`,
           );
         }
-        const raw = fs.readFileSync(target, "utf-8");
+        // Fail closed on content that is not exactly UTF-8 text: decoding and
+        // re-encoding would replace every unmappable byte with U+FFFD and
+        // silently destroy the file's encoding (the approval diff is computed
+        // after decoding, so the operator could not see the damage either).
+        const raw = decodeUtf8Text(fs.readFileSync(target));
+        if (raw === null) {
+          throw new WorkspaceError(
+            "file is not valid UTF-8 text (a non-UTF-8 encoding such as UTF-16 or Latin-1, or binary content); refusing to edit it because the rewrite would corrupt those bytes — re-encode it as UTF-8 or use write_file to replace it",
+          );
+        }
         const { bom, text } = splitBom(raw);
         const plan = planEdit(text, oldText, newText, replaceAll, rel);
         const updated = bom + plan.updated;
@@ -1810,11 +1843,15 @@ export class Workspace {
       throw exc;
     }
     // Model-supplied timeouts are clamped: a huge value would park a run (and
-    // a worker-pool slot) for hours on a single shell call.
+    // a worker-pool slot) for hours on a single shell call. A non-positive
+    // value is the documented "run without a timer" request and is passed
+    // through as 0; the caller's abort signal still bounds that call.
     const bounded =
-      timeout === undefined
+      timeout === undefined || !Number.isFinite(timeout)
         ? undefined
-        : Math.min(Math.max(timeout, MIN_SHELL_TIMEOUT_S), MAX_SHELL_TIMEOUT_S);
+        : timeout > 0
+          ? Math.min(Math.max(timeout, MIN_SHELL_TIMEOUT_S), MAX_SHELL_TIMEOUT_S)
+          : 0;
     const data = await this.shell.run(command, { timeout: bounded, signal });
     return { ...data, tool: "run_shell" };
   }

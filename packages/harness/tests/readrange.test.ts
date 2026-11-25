@@ -121,6 +121,37 @@ test("no-range read is byte-identical for large/truncated and CJK files", async 
   }
 });
 
+test("a non-UTF-8 whole-file read is flagged binary and keeps the decoded view", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    // Latin-1 "é" (0xE9) is not a valid UTF-8 sequence: the read must stay
+    // readable (the historical decoded view) but carry the additive marker so
+    // the model knows why edit_file will refuse the file.
+    const legacy = Buffer.from([0x61, 0xe9, 0x0a]);
+    fs.writeFileSync(path.join(root, "legacy.txt"), legacy);
+    // BOM-less ASCII UTF-16LE: valid UTF-8 bytes with NULs — binary too.
+    fs.writeFileSync(path.join(root, "utf16.txt"), Buffer.from("hi\n", "utf16le"));
+    write(root, "plain.txt", "aé\n");
+    const ws = new Workspace(root);
+
+    const latin = await ws.read_file("legacy.txt");
+    assert.equal(latin.status, "ok");
+    assert.equal(latin.binary, true);
+    assert.equal(latin.content, "a\uFFFD\n");
+
+    const utf16 = await ws.read_file("utf16.txt");
+    assert.equal(utf16.status, "ok");
+    assert.equal(utf16.binary, true);
+
+    // A valid UTF-8 read stays exactly the historical result (no marker).
+    const plain = await ws.read_file("plain.txt");
+    assert.equal(plain.content, "aé\n");
+    assert.equal("binary" in plain, false);
+  } finally {
+    cleanup();
+  }
+});
+
 test("offset/limit returns exactly the requested lines with page bookkeeping", async () => {
   const { root, cleanup } = tmpdir();
   try {

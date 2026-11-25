@@ -250,9 +250,41 @@ test("model-supplied run_shell timeout is clamped", async () => {
     const huge = await ws.run_shell("echo hi", 60 * 60 * 24);
     assert.equal(huge.status, "ok");
     assert.match(String(huge.error ?? ""), /^$/); // no timeout error
-    // A sub-floor timeout behaves as the floor (the command still runs).
+    // A sub-floor positive timeout behaves as the floor (the command still runs).
     const negative = await ws.run_shell("echo hi", -5);
     assert.equal(negative.status, "ok");
+  } finally {
+    tmp.cleanup();
+  }
+});
+
+test("run_shell honors non-positive timeout as 'no timer'", async () => {
+  const tmp = tmpdir("tb-sec-shell-notimer-");
+  try {
+    const { PermissionManager, StaticBroker, Decision } = await import("../src/permissions.ts");
+    const ws = new Workspace(
+      tmp.root,
+      new PermissionManager(null, new StaticBroker(Decision.ALLOW)),
+    );
+    // Runs ~1.5 s: under the old 1 s floor clamp (0/negative -> 1 s) this was
+    // killed with `timed out after 1.0s`; the documented contract arms no timer.
+    const command = `"${process.execPath}" -e "setTimeout(function(){}, 1500)"`;
+
+    const zero = await ws.run_shell(command, 0);
+    assert.equal(zero.status, "ok", JSON.stringify(zero));
+    assert.equal(zero.timed_out, false);
+    assert.ok(Number(zero.duration_ms) >= 1_200, `duration ${zero.duration_ms}ms`);
+
+    const negative = await ws.run_shell(command, -5);
+    assert.equal(negative.status, "ok", JSON.stringify(negative));
+    assert.equal(negative.timed_out, false);
+    assert.ok(Number(negative.duration_ms) >= 1_200, `duration ${negative.duration_ms}ms`);
+
+    // The positive floor is unchanged: 0.5 s is clamped to the 1 s minimum.
+    const tiny = await ws.run_shell(command, 0.5);
+    assert.equal(tiny.status, "timeout");
+    assert.equal(tiny.timed_out, true);
+    assert.match(String(tiny.error), /timed out after 1\.0s/);
   } finally {
     tmp.cleanup();
   }

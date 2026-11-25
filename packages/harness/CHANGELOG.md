@@ -250,6 +250,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   buffer) never renders stale. Frames are byte-identical to an uncached
   derivation across expansion states; no `app.ts` change and no row-memo key
   change. Tests: `tests/tuimemoexpansion.test.ts`.
+- **Workspace edits refuse non-UTF-8 files instead of corrupting them:**
+  `edit_file` decoded the whole target as UTF-8 and wrote it back with no
+  round-trip check, so a Latin-1/cp1251 or UTF-16 file had every unmappable
+  byte rewritten as `EF BF BD` (U+FFFD) — and the approval diff was computed
+  after the decode, so the damage was invisible to the operator. The edit now
+  fails closed with an explicit error naming the encoding problem and pointing
+  at `write_file`, leaving the bytes untouched; a whole-file `read_file` of such
+  content carries the additive `binary: true` marker so the model can see why a
+  read looks garbled. Valid UTF-8 text keeps the byte-exact BOM/line-ending
+  behavior and the edit ladder unchanged (the guard only rejects content that
+  does not round-trip or contains NUL). `run_shell` also honors its documented
+  contract again: a non-positive model-supplied `timeout` now arms no timer
+  instead of being clamped to 1 s (positive values keep the 1–600 s clamp and
+  the 30 s default). Tests: `tests/editqueue.test.ts`, `tests/readrange.test.ts`,
+  `tests/security.test.ts`.
 - **TUI `/rewind` refuses a session changed during the confirmation:** the
   preview now captures the session file's `size:mtimeMs:ino` signature (the
   server rewind route's own identity, extracted unchanged to

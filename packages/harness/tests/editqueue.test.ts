@@ -339,3 +339,76 @@ test("edit_file one byte under the source bound still applies", async () => {
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// non-UTF-8 content: edits fail closed instead of rewriting the bytes
+//
+// `edit_file` reads and writes the whole file as UTF-8, so a Latin-1/cp1251 or
+// UTF-16 file would have every unmappable byte replaced with U+FFFD on write —
+// and the approval diff is computed after the decode, so the damage would be
+// invisible. The guard refuses the edit and leaves the file byte-identical.
+// ---------------------------------------------------------------------------
+
+test("edit_file refuses a Latin-1 file and leaves its bytes untouched", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const file = path.join(root, "latin1.txt");
+    // 0xE9 is "é" in Latin-1 but not a valid UTF-8 sequence.
+    const original = Buffer.concat([
+      Buffer.from('const label = "caf', "latin1"),
+      Buffer.from([0xe9]),
+      Buffer.from('";\nkeep\n', "latin1"),
+    ]);
+    fs.writeFileSync(file, original);
+    const ws = approved(root);
+
+    const result = await ws.edit_file("latin1.txt", "keep", "kept");
+
+    assert.equal(result.status, "error");
+    assert.match(String(result.error), /not valid UTF-8/);
+    assert.match(String(result.error), /write_file/);
+    assert.deepEqual(fs.readFileSync(file), original, "refused edits never touch the bytes");
+  } finally {
+    cleanup();
+  }
+});
+
+test("edit_file refuses a UTF-16LE file and leaves its bytes untouched", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const file = path.join(root, "utf16.ps1");
+    // BOM-less ASCII UTF-16LE: the bytes round-trip through the UTF-8 decoder
+    // (NUL is legal UTF-8), so only the NUL sniff can catch it.
+    const original = Buffer.from("keep\n", "utf16le");
+    fs.writeFileSync(file, original);
+    const ws = approved(root);
+
+    const result = await ws.edit_file("utf16.ps1", "keep", "kept");
+
+    assert.equal(result.status, "error");
+    assert.match(String(result.error), /not valid UTF-8/);
+    assert.deepEqual(fs.readFileSync(file), original, "refused edits never touch the bytes");
+  } finally {
+    cleanup();
+  }
+});
+
+test("a valid UTF-8 file with a BOM and CRLF still edits byte-exactly", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    const file = path.join(root, "utf8.txt");
+    fs.writeFileSync(file, "\uFEFFcafé — naïve\r\nkeep  \r\n", "utf-8");
+    const ws = approved(root);
+
+    const result = await ws.edit_file("utf8.txt", "keep\n", "kept\n");
+
+    assert.equal(result.status, "ok", JSON.stringify(result));
+    assert.equal(result.replaced, 1);
+    assert.deepEqual(
+      fs.readFileSync(file),
+      Buffer.from("\uFEFFcafé — naïve\r\nkept\r\n", "utf-8"),
+    );
+  } finally {
+    cleanup();
+  }
+});
