@@ -2671,6 +2671,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mutate through their handlers; approval prompts cover the built-in
   mutation/shell paths, not those tools.
 
+### Added
+
+- **Degraded reviews are visible**: a review reply that fails the strict payload
+  check and its one repair re-ask still degrades fail-soft to
+  `verdict: "accept"` (unchanged, never a run error, the existing
+  `unstructured model reply for review` entry still fires once), but the
+  degradation is no longer silent to machine consumers. The run records it on
+  its state and exposes the additive `HarnessResult.reviewDegraded?: boolean`
+  — present only when the run's FINAL review was degraded, so a degraded review
+  followed by a clean revised review that completes the run omits it and a clean
+  run's result stays byte-identical. One additive typed runtime event
+  `{type: "review_degraded", round, verdict}` is emitted per degraded review
+  (the `auto_route`/`steering_dropped` pattern: the run manager stamps
+  `run_id`/`at` and the sidecar replay needs no extra code), and the flag
+  surfaces as `review_degraded` in the CLI `--json`/`--mode json` object and as
+  `reviewDegraded` on the `--stream` `result` record — both omitted when clean.
+  No protocol envelope, schema or session-format change; no new runtime
+  dependencies. Tests: `tests/reviewdegraded.test.ts`.
+
 ## [0.0.1] — 2026-11-04
 
 First public release.

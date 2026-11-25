@@ -13,9 +13,9 @@
  * envelope log. Events are the typed runtime events (run_status / envelope /
  * tool_started / tool_completed / approval_requested / approval_resolved /
  * approval_auto_denied / approval_auto_allowed / todo_updated / prompt_audit /
- * call_usage / reasoning / usage / auto_route / subagent_started /
- * subagent_activity / subagent_completed / steering_dropped / run_error /
- * run_end) plus `run_id`
+ * call_usage / reasoning / usage / auto_route / review_degraded /
+ * subagent_started / subagent_activity / subagent_completed / steering_dropped /
+ * run_error / run_end) plus `run_id`
  * and `at` (epoch seconds). Event JSON keeps the Python field names
  * (`run_id`, `approval_id`) so sidecar files stay interchangeable with the
  * Python implementation; `prompt_audit` keeps its camelCase payload
@@ -377,6 +377,27 @@ export interface AutoRouteEvent extends RuntimeEventMeta {
   downgraded_from?: "work";
 }
 
+/**
+ * Additive event: the review node's reply never produced a usable verdict, so
+ * the tolerant boundary fell back to sanitize + defaults and the run continued
+ * with `verdict: "accept"` (the pre-existing fail-soft behavior, unchanged).
+ * The warning (`unstructured model reply for review`) already records the
+ * degradation; this event makes it visible LIVE — the run's machine consumers
+ * otherwise see only the accept. `round` is the discussion round the review
+ * answered and `verdict` the sanitized verdict it fell back to. Emitted once
+ * per degraded review, immediately before that review's envelope; persisted by
+ * the run sidecar like every typed event, so the sidecar replay (type-driven)
+ * needs no extra code. Consumers that do not know the type can ignore it
+ * safely.
+ */
+export interface ReviewDegradedEvent extends RuntimeEventMeta {
+  type: "review_degraded";
+  /** Discussion round the degraded review answered (0 on the first review). */
+  round: number;
+  /** The sanitized verdict the degraded review ended up with (normally `accept`). */
+  verdict: string;
+}
+
 /** The job raised; surfaced to the operator before run_end. */
 export interface RunErrorEvent extends RuntimeEventMeta {
   type: "run_error";
@@ -425,6 +446,7 @@ export type RuntimeEvent =
   | ReasoningEvent
   | SteeringDroppedEvent
   | AutoRouteEvent
+  | ReviewDegradedEvent
   | UsageEvent
   | SubagentStartedEvent
   | SubagentActivityEvent

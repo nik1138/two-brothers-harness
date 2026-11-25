@@ -74,6 +74,12 @@ export interface HarnessResultSummary {
    * type so this module stays dependency-free of harness.ts.
    */
   autoRoute?: { route: "solo" | "consult" | "work"; reason: string; downgradedFrom?: "work" };
+  /**
+   * Additive: present only when the run's final review fell back to sanitize +
+   * defaults instead of a usable verdict (mirrors `HarnessResult.reviewDegraded`,
+   * so a clean run's `result` record keeps its pre-feature key set).
+   */
+  reviewDegraded?: boolean;
 }
 
 export interface RunStatusStreamEvent {

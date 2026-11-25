@@ -1588,6 +1588,10 @@ async function runOnce(
           // Additive auto-mode routing key, present only when the run routed;
           // consult/work machine objects stay byte-identical.
           ...(result.autoRoute !== undefined ? { auto_route: result.autoRoute } : {}),
+          // Additive degradation key, present only when the run's final review
+          // fell back to sanitize + defaults instead of a usable verdict;
+          // clean-run machine objects stay byte-identical.
+          ...(result.reviewDegraded === true ? { review_degraded: true } : {}),
         }),
       );
       return failed ? 1 : 0;

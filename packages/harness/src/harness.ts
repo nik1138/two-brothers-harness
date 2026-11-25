@@ -1317,6 +1317,17 @@ export interface HarnessResult {
    * routing carries none). Explicit consult/work runs never route.
    */
   autoRoute?: AutoRouteInfo;
+  /**
+   * Additive: present only when the run's LAST review was degraded — its reply
+   * never produced a usable verdict, so the tolerant boundary fell back to
+   * sanitize + defaults and the run continued with `verdict: "accept"`. The
+   * existing `unstructured model reply for review` warning still records the
+   * degradation; this field is the machine-readable half of it. A degraded
+   * review followed by a clean revised review that completes the run leaves it
+   * absent, and a clean run's result shape is byte-identical to before the
+   * field existed.
+   */
+  reviewDegraded?: boolean;
 }
 
 interface CooperationState {
@@ -1361,6 +1372,13 @@ interface CooperationState {
   todos: TodoItem[];
   /** The auto-mode routing decision once `senior_route` has decided. */
   autoRoute?: AutoRouteInfo;
+  /**
+   * The run's LAST review fell back to sanitize + defaults instead of a usable
+   * verdict. Reset at the start of every review call, so a later clean review
+   * (a revise cycle that then accepts) clears it — the result reports the
+   * final review, not any earlier degradation.
+   */
+  reviewDegraded: boolean;
 }
 
 type NodeName =
@@ -1719,6 +1737,14 @@ export class TwoBrothersHarness {
   private steeringWarnings: string[] = [];
   /** Fail-soft auto-routing degradation/downgrade warnings (folded into `result.warnings`). */
   private routeWarnings: string[] = [];
+  /**
+   * Per-call seam for the review node: true when the MOST RECENT
+   * {@link structuredReply} fell back to the tolerant pipeline (strict parse and
+   * the one repair re-ask both failed) instead of producing a usable payload.
+   * `seniorReview` resets it before its own call and reads it right after, so a
+   * degraded review is detected without widening every caller's signature.
+   */
+  private lastReplyDegraded = false;
   /** Set once a steering callback failed this run: never call it again. */
   private steeringFailed = false;
   /** Steer envelopes appended this run (capped by MAX_STEERING_ENVELOPES_PER_RUN). */
@@ -1928,6 +1954,9 @@ export class TwoBrothersHarness {
       warnings: result.warnings.length,
       sessionFile: ctx.store !== null ? ctx.store.path : null,
       ...(result.autoRoute !== undefined ? { autoRoute: { ...result.autoRoute } } : {}),
+      // Additive: present only when the run's final review was degraded, so a
+      // clean run's `result` record keeps its pre-feature key set.
+      ...(result.reviewDegraded === true ? { reviewDegraded: true } : {}),
     };
   }
 
@@ -2287,6 +2316,10 @@ export class TwoBrothersHarness {
       failed = initial.parseFailed;
     }
     if (failed) warn.push(`unstructured model reply for ${kind}`);
+    // The review node reads this immediately after its own call (see
+    // {@link lastReplyDegraded}): a failed strict parse plus a failed repair
+    // re-ask means the node fell back to sanitize + defaults.
+    this.lastReplyDegraded = failed;
     // The payload is already parsed; delivery only enriches the shared context
     // for the turns that follow (the node's own append happens next).
     this.deliverSkillRequest(state, role, reply);
@@ -4457,6 +4490,9 @@ export class TwoBrothersHarness {
   }
 
   private async seniorReview(state: CooperationState): Promise<NodeResult> {
+    // Reset the degradation seam: this node is its only reader, so the flag
+    // always describes THIS review's reply (never an earlier node's).
+    this.lastReplyDegraded = false;
     const evidence = state.verifyEvidence;
     const summary = state.verifySummary;
     let payload: Record<string, unknown>;
@@ -4501,6 +4537,17 @@ export class TwoBrothersHarness {
       payload.notes = `${String(payload.notes ?? "")} ${grounding}`.trim();
     }
     const verdict = String(payload.verdict ?? "accept");
+    // The degradation the reviewer's reply fell into: strict parse plus the one
+    // repair re-ask both failed, so sanitize + defaults produced this verdict.
+    // Recorded on the run state (the LAST review wins — a later clean review
+    // clears it) and surfaced as one additive live event, emitted before this
+    // review's envelope (the `auto_route` ordering). The existing
+    // "unstructured model reply for review" warning still fires once; this
+    // signal is what machine consumers can see without reading warnings.
+    state.reviewDegraded = this.lastReplyDegraded;
+    if (this.lastReplyDegraded) {
+      this.emitRuntime({ type: "review_degraded", round: state.rounds, verdict });
+    }
     this.append(state, "senior", "junior", "review", payload);
     state.lastVerdict = verdict;
     state.verifyEvidence = [];
@@ -4629,6 +4676,7 @@ export class TwoBrothersHarness {
       approvalDenials: new Map(),
       injectedSkills: new Set(),
       todos: [],
+      reviewDegraded: false,
     };
     this.emitStream({ type: "run_status", status: "started", at: nowIso() });
     try {
@@ -4704,6 +4752,7 @@ export class TwoBrothersHarness {
           ? { todos: state.todos.map((todo) => ({ ...todo })) }
           : {}),
         ...(state.autoRoute !== undefined ? { autoRoute: { ...state.autoRoute } } : {}),
+        ...(state.reviewDegraded ? { reviewDegraded: true } : {}),
       };
       this.emitStream({ type: "run_status", status: "completed", at: nowIso() });
       this.emitStream({ type: "result", result: this.streamSummary(result, ctx), at: nowIso() });
@@ -4738,6 +4787,7 @@ export class TwoBrothersHarness {
             ? { todos: state.todos.map((todo) => ({ ...todo })) }
             : {}),
           ...(state.autoRoute !== undefined ? { autoRoute: { ...state.autoRoute } } : {}),
+          ...(state.reviewDegraded ? { reviewDegraded: true } : {}),
         };
       }
       status = "failed";
