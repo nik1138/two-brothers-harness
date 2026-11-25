@@ -246,6 +246,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a normal load leaves no live handle behind. This is the class the repo fixed
   twice before (`e51c54f`, `1079917` — keep such timers ref'd). Tests:
   `tests/plugins.test.ts`.
+- **`read_file`'s binary marker now covers paged and streamed reads:** the
+  additive `binary: true` marker (added with the edit-encoding refusal) was
+  attached only by the whole-file at/below-2-MiB path, so a model paging
+  through a Latin-1/UTF-16 or binary file with `offset`/`limit`, or reading one
+  above the 2 MiB source bound, got the decoded view with no hint that
+  `edit_file` would refuse it. Both paths now validate the bytes they already
+  stream (strict incremental UTF-8 plus a NUL sniff, the streaming twin of
+  `decodeUtf8Text`) and attach the same marker; the decoded content, line
+  ranges, page bookkeeping and the oversize head+tail window are unchanged,
+  and a valid UTF-8 read still carries no marker. Tests:
+  `tests/readrange.test.ts`.
 - **TUI transcript memoization is no longer defeated while a tool row is
   expanded:** `withToolExpansion` (`src/tui/transcript.ts`) now memoizes its
   derivation on the source `blocks` array identity plus the expansion key-set

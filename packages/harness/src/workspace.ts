@@ -28,6 +28,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
+import { StringDecoder } from "node:string_decoder";
 
 import {
   Action,
@@ -778,6 +779,44 @@ function decodeUtf8Text(buf: Buffer): string | null {
   return Buffer.from(text, "utf-8").equals(buf) ? text : null;
 }
 
+/**
+ * Streaming twin of `decodeUtf8Text` for the read paths that never hold the
+ * whole file: true while every byte seen so far decodes as strict UTF-8 and no
+ * NUL byte occurs. A truncated trailing sequence (the streaming analogue of a
+ * failed re-encode) is invalid too, so the additive `binary` marker means the
+ * same thing on the paged, streamed and whole-file reads: `edit_file` will
+ * refuse this file.
+ */
+class Utf8TextProbe {
+  private readonly decoder = new TextDecoder("utf-8", { fatal: true });
+  private utf8 = true;
+
+  /** Feed one raw chunk; ignored once the bytes are known to be non-text. */
+  update(chunk: Buffer): void {
+    if (!this.utf8) return;
+    if (chunk.includes(0)) {
+      this.utf8 = false;
+      return;
+    }
+    try {
+      this.decoder.decode(chunk, { stream: true });
+    } catch {
+      this.utf8 = false;
+    }
+  }
+
+  /** Flush the decoder; safe to call once after the last `update`. */
+  valid(): boolean {
+    if (!this.utf8) return false;
+    try {
+      this.decoder.decode();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // per-file mutation queue (pi's file-mutation-queue.ts)
 // ---------------------------------------------------------------------------
@@ -965,6 +1004,8 @@ interface FilePage {
   /** Continuation offset inside the clipped line named by `next_offset` (UTF-16 units). */
   next_char_offset?: number;
   truncated: boolean;
+  /** The bytes are not safe UTF-8 text (`edit_file` would refuse them). */
+  binary: boolean;
 }
 
 /** Tolerant 1-based line offset: junk becomes 1, huge values stay safe integers. */
@@ -1126,9 +1167,7 @@ async function readFilePage(
     pendingLine = false;
   };
 
-  const stream = fs.createReadStream(target, { encoding: "utf8", highWaterMark: 64 * 1024 });
-  for await (const chunk of stream) {
-    const text = typeof chunk === "string" ? chunk : String(chunk);
+  const consume = (text: string): void => {
     for (let i = 0; i < text.length; i++) {
       const ch = text[i];
       if (swallowLF) {
@@ -1153,7 +1192,20 @@ async function readFilePage(
       currentLength += 1;
       pendingLine = true;
     }
+  };
+
+  // Bytes are consumed once: the text view is the same `StringDecoder` output
+  // `setEncoding("utf8")` produced before, and the raw chunks additionally
+  // feed the streaming validity probe behind the additive `binary` marker.
+  const decoder = new StringDecoder("utf8");
+  const probe = new Utf8TextProbe();
+  const stream = fs.createReadStream(target, { highWaterMark: 64 * 1024 });
+  for await (const chunk of stream) {
+    const bytes = chunk as Buffer;
+    probe.update(bytes);
+    consume(decoder.write(bytes));
   }
+  consume(decoder.end());
   if (pendingLine) completeLine();
 
   const eof = !partialTail && lastDelivered >= totalLines;
@@ -1164,6 +1216,7 @@ async function readFilePage(
     total_lines: totalLines,
     eof,
     truncated: charClipped,
+    binary: !probe.valid(),
   };
   if (!eof) {
     result.next_offset = nextOffsetOverride ?? lastDelivered + 1;
@@ -1184,33 +1237,44 @@ async function readFilePage(
  * `boundOutput`: the caller explicitly asked for that much content, so
  * materializing it is the contract, not a regression.
  */
-async function streamedBoundOutput(target: string, maxChars: number): Promise<BoundedText> {
+async function streamedBoundOutput(
+  target: string,
+  maxChars: number,
+): Promise<BoundedText & { binary: boolean }> {
   const headLen = Math.ceil(maxChars / 2);
   const tailLen = Math.floor(maxChars / 2);
   let head = "";
   let tail = "";
   let total = 0;
-  const stream = fs.createReadStream(target, { encoding: "utf8", highWaterMark: 64 * 1024 });
+  const absorb = (text: string): void => {
+    total += text.length;
+    if (head.length < headLen) {
+      head += text.length <= headLen - head.length ? text : text.slice(0, headLen - head.length);
+    }
+    tail = tailLen <= 0 ? "" : (tail + text).slice(-tailLen);
+  };
+  const decoder = new StringDecoder("utf8");
+  const probe = new Utf8TextProbe();
+  const stream = fs.createReadStream(target, { highWaterMark: 64 * 1024 });
   try {
     for await (const chunk of stream) {
-      const text = typeof chunk === "string" ? chunk : String(chunk);
-      total += text.length;
-      if (head.length < headLen) {
-        head +=
-          text.length <= headLen - head.length ? text : text.slice(0, headLen - head.length);
-      }
-      tail = tailLen <= 0 ? "" : (tail + text).slice(-tailLen);
+      const bytes = chunk as Buffer;
+      probe.update(bytes);
+      absorb(decoder.write(bytes));
     }
+    absorb(decoder.end());
   } finally {
     stream.destroy();
   }
+  const binary = !probe.valid();
   if (total <= maxChars) {
-    return boundOutput(fs.readFileSync(target, "utf-8"), maxChars);
+    return { ...boundOutput(fs.readFileSync(target, "utf-8"), maxChars), binary };
   }
   return {
     text: head + `\n...[truncated ${total - maxChars} chars]...\n` + tail,
     truncated: true,
     omittedChars: total - maxChars,
+    binary,
   };
 }
 
@@ -1486,7 +1550,11 @@ export class Workspace {
         // covers the whole file) the historical path is untouched.
         if (fs.statSync(p).size > MAX_SOURCE_TEXT_BYTES) {
           const bounded = await streamedBoundOutput(p, maxChars);
-          return this.result(tool, p, "ok", { content: bounded.text, truncated: bounded.truncated });
+          return this.result(tool, p, "ok", {
+            content: bounded.text,
+            truncated: bounded.truncated,
+            ...(bounded.binary ? { binary: true } : {}),
+          });
         }
         const rawBuf = fs.readFileSync(p);
         const exact = decodeUtf8Text(rawBuf);
@@ -1519,6 +1587,9 @@ export class Workspace {
         ...(page.next_char_offset !== undefined
           ? { next_char_offset: page.next_char_offset }
           : {}),
+        // The same additive marker as the whole-file read: a paged view of a
+        // binary/non-UTF-8 file still tells the model why `edit_file` refuses.
+        ...(page.binary ? { binary: true } : {}),
       });
     } catch (exc) {
       if (exc instanceof WorkspaceError || exc instanceof PermissionDenied) {

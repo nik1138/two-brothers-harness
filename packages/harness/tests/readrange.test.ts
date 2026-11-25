@@ -152,6 +152,57 @@ test("a non-UTF-8 whole-file read is flagged binary and keeps the decoded view",
   }
 });
 
+test("a non-UTF-8 paged read carries the same additive binary marker", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    // Latin-1 "é" (0xE9) and BOM-less ASCII UTF-16LE (valid UTF-8 bytes with
+    // NULs) are both refused by edit_file; a model paging through them must
+    // see the same hint the whole-file read gives, with the decoded page
+    // unchanged.
+    fs.writeFileSync(path.join(root, "legacy.txt"), Buffer.from([0x61, 0xe9, 0x0a]));
+    fs.writeFileSync(path.join(root, "utf16.txt"), Buffer.from("hi\n", "utf16le"));
+    write(root, "plain.txt", "aé\nb\n");
+    const ws = new Workspace(root);
+
+    const latin = await ws.read_file("legacy.txt", { offset: 1, limit: 5 });
+    assert.equal(latin.status, "ok");
+    assert.equal(latin.binary, true);
+    assert.equal(latin.content, "a\uFFFD");
+
+    const utf16 = await ws.read_file("utf16.txt", { offset: 1, limit: 5 });
+    assert.equal(utf16.binary, true);
+
+    // A valid UTF-8 page stays marker-free.
+    const plain = await ws.read_file("plain.txt", { offset: 1, limit: 5 });
+    assert.equal(plain.content, "aé\nb");
+    assert.equal("binary" in plain, false);
+  } finally {
+    cleanup();
+  }
+});
+
+test("paged reads keep multi-byte UTF-8 intact across 64 KiB stream chunks", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    // 11 bytes per line, so a 64 KiB chunk boundary lands inside a line (and
+    // inside a multi-byte sequence). The decoded page must be untouched.
+    const line = "aé—🙂";
+    const lines = 20_000;
+    write(root, "utf8-page.txt", `${line}\n`.repeat(lines));
+    const ws = new Workspace(root);
+    const page = await ws.read_file("utf8-page.txt", { offset: 1, limit: 3 });
+    assert.equal(page.content, [line, line, line].join("\n"));
+    assert.equal(page.total_lines, lines);
+    assert.equal(page.next_offset, 4);
+    assert.equal("binary" in page, false);
+    const tail = await ws.read_file("utf8-page.txt", { offset: lines, limit: 5 });
+    assert.equal(tail.content, line);
+    assert.equal(tail.eof, true);
+  } finally {
+    cleanup();
+  }
+});
+
 test("offset/limit returns exactly the requested lines with page bookkeeping", async () => {
   const { root, cleanup } = tmpdir();
   try {
@@ -813,7 +864,29 @@ test("whole-file read over the bound keeps UTF-8 sequences intact across stream 
       const result = await ws.read_file("utf8.txt", maxChars);
       assert.equal(result.truncated, true, `maxChars ${maxChars}`);
       assert.equal(result.content, expected.text, `maxChars ${maxChars}`);
+      assert.equal("binary" in result, false, `maxChars ${maxChars}`);
     }
+  } finally {
+    cleanup();
+  }
+});
+
+test("a streamed non-UTF-8 whole-file read carries the binary marker", async () => {
+  const { root, cleanup } = tmpdir();
+  try {
+    // Over the source bound so the read streams; Latin-1 0xE9 keeps the
+    // historical decoded window but marks the file as not rewritable.
+    const bytes = Buffer.alloc(MAX_SOURCE_TEXT_BYTES + 64, 0x61);
+    bytes[0] = 0xe9;
+    fs.writeFileSync(path.join(root, "legacy-big.txt"), bytes);
+    const ws = new Workspace(root);
+    const result = await ws.read_file("legacy-big.txt");
+    assert.equal(result.status, "ok");
+    assert.equal(result.binary, true);
+    assert.equal(
+      result.content,
+      boundOutput(bytes.toString("utf-8"), DEFAULT_MAX_CHARS).text,
+    );
   } finally {
     cleanup();
   }
