@@ -1919,7 +1919,8 @@ Junior never receives it, and a child cannot receive it either (no recursion).
   and never written back to `settings.json`). Deleting a provider clears a
   matching helper
   `provider_ref`; role/provider saves preserve the helper section. The child
-  still has only the read-only tool set regardless of the route's model.
+  still has only the approval-brokered built-in tool set regardless of the
+  route's model.
 - **Limits:** six child tool-loop steps, eight children per parent run, four
   active children, and a 12 000-char report cap. Exceeding a limit is a normal
   JSON tool error, never a parent crash.
@@ -2249,17 +2250,17 @@ them):
   [Provider connection](#provider-connection-provider)).
 - **Tool calling for both brothers** — in consult mode the senior's opening,
   the junior's proposal/revision and the senior's review may call the role's
-  consult belt before emitting the structured reply. The belt excludes the
-  harness's own workspace mutation tools (`workspace_write_file`,
-  `workspace_edit_file`, `workspace_delete_file`, `workspace_run_shell`), so
-  the built-in surface cannot mutate; it still includes `shared`-scope MCP and
-  plugin tools, whose handlers can do anything their server or plugin can
-  (including workspace writes or external side effects), and approval prompts
-  cover the harness's built-in mutation/shell paths, not those tools. The
-  consult phase is therefore bounded by the belt and the built-ins' approval
-  policy, not by a sandbox. A tool-less configuration or a provider without
-  `chatWithTools` keeps the exact pre-tools request path. Work mode is
-  unchanged (junior mutating deliverable loop, senior verification slice).
+  consult belt before emitting the structured reply. The four built-in
+  workspace mutation tools (`workspace_write_file`, `workspace_edit_file`,
+  `workspace_delete_file`, `workspace_run_shell`) are excluded from it, while
+  role-scoped (`shared`/`senior`/`junior`) MCP and plugin tools remain, and
+  their handlers can do anything their server or plugin can (including
+  workspace writes or external side effects). Approval prompts cover the
+  harness's built-in mutation/shell paths, not those tools. The consult phase
+  is therefore bounded by the belt and the built-ins' approval policy, not by
+  a sandbox. A tool-less configuration or a provider without `chatWithTools`
+  keeps the exact pre-tools request path. Work mode is unchanged (junior
+  mutating deliverable loop, senior verification slice).
 - **Permission presets and approval modes** — four named presets (Read only,
   Always ask, Workspace write, Full access) alias the persisted modes
   `readonly`, `ask`, `edits` and `allow-all`; edited from the web Settings →

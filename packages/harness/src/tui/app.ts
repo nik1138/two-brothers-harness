@@ -3843,7 +3843,7 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
       {
         id: "consult",
         label: "consult",
-        description: "the senior asks the junior and decides (read-only)",
+        description: "the senior asks the junior and decides",
         keywords: ["mode"],
       },
       {

@@ -702,9 +702,9 @@ Design anchors that already exist:
   (`workspace_write_file`/`workspace_edit_file`/`workspace_delete_file`/
   `workspace_run_shell`) and the display-only plan tool, so a consult node is
   never offered the built-in workspace mutations (operator-installed
-  shared-scope MCP/plugin tools keep their own behavior); `senior_decide`
-  deliberately stays a plain call (the review immediately before it already
-  ran the checks). A node only loops when its
+  role-scoped `shared`/`senior`/`junior` MCP/plugin tools keep their own
+  behavior); `senior_decide` deliberately stays a plain call (the review
+  immediately before it already ran the checks). A node only loops when its
   belt is non-empty AND the provider implements `chatWithTools` — tool-less
   configurations keep the exact pre-tools request path (no tools on the wire,
   no extra calls, same prompt-audit sections). Work mode is unchanged

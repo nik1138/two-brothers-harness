@@ -4497,7 +4497,7 @@ export class TwoBrothersHarness {
       const grounding =
         evidence.length > 0
           ? "Review grounded in senior verification of the workspace."
-          : "Review grounded in the senior's own read-only tool checks.";
+          : "Review grounded in the senior's own workspace checks.";
       payload.notes = `${String(payload.notes ?? "")} ${grounding}`.trim();
     }
     const verdict = String(payload.verdict ?? "accept");

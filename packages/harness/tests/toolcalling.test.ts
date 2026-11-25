@@ -419,7 +419,7 @@ test("consult mode: senior review grounds itself with the read-only belt", async
     "scope is clear",
     "verify: workspace_read_file notes.txt [ok]",
   ]);
-  assert.match(String(review.payload.notes), /read-only tool checks/);
+  assert.match(String(review.payload.notes), /workspace checks/);
 });
 
 // ---------------------------------------------------------------------------
