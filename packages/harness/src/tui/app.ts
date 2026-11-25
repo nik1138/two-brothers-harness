@@ -55,7 +55,7 @@ import {
   type McpToolSet,
 } from "../mcp.ts";
 import { PluginManager, type PluginBindings } from "../plugins.ts";
-import { bundleSkillRoots, mergeBundleCommands } from "../pluginbundle.ts";
+import { mergeBundleCommands, mergeBundleSkills } from "../pluginbundle.ts";
 import {
   DEFAULT_APPROVAL_MODE,
   Decision,
@@ -1134,12 +1134,14 @@ export async function loadTuiResources(options: {
       );
     }
   }
-  // Bundle skills ride after the operator roots (operator shadows bundle);
-  // bundle commands arrive namespaced `<bundle>:<command>`.
-  const skills = discoverSkills([
-    ...(options.skillsRoots ?? []),
-    ...bundleSkillRoots(plugins?.bundles.values() ?? []),
-  ]);
+  // Bundle skills ride after the operator roots (operator shadows bundle) and
+  // bundle markdowns over the 64 KiB cap skip fail-soft — the same
+  // `mergeBundleSkills` fold `serve` and the CLI use, so all three surfaces
+  // agree. Bundle commands arrive namespaced `<bundle>:<command>`.
+  const skills = mergeBundleSkills(
+    discoverSkills(options.skillsRoots ?? []),
+    plugins?.bundles.values() ?? [],
+  );
   const commands = mergeBundleCommands(
     discoverCommands(options.commandsRoots ?? []),
     plugins?.bundles.values() ?? [],

@@ -5,7 +5,8 @@
  * (expansion/mode via the existing engine, `matchCommand` colon segment),
  * bundle skills (operator shadowing, role scope, harness invocation), the
  * 64 KiB markdown fail-soft caps, manager reload, the server API + run
- * submission, and the CLI verbose surface.
+ * submission, the CLI verbose surface, and cross-surface (`serve`/CLI/TUI)
+ * skills-catalog parity.
  *
  * Hermetic and offline: temp dirs, mock/scripted providers, ephemeral
  * loopback ports. Run with: node --test tests/pluginbundle.test.ts
@@ -19,9 +20,15 @@ import { test } from "node:test";
 
 import { expandCommand, matchCommand } from "../src/commands.ts";
 import { resolveConfig } from "../src/config.ts";
-import { loadRunResources, type CliIO } from "../src/cli.ts";
+import {
+  loadRunResources,
+  sessionsDirForCli,
+  skillsRootsForCli,
+  type CliIO,
+} from "../src/cli.ts";
 import { TwoBrothersHarness } from "../src/harness.ts";
 import { PluginManager } from "../src/plugins.ts";
+import { loadTuiResources, type TuiIO } from "../src/tui/app.ts";
 import {
   BUNDLE_MANIFEST_MAX_BYTES,
   discoverPluginBundles,
@@ -645,14 +652,17 @@ interface RunningServer {
   close: () => Promise<void>;
 }
 
-async function startServer(pluginsDir: string): Promise<RunningServer> {
+async function startServer(
+  pluginsDir: string,
+  skillsDirs: string[] = [],
+): Promise<RunningServer> {
   const sessions = tmpdir("tb-bundle-srv-");
   const handle = createServer({
     configFactory: () => resolveConfig({ provider: "mock", mode: "consult" }),
     sessionsDir: sessions.root,
     webDist: null,
     pluginsDir,
-    skillsDirs: [],
+    skillsDirs,
     commandsDirs: [],
   });
   const server = await handle.listen("127.0.0.1", 0);
@@ -756,5 +766,164 @@ test("a namespaced bundle command expands on run submission with its mode", asyn
   } finally {
     await server.close();
     tmp.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// cross-surface skills parity: serve / CLI / TUI
+// ---------------------------------------------------------------------------
+
+/** One skill as every surface exposes it (bodies stay out of the web route). */
+interface SkillView {
+  name: string;
+  description: string;
+  scope: string;
+  tools: string[];
+  file: string;
+}
+
+/** One surface's model-facing skill catalog: metadata + diagnostics. */
+interface SurfaceCatalog {
+  skills: SkillView[];
+  diagnostics: string[];
+}
+
+function skillViews(
+  skills: ReadonlyArray<{
+    name: string;
+    description: string;
+    scope: string;
+    tools: readonly string[];
+    file: string;
+  }>,
+): SkillView[] {
+  return skills.map((skill) => ({
+    name: skill.name,
+    description: skill.description,
+    scope: skill.scope,
+    tools: [...skill.tools],
+    file: path.resolve(skill.file),
+  }));
+}
+
+/**
+ * The same bundle must produce the same catalog on all three surfaces: a
+ * bundle skill under the cap loads, a bundle markdown over the 64 KiB cap is
+ * skipped with one diagnostic, an operator skill shadows a same-named bundle
+ * skill, and the ordering is identical — `serve` folds bundles through
+ * `mergeBundleSkills`, and the CLI (`loadRunResources`) and TUI
+ * (`loadTuiResources`) now use that same fold.
+ */
+test("serve, CLI and TUI fold bundle skills into identical catalogs", async () => {
+  const root = tmpdir("tb-bundle-parity-");
+  const pluginsDir = path.join(root.root, "plugins");
+  const operatorSkills = path.join(root.root, "operator-skills");
+  const sessionsDir = path.join(root.root, "sessions");
+  try {
+    writeBundle(pluginsDir, "demo", VALID_MANIFEST("demo"), {
+      "skills/huge/SKILL.md": `---\ndescription: Huge bundle skill\n---\n${"x".repeat(70 * 1024)}`,
+      "skills/triage/SKILL.md": SKILL_FILE,
+      "skills/under/SKILL.md": [
+        "---",
+        "description: Under-cap bundle skill",
+        "---",
+        "Under-cap bundle body.",
+        "",
+      ].join("\n"),
+    });
+    fs.mkdirSync(path.join(operatorSkills, "triage"), { recursive: true });
+    fs.writeFileSync(
+      path.join(operatorSkills, "triage", "SKILL.md"),
+      ["---", "description: Operator triage", "---", "Operator body.", ""].join("\n"),
+      "utf-8",
+    );
+
+    // One root list for every surface: the CLI's own resolver, so the TUI and
+    // serve scan byte-identical roots (flags, env, cwd/sessions/home defaults).
+    const values: Record<string, any> = {
+      "plugins-dir": pluginsDir,
+      "skills-dir": [operatorSkills],
+      "sessions-dir": sessionsDir,
+    };
+    const operatorRoots = skillsRootsForCli(values);
+    const cfg = resolveConfig({ provider: "mock" });
+    const sink = { log: () => {}, error: () => {} };
+
+    // CLI surface: the real `run`/`chat` resource loader.
+    const cli = await loadRunResources(cfg, values, sink as CliIO);
+    // TUI surface: the real TUI session loader, same bundles and roots.
+    const tui = await loadTuiResources({
+      cfg,
+      io: sink as TuiIO,
+      pluginsDir,
+      sessionsDir: sessionsDirForCli(values),
+      skillsRoots: operatorRoots,
+      commandsRoots: [],
+    });
+    // serve surface: the real `GET /api/skills` route.
+    const server = await startServer(pluginsDir, operatorRoots);
+    let served: SurfaceCatalog;
+    try {
+      const res = await api<SurfaceCatalog>(server.base, "GET", "/api/skills");
+      assert.equal(res.status, 200);
+      served = { skills: skillViews(res.body.skills), diagnostics: [...res.body.diagnostics] };
+    } finally {
+      await server.close();
+    }
+
+    const surfaces: Array<{ label: string; catalog: SurfaceCatalog }> = [
+      { label: "CLI", catalog: { skills: skillViews(cli.skills.skills), diagnostics: cli.skills.diagnostics } },
+      { label: "TUI", catalog: { skills: skillViews(tui.skills.skills), diagnostics: tui.skills.diagnostics } },
+      { label: "serve", catalog: served },
+    ];
+
+    // (a) A bundle skill under the 64 KiB cap is admitted everywhere.
+    for (const { label, catalog } of surfaces) {
+      const under = catalog.skills.find((skill) => skill.name === "under");
+      assert.ok(under, `${label}: under-cap bundle skill is admitted`);
+      assert.equal(under.description, "Under-cap bundle skill", `${label}: metadata is preserved`);
+      assert.ok(
+        under.file.startsWith(fs.realpathSync(path.join(pluginsDir, "demo", "skills"))),
+        `${label}: under-cap skill comes from the bundle root`,
+      );
+    }
+
+    // (b) A bundle markdown over the cap is skipped everywhere, one diagnostic.
+    for (const { label, catalog } of surfaces) {
+      assert.ok(
+        !catalog.skills.some((skill) => skill.name === "huge"),
+        `${label}: over-cap bundle skill is skipped`,
+      );
+      const capLines = catalog.diagnostics.filter(
+        (line) => line.includes('"huge"') && line.includes("64 KiB markdown cap"),
+      );
+      assert.equal(capLines.length, 1, `${label}: exactly one cap diagnostic: ${catalog.diagnostics}`);
+    }
+
+    // (c) An operator skill shadows the same-named bundle skill everywhere.
+    const operatorFile = path.resolve(path.join(operatorSkills, "triage", "SKILL.md"));
+    for (const { label, catalog } of surfaces) {
+      const triage = catalog.skills.find((skill) => skill.name === "triage");
+      assert.equal(triage?.file, operatorFile, `${label}: the operator skill wins the name`);
+      assert.ok(
+        catalog.diagnostics.some(
+          (line) =>
+            line.includes('duplicate skill name "triage"') && line.includes(operatorFile),
+        ),
+        `${label}: the shadow is diagnosed: ${catalog.diagnostics}`,
+      );
+    }
+
+    // (d) Identical ordering (and identical catalogs + diagnostics).
+    assert.deepEqual(surfaces[1].catalog, surfaces[0].catalog, "TUI catalog matches the CLI");
+    assert.deepEqual(surfaces[2].catalog, surfaces[0].catalog, "serve catalog matches the CLI");
+    const names = surfaces[0].catalog.skills.map((skill) => skill.name);
+    assert.deepEqual(names, [...names].sort(), "catalog order is name-sorted");
+    assert.ok(
+      names.indexOf("triage") >= 0 && names.indexOf("triage") < names.indexOf("under"),
+      `triage orders before under: ${names}`,
+    );
+  } finally {
+    root.cleanup();
   }
 });

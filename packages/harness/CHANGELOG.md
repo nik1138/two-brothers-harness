@@ -321,6 +321,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   throwing sink neither masks the child's result/error nor leaks the per-run
   helper budget). Tests: `tests/steering.test.ts`, `tests/graph.test.ts`,
   `tests/subagentcontrols.test.ts`.
+- **Bundle skills now behave identically on `serve`, the CLI and the TUI:** the
+  `run`/`chat` resource loader (`src/cli.ts::loadRunResources`) and the TUI
+  session loader (`src/tui/app.ts::loadTuiResources`) fold active bundles
+  through the same `mergeBundleSkills` path `serve` uses instead of a plain
+  `discoverSkills([...operatorRoots, ...bundleRoots])`. The documented 64 KiB
+  per-bundle markdown cap is therefore enforced on every surface — an oversized
+  bundle `SKILL.md` is skipped with one diagnostic instead of being advertised
+  and injectable under `run`/`tui` — and operator-over-bundle shadowing plus the
+  name-sorted ordering are identical across the three surfaces. The already
+  loaded bundle set is reused (no re-discovery); discovery roots and
+  `--verbose` diagnostics are otherwise unchanged. Tests:
+  `tests/pluginbundle.test.ts` (cross-surface parity).
 - **TUI `/rewind` refuses a session changed during the confirmation:** the
   preview now captures the session file's `size:mtimeMs:ino` signature (the
   server rewind route's own identity, extracted unchanged to

@@ -121,7 +121,7 @@ import {
   type PluginBindings,
   type PluginDiagnosticEntry,
 } from "./plugins.ts";
-import { bundleSkillRoots, mergeBundleCommands } from "./pluginbundle.ts";
+import { bundleSkillRoots, mergeBundleCommands, mergeBundleSkills } from "./pluginbundle.ts";
 import {
   buildProvider,
   ANTHROPIC_MIN_THINKING_BUDGET,
@@ -1013,7 +1013,9 @@ export interface CliRunResources {
  * are deliberately no `--plugin` flags: the persisted list (via web Settings
  * or `PUT /api/settings`, or the env overlay) is the only opt-in. Active
  * declarative plugin bundles contribute their skills roots after the
- * operator roots, so an operator skill shadows a same-named bundle skill.
+ * operator roots, so an operator skill shadows a same-named bundle skill, and
+ * bundle markdowns over the 64 KiB cap are skipped — the catalog is folded by
+ * `mergeBundleSkills`, exactly like `serve`.
  */
 export async function loadRunResources(
   cfg: Config,
@@ -1032,10 +1034,13 @@ export async function loadRunResources(
     }
   }
   const operatorSkillRoots = skillsRootsForCli(values);
-  const skills = discoverSkills([
-    ...operatorSkillRoots,
-    ...bundleSkillRoots(plugins?.bundles.values() ?? []),
-  ]);
+  // The same fold `serve` uses: the bundle roots ride after the operator roots
+  // (operator shadows bundle) and bundle markdowns over the 64 KiB cap skip
+  // fail-soft, so all three surfaces agree on the catalog.
+  const skills = mergeBundleSkills(
+    discoverSkills(operatorSkillRoots),
+    plugins?.bundles.values() ?? [],
+  );
   if (cfg.verbose) {
     for (const entry of plugins?.errors ?? []) io.error(`[plugin] ${entry.plugin}: ${entry.error}`);
     for (const entry of plugins?.diagnostics ?? []) {
