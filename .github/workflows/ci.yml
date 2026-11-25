@@ -53,6 +53,12 @@ jobs:
         run: npm run build
         working-directory: packages/harness
 
+      # Dependency gates, from the repo root: exact pins on the package's
+      # runtime dependencies, plus undeclared bare imports in the built dist/
+      # — hence after the build. No other CI step invokes `npm run check`.
+      - name: Dependency checks
+        run: npm run check
+
       - name: Test (in-process)
         shell: bash
         run: |
@@ -229,6 +235,12 @@ jobs:
       - name: Build
         run: npm run build
         working-directory: packages/harness
+
+      # Dependency gates, from the repo root: exact pins on the package's
+      # runtime dependencies, plus undeclared bare imports in the built dist/
+      # — hence after the build. No other CI step invokes `npm run check`.
+      - name: Dependency checks
+        run: npm run check
 
       - name: Test (in-process)
         shell: pwsh
