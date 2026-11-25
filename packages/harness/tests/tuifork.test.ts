@@ -309,6 +309,25 @@ test("/fork parser echoes are bounded and never drop the usage clause", () => {
   assert.ok(longArgument.error.endsWith(` — usage: ${FORK_USAGE}`));
 });
 
+test("/fork --at: a value beyond the safe integer range is refused, never rounded", () => {
+  // The grammar accepts only decimal digits, but a value past
+  // Number.MAX_SAFE_INTEGER would be silently rounded to a different envelope.
+  for (const raw of ["9007199254740992", "9007199254740993", "1".repeat(400)]) {
+    const parsed = parseForkCommandArgs(`--at ${raw}`);
+    assert.deepEqual(parsed.request, {}, raw);
+    assert.equal(
+      parsed.error,
+      `--at must be a positive integer — usage: ${FORK_USAGE}`,
+      raw,
+    );
+  }
+  // The largest safe integer still parses; the fork service owns the range.
+  assert.deepEqual(parseForkCommandArgs("--at 9007199254740991"), {
+    request: { atSeq: 9007199254740991 },
+    error: null,
+  });
+});
+
 // --------------------------------------------------------------------------- //
 // assembled app: fork then switch
 // --------------------------------------------------------------------------- //

@@ -585,6 +585,21 @@ test("rewindSession: a persisted solo session rewinds without a dangling marker"
   }
 });
 
+test("sessionFileSignature: any stat failure is null, not only a missing path", () => {
+  const dir = tmpdir();
+  try {
+    const asFile = path.join(dir, "not-a-directory");
+    fs.writeFileSync(asFile, "x", "utf-8");
+    assert.equal(
+      sessionFileSignature(path.join(asFile, "nested.jsonl")),
+      null,
+      "a path that cannot be stat'ed for any reason is null, so the CAS refuses",
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("sessionFileSignature: size:mtimeMs:ino identity, null for a missing file", () => {
   const dir = tmpdir();
   try {

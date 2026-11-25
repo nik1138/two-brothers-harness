@@ -1150,6 +1150,105 @@ test("/rewind refuses a session changed while the confirmation is open and write
   }
 });
 
+test("/rewind refuses a session deleted while the confirmation is open and recreates nothing", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-tui-rewind-deleted-"));
+  const sessionsDir = path.join(root, "sessions");
+  const { file: sourceFile } = writeSession(sessionsDir, "alpha.jsonl", FOUR_ENVELOPES());
+  const sidecar = writeSidecar(sessionsDir, "alpha.jsonl");
+  const sidecarBytes = fs.readFileSync(sidecar);
+  const { app, input, output } = startApp(sessionsDir, {
+    cfg: resolveConfig({ provider: "mock", sessionFile: sourceFile, resume: true }),
+  });
+  try {
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+    input.type("/rewind");
+    input.enter();
+    assert.ok(await waitFor(() => lastFrameText(output).includes("Rewind session")));
+
+    // The file disappears while the human decides. Its CAS signature is now
+    // null, so accepting the stale preview must refuse instead of applying a
+    // cut to (or recreating) a session that no longer exists.
+    fs.rmSync(sourceFile);
+
+    input.key("right");
+    input.enter();
+    assert.ok(
+      await waitFor(() =>
+        flatText(output).includes("rewind: the session changed since the preview"),
+      ),
+      "the deleted session is reported as changed, never silently recreated",
+    );
+    assert.equal(fs.existsSync(sourceFile), false, "the refused rewind recreated no file");
+    assert.deepEqual(fs.readFileSync(sidecar), sidecarBytes, "the sidecar was not deleted");
+    assert.equal(
+      flatText(output).includes("rewound alpha.jsonl"),
+      false,
+      "no success is claimed for the vanished session",
+    );
+    assert.equal(await quit(input, app), 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("/rewind surfaces a rewrite failure after the preview and leaves the session byte-identical", {
+  skip: process.platform !== "win32" ? "rename over a read-only target succeeds on POSIX" : false,
+}, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-tui-rewind-rewrite-fail-"));
+  const sessionsDir = path.join(root, "sessions");
+  const { file: sourceFile, bytes: sourceBytes } = writeSession(
+    sessionsDir,
+    "alpha.jsonl",
+    FOUR_ENVELOPES(),
+  );
+  const sidecar = writeSidecar(sessionsDir, "alpha.jsonl");
+  const sidecarBytes = fs.readFileSync(sidecar);
+  const { app, input, output } = startApp(sessionsDir, {
+    cfg: resolveConfig({ provider: "mock", sessionFile: sourceFile, resume: true }),
+  });
+  try {
+    assert.ok(await waitFor(() => textOf(output).includes("Two Brothers")));
+    input.type("/rewind");
+    input.enter();
+    assert.ok(await waitFor(() => lastFrameText(output).includes("Rewind session")));
+
+    // A read-only session cannot be replaced by the store's temp-file rename on
+    // Windows, and the read-only attribute changes neither size, mtime nor
+    // inode, so the CAS still passes: the destructive write itself fails after
+    // a clean re-read and must be disclosed without touching a byte.
+    fs.chmodSync(sourceFile, 0o444);
+
+    input.key("right");
+    input.enter();
+    assert.ok(
+      await waitFor(() =>
+        flatText(output).includes("rewind failed: cannot rewrite session file"),
+      ),
+      "the store's real rewrite failure is surfaced",
+    );
+    assert.deepEqual(fs.readFileSync(sourceFile), sourceBytes, "the failed write kept every byte");
+    assert.deepEqual(fs.readFileSync(sidecar), sidecarBytes, "the sidecar was not cleared");
+    assert.deepEqual(
+      fs.readdirSync(sessionsDir).filter((name) => name.includes(".tmp-")),
+      [],
+      "the store cleaned up its temp file",
+    );
+    assert.equal(
+      flatText(output).includes("rewound alpha.jsonl"),
+      false,
+      "no success is claimed for a session that was not rewritten",
+    );
+    assert.equal(await quit(input, app), 0);
+  } finally {
+    try {
+      fs.chmodSync(sourceFile, 0o666);
+    } catch {
+      // best-effort restore so the temp-dir cleanup can remove the file
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("/rewind re-previews a changed session and then applies the new cut normally", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-tui-rewind-cas-retry-"));
   const sessionsDir = path.join(root, "sessions");

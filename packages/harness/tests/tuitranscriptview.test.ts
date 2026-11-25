@@ -7,6 +7,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX } from "../src/compaction.ts";
 import type { Message } from "../src/protocol.ts";
 import {
   addNotice,
@@ -33,6 +34,10 @@ import {
   transcriptView,
   type TranscriptView,
 } from "../src/tui/view/transcript.ts";
+import {
+  REPLAYED_REASONING_BLOCK_ID,
+  renderReplayedReasoning,
+} from "../src/tui/view/reasoning.ts";
 
 function message(id: string, from: string, text: string, seq: number): Message {
   return {
@@ -387,6 +392,73 @@ test("parked marker: large counts stay exact inside the gutter budget", () => {
   }
 });
 
+test("window markers: a window inside the replayed reasoning section is never gutted", () => {
+  const records = [
+    {
+      role: "senior" as const,
+      kind: "consult",
+      text: "a long replayed reasoning record ".repeat(20),
+      truncated: false,
+    },
+    {
+      role: "junior" as const,
+      kind: "proposal",
+      text: "      indented replay continuation",
+      truncated: false,
+    },
+  ];
+  const model = mixedModel(1);
+  const width = 60;
+  const sectionRows = renderReplayedReasoning(records, { width });
+  const indented = sectionRows.findIndex((row) => row.includes("indented replay continuation"));
+  assert.ok(indented > 1, "the fixture puts the indented row below a header and preview");
+
+  // A window whose top row continues a replayed record: the record's header row
+  // is above the window, but the replay section has no transcript gutter, so the
+  // top-slice marker must not replace the row's first cells.
+  const midRecord = transcriptView(model, {
+    width,
+    height: 2,
+    replayedReasoning: records,
+    scroll: { followLatest: false, anchorId: REPLAYED_REASONING_BLOCK_ID, offset: 1 },
+  });
+  assert.equal(midRecord.startRow, 1);
+  assert.ok(midRecord.totalRows > midRecord.startRow + 2, "content follows the window");
+  assert.ok(
+    !stripAnsi(midRecord.lines[0] ?? "").includes(TOP_SLICE_MARKER),
+    "a replayed record row is not turned into a guarded continuation row",
+  );
+  assert.ok(
+    stripAnsi(midRecord.lines[0] ?? "").startsWith("  "),
+    "the replay preview keeps its two-cell indent",
+  );
+
+  // A window whose bottom row is a replay row that happens to begin with a full
+  // continuation gutter: the parked indicator skips it instead of overwriting
+  // the record's own first cells with the hidden-row count.
+  const parkedInside = transcriptView(model, {
+    width,
+    height: 3,
+    replayedReasoning: records,
+    scroll: {
+      followLatest: false,
+      anchorId: REPLAYED_REASONING_BLOCK_ID,
+      offset: indented - 2,
+    },
+  });
+  assert.equal(parkedInside.lines.length, 3);
+  const bottom = stripAnsi(parkedInside.lines[2] ?? "");
+  assert.ok(bottom.includes("indented replay continuation"), "the record text survives");
+  assert.ok(
+    !bottom.includes(TOP_SLICE_MARKER),
+    "no parked marker overwrote the replayed record",
+  );
+  assert.ok(
+    bottom.startsWith(" ".repeat(TRANSCRIPT_LABEL_WIDTH)),
+    "the fixture row really uses the continuation gutter, so the skip is the guard",
+  );
+});
+
 // --------------------------------------------------------------------------- //
 // positioned-rows memo
 // --------------------------------------------------------------------------- //
@@ -575,6 +647,127 @@ test("memo: per-row tool expansion is keyed by the derived blocks identity", () 
     collapsed.lines,
     "an empty key set returns the input model and the collapsed frame",
   );
+});
+
+test("memo: a ninth distinct key evicts the oldest entry and keeps the newest eight", () => {
+  const model = mixedModel(2);
+  const counted = countingBlocks(model.blocks);
+  const cached: TuiModel = { blocks: counted.blocks, nextId: model.nextId };
+  const frame = (width: number): TranscriptView =>
+    transcriptView(cached, { width, height: 6, scroll: latestTranscriptScroll() });
+
+  const widths = [40, 41, 42, 43, 44, 45, 46, 47];
+  for (const width of widths) frame(width);
+  const afterEight = counted.reads();
+  assert.ok(afterEight > 0, "the first frame renders every block");
+
+  // All eight entries are live: re-requesting the oldest is a pure cache hit.
+  frame(40);
+  assert.equal(counted.reads(), afterEight, "the oldest of eight entries is still cached");
+
+  // A ninth distinct key pushes the cache past its per-document entry budget.
+  const ninth = frame(48);
+  assert.ok(counted.reads() > afterEight, "the ninth key renders from scratch");
+  const afterNine = counted.reads();
+
+  // The oldest entry was evicted, so it renders again instead of being reused...
+  frame(40);
+  assert.ok(counted.reads() > afterNine, "the evicted oldest entry re-renders");
+  const afterEvicted = counted.reads();
+  // ...while the newest entry is still cached.
+  const newest = frame(48);
+  assert.equal(counted.reads(), afterEvicted, "the newest entry stays cached");
+  assert.deepEqual(newest.lines, ninth.lines);
+});
+
+test("memo: the width key is floored, so a sub-cell resize reuses the same entry", () => {
+  const base = seniorReply("proposal: migration\n\n" + "step detail ".repeat(40));
+  const model = cloneModel(base);
+  const counted = countingBlocks(model.blocks);
+  const cached: TuiModel = { blocks: counted.blocks, nextId: model.nextId };
+  const options = { width: 60.9, height: 6, scroll: latestTranscriptScroll() };
+  const first = transcriptView(cached, options);
+  const afterFirst = counted.reads();
+  assert.ok(afterFirst > 0, "the first frame renders every block");
+
+  const second = transcriptView(cached, { ...options, width: 60.1 });
+  assert.equal(counted.reads(), afterFirst, "60.9 and 60.1 share the floored width entry");
+  assert.deepEqual(second.lines, first.lines);
+
+  const wider = transcriptView(cached, { ...options, width: 61 });
+  assert.ok(counted.reads() > afterFirst, "the next whole column is a distinct entry");
+  assert.notDeepEqual(wider.lines, first.lines);
+});
+
+test("memo: the tool row bound and the legacy expansion mode are invalidation inputs", () => {
+  const model = mixedModel(1);
+  const tool = model.blocks.find((block) => block.kind === "tool");
+  assert.ok(tool !== undefined);
+  const counted = countingBlocks(model.blocks);
+  const cached: TuiModel = { blocks: counted.blocks, nextId: model.nextId };
+  const scroll = scrollToBlock(tool.id);
+  const render = (extra: { maxToolRows?: number; expandedTools?: boolean }): TranscriptView =>
+    transcriptView(cached, { width: 60, height: 10, scroll, ...extra });
+
+  const two = render({ maxToolRows: 2 });
+  assert.ok(two.lines.join("\n").includes("… +"), "two rows show the hidden-line marker");
+  const afterTwo = counted.reads();
+  assert.ok(afterTwo > 0);
+  render({ maxToolRows: 2 });
+  assert.equal(counted.reads(), afterTwo, "the same bound is a cache hit");
+
+  const five = render({ maxToolRows: 5 });
+  assert.ok(counted.reads() > afterTwo, "a different bound re-renders");
+  assert.notDeepEqual(five.lines, two.lines, "a different bound changes the tool rows");
+
+  // The legacy expandedTools view is a different row mode, not just a bound.
+  const detail = render({ maxToolRows: 2, expandedTools: true });
+  assert.ok(counted.reads() > afterTwo, "the expanded mode re-renders");
+  assert.notDeepEqual(detail.lines, two.lines, "the expanded view renders different detail rows");
+  assert.notDeepEqual(detail.lines, five.lines);
+  assert.ok(detail.lines.join("\n").includes("call: c0"), "the expanded rows carry the call id");
+
+  // Earlier entries stay correct: a new key never poisons them.
+  assert.deepEqual(render({ maxToolRows: 2 }).lines, two.lines);
+  assert.deepEqual(render({ maxToolRows: 5 }).lines, five.lines);
+});
+
+test("memo: the summary preview bound is an invalidation input", () => {
+  const body = "## Goal\n" + "summarize the migration plan ".repeat(12);
+  let model = createTuiModel();
+  model = commitEnvelope(
+    model,
+    message(
+      "sum1",
+      "user",
+      `${COMPACTION_SUMMARY_PREFIX}${body}${COMPACTION_SUMMARY_SUFFIX}`,
+      1,
+    ),
+  );
+  const counted = countingBlocks(model.blocks);
+  const cached: TuiModel = { blocks: counted.blocks, nextId: model.nextId };
+  const render = (maxSummaryRows: number): TranscriptView =>
+    transcriptView(cached, {
+      width: 48,
+      height: 10,
+      maxSummaryRows,
+      scroll: latestTranscriptScroll(),
+    });
+
+  const one = render(1);
+  const afterOne = counted.reads();
+  assert.ok(afterOne > 0);
+  assert.ok(one.lines.join("\n").includes("context compacted"));
+  render(1);
+  assert.equal(counted.reads(), afterOne, "the same summary bound is a cache hit");
+
+  const six = render(6);
+  assert.ok(counted.reads() > afterOne, "a different summary bound re-renders");
+  assert.notDeepEqual(six.lines, one.lines, "the bound changes the preview rows");
+  assert.ok(six.lines.join("\n").includes("… +"), "the bound still collapses the hidden rows");
+
+  // The bounded entry was kept correct across the differently keyed render.
+  assert.deepEqual(render(1).lines, one.lines);
 });
 
 test("scrollTranscript: one positioned-rows pass per call", () => {
