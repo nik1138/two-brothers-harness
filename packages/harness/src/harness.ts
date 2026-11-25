@@ -1320,7 +1320,9 @@ export interface HarnessResult {
   /**
    * Additive: present only when the run's LAST review was degraded — its reply
    * never produced a usable verdict, so the tolerant boundary fell back to
-   * sanitize + defaults and the run continued with `verdict: "accept"`. The
+   * sanitize + defaults and the run continued with the tolerant boundary's
+   * default verdict (`accept` when nothing usable survives; a `verdict` the
+   * reply did emit can survive sanitize, e.g. `revise`). The
    * existing `unstructured model reply for review` warning still records the
    * degradation; this field is the machine-readable half of it. A degraded
    * review followed by a clean revised review that completes the run leaves it
@@ -4538,7 +4540,9 @@ export class TwoBrothersHarness {
     }
     const verdict = String(payload.verdict ?? "accept");
     // The degradation the reviewer's reply fell into: strict parse plus the one
-    // repair re-ask both failed, so sanitize + defaults produced this verdict.
+    // repair re-ask both failed, so sanitize + defaults produced this verdict —
+    // `accept` only when nothing usable survived (a `verdict` the reply did emit
+    // can survive sanitize, e.g. `revise`).
     // Recorded on the run state (the LAST review wins — a later clean review
     // clears it) and surfaced as one additive live event, emitted before this
     // review's envelope (the `auto_route` ordering). The existing

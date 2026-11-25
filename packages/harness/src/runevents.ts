@@ -380,7 +380,9 @@ export interface AutoRouteEvent extends RuntimeEventMeta {
 /**
  * Additive event: the review node's reply never produced a usable verdict, so
  * the tolerant boundary fell back to sanitize + defaults and the run continued
- * with `verdict: "accept"` (the pre-existing fail-soft behavior, unchanged).
+ * with the tolerant boundary's default verdict (`accept` when nothing usable
+ * survives; a `verdict` the reply did emit can survive sanitize, e.g. `revise`)
+ * — the pre-existing fail-soft behavior, unchanged.
  * The warning (`unstructured model reply for review`) already records the
  * degradation; this event makes it visible LIVE — the run's machine consumers
  * otherwise see only the accept. `round` is the discussion round the review
