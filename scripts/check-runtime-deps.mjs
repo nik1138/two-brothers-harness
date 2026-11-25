@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // Supply-chain check (pi-style): every bare specifier imported by the built
-// dist/*.js of packages/harness must be declared in its package.json runtime
+// dist/**/*.js of packages/harness must be declared in its package.json runtime
 // dependencies. Catches phantom imports (works locally via hoisting, breaks
 // for consumers) before publish. AST-free: regex scan of the emitted JS.
 
@@ -22,9 +22,22 @@ const declared = new Set([
 	...Object.keys(manifest.optionalDependencies ?? {}),
 ]);
 
+// Walk dist/ recursively, not just its top level: tsc emits subdirectories
+// (dist/tui/ today), and a module nested there importing an undeclared package
+// must fail this gate too.
+function collectJsFiles(dir, prefix = "") {
+	const files = [];
+	for (const entry of readdirSync(dir, { withFileTypes: true })) {
+		const name = prefix ? `${prefix}/${entry.name}` : entry.name;
+		if (entry.isDirectory()) files.push(...collectJsFiles(join(dir, entry.name), name));
+		else if (name.endsWith(".js")) files.push(name);
+	}
+	return files;
+}
+
 let distFiles;
 try {
-	distFiles = readdirSync(distDir).filter((name) => name.endsWith(".js"));
+	distFiles = collectJsFiles(distDir);
 } catch {
 	console.error(`No dist/ at ${distDir} — run "npm run build" in packages/harness first.`);
 	process.exit(1);
