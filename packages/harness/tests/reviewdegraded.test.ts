@@ -229,6 +229,68 @@ test("degraded revise then clean accept: the final review wins (not degraded)", 
 });
 
 // ---------------------------------------------------------------------------
+// only the REVIEW node is reported (a degraded consult is not a review signal)
+// ---------------------------------------------------------------------------
+
+test("degraded non-review node + clean review: no flag and no event", async () => {
+  // The consult reply degrades (prose + prose repair); the review that follows
+  // is clean. The degradation belongs to the consult node, so the run must NOT
+  // claim a degraded review — the per-call seam is reset by the review node.
+  const senior = new ScriptedProvider("senior", { consult: [PROSE, PROSE] });
+  const junior = new ScriptedProvider("junior");
+  const events: RuntimeEvent[] = [];
+  const harness = new TwoBrothersHarness(cfg(), {
+    senior,
+    junior,
+    onEvent: (event) => events.push(event),
+  });
+  const result = await harness.run(TASK);
+
+  assert.deepEqual(result.errors, ["unstructured model reply for consult"]);
+  assert.equal(senior.callsOf("review").length, 1, "the review itself was clean (no repair)");
+  assert.equal(result.reviewDegraded, undefined);
+  assert.equal(Object.hasOwn(result, "reviewDegraded"), false);
+  assert.ok(!events.some((event) => event.type === "review_degraded"));
+});
+
+test("two degraded reviews in one run: one event each, the last one sets the flag", async () => {
+  // Review 1 degrades to `revise` (→ a revise cycle), review 2 degrades to the
+  // accept default and ends the run: every degraded review is reported live,
+  // and the result field still describes the FINAL review.
+  const senior = new ScriptedProvider("senior", {
+    review: [DEGRADED_REVISE, DEGRADED_REVISE, PROSE, PROSE],
+  });
+  const junior = new ScriptedProvider("junior");
+  const events: RuntimeEvent[] = [];
+  const harness = new TwoBrothersHarness(cfg(), {
+    senior,
+    junior,
+    onEvent: (event) => events.push(event),
+  });
+  const result = await harness.run(TASK);
+
+  assert.equal(result.rounds, 1);
+  assert.equal(senior.callsOf("review").length, 4, "review 1 + repair + review 2 + repair");
+  assert.equal(repairEnvelopes(result.messages), 2);
+  const degraded = events.filter(
+    (event): event is ReviewDegradedEvent => event.type === "review_degraded",
+  );
+  assert.equal(degraded.length, 2, "both degraded reviews are reported");
+  assert.deepEqual(
+    degraded.map((event) => ({ round: event.round, verdict: event.verdict })),
+    [
+      { round: 0, verdict: "revise" },
+      { round: 1, verdict: "accept" },
+    ],
+  );
+  assert.equal(result.reviewDegraded, true, "the final review was degraded");
+  assert.equal(
+    result.errors.filter((error) => error === "unstructured model reply for review").length,
+    2,
+  );
+});
+
+// ---------------------------------------------------------------------------
 // sidecar persistence: type-driven, no extra code (RunManager + event store)
 // ---------------------------------------------------------------------------
 
