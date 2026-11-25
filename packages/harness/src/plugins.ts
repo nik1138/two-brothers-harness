@@ -1669,6 +1669,12 @@ export class PluginManager {
    * Hooks are still collected without a workspace (they may be session-level),
    * but tools are only built for workspace-bound runs, as before.
    *
+   * Entries are deduplicated by the resolved loaded plugin, not by the raw
+   * setting string: one plugin selected twice (same name, a path spelling of
+   * itself, or `{path, options}` plus a bare name) registers once, the first
+   * selection's options win, and each skipped duplicate lands on
+   * `diagnostics` with one note.
+   *
    * One generation per pass: the loaded-plugin map is snapshotted up front, so
    * a settings save that triggers `reload()` while a `register` is awaited
    * cannot mix module generations (and their diagnostics) within one run.
@@ -1709,9 +1715,33 @@ export class PluginManager {
     // one plugin are already rejected at load (registerModule), so a plugin
     // never collides with itself here.
     const claimedBy = new Map<string, string>();
+    // Loaded plugin name -> the first selection entry's options. A plugin
+    // selected more than once (the same name twice, or a name and a path
+    // spelling of it) is one plugin: the first selection wins and later
+    // duplicates are skipped with one diagnostic. Keying on the resolved
+    // loaded name — not the raw entry string — keeps `plain`, `plain.ts`,
+    // `./plain` and an absolute path together. The stored options let a
+    // duplicate carrying different options say they were ignored.
+    const selectedFirst = new Map<string, Record<string, unknown>>();
     for (const entry of normalizePluginSettings(active)) {
       const loaded = plugins.get(entry.path) ?? plugins.get(pluginNameOf(entry.path));
       if (loaded === undefined) continue;
+      const firstOptions = selectedFirst.get(loaded.name);
+      if (firstOptions !== undefined) {
+        const optionsIgnored =
+          Object.keys(entry.options).length > 0 &&
+          JSON.stringify(entry.options) !== JSON.stringify(firstOptions);
+        bindings.diagnostics.push({
+          plugin: loaded.name,
+          message:
+            `plugin ${JSON.stringify(loaded.name)} is selected more than once ` +
+            (optionsIgnored
+              ? "(first selection wins; this duplicate is skipped and its options were ignored)"
+              : "(first selection wins; this duplicate is skipped)"),
+        });
+        continue;
+      }
+      selectedFirst.set(loaded.name, entry.options);
       const hasEntryOptions = Object.keys(entry.options).length > 0;
       const rawOptions = hasEntryOptions
         ? entry.options

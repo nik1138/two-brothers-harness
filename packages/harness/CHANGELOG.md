@@ -231,6 +231,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/subagentmutating.test.ts`, `tests/subagentapprovals.test.ts`,
   `tests/subagent.test.ts`, `web/tests/subagentapprovals.test.ts`,
   `web/tests/subagents.test.ts` and the `subagent-mutation` browser scenario.
+- **Plugins selected twice register once:** `PluginManager.bindingsFor`
+  deduplicates its active list by the resolved loaded plugin — the same name
+  twice, or a name and a path spelling of itself (`./notes`, `notes.ts`, an
+  absolute path) — so one plugin's tools no longer collide with themselves and
+  its hooks are no longer appended twice. The first selection wins (its
+  per-entry options apply); each skipped duplicate records exactly one
+  `bindingsFor(...).diagnostics` note naming the plugin and the first-selection
+  rule, adding that the duplicate's options were ignored when they differ.
+  `normalizePluginSettings` and persisted settings semantics are unchanged.
+  Tests: `tests/plugincore.test.ts`.
 
 ### Fixed
 

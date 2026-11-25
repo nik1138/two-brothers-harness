@@ -136,6 +136,11 @@ Loading rules:
   through the run diagnostics (`bindingsFor(...).diagnostics`) and the server
   log, naming both plugins. Within one plugin, duplicate tool names fail the
   load as before.
+- **A plugin selected twice is one plugin.** Selection is deduplicated by the
+  resolved loaded plugin — the same name twice, or a name plus a path spelling
+  of itself (`./notes`, `notes.ts`, an absolute path) — so its tools register
+  once and its hooks run once; the first selection wins (its per-entry options
+  apply) and each later duplicate is skipped with one diagnostic.
 - No new runtime dependencies: a plugin may use only Node's standard library
   **and** the packages the harness already pins (e.g. `zod`). There is no
   plugin-level dependency installation.

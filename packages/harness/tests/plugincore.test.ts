@@ -99,6 +99,14 @@ const PLAIN_PLUGIN = [
   "",
 ].join("\n");
 
+const DEDUPE_PLUGIN = [
+  "export function register(ctx) {",
+  '  ctx.add_tool("dedupe", () => "dedupe", "A dedupe tool");',
+  '  ctx.on_hook("session_start", () => {});',
+  "}",
+  "",
+].join("\n");
+
 const SCOPES_PLUGIN = [
   "export const description = 'Scope fixture';",
   "export function register(ctx) {",
@@ -1014,16 +1022,118 @@ test("bindingsFor: a tool name claimed by two plugins keeps the first registrati
   }
 });
 
-test("bindingsFor: a plugin never collides with itself across repeated activation", async () => {
+test("bindingsFor: a plugin selected twice by name registers once with one diagnostic", async () => {
+  const dir = makePluginsDir({ "plain.ts": PLAIN_PLUGIN, "dedupe.ts": DEDUPE_PLUGIN });
+  const tmp = tmpdir("tb-plugincore-ws-");
+  try {
+    const manager = await PluginManager.create(dir.root);
+    const ws = workspaceWith(tmp.root);
+    // the historical pinned case: the same name twice is now one registration
+    const plain = await manager.bindingsFor(["plain", "plain"], ws);
+    assert.deepEqual(plain.tools.map((tool) => tool.name), ["plain"]);
+    assert.equal(plain.diagnostics.length, 1);
+    assert.equal(plain.diagnostics[0].plugin, "plain");
+    assert.match(plain.diagnostics[0].message, /first selection wins/);
+    assert.match(plain.diagnostics[0].message, /duplicate is skipped/);
+    // a plugin carrying a hook proves the hook is registered once, not twice
+    const bindings = await manager.bindingsFor(["dedupe", "dedupe"], ws);
+    // one registration: the tool is present once and cannot collide with itself
+    assert.deepEqual(bindings.tools.map((tool) => tool.name), ["dedupe"]);
+    assert.deepEqual(bindings.toolsByScope.shared.map((tool) => tool.name), ["dedupe"]);
+    assert.deepEqual(bindings.toolsByScope.senior, []);
+    assert.deepEqual(bindings.toolsByScope.junior, []);
+    // the run's hooks are registered once, not appended twice
+    assert.equal(bindings.hooks.session_start.length, 1);
+    // exactly one diagnostic names the duplicate and the first-selection rule
+    assert.equal(bindings.diagnostics.length, 1);
+    assert.equal(bindings.diagnostics[0].plugin, "dedupe");
+    assert.match(bindings.diagnostics[0].message, /"dedupe"/);
+    assert.match(bindings.diagnostics[0].message, /first selection wins/);
+    assert.match(bindings.diagnostics[0].message, /duplicate is skipped/);
+    assert.doesNotMatch(bindings.diagnostics[0].message, /options were ignored/);
+  } finally {
+    dir.cleanup();
+    tmp.cleanup();
+  }
+});
+
+test("bindingsFor: name and path spellings of one plugin dedupe to one registration", async () => {
   const dir = makePluginsDir({ "plain.ts": PLAIN_PLUGIN });
   const tmp = tmpdir("tb-plugincore-ws-");
   try {
     const manager = await PluginManager.create(dir.root);
-    // a duplicated settings entry re-registers the same plugin; its tool is
-    // not a cross-plugin duplicate, so it is not skipped or diagnosed
-    const bindings = await manager.bindingsFor(["plain", "plain"], workspaceWith(tmp.root));
-    assert.deepEqual(bindings.tools.map((tool) => tool.name), ["plain", "plain"]);
+    const ws = workspaceWith(tmp.root);
+    const absolute = path.join(dir.root, "plain.ts");
+    const spellings: PluginSetting[][] = [
+      ["./plain", "plain"],
+      ["plain.ts", "plain"],
+      [absolute, "plain"],
+    ];
+    for (const active of spellings) {
+      const bindings = await manager.bindingsFor(active, ws);
+      // the resolved loaded plugin, not the raw entry string, is the identity
+      assert.deepEqual(bindings.tools.map((tool) => tool.name), ["plain"]);
+      assert.equal(bindings.diagnostics.length, 1);
+      assert.equal(bindings.diagnostics[0].plugin, "plain");
+      assert.match(bindings.diagnostics[0].message, /first selection wins/);
+    }
+  } finally {
+    dir.cleanup();
+    tmp.cleanup();
+  }
+});
+
+test("bindingsFor: distinct plugins still register independently", async () => {
+  const dir = makePluginsDir({ "plain.ts": PLAIN_PLUGIN, "dedupe.ts": DEDUPE_PLUGIN });
+  const tmp = tmpdir("tb-plugincore-ws-");
+  try {
+    const manager = await PluginManager.create(dir.root);
+    const bindings = await manager.bindingsFor(
+      ["./plain", "dedupe"],
+      workspaceWith(tmp.root),
+    );
+    assert.deepEqual(bindings.tools.map((tool) => tool.name), ["plain", "dedupe"]);
+    assert.deepEqual(bindings.toolsByScope.shared.map((tool) => tool.name), [
+      "plain",
+      "dedupe",
+    ]);
+    assert.equal(bindings.hooks.session_start.length, 1);
     assert.deepEqual(bindings.diagnostics, []);
+  } finally {
+    dir.cleanup();
+    tmp.cleanup();
+  }
+});
+
+test("bindingsFor: the first selection's options win over a duplicate's", async () => {
+  const dir = makePluginsDir({ "opts.ts": OPTS_PLUGIN });
+  const tmp = tmpdir("tb-plugincore-ws-");
+  try {
+    const manager = await PluginManager.create(dir.root);
+    const ws = workspaceWith(tmp.root);
+    const bindings = await manager.bindingsFor(
+      [
+        { path: "opts", options: { greeting: "first" } },
+        { path: "./opts", options: { greeting: "second" } },
+      ],
+      ws,
+    );
+    assert.deepEqual(bindings.tools.map((tool) => tool.name), ["greet"]);
+    assert.equal(await bindings.tools[0].execute({}), "first");
+    assert.equal(bindings.diagnostics.length, 1);
+    assert.match(bindings.diagnostics[0].message, /first selection wins/);
+    assert.match(bindings.diagnostics[0].message, /options were ignored/);
+    // identical duplicate options are still ignored, without the options note
+    const same = await manager.bindingsFor(
+      [
+        { path: "opts", options: { greeting: "same" } },
+        { path: "./opts", options: { greeting: "same" } },
+      ],
+      ws,
+    );
+    assert.equal(await same.tools[0].execute({}), "same");
+    assert.equal(same.diagnostics.length, 1);
+    assert.doesNotMatch(same.diagnostics[0].message, /options were ignored/);
   } finally {
     dir.cleanup();
     tmp.cleanup();
