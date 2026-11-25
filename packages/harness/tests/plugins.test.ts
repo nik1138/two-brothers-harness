@@ -125,6 +125,41 @@ const DUPLICATES_PLUGIN = [
   "",
 ].join("\n");
 
+/**
+ * A plugin whose tool result is its module generation, so a test can tell
+ * which `?v=N` import a binding pass actually used.
+ */
+function generationPlugin(toolName: string, generation: string): string {
+  return [
+    `export const GENERATION = ${JSON.stringify(generation)};`,
+    "export function register(ctx) {",
+    `  ctx.add_tool(${JSON.stringify(toolName)}, () => GENERATION);`,
+    "}",
+    "",
+  ].join("\n");
+}
+
+/**
+ * A generation plugin that, while registering for a binding pass, kicks off
+ * the reload named by the test's one-shot global (and awaits it, so the map
+ * replacement lands deterministically mid-pass).
+ */
+const RELOAD_TRIGGER_GLOBAL = "__tbStartPluginReload";
+function reloadTriggerPlugin(toolName: string, generation: string): string {
+  return [
+    `const GENERATION = ${JSON.stringify(generation)};`,
+    "export function register(ctx) {",
+    `  ctx.add_tool(${JSON.stringify(toolName)}, () => GENERATION);`,
+    `  const start = globalThis[${JSON.stringify(RELOAD_TRIGGER_GLOBAL)}];`,
+    "  if (typeof start === \"function\") {",
+    `    delete globalThis[${JSON.stringify(RELOAD_TRIGGER_GLOBAL)}];`,
+    "    return start();",
+    "  }",
+    "}",
+    "",
+  ].join("\n");
+}
+
 /** Captures the ctx it was registered with, for per-run binding checks. */
 const MARKER_PLUGIN = [
   "export function register(ctx) {",
@@ -551,6 +586,79 @@ test("a plugin failing re-registration is skipped for that run only", async () =
     // the flaky plugin is skipped for the run; the good one still lands
     assert.deepEqual(tools.map((t) => t.name), ["ping", "seniors_only"]);
   } finally {
+    dir.cleanup();
+    tmp.cleanup();
+  }
+});
+
+test("a plugin whose register never settles is skipped after the deadline", async () => {
+  const dir = makePluginsDir({
+    "hung.ts": "export function register() {\n  return new Promise(() => {});\n}\n",
+    "rehang.ts": [
+      "let calls = 0;",
+      "export function register(ctx) {",
+      "  calls += 1;",
+      "  if (calls > 1) return new Promise(() => {});",
+      '  ctx.add_tool("slow", () => "first");',
+      "}",
+      "",
+    ].join("\n"),
+    "good.ts": GOOD_PLUGIN,
+  });
+  const tmp = tmpdir("tb-ws-");
+  try {
+    // A small deadline override keeps the case fast and hermetic.
+    const manager = await PluginManager.create(dir.root, [], { registerTimeoutMs: 100 });
+    // The plugin that hangs at load fails soft exactly like a thrown one.
+    assert.deepEqual([...manager.plugins.keys()], ["good", "rehang"]);
+    assert.equal(manager.errors.length, 1);
+    assert.equal(manager.errors[0].plugin, "hung");
+    assert.match(manager.errors[0].error, /registration timed out after 100 ms/);
+    // The healthy plugin loaded alongside still registers its tools.
+    const ws = workspaceWith(tmp.root, new StaticBroker(Decision.ALLOW));
+    assert.deepEqual(
+      (await manager.toolsFor(["good"], ws)).map((tool) => tool.name),
+      ["ping", "seniors_only"],
+    );
+    // A run-time binding applies the same bound to a plugin that hangs on
+    // re-registration: one diagnostic names the deadline and nothing from it
+    // is adopted.
+    const bindings = await manager.bindingsFor(["rehang", "good"], ws);
+    assert.deepEqual(bindings.tools.map((tool) => tool.name), ["ping", "seniors_only"]);
+    const hungNotes = bindings.diagnostics.filter((entry) => entry.plugin === "rehang");
+    assert.equal(hungNotes.length, 1);
+    assert.match(hungNotes[0].message, /timed out after 100 ms/);
+  } finally {
+    dir.cleanup();
+    tmp.cleanup();
+  }
+});
+
+test("one binding pass keeps a consistent plugin-map generation across a reload", async () => {
+  const dir = makePluginsDir({
+    "aaa.ts": reloadTriggerPlugin("gen_a", "one"),
+    "bbb.ts": generationPlugin("gen_b", "one"),
+  });
+  const tmp = tmpdir("tb-ws-");
+  const globals = globalThis as typeof globalThis & {
+    __tbStartPluginReload?: () => Promise<void>;
+  };
+  try {
+    const manager = await PluginManager.create(dir.root);
+    // Generation two changes the file the binding pass has not reached yet.
+    fs.writeFileSync(path.join(dir.root, "bbb.ts"), generationPlugin("gen_b", "two"), "utf-8");
+    globals.__tbStartPluginReload = () => manager.reload();
+    const ws = workspaceWith(tmp.root, new StaticBroker(Decision.ALLOW));
+    const bindings = await manager.bindingsFor(["aaa", "bbb"], ws);
+    assert.deepEqual(bindings.tools.map((tool) => tool.name), ["gen_a", "gen_b"]);
+    const results: Record<string, string> = {};
+    for (const tool of bindings.tools) results[tool.name] = String(await tool.execute({}));
+    // Both tools come from the generation the pass snapshotted, not a mix.
+    assert.deepEqual(results, { gen_a: "one", gen_b: "one" });
+    // The reload did replace the manager's map; only the in-flight pass is pinned.
+    assert.equal(manager.plugins.get("bbb")?.module.GENERATION, "two");
+  } finally {
+    delete globals.__tbStartPluginReload;
     dir.cleanup();
     tmp.cleanup();
   }

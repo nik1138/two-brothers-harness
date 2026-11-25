@@ -280,6 +280,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cross-role fill precedence itself is unchanged. Tests:
   `tests/providerwarnings.test.ts`, `tests/adapters.test.ts`,
   `tests/roleendpoints.test.ts`. No protocol change; no new dependencies.
+- **Plugin lifecycle hardening — bounded `register`, read-only MCP status:**
+  a plugin's `register(ctx)` now runs under `PLUGIN_REGISTER_TIMEOUT_MS`
+  (10 s, overridable through `PluginManagerOptions.registerTimeoutMs` for
+  tests) on both the load path and the per-run binding, so a registration that
+  never settles is skipped fail-soft with a `registration timed out after … ms`
+  error/diagnostic instead of blocking run admission or the server; the timer
+  is unref'd and cleared, and a late registration's context is discarded.
+  `GET /api/mcp` reads the selected plugins' load-time declarations through
+  `PluginManager.mcpServerDeclarations()` instead of re-executing `register`
+  per status poll (an additive `diagnostics` list only when non-empty; the
+  shipped `{configured, lastRun}` shape is unchanged), and `bindingsFor`
+  snapshots the loaded-plugin map so a reload during a binding pass cannot mix
+  module generations. Tests: `tests/plugins.test.ts`,
+  `tests/mcpstatus.test.ts`.
+
 - **TUI `/rewind` refuses a session changed during the confirmation:** the
   preview now captures the session file's `size:mtimeMs:ino` signature (the
   server rewind route's own identity, extracted unchanged to

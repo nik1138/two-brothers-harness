@@ -341,7 +341,6 @@ import {
   type HookRegistry,
   type PluginBindings,
   type PluginDiagnosticEntry,
-  type PluginMcpServer,
   type PluginSetting,
 } from "./plugins.ts";
 import {
@@ -3487,11 +3486,13 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
   // MCP status (the opencode visibility model): WHAT is configured — the
   // config-file servers plus the plugin contributions, with each server's
   // effective role, transport and a secrets-free target — and HOW the last
-  // run's MCP load went. `configured` is recomputed per request through the
-  // same merge the run uses (a missing config file warns-and-continues like
-  // the run path; a failed binding pass falls back to the config-file view);
-  // `lastRun` is the in-memory record written by the most recent run whose
-  // merged server set was non-empty, or null before any such run.
+  // run's MCP load went. `configured` is recomputed per request from the
+  // config file and the plugins' **load-time** declarations (a missing config
+  // file warns-and-continues like the run path); a status read never executes
+  // plugin `register` code, so no plugin side effect fires per poll and no
+  // per-run binding diagnostics are produced or discarded. `lastRun` is the
+  // in-memory record written by the most recent run whose merged server set
+  // was non-empty, or null before any such run.
   routes.push(
     compileRoute("GET", "/api/mcp", async () => {
       await state.pluginsReady;
@@ -3503,15 +3504,24 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
           console.warn(`[two-brothers] MCP config: ${errorDetail(exc)}`);
         }
       }
-      let pluginServers: PluginMcpServer[] = [];
-      try {
-        pluginServers = (
-          await state.plugins.bindingsFor(state.pluginSelection, null)
-        ).mcpServers;
-      } catch (exc) {
-        console.warn(`[two-brothers] plugin binding failed: ${errorDetail(exc)}`);
+      const declarations = state.plugins.mcpServerDeclarations(state.pluginSelection);
+      const response: {
+        configured: ReturnType<typeof describeConfigured>;
+        lastRun: typeof state.lastMcpStatus;
+        diagnostics?: string[];
+      } = {
+        configured: describeConfigured(base, declarations.servers),
+        lastRun: state.lastMcpStatus,
+      };
+      // Additive: load-time notes of the selected plugins (deprecations,
+      // rejected options/declarations). Omitted when empty so the shipped
+      // `{configured, lastRun}` shape stays byte-compatible.
+      if (declarations.diagnostics.length > 0) {
+        response.diagnostics = declarations.diagnostics.map(
+          (entry) => `${entry.plugin}: ${entry.message}`,
+        );
       }
-      return { configured: describeConfigured(base, pluginServers), lastRun: state.lastMcpStatus };
+      return response;
     }),
   );
 

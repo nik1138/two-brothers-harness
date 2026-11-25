@@ -396,3 +396,85 @@ test("GET /api/mcp: a run with nothing configured leaves lastRun untouched", asy
     await srv.close();
   }
 });
+
+/** A temp plugins dir; `files` maps file name -> source. */
+function makePluginsDir(files: Record<string, string>): {
+  root: string;
+  cleanup: () => void;
+} {
+  const tmp = tmpdir("tb-mcp-status-plugins-");
+  for (const [name, source] of Object.entries(files)) {
+    fs.writeFileSync(path.join(tmp.root, name), source, "utf-8");
+  }
+  fs.writeFileSync(path.join(tmp.root, "package.json"), JSON.stringify({ type: "module" }));
+  return tmp;
+}
+
+/**
+ * A plugin that appends one line per `register` call and contributes one MCP
+ * server, so the status route's side effects are directly observable.
+ */
+const REGISTER_COUNTER_PLUGIN = [
+  'import { appendFileSync } from "node:fs";',
+  'const calls = new URL("./register-calls.log", import.meta.url);',
+  "export function register(ctx) {",
+  '  appendFileSync(calls, "register\\n");',
+  '  ctx.add_mcp_server("counter_notes", { command: "counter-notes" });',
+  "}",
+  "",
+].join("\n");
+
+test("GET /api/mcp reads load-time declarations without re-executing plugin register", async (t) => {
+  const dir = makePluginsDir({ "counter.ts": REGISTER_COUNTER_PLUGIN });
+  const sessions = tmpdir("tb-mcp-status-sessions-");
+  const previous = process.env.TWO_BROTHERS_PLUGINS_SENIOR;
+  process.env.TWO_BROTHERS_PLUGINS_SENIOR = "counter";
+  t.after(() => {
+    if (previous === undefined) delete process.env.TWO_BROTHERS_PLUGINS_SENIOR;
+    else process.env.TWO_BROTHERS_PLUGINS_SENIOR = previous;
+  });
+  const callsFile = path.join(dir.root, "register-calls.log");
+  const registerCalls = (): number => {
+    if (!fs.existsSync(callsFile)) return 0;
+    return fs
+      .readFileSync(callsFile, "utf-8")
+      .split("\n")
+      .filter((line) => line !== "").length;
+  };
+  try {
+    const srv = await startStatusServer({ pluginsDir: dir.root, sessionsDir: sessions.root });
+    try {
+      const first = await api<{ configured: Array<Record<string, unknown>> }>(
+        srv.base,
+        "GET",
+        "/api/mcp",
+      );
+      // One registration from the load path; the status read added none.
+      assert.equal(registerCalls(), 1);
+      assert.deepEqual(first.body.configured, [
+        {
+          name: "counter_notes",
+          source: "plugin",
+          plugin: "counter",
+          role: "junior",
+          transport: "stdio",
+          target: "counter-notes",
+        },
+      ]);
+
+      const second = await api<{ configured: Array<Record<string, unknown>> }>(
+        srv.base,
+        "GET",
+        "/api/mcp",
+      );
+      // Repeated status polls stay read-only with respect to plugin code.
+      assert.equal(registerCalls(), 1);
+      assert.deepEqual(second.body.configured, first.body.configured);
+    } finally {
+      await srv.close();
+    }
+  } finally {
+    dir.cleanup();
+    sessions.cleanup();
+  }
+});

@@ -848,6 +848,57 @@ export function validateToolArgs(
 const DEFAULT_PLUGIN_TOOL_TIMEOUT_MS = 60_000;
 
 /**
+ * Wall-clock deadline for one plugin `register(ctx)` call: 10 s.
+ *
+ * `register` is ordinary in-process JS, so a plugin that awaits a promise
+ * which never settles would otherwise block every caller: the load path
+ * (`loadPlugins`), run admission (the per-run `bindingsFor` the server awaits
+ * before starting a cooperation cycle) and `GET /api/mcp`. The bound is
+ * deliberately generous for a synchronous-ish registration and fail-soft:
+ * expiry is reported through the same branch as a thrown registration (the
+ * plugin is skipped, no tools/hooks/MCP servers from it are adopted), never a
+ * process crash and never a half-registered plugin. Overridable for tests
+ * through `PluginManagerOptions.registerTimeoutMs`.
+ */
+export const PLUGIN_REGISTER_TIMEOUT_MS = 10_000;
+
+/** A positive finite override, else the shared default (tolerant boundary). */
+function registrationDeadlineMs(value: number | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : PLUGIN_REGISTER_TIMEOUT_MS;
+}
+
+/**
+ * Await one plugin `register(ctx)` under the wall-clock deadline above.
+ *
+ * The timer is `unref`'d and cleared on both outcomes, so a registration that
+ * returns promptly leaves no live handle behind. A registration that settles
+ * (or rejects) after the deadline has its result discarded: the race already
+ * attached handlers to the plugin promise, so a late rejection is never an
+ * unhandled rejection, and the caller drops the local `ctx` — nothing the
+ * late call registers can reach the manager.
+ */
+async function registerWithDeadline(
+  register: (ctx: PluginContext) => unknown,
+  ctx: PluginContext,
+  timeoutMs: number,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(new PluginError(`registration timed out after ${timeoutMs} ms`));
+    }, timeoutMs);
+    timer.unref?.();
+  });
+  try {
+    await Promise.race([Promise.resolve(register(ctx)), deadline]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
  * Run one tool handler under its cooperative deadline.
  *
  * The handler receives an `AbortSignal` that combines the caller's signal
@@ -1107,12 +1158,19 @@ export function validatePluginOptions(
  * operators to ignore diagnostics). The server passes null: its discovery
  * view (`GET /api/plugins`) lists every discovered plugin and per-run
  * binding is opt-in through `bindingsFor`.
+ *
+ * Each plugin's `register(ctx)` is awaited under `PLUGIN_REGISTER_TIMEOUT_MS`
+ * (overridable through `registerTimeoutMs`, used by tests): a registration
+ * that does not settle in time fails that plugin exactly like a thrown
+ * registration — it is skipped, recorded in `errors`, and contributes no
+ * tools, hooks or MCP servers.
  */
 export async function loadPlugins(
   pluginsDir: string,
   loadCount = 0,
   settings: readonly PluginSetting[] = [],
   importOnly: ReadonlySet<string> | null = null,
+  registerTimeoutMs: number = PLUGIN_REGISTER_TIMEOUT_MS,
 ): Promise<{
   plugins: Map<string, LoadedPlugin>;
   errors: PluginErrorEntry[];
@@ -1122,6 +1180,7 @@ export async function loadPlugins(
   const errors: PluginErrorEntry[] = [];
   const diagnostics: PluginDiagnosticEntry[] = [];
   const optionsFor = optionsByName(settings);
+  const deadlineMs = registrationDeadlineMs(registerTimeoutMs);
   let stat: fs.Stats;
   try {
     stat = fs.statSync(pluginsDir);
@@ -1147,7 +1206,7 @@ export async function loadPlugins(
     const filePath = path.join(pluginsDir, fileName);
     try {
       const module = await importPluginModule(filePath, loadCount);
-      const loaded = await registerModule(name, module, filePath, optionsFor.get(name) ?? {});
+      const loaded = await registerModule(name, module, filePath, optionsFor.get(name) ?? {}, deadlineMs);
       for (const message of loaded.diagnostics) diagnostics.push({ plugin: name, message });
       plugins.set(name, loaded);
     } catch (exc) {
@@ -1202,6 +1261,7 @@ async function registerModule(
   module: Record<string, unknown>,
   filePath: string,
   rawOptions: Record<string, unknown> = {},
+  registerTimeoutMs: number = PLUGIN_REGISTER_TIMEOUT_MS,
 ): Promise<LoadedPlugin> {
   const register = module.register;
   if (typeof register !== "function") {
@@ -1210,7 +1270,11 @@ async function registerModule(
   const resolved = resolvePluginOptions(module, rawOptions);
   const ctx = new PluginContext(name, null, resolved.options);
   ctx.diagnostics.push(...resolved.diagnostics);
-  await register(ctx);
+  await registerWithDeadline(
+    register as (ctx: PluginContext) => unknown,
+    ctx,
+    registrationDeadlineMs(registerTimeoutMs),
+  );
   registerManifestMcpServers(ctx, module);
   const seen = new Set<string>();
   for (const tool of ctx._tools) {
@@ -1287,6 +1351,14 @@ export interface PluginManagerOptions {
    * per-run binding is already opt-in through `bindingsFor`.
    */
   selectedOnly?: boolean;
+  /**
+   * Wall-clock deadline for one plugin `register(ctx)` call, in milliseconds;
+   * omitted = `PLUGIN_REGISTER_TIMEOUT_MS` (10 s). A test knob for keeping the
+   * deadline case fast, not an operator-facing setting: the bound is a
+   * safety net, not a tuning surface. Values that are not positive finite
+   * numbers fall back to the default.
+   */
+  registerTimeoutMs?: number;
 }
 
 /** One run's plugin contribution: tools (flat + scoped), hooks, MCP servers, diagnostics. */
@@ -1342,6 +1414,7 @@ export class PluginManager {
    */
   bundles = new Map<string, LoadedPluginBundle>();
   private readonly selectedOnly: boolean;
+  private readonly registerTimeoutMs: number;
   private loadCount = 0;
   private reloadTail: Promise<void> = Promise.resolve();
 
@@ -1353,6 +1426,7 @@ export class PluginManager {
     this.pluginsDir = pluginsDir;
     this.settings = [...settings];
     this.selectedOnly = options.selectedOnly === true;
+    this.registerTimeoutMs = registrationDeadlineMs(options.registerTimeoutMs);
   }
 
   /** Construct + load — the async equivalent of Python's eager `__init__`. */
@@ -1388,6 +1462,7 @@ export class PluginManager {
       this.loadCount,
       this.settings,
       this.selectedOnly ? pluginSelectionNames(this.settings) : null,
+      this.registerTimeoutMs,
     );
     const discovered = discoverPluginBundles(this.pluginsDir);
     this.plugins = plugins;
@@ -1521,6 +1596,13 @@ export class PluginManager {
    *
    * Hooks are still collected without a workspace (they may be session-level),
    * but tools are only built for workspace-bound runs, as before.
+   *
+   * One generation per pass: the loaded-plugin map is snapshotted up front, so
+   * a settings save that triggers `reload()` while a `register` is awaited
+   * cannot mix module generations (and their diagnostics) within one run.
+   * Each `register` is bounded by `registerTimeoutMs`; a registration that
+   * misses the deadline is skipped exactly like a throwing one, and its late
+   * context is discarded — never partially adopted.
    */
   async bindingsFor(
     active: readonly PluginSetting[],
@@ -1533,6 +1615,10 @@ export class PluginManager {
       mcpServers: [],
       diagnostics: [],
     };
+    // Snapshot the loaded map: `reload()` replaces it wholesale, and a settings
+    // save can land while a registration below is awaited.
+    const plugins = new Map(this.plugins);
+    const registerTimeoutMs = this.registerTimeoutMs;
     // per-run contexts that registered successfully, for the MCP collection
     const contexts: PluginContext[] = [];
     let builtinHere = new Set<string>(BUILTIN_TOOL_NAMES);
@@ -1552,7 +1638,7 @@ export class PluginManager {
     // never collides with itself here.
     const claimedBy = new Map<string, string>();
     for (const entry of normalizePluginSettings(active)) {
-      const loaded = this.plugins.get(entry.path) ?? this.plugins.get(pluginNameOf(entry.path));
+      const loaded = plugins.get(entry.path) ?? plugins.get(pluginNameOf(entry.path));
       if (loaded === undefined) continue;
       const hasEntryOptions = Object.keys(entry.options).length > 0;
       const rawOptions = hasEntryOptions
@@ -1564,7 +1650,11 @@ export class PluginManager {
       try {
         const register = loaded.module.register;
         if (typeof register !== "function") throw new PluginError("register(ctx) vanished");
-        await register(ctx);
+        await registerWithDeadline(
+          register as (ctx: PluginContext) => unknown,
+          ctx,
+          registerTimeoutMs,
+        );
       } catch (exc) {
         const message = `registration failed for a run: ${formatError(exc)}`;
         console.warn(`[two-brothers] plugin "${loaded.name}" ${message}`);
@@ -1610,5 +1700,37 @@ export class PluginManager {
     }
     bindings.mcpServers = collectPluginMcpServers(contexts);
     return bindings;
+  }
+
+  /**
+   * The load-time MCP server declarations of the selected plugins, plus their
+   * load-time diagnostics — a read-only view for status surfaces.
+   *
+   * Unlike {@link bindingsFor} this never executes plugin `register` code:
+   * each plugin's `LoadedPlugin.mcpServers` is the declaration set recorded
+   * once at load (register-time `add_mcp_server` calls plus the module's
+   * exported `mcpServers`), in the same activation order the per-run binding
+   * would collect. That makes `GET /api/mcp` side-effect free with respect to
+   * plugins — no repeated registrations per status poll, and no binding
+   * diagnostics to discard. The map is snapshotted so the view is one load
+   * generation, and unknown selection names are skipped exactly like
+   * `bindingsFor`.
+   */
+  mcpServerDeclarations(active: readonly PluginSetting[]): {
+    servers: PluginMcpServer[];
+    diagnostics: PluginDiagnosticEntry[];
+  } {
+    const plugins = new Map(this.plugins);
+    const servers: PluginMcpServer[] = [];
+    const diagnostics: PluginDiagnosticEntry[] = [];
+    const seen = new Set<string>();
+    for (const entry of normalizePluginSettings(active)) {
+      const loaded = plugins.get(entry.path) ?? plugins.get(pluginNameOf(entry.path));
+      if (loaded === undefined || seen.has(loaded.name)) continue;
+      seen.add(loaded.name);
+      for (const server of loaded.mcpServers) servers.push(server);
+      for (const message of loaded.diagnostics) diagnostics.push({ plugin: loaded.name, message });
+    }
+    return { servers, diagnostics };
   }
 }
