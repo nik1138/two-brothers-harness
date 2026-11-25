@@ -10,8 +10,8 @@ Last updated: **2026-11-25**.
 
 ## Current state
 
-- `origin/main` = `12e3097`; `main` has this docs checkpoint commit on top
-  (1 ahead, unpushed) and is clean.
+- `origin/main` = the `39b297b` checkpoint commit (pushed by the lead; this
+  lane did not push), clean.
 - **0.0.2 shipped**: tag `v0.0.2` at `354df89`; `latest` = `next` = **0.0.2**.
   **No tag, publish, or version bump this session** — the next release
   repeats `docs/release.md` and needs fresh explicit owner permission. The
@@ -21,13 +21,14 @@ Last updated: **2026-11-25**.
   checks"** step (verified through the Actions API). Actions are node24
   majors; `npm run check` (pinned + recursive runtime-deps, 105 files) runs
   in CI.
-- Baselines at `12e3097` (Windows merged tree, **recorded lane evidence**):
-  package **2 812 / 2 803 pass / 0 fail / 0 cancelled / 9 POSIX-only skips**
-  in BOTH `npm test` and `test:spawn`; web **753 / 753** + build PASS;
-  browser **44 PASS / 0 FAIL / 1 SKIP**; CLI **19 + 19**; faults **7/7**;
-  `npm run check` PASS; `SMOKE TEST: PASS`. WSL Node-22 at `12e3097`:
-  **2 812 / 2 810 pass / 0 fail / 0 cancelled / 2 skipped**, three
-  consecutive runs.
+- Baselines at `12e3097` (Windows merged tree; the lead re-ran `npm test`,
+  `typecheck`, `selftest`, CLI E2E and `git fsck` on the restored tree, the
+  rest is recorded lane evidence): package **2 812 / 2 803 pass / 0 fail /
+  0 cancelled / 9 POSIX-only skips** in BOTH `npm test` and `test:spawn`;
+  web **753 / 753** + build PASS; browser **44 PASS / 0 FAIL / 1 SKIP**;
+  CLI **19 + 19**; faults **7/7**; `npm run check` PASS;
+  `SMOKE TEST: PASS`. WSL Node-22 at `12e3097`: **2 812 / 2 810 pass /
+  0 fail / 0 cancelled / 2 skipped**, three consecutive runs.
 - This window shipped **16 commits** (`b1fc2c5` → `12e3097`): 11 fixes,
   3 docs, 1 test, 1 perf — steering accounting + fail-soft sinks, bundle
   skills parity, compaction size safety, the binary marker on paged/streamed
@@ -40,9 +41,17 @@ Last updated: **2026-11-25**.
 - **Known loss (2026-11-25):** a housekeeping lane most likely followed an
   NTFS `node_modules` junction (see `AGENTS.md`, "Subagent Lanes") and deleted
   294 tracked files from the main checkout and the gitignored
-  `packages/harness/sessions` store. Tracked files were restored from `HEAD`;
-  the **sessions are gone** (no backup) and the live `:8600` server runs with
-  an empty store.
+  `packages/harness/sessions` store, including the sealed
+  `sessions/settings.json`. Tracked files were restored from `HEAD`; the
+  **sessions and provider keys/role settings are gone** (no backup) and the
+  live `:8600` server runs with an empty store.
+
+## Operational (do first)
+
+- [ ] **Re-enter provider keys and role settings** — the sealed
+      `sessions/settings.json` was destroyed by the 2026-11-25 incident; the
+      live app is unusable until the owner restores them (the `:8600` server
+      holds an empty store). See "Known loss".
 
 ## In flight
 

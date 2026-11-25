@@ -7,27 +7,30 @@ this file is the current state for the next session. The previous refresh
 detail stays in git history; release mechanics and evidence live in
 `docs/release.md`.
 
-Last updated: **2026-11-25**. **Checkpoint base: `origin/main` = `12e3097`**
-(this docs checkpoint commit sits on top, unpushed). Suite counts are
-**recorded merged-tree lane evidence**; git/CI/publish facts were
-re-verified read-only this refresh (`git rev-parse`, the GitHub Actions
-API). The tree is clean; the checkpoint commit is local and **not pushed**
-by this lane.
+Last updated: **2026-11-25**. **Checkpoint: `39b297b`** — pushed to
+`origin/main` by the lead (`12e3097..39b297b`); the docs lane itself did not
+push. Suite counts are **merged-tree evidence**: the lead re-ran the core
+gates on the restored `12e3097` tree after the 2026-11-25 restore
+(`typecheck` 0, `node dist/selftest.js` 0, `npm test` 2 812 / 2 803 pass /
+0 fail / 0 cancelled / 9 skipped, `e2e/cli.ts` and `--dist` 19 scenarios
+each, `git fsck` clean); WSL/web/browser/faults figures remain recorded lane
+evidence. Git/CI/publish facts were re-verified read-only (`git rev-parse`,
+the GitHub Actions API).
 
 ## Current state
 
 | Item | Value |
 |---|---|
-| Branch / HEAD | `main` parent `12e3097` = `origin/main`; the docs checkpoint commit is on top (1 ahead of `origin/main`, unpushed). Working tree clean |
+| Branch / HEAD | `origin/main` = the `39b297b` checkpoint commit (pushed by the lead); the docs lane did not push. Working tree clean |
 | Published | **STILL 0.0.2 on `latest` AND `next`**; tags only `v0.0.1` / `v0.0.2` (`v0.0.2` at `354df89`). **No tag, publish, or version bump this session** — the next release repeats `docs/release.md` and needs fresh explicit owner permission. The GitHub Release *page* for `v0.0.2` remains an owner-manual step (no `gh` CLI) |
 | Session window | previous checkpoint `b1fc2c5` → `12e3097`: **16 commits** (11 fixes, 3 docs, 1 test, 1 perf). Every feature independently accepted in a separate lane; every merge fast-forward with merged-tree gates green before push |
 | CI | **green on all 3 legs at `12e3097`**: run [45646884074](https://github.com/nik1138/two-brothers-harness/actions/runs/45646884074) (run 137) — `harness (22)`, `harness (24)` and `harness-windows` all `success`, with **"Dependency checks" green in every job** (verified through the Actions API this refresh). Actions are node24 majors (`checkout`/`setup-node`/`upload-artifact` @v7) |
-| Package suite baseline | **2 812 total / 2 803 pass / 0 fail / 0 cancelled / 9 POSIX-only skips**, Windows, merged tree at `12e3097`, in BOTH `npm test` and `npm run test:spawn` (+52 tests over the `b1fc2c5` baseline of 2 760) |
+| Package suite baseline | **2 812 total / 2 803 pass / 0 fail / 0 cancelled / 9 POSIX-only skips**, Windows, merged tree at `12e3097`, in `npm test` (re-run by the lead after the restore) and `npm run test:spawn` (lane evidence) (+52 tests over the `b1fc2c5` baseline of 2 760) |
 | WSL Linux parity | at `12e3097` (Ubuntu, Node **v22.23.5**): 2 812 total / 2 810 pass / 0 fail / 0 cancelled / 2 skipped, **three consecutive runs**. This is the gate that discriminates the Node-22 timer class |
 | Web / browser / CLI / faults | web **753 / 753**, web build PASS; browser E2E **44 PASS / 0 FAIL / 1 SKIP**; `e2e/cli.ts` and `e2e/cli.ts --dist` PASS (**19 scenarios each**); server-prompt-audit PASS; server-status PASS (**3**); faults **7/7**; reference selftest PASS; `npm run check` PASS (**105 dist files**); `SMOKE TEST: PASS` |
 | Packaging | `npm run check` PASS at `12e3097` (105 dist files, only `zod` + `@earendil-works/pi-mcp`); packaging metadata untouched since the 0.0.2 measurement at `8baae35`, so the tarball figures stand: **428 files / 1.66 MB packed / 6.77 MB unpacked**. `docs/release.md` now carries those figures (`2b7acdf`) — the old L157 drift (368 / 1.28 MB / 5.17 MB) is closed. Tarball-smoke and `pack:check` were not re-run for this batch |
 | Live serve | **running with an empty store** after the 2026-11-25 incident (below): `127.0.0.1:8600`, PID **171960**, `node dist/cli.js serve --sessions-dir sessions` from `packages/harness`; `GET /` 200 (2 728-byte index), `/api/sessions` 200 `[]`. The previous checkpoint's two preserved sessions are **lost** (gitignored store, no backup — see "Known loss") |
-| Provider keys | re-entered by the owner after the 2026-11-14 incident; closed |
+| Provider keys | **NOT set** — the 2026-11-25 incident destroyed the sealed store (`sessions/settings.json`), so the owner must re-enter provider keys and role settings before the live app is usable (`:8600` serves an empty store). See "Known loss" |
 
 ## Shipped since the last checkpoint (`b1fc2c5` → `12e3097`, 16 commits)
 
@@ -170,8 +173,10 @@ checkout and the gitignored `packages/harness/sessions` store. The tracked
 files were restored from `HEAD` and the tree is content-clean; the **session
 store is gone — no backup was found**, so the two sessions the previous
 checkpoint preserved (`2026-11-14T16-33-32-134-4176c1`,
-`2026-11-14T16-39-48-429-066581`) are lost. The live server now runs with an
-empty store. Do not claim those sessions exist.
+`2026-11-14T16-39-48-429-066581`) are lost. The sealed
+`sessions/settings.json` key/settings store went with it, so provider keys
+and role settings are **not configured**; the live server runs with an empty
+store. Do not claim those sessions or keys exist.
 
 ### Unmerged worktrees awaiting the owner's decision (do not remove)
 
@@ -268,14 +273,16 @@ third sibling not on the backlog).
 ## Handoff checklist
 
 - [ ] Read `AGENTS.md`, `docs/backlog.md`, this file, and `todo.md`.
-- [ ] Confirm `git status` clean and `git log -1` is this docs checkpoint
-      (parent `12e3097`).
+- [ ] Confirm `git status` clean and `git log -1` is a docs checkpoint
+      commit whose parent chain includes `12e3097`.
 - [ ] Check the background-task panel for running gates/lanes (stale-serve
       writer-lock gotcha).
 - [ ] Run package + web tests and the smoke gate on the merged tree.
 - [ ] Live serve: the `:8600` instance runs from `packages/harness` with an
       **empty** session store (see "Known loss"); rebuild + `sync-web` +
       restart if product bytes change again.
+- [ ] Provider keys/role settings are **not configured** after the
+      2026-11-25 loss — the owner re-enters them before using the live app.
 - [ ] Keep `research/`, sessions, credentials, logs out of git (this file +
       `todo.md` are the tracked checkpoint exception).
 - [ ] No publish/tag/version bump without explicit owner permission.
