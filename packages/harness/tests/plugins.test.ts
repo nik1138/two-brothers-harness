@@ -606,9 +606,43 @@ test("a plugin whose register never settles is skipped after the deadline", asyn
     "good.ts": GOOD_PLUGIN,
   });
   const tmp = tmpdir("tb-ws-");
+  // Capture the deadline timers this test's load arms, to pin the property the
+  // Node-22 regression needs: ref'd while pending (an unref'd deadline lets
+  // the loop drain before it fires) and cleared on both outcomes.
+  const timerMs = 100;
+  const createdTimers = new Set<ReturnType<typeof setTimeout>>();
+  const clearedTimers = new Set<ReturnType<typeof setTimeout>>();
+  const refWhilePending = new Map<ReturnType<typeof setTimeout>, boolean>();
+  const originalSet = globalThis.setTimeout;
+  const originalClear = globalThis.clearTimeout;
+  globalThis.setTimeout = ((
+    callback: (...args: unknown[]) => void,
+    ms?: number,
+    ...args: unknown[]
+  ) => {
+    const timer = originalSet(callback as never, ms, ...(args as never[]));
+    if (ms === timerMs) {
+      createdTimers.add(timer);
+      // Runs after the deadline's `setTimeout` returns — i.e. after the code
+      // under test would have called `unref` — but while the timer is pending.
+      queueMicrotask(() => refWhilePending.set(timer, timer.hasRef()));
+    }
+    return timer;
+  }) as unknown as typeof setTimeout;
+  globalThis.clearTimeout = ((timer: ReturnType<typeof setTimeout>) => {
+    if (createdTimers.has(timer)) clearedTimers.add(timer);
+    originalClear(timer);
+  }) as unknown as typeof clearTimeout;
   try {
     // A small deadline override keeps the case fast and hermetic.
-    const manager = await PluginManager.create(dir.root, [], { registerTimeoutMs: 100 });
+    const manager = await PluginManager.create(dir.root, [], { registerTimeoutMs: timerMs });
+    // One deadline per registration in the load: "good" and "rehang" return
+    // promptly (fast path), "hung" never settles (deadline path). Every timer
+    // was ref'd while pending and is cleared on its outcome.
+    assert.equal(createdTimers.size, 3);
+    assert.equal(clearedTimers.size, 3);
+    assert.equal(refWhilePending.size, 3);
+    assert.deepEqual([...refWhilePending.values()], [true, true, true]);
     // The plugin that hangs at load fails soft exactly like a thrown one.
     assert.deepEqual([...manager.plugins.keys()], ["good", "rehang"]);
     assert.equal(manager.errors.length, 1);
@@ -629,6 +663,8 @@ test("a plugin whose register never settles is skipped after the deadline", asyn
     assert.equal(hungNotes.length, 1);
     assert.match(hungNotes[0].message, /timed out after 100 ms/);
   } finally {
+    globalThis.setTimeout = originalSet;
+    globalThis.clearTimeout = originalClear;
     dir.cleanup();
     tmp.cleanup();
   }

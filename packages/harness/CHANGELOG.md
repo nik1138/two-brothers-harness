@@ -234,6 +234,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Plugin deadline timers stay ref'd while pending (Node 22):** the plugin
+  `register(ctx)` deadline timer introduced with the lifecycle hardening was
+  `unref`'d, so on Node 22 a plugin whose `register()` returns a promise that
+  never settles let the event loop drain before the deadline fired whenever no
+  other ref'd handle existed. The hang was then never reported and `node:test`
+  cancelled the remaining tests (1863 cancelled in the full suite); Node 24
+  masked it. A deadline timer is the only thing that can settle a hanging
+  promise, so it must keep the loop alive: the timer now stays REF'd while
+  pending, and `clearTimeout` in `finally` still clears it on every outcome, so
+  a normal load leaves no live handle behind. This is the class the repo fixed
+  twice before (`e51c54f`, `1079917` — keep such timers ref'd). Tests:
+  `tests/plugins.test.ts`.
 - **TUI transcript memoization is no longer defeated while a tool row is
   expanded:** `withToolExpansion` (`src/tui/transcript.ts`) now memoizes its
   derivation on the source `blocks` array identity plus the expansion key-set
@@ -286,7 +298,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tests) on both the load path and the per-run binding, so a registration that
   never settles is skipped fail-soft with a `registration timed out after … ms`
   error/diagnostic instead of blocking run admission or the server; the timer
-  is unref'd and cleared, and a late registration's context is discarded.
+  stays ref'd while pending and is cleared on every outcome, so a normal load
+  leaves no live handle behind, and a late registration's context is discarded.
   `GET /api/mcp` reads the selected plugins' load-time declarations through
   `PluginManager.mcpServerDeclarations()` instead of re-executing `register`
   per status poll (an additive `diagnostics` list only when non-empty; the

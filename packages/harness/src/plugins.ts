@@ -872,12 +872,18 @@ function registrationDeadlineMs(value: number | undefined): number {
 /**
  * Await one plugin `register(ctx)` under the wall-clock deadline above.
  *
- * The timer is `unref`'d and cleared on both outcomes, so a registration that
- * returns promptly leaves no live handle behind. A registration that settles
- * (or rejects) after the deadline has its result discarded: the race already
- * attached handlers to the plugin promise, so a late rejection is never an
- * unhandled rejection, and the caller drops the local `ctx` — nothing the
- * late call registers can reach the manager.
+ * The timer stays REF'd while pending: a deadline timer is the only thing that
+ * can settle a hanging promise, so it must keep the event loop alive until it
+ * fires. `unref` would let Node 22 drain the loop when a plugin's `register()`
+ * returns a promise that never settles and no other ref'd handle exists, so
+ * the deadline would never fire (and `node:test` would cancel the remaining
+ * tests). The repo fixed this timer class twice before (`e51c54f`, `1079917` —
+ * keep such timers ref'd). `clearTimeout` in `finally` keeps the fast path
+ * hygienic: a registration that returns promptly leaves no live handle behind.
+ * A registration that settles (or rejects) after the deadline has its result
+ * discarded: the race already attached handlers to the plugin promise, so a
+ * late rejection is never an unhandled rejection, and the caller drops the
+ * local `ctx` — nothing the late call registers can reach the manager.
  */
 async function registerWithDeadline(
   register: (ctx: PluginContext) => unknown,
@@ -889,7 +895,9 @@ async function registerWithDeadline(
     timer = setTimeout(() => {
       reject(new PluginError(`registration timed out after ${timeoutMs} ms`));
     }, timeoutMs);
-    timer.unref?.();
+    // Deliberately REF'd: this timer is the only thing that can settle a
+    // hanging `register()`, so it must keep the event loop alive (Node 22
+    // drains the loop before an unref'd deadline fires). Cleared in `finally`.
   });
   try {
     await Promise.race([Promise.resolve(register(ctx)), deadline]);
