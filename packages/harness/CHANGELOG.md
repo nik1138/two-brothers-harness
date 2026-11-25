@@ -2691,6 +2691,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `reviewDegraded` on the `--stream` `result` record — both omitted when clean.
   No protocol envelope, schema or session-format change; no new runtime
   dependencies. Tests: `tests/reviewdegraded.test.ts`.
+- **Fresh tasks are no longer swallowed by the same-task dedupe:**
+  `harness.run` dropped a submitted task whenever an identical `user`/`message`
+  envelope already existed anywhere in the context, so an operator repeating a
+  prompt (including a second identical `serve` submission) silently got no new
+  turn. The new additive `HarnessOptions.dedupeInitialTask` (default `false`)
+  makes `run` always append the task envelope; `true` keeps the historical
+  check and is wired only where the context already legitimately carries the
+  task — `run`/`chat` on `--resume` (the loaded session) and the TUI's
+  attachment pre-append path. `serve` keeps the default, so a repeated prompt
+  creates a real new envelope, and `renderTranscript`'s `[[TASK]]` marker still
+  wraps the first user message. Tests: `tests/graph.test.ts`,
+  `tests/session.test.ts`.
 
 ## [0.0.1] — 2026-11-04
 

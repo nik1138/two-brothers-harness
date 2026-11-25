@@ -11,12 +11,19 @@ import { test } from "node:test";
 
 import { resolveConfig } from "../src/config.ts";
 import { SharedContext } from "../src/context.ts";
+import { main, type CliIO } from "../src/cli.ts";
 import { TwoBrothersHarness } from "../src/harness.ts";
 import { restoreContext, restoreContextResult, SessionError, SessionStore } from "../src/session.ts";
 import { createMessage } from "../src/protocol.ts";
 
 function tmpdir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "two-brothers-session-"));
+}
+
+function cliIO(): CliIO & { out: string[]; err: string[] } {
+  const out: string[] = [];
+  const err: string[] = [];
+  return { out, err, log: (line) => out.push(line), error: (line) => err.push(line) };
 }
 
 function mockHarness() {
@@ -92,6 +99,56 @@ test("resume continues the cooperation loop with dense seq numbering", async () 
       ["message", "consult", "proposal", "review", "decision"],
     );
     assert.equal(store.load().length, 10);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("CLI --resume does not duplicate an identical task (fresh runs append)", async () => {
+  const dir = tmpdir();
+  try {
+    const file = path.join(dir, "resume.jsonl");
+    const task = "Name one benefit of code review";
+
+    const firstIo = cliIO();
+    assert.equal(
+      await main(["run", task, "--provider", "mock", "--session-file", file], firstIo),
+      0,
+      firstIo.err.join("\n"),
+    );
+    assert.deepEqual(new SessionStore(file).load().map((event) => event.seq), [1, 2, 3, 4, 5]);
+
+    // The resumed session already carries the task envelope: re-submitting the
+    // identical task continues the cycle without appending it again.
+    const secondIo = cliIO();
+    assert.equal(
+      await main(
+        ["run", task, "--provider", "mock", "--session-file", file, "--resume"],
+        secondIo,
+      ),
+      0,
+      secondIo.err.join("\n"),
+    );
+    const resumed = new SessionStore(file).load();
+    assert.equal(resumed.length, 9, "the resumed run appends 4 envelopes, not 5");
+    assert.deepEqual(
+      resumed.map((event) => event.seq),
+      [1, 2, 3, 4, 5, 6, 7, 8, 9],
+    );
+    const taskEnvelopes = resumed.filter(
+      (event) =>
+        event.from === "user" && event.kind === "message" && event.payload.text === task,
+    );
+    assert.equal(taskEnvelopes.length, 1, "the resumed task is not appended twice");
+    assert.deepEqual(
+      resumed.slice(5).map((event) => event.kind),
+      ["consult", "proposal", "review", "decision"],
+    );
+
+    // The rendered transcript keeps one [[TASK]] marker around the first task.
+    const transcript = restoreContext(new SessionStore(file)).renderTranscript();
+    assert.equal(transcript.match(/\[\[TASK\]\]/g)?.length, 1);
+    assert.ok(transcript.startsWith(`[[TASK]]\n${task}\n[[/TASK]]\n\nContext events:`));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

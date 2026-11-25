@@ -1570,6 +1570,13 @@ flushed immediately, so a crash loses at most the final, partially written line
 - `--resume` (env `TWO_BROTHERS_RESUME`, boolean) rebuilds the shared context
   from the file; `seq` numbering continues densely. With a missing file, a
   fresh session starts with a `[warn]`.
+- A submitted task is a real turn: `run` (and every `chat` REPL task) appends
+  its task envelope even when an identical user message already exists in the
+  context, so repeating a prompt is never swallowed. The same-task dedupe is
+  kept only for `--resume` (the loaded session already carries its task
+  envelopes, so re-submitting the identical task continues the cycle instead
+  of appending it twice); `serve` never pre-appends the task, so a repeated
+  prompt over the API always creates a new envelope.
 - `chat`: one shared context across all REPL tasks, persisted; with `--resume`
   it continues a previous session.
 - (TS package) `--compact` / `--compact-threshold <chars>` (env

@@ -1140,6 +1140,19 @@ export interface HarnessOptions {
   /** Overrides `cfg.maxRounds` for this harness instance. */
   maxRounds?: number;
   /**
+   * Resume-only task-envelope dedupe (default `false`). When `false`, `run`
+   * always appends the submitted task as the opening `user`/`message`
+   * envelope, so a repeated prompt is a real new turn even when an identical
+   * user message already exists anywhere in the context. `true` restores the
+   * historical check (skip the append when an identical `user`/`message`
+   * envelope already exists) and belongs only to callers whose context already
+   * legitimately carries the task: `run`/`chat` on `--resume` (the session
+   * file was loaded) and the TUI's attachment pre-append path (it appends the
+   * task itself). Never wire it on `serve`: the server deliberately does not
+   * pre-append the task, so a repeated prompt must create a new envelope.
+   */
+  dedupeInitialTask?: boolean;
+  /**
    * Plugin lifecycle hooks (`plugins.ts`): `session_start` / `session_end`
    * around the run and `before_tool_call` / `after_tool_call` around every
    * tool execution. Dispatch is fail-soft (a throwing handler is recorded on
@@ -4688,7 +4701,12 @@ export class TwoBrothersHarness {
         session_id: sessionId,
         workspace: this.options.workspace?.root ?? null,
       });
+      // A submitted task is a fresh turn by default: append it even when an
+      // identical user message already exists (the operator may repeat a
+      // prompt). Only the resume/pre-appended paths opt into the historical
+      // same-task check (`dedupeInitialTask`) so they never append twice.
       if (
+        this.options.dedupeInitialTask !== true ||
         !ctx.events.some(
           (e) =>
             e.from === "user" && e.kind === "message" && String(e.payload.text ?? "") === task,

@@ -294,7 +294,10 @@ test("fail-soft: a summarizer error keeps the full context and warns once", asyn
   assert.ok(result.warnings[0]!.includes("context compaction failed"));
   assert.ok(result.warnings[0]!.includes("summarizer endpoint down"));
   assert.deepEqual(ctx.events.slice(0, original.length), original);
-  assert.equal(ctx.events.length, original.length + 4); // consult, proposal, review, decision
+  // The run now appends its own task envelope: task + consult + proposal +
+  // review + decision (the fixture's existing "trigger" message no longer
+  // suppresses it).
+  assert.equal(ctx.events.length, original.length + 5);
   assert.equal(ctx.events.filter(isCompactionSummary).length, 0);
   // the failing summarizer is not hammered again later in the run
   assert.equal(compactionRequests(senior).length, 1);

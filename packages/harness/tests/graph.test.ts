@@ -6,6 +6,7 @@
  * (or node --test tests/)
  */
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -30,8 +31,10 @@ import {
   type ToolChatResponse,
   type UsageTotals,
 } from "../src/provider.ts";
-import { SessionStore } from "../src/session.ts";
+import { restoreContext, SessionStore } from "../src/session.ts";
 import { TODO_TOOL_NAME } from "../src/todos.ts";
+import { runTuiApp } from "../src/tui/app.ts";
+import { stripAnsi } from "../src/tui/screen.ts";
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -172,16 +175,192 @@ test("continuing a context keeps seq dense (resume)", async () => {
   assert.equal(second.context.events[5].payload.text, "task two");
 });
 
-test("a resumed context is never re-appended (same-task dedup)", async () => {
+test("a repeated prompt is a fresh turn: the default appends a second task envelope", async () => {
   const harness = new TwoBrothersHarness(cfg({ mode: "consult" }));
   const ctx = new SharedContext();
   await harness.run("same task", ctx);
+  const second = await harness.run("same task", ctx);
+  // Two independent submissions of the same prompt: 5 + 5 envelopes, dense seq.
+  assert.equal(ctx.events.length, 10, "the second run appends its own task envelope");
+  assert.deepEqual(
+    ctx.events.map((e) => e.seq),
+    Array.from({ length: 10 }, (_, i) => i + 1),
+  );
+  const userMessages = ctx.events.filter((e) => e.from === "user" && e.kind === "message");
+  assert.equal(userMessages.length, 2, "the identical prompt appears twice");
+  assert.equal(second.messages[0]?.payload.text, "same task");
+  assert.deepEqual(
+    second.messages.map((m) => m.kind),
+    ["message", "consult", "proposal", "review", "decision"],
+  );
+  // renderTranscript keeps its contract: the FIRST user message is the task
+  // marker, the repeated message stays an ordinary context event.
+  const transcript = ctx.renderTranscript();
+  assert.equal(transcript.match(/\[\[TASK\]\]/g)?.length, 1, "one [[TASK]] marker");
+  assert.equal(transcript.match(/\[\[\/TASK\]\]/g)?.length, 1, "one [[/TASK]] marker");
+  assert.ok(
+    transcript.startsWith("[[TASK]]\nsame task\n[[/TASK]]\n\nContext events:"),
+    "the first user message is the task block",
+  );
+});
+
+test("dedupeInitialTask keeps the resume behavior: an identical task is not re-appended", async () => {
+  const harness = new TwoBrothersHarness(cfg({ mode: "consult" }), {
+    dedupeInitialTask: true,
+  });
+  const ctx = new SharedContext();
   await harness.run("same task", ctx);
-  assert.equal(ctx.events.length, 9, "second run reuses the existing user message");
+  const second = await harness.run("same task", ctx);
+  assert.equal(ctx.events.length, 9, "the second run reuses the existing task envelope");
   assert.deepEqual(
     ctx.events.map((e) => e.seq),
     Array.from({ length: 9 }, (_, i) => i + 1),
   );
+  assert.equal(second.messages.length, 4, "no second task envelope");
+  assert.deepEqual(
+    second.messages.map((m) => m.kind),
+    ["consult", "proposal", "review", "decision"],
+  );
+  assert.equal(second.messages[0]?.seq, 6);
+  assert.equal(
+    ctx.events.filter((e) => e.from === "user" && e.kind === "message").length,
+    1,
+  );
+  const transcript = ctx.renderTranscript();
+  assert.equal(transcript.match(/\[\[TASK\]\]/g)?.length, 1, "one [[TASK]] marker");
+  assert.ok(transcript.startsWith("[[TASK]]\nsame task\n[[/TASK]]\n\nContext events:"));
+});
+
+// ---------------------------------------------------------------------------
+// TUI attachment pre-append (the app appends the task itself)
+// ---------------------------------------------------------------------------
+
+class FakeTuiInput extends EventEmitter {
+  isTTY = true;
+  setRawMode(): void {}
+  resume(): void {}
+  pause(): void {}
+  setEncoding(): void {}
+  unref(): void {}
+
+  type(text: string): void {
+    for (const char of text) {
+      this.emit("keypress", char, {
+        name: char,
+        ctrl: false,
+        shift: char !== char.toLowerCase(),
+      });
+    }
+  }
+
+  key(name: string): void {
+    this.emit("keypress", "", { name, ctrl: false, shift: false });
+  }
+
+  enter(): void {
+    this.emit("keypress", "\r", { name: "return", ctrl: false, shift: false });
+  }
+}
+
+class FakeTuiOutput extends EventEmitter {
+  isTTY = true;
+  columns = 80;
+  rows = 24;
+  data = "";
+
+  write(chunk: string): boolean {
+    this.data += chunk;
+    return true;
+  }
+}
+
+const tuiText = (output: FakeTuiOutput): string => stripAnsi(output.data);
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 10_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return predicate();
+}
+
+test("TUI attachment path appends exactly one task envelope and one [[TASK]] marker", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tb-task-dedupe-tui-"));
+  const sessionFile = path.join(root, "session.jsonl");
+  const skillsRoot = path.join(root, "skills");
+  fs.mkdirSync(path.join(skillsRoot, "checklist"), { recursive: true });
+  fs.writeFileSync(
+    path.join(skillsRoot, "checklist", "SKILL.md"),
+    [
+      "---",
+      "name: checklist",
+      "description: Check the tests first",
+      "scope: shared",
+      "---",
+      "",
+      "Always check the tests first.",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const input = new FakeTuiInput();
+  const output = new FakeTuiOutput();
+  // Injected streams keep the app away from the host home directory (no
+  // history file, no real TTY); the session file is the evidence.
+  const app = runTuiApp({
+    cfg: resolveConfig({ provider: "mock", sessionFile }),
+    io: { log: () => {}, error: () => {} },
+    input: input as unknown as NodeJS.ReadStream,
+    output: output as unknown as NodeJS.WriteStream,
+    pluginsDir: path.join(root, "plugins"),
+    sessionsDir: path.join(root, "sessions"),
+    skillsRoots: [skillsRoot],
+  });
+  try {
+    assert.ok(await waitUntil(() => tuiText(output).includes("Two Brothers")));
+    const task = "@skill:checklist please verify";
+    input.type(task);
+    input.enter();
+    assert.ok(await waitUntil(() => tuiText(output).includes("decision:"), 30_000));
+    assert.ok(await waitUntil(() => tuiText(output).includes("turn completed")));
+    const restored = restoreContext(new SessionStore(sessionFile));
+    const taskEnvelopes = restored.events.filter(
+      (event) => event.from === "user" && event.kind === "message" && event.payload.text === task,
+    );
+    assert.equal(taskEnvelopes.length, 1, "exactly one task envelope (no duplicate)");
+    // Pre-append order: task first, then the canonical skill block.
+    assert.equal(restored.events[0]?.payload.text, task);
+    assert.ok(String(restored.events[1]?.payload.text ?? "").includes("<skill-loaded"));
+    const transcript = restored.renderTranscript();
+    assert.equal(transcript.match(/\[\[TASK\]\]/g)?.length, 1, "one [[TASK]] marker");
+    assert.ok(
+      transcript.startsWith(`[[TASK]]\n${task}\n[[/TASK]]\n\nContext events:`),
+      "the pre-appended task is the rendered [[TASK]] block",
+    );
+  } finally {
+    let settled = false;
+    for (let press = 0; press < 8; press += 1) {
+      input.key("escape");
+      settled = await Promise.race([
+        app.then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 200)),
+      ]);
+      if (settled) break;
+    }
+    if (!settled) {
+      const code = await Promise.race([
+        app,
+        new Promise<number>((resolve) => {
+          // Only the hang fallback arms a timer; it is unref'd so it can never
+          // keep the test process alive.
+          setTimeout(() => resolve(-1), 10_000).unref();
+        }),
+      ]);
+      assert.equal(code, 0, "the TUI did not exit after repeated Escape");
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------

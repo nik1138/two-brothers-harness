@@ -1297,6 +1297,14 @@ interface TurnSetup {
    */
   spillRoot?: string;
   streamTokens?: boolean;
+  /**
+   * The attachment pre-append path (`executeTurn` appends the task envelope
+   * itself so `[[TASK]]` ordering stays first): the harness must not append it
+   * again, so the run keeps the historical identical-task check. A fresh
+   * submission without attachments leaves this unset, and the harness appends
+   * (a repeated TUI prompt is a real new turn).
+   */
+  dedupeInitialTask?: boolean;
   signal?: AbortSignal;
   /**
    * Mid-run operator steering (`HarnessOptions.steering`): the per-turn queue's
@@ -1427,6 +1435,7 @@ async function buildTurnHarness(setup: TurnSetup): Promise<TurnHarness> {
     ...(setup.onRuntimeEvent !== undefined ? { onEvent: setup.onRuntimeEvent } : {}),
     onStreamEvent: setup.onStreamEvent,
     ...(setup.streamTokens === true ? { streamTokens: true } : {}),
+    ...(setup.dedupeInitialTask === true ? { dedupeInitialTask: true } : {}),
     ...(setup.signal !== undefined ? { signal: setup.signal } : {}),
     ...(setup.providers?.senior !== undefined ? { senior: setup.providers.senior } : {}),
     ...(setup.providers?.junior !== undefined ? { junior: setup.providers.junior } : {}),
@@ -3234,12 +3243,13 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
     turnAbort = controller;
     // Attach the validated mention blocks to the shared context BEFORE the run.
     // The operator task is appended first so `renderTranscript`'s [[TASK]]
-    // extraction is unchanged; `harness.run` sees the task already present and
-    // does not append a duplicate. Skills come first, then files (the server
-    // order), and identical blocks are never re-attached, so a retry does not
-    // grow the context.
+    // extraction is unchanged; the turn's harness is built with
+    // `dedupeInitialTask` so `harness.run` does not append a duplicate. Skills
+    // come first, then files (the server order), and identical blocks are
+    // never re-attached, so a retry does not grow the context.
     const fileAttachmentPlan = fileAttachment;
-    if (attachment.plan.blocks.length > 0 || fileAttachmentPlan !== null) {
+    const preAppendedTask = attachment.plan.blocks.length > 0 || fileAttachmentPlan !== null;
+    if (preAppendedTask) {
       try {
         const hasMessage = (text: string): boolean =>
           context.events.some(
@@ -3443,6 +3453,7 @@ async function runTuiAppInner(options: TuiAppOptions): Promise<number> {
           ...(options.mcpConfig !== undefined ? { mcpConfig: options.mcpConfig } : {}),
           spillRoot: path.join(sessionsDir, "spill"),
           ...(options.streamTokens === true ? { streamTokens: true } : {}),
+          ...(preAppendedTask ? { dedupeInitialTask: true } : {}),
           ...(turnWorkspace !== undefined ? { workspace: turnWorkspace } : {}),
           ...(options.providerOverrides !== undefined
             ? { providers: options.providerOverrides }

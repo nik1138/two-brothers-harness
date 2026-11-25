@@ -1334,6 +1334,13 @@ export interface RunOnceOptions {
    * when the turn settles.
    */
   cancelEmitter?: TurnSignalEmitter;
+  /**
+   * `--resume` only: the context was loaded from the session file, so an
+   * identical re-submitted task is not appended a second time. A fresh
+   * `run`/chat turn leaves this unset and appends (a repeated prompt is a
+   * real new turn).
+   */
+  dedupeInitialTask?: boolean;
 }
 
 async function runOnce(
@@ -1502,6 +1509,7 @@ async function runOnce(
       ...native,
       ...(compaction ? { compaction } : {}),
       ...(repeatToolGuard !== undefined ? { repeatToolGuard } : {}),
+      ...(options.dedupeInitialTask === true ? { dedupeInitialTask: true } : {}),
       ...(spillRoot ? { spill: { root: spillRoot } } : {}),
       ...(bindings ? { hooks: bindings.hooks } : {}),
       ...(resources?.skills ? { skills: resources.skills } : {}),
@@ -2103,6 +2111,11 @@ async function doRun(
   try {
     const context = openSession(cfg, io);
     const resources = await loadRunResources(cfg, values, io);
+    // `--resume` restored the session context and its task envelopes, so the
+    // historical same-task dedupe stays for this run. A fresh run (no resume,
+    // or a resume that found no file) leaves the harness default: the task is
+    // always appended, so a repeated prompt is a real new turn.
+    const resumed = cfg.resume === true && context.events.length > 0;
     return await runOnce(cfg, resolved.task, io, context, {
       ...(mcpConfig !== undefined ? { mcpConfig } : {}),
       outputMode: resolveOutputMode(values, cfg.jsonOut),
@@ -2111,6 +2124,7 @@ async function doRun(
       streamTokens,
       style,
       live: liveFlag(values),
+      ...(resumed ? { dedupeInitialTask: true } : {}),
     });
   } catch (exc) {
     if (exc instanceof SessionError) {
@@ -2271,6 +2285,11 @@ async function doChat(
     }
     throw exc;
   }
+  // A resumed REPL's first turn continues a context that already carries the
+  // session's task envelopes, so an identical task is not appended twice.
+  // Every later REPL turn is a fresh submission: it appends (harness default),
+  // so an operator repeating a prompt still gets a real new turn.
+  let resumeDedupePending = cfg.resume === true && context.events.length > 0;
   // Plugins + skills load once per REPL process; every turn reuses them.
   const resources = await loadRunResources(cfg, values, io);
   // `--mcp-config` > `TWO_BROTHERS_MCP_CONFIG`, resolved once per REPL process
@@ -2547,7 +2566,9 @@ async function doChat(
           live,
           cancelEmitter: rl,
           ...(discovered.mode ? { mode: discovered.mode } : {}),
+          ...(resumeDedupePending ? { dedupeInitialTask: true } : {}),
         });
+        resumeDedupePending = false;
         const stop = replTurnStop(turnCode);
         if (stop !== null) return stop;
         if (!machineOutput) io.log("");
@@ -2580,7 +2601,9 @@ async function doChat(
               live,
               cancelEmitter: rl,
               ...(base.mode ? { mode: base.mode } : {}),
+              ...(resumeDedupePending ? { dedupeInitialTask: true } : {}),
             });
+            resumeDedupePending = false;
             const stop = replTurnStop(turnCode);
             if (stop !== null) return stop;
             if (!machineOutput) io.log("");
@@ -2601,7 +2624,9 @@ async function doChat(
       live,
       cancelEmitter: rl,
       mode: replMode,
+      ...(resumeDedupePending ? { dedupeInitialTask: true } : {}),
     });
+    resumeDedupePending = false;
     const stop = replTurnStop(turnCode);
     if (stop !== null) return stop;
     if (!machineOutput) io.log("");
