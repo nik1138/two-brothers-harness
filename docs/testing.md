@@ -40,10 +40,10 @@ The script runs:
 11. the `web/` build
 
 Expected final line: `SMOKE TEST: PASS`. It is an offline pre-flight, not the
-whole product gate — run the package gates below for that. On the final
-validation run (commit `9f353c4`) the smoke gate passed with the package
-suite at 2 488 tests (2 480 pass, 0 fail, 8 skips), fault injection 7/7 and
-the hermetic server suites 4/4.
+whole product gate — run the package gates below for that. On the latest
+recorded validation run (commit `9f353c4`) the smoke gate passed with the
+package suite at 2 488 tests (2 480 pass, 0 fail, 8 skips), fault injection
+7/7 and the hermetic server suites 4/4.
 
 Stop a local `serve`/web backend that uses `packages/harness/sessions` before
 running the gate: the TUI tests take the same single-writer lock, and a live

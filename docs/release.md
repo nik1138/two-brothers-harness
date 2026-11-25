@@ -54,7 +54,7 @@ workaround to their web-build stages only).
    lane must report its command, count and PASS; one FAIL blocks publishing.
    The rehearsal above is the single-machine counterpart, not a replacement.
 
-   Final gate evidence, validated at commit `3fe647f` on Windows: package
+   Latest recorded gate evidence at `3fe647f` on Windows: package
    suite **2 483 tests — 2 475 pass, 0 fail, 8 skips** in both `npm test` and
    `npm run test:spawn`; web suite **642/642**; hermetic CLI E2E **19/19** on
    sources and **19/19** on `dist`; browser matrix **39 PASS / 0 FAIL / 1
@@ -96,7 +96,7 @@ workaround to their web-build stages only).
      workflow runs direct `npm publish`, so stage-only is not enough.
      Optionally enable **npm dist-tag** if the workflow should promote tags.
      The package `repository.url` must match this GitHub repository exactly
-     (it does in 0.0.1).
+     (it does).
 
    CLI equivalent (needs account-level 2FA; npm prompts for an OTP or opens a
    browser authentication URL):
@@ -144,7 +144,7 @@ two-brothers run "Plan a migration from Redis to Valkey" --provider mock
 two-brothers serve --port 8600   # http://127.0.0.1:8600 serves the packaged web UI
 ```
 
-Expected: `--version` prints `0.0.1`; the mock run prints a decision with the
+Expected: `--version` prints `0.0.2`; the mock run prints a decision with the
 compact `tokens … in / … out` usage footer and exits 0; `serve` serves the
 built Vue workspace from the tarball (no separate frontend build).
 
@@ -154,11 +154,12 @@ The package keeps its tsc source maps (`dist/*.js.map` and the declaration
 maps): `sourceMap`/`declarationMap` are on in
 `packages/harness/tsconfig.build.json`, and every `dist/*.js` already carries a
 `sourceMappingURL`, so dropping the maps would leave dead links and a stack
-trace that points into nowhere. Measured on the final package: **368 files,
-1.28 MB packed / 5.17 MB unpacked**, of which **180 `.map` files are 1.60 MB
-unpacked (30.9%)** — a small packed cost because maps compress well. That is
-the deliberate trade: an npm-installed user, or a crash report from their
-machine, gets a stack trace that resolves back to the TypeScript sources.
+trace that points into nowhere. Measured on the 0.0.2 package: **428 files,
+1.66 MB packed / 6.77 MB unpacked**, of which **210 `.map` files are 2.01 MiB
+— 31.2% of the unpacked size** — a small packed cost because maps compress
+well. That is the deliberate trade: an npm-installed user, or a crash report
+from their machine, gets a stack trace that resolves back to the TypeScript
+sources.
 
 ## After publishing 0.0.1 (docs, immediately)
 
