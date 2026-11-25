@@ -308,7 +308,7 @@ export const FLAGS: Record<string, FlagHelp> = {
     value: "<dir>",
     description:
       "bind a tui run to one confined workspace: workspace tools for the junior, " +
-      "read-only verification for the senior, and an approval panel for writes/shell " +
+      "the verification slice for the senior, and an approval panel for writes/shell " +
       "(tui only)",
   },
   "keys-file": {
@@ -696,7 +696,7 @@ defineCommand({
     '"two-brothers" in an interactive terminal opens this TUI; a piped stdin is ' +
     "refused with exit 2 (use chat for scripts). With --workspace <dir> every turn " +
     "is bound to that confined workspace: the junior gets the workspace_* tool " +
-    "belt, the senior the read-only verify slice, writes/edits/deletes/shell park " +
+    "belt, the senior the verification slice, writes/edits/deletes/shell park " +
     "the run on an approval panel (1/Y allow once, 2/A allow for this TUI session, " +
     "3/N/Esc deny, Ctrl+E preview), and composer @path mentions attach workspace " +
     "files read read-only. The workspace approval policy is the saved " +
