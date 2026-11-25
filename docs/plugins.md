@@ -235,11 +235,12 @@ active-plugin list:
   does the same through `mergePluginScopes`. `toolsFor()` remains the flat
   compatibility view (every tool, regardless of scope).
 - **Senior plugins and mutation.** The Senior's built-in workspace tools are
-  still filtered to the read-only verify slice (`SENIOR_VERIFY_TOOL_NAMES`),
+  still filtered to the verification slice (`SENIOR_VERIFY_TOOL_NAMES`),
   but scoped/shared *plugin* tools join unfiltered — an operator-installed
-  plugin tool may mutate from either role; it still runs through the
-  `PermissionManager` broker, so the operator approves every write
-  (deny-on-stop applies).
+  plugin tool may mutate from either role. Writes that go through the
+  plugin's `ctx.workspace_*` bridge still pass through the `PermissionManager`
+  broker (deny-on-stop applies); a plugin's own side effects outside that
+  bridge are not brokered (see Confinement and permissions).
 
 ## Hooks
 

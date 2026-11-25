@@ -88,7 +88,7 @@ non-blocking turns. Piped no-arg invocations print the usage screen instead;
 `chat` stays the plain REPL for scripts.
 
 `tui --workspace <dir>` binds every turn to one confined root: the junior gets
-the `workspace_*` tool belt and the senior the read-only verify slice, writes/
+the `workspace_*` tool belt and the senior the verification slice, writes/
 edits/deletes/shell park the run on a docked approval panel (`1`/`y` allow
 once, `2`/`a` allow for this TUI process only, `3`/`n`/`Esc` deny,
 `Ctrl+E` full-screen diff/command preview; stopping denies everything
@@ -198,13 +198,14 @@ the original and its sidecar stay byte-identical.
   bounded transcript persists under `<sessions>/subagents/`, and the web
   workspace and the TUI (`Ctrl+Y` / `/agents`) show the live helpers.
 - **Tools for both brothers**: in consult mode the senior's opening, the
-  junior's proposal/revision and the senior's review may call a read-only
-  workspace belt before emitting the structured reply (bounded; the four
-  workspace mutation built-ins are always excluded, while operator-installed
-  MCP/plugin tools stay as their role scopes grant them); tool-less
-  configurations keep the exact pre-tools
+  junior's proposal/revision and the senior's review may call the consult
+  belt before emitting the structured reply (bounded; the four workspace
+  mutation built-ins are always excluded, while operator-installed
+  MCP/plugin tools stay as their role scopes grant them and may mutate
+  through their handlers — approval prompts cover the built-ins, not those
+  tools); tool-less configurations keep the exact pre-tools
   request path, and work mode keeps its mutating junior deliverable loop and
-  the senior's read-only verify slice unchanged.
+  the senior's verification slice unchanged.
 - **Approval modes and guardrails**: Ask (default) / Read only / Edits /
   Allow all as a persisted, operator-selected policy
   (`sessions/settings.json` `approval_policy`, `--approval-mode`/env pins never

@@ -361,7 +361,7 @@ workspace root:
 - The junior's belt gains the confined `workspace_*` tools
   (`workspace_read_file`, `workspace_list_dir`, `workspace_search_text`,
   `workspace_write_file`, `workspace_edit_file`, `workspace_delete_file`,
-  `workspace_run_shell`) and the senior gets the read-only verify slice (plus
+  `workspace_run_shell`) and the senior gets the verification slice (plus
   approval-brokered `run_shell`); plugin bindings see the same workspace.
 - `workspace_read_file` pages a large file by line: `offset` is the 1-based
   first line (default 1), `limit` the page size in lines (default 2 000,
@@ -1308,11 +1308,12 @@ mutations and shell commands pause the run on an
 the session (see the session-scope paragraph above) — unless the effective
 [approval mode](#approval-modes) allows them without asking (or denies them
 outright, as `readonly` does). The
-senior gets read-only workspace checks (plus approval-brokered `run_shell`) to
+senior gets workspace checks (plus approval-brokered `run_shell`) to
 verify the junior's deliverable before reviewing it. In consult mode neither
-role is offered a workspace mutation tool: both may call the read-only
-workspace belt (operator-installed MCP/plugin tools keep their own scopes;
-see [tool use for both brothers](#features-beyond-the-original-prototype)).
+role is offered a built-in workspace mutation tool: both may call the consult
+belt (operator-installed MCP/plugin tools keep their own scopes and may
+mutate through their handlers; see
+[tool use for both brothers](#features-beyond-the-original-prototype)).
 
 Shell and delete approvals carry a fixed, honest `reason`; write and edit
 approvals carry none because their unified diff is the explanation:
@@ -1467,7 +1468,7 @@ per-role connection without leaving the terminal.
 | `--dry-run` | flag | off | (TS package, `run`/`chat`) resolve the run (config with sources, tools, session, compaction, limits) and print the plan; exits 0 with no model calls and no session write. `run --dry-run --json` prints one JSON object. Invalid with `--stream` (usage error, exit 2) |
 | `--task-file` | path | — | (TS package, `run` only) read the task from a file — missing/unreadable/blank exits 2; mutually exclusive with a positional task. `run -` reads the task from stdin instead (bounded to 1 MiB, blank exits 2) |
 | `--commands-dir` | path | — (repeatable) | (TS package) extra slash-command root for the chat REPL and `tui`; defaults are `TWO_BROTHERS_COMMANDS_DIR` (OS path list), then `<cwd>/commands` and `~/.two-brothers/commands` |
-| `--workspace` | dir | — | (TS package, `tui` only) bind every turn to one confined workspace root: `workspace_*` tools for the junior, the read-only verify slice for the senior, the operator approval panel for mutations/shell, and `@path` file mentions. An invalid root exits 2 before the screen opens |
+| `--workspace` | dir | — | (TS package, `tui` only) bind every turn to one confined workspace root: `workspace_*` tools for the junior, the verification slice for the senior, the operator approval panel for mutations/shell, and `@path` file mentions. An invalid root exits 2 before the screen opens |
 | `--sessions-dir` | dir | `sessions` | (TS package, `run`/`chat`/`tui` among run/chat/tui/serve) sessions directory read for the persisted settings store. `run`/`chat`/`tui` resolve the strict opt-in plugin selection from `<dir>/settings.json` (see `--plugins-dir`); the flag does not redirect `--session-file`. For the TUI it also points the session store — session JSONL files, settings and runtime sidecars — and the TUI holds the store's single-writer lock there, so a TUI pointed at its own directory is never blocked by a live `serve` on the default one. The store commands (`serve`, `sessions`, `spill`, `doctor`, `config`, `onboard`) take their own `--sessions-dir` |
 | `--keys-file` | path | `~/.two-brothers/tui-keys.json` | (TS package, `tui` only) user-authored JSON with TUI chord overrides for the rebindable global commands (command palette, shortcut reference, draft stash); a missing file means the defaults, an invalid file prints one diagnostic and falls back to the defaults without touching the screen; env `TWO_BROTHERS_TUI_KEYS_FILE`; never persisted; read at startup and re-read by `/keys reload` (or by `--keys-watch`); the same file is written atomically by the in-TUI editor (`/keys edit`) through the same schema |
 | `--keys-watch` | flag | off | (TS package, `tui` only) keep polling the captured keys file and live-apply valid chord edits through the same validated reload path as `/keys reload`; a valid change swaps the active table and posts one bounded notice naming the new chords, an invalid file keeps the last good chords with one bounded warning per detected change, an absent/unreadable file keeps them with an informational notice. `fs.watchFile` polling (~twice a second, debounced/coalesced); captured at startup, never persisted; `/keys show` reports the watch state (`on`/`off`/`unavailable`); env `TWO_BROTHERS_TUI_KEYS_WATCH=1` |
@@ -1663,13 +1664,14 @@ metadata only at `GET /api/skills`.
 |---|---|
 | `consult` | senior asks for advice → junior `proposal` → `review` → `decision` |
 | `work` | senior delegates (`delegation`) → junior `deliverable` → `review` → `decision` |
-| `auto` | the senior routes the run: one structured pre-decision chooses `solo` (the senior answers alone, read-only), `consult` or `work`; the chosen route and its reason are recorded |
+| `auto` | the senior routes the run: one structured pre-decision chooses `solo` (the senior answers alone on its consult belt), `consult` or `work`; the chosen route and its reason are recorded |
 
 In `auto` mode the senior makes ONE plain routing call before the cycle
 (`{route, reason}`); the harness bounds it (strict schema, one repair re-ask)
 and applies deterministic guardrails: `work` is downgraded to `consult` when
-no workspace is bound, `solo` is always honored (its belt is read-only), and
-an unparseable route fails closed to `consult` with one warning (exit 0). The
+no workspace is bound, `solo` is always honored (its belt is the consult
+belt), and an unparseable route fails closed to `consult` with one warning
+(exit 0). The
 effective route rides a `[[AUTO ROUTE]] <route> — <reason>` message envelope
 in the transcript, an additive `auto_route` runtime event, the `auto_route`
 key of the `--json` object, and the run record's additive `route` /
@@ -2232,7 +2234,7 @@ them):
   (`--live`/`--no-live`; see [Human text output](#human-text-output-ts-package)).
   Machine modes stay byte-identical.
 - **TUI workspace runs and approvals** — `tui --workspace <dir>` gives the TUI
-  the confined workspace tools, the senior's read-only verify slice, a docked
+  the confined workspace tools, the senior's verification slice, a docked
   approval panel for mutations/shell (numbered decisions, `Ctrl+E` preview,
   in-memory session allows) and `@path` file mentions. The effective
   [approval mode](#approval-modes) decides whether a mutation parks;
@@ -2247,11 +2249,17 @@ them):
   [Provider connection](#provider-connection-provider)).
 - **Tool calling for both brothers** — in consult mode the senior's opening,
   the junior's proposal/revision and the senior's review may call the role's
-  **read-only** tool belt (workspace reads/searches, MCP tools, plugin tools —
-  never the workspace mutations) before emitting the structured reply; a
-  tool-less configuration or a provider without `chatWithTools` keeps the
-  exact pre-tools request path. Work mode is unchanged (junior mutating
-  deliverable loop, senior read-only verify slice).
+  consult belt before emitting the structured reply. The belt excludes the
+  harness's own workspace mutation tools (`workspace_write_file`,
+  `workspace_edit_file`, `workspace_delete_file`, `workspace_run_shell`), so
+  the built-in surface cannot mutate; it still includes `shared`-scope MCP and
+  plugin tools, whose handlers can do anything their server or plugin can
+  (including workspace writes or external side effects), and approval prompts
+  cover the harness's built-in mutation/shell paths, not those tools. The
+  consult phase is therefore bounded by the belt and the built-ins' approval
+  policy, not by a sandbox. A tool-less configuration or a provider without
+  `chatWithTools` keeps the exact pre-tools request path. Work mode is
+  unchanged (junior mutating deliverable loop, senior verification slice).
 - **Permission presets and approval modes** — four named presets (Read only,
   Always ask, Workspace write, Full access) alias the persisted modes
   `readonly`, `ask`, `edits` and `allow-all`; edited from the web Settings →

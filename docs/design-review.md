@@ -36,8 +36,9 @@ An honest critique of the current version and what to improve.
   filesystem/shell tools rooted at an operator-registered directory; reads
   auto-allow, mutations and shell commands pause the run on an operator
   approval (fail closed — no broker means denial), and tool/diff/approval
-  history persists in per-session runtime sidecars. The senior gets read-only
-  workspace checks to ground its review in observed file state.
+  history persists in per-session runtime sidecars. The senior gets its own
+  workspace checks (plus approval-brokered shell) to ground its review in
+  observed file state.
 - **Async web runs**: background runs on a worker pool (default 2; same-session
   runs stay serialized) with typed SSE events, cooperative stop, reconnectable
   streams (`?after=N`), follow-up messages into the same session, and per-role

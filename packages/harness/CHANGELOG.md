@@ -2653,6 +2653,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   correctly (`isCliEntry` compares canonical paths on both sides), so an
   installed `two-brothers` executes instead of silently exiting without
   output; regression coverage included.
+- **Docs: the read-only consult claim now matches the actual belt** (built-in
+  mutations excluded; shared MCP/plugin tools may mutate): the reference no
+  longer calls the consult belt read-only. It excludes the harness's own
+  workspace mutation tools (write/edit/delete/shell), while `shared`-scope MCP
+  and plugin tools remain in it and may mutate through their handlers;
+  approval prompts cover the built-in mutation/shell paths, not those tools.
 
 ## [0.0.1] — 2026-11-04
 

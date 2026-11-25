@@ -27,7 +27,7 @@ MCP servers and plugins must be assignable per role, in three scopes:
 Design anchors that already exist:
 
 - `packages/harness/src/harness.ts`: junior `tools` belt + `seniorTools`
-  (joins the verify slice unfiltered today) + verify-time read-only
+  (joins the verify slice unfiltered today) + verify-time name
   filtering via `SENIOR_VERIFY_TOOL_NAMES`. Generalize this into an
   explicit role-scoped tool registry (shared / senior / junior) instead
   of ad-hoc parameters.
@@ -548,7 +548,7 @@ Design anchors that already exist:
 
 - **TUI workspace-bound runs, approval panel and `@file` mentions** —
   `tui --workspace <dir>` binds every turn to one confined root: the junior
-  gets the `workspace_*` belt, the senior the read-only verify slice, plugins
+  gets the `workspace_*` belt, the senior the verification slice, plugins
   bind workspace-bound and the composer `@path` picker/attachments read from
   it. A parked write/edit/delete/shell replaces the composer with a docked
   approval panel (action/target/command/reason, bounded diff summary; numbered
@@ -696,13 +696,15 @@ Design anchors that already exist:
 
 - **Tool calling for both brothers** — in consult mode the senior's opening,
   the junior's proposal/revision and the senior's review may now call the
-  role's **read-only** tool belt before emitting the structured reply, reusing
+  role's consult belt before emitting the structured reply, reusing
   the bounded `toolLoop` (`MAX_CONSULT_TOOL_ITERATIONS` = 4). The consult belt
   is the role's belt minus `WORKSPACE_MUTATION_TOOL_NAMES`
   (`workspace_write_file`/`workspace_edit_file`/`workspace_delete_file`/
-  `workspace_run_shell`) and the display-only plan tool, so a consult node can
-  never mutate; `senior_decide` deliberately stays a plain call (the review
-  immediately before it already ran the checks). A node only loops when its
+  `workspace_run_shell`) and the display-only plan tool, so a consult node is
+  never offered the built-in workspace mutations (operator-installed
+  shared-scope MCP/plugin tools keep their own behavior); `senior_decide`
+  deliberately stays a plain call (the review immediately before it already
+  ran the checks). A node only loops when its
   belt is non-empty AND the provider implements `chatWithTools` — tool-less
   configurations keep the exact pre-tools request path (no tools on the wire,
   no extra calls, same prompt-audit sections). Work mode is unchanged
@@ -1671,10 +1673,10 @@ guardrails:
   `consult` with ONE warning (exit 0); a provider failure fails the run
   normally with usage attached. Guardrail G1 downgrades work→consult when no
   workspace is bound (recorded in the marker, the event and a warning); G2
-  always honors solo (structurally read-only); G3 routes once per run and
-  consumes no rounds; G4 leaves operator precedence unchanged.
+  always honors solo (bounded by the consult belt); G3 routes once per run
+  and consumes no rounds; G4 leaves operator precedence unchanged.
 - **Solo** — `senior_route → senior_solo → END`: the senior answers alone on
-  its read-only CONSULT belt (helpers kept, mutations and `todo_write`
+  its consult belt (helpers kept, the built-in mutations and `todo_write`
   filtered; tool-less configs keep the exact plain path), bounded by
   `MAX_CONSULT_TOOL_ITERATIONS`. The code-only `SOLO_DECISION_DIRECTIVE`
   forbids claiming unperformed work. Legal per PROTOCOL.md §5 ("decide on its

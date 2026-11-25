@@ -67,7 +67,7 @@ user → CLI → cooperation state machine (TypeScript package)
                 └── Junior (model B, system prompt B)
                 │        │ proposal / deliverable (workspace + MCP tools in delegation mode)
                 │        ▼
-                Senior: verify (read-only workspace checks, work mode) → review → decision (final)
+                Senior: verify (workspace checks, work mode) → review → decision (final)
                          │
                          ▼
                 SharedContext (one shared append-only log)

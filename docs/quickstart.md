@@ -71,8 +71,8 @@ node dist/cli.js run "Write hello world" --provider mock --mode work
 The junior takes on part of the work: `delegation` → `deliverable` → `review` → `decision`.
 
 In `auto` mode the senior chooses the route itself — one structured
-pre-decision picks `solo` (the senior answers alone, read-only), `consult` or
-`work`, and the reason is recorded in the transcript:
+pre-decision picks `solo` (the senior answers alone on its consult belt),
+`consult` or `work`, and the reason is recorded in the transcript:
 
 ```powershell
 node dist/cli.js run "Explain the trade-offs of dual-write migration" --provider mock --mode auto
@@ -601,7 +601,7 @@ after it resolves`).
 senior and junior can actually read, search, edit and run commands inside it:
 
 - The junior gets the `workspace_*` tool belt and the senior gets the
-  read-only verify slice (plus approval-brokered `run_shell`). Reads
+  verification slice (plus approval-brokered `run_shell`). Reads
   auto-allow; every write, edit, delete and shell command pauses the run —
   unless the effective [approval mode](cli-reference.md#approval-modes) allows it (`edits`,
   `allow-all`) or denies it before a card can appear (`readonly`).
