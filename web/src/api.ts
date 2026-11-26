@@ -193,6 +193,21 @@ export async function renameSession(name: string, title: string): Promise<Sessio
   )
 }
 
+/**
+ * Bind a workspace to an existing session (`PATCH /api/sessions/{name}`
+ * `{workspace_id}`). The backend refuses a run that resolves no workspace, so
+ * this is how an unlinked session gains one; the saved sidecar comes back.
+ */
+export async function setSessionWorkspace(
+  name: string,
+  workspaceId: string,
+): Promise<SessionRenameResult> {
+  return request<SessionRenameResult>(
+    `/api/sessions/${encodeURIComponent(name)}`,
+    json('PATCH', { workspace_id: workspaceId }),
+  )
+}
+
 /** Remove a session plus its metadata/runtime sidecars (stops a live run first). */
 export async function deleteSession(name: string): Promise<{ deleted: string }> {
   return request<{ deleted: string }>(`/api/sessions/${encodeURIComponent(name)}`, {

@@ -4,6 +4,7 @@ import { NButton, NInput, NModal } from 'naive-ui'
 import type { InputInst } from 'naive-ui'
 import { ApiError, addWorkspace } from '../api'
 import { clickInModalBody } from '../modal'
+import { SELECT_WORKSPACE_NOTE, initialSessionWorkspaceId } from '../workspaceContext'
 import WorkspaceFinder from './WorkspaceFinder.vue'
 import type { Workspace } from '../types'
 
@@ -12,6 +13,10 @@ import type { Workspace } from '../types'
  * listed for choice; "Add folder" swaps the SAME modal to the finder step, so
  * adding a workspace never stacks a second dialog. Keep the public contract
  * (`close`, `create`) unchanged.
+ *
+ * A session always belongs to a workspace ("select a workspace to start"):
+ * there is no unattached option, Create stays disabled until a real workspace
+ * is picked, and an empty registry keeps the finder as the only path forward.
  */
 
 const props = defineProps<{
@@ -24,7 +29,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   close: []
-  create: [payload: { title: string; workspace_id: string | null }]
+  create: [payload: { title: string; workspace_id: string }]
   /** A workspace was added from inside this flow (optional app hook). */
   'workspace-created': [workspace: Workspace]
 }>()
@@ -38,24 +43,23 @@ function onMaskClick(e: MouseEvent) {
 const uid = useId().replace(/[^a-zA-Z0-9_-]/g, '')
 const titleId = `new-session-title-${uid}`
 const workspaceLabelId = `new-session-workspace-${uid}`
+const createReasonId = `new-session-create-reason-${uid}`
+const emptyReasonId = `new-session-empty-reason-${uid}`
 const radioName = `new-session-workspace-${uid}`
 
 const title = ref('')
 /**
- * Initial pick: an explicit sidebar-filter workspace wins; otherwise fall back
- * to the newest recent workspace that still exists. Read exactly once — any
- * later change is the operator's own choice and is never overwritten.
+ * Initial pick: an explicit sidebar-filter workspace wins; otherwise the newest
+ * recent workspace that still exists. Read exactly once and only ever a real
+ * workspace — any later change is the operator's own choice.
  */
-function initialWorkspaceId(): string {
-  const exists = (id: string) => props.workspaces.some((workspace) => workspace.id === id)
-  if (props.defaultWorkspace && exists(props.defaultWorkspace)) return props.defaultWorkspace
-  for (const workspace of props.recentWorkspaces ?? []) {
-    if (exists(workspace.id)) return workspace.id
-  }
-  return ''
-}
-
-const workspaceId = ref<string>(initialWorkspaceId())
+const workspaceId = ref<string>(
+  initialSessionWorkspaceId(
+    props.workspaces.map((workspace) => workspace.id),
+    props.defaultWorkspace,
+    (props.recentWorkspaces ?? []).map((workspace) => workspace.id),
+  ),
+)
 const step = ref<'choose' | 'add'>('choose')
 const adding = ref(false)
 const addError = ref<string | null>(null)
@@ -69,6 +73,9 @@ const allWorkspaces = computed(() => {
   const known = new Set(props.workspaces.map((w) => w.id))
   return [...props.workspaces, ...addedWorkspaces.value.filter((w) => !known.has(w.id))]
 })
+
+/** Create is available only with a real workspace ("select a workspace to start"). */
+const canCreate = computed(() => workspaceId.value !== '')
 
 function errText(e: unknown): string {
   return e instanceof ApiError ? e.message : String(e)
@@ -121,9 +128,11 @@ async function onAddWorkspace(payload: { path: string; name: string }): Promise<
 }
 
 function submit(): void {
+  // "Select a workspace to start": no workspace, no session.
+  if (!canCreate.value) return
   emit('create', {
     title: title.value.trim(),
-    workspace_id: workspaceId.value || null,
+    workspace_id: workspaceId.value,
   })
 }
 
@@ -200,21 +209,7 @@ onMounted(() => {
             </n-button>
           </div>
 
-          <div class="ns-workspaces" role="radiogroup" :aria-labelledby="workspaceLabelId">
-            <label class="ns-ws" :class="{ 'is-selected': workspaceId === '' }">
-              <input
-                v-model="workspaceId"
-                class="ns-radio"
-                type="radio"
-                :name="radioName"
-                value=""
-              />
-              <span class="ns-radio-dot" aria-hidden="true" />
-              <span class="ns-ws-text">
-                <span class="ns-ws-name">No workspace</span>
-                <span class="ns-ws-path">Keep this session unattached</span>
-              </span>
-            </label>
+          <div v-if="allWorkspaces.length" class="ns-workspaces" role="radiogroup" :aria-labelledby="workspaceLabelId">
             <label
               v-for="workspace in allWorkspaces"
               :key="workspace.id"
@@ -235,8 +230,11 @@ onMounted(() => {
               </span>
             </label>
           </div>
-          <p v-if="!allWorkspaces.length" class="field-hint ns-empty">
-            No workspaces yet — add a project folder to group sessions by directory.
+          <p v-if="!allWorkspaces.length" :id="emptyReasonId" class="field-hint ns-empty">
+            No workspaces yet — add a project folder to start a session.
+          </p>
+          <p v-else-if="!canCreate" :id="createReasonId" class="field-hint ns-reason">
+            {{ SELECT_WORKSPACE_NOTE }}.
           </p>
           <p class="field-hint">Send a task below to start the conversation.</p>
         </div>
@@ -244,7 +242,16 @@ onMounted(() => {
         <div class="ns-actions">
           <span class="ns-hint">Esc closes</span>
           <n-button attr-type="button" @click="emit('close')">Cancel</n-button>
-          <n-button attr-type="button" type="primary" @click="submit">Create</n-button>
+          <n-button
+            attr-type="button"
+            type="primary"
+            :disabled="!canCreate"
+            :title="canCreate ? undefined : SELECT_WORKSPACE_NOTE"
+            :aria-describedby="canCreate ? undefined : allWorkspaces.length ? createReasonId : emptyReasonId"
+            @click="submit"
+          >
+            Create
+          </n-button>
         </div>
       </template>
 
@@ -416,6 +423,12 @@ onMounted(() => {
 
 .ns-empty {
   margin: 0.1rem 0 0;
+}
+
+/* The disabled Create reason: readable next to the action row, not a toast. */
+.ns-reason {
+  margin: 0.1rem 0 0;
+  color: var(--warning);
 }
 
 .ns-actions {

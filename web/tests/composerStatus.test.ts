@@ -1,5 +1,6 @@
 // Focused tests for src/composerStatus.ts (the composer's truthful status
-// seats: models, permission expectation, latest prompt-audit context). No DOM:
+// seats: workspace, models, permission expectation, latest prompt-audit
+// context). No DOM:
 //   node --import ./tests/register-ts.mjs --test tests/composerStatus.test.ts
 
 import assert from 'node:assert/strict'
@@ -45,6 +46,19 @@ test('missing or blank model labels stay honest without inventing a model', () =
   const seats = composerSeats({ settingsReady: true, seniorLabel: '  ', juniorLabel: null })
   assert.equal(seats[0].value, 'S not set · J not set')
   assert.match(seats[0].title, /Senior model: not set/)
+})
+
+test('the workspace seat names the workspace the next run carries', () => {
+  const seats = composerSeats({ workspaceName: '  two-brothers  ' })
+  assert.equal(seats.length, 1)
+  assert.equal(seats[0].id, 'workspace')
+  assert.equal(seats[0].label, 'Workspace')
+  assert.equal(seats[0].value, 'two-brothers')
+  assert.match(seats[0].title, /Workspace: two-brothers/)
+  assert.match(seats[0].title, /file and shell tools scoped to this folder/)
+  // no name (unlinked/unknown) hides the seat instead of guessing a folder
+  assert.deepEqual(composerSeats({ workspaceName: null }), [])
+  assert.deepEqual(composerSeats({ workspaceName: '   ' }), [])
 })
 
 test('the permission seat states the real approval model per workspace context', () => {
@@ -125,9 +139,10 @@ test('a single offered tool is not pluralized', () => {
   assert.match(seats[0].value, /1 tool$/)
 })
 
-test('seats are ordered models → permissions → context', () => {
+test('seats are ordered workspace → models → permissions → context', () => {
   const seats = composerSeats({
     settingsReady: true,
+    workspaceName: 'ws',
     seniorLabel: 'a',
     juniorLabel: 'b',
     workspaceLinked: true,
@@ -135,8 +150,11 @@ test('seats are ordered models → permissions → context', () => {
   })
   assert.deepEqual(
     seats.map((seat) => seat.id),
-    ['models', 'permissions', 'context'],
+    ['workspace', 'models', 'permissions', 'context'],
   )
+  // the workspace seat never implies the permission seat (and vice versa)
+  assert.equal(composerSeats({ workspaceName: 'ws' })[0].id, 'workspace')
+  assert.equal(composerSeats({ workspaceLinked: true })[0].id, 'permissions')
 })
 
 test('formatCharCount is compact, monotonic and bounded', () => {

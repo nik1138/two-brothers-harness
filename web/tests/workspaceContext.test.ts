@@ -1,4 +1,5 @@
-// Focused tests for src/workspaceContext.ts — the workspace a web run carries.
+// Focused tests for src/workspaceContext.ts — the display context the composer
+// picker uses (the run rule's own helpers are covered in workspaceStart.test.ts).
 // No DOM:
 //   node --import ./tests/register-ts.mjs --test tests/workspaceContext.test.ts
 
@@ -6,42 +7,49 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 
-import { runWorkspaceId } from '../src/workspaceContext.ts'
+import { contextWorkspaceId } from '../src/workspaceContext.ts'
 import { pathCrumbs, separatorFor } from '../src/fsPath.ts'
 
-test('a session-linked workspace wins over the sidebar filter', () => {
-  assert.equal(runWorkspaceId('linked-ws', 'all'), 'linked-ws')
-  assert.equal(runWorkspaceId('linked-ws', 'other-ws'), 'linked-ws')
-  assert.equal(runWorkspaceId('  linked-ws  ', 'other-ws'), 'linked-ws')
+test('a session-linked workspace wins over the pick and the sidebar filter', () => {
+  assert.equal(contextWorkspaceId('linked-ws', 'picked-ws', 'all'), 'linked-ws')
+  assert.equal(contextWorkspaceId('linked-ws', null, 'other-ws'), 'linked-ws')
+  assert.equal(contextWorkspaceId('  linked-ws  ', 'picked-ws', 'other-ws'), 'linked-ws')
 })
 
-test('the sidebar filter is the fallback for an unlinked session', () => {
-  assert.equal(runWorkspaceId(null, 'filter-ws'), 'filter-ws')
-  assert.equal(runWorkspaceId('', 'filter-ws'), 'filter-ws')
-  assert.equal(runWorkspaceId(undefined, '  filter-ws  '), 'filter-ws')
-  assert.equal(runWorkspaceId('   ', 'filter-ws'), 'filter-ws')
+test('the explicit pick wins over the sidebar filter', () => {
+  assert.equal(contextWorkspaceId(null, 'picked-ws', 'filter-ws'), 'picked-ws')
+  assert.equal(contextWorkspaceId('', '  picked-ws  ', 'filter-ws'), 'picked-ws')
+  assert.equal(contextWorkspaceId(undefined, 'picked-ws', 'all'), 'picked-ws')
 })
 
-test('no link and no real filter means no workspace', () => {
-  assert.equal(runWorkspaceId(null, 'all'), null)
-  assert.equal(runWorkspaceId(undefined, 'all'), null)
-  assert.equal(runWorkspaceId('', ''), null)
-  assert.equal(runWorkspaceId('   ', '   '), null)
-  assert.equal(runWorkspaceId(null, null), null)
-  assert.equal(runWorkspaceId(null, undefined), null)
+test('the sidebar filter is the last display fallback for an unlinked session', () => {
+  assert.equal(contextWorkspaceId(null, null, 'filter-ws'), 'filter-ws')
+  assert.equal(contextWorkspaceId('', '', '  filter-ws  '), 'filter-ws')
+  assert.equal(contextWorkspaceId(undefined, undefined, 'filter-ws'), 'filter-ws')
 })
 
-test('unexpected values are treated as not set', () => {
+test('the all sentinel and junk values are never a workspace', () => {
+  assert.equal(contextWorkspaceId(null, null, 'all'), null)
+  assert.equal(contextWorkspaceId('', '', ''), null)
+  assert.equal(contextWorkspaceId('   ', '   ', '   '), null)
+  assert.equal(contextWorkspaceId(null, null, null), null)
+  assert.equal(contextWorkspaceId(null, null, undefined), null)
+  assert.equal(contextWorkspaceId('all', 'all', 'all'), null)
   const junk = 42 as unknown as string
-  assert.equal(runWorkspaceId(junk, 'filter-ws'), 'filter-ws')
-  assert.equal(runWorkspaceId(null, junk), null)
-  assert.equal(runWorkspaceId({} as unknown as string, junk), null)
+  assert.equal(contextWorkspaceId(junk, 'picked-ws', junk), 'picked-ws')
+  assert.equal(contextWorkspaceId(null, junk, junk), null)
+  assert.equal(contextWorkspaceId({} as unknown as string, junk, junk), null)
 })
 
-test('App submits the composer workspace with every run (source-level)', () => {
+test('App never submits the display context as the run workspace (source-level)', () => {
   const source = readFileSync(new URL('../src/App.vue', import.meta.url), 'utf8')
-  assert.match(source, /workspace_id: composerWorkspaceId\.value/)
+  // the run request carries the bound/picked mission workspace
+  assert.match(source, /workspace_id: request\.workspace_id/)
+  assert.match(source, /workspace_id: workspaceId,/)
+  // the sidebar-filter display fallback is never a run submission
+  assert.doesNotMatch(source, /workspace_id: composerWorkspaceId\.value/)
   assert.doesNotMatch(source, /workspace_id: workspaceFilter\.value/)
+  assert.doesNotMatch(source, /workspace_id: null,\s*\n\s*stream_tokens/)
 })
 
 // fsPath — the workspace finder breadcrumbs and separator selection.

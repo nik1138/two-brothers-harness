@@ -35,6 +35,7 @@ import {
   listWorkspaces,
   previewRunUndo,
   reorderWorkspaces,
+  setSessionWorkspace,
   startRun,
   steerRun,
   stopRun,
@@ -121,7 +122,13 @@ import { buildPaletteItems, PALETTE_SESSION_PREFIX, PALETTE_WORKSPACE_PREFIX } f
 import type { PaletteItem } from './palette'
 import { contentItemSession } from './search'
 import { isSameOrder, moveWorkspaceId } from './workspaceOrder'
-import { runWorkspaceId } from './workspaceContext'
+import {
+  canStartRun,
+  contextWorkspaceId,
+  isSelectWorkspaceMessage,
+  normalizeWorkspaceId,
+  runWorkspaceForSession,
+} from './workspaceContext'
 import {
   STREAMING_MAX_CHARS,
   applyRuntimeEvent,
@@ -165,6 +172,7 @@ import SettingsDialog from './components/SettingsDialog.vue'
 import WorkspaceDialog from './components/WorkspaceDialog.vue'
 import WorkspaceRenameDialog from './components/WorkspaceRenameDialog.vue'
 import NewSessionDialog from './components/NewSessionDialog.vue'
+import WorkspaceStartPrompt from './components/WorkspaceStartPrompt.vue'
 import DiffReview from './components/DiffReview.vue'
 import ApprovalCard from './components/ApprovalCard.vue'
 import QuestionCard from './components/QuestionCard.vue'
@@ -200,6 +208,27 @@ const sessions = ref<SessionInfo[]>([])
 const workspaces = ref<Workspace[]>([])
 const workspaceFilter = ref<string>('all')
 const selected = ref<string | null>(null)
+/**
+ * Workspace picked in the in-place "select a workspace to start" prompt. Kept
+ * visible while a bind request is in flight and after it fails (an error never
+ * clears the operator's selection); reset on a session switch.
+ */
+const pendingWorkspaceId = ref<string | null>(null)
+/** Session the in-flight bind (`PATCH /api/sessions/{name}`) targets. */
+const bindingSession = ref<string | null>(null)
+/** One bounded bind error, rendered inside the prompt instead of a toast. */
+const workspaceBindError = ref<string | null>(null)
+/**
+ * The backend refused a run with the documented no-workspace 400. The prompt
+ * stays up until a bind succeeds, even when the cached list claimed a link.
+ */
+const workspacePromptForced = ref(false)
+/**
+ * Workspace links this tab learned from responses the sessions list has not
+ * picked up yet (a bind PATCH or an accepted run on a fresh session). Removed
+ * by the next refresh that reports the same link.
+ */
+const sessionWorkspaceOverrides = ref<Record<string, string>>({})
 const events = ref<Envelope[]>([])
 /** Runtime sidecar events (tool calls, approvals) for the selected session. */
 const runtimeEvents = ref<RunEvent[]>([])
@@ -549,12 +578,18 @@ const selectedSessionInfo = computed<{ name: string; title?: string } | null>(()
     ? { name: selected.value, ...(title.value ? { title: title.value } : {}) }
     : null,
 )
-/** Selected session's workspace name, when it is linked to a known workspace. */
-const selectedWorkspaceName = computed<string | null>(() => {
+/** Selected session's workspace id (a link learned by this tab wins over a stale list). */
+const selectedSessionWorkspaceId = computed<string | null>(() => {
   const name = selected.value
   if (!name) return null
+  const override = normalizeWorkspaceId(sessionWorkspaceOverrides.value[name])
+  if (override) return override
   const session = sessions.value.find((item) => item.name === name)
-  const workspaceId = session?.workspace_id
+  return normalizeWorkspaceId(session?.workspace_id)
+})
+/** Selected session's workspace name, when it is linked to a known workspace. */
+const selectedWorkspaceName = computed<string | null>(() => {
+  const workspaceId = selectedSessionWorkspaceId.value
   if (!workspaceId) return null
   return workspaces.value.find((workspace) => workspace.id === workspaceId)?.name ?? null
 })
@@ -862,17 +897,40 @@ const visibleSessions = computed(() =>
 )
 
 /**
- * Workspace the composer's `@` file picker searches: the selected session's
- * linked workspace, else the sidebar filter (a session started under it will
- * belong to that workspace).
+ * The workspace the next run will carry: the selected session's own link, or
+ * the explicit start-screen pick. The sidebar filter is deliberately not a
+ * fallback — "select a workspace to start" means no run starts without one.
  */
-const composerWorkspaceId = computed<string | null>(() => {
-  const name = selected.value
-  const session = name
-    ? sessions.value.find((item) => item.name === name)
-    : undefined
-  return runWorkspaceId(session?.workspace_id, workspaceFilter.value)
+const nextRunWorkspaceId = computed<string | null>(() =>
+  runWorkspaceForSession(
+    selected.value !== null,
+    selectedSessionWorkspaceId.value,
+    pendingWorkspaceId.value,
+  ),
+)
+/** A run cannot start until a real workspace is linked (or explicitly picked). */
+const workspaceRequired = computed(
+  () => workspacePromptForced.value || nextRunWorkspaceId.value === null,
+)
+/** Display name of the next run's workspace; unknown names stay absent (never guessed). */
+const nextRunWorkspaceName = computed<string | null>(() => {
+  const workspaceId = nextRunWorkspaceId.value
+  if (!workspaceId) return null
+  return workspaces.value.find((workspace) => workspace.id === workspaceId)?.name ?? null
 })
+
+/**
+ * Workspace whose files the composer's `@` picker searches: the selected
+ * session's link, else the explicit pick, else the sidebar filter (a display
+ * and picker fallback only — it never decides a run).
+ */
+const composerWorkspaceId = computed<string | null>(() =>
+  contextWorkspaceId(
+    selectedSessionWorkspaceId.value,
+    pendingWorkspaceId.value,
+    workspaceFilter.value,
+  ),
+)
 
 /** Recent workspaces that still exist, newest first (the finder/dialog quick picks). */
 const recentWorkspaces = computed<Workspace[]>(() => {
@@ -886,16 +944,18 @@ const recentWorkspaces = computed<Workspace[]>(() => {
 })
 
 /**
- * Workspace context the welcome/empty hero shows: the sidebar filter when one is
- * active, else the selected session's linked workspace (null = all/none).
+ * Workspace context the welcome/empty hero shows: the selected session's bound
+ * workspace (the pick it is being bound to while a bind is pending), else the
+ * explicit start-screen pick, else the sidebar filter.
  */
 const heroWorkspaceName = computed<string | null>(() => {
-  if (workspaceFilter.value !== 'all') {
-    return (
-      workspaces.value.find((workspace) => workspace.id === workspaceFilter.value)?.name ?? null
-    )
-  }
-  return selectedWorkspaceName.value
+  const nameOf = (id: string | null): string | null =>
+    id ? (workspaces.value.find((workspace) => workspace.id === id)?.name ?? null) : null
+  const picked = nameOf(pendingWorkspaceId.value)
+  if (selected.value) return selectedWorkspaceName.value ?? picked
+  if (picked) return picked
+  if (workspaceFilter.value !== 'all') return nameOf(workspaceFilter.value)
+  return null
 })
 
 /** Editable task suggestions: starters are drafted into the composer, never run directly. */
@@ -1515,6 +1575,8 @@ async function syncRunOutcome(session: string) {
             mode: latest.mode || 'consult',
             provider: providerBySession.value[session] ?? null,
             session,
+            // unknown for a rebuilt record: startNewRun re-resolves the session's
+            // bound workspace (or shows the prompt) and never submits this value
             workspace_id: null,
           },
         }
@@ -2184,6 +2246,84 @@ function onFilterWorkspace(id: string) {
   if (id !== 'all') noteRecentWorkspace(id)
 }
 
+/**
+ * Record a workspace link this tab just learned (a bind PATCH or an accepted
+ * run on a fresh session), in both the session list and the override map the
+ * next list refresh prunes. This is what unblocks the composer immediately.
+ */
+function bindSessionLocally(name: string, workspaceId: string | null | undefined) {
+  const id = normalizeWorkspaceId(workspaceId)
+  if (!id) return
+  sessionWorkspaceOverrides.value = { ...sessionWorkspaceOverrides.value, [name]: id }
+  sessions.value = sessions.value.map((session) =>
+    session.name === name ? { ...session, workspace_id: id } : session,
+  )
+}
+
+/** Forget a session's cached link (the backend refused a run for lack of one). */
+function markSelectedSessionUnbound() {
+  const name = selected.value
+  if (!name) return
+  const overrides = { ...sessionWorkspaceOverrides.value }
+  delete overrides[name]
+  sessionWorkspaceOverrides.value = overrides
+  sessions.value = sessions.value.map((session) => {
+    if (session.name !== name || session.workspace_id === undefined) return session
+    const next = { ...session }
+    delete next.workspace_id
+    return next
+  })
+}
+
+/**
+ * Bind the picked workspace to the selected session through the documented
+ * `PATCH /api/sessions/{name}` `{workspace_id}`. The pick stays visible on a
+ * failure (one bounded inline error), and the composer stays blocked until a
+ * bind actually succeeds — no silent/optimistic binding.
+ */
+async function bindSelectedSessionWorkspace(workspaceId: string) {
+  const name = selected.value
+  const id = normalizeWorkspaceId(workspaceId)
+  if (!name || !id || bindingSession.value !== null) return
+  bindingSession.value = name
+  workspaceBindError.value = null
+  try {
+    const saved = await setSessionWorkspace(name, id)
+    const savedId = normalizeWorkspaceId(saved.workspace_id) ?? id
+    bindSessionLocally(name, savedId)
+    if (selected.value === name) {
+      pendingWorkspaceId.value = null
+      workspacePromptForced.value = false
+      workspaceBindError.value = null
+      noteRecentWorkspace(savedId)
+      // the prompt (and the focused radio) disappears: hand focus to the composer
+      nextTick(() => document.getElementById('composer-input')?.focus())
+    }
+  } catch (e) {
+    if (selected.value === name) workspaceBindError.value = errText(e).slice(0, 240)
+  } finally {
+    if (bindingSession.value === name) bindingSession.value = null
+  }
+}
+
+/**
+ * Workspace pick from the in-place prompt: bind an existing session at once, or
+ * stage the explicit start-screen pick the first run will carry (the backend
+ * links the new session when that run is accepted).
+ */
+function onWorkspaceStartSelect(workspaceId: string) {
+  const id = normalizeWorkspaceId(workspaceId)
+  if (!id) return
+  pendingWorkspaceId.value = id
+  workspaceBindError.value = null
+  noteRecentWorkspace(id)
+  if (selected.value) {
+    void bindSelectedSessionWorkspace(id)
+  } else {
+    workspacePromptForced.value = false
+  }
+}
+
 async function refreshSessions(silent = true) {
   try {
     const next = await listSessions()
@@ -2191,6 +2331,19 @@ async function refreshSessions(silent = true) {
     const names = next.map((session) => session.name)
     pruneSeen(names)
     pruneLastRuns(names)
+    // drop overrides the list now reports identically (and vanished sessions)
+    const overrides = sessionWorkspaceOverrides.value
+    if (Object.keys(overrides).length > 0) {
+      const byName = new Map(next.map((session) => [session.name, session]))
+      const pruned: Record<string, string> = {}
+      for (const [name, id] of Object.entries(overrides)) {
+        const entry = byName.get(name)
+        if (entry && normalizeWorkspaceId(entry.workspace_id) !== id) pruned[name] = id
+      }
+      if (Object.keys(pruned).length !== Object.keys(overrides).length) {
+        sessionWorkspaceOverrides.value = pruned
+      }
+    }
   } catch (e) {
     if (!silent || errors.value.length === 0) reportError(errText(e))
   }
@@ -2225,6 +2378,11 @@ async function loadSession(name: string) {
   if (drawerQuery?.matches && !sidebarCollapsed.value) sidebarCollapsed.value = true
   // never show the previous session's live draft while this one loads
   resetStreamingDraft()
+  // an in-place workspace pick belongs to the session it was made for
+  pendingWorkspaceId.value = null
+  bindingSession.value = null
+  workspaceBindError.value = null
+  workspacePromptForced.value = false
   loading.value = true
   closeSubagent()
   try {
@@ -2239,6 +2397,8 @@ async function loadSession(name: string) {
     maxSeq = detail.events.reduce((m, e) => Math.max(m, e.seq), 0)
     setRuntimeHistory(runtime.events)
     setSubagentHistory(helpers)
+    // the detail read is authoritative for the link; the list refresh may lag
+    if (detail.workspace_id) bindSessionLocally(name, detail.workspace_id)
     selected.value = name
     // opening a session consumes its unread dot (persisted for the next reload)
     markSeen(name)
@@ -2271,14 +2431,25 @@ async function startNewRun(payload: {
   token?: number
 }) {
   errors.value = []
+  // "select a workspace to start": never submit a run without a bound workspace.
+  const workspaceId = nextRunWorkspaceId.value
+  if (workspaceRequired.value || !workspaceId) {
+    // keep the in-place prompt (and the operator's pick) up; clear only the
+    // composer's pending-submit marker so the draft stays editable
+    workspacePromptForced.value = true
+    if (typeof payload.token === 'number') {
+      submitResult.value = { token: payload.token, accepted: false }
+    }
+    return
+  }
   const request: RunRequestState = {
     task: payload.task,
     mode: payload.mode,
     provider: payload.provider,
     session: selected.value,
-    // Same workspace the composer file picker and status seats use: the
-    // session's link wins, the sidebar filter is the unlinked-session fallback.
-    workspace_id: composerWorkspaceId.value,
+    // The run carries the bound workspace only: a session's own link, or the
+    // explicit start-screen pick. The sidebar filter is never a run fallback.
+    workspace_id: workspaceId,
   }
   let accepted = false
   try {
@@ -2292,6 +2463,12 @@ async function startNewRun(payload: {
       stream_tokens: true,
     })
     accepted = true
+    // The backend links a fresh session to this workspace; mirror it locally so
+    // the composer never flashes the prompt while the list refresh is in flight.
+    bindSessionLocally(res.session, request.workspace_id)
+    if (pendingWorkspaceId.value === request.workspace_id) pendingWorkspaceId.value = null
+    workspaceBindError.value = null
+    workspacePromptForced.value = false
     requestByRun.value = { ...requestByRun.value, [res.run_id]: request }
     workspaceByRunId.set(res.run_id, request.workspace_id)
     setLastEventId(res.run_id, 0)
@@ -2343,7 +2520,16 @@ async function startNewRun(payload: {
   } catch (e) {
     // The request never became a run: nothing was consumed (the composer
     // clears only an accepted submission), so the draft stays exactly as typed.
-    reportError(errText(e))
+    if (e instanceof ApiError && isSelectWorkspaceMessage(e.message)) {
+      // Forward-compatible net for the documented no-workspace refusal: this
+      // client already preempts the case, so an enforcing backend must land on
+      // the same in-place picker rather than a toast. The bound link is
+      // forgotten so the next pick re-resolves it.
+      markSelectedSessionUnbound()
+      workspacePromptForced.value = true
+    } else {
+      reportError(errText(e))
+    }
   } finally {
     if (typeof payload.token === 'number') {
       submitResult.value = { token: payload.token, accepted }
@@ -2356,7 +2542,8 @@ async function retryLastRun() {
   const request = retryRequest.value
   if (!request || runActive.value) return
   if (request.session && request.session !== selected.value) selected.value = request.session
-  if (request.workspace_id) onFilterWorkspace(request.workspace_id)
+  // The retry carries the session's current bound workspace (or shows the
+  // in-place prompt); it never re-uses a stale request workspace or the filter.
   await startNewRun({ task: request.task, mode: request.mode, provider: request.provider })
 }
 
@@ -2854,13 +3041,16 @@ function onSessionDeleted(name: string) {
   refreshSessions()
 }
 
-async function onCreateSession(payload: { title: string; workspace_id: string | null }) {
+async function onCreateSession(payload: { title: string; workspace_id: string }) {
+  // "select a workspace to start": the dialog disables Create, this is the guard.
+  if (!canStartRun(payload.workspace_id)) return
   try {
     const created = await createSession({
       title: payload.title || undefined,
-      workspace_id: payload.workspace_id ?? undefined,
+      workspace_id: payload.workspace_id,
     })
-    if (payload.workspace_id) noteRecentWorkspace(payload.workspace_id)
+    noteRecentWorkspace(payload.workspace_id)
+    bindSessionLocally(created.name, payload.workspace_id)
     newSessionOpen.value = false
     await refreshSessions()
     await loadSession(created.name)
@@ -3352,9 +3542,25 @@ onUnmounted(() => {
         :cost="costForSelected"
       />
       <div class="composer-inert" :inert="viewedSubagent !== null || subagentLoading">
+        <!-- "select a workspace to start": in-place composer state, never a
+             toast or a dialog. Picking binds an existing session through
+             PATCH /api/sessions/{name}; the start screen stages the pick the
+             first run will carry. -->
+        <WorkspaceStartPrompt
+          v-if="workspaceRequired"
+          :context="selected ? 'session' : 'start'"
+          :workspaces="workspaces"
+          :selected-id="pendingWorkspaceId"
+          :busy="selected !== null && bindingSession === selected"
+          :error="workspaceBindError"
+          @select="onWorkspaceStartSelect"
+          @add-workspace="workspaceDialogOpen = true"
+        />
         <Composer
           :session-id="selected"
           :workspace-id="composerWorkspaceId"
+          :workspace-name="nextRunWorkspaceName"
+          :workspace-required="workspaceRequired"
           :busy="live"
           :queued-count="queuedCount"
           :waiting="waiting"

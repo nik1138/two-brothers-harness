@@ -255,6 +255,23 @@ test('canSubmitComposer: text plus no lock; compaction is its own lock reason', 
   assert.equal(composerLockReason(null), 'busy')
 })
 
+test('no workspace is the first lock: no run starts without one', () => {
+  // The run rule ("select a workspace to start") outranks every other lock:
+  // an unbound composer never submits, even when it is otherwise idle.
+  assert.equal(composerLockReason({ workspace: false }), 'workspace')
+  assert.equal(composerLockReason({ workspace: false, text: 'ship it' }), 'workspace')
+  assert.equal(composerLockReason({ workspace: false, busy: true }), 'workspace')
+  assert.equal(
+    composerLockReason({ workspace: false, busy: true, compacting: true, waiting: true }),
+    'workspace',
+  )
+  assert.equal(canSubmitComposer({ workspace: false, text: 'ship it' }), false)
+  // workspace present/unknown keeps the previous behavior exactly
+  assert.equal(composerLockReason({ workspace: true }), null)
+  assert.equal(composerLockReason({}), null)
+  assert.equal(canSubmitComposer({ workspace: true, text: 'ship it' }), true)
+})
+
 // -- double-escape stop gesture ----------------------------------------------
 
 test('isStopGesture: a 500 ms window, resetting outside it', () => {

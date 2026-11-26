@@ -1023,6 +1023,14 @@ Web runs also honor the shared compaction flags (`--compact`,
 and the manual `POST /api/sessions/{name}/compact` budgets. Without any of them
 web runs never auto-compact — exactly the CLI's "unset means off" behavior.
 
+Every web run needs a workspace ("select a workspace to start"). The New
+session dialog offers only registered workspaces (no unattached option, and
+Create stays disabled until one is picked), while an existing session with no
+metadata link shows the composer's in-place workspace picker instead of
+submitting: choosing one binds it through `PATCH /api/sessions/{name}`
+`{workspace_id}` and the next run carries that id. The client never posts a run
+without one; the sidebar filter is a view filter, never a run workspace.
+
 `serve` traps `SIGINT`/`SIGTERM` and, on POSIX, `SIGHUP`: each runs the graceful
 shutdown — stop accepting connections, cancel queued/running/waiting runs with
 pending approvals denied, wait a bounded 5 s grace (`SERVE_SHUTDOWN_GRACE_MS`)

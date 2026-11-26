@@ -259,6 +259,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `web/tests/providerSettings.test.ts`,
   `web/tests/providerDiscovery.test.ts`; E2E `settings-provider-setup`
   scenario.
+- **Web: a run requires a workspace ("select a workspace to start"):** the
+  New session dialog no longer offers "No workspace" and keeps Create disabled
+  until a registered workspace is picked (its add-folder finder stays the way
+  to create one); an existing session with no metadata link shows an in-place
+  composer prompt (submit disabled with an accessible reason) that binds the
+  chosen workspace through `PATCH /api/sessions/{name}` `{workspace_id}` and
+  unblocks the composer; every run carries the bound id (the sidebar filter is
+  only a display/`@`-picker fallback) and the client never posts a run without
+  one; a no-workspace refusal from an enforcing backend maps to that same
+  prompt instead of a toast; the bound workspace is named in the composer
+  status seats plus the existing hero/`/status` surfaces. Tests:
+  `web/tests/workspaceStart.test.ts`, the `hero-starters` browser scenario.
 
 ### Fixed
 

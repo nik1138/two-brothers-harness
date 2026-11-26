@@ -180,9 +180,15 @@ export function canUseStopGesture(context: StopGestureContext | null | undefined
 }
 
 /** Why the composer cannot submit right now (null = it can). */
-export type ComposerLockReason = 'busy' | 'compacting' | 'waiting' | null
+export type ComposerLockReason = 'workspace' | 'busy' | 'compacting' | 'waiting' | null
 
 export interface ComposerSendContext {
+  /**
+   * No workspace is selected/bound for the next run. The run rule never starts
+   * without one, so this is the most fundamental lock (checked first).
+   * Undefined means "not known to this surface" (no workspace lock).
+   */
+  workspace?: boolean
   /** A followed run is working. */
   busy?: boolean
   /** The followed run is parked on an approval (drafting allowed, sending not). */
@@ -192,11 +198,12 @@ export interface ComposerSendContext {
   text?: string | null
 }
 
-/** Precedence: working run → compaction → approval wait. */
+/** Precedence: no workspace → working run → compaction → approval wait. */
 export function composerLockReason(
   context: ComposerSendContext | null | undefined,
 ): ComposerLockReason {
   if (!context) return 'busy'
+  if (context.workspace === false) return 'workspace'
   if (context.busy) return 'busy'
   if (context.compacting) return 'compacting'
   if (context.waiting) return 'waiting'

@@ -5,6 +5,9 @@
  * Truthfulness rules:
  * - every seat disappears when its data is unknown (role settings not loaded, no
  *   workspace context, no prompt audit yet) — the row never guesses;
+ * - the workspace seat names the workspace the next run will carry (a linked
+ *   session, or the operator's explicit pick on the start screen); an unknown
+ *   name hides it instead of showing a stale or guessed folder;
  * - the context seat reports the latest prompt audit's character counts and
  *   offered-tool count exactly as recorded. No tokenizer is invented from char
  *   counts, and no context-window number is shown: the web client does not
@@ -32,6 +35,11 @@ export interface AuditSeatInput {
 export interface ComposerStatusInput {
   /** Role settings are loaded; false/undefined ⇒ the models seat is hidden. */
   settingsReady?: boolean
+  /**
+   * Display name of the workspace the next run will carry (the session's link
+   * or the explicit start-screen pick). Empty/undefined ⇒ the seat is hidden.
+   */
+  workspaceName?: string | null
   /** Display label per role, already humanized by the caller (`modelLabel`). */
   seniorLabel?: string | null
   juniorLabel?: string | null
@@ -52,7 +60,7 @@ export interface ComposerStatusInput {
   approvalMode?: ApprovalMode | null
 }
 
-export type ComposerSeatId = 'models' | 'permissions' | 'context'
+export type ComposerSeatId = 'workspace' | 'models' | 'permissions' | 'context'
 
 /** One rendered seat: short visible value plus the full truthful description. */
 export interface ComposerSeat {
@@ -96,6 +104,17 @@ export function formatCharCount(chars: number): string {
   // Rounding must never print "1000k": values that would round up switch unit.
   if (n < 999_500) return `${Math.round(n / 1_000)}k`
   return `${trimTrailingZero(n / 1_000_000)}M`
+}
+
+function workspaceSeat(input: ComposerStatusInput): ComposerSeat | null {
+  const name = safeLabel(input.workspaceName)
+  if (name === null) return null
+  return {
+    id: 'workspace',
+    label: 'Workspace',
+    value: name,
+    title: `Workspace: ${name}. This session's runs get file and shell tools scoped to this folder.`,
+  }
 }
 
 function modelsSeat(input: ComposerStatusInput): ComposerSeat | null {
@@ -186,13 +205,15 @@ function contextSeat(input: ComposerStatusInput): ComposerSeat | null {
 }
 
 /**
- * Derive the visible seats in display order (models → permissions → context).
- * A seat with no data is simply absent, so the row collapses instead of showing
- * placeholders.
+ * Derive the visible seats in display order (workspace → models → permissions
+ * → context). A seat with no data is simply absent, so the row collapses
+ * instead of showing placeholders.
  */
 export function composerSeats(input: ComposerStatusInput | null | undefined): ComposerSeat[] {
   if (!input || typeof input !== 'object') return []
   const seats: ComposerSeat[] = []
+  const workspace = workspaceSeat(input)
+  if (workspace) seats.push(workspace)
   const models = modelsSeat(input)
   if (models) seats.push(models)
   const permissions = permissionsSeat(input)

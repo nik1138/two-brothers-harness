@@ -58,7 +58,14 @@
 //                  absent until an audit exists
 //   hero-starters  mock provider: the welcome/empty hero renders with workspace
 //                  context + starters; a starter drafts into an empty composer
-//                  (editable, not sent) and never overwrites an existing draft
+//                  (editable, not sent) and never overwrites an existing draft;
+//                  the New session dialog has no "No workspace" option and keeps
+//                  Create disabled until a real workspace is picked; an existing
+//                  unbound session shows the in-place "Select a workspace to
+//                  start" state, blocks submit, binds through PATCH with the
+//                  documented {workspace_id} body (an injected failure stays in
+//                  place with the pick kept), and only then starts a run that
+//                  carries the bound workspace id
 //   composer-recall mock provider: two accepted submissions are recalled with
 //                  ArrowUp (newest first, unsent draft stashed and restored
 //                  exactly); a multiline draft only recalls at its absolute
@@ -290,6 +297,18 @@ const TMP_ROOT = process.env.TWO_BROTHERS_E2E_TMP_ROOT
 function tmpDir(prefix) {
   fs.mkdirSync(TMP_ROOT, { recursive: true })
   return fs.mkdtempSync(path.join(TMP_ROOT, `${prefix}-`))
+}
+
+/**
+ * Temp dirs created by shared helpers (the workspace folder added inside the
+ * New session dialog). Scenario-specific dirs keep their own finally cleanup;
+ * these are removed by the end-of-run sweep so a helper can stay self-contained.
+ */
+const scratchDirs = new Set()
+function scratchDir(prefix) {
+  const dir = tmpDir(prefix)
+  scratchDirs.add(dir)
+  return dir
 }
 
 // Node's fs.rmSync(..., {recursive:true}) silently no-ops on this machine
@@ -835,10 +854,70 @@ async function selectWorkspaceFilter(page, name) {
   await page.locator('select[title="Filter sessions by workspace"]').selectOption({ label: name })
 }
 
+/**
+ * Add a workspace folder from inside the already-open New session dialog: its
+ * "Add folder…" action swaps the modal to the finder step, and confirming
+ * returns to the choose step with the new workspace picked.
+ */
+async function addWorkspaceInSessionDialog(dialog) {
+  const dir = scratchDir('tb-e2e-ws-dialog')
+  await dialog.locator('button[data-focus-target="add-folder"]').click()
+  await dialog.locator('button[aria-label="Edit path"]').click()
+  const pathInput = dialog.locator('input[aria-label="Folder path"]')
+  await pathInput.fill(dir)
+  await pathInput.press('Enter')
+  await waitFor(async () => (await dialog.locator('.wsf-current-path').innerText()).trim() === dir, {
+    desc: 'the dialog finder to list the new workspace folder',
+  })
+  await dialog.getByRole('button', { name: 'Add workspace', exact: true }).click()
+  await waitFor(async () => (await dialog.locator('.ns-workspaces').count()) === 1, {
+    desc: 'the New session dialog to return to its workspace list',
+  })
+  return dir
+}
+
+/** Register a workspace through the API (a hermetic temp folder). */
+async function createApiWorkspace(base, dir, name) {
+  const created = await apiCall(base, 'POST', '/api/workspaces', {
+    path: dir,
+    ...(name ? { name } : {}),
+  })
+  assert.equal(created.status, 201, `POST /api/workspaces -> HTTP ${created.status}: ${created.text}`)
+  assert.ok(created.json?.id, 'POST /api/workspaces returned no id')
+  return created.json.id
+}
+
+/**
+ * Bind a directly seeded (flat) session to a workspace through its metadata
+ * sidecar. The seeded-run scenarios write the session JSONL themselves and must
+ * keep the flat layout, so they seed the link the same way they seed the log.
+ */
+function bindSeededWorkspace(be, sessionName, workspaceId) {
+  const stem = sessionName.replace(/\.jsonl$/, '')
+  const metaPath = path.join(be.dir, `${stem}.meta.json`)
+  const meta = fs.existsSync(metaPath)
+    ? JSON.parse(fs.readFileSync(metaPath, 'utf-8'))
+    : {}
+  fs.writeFileSync(
+    metaPath,
+    JSON.stringify({ ...meta, workspace_id: workspaceId }, null, 2),
+    'utf-8',
+  )
+}
+
 async function createSession(page, title) {
   await page.click('button[aria-label="New session"]')
   const dialog = page.locator('[role="dialog"][aria-label="New session"]')
   await dialog.waitFor({ state: 'visible' })
+  // A session always needs a workspace ("select a workspace to start"). With an
+  // empty registry, add one through the dialog's own "Add folder…" finder; when
+  // the registry has entries but none is preselected, pick one explicitly — the
+  // same choices an operator makes. Create is never clicked while disabled.
+  if ((await dialog.locator('.ns-workspaces .ns-ws').count()) === 0) {
+    await addWorkspaceInSessionDialog(dialog)
+  } else if ((await dialog.locator('.ns-workspaces input[type="radio"]:checked').count()) === 0) {
+    await dialog.locator('.ns-workspaces .ns-ws').first().click()
+  }
   if (title) await dialog.locator('input').first().fill(title)
   await dialog.getByRole('button', { name: 'Create' }).click()
   await dialog.waitFor({ state: 'hidden', timeout: 10000 })
@@ -1357,11 +1436,15 @@ async function scenarioHistoryNav(runner) {
 
 async function scenarioTranscriptStability(runner) {
   const be = await startBackend({ kind: 'mock' })
+  const wsDir = tmpDir('tb-e2e-ws-stability')
   const { context, page, consoleGuard } = await newScenarioPage()
   /** seq of user message i (1-based): the seed writes two envelopes per turn. */
   const userSeq = (i) => 2 * i - 1
   const ANCHOR_TURN = 75
   try {
+    // A run never starts without a workspace; the seed stays flat (direct JSONL
+    // write) and gets the link through its metadata sidecar.
+    const workspaceId = await createApiWorkspace(be.base, wsDir, 'e2e stability ws')
     const created = await apiCall(be.base, 'POST', '/api/sessions', {
       title: 'E2E transcript stability',
     })
@@ -1400,6 +1483,7 @@ async function scenarioTranscriptStability(runner) {
       rows.map((row) => JSON.stringify(row)).join('\n') + '\n',
       'utf-8',
     )
+    bindSeededWorkspace(be, session, workspaceId)
 
     await page.goto(be.base)
     await page.locator('nav[aria-label="Sessions"]').waitFor()
@@ -1481,6 +1565,7 @@ async function scenarioTranscriptStability(runner) {
   } finally {
     await context.close().catch(() => {})
     await killBackend(be)
+    rmTree(wsDir)
     rmTree(be.dir)
   }
 }
@@ -1509,6 +1594,7 @@ async function scenarioTranscriptStability(runner) {
 
 async function scenarioStreamFollow(runner) {
   const be = await startBackend({ kind: 'fixture', scenario: 'stream-follow' })
+  const wsDir = tmpDir('tb-e2e-ws-stream-follow')
   const { context, page, consoleGuard } = await newScenarioPage()
   /** seq of user message i (1-based): the seed writes two envelopes per turn. */
   const userSeq = (i) => 2 * i - 1
@@ -1524,6 +1610,9 @@ async function scenarioStreamFollow(runner) {
     return pairs
   }
   try {
+    // A run never starts without a workspace; the seed stays flat (direct JSONL
+    // write) and gets the link through its metadata sidecar.
+    const workspaceId = await createApiWorkspace(be.base, wsDir, 'e2e stream follow ws')
     const created = await apiCall(be.base, 'POST', '/api/sessions', {
       title: 'E2E stream follow',
     })
@@ -1562,6 +1651,7 @@ async function scenarioStreamFollow(runner) {
       rows.map((row) => JSON.stringify(row)).join('\n') + '\n',
       'utf-8',
     )
+    bindSeededWorkspace(be, session, workspaceId)
 
     await page.goto(be.base)
     await page.locator('nav[aria-label="Sessions"]').waitFor()
@@ -1781,6 +1871,7 @@ async function scenarioStreamFollow(runner) {
   } finally {
     await context.close().catch(() => {})
     await killBackend(be)
+    rmTree(wsDir)
     rmTree(be.dir)
   }
 }
@@ -1860,6 +1951,7 @@ async function scenarioStreamFollowTouch(runner) {
     scenario: 'stream-follow',
     streamChunkMs: 12,
   })
+  const wsDir = tmpDir('tb-e2e-ws-stream-touch')
   const context = await browser.newContext({
     viewport: { width: 390, height: 844 },
     hasTouch: true,
@@ -1879,7 +1971,10 @@ async function scenarioStreamFollowTouch(runner) {
   try {
     // seed a scrollable transcript: 60 operator/senior turns stay inside the
     // newest-200 window (no paging compensation involved) and are tall enough
-    // to remain >150px of history above the fold after the swipe
+    // to remain >150px of history above the fold after the swipe.
+    // A run never starts without a workspace: the flat seed gets its link
+    // through the metadata sidecar (the JSONL stays directly written).
+    const workspaceId = await createApiWorkspace(be.base, wsDir, 'e2e stream touch ws')
     const created = await apiCall(be.base, 'POST', '/api/sessions', {
       title: 'E2E stream follow touch',
     })
@@ -1918,6 +2013,7 @@ async function scenarioStreamFollowTouch(runner) {
       rows.map((row) => JSON.stringify(row)).join('\n') + '\n',
       'utf-8',
     )
+    bindSeededWorkspace(be, session, workspaceId)
 
     await page.goto(be.base)
     // below 768px the sidebar starts closed: open the drawer to reach the seed
@@ -2081,6 +2177,7 @@ async function scenarioStreamFollowTouch(runner) {
   } finally {
     await context.close().catch(() => {})
     await killBackend(be)
+    rmTree(wsDir)
     rmTree(be.dir)
   }
 }
@@ -5099,6 +5196,11 @@ async function scenarioModelSwitch(runner) {
 // empty-transcript hero (inside the transcript area, replacing the bare hint).
 // Starters only *draft* text into the composer; an occupied composer keeps its
 // draft and shows an honest notice instead.
+//
+// The "select a workspace to start" rule is exercised here too: the New
+// session dialog cannot create without a real workspace, and an existing
+// session with no link shows the in-place composer prompt (submit disabled)
+// until a workspace is bound through PATCH /api/sessions/{name}.
 
 async function scenarioHeroStarters(runner) {
   const be = await startBackend({ kind: 'mock' })
@@ -5176,7 +5278,221 @@ async function scenarioHeroStarters(runner) {
       'the blocked starter must not start a run',
     )
 
-    consoleGuard.assertClean()
+    // -- New session: no "No workspace" option; Create waits for a real pick ---
+    // A fresh device state (no recents) plus "All workspaces" is the only way
+    // the dialog has no preselected workspace: prove Create is disabled, the
+    // picker lists every registered workspace, and the reason is inline.
+    await page.evaluate(
+      () => window.localStorage.removeItem('two-brothers.recentWorkspaces.v1'),
+    )
+    await page.reload()
+    await page.locator('nav[aria-label="Sessions"]').waitFor()
+    await page.click('button[aria-label="New session"]')
+    const newDialog = page.locator('[role="dialog"][aria-label="New session"]')
+    await newDialog.waitFor({ state: 'visible' })
+    const createButton = newDialog.getByRole('button', { name: 'Create', exact: true })
+    assert.equal(
+      await createButton.isDisabled(),
+      true,
+      'Create must be disabled until a workspace is picked',
+    )
+    assert.equal(
+      await newDialog.getByText('No workspace', { exact: true }).count(),
+      0,
+      'the dialog must not offer a "No workspace" option',
+    )
+    assert.equal(
+      await newDialog.locator('.ns-workspaces input[type="radio"][value=""]').count(),
+      0,
+      'there must be no empty-value workspace radio',
+    )
+    const registered = await (await fetch(`${be.base}/api/workspaces`)).json()
+    assert.equal(
+      await newDialog.locator('.ns-workspaces .ns-ws').count(),
+      registered.length,
+      'the dialog lists exactly the registered workspaces',
+    )
+    const createReason = newDialog.locator('.ns-reason')
+    await createReason.waitFor({ state: 'visible' })
+    assert.match(
+      (await createReason.innerText()).trim(),
+      /^Select a workspace to start\.$/,
+      'the disabled Create must carry a short inline reason',
+    )
+    assert.equal(
+      await createButton.getAttribute('aria-describedby'),
+      await createReason.getAttribute('id'),
+      'the disabled Create must be described by its inline reason',
+    )
+    await newDialog.locator('.ns-workspaces .ns-ws').first().click()
+    assert.equal(
+      await createButton.isDisabled(),
+      false,
+      'picking a real workspace must enable Create',
+    )
+    await page.keyboard.press('Escape')
+    await newDialog.waitFor({ state: 'hidden' })
+
+    // -- existing unbound session: in-place "Select a workspace to start" ------
+    const unbound = await apiCall(be.base, 'POST', '/api/sessions', {
+      title: 'E2E unbound session',
+    })
+    assert.equal(unbound.status, 201, `create unbound session -> HTTP ${unbound.status}`)
+    const unboundName = unbound.json.name
+    const boundWorkspaceId = registered.find((workspace) => workspace.name === wsName)?.id
+    assert.ok(boundWorkspaceId, `workspace "${wsName}" missing from the registry`)
+
+    await page
+      .locator('.session-row')
+      .filter({ hasText: 'E2E unbound session' })
+      .locator('.session-item')
+      .click()
+    await waitFor(
+      async () => (await page.locator('.chat-title').innerText()).trim() === 'E2E unbound session',
+      { desc: 'the unbound session to be selected' },
+    )
+    const startPrompt = page.locator('[data-workspace-start]')
+    await startPrompt.waitFor({ state: 'visible', timeout: 10000 })
+    assert.equal(
+      (await startPrompt.locator('.workspace-start-title').innerText()).trim(),
+      'Select a workspace to start',
+    )
+    assert.match(
+      await startPrompt.innerText(),
+      /select a workspace to start/,
+      'the prompt must name the backend contract literal so both are the same rule',
+    )
+    const sendButton = page.locator('form[aria-label="New task"] button[type="submit"]')
+    assert.equal(
+      await sendButton.isDisabled(),
+      true,
+      'submit must be disabled until the workspace is bound',
+    )
+    assert.equal(await sendButton.getAttribute('aria-disabled'), 'true')
+    const workspaceNote = page.locator('form[aria-label="New task"] .composer-hint.is-warn')
+    assert.equal((await workspaceNote.innerText()).trim(), 'Select a workspace to start')
+    assert.equal(
+      await sendButton.getAttribute('aria-describedby'),
+      await workspaceNote.getAttribute('id'),
+      'the disabled submit must be described by the workspace note',
+    )
+    // A non-empty draft is not enough: the workspace is the missing prerequisite.
+    const unboundTextarea = page.locator('textarea.composer-input')
+    await unboundTextarea.fill('After binding a workspace')
+    assert.equal(
+      await sendButton.isDisabled(),
+      true,
+      'text alone must not start a run without a workspace',
+    )
+
+    // -- a failed bind stays in place: one bounded error, pick kept, still blocked
+    let failNextBind = true
+    let bindPatches = 0
+    await page.route('**/api/sessions/*', async (route) => {
+      if (route.request().method() !== 'PATCH') return route.continue()
+      bindPatches += 1
+      if (failNextBind) {
+        failNextBind = false
+        return route.fulfill({
+          status: 500,
+          contentType: 'application/json',
+          body: JSON.stringify({ detail: 'synthetic bind failure' }),
+        })
+      }
+      return route.continue()
+    })
+    const firstPick = startPrompt.locator('.workspace-start-option').first()
+    assert.ok(
+      (await firstPick.innerText()).includes(wsName),
+      'the prompt lists the registered workspace by name',
+    )
+    await firstPick.click()
+    const bindError = startPrompt.locator('.workspace-start-error')
+    await bindError.waitFor({ state: 'visible', timeout: 10000 })
+    assert.match(
+      (await bindError.innerText()).trim(),
+      /synthetic bind failure/,
+      'the failed bind reports one bounded inline error',
+    )
+    assert.equal(
+      await startPrompt.locator('.workspace-start-option.is-selected').count(),
+      1,
+      'a failed bind must not clear the operator selection',
+    )
+    assert.equal(await startPrompt.isVisible(), true, 'the prompt stays in place after a failure')
+    assert.equal(await sendButton.isDisabled(), true, 'the composer stays blocked after a failure')
+
+    // -- retry binds through PATCH /api/sessions/{name} {workspace_id} ---------
+    const patchRequest = page.waitForRequest(
+      (request) => request.method() === 'PATCH' && request.url().includes('/api/sessions/'),
+    )
+    const patchResponse = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'PATCH' && response.url().includes('/api/sessions/'),
+    )
+    await startPrompt.locator('[data-workspace-retry]').click()
+    const patch = await patchRequest
+    assert.equal(bindPatches, 2, 'the retry must issue the second bind request')
+    assert.deepEqual(
+      patch.postDataJSON(),
+      { workspace_id: boundWorkspaceId },
+      'the bind PATCH body is exactly { workspace_id }',
+    )
+    assert.equal((await patchResponse).status(), 200, 'the bind PATCH must succeed')
+    await startPrompt.waitFor({ state: 'hidden', timeout: 10000 })
+    await waitFor(async () => !(await sendButton.isDisabled()), {
+      desc: 'the composer to unblock after the successful bind',
+    })
+    assert.equal(
+      await sendButton.getAttribute('aria-disabled'),
+      null,
+      'the unblocked submit must drop its aria-disabled reason',
+    )
+    assert.equal(
+      await sendButton.getAttribute('aria-describedby'),
+      null,
+      'the unblocked submit must drop the workspace note reference',
+    )
+
+    // the session list/meta now carries the link
+    await waitFor(
+      async () => {
+        const rows = await (await fetch(`${be.base}/api/sessions`)).json()
+        return rows.find((row) => row.name === unboundName && row.workspace_id === boundWorkspaceId)
+      },
+      { desc: 'the session list to report the bound workspace' },
+    )
+    const unboundDetail = await (
+      await fetch(`${be.base}/api/sessions/${encodeURIComponent(unboundName)}`)
+    ).json()
+    assert.equal(unboundDetail.workspace_id, boundWorkspaceId)
+
+    // the bound workspace stays visible on the composer status row
+    const workspaceSeat = page.locator('.composer-seat.is-workspace')
+    await workspaceSeat.waitFor({ state: 'visible', timeout: 10000 })
+    assert.equal(
+      (await workspaceSeat.innerText()).replace(/\s+/g, ' ').trim(),
+      `Workspace ${wsName}`,
+    )
+
+    // -- only now can the run start, and it carries the bound workspace id ------
+    const runRequest = page.waitForRequest(
+      (request) => request.method() === 'POST' && request.url().endsWith('/api/runs'),
+    )
+    // the draft typed while the session was unbound is still there and submits now
+    await unboundTextarea.press('Enter')
+    const runBody = (await runRequest).postDataJSON()
+    assert.equal(runBody.workspace_id, boundWorkspaceId, 'the run must carry the bound workspace id')
+    await waitForRunEnd(page)
+    await waitFor(
+      async () => (await page.locator('.chat-group.side-operator').count()) >= 1,
+      { desc: 'the bound-session run to render' },
+    )
+    assert.equal(await workspaceSeat.count(), 1, 'the workspace stays visible after the run')
+    await page.unroute('**/api/sessions/*')
+
+    // the injected 500 logs one expected resource error; nothing else is allowed
+    consoleGuard.assertClean([/Failed to load resource: the server responded with a status of 500/])
     runner.pass('hero-starters')
   } finally {
     await context.close().catch(() => {})
@@ -8843,6 +9159,15 @@ async function sweepOwnedProcesses() {
   await Promise.all([...children].map((p) => killPidTree(p.pid, p)))
   // give the exit events a moment to land so nothing is reaped twice
   for (let i = 0; i < 30 && children.size > 0; i++) await sleep(100)
+  // helper-owned temp folders (e.g. a workspace added inside the New session dialog)
+  for (const dir of scratchDirs) {
+    try {
+      rmTree(dir)
+    } catch {
+      // a stray temp dir must never turn a passing run into a failure
+    }
+  }
+  scratchDirs.clear()
 }
 
 process.on('uncaughtException', (e) => {

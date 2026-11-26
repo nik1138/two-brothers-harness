@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
 import { NButton, NPopover } from 'naive-ui'
 import {
   ApiError,
@@ -54,6 +54,7 @@ import {
   clampSteerPending,
 } from '../steering'
 import { composerSeats } from '../composerStatus'
+import { SELECT_WORKSPACE_NOTE } from '../workspaceContext'
 import { clearDraft, getDraft, planSubmitConsumption, setDraft } from '../drafts'
 import { appendQuoteDraft, quoteDraftBase } from '../messageQuote'
 import { createRecallState, loadRecall, recordRecall, saveRecall, stepRecall } from '../recall'
@@ -85,9 +86,20 @@ const props = defineProps<{
   sessionId?: string | null
   /**
    * Workspace whose files the `@` picker searches (the selected session's
-   * workspace, or the active sidebar filter for a not-yet-started session).
+   * workspace, an explicit start-screen pick, or the active sidebar filter for
+   * an unlinked session). Display-only context; it never decides a run.
    */
   workspaceId?: string | null
+  /**
+   * Display name of the workspace the next run will carry (the session's bound
+   * link, or the start-screen pick). Its seat hides while unknown.
+   */
+  workspaceName?: string | null
+  /**
+   * No workspace is selected/bound: the run rule never starts without one, so
+   * sending is disabled with an accessible reason until it is resolved.
+   */
+  workspaceRequired?: boolean
   /**
    * Outcome of the last submission. The box clears only when the run request
    * was accepted (`accepted: true`); a rejected request keeps the text and its
@@ -332,6 +344,7 @@ function resizeInput() {
  * in-flight compaction keep the send control unavailable.
  */
 const sendContext = computed<ComposerSendContext>(() => ({
+  workspace: props.workspaceRequired !== true,
   busy: false,
   waiting: props.waiting,
   compacting: props.compacting,
@@ -352,6 +365,9 @@ let submitToken = 0
 const canSend = computed(() => !submitting.value && canSubmitComposer(sendContext.value))
 
 const lockReason = computed(() => composerLockReason(sendContext.value))
+
+/** Accessible id for the "select a workspace to start" reason (see the foot). */
+const workspaceNoteId = `composer-workspace-note-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`
 
 // -- mid-run operator steering (wave 23) -------------------------------------
 // A steer is explicitly NOT a queued task: Enter/Send keep their exact
@@ -380,6 +396,7 @@ const steerTitle = computed(() => {
 })
 
 const placeholder = computed(() => {
+  if (lockReason.value === 'workspace') return `${SELECT_WORKSPACE_NOTE} — it is required for a run…`
   if (lockReason.value === 'compacting') return 'Compacting context — sending unlocks when it finishes…'
   if (lockReason.value === 'waiting') return 'Draft the next task…'
   if (props.busy) return 'Type the next task — it will queue behind the run in progress…'
@@ -419,9 +436,10 @@ const settingsHint = computed(
 const statusSeats = computed(() =>
   composerSeats({
     settingsReady: settingsState.value === 'ready',
+    workspaceName: props.workspaceName ?? null,
     seniorLabel: settings.value ? modelLabel(seniorRoute.value) : null,
     juniorLabel: settings.value ? modelLabel(juniorRoute.value) : null,
-    workspaceLinked: Boolean(props.workspaceId),
+    workspaceLinked: Boolean(props.workspaceName),
     approvalMode: settings.value?.approval_policy?.mode ?? null,
     latestAudit: props.latestAudit ?? null,
   }),
@@ -2058,6 +2076,7 @@ onBeforeUnmount(() => {
         :aria-controls="pickerOpen ? mentionListId : undefined"
         :aria-activedescendant="activeOptionId"
         :placeholder="placeholder"
+        :aria-describedby="workspaceRequired ? workspaceNoteId : undefined"
         @keydown="onKeydown"
         @input="onInput"
         @keyup="syncPicker"
@@ -2532,6 +2551,9 @@ onBeforeUnmount(() => {
           type="primary"
           class="composer-send"
           :disabled="!canSend"
+          :title="workspaceRequired ? SELECT_WORKSPACE_NOTE : undefined"
+          :aria-disabled="workspaceRequired ? 'true' : undefined"
+          :aria-describedby="workspaceRequired ? workspaceNoteId : undefined"
         >
           {{ submitting ? (busy ? 'Queueing…' : 'Sending…') : busy ? 'Queue' : 'Send' }}
         </n-button>
@@ -2569,7 +2591,13 @@ onBeforeUnmount(() => {
       </ul>
 
       <div class="composer-foot">
-        <span v-if="pickerOpen" class="composer-hint" role="status">
+        <span
+          v-if="workspaceRequired"
+          :id="workspaceNoteId"
+          class="composer-hint is-warn"
+          role="status"
+        >{{ SELECT_WORKSPACE_NOTE }}</span>
+        <span v-else-if="pickerOpen" class="composer-hint" role="status">
           {{ pickerFootHint }}
         </span>
         <span v-else-if="settingsMissing" class="composer-hint is-warn">{{ settingsHint }}</span>
