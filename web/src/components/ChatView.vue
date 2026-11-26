@@ -301,6 +301,32 @@ function verdictClass(m: ChatMessage): string {
   return m.verdict ? `verdict-${m.verdict}` : ''
 }
 
+/** The group's first message owns the inline header chips; continuation
+ *  messages keep their own bubble meta row. */
+function groupLead(g: ChatGroup): ChatMessage | null {
+  return g.messages[0] ?? null
+}
+
+function headerKind(g: ChatGroup): string | null {
+  const lead = groupLead(g)
+  return lead && lead.kind !== 'message' ? lead.kind : null
+}
+
+function headerVerdict(g: ChatGroup): string | null {
+  return groupLead(g)?.verdict ?? null
+}
+
+function headerVerdictClass(g: ChatGroup): string {
+  const verdict = headerVerdict(g)
+  return verdict ? `verdict-${verdict}` : ''
+}
+
+/** A decision opens its own group and renders unboxed, full-width, under the
+ *  header rule. */
+function isDecisionGroup(g: ChatGroup): boolean {
+  return groupLead(g)?.highlight === true
+}
+
 /** Pending approvals surfaced by the dock above the composer hide their
  * duplicate timeline card; resolved approvals always render as history. */
 function isDockedApproval(entry: TimelineEntry['entry']): boolean {
@@ -1676,26 +1702,50 @@ watch(
             {{ initial(row.entry.group.author) }}
           </div>
           <div class="group-content">
-            <header class="group-header">
+            <header
+              class="group-header"
+              :class="{ 'group-header-highlight': isDecisionGroup(row.entry.group) }"
+            >
               <span class="speaker-name">{{ SPEAKER_LABEL[row.entry.group.author] }}</span>
               <time
                 v-if="groupTime(row.entry.group)"
                 class="muted"
                 :datetime="row.entry.group.startTs"
               >{{ formatTime(row.entry.group.startTs) }}</time>
+              <!-- The first message's kind/verdict ride the header line; its
+                   own bubble meta below skips them so they never duplicate. -->
+              <span
+                v-if="headerKind(row.entry.group)"
+                class="kind-chip"
+              >{{ headerKind(row.entry.group) }}</span>
+              <span
+                v-if="headerVerdict(row.entry.group)"
+                class="verdict-chip"
+                :class="headerVerdictClass(row.entry.group)"
+              >{{ headerVerdict(row.entry.group) }}</span>
             </header>
 
-            <div v-for="(m, j) in row.entry.group.messages" :key="m.id" class="bubble-wrap">
+            <div
+              v-for="(m, j) in row.entry.group.messages"
+              :key="m.id"
+              class="bubble-wrap"
+              :class="{ 'bubble-wrap-highlight': m.highlight }"
+            >
               <article
                 class="bubble"
                 :class="{ 'bubble-highlight': m.highlight, 'bubble-continuation': j > 0 }"
                 :tabindex="row.entry.group.author === 'operator' ? -1 : undefined"
                 :data-history-nav-target="row.entry.group.author === 'operator' && m.kind === 'message' ? m.seq : undefined"
               >
-                <header v-if="m.title || m.verdict || m.highlight" class="bubble-meta">
+                <header
+                  v-if="j === 0 ? !!m.title : (m.title || m.verdict || m.kind !== 'message')"
+                  class="bubble-meta"
+                >
                   <h3 v-if="m.title" class="bubble-title">{{ m.title }}</h3>
-                  <span v-if="m.kind !== 'message'" class="kind-chip">{{ m.kind }}</span>
-                  <span v-if="m.verdict" class="verdict-chip" :class="verdictClass(m)">{{ m.verdict }}</span>
+                  <template v-if="j > 0">
+                    <span v-if="m.kind !== 'message'" class="kind-chip">{{ m.kind }}</span>
+                    <span v-if="m.verdict" class="verdict-chip" :class="verdictClass(m)">{{ m.verdict }}</span>
+                  </template>
                 </header>
 
                 <div v-if="m.body" class="bubble-body md-body">
@@ -2090,6 +2140,24 @@ watch(
 .side-operator .bubble-actions {
   /* Reuse the operator bubble's reading order: copy nearest the bubble. */
   flex-direction: row-reverse;
+}
+
+/* A decision owns the transcript column: the side action gutter would narrow
+   the text, so its compact controls move under the full-width body instead. */
+.bubble-wrap-highlight {
+  align-self: stretch;
+  width: 100%;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.bubble-wrap-highlight .bubble {
+  width: 100%;
+}
+
+.bubble-wrap-highlight .bubble-actions {
+  flex-direction: row;
+  padding-top: 0;
 }
 
 .bubble-wrap:hover .bubble-actions,

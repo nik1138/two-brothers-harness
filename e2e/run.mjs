@@ -1009,10 +1009,89 @@ async function scenarioChat(runner) {
       assert.ok(speakers.has(who), `speaker "${who}" missing (got: ${[...speakers].join(', ')})`)
     }
 
-    // final senior decision, highlighted
+    // final senior decision, highlighted; its chip rides the group header
     assert.equal(await decision.count(), 1, 'expected exactly one highlighted senior decision')
-    const kindChip = await decision.locator('.kind-chip').innerText()
+    const decisionGroup = page.locator('.chat-group.side-senior:has(.bubble.bubble-highlight)')
+    const kindChip = await decisionGroup.locator('.group-header .kind-chip').innerText()
     assert.equal(kindChip.trim().toLowerCase(), 'decision')
+
+    const decisionLayout = await decisionGroup.evaluate((group) => {
+      const box = (el) => {
+        const r = el.getBoundingClientRect()
+        return {
+          left: r.left,
+          right: r.right,
+          top: r.top,
+          bottom: r.bottom,
+          width: r.width,
+          height: r.height,
+        }
+      }
+      const header = group.querySelector('.group-header')
+      const bubble = group.querySelector('.bubble.bubble-highlight')
+      const body = bubble.querySelector('.bubble-body')
+      const content = group.querySelector('.group-content')
+      const plainBody = [
+        ...document.querySelectorAll(
+          '.chat-group.side-senior .bubble:not(.bubble-highlight) .bubble-body',
+        ),
+      ].find((el) => (el.textContent || '').trim().length > 0)
+      const style = getComputedStyle(bubble)
+      return {
+        header: box(header),
+        name: box(header.querySelector('.speaker-name')),
+        time: header.querySelector('time') ? box(header.querySelector('time')) : null,
+        chip: box(header.querySelector('.kind-chip')),
+        body: box(body),
+        content: box(content),
+        plainBody: plainBody ? box(plainBody) : null,
+        background: style.backgroundColor,
+        borderTop: style.borderTopWidth,
+        borderLeft: style.borderLeftWidth,
+        paddingLeft: style.paddingLeft,
+        paddingRight: style.paddingRight,
+      }
+    })
+    const centerY = (r) => (r.top + r.bottom) / 2
+
+    // the header line reads name → time → DECISION, all on one row
+    assert.ok(decisionLayout.time, 'the decision header must keep the time visible')
+    assert.ok(
+      decisionLayout.name.right <= decisionLayout.time.left + 0.5,
+      `the speaker name must precede the time (name right ${decisionLayout.name.right}, time left ${decisionLayout.time.left})`,
+    )
+    assert.ok(
+      decisionLayout.time.right <= decisionLayout.chip.left + 0.5,
+      `the decision chip must follow the time (time right ${decisionLayout.time.right}, chip left ${decisionLayout.chip.left})`,
+    )
+    assert.ok(
+      Math.abs(centerY(decisionLayout.chip) - centerY(decisionLayout.name)) <= 2,
+      `the decision chip must sit on the speaker/time line ` +
+        `(chip center ${centerY(decisionLayout.chip)}, name center ${centerY(decisionLayout.name)})`,
+    )
+    assert.ok(
+      decisionLayout.chip.top >= decisionLayout.header.top - 0.5 &&
+        decisionLayout.chip.bottom <= decisionLayout.header.bottom + 0.5,
+      'the decision chip must stay inside the group header',
+    )
+
+    // the decision body owns the transcript column: no boxed inset, full width
+    assert.ok(decisionLayout.plainBody, 'a sibling plain senior bubble must exist for the column edge')
+    assert.ok(
+      Math.abs(decisionLayout.body.left - decisionLayout.plainBody.left) <= 1,
+      `the decision body must start at the message column edge ` +
+        `(decision ${decisionLayout.body.left}, plain ${decisionLayout.plainBody.left})`,
+    )
+    assert.ok(
+      Math.abs(decisionLayout.body.right - decisionLayout.content.right) <= 1,
+      `the decision body must use the full column width ` +
+        `(body right ${decisionLayout.body.right}, column right ${decisionLayout.content.right})`,
+    )
+    assert.equal(decisionLayout.background, 'rgba(0, 0, 0, 0)', 'the decision bubble must not paint a box')
+    assert.equal(decisionLayout.borderTop, '0px', 'the decision bubble must not draw a border')
+    assert.equal(decisionLayout.borderLeft, '0px', 'the decision bubble must not draw a border')
+    assert.equal(decisionLayout.paddingLeft, '0px', 'the decision body must not be inset')
+    assert.equal(decisionLayout.paddingRight, '0px', 'the decision body must not be inset')
 
     // no raw protocol JSON / transcript markers leaked into the UI
     const transcript = await page.locator('.chat-scroll').innerText()
@@ -7767,7 +7846,13 @@ async function scenarioReal(runner) {
     }
     assert.equal(await decision.count(), 1, 'expected exactly one highlighted senior decision')
     assert.equal(
-      (await decision.locator('.kind-chip').innerText()).trim().toLowerCase(),
+      (
+        await page
+          .locator('.chat-group.side-senior:has(.bubble.bubble-highlight) .group-header .kind-chip')
+          .innerText()
+      )
+        .trim()
+        .toLowerCase(),
       'decision',
     )
     const transcript = await page.locator('.chat-scroll').innerText()

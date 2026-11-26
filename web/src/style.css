@@ -495,6 +495,13 @@ samp {
   font-size: 0.8rem;
 }
 
+/* A decision keeps one piece of chrome — a quiet rule under its header — so
+   the turn still reads as a boundary without boxing the body in. */
+.group-header-highlight {
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
 .speaker-name {
   font-weight: 600;
 }
@@ -523,17 +530,14 @@ samp {
   border-top-right-radius: var(--radius-md);
 }
 
-/* A decision stays visually distinct without shouting: accent edge + soft fill. */
+/* A decision is unboxed: the body owns the transcript column (no fill, border
+   or horizontal inset), and the header's rule marks the turn instead. The
+   `.bubble-highlight` class stays on the article for selectors/semantics. */
 .bubble-highlight {
-  border: 1px solid var(--accent);
-  border-left: 3px solid var(--accent);
-  border-radius: var(--radius-md);
-  background: var(--surface-highlight);
-  padding: 0.6rem 0.9rem;
-}
-
-.side-operator .bubble-highlight {
-  background: var(--surface-highlight);
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 0;
 }
 
 .bubble-meta {

@@ -24,6 +24,7 @@ import {
   speakerLabel,
   speakerOf,
   taskOf,
+  type ChatGroup,
   type ChatItem,
 } from '../src/chat.ts'
 import type { Envelope } from '../src/types.ts'
@@ -277,4 +278,106 @@ test('projection: the solo decision envelope keeps the highlighted decision row'
     !items.some((item) => item.type === 'group' && item.group.author === 'junior'),
     'no junior rows on a solo run',
   )
+})
+
+// -- grouping + the header chips it feeds -------------------------------------
+
+/** One envelope between two roles at an explicit time (grouping reads `ts`). */
+function msg(
+  seq: number,
+  from: Envelope['from'],
+  to: Envelope['to'],
+  kind: Envelope['kind'],
+  ts: string,
+  payload: Record<string, unknown>,
+): Envelope {
+  return { v: 1, id: `m${seq}`, seq, ts, from, to, kind, payload } as unknown as Envelope
+}
+
+function groupsOf(items: ChatItem[]): ChatGroup[] {
+  const out: ChatGroup[] = []
+  for (const item of items) if (item.type === 'group') out.push(item.group)
+  return out
+}
+
+const T0 = '2026-11-04T00:00:00Z'
+const T_PLUS_1_MIN = '2026-11-04T00:01:00Z'
+const T_PLUS_11_MIN = '2026-11-04T00:11:00Z'
+
+test('projection: a decision always starts its own group', () => {
+  resetChatProjection([])
+  // a review and a decision from the same speaker one minute apart: without
+  // the rule the decision would extend the review group and lose its header.
+  appendEnvelope(
+    msg(1, 'senior', 'user', 'review', T0, { verdict: 'accept', notes: 'Looks fine.', points: [] }),
+  )
+  appendEnvelope(
+    msg(2, 'senior', 'user', 'decision', T_PLUS_1_MIN, {
+      decision: 'Ship it.',
+      rationale: 'r',
+      confidence: 0.9,
+      dissent: null,
+      accepted_proposals: [],
+    }),
+  )
+  const groups = groupsOf(currentChatItems())
+  assert.equal(groups.length, 2, 'the decision must not extend the review group')
+  assert.equal(groups[0]?.messages.length, 1, 'the review keeps its own group')
+  const decisionGroup = groups[1]
+  assert.ok(decisionGroup, 'the decision group exists')
+  assert.equal(decisionGroup.messages.length, 1, 'the decision group carries exactly the decision')
+  assert.equal(decisionGroup.messages[0]?.kind, 'decision')
+  assert.equal(decisionGroup.messages[0]?.highlight, true)
+  assert.equal(decisionGroup.messages[0]?.body, 'Ship it.')
+  assert.equal(decisionGroup.startTs, T_PLUS_1_MIN, 'the split header carries the decision time')
+})
+
+test('projection: the first message drives the group header chips', () => {
+  resetChatProjection([])
+  appendEnvelope(
+    msg(1, 'senior', 'user', 'review', T0, { verdict: 'accept', notes: 'First pass.', points: [] }),
+  )
+  appendEnvelope(
+    msg(2, 'senior', 'user', 'review', T_PLUS_1_MIN, { verdict: 'accept', notes: 'Second pass.', points: [] }),
+  )
+  const [reviewGroup] = groupsOf(currentChatItems())
+  assert.ok(reviewGroup, 'the two reviews group together')
+  assert.equal(reviewGroup.messages.length, 2, 'reviews without a decision keep grouping')
+  // ChatView renders these header chips from messages[0]; continuation rows
+  // keep their own meta row.
+  assert.equal(reviewGroup.messages[0]?.kind, 'review', 'kind chip text')
+  assert.equal(reviewGroup.messages[0]?.verdict, 'accept', 'verdict chip text')
+
+  resetChatProjection([])
+  appendEnvelope(
+    msg(1, 'senior', 'user', 'decision', T0, {
+      decision: 'Proceed.',
+      rationale: 'r',
+      accepted_proposals: [],
+    }),
+  )
+  const [decisionGroup] = groupsOf(currentChatItems())
+  assert.ok(decisionGroup)
+  assert.equal(decisionGroup.messages[0]?.kind, 'decision', 'decision header chip text')
+  assert.equal(decisionGroup.messages[0]?.verdict, null, 'decisions carry no verdict chip')
+})
+
+test('projection: non-decision grouping keeps the gap and order rules', () => {
+  resetChatProjection([])
+  appendEnvelope(msg(1, 'junior', 'senior', 'deliverable', T0, { result: 'done' }))
+  appendEnvelope(msg(2, 'junior', 'senior', 'deliverable', T_PLUS_1_MIN, { result: 'more' }))
+  let groups = groupsOf(currentChatItems())
+  assert.equal(groups.length, 1, 'same speaker, recipient and gap still group')
+  assert.equal(groups[0]?.messages.length, 2)
+
+  // beyond GROUP_GAP_MS (10 min) a same-speaker message opens a new group
+  appendEnvelope(msg(3, 'junior', 'senior', 'deliverable', T_PLUS_11_MIN, { result: 'later' }))
+  groups = groupsOf(currentChatItems())
+  assert.equal(groups.length, 2, 'the 10-minute gap still splits groups')
+  assert.equal(groups[1]?.messages.length, 1)
+
+  // a different recipient never joins the open group
+  appendEnvelope(msg(4, 'junior', 'user', 'deliverable', T_PLUS_11_MIN, { result: 'to operator' }))
+  groups = groupsOf(currentChatItems())
+  assert.equal(groups.length, 3, 'a recipient change still splits groups')
 })

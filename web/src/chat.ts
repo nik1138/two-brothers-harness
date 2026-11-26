@@ -392,8 +392,12 @@ function appendToProjection(state: ChatProjectionState, env: Envelope) {
   const gap =
     state.group && prev ? new Date(env.ts).getTime() - new Date(prev.ts).getTime() : Infinity
 
+  // A highlighted (final-decision) message always opens its own group: the
+  // group header carries the decision's kind chip, so it must belong to the
+  // decision turn alone. Every other kind keeps the historical order/gap rules.
   const sameGroup =
     state.group !== null &&
+    !msg.highlight &&
     state.group.author === author &&
     state.group.recipient === recipient &&
     !prev?.highlight &&

@@ -2741,6 +2741,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   link (the key is removed). Unknown ids are a 400 `unknown workspace_id`, a
   blank id/title a 400, an unknown session a 404. Existing title-only clients
   keep their exact behavior. Tests: `tests/sessionworkspacepatch.test.ts`.
+- **Web chat decision layout:** a final decision now opens its own group, so
+  its `DECISION` chip (and a verdict chip, when present) rides the speaker/time
+  header line inline instead of a chip row boxed inside the bubble; the
+  decision body loses its accent card (no fill, border or horizontal padding)
+  and spans the full transcript column, marked only by a quiet token-coloured
+  rule under the header, with `Details`/copy/quote as compact controls under
+  the text. Grouping for every other kind is unchanged and the
+  `.bubble-highlight` class stays on the article. Tests:
+  `web/tests/chat.test.ts`, `e2e/run.mjs` (`chat`, `real`).
 
 ## [0.0.1] — 2026-11-04
 
