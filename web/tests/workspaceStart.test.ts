@@ -23,7 +23,8 @@ const sourceOf = (file: string) =>
 test('the UI copy names the backend contract message byte-for-byte', () => {
   assert.equal(SELECT_WORKSPACE_MESSAGE, 'select a workspace to start')
   assert.equal(SELECT_WORKSPACE_NOTE, 'Select a workspace to start')
-  // the in-place prompt and the backend's refusal are recognizably the same rule
+  // the in-place prompt and the (expected) backend refusal are recognizably
+  // the same rule; the client gate is authoritative until one lands
   const prompt = sourceOf('components/WorkspaceStartPrompt.vue')
   assert.match(prompt, /SELECT_WORKSPACE_MESSAGE/)
   assert.match(prompt, /SELECT_WORKSPACE_NOTE/)

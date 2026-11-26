@@ -195,8 +195,10 @@ export async function renameSession(name: string, title: string): Promise<Sessio
 
 /**
  * Bind a workspace to an existing session (`PATCH /api/sessions/{name}`
- * `{workspace_id}`). The backend refuses a run that resolves no workspace, so
- * this is how an unlinked session gains one; the saved sidecar comes back.
+ * `{workspace_id}`). The client-side gate is what stops a run without a
+ * workspace today; once an enforcing backend lands, POST /api/runs refuses
+ * such a run, and this bind is how an unlinked session gains one. The saved
+ * sidecar comes back.
  */
 export async function setSessionWorkspace(
   name: string,

@@ -15,7 +15,12 @@
  * sidebar's no-filter sentinel, never a workspace id.
  */
 
-/** The backend's refusal for a run that resolves no workspace (POST /api/runs). */
+/**
+ * The documented refusal for a run that resolves no workspace
+ * (POST /api/runs). Forward-compatible: the client gate is authoritative
+ * today, and once an enforcing backend lands it answers this message while
+ * the picker and its error handling already recognize it.
+ */
 export const SELECT_WORKSPACE_MESSAGE = 'select a workspace to start'
 
 /** UI copy naming that same rule (the in-place prompt and the disabled submit note). */
