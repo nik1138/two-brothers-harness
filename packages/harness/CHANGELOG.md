@@ -2703,6 +2703,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   creates a real new envelope, and `renderTranscript`'s `[[TASK]]` marker still
   wraps the first user message. Tests: `tests/graph.test.ts`,
   `tests/session.test.ts`.
+- **PATCH can bind a workspace to an existing session:** `PATCH
+  /api/sessions/{name}` now accepts `{title?, workspace_id?}` (at least one
+  field). `title` keeps the historical rename contract; `workspace_id` must
+  name a registered workspace (the persisted sidecar link is set, so
+  later runs that omit the id inherit it) and `workspace_id: null` clears the
+  link (the key is removed). Unknown ids are a 400 `unknown workspace_id`, a
+  blank id/title a 400, an unknown session a 404. Existing title-only clients
+  keep their exact behavior. Tests: `tests/sessionworkspacepatch.test.ts`.
 
 ## [0.0.1] — 2026-11-04
 

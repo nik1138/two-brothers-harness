@@ -312,7 +312,7 @@ import {
   summarizeLoadFailure,
   type McpLastRunStatus,
 } from "./mcpstatus.ts";
-import { deriveTitle, SessionMetadataStore } from "./metadata.ts";
+import { deriveTitle, SessionMetadataStore, sessionMetaPath } from "./metadata.ts";
 import { SessionLayout } from "./sessionlayout.ts";
 import {
   MENTION_MAX_FILES,
@@ -2983,6 +2983,23 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
 
   // -- routes: session metadata ------------------------------------------------
 
+  /**
+   * Clear a session's workspace link (`PATCH /api/sessions/{name}` with
+   * `{"workspace_id": null}`). The key is removed (not written as null) so the
+   * sidecar keeps its legacy unlinked shape; a session without a sidecar has
+   * nothing to clear and is left untouched.
+   */
+  function clearSessionWorkspace(name: string): Record<string, unknown> | null {
+    const meta = state.metadata.get(name);
+    if (meta === null) return null;
+    const target = layout.metaPath(name) ?? sessionMetaPath(sessionsDir, name);
+    const next: Record<string, unknown> = { ...meta, updated: Math.floor(Date.now() / 1000) };
+    delete next.workspace_id;
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, JSON.stringify(next, null, 2), "utf-8");
+    return next;
+  }
+
   routes.push(
     compileRoute("POST", "/api/sessions", async (ctx) => {
       const body = await ctx.json();
@@ -3010,11 +3027,46 @@ export function createServer(options: ServerOptions = {}): ServerHandle {
       const store = storeFor(name);
       if (!store.exists()) throw new HttpError(404, "not found");
       const body = await ctx.json();
-      const title = optionalString(body, "title");
-      if (title === undefined || !title.trim()) {
-        throw new HttpError(400, "title must not be empty");
+      const record = body as Record<string, unknown>;
+      const hasTitle = isRecord(record) && "title" in record;
+      const hasWorkspace = isRecord(record) && "workspace_id" in record;
+      if (!hasTitle && !hasWorkspace) {
+        throw new HttpError(400, "provide title or workspace_id");
       }
-      const meta = state.metadata.save(name, { title });
+      // Title keeps its historical contract: present and non-blank.
+      let title: string | undefined;
+      if (hasTitle) {
+        title = optionalString(record, "title");
+        if (title === undefined || !title.trim()) {
+          throw new HttpError(400, "title must not be empty");
+        }
+      }
+      // Workspace link: a registered id binds it; null clears it. Unknown ids
+      // are the same 400 the run route uses; a blank id is a body error.
+      let workspaceId: string | null | undefined;
+      if (hasWorkspace) {
+        const raw = record.workspace_id;
+        if (raw === null) {
+          workspaceId = null;
+        } else if (typeof raw === "string") {
+          const id = raw.trim();
+          if (id === "") throw new HttpError(400, "workspace_id must not be empty");
+          ensureWorkspace(id);
+          workspaceId = id;
+        } else {
+          throw invalidBody();
+        }
+      }
+      if (workspaceId === null) {
+        const cleared = clearSessionWorkspace(name) ?? {};
+        const meta =
+          title === undefined ? cleared : state.metadata.save(name, { title });
+        return { name, ...meta };
+      }
+      const meta = state.metadata.save(name, {
+        ...(title !== undefined ? { title } : {}),
+        ...(workspaceId !== undefined ? { workspaceId } : {}),
+      });
       return { name, ...meta };
     }),
   );

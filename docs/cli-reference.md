@@ -1046,7 +1046,7 @@ but stores `meta.json` and `events.jsonl` inside
 | `GET /api/search?q=&limit=` | full-text search over session titles and envelope payload strings; returns `{query, scanned_sessions, truncated, hits[]}`; `q` shorter than 2 characters is a 400 |
 | `GET /api/sessions/{name}/export?format=markdown\|json\|html` | download one session as Markdown (default), JSON or one self-contained HTML page with `Content-Disposition: attachment` (the HTML page inlines its CSS, escapes payloads and has no scripts/links; markdown/json stay byte-identical to the pre-wave-23 exporter); 404 for an unknown session, 400 for an unknown format (`format must be markdown, json or html`) (HEAD supported) |
 | `POST /api/sessions` | create a session (`{"title"?, "workspace_id"?}`) |
-| `PATCH /api/sessions/{name}` | rename a session (set a readable title) |
+| `PATCH /api/sessions/{name}` | update a session: `{"title"?, "workspace_id"?}` — at least one field. `title` keeps the historical rename (non-empty). `workspace_id` binds a registered workspace to the session (the unblock path for an old unbound session; an unknown id is a 400 `unknown workspace_id`), and `workspace_id: null` clears the link (removed from the sidecar). Responds `200 {name, ...meta}`; 404 unknown session |
 | `DELETE /api/sessions/{name}` | delete a session — the JSONL, its `<name>.meta.json` and the runtime sidecar (`200 {"deleted": name}`; 404 on unknown) |
 | `GET /api/sessions/{name}` | all protocol envelopes of one session |
 | `GET /api/sessions/{name}/events` | runtime sidecar events (tool calls, approvals) for browser reload |
