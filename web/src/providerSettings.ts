@@ -635,6 +635,11 @@ export function discoveredAdditions(current: unknown, discovered: unknown): stri
 /** Reported-list length above which a picker offers its "Filter models" input. */
 export const MODEL_FILTER_THRESHOLD = 8
 
+/** True when a reported list is long enough for a picker to show its filter. */
+export function showsModelFilter(models: unknown): boolean {
+  return discoveredModels(models).length > MODEL_FILTER_THRESHOLD
+}
+
 /**
  * Visible rows for a picker: case-insensitive substring match on the model id.
  * A blank/absent query shows every id; input order is preserved.
@@ -715,12 +720,15 @@ export function addDiscoveryEligible(draft: {
 }
 
 /**
- * Default Add-card selection: none. A fetch only presents the reported ids —
- * the operator explicitly checks the ones to add (Select all / per-model
- * toggles), so saving with zero models stays a valid choice.
+ * Default Add-card selection after a fetch settles: the reported ids already in
+ * the draft, in reported order. A fresh/empty draft therefore preselects
+ * nothing (the operator chooses), while a re-fetch keeps the ids the operator
+ * already put in the draft from silently disappearing — applyAddModelSelection
+ * then retains them and leaves manual ids the endpoint did not report alone.
  */
-export function defaultAddModelSelection(_discovered: unknown): string[] {
-  return []
+export function defaultAddModelSelection(discovered: unknown, current?: unknown): string[] {
+  const existing = new Set(cleanModelList(current))
+  return discoveredModels(discovered).filter((model) => existing.has(model))
 }
 
 /**

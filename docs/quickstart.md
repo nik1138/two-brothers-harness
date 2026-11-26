@@ -280,7 +280,8 @@ the same hero appears inside a selected session that has no transcript yet.
    separate, explicit probe: it asks the endpoint named by the current draft
    (Base URL and wire kind, plus the API key typed in the form for this one
    request) which models it reports and lists them without saving anything.
-   Adding them is deliberate too — **Add N to draft**, then **Save changes**;
+   Adding them is deliberate too — check the models to add, then **Add
+   selected (N)** and **Save changes**;
    an empty answer ("reported no models") is valid and never erases the saved
    model list. Only OpenAI-compatible endpoints expose a `/models` listing, so
    the control answers honestly (unsupported) for Anthropic/Gemini, and a

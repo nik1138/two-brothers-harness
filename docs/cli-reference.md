@@ -1226,8 +1226,9 @@ variant for an unsaved draft (the web **Add provider** card): same probe, same
 errors, but no preset is looked up — no stored or env-backed credential can be
 resolved or attached; only the typed draft key is used (write-only, one
 request, never echoed). It works with zero presets and with all-keyed presets.
-Its result uses the same picker rules: **Fetch models** selects nothing by
-default, **Select all**/**Clear** and the optional **Filter models** input
+Its result uses the same picker rules: **Fetch models** selects nothing for a
+fresh draft while a re-fetch keeps the reported ids already in the draft
+selected, **Select all**/**Clear** and the optional **Filter models** input
 choose the reported ids, and **Add provider** still works with zero models.
 
 **models.dev catalog browse.** Settings → Providers → **Browse models.dev…**

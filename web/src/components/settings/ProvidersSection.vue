@@ -16,7 +16,6 @@ import {
 import type { ProviderCreateRequest, ProviderDiscoverRequest, ProviderPatchRequest } from '../../api'
 import type { ProviderPreset } from '../../types'
 import {
-  MODEL_FILTER_THRESHOLD,
   PROVIDER_KIND_DEFAULT,
   PROVIDER_KINDS,
   addDiscoveryEligible,
@@ -54,6 +53,7 @@ import {
   selectAllModels,
   selectedReportedAdditions,
   settleDiscovery,
+  showsModelFilter,
   startDiscovery,
   supportsModelDiscovery,
   toggleModelSelection,
@@ -168,6 +168,8 @@ const discoveryInDraft = computed(() => new Set(draft.models))
 const discoveryVisibleModels = computed(() =>
   filterModelIds(discoveryModels.value, discoveryFilter.value),
 )
+/** Long reported lists get the filter; the threshold is pinned in tests. */
+const showDiscoveryFilter = computed(() => showsModelFilter(discoveryModels.value))
 /** Selected ids that are reported, checked and not already in the draft. */
 const discoverySelectedCount = computed(
   () =>
@@ -239,6 +241,8 @@ const addDiscoveryFilter = ref('')
 const addDiscoveryVisibleModels = computed(() =>
   filterModelIds(addDiscoveryModels.value, addDiscoveryFilter.value),
 )
+/** Long reported lists get the filter; the threshold is pinned in tests. */
+const showAddDiscoveryFilter = computed(() => showsModelFilter(addDiscoveryModels.value))
 const addDiscoveryCanSelectAll = computed(() =>
   addDiscoveryVisibleModels.value.some(
     (model) => !addDiscoverySelection.value.includes(model),
@@ -880,8 +884,12 @@ async function fetchAddModels(): Promise<void> {
     addDiscovery.value = settleDiscovery(addDiscovery.value, token, ADD_DISCOVERY_NAME, result.models)
     const phase = addDiscovery.value.phase
     if (phase === 'ready') {
-      // Nothing is preselected: the operator explicitly checks what to add.
-      addDiscoverySelection.value = defaultAddModelSelection(addDiscovery.value.models)
+      // Nothing is preselected for a fresh draft, but a re-fetch keeps the
+      // reported ids the operator already put in the draft.
+      addDiscoverySelection.value = defaultAddModelSelection(
+        addDiscovery.value.models,
+        addModels.value,
+      )
       applyAddSelection()
       const count = addDiscovery.value.models.length
       announce(`${count} model${count === 1 ? '' : 's'} found. Select the ones to add.`)
@@ -1264,7 +1272,7 @@ async function submitAdd(): Promise<void> {
                   </button>
                 </div>
                 <label
-                  v-if="discoveryModels.length > MODEL_FILTER_THRESHOLD"
+                  v-if="showDiscoveryFilter"
                   class="provider-discovery-filter"
                 >
                   <span class="provider-discovery-filter-label">Filter models</span>
@@ -1575,7 +1583,7 @@ async function submitAdd(): Promise<void> {
               </button>
             </div>
             <label
-              v-if="addDiscoveryModels.length > MODEL_FILTER_THRESHOLD"
+              v-if="showAddDiscoveryFilter"
               class="provider-discovery-filter"
             >
               <span class="provider-discovery-filter-label">Filter models</span>

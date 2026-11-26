@@ -9,11 +9,13 @@ import { test } from 'node:test'
 import {
   MODEL_FILTER_THRESHOLD,
   appendSelectedReportedModels,
+  applyAddModelSelection,
   defaultAddModelSelection,
   filterModelIds,
   hasAddableReportedModels,
   selectAllModels,
   selectedReportedAdditions,
+  showsModelFilter,
   toggleModelSelection,
 } from '../src/providerSettings'
 
@@ -30,11 +32,42 @@ const REPORTED = [
   'e2e-b7',
 ]
 
-test('defaultAddModelSelection: a fetch never preselects anything', () => {
+test('defaultAddModelSelection: a fetch never preselects for an empty draft', () => {
   assert.deepEqual(defaultAddModelSelection(REPORTED), [])
+  assert.deepEqual(defaultAddModelSelection(REPORTED, []), [])
   assert.deepEqual(defaultAddModelSelection([{ id: 'm1' }, ' m2 ', 'm1']), [])
   assert.deepEqual(defaultAddModelSelection([]), [])
   assert.deepEqual(defaultAddModelSelection(null), [])
+})
+
+test('defaultAddModelSelection: a re-fetch keeps the reported ids already in the draft', () => {
+  // Only reported ids are eligible: they come back selected in reported order,
+  // so applyAddModelSelection cannot drop the operator's earlier choices.
+  assert.deepEqual(
+    defaultAddModelSelection(['alpha', 'beta', 'gamma'], ['gamma', 'alpha']),
+    ['alpha', 'gamma'],
+  )
+  assert.deepEqual(
+    applyAddModelSelection(
+      ['manual', 'alpha'],
+      ['alpha', 'beta', 'gamma'],
+      defaultAddModelSelection(['alpha', 'beta', 'gamma'], ['manual', 'alpha']),
+    ),
+    ['manual', 'alpha'],
+    'an already-chosen reported id survives a re-fetch',
+  )
+  // A manual id the endpoint does not report never enters the selection...
+  assert.deepEqual(defaultAddModelSelection(['alpha', 'beta'], ['manual']), [])
+  // ...and stays untouched in the draft when the selection is applied.
+  assert.deepEqual(
+    applyAddModelSelection(
+      ['manual'],
+      ['alpha', 'beta'],
+      defaultAddModelSelection(['alpha', 'beta'], ['manual']),
+    ),
+    ['manual'],
+    'an unreported manual id is not a discovery choice',
+  )
 })
 
 test('toggleModelSelection adds/removes one id without disturbing order', () => {
@@ -57,11 +90,14 @@ test('filterModelIds: case-insensitive substring, order preserved, blank = all',
   assert.deepEqual(filterModelIds([{ id: 'A-B' }, 'a-b'], 'a-b'), ['A-B', 'a-b'])
 })
 
-test('model filters stay opt-in past the threshold', () => {
+test('model filter boundary: 8 ids stay unfiltered, 9 show the filter', () => {
   // The pickers show the filter only when the reported list is longer than
-  // MODEL_FILTER_THRESHOLD; the constant itself is part of the contract.
+  // MODEL_FILTER_THRESHOLD; showsModelFilter pins the exact boundary.
   assert.equal(MODEL_FILTER_THRESHOLD, 8)
-  assert.equal(REPORTED.length > MODEL_FILTER_THRESHOLD, true)
+  assert.equal(showsModelFilter(REPORTED.slice(0, 8)), false)
+  assert.equal(showsModelFilter(REPORTED.slice(0, 9)), true)
+  assert.equal(showsModelFilter([]), false)
+  assert.equal(showsModelFilter(REPORTED), true)
 })
 
 test('selectAllModels: Select all unions the visible rows only', () => {

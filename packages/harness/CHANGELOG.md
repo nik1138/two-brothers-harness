@@ -246,7 +246,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Refresh models** result and the **Add provider** card's **Fetch models**
   result both render the reported ids as checkboxes that start unchecked; only
   the checked ids are appended to the model draft (discovered order, no
-  duplicates), and the Add card can still be saved with zero models. Ids
+  duplicates), and the Add card can still be saved with zero models. A fresh
+  Add draft selects nothing, while a re-fetch keeps the reported ids already
+  in the draft selected so an existing choice is never silently dropped. Ids
   already in the draft render disabled as "in draft" and stay out of the
   "N of M selected" add count; **Add selected (N)** announces the result, and
   a reported list longer than eight ids gets a case-insensitive **Filter
