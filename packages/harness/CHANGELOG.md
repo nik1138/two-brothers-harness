@@ -241,6 +241,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rule, adding that the duplicate's options were ignored when they differ.
   `normalizePluginSettings` and persisted settings semantics are unchanged.
   Tests: `tests/plugincore.test.ts`.
+- **Web provider discovery is an explicit picker:** Settings → Providers no
+  longer bulk-adds every model an endpoint reports. The existing provider's
+  **Refresh models** result and the **Add provider** card's **Fetch models**
+  result both render the reported ids as checkboxes that start unchecked; only
+  the checked ids are appended to the model draft (discovered order, no
+  duplicates), and the Add card can still be saved with zero models. Ids
+  already in the draft render disabled as "in draft" and stay out of the
+  "N of M selected" add count; **Add selected (N)** announces the result, and
+  a reported list longer than eight ids gets a case-insensitive **Filter
+  models** input (Select all applies to the visible rows, Clear clears the
+  selection). No backend, protocol or dependency change. Files:
+  `web/src/providerSettings.ts`,
+  `web/src/components/settings/ProvidersSection.vue`,
+  `web/tests/providerSettings.test.ts`,
+  `web/tests/providerDiscovery.test.ts`; E2E `settings-provider-setup`
+  scenario.
 
 ### Fixed
 

@@ -595,7 +595,9 @@ export function discoveryStatusText(state: ProviderDiscoveryState): string {
       return 'Asking the endpoint for its model list…'
     case 'ready': {
       const count = state.models.length
-      return `${count} model${count === 1 ? '' : 's'} reported by the endpoint. Nothing is saved until you add them to the draft and Save changes.`
+      return `${count} model${
+        count === 1 ? '' : 's'
+      } reported by the endpoint. Choose the ones to add to the draft; nothing is saved until you add them and Save changes.`
     }
     case 'empty':
     case 'error':
@@ -622,6 +624,80 @@ export function discoveredAdditions(current: unknown, discovered: unknown): stri
   return discoveredModels(discovered).filter((model) => !existing.includes(model))
 }
 
+// -- discovered-model pickers --------------------------------------------------
+//
+// Both discovery results ("Refresh models" in the detail card and "Fetch
+// models" in the Add card) render as checkbox pickers: nothing is selected
+// until the operator checks it, and only the checked ids ever reach a model
+// list. The helpers below stay pure so the selection/filter rules are testable
+// without a DOM.
+
+/** Reported-list length above which a picker offers its "Filter models" input. */
+export const MODEL_FILTER_THRESHOLD = 8
+
+/**
+ * Visible rows for a picker: case-insensitive substring match on the model id.
+ * A blank/absent query shows every id; input order is preserved.
+ */
+export function filterModelIds(models: unknown, query: unknown): string[] {
+  const list = discoveredModels(models)
+  const needle = text(query).toLowerCase()
+  if (!needle) return list
+  return list.filter((model) => model.toLowerCase().includes(needle))
+}
+
+/** True when at least one reported model can still be added to the list. */
+export function hasAddableReportedModels(current: unknown, reported: unknown): boolean {
+  return discoveredAdditions(current, reported).length > 0
+}
+
+/**
+ * The checked reported ids that are not already in the current list, in
+ * reported order. Already-present ids are excluded even when checked (a picker
+ * disables them); unknown checked ids are ignored.
+ */
+export function selectedReportedAdditions(
+  current: unknown,
+  reported: unknown,
+  selected: unknown,
+): string[] {
+  const chosen = new Set(cleanModelList(selected))
+  const existing = new Set(cleanModelList(current))
+  return discoveredModels(reported).filter((model) => chosen.has(model) && !existing.has(model))
+}
+
+/**
+ * Append the checked reported ids to a model list: existing entries keep their
+ * order, only checked-and-new ids are appended in reported order, and no id is
+ * duplicated. The report itself is never written (checking nothing is a no-op).
+ */
+export function appendSelectedReportedModels(
+  current: unknown,
+  reported: unknown,
+  selected: unknown,
+): string[] {
+  const out = cleanModelList(current)
+  const chosen = new Set(cleanModelList(selected))
+  for (const model of discoveredModels(reported)) {
+    if (!chosen.has(model) || out.includes(model)) continue
+    out.push(model)
+  }
+  return out
+}
+
+/**
+ * "Select all" for the visible/filtered rows: the union of the current
+ * selection and the visible ids, order preserved. Hidden selected ids stay
+ * selected (the count keeps covering every reported row).
+ */
+export function selectAllModels(selected: unknown, visible: unknown): string[] {
+  const out = cleanModelList(selected)
+  for (const model of discoveredModels(visible)) {
+    if (!out.includes(model)) out.push(model)
+  }
+  return out
+}
+
 // -- model discovery in the Add provider card -----------------------------------
 //
 // The Add card probes the typed draft through the name-agnostic
@@ -638,9 +714,13 @@ export function addDiscoveryEligible(draft: {
   return validateProviderBaseUrl(draft?.baseUrl) === null && supportsModelDiscovery(draft?.kind)
 }
 
-/** Default Add-card selection: every successfully discovered id. */
-export function defaultAddModelSelection(discovered: unknown): string[] {
-  return discoveredModels(discovered)
+/**
+ * Default Add-card selection: none. A fetch only presents the reported ids —
+ * the operator explicitly checks the ones to add (Select all / per-model
+ * toggles), so saving with zero models stays a valid choice.
+ */
+export function defaultAddModelSelection(_discovered: unknown): string[] {
+  return []
 }
 
 /**
@@ -663,12 +743,17 @@ export function applyAddModelSelection(
   return out
 }
 
-/** One checkbox toggle in the Add-card discovery list. */
-export function toggleAddModelSelection(selected: unknown, id: unknown): string[] {
+/** One checkbox toggle in a discovered-model picker (order preserved). */
+export function toggleModelSelection(selected: unknown, id: unknown): string[] {
   const list = cleanModelList(selected)
   const model = text(id)
   if (!model) return list
   return list.includes(model) ? list.filter((entry) => entry !== model) : [...list, model]
+}
+
+/** One checkbox toggle in the Add-card discovery list. */
+export function toggleAddModelSelection(selected: unknown, id: unknown): string[] {
+  return toggleModelSelection(selected, id)
 }
 
 /** Visible status copy for the Add-card probe ('' when there is nothing to say). */
@@ -678,7 +763,9 @@ export function addDiscoveryStatusText(state: ProviderDiscoveryState): string {
       return 'Asking the endpoint for its model list…'
     case 'ready': {
       const count = state.models.length
-      return `${count} model${count === 1 ? '' : 's'} found. All are selected below — uncheck any you do not want to add, then Add provider.`
+      return `${count} model${
+        count === 1 ? '' : 's'
+      } found. Select the ones to add — nothing is added until you check them and choose Add provider.`
     }
     case 'empty':
     case 'error':

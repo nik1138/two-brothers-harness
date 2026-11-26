@@ -671,7 +671,8 @@ test('discoveryStatusText truthfully describes every phase', () => {
   assert.match(discoveryStatusText(startDiscovery('mine', 1)), /Asking the endpoint/)
   const ready = settleDiscovery(startDiscovery('mine', 2), 2, 'mine', ['a', 'b'])
   assert.match(discoveryStatusText(ready), /2 models reported/)
-  assert.match(discoveryStatusText(ready), /Nothing is saved/)
+  assert.match(discoveryStatusText(ready), /Choose the ones to add/)
+  assert.match(discoveryStatusText(ready), /nothing is saved/)
   const one = settleDiscovery(startDiscovery('mine', 3), 3, 'mine', ['a'])
   assert.match(discoveryStatusText(one), /1 model reported/)
   const empty = settleDiscovery(startDiscovery('mine', 4), 4, 'mine', [])
@@ -721,10 +722,11 @@ test('addDiscoveryEligible: only a valid Base URL and an OpenAI-compatible kind'
   assert.equal(addDiscoveryEligible(undefined), false)
 })
 
-test('defaultAddModelSelection selects every successfully discovered id', () => {
-  assert.deepEqual(defaultAddModelSelection(['a', 'b']), ['a', 'b'])
-  assert.deepEqual(defaultAddModelSelection([{ id: 'm1' }, ' m2 ', 'm1']), ['m1', 'm2'])
+test('defaultAddModelSelection: a fetch never preselects anything', () => {
+  assert.deepEqual(defaultAddModelSelection(['a', 'b']), [])
+  assert.deepEqual(defaultAddModelSelection([{ id: 'm1' }, ' m2 ', 'm1']), [])
   assert.deepEqual(defaultAddModelSelection([]), [])
+  assert.deepEqual(defaultAddModelSelection(null), [])
 })
 
 test('applyAddModelSelection: manual ids stay, selected discovered ids follow', () => {
@@ -754,7 +756,8 @@ test('addDiscoveryStatusText describes the Add-card probe honestly', () => {
   assert.match(addDiscoveryStatusText(startDiscovery('add', 1)), /Asking the endpoint/)
   const ready = settleDiscovery(startDiscovery('add', 2), 2, 'add', ['a', 'b'])
   assert.match(addDiscoveryStatusText(ready), /2 models found/)
-  assert.match(addDiscoveryStatusText(ready), /All are selected/)
+  assert.match(addDiscoveryStatusText(ready), /Select the ones to add/)
+  assert.match(addDiscoveryStatusText(ready), /nothing is added/)
   const one = settleDiscovery(startDiscovery('add', 3), 3, 'add', ['a'])
   assert.match(addDiscoveryStatusText(one), /1 model found/)
   const empty = settleDiscovery(startDiscovery('add', 4), 4, 'add', [])

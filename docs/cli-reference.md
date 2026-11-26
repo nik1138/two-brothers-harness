@@ -1211,11 +1211,24 @@ kind probes the Gemini listing `GET {base}/v1beta/models` with the
 is the same one the web Settings → Providers **Refresh models** button calls;
 the offline equivalent is `two-brothers models --base-url <url> [--kind google]`.
 
+The web result is an explicit checkbox picker, never a bulk add: every reported
+id is a row, nothing is selected by default, ids already in the draft render as
+disabled **in draft** rows (excluded from the add count), and **Add selected
+(N)** appends only the checked new ids to the draft in discovered order without
+duplicates — **Save changes** still persists them. When every reported id is
+already in the draft the picker says so and disables the add action. A reported
+list longer than eight ids gets a case-insensitive **Filter models** input;
+**Select all** applies to the visible/filtered rows, **Clear** clears the whole
+selection, and the "N of M selected" count keeps covering every reported row.
+
 **Provider draft discovery.** `POST /api/providers/discover` is the name-agnostic
 variant for an unsaved draft (the web **Add provider** card): same probe, same
 errors, but no preset is looked up — no stored or env-backed credential can be
 resolved or attached; only the typed draft key is used (write-only, one
 request, never echoed). It works with zero presets and with all-keyed presets.
+Its result uses the same picker rules: **Fetch models** selects nothing by
+default, **Select all**/**Clear** and the optional **Filter models** input
+choose the reported ids, and **Add provider** still works with zero models.
 
 **models.dev catalog browse.** Settings → Providers → **Browse models.dev…**
 reads the public catalog through the two read-only routes above. No snapshot
@@ -2242,7 +2255,9 @@ them):
   seed can be reset to its canonical default from Settings → Providers
   without touching the Senior/Junior role assignments, and **Refresh models**
   probes the current draft's OpenAI-compatible endpoint through
-  `POST /api/providers/{name}/discover` without saving anything, and
+  `POST /api/providers/{name}/discover` without saving anything, listing the
+  reported models as a checkbox picker so only the checked ones are added to
+  the draft, and
   **Browse models.dev…** prefills the Add form from the public catalog
   (read-only summary/detail routes, curated seed fallback offline, one wire
   family per import; nothing is saved until **Add provider**).

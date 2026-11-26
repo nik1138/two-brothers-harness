@@ -16,24 +16,26 @@ import {
 import type { ProviderCreateRequest, ProviderDiscoverRequest, ProviderPatchRequest } from '../../api'
 import type { ProviderPreset } from '../../types'
 import {
+  MODEL_FILTER_THRESHOLD,
   PROVIDER_KIND_DEFAULT,
   PROVIDER_KINDS,
   addDiscoveryEligible,
   addDiscoveryStatusText,
   apiKeyPlaceholder,
   apiKeyStateLabel,
+  appendSelectedReportedModels,
   applyAddModelSelection,
   applyProviderDelete,
   applyProviderReset,
   applyProviderUpdate,
   cleanModelList,
   defaultAddModelSelection,
-  discoveredAdditions,
   discoveryStatusText,
   failDiscovery,
+  filterModelIds,
+  hasAddableReportedModels,
   isCurrentDiscovery,
   isProviderDraftDirty,
-  mergeDiscoveredModels,
   newDiscoveryState,
   nextProviderIndex,
   normalizeProviders,
@@ -49,10 +51,12 @@ import {
   providerRowSummary,
   providerUsageBadges,
   resolveProviderSelection,
+  selectAllModels,
+  selectedReportedAdditions,
   settleDiscovery,
   startDiscovery,
   supportsModelDiscovery,
-  toggleAddModelSelection,
+  toggleModelSelection,
   unsupportedDiscoveryCopy,
   validateAddProviderForm,
   validateProviderBaseUrl,
@@ -154,8 +158,30 @@ const discoveryText = computed(() => discoveryStatusText(discovery.value))
 const discoveryModels = computed(() =>
   discovery.value.phase === 'ready' ? discovery.value.models : [],
 )
-const discoveryAdditions = computed(() =>
-  discoveredAdditions(draft.models, discoveryModels.value),
+const discoveryCountId = `${panelId}-discovery-count`
+/** Ids the operator checked in the detail picker (nothing is checked by default). */
+const discoverySelection = ref<string[]>([])
+/** Case-insensitive filter over the reported ids ('' shows every row). */
+const discoveryFilter = ref('')
+/** Ids already in the draft render as disabled "in draft" rows. */
+const discoveryInDraft = computed(() => new Set(draft.models))
+const discoveryVisibleModels = computed(() =>
+  filterModelIds(discoveryModels.value, discoveryFilter.value),
+)
+/** Selected ids that are reported, checked and not already in the draft. */
+const discoverySelectedCount = computed(
+  () =>
+    selectedReportedAdditions(draft.models, discoveryModels.value, discoverySelection.value).length,
+)
+const discoveryAllInDraft = computed(
+  () =>
+    discoveryModels.value.length > 0 &&
+    !hasAddableReportedModels(draft.models, discoveryModels.value),
+)
+const discoveryCanSelectAll = computed(() =>
+  discoveryVisibleModels.value.some(
+    (model) => !discoveryInDraft.value.has(model) && !discoverySelection.value.includes(model),
+  ),
 )
 
 /** Unsaved-draft guard: closing, or switching to another provider. */
@@ -208,6 +234,16 @@ const addDiscoveryModels = computed(() =>
 )
 /** Ids the operator checked in the discovery list (drives the draft's models). */
 const addDiscoverySelection = ref<string[]>([])
+/** Nothing is checked until the operator picks; a fetch alone adds no model. */
+const addDiscoveryFilter = ref('')
+const addDiscoveryVisibleModels = computed(() =>
+  filterModelIds(addDiscoveryModels.value, addDiscoveryFilter.value),
+)
+const addDiscoveryCanSelectAll = computed(() =>
+  addDiscoveryVisibleModels.value.some(
+    (model) => !addDiscoverySelection.value.includes(model),
+  ),
+)
 /** The probe needs a valid Base URL and an OpenAI-compatible kind. */
 const addFetchEligible = computed(() =>
   addDiscoveryEligible({ baseUrl: addBaseUrl.value, kind: addKind.value }),
@@ -302,10 +338,12 @@ function resetDraft(provider: ProviderView | null = openProvider.value): void {
   draft.contextWindow = next.contextWindow
 }
 
-/** Drop any probe result and invalidate an in-flight one (newer token wins). */
+/** Drop any probe result/selection and invalidate an in-flight one (newer token wins). */
 function resetDiscovery(): void {
   discoverySequence += 1
   discovery.value = newDiscoveryState()
+  discoverySelection.value = []
+  discoveryFilter.value = ''
 }
 
 /**
@@ -319,6 +357,10 @@ async function refreshModels(): Promise<void> {
   const name = provider.name
   const token = ++discoverySequence
   const started = startDiscovery(name, token)
+  // Every refresh starts from an empty picker: a stale selection can never
+  // leak into the new catalog, and the operator re-checks what to add.
+  discoverySelection.value = []
+  discoveryFilter.value = ''
   // Honest early answer for wire kinds without a live model listing:
   // the server refuses them too (400), but this avoids a pointless round trip.
   if (!supportsModelDiscovery(draft.kind)) {
@@ -345,32 +387,71 @@ async function refreshModels(): Promise<void> {
     if (phase === 'ready') {
       const count = discovery.value.models.length
       announce(
-        `${count} model${count === 1 ? '' : 's'} reported by the endpoint. Nothing was saved.`,
+        `${count} model${
+          count === 1 ? '' : 's'
+        } reported by the endpoint. Choose the ones to add to the draft; nothing was saved.`,
       )
-    } else if (phase === 'empty') {
+    } else {
+      // Empty answers leave no rows to pick: drop any residual selection.
+      discoverySelection.value = []
+      discoveryFilter.value = ''
       announce(discovery.value.message)
     }
   } catch (e) {
     if (!isCurrentDiscovery(discovery.value, token, name)) return
     const status = e instanceof ApiError ? e.status : 0
     discovery.value = failDiscovery(discovery.value, token, name, status, errText(e))
+    discoverySelection.value = []
+    discoveryFilter.value = ''
     announce(discovery.value.message)
   }
 }
 
-/** Explicit, draft-only merge of the reported models (still needs Save changes). */
+/** Check/uncheck one reported row (in-draft rows are disabled and never enter the selection). */
+function onDiscoveryToggle(model: string, event: Event): void {
+  const checked = event.target instanceof HTMLInputElement ? event.target.checked : false
+  const next = new Set(toggleModelSelection(discoverySelection.value, model))
+  if (checked) next.add(model)
+  else next.delete(model)
+  // Keep reported order (not click order); in-draft ids are not selectable.
+  discoverySelection.value = discoveryModels.value.filter(
+    (entry) => next.has(entry) && !discoveryInDraft.value.has(entry),
+  )
+}
+
+/** Select every visible row that can still be added (in-draft rows stay excluded). */
+function selectAllDiscovery(): void {
+  const next = new Set(selectAllModels(discoverySelection.value, discoveryVisibleModels.value))
+  discoverySelection.value = discoveryModels.value.filter(
+    (entry) => next.has(entry) && !discoveryInDraft.value.has(entry),
+  )
+}
+
+function clearDiscoverySelection(): void {
+  discoverySelection.value = []
+}
+
+/** Explicit, draft-only append of exactly the checked reported ids (needs Save changes). */
 function useDiscoveredModels(): void {
-  if (!openProvider.value || busy.value || addBusy.value || !discoveryModels.value.length) return
-  const additions = discoveryAdditions.value
-  if (!additions.length) {
-    announce('All reported models are already in the draft.')
+  if (!openProvider.value || busy.value || addBusy.value) return
+  const selected = selectedReportedAdditions(
+    draft.models,
+    discoveryModels.value,
+    discoverySelection.value,
+  )
+  if (!selected.length) {
+    announce(
+      discoveryAllInDraft.value
+        ? 'All reported models are already in the draft.'
+        : 'Select at least one reported model to add.',
+    )
     return
   }
-  draft.models = mergeDiscoveredModels(draft.models, discoveryModels.value)
+  draft.models = appendSelectedReportedModels(draft.models, discoveryModels.value, selected)
+  // The added ids are now in the draft (and disabled), so the picker starts clean.
+  discoverySelection.value = []
   announce(
-    `Added ${additions.length} model${
-      additions.length === 1 ? '' : 's'
-    } to the draft. Save changes to keep them.`,
+    `Added ${selected.length} model${selected.length === 1 ? '' : 's'} to draft. Save changes to keep them.`,
   )
 }
 
@@ -752,6 +833,7 @@ function resetAddDiscovery(): void {
   addDiscoverySequence += 1
   addDiscovery.value = newDiscoveryState()
   addDiscoverySelection.value = []
+  addDiscoveryFilter.value = ''
 }
 
 /** Push the current discovery selection into the Add draft's model list. */
@@ -768,9 +850,8 @@ function applyAddSelection(): void {
  * draft route (`POST /api/providers/discover`). Writes nothing: the provider
  * exists only after Add provider. Only the key typed in this form is sent —
  * the route never resolves stored or env credentials — so a keyless local
- * endpoint probes unauthenticated even when other presets have keys. On
- * success every discovered model is selected (and thereby in the draft);
- * deselection removes it again.
+ * endpoint probes unauthenticated even when other presets have keys. A fetch
+ * selects nothing: the operator checks the models to add (or Select all).
  */
 async function fetchAddModels(): Promise<void> {
   if (addBusy.value || addDiscovering.value) return
@@ -799,20 +880,22 @@ async function fetchAddModels(): Promise<void> {
     addDiscovery.value = settleDiscovery(addDiscovery.value, token, ADD_DISCOVERY_NAME, result.models)
     const phase = addDiscovery.value.phase
     if (phase === 'ready') {
-      // Low-friction default: everything discovered is selected (and so in the
-      // draft); the operator can uncheck before Add provider.
+      // Nothing is preselected: the operator explicitly checks what to add.
       addDiscoverySelection.value = defaultAddModelSelection(addDiscovery.value.models)
       applyAddSelection()
       const count = addDiscovery.value.models.length
-      announce(`${count} model${count === 1 ? '' : 's'} found. All are selected.`)
-    } else if (phase === 'empty') {
+      announce(`${count} model${count === 1 ? '' : 's'} found. Select the ones to add.`)
+    } else {
       addDiscoverySelection.value = []
+      addDiscoveryFilter.value = ''
       announce(addDiscovery.value.message)
     }
   } catch (e) {
     if (!isCurrentDiscovery(addDiscovery.value, token, ADD_DISCOVERY_NAME)) return
     const status = e instanceof ApiError ? e.status : 0
     addDiscovery.value = failDiscovery(addDiscovery.value, token, ADD_DISCOVERY_NAME, status, errText(e))
+    addDiscoverySelection.value = []
+    addDiscoveryFilter.value = ''
     announce(addDiscovery.value.message)
   }
 }
@@ -821,7 +904,7 @@ function onAddDiscoveryToggle(model: string, event: Event): void {
   const checked = event.target instanceof HTMLInputElement ? event.target.checked : false
   // The :checked binding keeps the model and the box in sync, so the toggle
   // result matches the box; the checkbox state still wins defensively.
-  const next = new Set(toggleAddModelSelection(addDiscoverySelection.value, model))
+  const next = new Set(toggleModelSelection(addDiscoverySelection.value, model))
   if (checked) next.add(model)
   else next.delete(model)
   // Keep discovery order (not click order) so the draft list stays stable.
@@ -829,8 +912,12 @@ function onAddDiscoveryToggle(model: string, event: Event): void {
   applyAddSelection()
 }
 
+/** Select all visible rows (a filter narrows what Select all applies to). */
 function selectAllAddDiscovery(): void {
-  addDiscoverySelection.value = defaultAddModelSelection(addDiscoveryModels.value)
+  addDiscoverySelection.value = selectAllModels(
+    addDiscoverySelection.value,
+    addDiscoveryVisibleModels.value,
+  )
   applyAddSelection()
 }
 
@@ -1148,39 +1235,95 @@ async function submitAdd(): Promise<void> {
                   {{ discoveryText }}
                 </span>
               </div>
-              <div
-                v-if="discoveryModels.length"
-                class="provider-discovered"
-                aria-label="Models reported by the endpoint"
-              >
-                <p class="provider-discovered-text">
-                  Reported by the endpoint (not saved):
-                  <code
-                    v-for="model in discoveryModels"
-                    :key="model"
-                    class="provider-discovered-model"
-                    >{{ model }}</code
+              <fieldset v-if="discoveryModels.length" class="provider-discovery">
+                <legend class="provider-discovery-legend">Models reported by the endpoint</legend>
+                <div class="provider-discovery-head">
+                  <span
+                    :id="discoveryCountId"
+                    class="provider-discovery-count"
+                    role="status"
+                    aria-live="polite"
                   >
+                    {{ discoverySelectedCount }} of {{ discoveryModels.length }} selected
+                  </span>
+                  <button
+                    type="button"
+                    class="provider-link-button"
+                    :disabled="busy || addBusy || !discoveryCanSelectAll"
+                    @click="selectAllDiscovery"
+                  >
+                    Select all
+                  </button>
+                  <button
+                    type="button"
+                    class="provider-link-button is-quiet"
+                    :disabled="busy || addBusy || !discoverySelection.length"
+                    @click="clearDiscoverySelection"
+                  >
+                    Clear
+                  </button>
+                </div>
+                <label
+                  v-if="discoveryModels.length > MODEL_FILTER_THRESHOLD"
+                  class="provider-discovery-filter"
+                >
+                  <span class="provider-discovery-filter-label">Filter models</span>
+                  <input
+                    v-model="discoveryFilter"
+                    type="search"
+                    class="provider-discovery-filter-input"
+                    placeholder="Filter models"
+                    autocomplete="off"
+                  />
+                </label>
+                <p v-if="!discoveryVisibleModels.length" class="provider-discovery-empty">
+                  No reported models match “{{ discoveryFilter.trim() }}”.
+                </p>
+                <ul
+                  v-else
+                  class="provider-discovery-list"
+                  role="group"
+                  :aria-labelledby="discoveryCountId"
+                >
+                  <li v-for="model in discoveryVisibleModels" :key="model">
+                    <label
+                      class="provider-discovery-row"
+                      :class="{ 'is-in-draft': discoveryInDraft.has(model) }"
+                    >
+                      <input
+                        type="checkbox"
+                        class="provider-discovery-check"
+                        :checked="discoveryInDraft.has(model) || discoverySelection.includes(model)"
+                        :disabled="busy || addBusy || discoveryInDraft.has(model)"
+                        @change="onDiscoveryToggle(model, $event)"
+                      />
+                      <code class="provider-discovery-id">{{ model }}</code>
+                      <span v-if="discoveryInDraft.has(model)" class="provider-discovery-in-draft">
+                        in draft
+                      </span>
+                    </label>
+                  </li>
+                </ul>
+                <p v-if="discoveryAllInDraft" class="provider-discovery-note">
+                  All reported models are already in the draft.
                 </p>
                 <n-button
-                  class="provider-discovered-action"
+                  class="provider-discovery-add"
                   attr-type="button"
                   size="tiny"
-                  :disabled="busy || addBusy || !discoveryAdditions.length"
+                  type="primary"
+                  :disabled="busy || addBusy || !discoverySelectedCount"
                   @click="useDiscoveredModels"
                 >
-                  {{
-                    discoveryAdditions.length
-                      ? `Add ${discoveryAdditions.length} to draft`
-                      : 'All in draft'
-                  }}
+                  Add selected ({{ discoverySelectedCount }})
                 </n-button>
-              </div>
+              </fieldset>
               <span class="provider-field-note">
                 Model IDs are suggestions for the role pickers and onboarding; set the model each
                 role actually uses in Models &amp; roles. Refresh probes the current Base URL and
-                Kind (with the API key typed above, or the saved key when blank) without saving;
-                the offline path is <code>two-brothers models --base-url &lt;url&gt; [--kind google]</code>.
+                Kind (with the API key typed above, or the saved key when blank) without saving, and
+                lists the reported ids so you choose which ones to add to the draft; the offline path
+                is <code>two-brothers models --base-url &lt;url&gt; [--kind google]</code>.
               </span>
             </div>
 
@@ -1403,15 +1546,21 @@ async function submitAdd(): Promise<void> {
               enter a valid Base URL and keep a supported kind. Manual ids above always work.
             </span>
           </div>
-          <div v-if="addDiscoveryModels.length" class="provider-add-discovery">
-            <div class="provider-add-discovery-head">
-              <span class="provider-add-discovery-count" :id="addDiscoveryCountId">
+          <fieldset v-if="addDiscoveryModels.length" class="provider-discovery">
+            <legend class="provider-discovery-legend">Models reported by the endpoint</legend>
+            <div class="provider-discovery-head">
+              <span
+                :id="addDiscoveryCountId"
+                class="provider-discovery-count"
+                role="status"
+                aria-live="polite"
+              >
                 {{ addDiscoverySelection.length }} of {{ addDiscoveryModels.length }} selected
               </span>
               <button
                 type="button"
                 class="provider-link-button"
-                :disabled="addDiscoverySelection.length >= addDiscoveryModels.length || addBusy"
+                :disabled="addBusy || !addDiscoveryCanSelectAll"
                 @click="selectAllAddDiscovery"
               >
                 Select all
@@ -1419,31 +1568,48 @@ async function submitAdd(): Promise<void> {
               <button
                 type="button"
                 class="provider-link-button is-quiet"
-                :disabled="!addDiscoverySelection.length || addBusy"
+                :disabled="addBusy || !addDiscoverySelection.length"
                 @click="clearAddDiscovery"
               >
                 Clear
               </button>
             </div>
-            <ul
-              class="provider-add-model-list"
-              :aria-labelledby="addDiscoveryCountId"
-              aria-label="Models reported by the endpoint"
+            <label
+              v-if="addDiscoveryModels.length > MODEL_FILTER_THRESHOLD"
+              class="provider-discovery-filter"
             >
-              <li v-for="model in addDiscoveryModels" :key="model">
-                <label class="provider-add-model">
+              <span class="provider-discovery-filter-label">Filter models</span>
+              <input
+                v-model="addDiscoveryFilter"
+                type="search"
+                class="provider-discovery-filter-input"
+                placeholder="Filter models"
+                autocomplete="off"
+              />
+            </label>
+            <p v-if="!addDiscoveryVisibleModels.length" class="provider-discovery-empty">
+              No reported models match “{{ addDiscoveryFilter.trim() }}”.
+            </p>
+            <ul
+              v-else
+              class="provider-discovery-list"
+              role="group"
+              :aria-labelledby="addDiscoveryCountId"
+            >
+              <li v-for="model in addDiscoveryVisibleModels" :key="model">
+                <label class="provider-discovery-row">
                   <input
                     type="checkbox"
-                    class="provider-add-model-check"
+                    class="provider-discovery-check"
                     :checked="addDiscoverySelection.includes(model)"
                     :disabled="addBusy"
                     @change="onAddDiscoveryToggle(model, $event)"
                   />
-                  <code class="provider-add-model-id">{{ model }}</code>
+                  <code class="provider-discovery-id">{{ model }}</code>
                 </label>
               </li>
             </ul>
-          </div>
+          </fieldset>
         </div>
         <details class="provider-advanced">
           <summary class="provider-advanced-summary">Advanced</summary>
@@ -1899,85 +2065,82 @@ async function submitAdd(): Promise<void> {
   color: var(--text-secondary);
 }
 
-.provider-discovered {
+/* Discovered-model pickers (detail "Refresh models" + Add-card "Fetch models"):
+   an explicit checkbox list with an optional filter. */
+.provider-discovery {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  min-width: 0;
+  margin: 0;
   padding: 8px 10px;
   background: var(--ok-soft);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
 }
 
-.provider-discovered-text {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 5px;
-  margin: 0;
+.provider-discovery-legend {
+  padding: 0;
   font-size: 0.72rem;
-  line-height: 1.5;
+  font-weight: 600;
   color: var(--text-secondary);
 }
 
-.provider-discovered-model {
-  padding: 0 6px;
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
-  line-height: 1.5;
-  color: var(--text-primary);
-  overflow-wrap: anywhere;
-  background: var(--surface-canvas);
-  border: 1px solid var(--border-subtle);
-  border-radius: 999px;
-}
-
-.provider-discovered-action {
-  align-self: flex-start;
-}
-
-/* Add-card discovery result: checkboxes whose selection is the draft's list. */
-.provider-add-discovery {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px 10px;
-  background: var(--ok-soft);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-}
-
-.provider-add-discovery-head {
+.provider-discovery-head {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 10px;
 }
 
-.provider-add-discovery-count {
+.provider-discovery-count {
   flex: 1;
   min-width: 8rem;
   font-size: 0.7rem;
   color: var(--text-secondary);
 }
 
-.provider-link-button:disabled {
-  opacity: 0.5;
-  cursor: default;
+.provider-discovery-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
 }
 
-.provider-add-model-list {
+.provider-discovery-filter-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.provider-discovery-filter-input {
+  width: 100%;
+  min-width: 0;
+  padding: 3px 7px;
+  font: inherit;
+  font-size: 0.72rem;
+  color: var(--text-primary);
+  background: var(--surface-canvas);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.provider-discovery-filter-input:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.provider-discovery-list {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  max-height: 180px;
+  max-height: 240px;
   margin: 0;
   padding: 0;
   overflow-y: auto;
   list-style: none;
 }
 
-.provider-add-model {
+.provider-discovery-row {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -1986,28 +2149,68 @@ async function submitAdd(): Promise<void> {
   cursor: pointer;
 }
 
-.provider-add-model:hover {
+.provider-discovery-row:hover {
   background: var(--surface-hover);
 }
 
-.provider-add-model-check {
+.provider-discovery-row.is-in-draft {
+  cursor: default;
+}
+
+.provider-discovery-row.is-in-draft:hover {
+  background: none;
+}
+
+.provider-discovery-check {
   flex: none;
   margin: 0;
   accent-color: var(--accent);
   cursor: pointer;
 }
 
-.provider-add-model-check:focus-visible {
+.provider-discovery-check:disabled {
+  cursor: default;
+}
+
+.provider-discovery-check:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 
-.provider-add-model-id {
+.provider-discovery-id {
   min-width: 0;
   overflow-wrap: anywhere;
   font-family: var(--font-mono);
   font-size: 0.72rem;
   color: var(--text-primary);
+}
+
+.provider-discovery-row.is-in-draft .provider-discovery-id {
+  color: var(--text-tertiary);
+}
+
+.provider-discovery-in-draft {
+  flex: none;
+  font-size: 0.66rem;
+  font-weight: 600;
+  color: var(--text-tertiary);
+}
+
+.provider-discovery-note,
+.provider-discovery-empty {
+  margin: 0;
+  font-size: 0.7rem;
+  line-height: 1.45;
+  color: var(--text-tertiary);
+}
+
+.provider-discovery-add {
+  align-self: flex-start;
+}
+
+.provider-link-button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .provider-optional {

@@ -7829,17 +7829,31 @@ async function scenarioSettingsProviderSetup(runner) {
       .locator('input[placeholder="stored encrypted, never shown again"]')
       .fill(OPENAI_KEY)
     await addCard.getByRole('button', { name: 'Fetch models', exact: true }).click()
-    await addCard.locator('.provider-add-model-list').waitFor({ state: 'visible' })
-    assert.equal(await addCard.locator('.provider-add-model').count(), 3)
-    const countText = () => addCard.locator('.provider-add-discovery-count').innerText()
+    await addCard.locator('.provider-discovery-list').waitFor({ state: 'visible' })
+    assert.equal(await addCard.locator('.provider-discovery-row').count(), 3)
+    const countText = () => addCard.locator('.provider-discovery-count').innerText()
+    // Nothing is preselected: a fetch only presents the ids.
+    assert.match(await countText(), /0 of 3 selected/)
+    assert.equal(
+      await addCard.locator('.n-dynamic-tags .n-tag').count(),
+      0,
+      'a fetch must not put any model in the Add draft',
+    )
+    // Clear is disabled with nothing selected; Select all then Clear then
+    // Select all again exercises both controls, then drop one model.
+    assert.equal(
+      await addCard.getByRole('button', { name: 'Clear', exact: true }).isDisabled(),
+      true,
+      'Clear is disabled at zero selection',
+    )
+    await addCard.getByRole('button', { name: 'Select all', exact: true }).click()
     assert.match(await countText(), /3 of 3 selected/)
-    // Clear once, Select all once, then drop one model from the selection.
     await addCard.getByRole('button', { name: 'Clear', exact: true }).click()
     assert.match(await countText(), /0 of 3 selected/)
     await addCard.getByRole('button', { name: 'Select all', exact: true }).click()
     assert.match(await countText(), /3 of 3 selected/)
     await addCard
-      .locator('.provider-add-model', { hasText: 'e2e-disc-gamma' })
+      .locator('.provider-discovery-row', { hasText: 'e2e-disc-gamma' })
       .locator('input[type="checkbox"]')
       .uncheck()
     assert.match(await countText(), /2 of 3 selected/)
@@ -7884,15 +7898,18 @@ async function scenarioSettingsProviderSetup(runner) {
     await addCard.locator('details.provider-advanced .n-select').first().click()
     await page.locator('.n-base-select-option', { hasText: 'Google Gemini' }).first().click()
     await addCard.getByRole('button', { name: 'Fetch models', exact: true }).click()
-    await addCard.locator('.provider-add-model-list').waitFor({ state: 'visible' })
-    assert.match(await countText(), /2 of 2 selected/)
-    const googleDiscovery = await addCard.locator('.provider-add-discovery').innerText()
+    await addCard.locator('.provider-discovery-list').waitFor({ state: 'visible' })
+    assert.match(await countText(), /0 of 2 selected/)
+    const googleDiscovery = await addCard.locator('.provider-discovery').innerText()
     assert.match(googleDiscovery, /gemini-e2e-flash/)
     assert.match(googleDiscovery, /gemini-e2e-pro/)
     assert.ok(
       !googleDiscovery.includes('models/'),
       'the Gemini models/ prefix must be stripped in the discovery list',
     )
+    // The default is empty, so the Google models are explicitly selected.
+    await addCard.getByRole('button', { name: 'Select all', exact: true }).click()
+    assert.match(await countText(), /2 of 2 selected/)
     await addCard.locator('.provider-add-actions button.n-button--primary-type').click()
     await pane
       .locator('.provider-row', {
@@ -7904,6 +7921,148 @@ async function scenarioSettingsProviderSetup(runner) {
     assert.ok(google, 'e2e-google missing from /api/providers after save')
     assert.equal(google.kind, 'google')
     assert.deepEqual(google.models, ['gemini-e2e-flash', 'gemini-e2e-pro'])
+
+    // -- detail "Refresh models": an explicit picker, never a bulk add ------
+    // The saved e2e-disc provider already lists alpha and beta (not gamma), so
+    // refreshing reports three ids: two rendered as disabled "in draft" rows
+    // and one genuinely addable row. Nothing is preselected.
+    const discRow = pane.locator('.provider-row', {
+      has: page.locator('.provider-row-name', { hasText: /^e2e-disc$/ }),
+    })
+    const discDetail = pane.locator('.provider-detail')
+    const discRowFor = (id) => discDetail.locator('.provider-discovery-row', { hasText: id })
+    const discCheckboxFor = (id) => discRowFor(id).locator('input[type="checkbox"]')
+    await discRow.click()
+    await discDetail.waitFor({ state: 'visible' })
+    await discDetail.getByRole('button', { name: 'Refresh models', exact: true }).click()
+    await discDetail.locator('.provider-discovery-list').waitFor({ state: 'visible' })
+    assert.equal(await discDetail.locator('.provider-discovery-row').count(), 3)
+    assert.equal(await discDetail.locator('.provider-discovery-row.is-in-draft').count(), 2)
+    for (const id of ['e2e-disc-alpha', 'e2e-disc-beta']) {
+      assert.equal(await discCheckboxFor(id).isChecked(), true, `${id} must render checked as in draft`)
+      assert.equal(await discCheckboxFor(id).isDisabled(), true, `${id} must be unselectable as in draft`)
+    }
+    assert.equal(await discCheckboxFor('e2e-disc-gamma').isChecked(), false, 'nothing is preselected')
+    assert.equal(await discCheckboxFor('e2e-disc-gamma').isDisabled(), false)
+    const discCount = () => discDetail.locator('.provider-discovery-count').innerText()
+    assert.match(await discCount(), /0 of 3 selected/)
+    const addSelected = discDetail.locator('.provider-discovery-add')
+    assert.equal(await addSelected.isDisabled(), true, 'Add selected is disabled at zero')
+    // Check only gamma: exactly one model may be appended to the draft.
+    await discCheckboxFor('e2e-disc-gamma').check()
+    assert.match(await discCount(), /1 of 3 selected/)
+    assert.equal(await addSelected.isDisabled(), false)
+    assert.match(await addSelected.innerText(), /Add selected \(1\)/)
+    await addSelected.click()
+    await waitFor(
+      async () =>
+        (await pane.locator('.visually-hidden[role="status"]').innerText()).includes(
+          'Added 1 model to draft',
+        ),
+      { desc: 'the detail picker to announce the single-model add' },
+    )
+    assert.match(await discCount(), /0 of 3 selected/)
+    assert.equal(await discDetail.locator('.provider-discovery-row.is-in-draft').count(), 3)
+    assert.match(
+      await discDetail.locator('.provider-discovery-note').innerText(),
+      /All reported models are already in the draft/,
+    )
+    assert.equal(await addSelected.isDisabled(), true)
+    await discDetail.getByRole('button', { name: 'Save changes', exact: true }).click()
+    await discDetail.waitFor({ state: 'hidden' })
+    const providersAfterDetail = (await (await fetch(`${be.base}/api/providers`)).json()).providers
+    const discAfterDetail = providersAfterDetail.find((provider) => provider.name === 'e2e-disc')
+    assert.ok(discAfterDetail, 'e2e-disc missing from /api/providers after the detail save')
+    assert.deepEqual(
+      [...discAfterDetail.models].sort(),
+      ['e2e-disc-alpha', 'e2e-disc-beta', 'e2e-disc-custom', 'e2e-disc-gamma'],
+      'only the checked new id is appended to the draft',
+    )
+    assert.equal(discAfterDetail.models.length, 4, 'no model id is duplicated')
+    assert.equal(
+      discAfterDetail.models[discAfterDetail.models.length - 1],
+      'e2e-disc-gamma',
+      'the newly checked id is appended after the existing draft order',
+    )
+
+    // -- long reported list: filter narrows rows and Select all -------------
+    // Route-intercepted (hermetic) ten-id answer: four ids are already saved,
+    // so in-draft rows stay marked and only the visible addable ones count.
+    const FILTER_MODELS = [
+      'e2e-disc-alpha',
+      'e2e-disc-beta',
+      'e2e-disc-custom',
+      'e2e-disc-gamma',
+      'e2e-filter-a1',
+      'e2e-filter-a2',
+      'e2e-filter-a3',
+      'e2e-filter-b1',
+      'e2e-filter-b2',
+      'e2e-filter-b3',
+    ]
+    const discoverRoute = '**/api/providers/e2e-disc/discover'
+    await page.route(discoverRoute, async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.continue()
+        return
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          models: FILTER_MODELS.map((id) => ({ id })),
+          base_url: be.modelBase,
+          kind: 'openai-compatible',
+        }),
+      })
+    })
+    try {
+      await discRow.click()
+      await discDetail.waitFor({ state: 'visible' })
+      await discDetail.getByRole('button', { name: 'Refresh models', exact: true }).click()
+      await discDetail.locator('.provider-discovery-list').waitFor({ state: 'visible' })
+      assert.equal(
+        await discDetail.locator('.provider-discovery-row').count(),
+        FILTER_MODELS.length,
+      )
+      assert.equal(await discDetail.locator('.provider-discovery-row.is-in-draft').count(), 4)
+      const filterInput = discDetail.locator('.provider-discovery-filter-input')
+      await filterInput.waitFor({ state: 'visible' })
+      assert.equal(await filterInput.getAttribute('placeholder'), 'Filter models')
+      await filterInput.fill('filter-a')
+      assert.equal(
+        await discDetail.locator('.provider-discovery-row').count(),
+        3,
+        'the filter hides every non-matching reported row',
+      )
+      await discDetail.getByRole('button', { name: 'Select all', exact: true }).click()
+      assert.match(
+        await discDetail.locator('.provider-discovery-count').innerText(),
+        /3 of 10 selected/,
+        'Select all applies to the visible rows while the count covers all reported rows',
+      )
+      await filterInput.fill('no-such-model')
+      assert.equal(await discDetail.locator('.provider-discovery-row').count(), 0)
+      assert.match(
+        await discDetail.locator('.provider-discovery-empty').innerText(),
+        /No reported models match/,
+      )
+      assert.equal(
+        await discDetail.getByRole('button', { name: 'Select all', exact: true }).isDisabled(),
+        true,
+        'Select all is disabled when nothing visible is selectable',
+      )
+      await discDetail.getByRole('button', { name: 'Clear', exact: true }).click()
+      await filterInput.fill('')
+      assert.equal(await discDetail.locator('.provider-discovery-row').count(), FILTER_MODELS.length)
+      assert.match(await discDetail.locator('.provider-discovery-count').innerText(), /0 of 10 selected/)
+      assert.equal(await discDetail.locator('.provider-discovery-row.is-in-draft').count(), 4)
+    } finally {
+      await page.unroute(discoverRoute)
+      // Nothing was added: close the detail without saving.
+      await discRow.click()
+      await discDetail.waitFor({ state: 'hidden' })
+    }
 
     // -- the wire contract, from the fixture's own request log ---------------
     const requests = fs
