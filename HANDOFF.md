@@ -3,100 +3,136 @@
 Local working handoff, tracked as the checkpoint record (owner decision
 2026-11-14). The frozen historical snapshot is `docs/history/handoff.md`;
 this file is the current state for the next session. The previous refresh
-(the `39b297b` checkpoint, corrected by `bf1826f`) is superseded by this
-one — its full detail stays in git history; release mechanics and evidence
-live in `docs/release.md`.
+(the `33ecc36` checkpoint) is superseded by this one — its full detail stays
+in git history; release mechanics and evidence live in `docs/release.md`.
 
-Last updated: **2026-11-25**. **Checkpoint: `b0b150e`** — the merged tree,
-pushed to `origin/main` by the lead (`bf1826f..b0b150e`). This docs commit
-sits on top of it and is local only (no push). Suite counts are **merged-tree
-evidence** at `b0b150e`: the merged-tree matrix was run on that tree (lead
-and lane evidence); this docs lane independently re-ran `npm test` (2 825 / 2 816 pass / 0 fail
-/ 0 cancelled / 9 skipped, Node v24.13.0) and re-verified the CI run through
-the GitHub Actions API. Git/publish facts were re-verified read-only
-(`git rev-parse`, `git tag`, `git branch --no-merged`, `git worktree list`,
-the Actions API).
+Last updated: **2026-11-26**. **Checkpoint: `2347d7c`** — the merged tree,
+pushed to `origin/main` by the lead (`33ecc36..6ba53ed` for the first batch,
+`6ba53ed..2347d7c` for the second). This docs commit sits on top of it and is
+local only (no push). Suite counts are merged-tree evidence: package
+**2 829 total / 2 820 pass / 0 fail / 0 cancelled / 9 skipped** at `6ba53ed`
+in both `npm test` and `npm run test:spawn`, independently re-confirmed at
+`2347d7c` by this docs lane (`npm test`, Node v24.13.0; the package
+`src/`/`tests/` trees are unchanged after `6ba53ed`); WSL Node-22 at `6ba53ed`
+**2 829 / 2 827 pass / 0 fail / 0 cancelled / 2 skipped ×3**; web
+**777 / 777**; browser E2E **44 PASS / 0 FAIL / 1 SKIP** at both `6ba53ed`
+and `2347d7c`. CI runs **45813789753** (`6ba53ed`) and **45821219237**
+(`2347d7c`) are green on all three legs with "Dependency checks" green
+(re-verified through the Actions API). Git/publish facts were re-verified
+read-only (`git rev-parse`, `git tag`, `git branch --no-merged`,
+`git worktree list`, the Actions API, `npm view`).
 
 ## Current state
 
 | Item | Value |
 |---|---|
-| Branch / HEAD | `origin/main` = `b0b150e`; the checkpoint commit is the docs commit on top of it (local only, not pushed by this lane). Working tree clean before that commit |
+| Branch / HEAD | `main` = `origin/main` = `2347d7c`; the checkpoint commit is the docs commit on top of it (local only, not pushed by this lane). Working tree clean before that commit |
 | Published | **STILL 0.0.2 on `latest` AND `next`**; tags only `v0.0.1` / `v0.0.2` (`v0.0.2` at `354df89`). **No tag, publish, or version bump this session** — the next release repeats `docs/release.md` and needs fresh explicit owner permission. The GitHub Release *page* for `v0.0.2` remains an owner-manual step (no `gh` CLI) |
-| Session window | previous checkpoint `39b297b` (its `bf1826f` correction) → `b0b150e`: **12 commits** — the 11-commit B1–B4 batch (1 feat, 2 fixes, 6 docs, 2 tests) plus the `bf1826f` checkpoint correction. Every accepted lane was gated on the merged tree before push; the window's history is linear (no merge commits) |
-| CI | **green on all 3 legs at `b0b150e`**: run [45684572246](https://github.com/nik1138/two-brothers-harness/actions/runs/45684572246) (run 140) — `harness (22)`, `harness (24)` and `harness-windows` all `success`, with **"Dependency checks" green in every job** (verified through the Actions API this refresh) |
-| Package suite baseline | **2 825 total / 2 816 pass / 0 fail / 0 cancelled / 9 POSIX-only skips**, Windows, merged tree at `b0b150e`, in `npm test` (re-run by this docs lane, Node v24.13.0) and in `npm run test:spawn` (identical lane evidence) (+13 tests over the `12e3097` baseline of 2 812) |
-| WSL Linux parity | at `b0b150e` (Ubuntu, Node **v22.23.5**): 2 825 total / 2 823 pass / 0 fail / 0 cancelled / 2 skipped, **three consecutive runs**; targeted 100/100. This is the gate that discriminates the Node-22 timer class |
-| Web / browser / CLI / faults | web **753 / 753**, web build PASS; browser E2E **44 PASS / 0 FAIL / 1 SKIP**; `e2e/cli.ts` and `e2e/cli.ts --dist` PASS (**19 scenarios each**); server-prompt-audit PASS; server-status PASS (**3/3**); faults **7/7**; reference selftest PASS; root `npm run check` PASS (**105 dist files**); `SMOKE TEST: PASS` |
-| Packaging | `npm run check` PASS at `b0b150e` (105 dist files, only `zod` + `@earendil-works/pi-mcp`). Packaging metadata is untouched since the 0.0.2 measurement at `8baae35` (`git log 8baae35..b0b150e -- packages/harness/package.json` is empty), so the tarball figures stand: **428 files / 1.66 MB packed / 6.77 MB unpacked**. `docs/release.md` carries those figures (`2b7acdf`). Tarball-smoke, `pack:check` and the release rehearsal were **not** re-run for this batch (no release prep started) |
-| Live serve | the lead restarts the `:8600` serve at `b0b150e` (the previous instance predates this batch); it runs from `packages/harness` with `--sessions-dir sessions` against an **empty store** left by the 2026-11-25 incident (below). The previous checkpoint's two preserved sessions are **lost** (gitignored store, no backup — see "Known loss") |
-| Provider keys | **NOT set** — the 2026-11-25 incident destroyed the sealed store (`sessions/settings.json`), so the owner must re-enter provider keys and role settings before the live app is usable. See "Known loss" |
+| Session window | previous checkpoint `33ecc36` → `2347d7c`: **5 commits** — 3 features (`04a9fb3` server PATCH binder; `fdd9519` + `ce4595d` web), 1 fix (`6ba53ed`), 1 docs follow-up (`2347d7c`). Linear history (no merge commits), integrated in two merged-tree passes: `33ecc36..6ba53ed` and `6ba53ed..2347d7c` |
+| CI | **green on all 3 legs at both tips**: run [45813789753](https://github.com/nik1138/two-brothers-harness/actions/runs/45813789753) at `6ba53ed` and run [45821219237](https://github.com/nik1138/two-brothers-harness/actions/runs/45821219237) at `2347d7c` — `harness (22)`, `harness (24)` and `harness-windows` all `success`, with **"Dependency checks" green in every job** (Actions API re-checked this refresh) |
+| Package suite baseline | **2 829 total / 2 820 pass / 0 fail / 0 cancelled / 9 POSIX-only skips** at `6ba53ed`, Windows, in `npm test` and in `npm run test:spawn` (identical lane evidence); this docs lane re-ran `npm test` at `2347d7c` with the same counts (230 s). The `sessionworkspacepatch` suite adds 4 tests to the previous baseline |
+| WSL Linux parity | at `6ba53ed` (Ubuntu-24.04, Node **v22.23.5** via nvm, npm 10.9.9): **2 829 / 2 827 pass / 0 fail / 0 cancelled / 2 skipped**, **three consecutive runs**; raw logs `wsl-npm-test-{1,2,3}.log`. This is the gate that discriminates the Node-22 timer class. **Not re-run for the `2347d7c` merge** — that merge changed no `packages/harness/src/` or `tests/` file (web/docs/CHANGELOG/e2e only) |
+| Web / browser / CLI / faults | web **777 / 777** (this docs lane re-ran the suite) + web build PASS (integration evidence); browser E2E **44 PASS / 0 FAIL / 1 SKIP** at `6ba53ed` (286.7 s) and at `2347d7c` (306.4 s; the SKIP is `real`, opt-in); `e2e/cli.ts` and `e2e/cli.ts --dist` PASS (**19 scenarios each**); server-prompt-audit PASS; server-status PASS (**3/3**); faults **7/7**; reference selftest PASS; root `npm run check` PASS (**105 dist files**); `SMOKE TEST: PASS` |
+| Packaging | `npm run check` PASS at `2347d7c` (105 dist files, only `zod` + `@earendil-works/pi-mcp`). `packages/harness/package.json` is untouched since the 0.0.2 measurement at `8baae35` (`git log 8baae35..2347d7c -- packages/harness/package.json` is empty), so the tarball figures stand: **428 files / 1.66 MB packed / 6.77 MB unpacked**. `docs/release.md` carries those figures (`2b7acdf`). Tarball-smoke, `pack:check` and the release rehearsal were **not** re-run for this window (no release prep started) |
+| Live serve | rebuilt and restarted by the lead at `2347d7c`; **PID 76540** (`.tmp/serve-8600.log` + `packages/harness/sessions/.writer.json`: `owner: serve`, `created 2026-11-26T12:44:07Z`; process command line `node dist/cli.js serve --port 8600 --sessions-dir sessions`, cwd `packages/harness`). It serves the store described under "Known loss" — two 2026-11-26 sessions plus a re-created settings file, not an empty store |
+| Provider settings | the sealed `settings.json` destroyed on 2026-11-25 has been re-created: one encrypted provider key (plus the local `lmstudio` provider) and role settings are present in `packages/harness/sessions/settings.json`. The two pre-incident sessions and the original sealed store remain unrecoverable. The owner should confirm the re-created provider/roles are the intended ones before relying on the live app |
 
-## Shipped since the last checkpoint (`bf1826f` → `b0b150e`, 11 commits)
+## Shipped since the last checkpoint (`33ecc36` → `2347d7c`, 5 commits)
 
-Ten accepted lane commits plus one disclosed test-only integration fixture
-fix (`b0b150e`). Every feature was accepted in its own lane; one merged-tree
-FAIL blocks the push. Per-commit contracts are in
-`packages/harness/CHANGELOG.md` (`[Unreleased]`) and in each commit message.
+Every slice was accepted in its own lane and gated on the merged tree; one
+merged-tree FAIL blocks the push. Per-commit contracts are in
+`packages/harness/CHANGELOG.md` (`[Unreleased]`) and in each commit.
 
-**B1 — a degraded review is now visible, not silently accepted** (`ef9b64b`,
-docs `dc19a0d` / `32c965c`, tests `dd39953`). A review whose strict payload
-fails and then fails the one repair re-ask still degrades fail-soft: the
-default verdict is still `accept` when nothing usable survives, and a
-`verdict` the reply did emit (e.g. `revise`) is kept. What changed is the
-signal: `HarnessResult.reviewDegraded?: boolean` (absent on a clean run; the
-run's **final** review wins, so a later clean revised review clears it), one
-additive `review_degraded` runtime event `{type, round, verdict}` per
-degraded review (SSE + sidecar replay, emitted before that review's
-envelope), `review_degraded: true` in `--json` / `--mode json`, and
-`reviewDegraded: true` on the `--stream` result record. The existing
-"unstructured model reply for review" warning is unchanged; no protocol
-envelope, schema or session-format change.
+### Provider model picker (`fdd9519`, `6ba53ed`; docs in `fdd9519` / `6ba53ed`)
 
-**B2 — fresh tasks always append; dedupe is resume-only** (`3c65809`, docs
-`0508085`). New `HarnessOptions.dedupeInitialTask`, default `false`:
-`run()` always appends the task envelope for a fresh run, so a repeated
-prompt is a real new turn even when an identical user message already exists.
-The historical same-task check survives only where the caller already
-appended the task — `--resume` (a resumed `run` and the first resumed `chat`
-turn) and the TUI `@skill:`/`@file` pre-append path. `serve` never opts in,
-so two identical `POST /api/runs` deliberately create two envelopes. The
-graph/session/compaction pins were updated with the flag.
+Settings → Providers discovery is now an **explicit picker, never a bulk
+add**. The existing-provider **Refresh models** result and the **Add
+provider** card's **Fetch models** result both render every reported model id
+as a checkbox row; a fresh draft selects **nothing**, and only checked ids are
+appended to the model draft (discovered order, no duplicates). The Add card
+can still be saved with zero models. Ids already in the draft render disabled
+as **"in draft"**, are excluded from the add count, and stay out of the
+appended set; when every reported id is already in the draft the picker says
+so and disables the action. A reported list longer than **8** ids gets a
+case-insensitive **Filter models** input; **Select all** applies to the
+visible/filtered rows (the "N of M selected" count covers every reported row),
+**Clear** clears the selection, and the primary action is **"Add selected (N)"**
+(disabled at 0). A re-fetch keeps reported ids already in the draft selected,
+so a previously chosen model is never silently dropped (`6ba53ed` fixes that
+first-cut behavior). New suite `web/tests/providerDiscovery.test.ts`; the
+`settings-provider-setup` browser scenario was updated; the
+`docs/cli-reference.md` / `quickstart.md` / `troubleshooting.md` wording
+("Add N to draft" → check, then "Add selected (N)") was corrected. No backend,
+protocol or dependency change.
 
-**B3 — the consult belt's "read-only" promise is corrected** (`1fd1585` +
-`e9930a3`, `3801afa`). The false promise is gone from `docs/`
-(`cli-reference`, `plugins`, `quickstart`, `backlog`, `design-review`), both
-READMEs and two `clihelp.ts` strings; the TUI mode-picker drops
-"(read-only)", the senior-review grounding note now says "workspace checks",
-and the helper-child line says "approval-brokered built-in tool set" instead
-of "read-only tool set". The honest contract, now stated everywhere: the
-four built-in workspace mutation tools (`workspace_write_file`,
-`workspace_edit_file`, `workspace_delete_file`, `workspace_run_shell`) are
-excluded from the consult belt, while role-scoped (`shared`/`senior`/`junior`)
-MCP and plugin tools remain and may mutate through their handlers; approval
-prompts cover the built-in mutation/shell paths, not those tools; the consult
-phase is not a sandbox.
+### Workspace start gate (`04a9fb3`, `ce4595d`, `2347d7c`)
 
-**B4 — a plugin selected twice registers once** (`a6464da`). `bindingsFor`
-(and `configurePluginBindings`) dedupes the active list by the **resolved
-loaded plugin**, not the raw setting string — the same name twice, or a name
-plus a path spelling of itself (`./notes`, `notes.ts`, an absolute path) —
-so its tools register once and its hooks run once. The first selection wins
-(its per-entry options apply); each skipped duplicate is recorded with
-exactly one diagnostic naming the plugin and the first-selection rule (and
-that the duplicate's options were ignored when they differ).
-`normalizePluginSettings` and persisted-settings semantics are unchanged.
+**PATCH binder (`04a9fb3`).** `PATCH /api/sessions/{name}` now accepts
+`{title?, workspace_id?}` and requires **at least one field**. `title` keeps
+its historical rename contract; `workspace_id` must name a **registered**
+workspace and sets the persisted sidecar link (later runs that omit the id
+inherit it); `workspace_id: null` clears the link by removing the key.
+Unknown ids are a 400 `unknown workspace_id`; a blank id or title is a 400;
+no field is a 400 `provide title or workspace_id`; an unknown session is a
+404. Existing title-only clients keep their exact behavior. New suite
+`packages/harness/tests/sessionworkspacepatch.test.ts` (4 tests, registered in
+`run-all.ts`).
 
-### Integration fixture fix (`b0b150e`, test-only)
+**Web gate (`ce4595d`).** The web app never starts a run without a workspace.
+The New-session dialog has no "No workspace" option and keeps **Create**
+disabled until a real registered workspace is picked (the add-folder finder
+stays the way to create one; the disabled submit carries an accessible
+reason). An existing session with no metadata link shows an in-place
+**"Select a workspace to start"** picker inside the composer: submitting is
+blocked with the accessible reason, choosing a workspace binds it through
+`PATCH /api/sessions/{name}` `{workspace_id}` and unblocks the run; on failure
+the prompt shows one bounded error in place and **keeps the pick**. Every run
+posts the bound non-null `workspace_id`; the sidebar filter is only a
+display / `@`-picker fallback, never a run workspace — the old filter-based
+`runWorkspaceId` run fallback is gone. New `WorkspaceStartPrompt.vue` and
+`web/tests/workspaceStart.test.ts`; the `hero-starters` browser scenario
+carries the gate assertions. Web suite is 777.
 
-`e2e/faults.ts`'s two overflow scenarios restore a seeded session that
-already carries the task and then call `harness.run` directly. With B2's
-default (fresh runs always append), that appended a second task envelope and
-broke `overflow-recovery`'s envelope-kind assertion. The scenarios now build
-the harness with `dedupeInitialTask: true` — the same resume contract
-`run`/`chat --resume` uses — so they keep their seeded-session premise. The
-breakage was reproduced on the accepted B2 tip first, then fixed; test-only,
-no product behavior change.
+**Comment-only follow-up (`2347d7c`).** Marks the backend no-workspace
+refusal as **forward-compatible**: the client gate is authoritative today,
+and once an enforcing backend lands it answers `select a workspace to start`
+(the picker's error handling already recognizes that message). No behavior
+change.
+
+### Deferred slice — workspace enforcement (NOT shipped)
+
+Requiring a workspace for CLI `run`/`chat` (`--workspace`), refusing a
+tool-less TUI start, and the serve-side 400 `select a workspace to start` for
+an unbound run were attempted broadly and **reverted**, preserved as
+`C:\code\two-brothers-harness\.tmp\workspace-enforcement-wip.patch`
+(**370,220 bytes ≈ 370 KB**, 43 files including the test ripple). The reason
+for deferral: the ripple (40+ server/CLI test files) made the lane unsafe to
+land in one step, so the **web gate + PATCH binder shipped first**. The next
+step is an owner decision (resume the patch as its own slice, or stop at the
+web gate) — tracked as A3 in `todo.md` and
+`.tmp/owner-decisions-2026-11-25.md`. Until then the web client is the only
+enforcement point; direct API calls and CLI/TUI runs can still omit a
+workspace.
+
+### Live-model validation (2026-11-26)
+
+Against the owner's LM Studio at `http://192.168.31.123:1234/v1` with
+`lfm3-1.7b` for **both** roles, the live suite at `33ecc36` recorded
+**13 PASS / 1 FAIL across the 14 suites the runner listed**
+(`.tmp/live-e2e/run-lfm3-both.log`;
+`packages/harness/e2e/runs/report-2026-11-26T09-05-40-164Z.json`; the lead's
+summary counts it as 14/15). `connection`, `consult`, `work`, `resume`,
+`connection-server`, `server-prompt-audit`, `server-work-approvals`, and the
+status/mode/error-restart suites (live **and** hermetic) all PASS. The one
+miss is `server-consult` (timed out after **900.1 s**): the model invoked
+`ask_user`, so the run correctly parked at `run_status: waiting` after an
+`approval_requested` question; the live client does not answer questions, so
+the SSE drive timed out — **model behaviour, not a regression**. Earlier,
+with `lfm3-vl-2b` as senior, `work` was flaky on **both** the merged and
+baseline trees (merged 2/3 vs baseline 1/3,
+`.tmp/live-e2e/work-repeatability.log`) — model capability, not a code
+regression. Use `--max-tokens` **≥ 512**: reasoning models otherwise return
+empty content.
 
 ### Residuals (recorded honestly; not fixed)
 
@@ -147,9 +183,9 @@ no product behavior change.
    the merged `CHANGELOG.md`; when patch-ids differ because of hunk context,
    verify the per-file added/removed line arrays are byte-identical.
 4. **The merged-tree gate catches cross-lane defects** — per-lane acceptance
-   is necessary but not sufficient (this batch: the B2 default broke a
-   hermetic fixture that constructs the harness directly); keep the full
-   merged-tree matrix before push.
+   is necessary but not sufficient (the B2 batch's default broke a hermetic
+   fixture that constructs the harness directly); keep the full merged-tree
+   matrix before push.
 5. **`web/` is NOT an npm workspace** — a fresh worktree needs `npm install`
    in `web/` for smoke's `vue-tsc`.
 6. **CI failure artifacts need auth to download** — owner-approved read-only
@@ -165,20 +201,21 @@ no product behavior change.
 Broad audits completed ahead of the `12e3097` checkpoint covered tool
 calling, subagents, MCP, skills, cache, plugins, junior/senior workflow, and
 docs/README freshness. Those SAFE findings landed there (`b1fc2c5` →
-`12e3097`). The 2026-11-25 owner-gated queue's **B1–B4 landed in this batch**
-(above); the remaining decisions are in `.tmp/owner-decisions-2026-11-25.md`
-(gitignored; refreshed to `b0b150e`, where the still-open A1–A2, B5–B11,
-C1–C4 and D1–D2 lead the file). OAuth designs were reviewed and **deferred
-by the owner** ("I think we don't need this now") — do not propose OAuth
-again.
+`12e3097`); the 2026-11-25 owner-gated queue's **B1–B4 landed at `b0b150e`**
+and the **provider picker + workspace gate landed in this window** (above).
+The remaining decisions are in `.tmp/owner-decisions-2026-11-25.md`
+(gitignored; refreshed to `2347d7c`, where the still-open A1–A3, B5–B11,
+C1–C4 and D1–D2 lead the file). OAuth designs were reviewed and **deferred by
+the owner** ("I think we don't need this now") — do not propose OAuth again.
 
 ## In flight
 
-Nothing is in flight on `main` — the tree is clean at `b0b150e`, and this
+Nothing is in flight on `main` — the tree is clean at `2347d7c`, and this
 docs checkpoint commit is local only (no push). The **safe autonomous queue
-is exhausted**; every remaining item needs an owner decision.
+is exhausted**; every remaining item needs an owner decision, including the
+deferred workspace-enforcement slice.
 
-### Known loss (2026-11-25)
+### Known loss (2026-11-25; store since re-created)
 
 A housekeeping lane removing merged worktrees **most likely followed an NTFS
 `node_modules` junction** from a removed acceptance worktree into the main
@@ -187,13 +224,20 @@ practice is on record in `.tmp/review/wave23.md`); the main store's own
 workspace junction `node_modules/@two-brothers/harness` → `packages/harness`
 then turned it into a double wipe. It deleted 294 tracked files from the main
 checkout and the gitignored `packages/harness/sessions` store. The tracked
-files were restored from `HEAD` and the tree is content-clean; the **session
-store is gone — no backup was found**, so the two sessions the previous
-checkpoint preserved (`2026-11-14T16-33-32-134-4176c1`,
-`2026-11-14T16-39-48-429-066581`) are lost. The sealed
-`sessions/settings.json` key/settings store went with it, so provider keys
-and role settings are **not configured**; the live server runs with an empty
-store. Do not claim those sessions or keys exist.
+files were restored from `HEAD` and the tree is content-clean; the
+**pre-incident session store is gone — no backup was found**, so the two
+sessions the previous checkpoint preserved
+(`2026-11-14T16-33-32-134-4176c1`, `2026-11-14T16-39-48-429-066581`) are
+lost, as is the original sealed `settings.json`.
+
+The store has since been **re-created by the live validation**: it currently
+holds two 2026-11-26 sessions (`2026-11-26T12-03-20-143-e977e3`,
+`2026-11-26T15-12-02-319-2cf36f`), `workspaces.json`, and a `settings.json`
+with one encrypted provider key plus the local `lmstudio` provider and role
+settings (roles point at `ternary-bonsai-2.5-27b` on `localhost:1234`). So
+provider keys/settings are **configured again**, but the pre-incident store
+and its keys remain unrecoverable; do not claim those sessions or the
+original key store exist.
 
 ### Unmerged worktrees awaiting the owner's decision (do not remove)
 
@@ -206,13 +250,17 @@ store. Do not claim those sessions or keys exist.
 | `C:/code/tb-lane-touch` | `test-stream-scroll-touch` @ `dbf0c2f` |
 
 Each needs a merge / abandon / keep call. Verified this refresh with
-`git worktree list`: these five are the worktrees awaiting a decision; this
-batch's lane worktrees and the previous batch's detached acceptance
-worktrees are no longer present, and this docs lane deleted nothing. The six
-unmerged local branches also include `dev` (`715275f`) and
-`docs-goal-modules` (`7c187fd`), which have no worktree. opencode-owned
-worktrees (26, incl. `agents-depth3` @ `7b1d80f`, fully merged but
-opencode-owned) and `Temp/tb-review-tip` are never touched.
+`git worktree list`: these five are the **decision** worktrees; six local
+branches are unmerged (`dev 715275f`, `docs-goal-modules 7c187fd`, plus the
+four decision branches above). `git worktree list` also shows this window's
+**merged** lane/acceptance worktrees — `.tmp/wt-default-workspace`
+(`agents-default-workspace` @ `04a9fb3`), `.tmp/wt-provider-model-picker`
+(`agents-provider-model-picker` @ `6ba53ed`), `.tmp/wt-web-workspace`
+(`agents-web-workspace` @ `2347d7c`), and detached
+`.tmp/accept-provider-picker` @ `5343cf7` / `.tmp/accept-web-workspace` @
+`ce4595d` — which are cleanup candidates for a later hygiene pass. This docs
+lane removed nothing. opencode-owned worktrees (26, incl. `agents-depth3` @
+`7b1d80f`) and `Temp/tb-review-tip` are never touched.
 
 ## Incident / prevention notes (kept)
 
@@ -248,9 +296,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/release-rehearsa
 $env:TWO_BROTHERS_E2E_ONLY='settings-subagent'; node e2e/run.mjs
 ```
 
-Web-build gates need `TEMP`/`TMP` inside the checkout (`.tmp/build-temp`).
-Do not run the live server and smoke against the same sessions dir at once
-(writer lock).
+For the live LM Studio suite, set `TWO_BROTHERS_E2E_BASE_URL` and both
+`TWO_BROTHERS_E2E_SENIOR_MODEL` / `TWO_BROTHERS_E2E_JUNIOR_MODEL` (the
+2026-11-26 run used `lfm3-1.7b` for both), then run `npm run test:e2e` from
+`packages/harness`. Direct CLI runs against reasoning models need
+`--max-tokens` ≥ 512; otherwise they can return empty content. Web-build gates
+need `TEMP`/`TMP` inside the checkout (`.tmp/build-temp`). Do not run the live
+server and smoke against the same sessions dir at once (writer lock).
 
 ## Constraints / owner decisions
 
@@ -263,32 +315,39 @@ Do not run the live server and smoke against the same sessions dir at once
 - No new runtime deps without a ledger entry; web keeps building;
   `typescript/` zero-dependency.
 - Conventional Commits; independent acceptance before merge.
-- B1–B4 are **accepted and merged**; B1's `reviewDegraded` /
-  `review_degraded` surface is additive and final-review-wins. B2's
-  `dedupeInitialTask` defaults to `false` and is never wired on `serve`.
+- B1–B4 are accepted and merged. The provider picker and the web workspace
+  gate are accepted and merged; the web client is the **only** workspace
+  enforcement point until the deferred CLI/TUI/serve slice is decided (A3).
+- The web gate's `runWorkspaceForSession` has **no** filter parameter; a run
+  never inherits the sidebar filter.
 
 ## Next moves
 
 Per `todo.md`'s owner menu:
 
 1. **Release decisions (A1–A2):** the next version and go-ahead (`0.1.0`
-   recommended — 83 commits since `v0.0.2`; `0.0.3` if incremental), release
-   prep, and the manual GitHub Release page for `v0.0.2`. Publishing is
-   owner-run.
-2. **Behavior decisions (B5–B11):** bundle selection authority, cost-prefix
+   recommended — **89 commits** since `v0.0.2`; `0.0.3` if incremental),
+   release prep, and the manual GitHub Release page for `v0.0.2`. Publishing
+   is owner-run.
+2. **Deferred enforcement decision (A3):** resume
+   `.tmp/workspace-enforcement-wip.patch` as its own slice (`--workspace` for
+   CLI `run`/`chat`, tool-less TUI refusal, serve-side 400), stay web-only
+   for now, or stop. Exact options/recommendation are in
+   `.tmp/owner-decisions-2026-11-25.md`.
+3. **Behavior decisions (B5–B11):** bundle selection authority, cost-prefix
    matching, plugin MCP default role, compaction truncation notice, dropped
    steering in the web UI, `@file` binary marker, preset seed windows —
-   exact questions and evidence are in `.tmp/owner-decisions-2026-11-25.md`;
    nothing starts without the call.
-3. **UX decisions (C1–C4):** toast stack geometry, CLI writer lock, Home/End
+4. **UX decisions (C1–C4):** toast stack geometry, CLI writer lock, Home/End
    transcript jump, mouse-wheel scrolling.
-4. **Housekeeping (D1–D2):** the five unmerged worktrees (merge / abandon /
-   keep) and a session-store backup policy.
-5. **Design shelf (owner-gated, unimplemented):**
+5. **Housekeeping (D1–D2):** the five decision worktrees (merge / abandon /
+   keep), the merged lane worktrees' cleanup, and a session-store backup
+   policy.
+6. **Design shelf (owner-gated, unimplemented):**
    `.tmp/web-wiring-consolidation-design.md`,
    `.tmp/keybinding-surfaces-design.md`, `.tmp/test-audit-report.md`,
    `.tmp/backlog-triage.md`.
-6. **OAuth — deferred by the owner; do not propose.** `.tmp/oauth-design.md`
+7. **OAuth — deferred by the owner; do not propose.** `.tmp/oauth-design.md`
    stays reference only.
 
 The safe autonomous queue is **exhausted** beyond this. The deferred
@@ -300,15 +359,16 @@ third sibling not on the backlog).
 
 - [ ] Read `AGENTS.md`, `docs/backlog.md`, this file, and `todo.md`.
 - [ ] Confirm `git status` clean, `git log -1` is a docs checkpoint commit,
-      and its parent (`HEAD~1`) is `b0b150e`.
+      and its parent (`HEAD~1`) is `2347d7c`.
 - [ ] Check the background-task panel for running gates/lanes (stale-serve
-      writer-lock gotcha).
+      writer-lock gotcha; the live `:8600` serve owns
+      `packages/harness/sessions/.writer.json`, PID 76540).
 - [ ] Run package + web tests and the smoke gate on the merged tree.
-- [ ] Live serve: the `:8600` instance runs from `packages/harness` with an
-      **empty** session store (see "Known loss"); rebuild + `sync-web` +
-      restart if product bytes change again.
-- [ ] Provider keys/role settings are **not configured** after the
-      2026-11-25 loss — the owner re-enters them before using the live app.
+- [ ] Live serve: the `:8600` instance runs from `packages/harness` against a
+      store holding the two 2026-11-26 sessions and the re-created settings;
+      rebuild + `sync-web` + restart if product bytes change again.
+- [ ] Confirm the re-created provider key and role settings are the intended
+      ones — the 2026-11-25 loss destroyed the original sealed store.
 - [ ] Keep `research/`, sessions, credentials, logs out of git (this file +
       `todo.md` are the tracked checkpoint exception).
 - [ ] No publish/tag/version bump without explicit owner permission.
